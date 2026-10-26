@@ -2957,18 +2957,24 @@ private:
 
     /// write_bulk()'s copy into the ring's free run. THE RUNTIME'S memcpy
     /// WHERE ITS FIXED COST PAYS, the byte loop below it - measured with
-    /// bench_stm32's letter u on the Cortex-M0+ at two wait states: the
-    /// loop is 4 cycles and 9 a byte, memcpy 70 and under one a byte when
-    /// the two ends share their word alignment (its LDM/STM block, rt.cpp)
-    /// and its own byte loop otherwise, never ahead. So memcpy takes a run
-    /// of `copy_crossover` bytes or more whose ends are aligned alike - the
-    /// two cost the same near 13 - and the loop takes the rest: two
-    /// pointers and no index, the test at the bottom, a load, a store, two
-    /// steps and one branch a byte. `n` is at least one.
-    static constexpr uint32_t copy_crossover = 16;
+    /// bench_stm32's letter u on the Cortex-M0+ at 64 MHz and two wait
+    /// states, cycles a copy: the loop is 4 cycles and 9 a byte, 184 for
+    /// 20 bytes and 220 for 24; memcpy 125 and 132 when the two ends share
+    /// their word alignment (its LDM/STM block, rt/rt.cpp), 228 and 238
+    /// with the destination a byte past a word (its copy across
+    /// alignments, three head bytes, the dearest case). The ring's head is
+    /// at any offset of its word, so the run's ends are aligned alike one
+    /// time in four: taken so, memcpy is ahead from 24 bytes, and it takes
+    /// a run of `copy_crossover` bytes or more whatever its alignment. The
+    /// loop takes the rest: two pointers and no index, the test at the
+    /// bottom, a load, a store, two steps and one branch a byte. `n` is at
+    /// least one.
+    static constexpr uint32_t copy_crossover = 24;
     [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t n) {
-        if (n >= copy_crossover &&
-            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+        // A ring shorter than copy_crossover never takes memcpy: the test's
+        // first half is a constant, and no copy is compiled past the
+        // ring's end.
+        if (tx_size >= copy_crossover && n >= copy_crossover) {
             std::memcpy(to, from, n);
             return;
         }

@@ -385,10 +385,15 @@ TX and RX inside the chip and leaves the RX pad alone.
   nothing twice. It reads neither SR nor DR, and it binds again a stream
   a transfer error stopped (as every read verb does: the restart is the
   consumer's, the view being its).
-- `write_bulk()` COPIES WITH memcpy where it pays: a run of 16 bytes or
-  more whose source and ring slot share their alignment modulo the word
-  takes the runtime's word path, any other the four-instruction byte
-  loop (memcpy would run the same loop behind a call).
+- `write_bulk()` COPIES WITH memcpy where it pays: a run of 20 bytes or
+  more takes the runtime's `memcpy` whatever the alignment of its two
+  ends, which copies words across alignments too
+  ([design/runtime.md](../design/runtime.md)), and a shorter one the
+  four-instruction byte loop. On the STM32F446RE at 180 MHz the loop is
+  6 cycles a byte, 97 for 16 bytes and 121 for 20; `memcpy` takes 78
+  and 84 with the two ends aligned alike, 113 and 115 with the
+  destination a byte past a word: from 20 bytes it is ahead at either
+  alignment.
 
 ## How to use it
 

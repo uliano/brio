@@ -1732,8 +1732,10 @@ struct Uart {
             // the room is not empty and the run is not done.
             const uint8_t* from = src.data() + queued;
             uint8_t* to = room.data();
-            if (take >= copy_threshold &&
-                ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+            // A ring shorter than copy_threshold never takes memcpy: the
+            // test's first half is a constant, and no copy is compiled past
+            // the ring's end.
+            if (tx_size >= copy_threshold && take >= copy_threshold) {
                 (void)memcpy(to, from, take);
             } else {
                 uint8_t* const end = to + take;
@@ -2276,10 +2278,18 @@ private:
     static inline volatile bool m_rx_given_up = false;
 
     /// write_bulk()'s copy into the ring: the runtime's memcpy for a run of
-    /// at least this many bytes whose source and ring slot share their
-    /// alignment modulo the word (rt/rt.cpp's word path), the byte loop
-    /// otherwise, where memcpy would run the same loop behind a call.
-    static constexpr uint32_t copy_threshold = 16;
+    /// at least this many bytes, whatever the alignment of its two ends,
+    /// and the byte loop below it. Measured at 144 MHz (bench_vx03 letter
+    /// m, its copy table, cycles a copy): the byte loop is 7 cycles a byte
+    /// on both parts, 117 for 16 bytes and 145 for 20; memcpy with the two
+    /// ends aligned alike 71 and 79 on the CH32V203, 56 and 63 on the
+    /// CH32V303, and with the destination a byte past a word (rt/rt.cpp's
+    /// copy across alignments, three head bytes, the dearest case) 143 and
+    /// 134, 119 and 119. The ring's head is at any offset of its word, the
+    /// ends aligned alike one time in four: taken so, memcpy is ahead from
+    /// 20 bytes on the CH32V203 and from 16 on the CH32V303, and 20 serves
+    /// both.
+    static constexpr uint32_t copy_threshold = 20;
     /// The counters the vectors bump and the thread reads: VOLATILE, so a
     /// thread polling one in a loop sees each store (a plain one is read
     /// once and kept in a register).

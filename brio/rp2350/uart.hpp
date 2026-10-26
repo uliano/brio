@@ -206,11 +206,17 @@ struct Rp2350Pl011 {
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 32;
     /// write_bulk()'s memcpy crossover (bench_rp2350 letter u at 150 MHz
-    /// from the XIP cache), the same on both cores: the byte loop 6
-    /// cycles a byte on the M33 and Hazard3 alike, the runtime's memcpy
-    /// about 27 and 29 and under one a byte with the two ends aligned
-    /// alike - the loop still ahead at 8 bytes, memcpy at 12 on each.
-    static constexpr uint32_t copy_crossover = 12;
+    /// from the XIP cache, cycles a copy), one for both cores: the byte
+    /// loop is 6 cycles a byte on the M33 and Hazard3 alike, 96 and 99 for
+    /// 16 bytes, 120 and 123 for 20. The runtime's memcpy with the two ends
+    /// aligned alike is 61 and 56 for 16 bytes; with the destination a
+    /// byte past a word (its copy across alignments, three head bytes, the
+    /// dearest case) 91 and 117 for 16, 90 and 115 for 20 - the M33's
+    /// unaligned loads ahead of Hazard3's merged words. The ring's head is
+    /// at any offset of its word, the ends aligned alike one time in four:
+    /// taken so, memcpy is ahead from 16 bytes on the M33 and from 20 on
+    /// Hazard3, and 20 serves both.
+    static constexpr uint32_t copy_crossover = 20;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? UART0 : UART1); }

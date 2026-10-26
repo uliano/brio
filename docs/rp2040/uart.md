@@ -392,10 +392,13 @@ extern "C" void isr_uart0() {
   0xFF at 9600 on GP4 with the loop-back off, the pad read through SIO):
   true 0 us from the last stop bit's end, a bit being 104 us; under the
   transmit engine (`test_rp2040_dma` letter t) the same.
-- THE COPY INTO THE RING: the byte loop 2 cycles and 9 a byte, the
-  runtime's `memcpy` about 54 and under one a byte with the two ends
-  aligned alike - the loop ahead at 8 bytes, `memcpy` at 12, the
-  family's `copy_crossover`.
+- THE COPY INTO THE RING: the byte loop 2 cycles and 9 a byte, 146 for
+  16 bytes and 182 for 20; the runtime's `memcpy` 87 and 95 with the two
+  ends aligned alike, 189 and 199 with the destination a byte past a
+  word (it copies words across alignments too,
+  [design/runtime.md](../design/runtime.md)). The ring's head is at any
+  offset of its word, the ends aligned alike one time in four: taken so,
+  `memcpy` is ahead from 20 bytes, the family's `copy_crossover`.
 - AGAINST THE VENDOR: the pico-sdk 2.3.1 has no interrupt or DMA
   receive, only `uart_read_blocking` and `uart_write_blocking`, POLLED
   loops (a flag test and a data access a byte), run on the same board

@@ -88,6 +88,18 @@
 //      and irq and isr are whatever the tick took in the best run. At 1
 //      and 16 bytes a line is mostly the call and the stopwatch, not the
 //      copy: x is large there by construction.
+//      Then the copy at 60 bytes (a printed line's run) and across
+//      alignments - memcpy.d1s0, memcpy.d0s1 and memcpy.d1s2, the
+//      destination and the source that many bytes past a word - at 1, 16,
+//      256, half the buffer and 60, between the buffer's two halves; then
+//      strlen and memchr (the NUL within 64 bytes, as print() asks, or
+//      within n + 1 past that) over strings of 15, 50 and the buffer's
+//      bytes starting on a word and one past it (strlen.s1, memchr.s1),
+//      against a load a word, 4 bytes a cycle.
+//   c  write_bulk()'s copy choice: the transport's byte loop against
+//      memcpy over 1 to 128 bytes, both ends aligned and the destination
+//      one past a word, cycles a copy (the crossover the USART takes). A
+//      letter of its own so that letter m's image fits the CH32V003.
 //   p  print(serial, s) of a static string of 1, 16, 256 and 4096 bytes
 //      (62 letters and a CR LF to a line of 64), then the DRAIN: the
 //      transport's tx_idle() (its ring empty) and then the resource's TC
@@ -265,8 +277,8 @@
 // and the window's close is counted in both.
 //
 // build: boards = v006k8,v003f4
-// build: groups = rt,m,p,d,s,e,uw
-// build: groups.v006k8 = rtmpdes,uw
+// build: groups = rt,m,c,p,d,s,e,uw
+// build: groups.v006k8 = rtmpdes,cuw
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -533,7 +545,7 @@ void tr_ruler() {
 // ---------------------------------------------------------------------------
 /// Half the part's SRAM: 4096 bytes on the CH32V006, 1024 on the CH32V003.
 constexpr uint32_t ram_bytes = device::sram_bytes / 2u;
-alignas(4) uint8_t ram[ram_bytes];
+alignas(4) uint8_t ram[ram_bytes + 8u];
 
 enum class MemOp : uint8_t { copy_ram, copy_flash, fill };
 
@@ -576,6 +588,158 @@ constexpr uint32_t wire_copy_ram = 2u * Ruler::hz();
 constexpr uint32_t wire_copy_flash = 1u * Ruler::hz();
 constexpr uint32_t wire_fill = 4u * Ruler::hz();
 
+/// The best of 8 runs of `op`, timed as mem_best() times its own.
+template <typename Op>
+BenchSample best_of_8_op(Op op) {
+    BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
+    for (uint8_t run = 0; run < 8u; ++run) {
+        const BenchCounters before = counters();
+        Stopwatch<Ruler> sw;
+        sw.start();
+        op();
+        const uint32_t wall = sw.elapsed();
+        __asm__ volatile("" ::: "memory");
+        const BenchSample s = bench_sample(wall, before, counters());
+        if (s.wall < best.wall) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+/// The copy's rows across alignments: the destination and the source each
+/// this many bytes past a word.
+struct CopyAlignment {
+    const char* op;
+    uint8_t dst;
+    uint8_t src;
+};
+constexpr CopyAlignment copy_alignments[] = {{"memcpy.d1s0", 1, 0}, {"memcpy.d0s1", 0, 1}, {"memcpy.d1s2", 1, 2}};
+/// The run a printed line of 60 bytes hands the transport.
+constexpr uint32_t line_run_bytes = 60;
+/// The scans' lengths: two of the writer's texts and letter p's longest
+/// the buffer holds.
+constexpr uint32_t scan_sizes[] = {15, 50, ram_bytes};
+volatile size_t scan_sink = 0;
+
+/// One copy of `n` bytes from ram + so to (ram + ram_bytes / 2u + 4u) + dof.
+BenchSample copy_at(uint32_t n, uint32_t dof, uint32_t so) {
+    return best_of_8_op([n, dof, so] {
+        uint8_t* d = (ram + ram_bytes / 2u + 4u) + dof;
+        const uint8_t* s = ram + so;
+        uint32_t len = n;
+        __asm__ volatile("" : "+r"(len), "+r"(d), "+r"(s));   // a run-time call, never a builtin's expansion
+        (void)memcpy(d, s, len);
+    });
+}
+
+/// The copy at 60 bytes and across the three alignments, at every size
+/// and at 60.
+void copy_alignment_lines() {
+    bench_line(serial, "memcpy", line_run_bytes, copy_at(line_run_bytes, 0, 0), Ruler::hz(), wire_copy_ram);
+    console_drain();
+    for (const CopyAlignment& a : copy_alignments) {
+        for (const uint32_t n : mem_sizes) {
+            bench_line(serial, a.op, (n > ram_bytes / 2u ? ram_bytes / 2u : n), copy_at((n > ram_bytes / 2u ? ram_bytes / 2u : n), a.dst, a.src), Ruler::hz(), wire_copy_ram);
+            console_drain();
+        }
+        bench_line(serial, a.op, line_run_bytes, copy_at(line_run_bytes, a.dst, a.src), Ruler::hz(), wire_copy_ram);
+        console_drain();
+    }
+}
+
+/// strlen and memchr over a string of n bytes starting `off` past a word:
+/// bytes above 0x7F and a NUL at n. memchr is asked for the NUL within 64
+/// bytes, as print() asks it, or within n + 1 past that.
+void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
+    const uint32_t scan_wire = 4u * Ruler::hz();   // a load a word: 4 bytes a cycle
+    for (const uint32_t n : scan_sizes) {
+        for (uint32_t i = 0; i < n; ++i) {
+            ram[off + i] = static_cast<uint8_t>(0x80u | (i * 7u + 1u));
+        }
+        ram[off + n] = 0u;
+        const BenchSample a = best_of_8_op([off] {
+            const char* p = reinterpret_cast<const char*>(ram + off);
+            __asm__ volatile("" : "+r"(p));
+            scan_sink = strlen(p);
+        });
+        bench_line(serial, strlen_op, n, a, Ruler::hz(), scan_wire);
+        console_drain();
+        const uint32_t bound = n < 64u ? 64u : n + 1u;
+        const BenchSample b = best_of_8_op([off, bound] {
+            const void* p = ram + off;
+            uint32_t len = bound;
+            __asm__ volatile("" : "+r"(p), "+r"(len));
+            scan_sink = reinterpret_cast<size_t>(memchr(p, 0, len));
+        });
+        bench_line(serial, memchr_op, n, b, Ruler::hz(), scan_wire);
+        console_drain();
+    }
+}
+
+/// write_bulk()'s choice measured: its byte loop against memcpy over k
+/// bytes, both ends word-aligned and the destination one past a word, 64
+/// copies a sample, the best of 8, the empty loop's cycles taken off.
+/// The table's own two buffers, 128 bytes and a byte of offset with room:
+/// letter c's image then carries no work buffer, which beside letter u's
+/// rings the CH32V006's RAM would not hold.
+alignas(4) uint8_t copy_src[136];
+alignas(4) uint8_t copy_dst[136];
+
+[[gnu::noinline, gnu::optimize("no-tree-loop-distribute-patterns")]]
+uint32_t time_byte_loop(uint32_t off_dst, uint32_t k) {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        const uint8_t* from = copy_src;
+        uint8_t* to = copy_dst + off_dst;
+        uint8_t* const end = to + k;
+        do {
+            *to++ = *from++;
+        } while (to != end);
+        __asm__ volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+[[gnu::noinline]] uint32_t time_memcpy(uint32_t off_dst, uint32_t k) {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        uint32_t len = k;
+        __asm__ volatile("" : "+r"(len));
+        (void)memcpy(copy_dst + off_dst, copy_src, len);
+        __asm__ volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+[[gnu::noinline]] uint32_t time_empty() {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        __asm__ volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+
+void copy_crossover_lines() {
+    uint32_t empty = 0xFFFF'FFFFu;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const uint32_t e = time_empty();
+        empty = e < empty ? e : empty;
+    }
+    print(serial, "  write_bulk's copy, cycles a copy (byte loop / memcpy), aligned and dst+1:", crlf);
+    for (const uint32_t k : {1u, 2u, 4u, 8u, 12u, 16u, 20u, 24u, 32u, 48u, 64u, 128u}) {
+        uint32_t best[4] = {0xFFFF'FFFFu, 0xFFFF'FFFFu, 0xFFFF'FFFFu, 0xFFFF'FFFFu};
+        for (uint8_t i = 0; i < 8u; ++i) {
+            const uint32_t r[4] = {time_byte_loop(0, k), time_memcpy(0, k), time_byte_loop(1, k),
+                                   time_memcpy(1, k)};
+            for (uint8_t j = 0; j < 4u; ++j) {
+                best[j] = r[j] < best[j] ? r[j] : best[j];
+            }
+        }
+        print(serial, "  copy n=", k, ": aligned ", (best[0] - empty) / 64u, " / ", (best[1] - empty) / 64u,
+              "   dst+1 ", (best[2] - empty) / 64u, " / ", (best[3] - empty) / 64u, crlf);
+        console_drain();
+    }
+}
+
 void tm_memory() {
     console_drain();
     for (const uint32_t n : mem_sizes) {
@@ -590,6 +754,15 @@ void tm_memory() {
     for (const uint32_t n : mem_sizes) {
         bench_line(serial, "memset", n, mem_best<MemOp::fill>(n), Ruler::hz(), wire_fill);
     }
+    copy_alignment_lines();
+    scan_lines(0, "strlen", "memchr");
+    scan_lines(1, "strlen.s1", "memchr.s1");
+    bench.verdict("ran", true);
+}
+
+void tc_copy() {
+    console_drain();
+    copy_crossover_lines();
     bench.verdict("ran", true);
 }
 
@@ -1906,6 +2079,7 @@ int main() {
 
     bench.letter('r', "the ruler's self-check and the instrument's cost", tr_ruler);
     bench.letter('m', "memcpy and memset of the runtime against the core's floor", tm_memory);
+    bench.letter('c', "write_bulk's copy: its byte loop against memcpy, aligned and apart", tc_copy);
     bench.letter('p', "a print through the console against the wire", tp_print);
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
     bench.letter('d', "the DMA: copy, fill, a paced block", td_dma);

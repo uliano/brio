@@ -336,9 +336,15 @@ the key that runs the single-board set, `w` the two-board key, below).
   channel's vector) or `InRam` (one instance in SRAM, a call from the
   vector), refused on a port without a transmit engine; `isr()` takes no
   placement (Bench findings). `init()` puts the
-  block through its reset line first. `write_bulk()` copies a run of 16
-  bytes or more whose source and ring slot share their alignment with
-  the runtime's memcpy, any other with its byte loop.
+  block through its reset line first. `write_bulk()` copies a run of 20
+  bytes or more with the runtime's memcpy whatever the alignment of its
+  two ends, a shorter one with its byte loop: on the CH32V006 at 48 MHz
+  the loop is 15 or 18 cycles a byte by where it lies behind the flash's
+  two wait states (309 or 363 for 20 bytes, measured in two images),
+  `memcpy` 159 to 167 with the two ends aligned alike and 309 to 317
+  with the destination a byte past a word, and taken over the four
+  offsets the ring's head may have, `memcpy` is ahead from 20 bytes in
+  both images.
 - `tx_room()` is the bytes `write_bulk()` would take now, the transmit
   ring's free count (util/stream.hpp's `RoomSink`,
   [design/serial.md](../design/serial.md)): it grows a byte at a time as

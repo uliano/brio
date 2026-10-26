@@ -881,10 +881,12 @@ struct Uart {
     static constexpr UartOptions options = opts;
     static constexpr bool has_tx_engine = TxEngine::present;
     static constexpr bool has_rx_engine = RxEngine::present;
-    /// write_bulk()'s copy into the ring: the runtime's memcpy for a run of
-    /// at least this many bytes whose source and ring slot share their
-    /// alignment modulo the word (rt/rt.cpp's word path), the byte loop
-    /// otherwise, where memcpy would run the same loop behind a call.
+    /// write_bulk()'s copy into the ring under a transmit engine: the
+    /// runtime's memcpy for a run of at least this many bytes, whatever the
+    /// alignment of its two ends (rt/rt.cpp copies words across
+    /// alignments), and the byte loop below it. NOT MEASURED on this
+    /// family, no copy table running on its part (docs/ch32x035/usart.md,
+    /// "Not covered yet").
     static constexpr uint32_t copy_threshold = 16;
 
     using Tx = Pin<pads.tx.port, pads.tx.pin>;
@@ -1294,8 +1296,10 @@ public:
             const uint8_t* from = src.data() + queued;
             uint8_t* to = room.data();
             if constexpr (has_tx_engine) {
-                if (take >= copy_threshold &&
-                    ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+                // A ring shorter than copy_threshold never takes memcpy: the
+                // test's first half is a constant, and no copy is compiled
+                // past the ring's end.
+                if (tx_size >= copy_threshold && take >= copy_threshold) {
                     (void)memcpy(to, from, take);
                     m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
                     queued += take;

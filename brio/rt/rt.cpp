@@ -25,15 +25,57 @@
  * with its own name. The AVR does not compile this file: avr-libc's mem*
  * are hand-written assembly, small and fast at once.
  *
- * THE WORD PATH. A copy moves words when source and destination share
- * their alignment modulo the word (bytes up to a word boundary, then
- * blocks of four words, then single words, then the tail), and bytes
- * otherwise. No function here ever performs a word access at an address
- * that is not a multiple of the word: ARMv6-M faults on one and Hazard3
- * traps, so the alignment test is part of the contract, not an
- * optimization. The events the kernel copies are word-aligned by their
- * own members whenever they are large enough to reach memcpy at all
- * (design/runtime.md, the census).
+ * THE WORD PATH. A copy moves words once its destination is on a word
+ * boundary: bytes up to that boundary, then words, then the tail. When
+ * source and destination share their alignment modulo the word the words
+ * go in blocks of four (below), then singly; when they do not, the copy
+ * runs ACROSS ALIGNMENTS (next paragraph), for a copy of rt_shift_min
+ * bytes or more - a shorter one stays a byte loop, the across path's fixed
+ * cost being more than its bytes. A copy into a transport's ring meets
+ * every alignment (the ring's head is wherever the last run left it), so
+ * the across path is no rare case.
+ *
+ * THE COPY ACROSS ALIGNMENTS takes the form each core's manual allows.
+ * The Cortex-M4 and the M33 load a word from any address (ARMv7-M ARM
+ * A3.2.1, the RP2350 datasheet 3.7.4.3.2 for the M33; LDM, LDRD and the
+ * rest still fault, and so does LDR itself if CCR.UNALIGN_TRP is set -
+ * no crt of brio's sets it, and a program that sets it to find stray
+ * unaligned accesses finds this copy's too, as it finds the compiler's
+ * own): there the source is read with plain loads at its own offset,
+ * four a turn, and the core splits each into aligned bus accesses, one
+ * or two cycles dearer than an aligned load (DDI 0439B 3.3.2). Measured
+ * on the STM32F446 and the RP2350's M33, that beats merging aligned words
+ * by shifts at every length. Everywhere else an unaligned word access is
+ * a fault or a trap - ARMv6-M faults on one, Hazard3 "requires natural
+ * alignment of all accesses" (the RP2350 datasheet 3.8.9, MCAUSE codes 4
+ * and 6), and the QingKe V2 and V4 manuals list load and store address
+ * misalignment as exceptions (2.1, table 2-1, codes 4 and 6) - so the
+ * source is read as ALIGNED words, the word that holds its next byte
+ * first, and each word stored is merged from two of them by shifts
+ * (little-endian: the low word shifted right by 8k bits, the high one
+ * left by 32 - 8k, k the source's offset in its word, 1 to 3). There no
+ * function here performs a word access at an address that is not a
+ * multiple of the word.
+ *
+ * WHY READING WHOLE WORDS IS SOUND. The merging copy reads the aligned
+ * word that holds the source's first byte, and the one that holds its
+ * last: bytes before the first and after the last are read with them.
+ * They lie in the same aligned word as a byte the copy may read, and on
+ * every core this file runs on memory is mapped, protected and faulted
+ * in units of at least a word (a memory's end, an MPU or PMP region), so
+ * they are readable wherever that byte is; their values are discarded.
+ * strlen and memchr read the same way, the aligned word that holds the
+ * string's last byte and nothing past it. A sanitizer that tracks
+ * objects byte by byte would see those reads; the host suite's arenas
+ * carry the slack around every source (test/test_rt/), and a source that
+ * ends at the last byte of a page, with no page after it, is one of its
+ * cases.
+ *
+ * THE SCANS. strlen and memchr read bytes up to a word boundary, then
+ * aligned words, testing each for a zero byte with the carry trick -
+ * (w - 0x01010101) & ~w & 0x80808080, no multiply, which the CH32V003's
+ * QingKe V2 has none of - memchr after an exclusive or with its byte
+ * replicated across the word, then the bytes of the word that hit.
  *
  * THE BLOCK ON A THUMB CORE. The Cortex-M0+, M4 and M33 move several
  * words in one instruction: a load or store multiple of N registers takes
@@ -255,9 +297,183 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
 
 #endif
 
+// THE COPY ACROSS ALIGNMENTS (the file's header says why each form).
+// rt_shift_min is the shortest copy that takes it: where its fixed cost
+// (up to three head bytes, the setup, the call on a core that makes one)
+// is paid back against the byte loop, the destination's offset in its
+// word taken as equally likely. Measured with the bench suites' letter m
+// and its copy table: 8 where unaligned loads do the work (the across
+// copy of 8 bytes as dear as the bytes on the STM32F446, cheaper on the
+// M33); 16 where words are merged (on the STM32G0, the RP2040, the
+// CH32V006, CH32V203 and CH32V303 and Hazard3, a copy of 16 bytes is
+// cheaper with no head byte and dearer with three, about even taken
+// over the four, and dearer at 12 either way). It leaves at least one
+// word after the head bytes.
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the copy and the scans read words little-endian");
+
+#if defined(__ARM_FEATURE_UNALIGNED)
+
+constexpr size_t rt_shift_min = 8;
+
+// A word loaded from any address: the compiler emits a plain LDR, which
+// the core splits.
+using RtWordUnaligned = uint32_t __attribute__((__may_alias__, __aligned__(1)));
+
+// The words of n from s to a word-aligned d, both advanced: four loads at
+// s's own offset a turn, then single words.
+[[gnu::always_inline]] inline void rt_copy_words_across(unsigned char*& d, const unsigned char*& s, size_t n) {
+    const size_t span = n & ~(rt_block_bytes - 1u);
+    if (span != 0u) {
+        unsigned char* const blocks = d + span;
+        do {
+            const RtWord w0 = reinterpret_cast<const RtWordUnaligned*>(s)[0];
+            const RtWord w1 = reinterpret_cast<const RtWordUnaligned*>(s)[1];
+            const RtWord w2 = reinterpret_cast<const RtWordUnaligned*>(s)[2];
+            const RtWord w3 = reinterpret_cast<const RtWordUnaligned*>(s)[3];
+            reinterpret_cast<RtWord*>(d)[0] = w0;
+            reinterpret_cast<RtWord*>(d)[1] = w1;
+            reinterpret_cast<RtWord*>(d)[2] = w2;
+            reinterpret_cast<RtWord*>(d)[3] = w3;
+            d += rt_block_bytes;
+            s += rt_block_bytes;
+        } while (d != blocks);
+    }
+    n &= rt_block_bytes - 1u;
+    if (n >= rt_word_bytes) {
+        unsigned char* const words = d + (n & ~rt_word_mask);
+        do {
+            *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWordUnaligned*>(s);
+            d += rt_word_bytes;
+            s += rt_word_bytes;
+        } while (d != words);
+    }
+}
+
+#else
+
+constexpr size_t rt_shift_min = 16;
+
+// The words of n (four or more) to a word-aligned d out of aligned source
+// words, `lo` the one already read, `from` the next: each word stored is
+// lo >> 8K | hi << (32 - 8K), K the source's offset in its word. The
+// shifts are constants, one instance per offset: with the shifts in
+// registers the loop spills to the stack on the Cortex-M0+ (whose Thumb-1
+// instructions reach eight registers) and on the QingKe V2 (RV32E, sixteen),
+// and a constant shift is no instruction more than a variable one. Thumb-1
+// runs a word a turn (four a turn spill again, measured slower on the
+// STM32G0), and so does RV32E, the QingKe V2 of the CH32V00x parts: there
+// four a turn cost some 300 bytes, which the 15 KB image of the CH32V003
+// does not have to spare, for 10 to 16 per cent at 60 bytes on the
+// CH32V006. The other RISC-V cores run four a turn, then single words.
+template <unsigned K>
+[[gnu::always_inline]] inline void rt_merge_words(unsigned char*& d, const RtWord* from, RtWord lo, size_t n) {
+    constexpr unsigned right = 8u * K;
+    constexpr unsigned left = 32u - right;
+#if !defined(__thumb__) && !defined(__riscv_e)
+    const size_t span = n & ~(rt_block_bytes - 1u);
+    if (span != 0u) {
+        unsigned char* const blocks = d + span;
+        do {
+            const RtWord w0 = from[0];
+            const RtWord w1 = from[1];
+            const RtWord w2 = from[2];
+            const RtWord w3 = from[3];
+            reinterpret_cast<RtWord*>(d)[0] = (lo >> right) | (w0 << left);
+            reinterpret_cast<RtWord*>(d)[1] = (w0 >> right) | (w1 << left);
+            reinterpret_cast<RtWord*>(d)[2] = (w1 >> right) | (w2 << left);
+            reinterpret_cast<RtWord*>(d)[3] = (w2 >> right) | (w3 << left);
+            lo = w3;
+            from += 4;
+            d += rt_block_bytes;
+        } while (d != blocks);
+    }
+    n &= rt_block_bytes - 1u;
+    if (n < rt_word_bytes) {
+        return;
+    }
+#endif
+    unsigned char* const words = d + (n & ~rt_word_mask);
+    do {
+        const RtWord hi = *from++;
+        *reinterpret_cast<RtWord*>(d) = (lo >> right) | (hi << left);
+        lo = hi;
+        d += rt_word_bytes;
+    } while (d != words);
+}
+
+// The words of n (four or more) from an s that is not word-aligned to a
+// word-aligned d, both advanced. The first read is the aligned word that
+// holds s's first byte, the last the one that holds the last byte these
+// words move (the file's header: why that is sound).
+[[gnu::always_inline]] inline void rt_copy_words_across(unsigned char*& d, const unsigned char*& s, size_t n) {
+    const uintptr_t k = rt_address(s) & rt_word_mask;
+    const RtWord* const from = reinterpret_cast<const RtWord*>(s - k);
+    const RtWord lo = from[0];
+    s += n & ~rt_word_mask;
+    if (k == 1u) {
+        rt_merge_words<1>(d, from + 1, lo, n);
+    } else if (k == 2u) {
+        rt_merge_words<2>(d, from + 1, lo, n);
+    } else {
+        rt_merge_words<3>(d, from + 1, lo, n);
+    }
+}
+
+#endif
+
+static_assert(rt_shift_min >= rt_word_bytes + rt_word_mask, "a word past the head bytes");
+
+// A copy across alignments of rt_shift_min bytes or more: bytes up to d's
+// word boundary, the words, the tail. Inline on the cores that load
+// unaligned words, whose form needs few registers; elsewhere out of line,
+// so its registers are its own and the co-aligned copy's frame does not
+// grow (a tail call on RISC-V, a call on Thumb-1).
+#if defined(__ARM_FEATURE_UNALIGNED)
+[[gnu::always_inline]] inline
+#else
+[[gnu::noinline, gnu::aligned(4)]]
+#endif
+void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
+#if defined(__ARM_FEATURE_UNALIGNED)
+    // Inline, the head is the co-aligned copy's own loop: counted, it made
+    // GCC keep both pointers' first values live through rt_copy_forward,
+    // a register and two moves more on every copy of four bytes or more
+    // (4 to 7 cycles, measured on the STM32F446).
+    while ((rt_address(d) & rt_word_mask) != 0u) {
+        *d++ = *s++;
+        --n;
+    }
+#else
+    // Out of line, the head is counted: the test on the count, one branch
+    // a byte (the file's header), where the pointer test made two - 14
+    // cycles on a copy of 16 bytes to a destination one past a word, on
+    // the CH32V203.
+    const size_t head = (0u - rt_address(d)) & rt_word_mask;
+    if (head != 0u) {
+        unsigned char* const boundary = d + head;
+        n -= head;
+        do {
+            *d++ = *s++;
+        } while (d != boundary);
+    }
+#endif
+    rt_copy_words_across(d, s, n);
+    n &= rt_word_mask;
+    if (n != 0u) {
+        unsigned char* const last = d + n;
+        do {
+            *d++ = *s++;
+        } while (d != last);
+    }
+}
+
 // Forward copy: correct for disjoint ranges and for a destination below
-// an overlapping source.
-void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
+// an overlapping source. On a word boundary, like rt_copy_across, strlen
+// and memchr: where the C extension packs code at halfwords, a 32-bit
+// instruction across a word costs a fetch, and the QingKe V4B's co-aligned
+// copy of 4096 bytes measured 3412 cycles with its loop at an odd
+// halfword against 3156 on a word.
+[[gnu::aligned(4)]] void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
     if (n >= rt_word_bytes && ((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
         while ((rt_address(d) & rt_word_mask) != 0u) {
             *d++ = *s++;
@@ -274,8 +490,11 @@ void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
             } while (d != words);
         }
         n &= rt_word_mask;
+    } else if (n >= rt_shift_min) {
+        rt_copy_across(d, s, n);
+        return;
     }
-    // The bytes: a whole copy that is not co-aligned, or the tail.
+    // The bytes: a copy too short for the word path, or the tail.
     if (n != 0u) {
         unsigned char* const last = d + n;
         do {
@@ -285,7 +504,9 @@ void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
 }
 
 // Backward copy, from the end: correct for a destination above an
-// overlapping source. The same shape, mirrored, a word a turn.
+// overlapping source. The same shape, mirrored, a word a turn, and bytes
+// across alignments: no image calls memmove today (design/runtime.md),
+// so the merging form is not written backwards for it.
 void rt_copy_backward(unsigned char* d, const unsigned char* s, size_t n) {
     d += n;
     s += n;
@@ -362,22 +583,71 @@ int rt_memcmp(const void* a, const void* b, size_t n) {
     return 0;
 }
 
-// The length of a zero-terminated string: a byte scan. The strings brio
-// measures at run time are short, so the word-at-a-time trick would buy
-// nothing worth its code.
+// A word holding a zero byte, by the carry trick: a zero byte borrows
+// through its top bit in w - 0x01010101 and has that bit clear in w, so
+// the lowest zero byte always raises its 0x80. A byte above it may raise
+// its own falsely, from the borrow; the scans look at the bytes of the
+// word that hits, never at which bits it raised.
+[[gnu::always_inline]] inline bool rt_has_zero(const RtWord w) {
+    return ((w - RtWord{0x01010101u}) & ~w & RtWord{0x80808080u}) != 0u;
+}
+
+// The length of a zero-terminated string: bytes up to a word boundary,
+// then aligned words until one holds a zero byte, then its bytes.
 size_t rt_strlen(const char* s) {
     const char* p = s;
+    while ((rt_address(p) & rt_word_mask) != 0u) {
+        if (*p == '\0') {
+            return static_cast<size_t>(p - s);
+        }
+        ++p;
+    }
+    const RtWord* w = reinterpret_cast<const RtWord*>(p);
+    RtWord x;
+    do {
+        x = *w++;
+    } while (!rt_has_zero(x));
+    p = reinterpret_cast<const char*>(w - 1);
     while (*p != '\0') {
         ++p;
     }
     return static_cast<size_t>(p - s);
 }
 
-// The first byte equal to (unsigned char)c within n bytes, or nothing.
+// The first byte equal to (unsigned char)c within n bytes, or nothing:
+// bytes up to a word boundary, then aligned words, each xored with the
+// byte replicated, until one holds a zero byte, then the bytes from it to
+// the bound.
 void* rt_memchr(const void* s, int c, size_t n) {
     const auto* p = static_cast<const unsigned char*>(s);
     const auto v = static_cast<unsigned char>(c);
-    for (; n != 0u; --n, ++p) {
+    while ((rt_address(p) & rt_word_mask) != 0u) {
+        if (n == 0u) {
+            return nullptr;
+        }
+        if (*p == v) {
+            return const_cast<unsigned char*>(p);
+        }
+        ++p;
+        --n;
+    }
+    const unsigned char* const last = p + n;
+    if (n >= rt_word_bytes) {
+        RtWord pattern = v;
+        pattern |= pattern << 8;
+        pattern |= pattern << 16;
+        // p is on a word boundary: its words end where last's word begins.
+        const RtWord* w = reinterpret_cast<const RtWord*>(p);
+        const RtWord* const words = reinterpret_cast<const RtWord*>(rt_address(last) & ~rt_word_mask);
+        do {
+            if (rt_has_zero(*w ^ pattern)) {
+                break;
+            }
+            ++w;
+        } while (w != words);
+        p = reinterpret_cast<const unsigned char*>(w);
+    }
+    for (; p != last; ++p) {
         if (*p == v) {
             return const_cast<unsigned char*>(p);
         }
@@ -407,11 +677,11 @@ int memcmp(const void* a, const void* b, size_t n) {
     return rt_memcmp(a, b, n);
 }
 
-size_t strlen(const char* s) {
+[[gnu::aligned(4)]] size_t strlen(const char* s) {
     return rt_strlen(s);
 }
 
-void* memchr(const void* s, int c, size_t n) {
+[[gnu::aligned(4)]] void* memchr(const void* s, int c, size_t n) {
     return rt_memchr(s, c, n);
 }
 

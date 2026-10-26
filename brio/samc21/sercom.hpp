@@ -1627,15 +1627,18 @@ private:
 /**
  * THE COPY'S CROSSOVER: the run length from which the transport's copy
  * into or out of a ring calls the runtime's memcpy instead of its own
- * byte loop (Uart::copy_run()), when the two ends share their alignment
- * in the word. Measured with bench_samc's letter u - write_bulk() timed
- * at nine lengths and the four source alignments, the figures in
- * docs/samc21/sercom.md: the inline byte loop costs about nine and a half
- * cycles a byte at 48 MHz behind two wait states; memcpy about 170 cycles
- * of call, tests and tail, then under a cycle a byte when the ends are
- * co-aligned (its word path) - so the two meet at about twenty bytes - and
- * eleven a byte when they are not (its byte path, the same loop out of
- * line), where it never pays and is not called.
+ * byte loop (Uart::copy_run()), whatever the alignment of the two ends.
+ * Measured with bench_samc's letter u - write_bulk() timed at twelve
+ * lengths and the four source alignments, the figures in
+ * docs/samc21/sercom.md: the inline byte loop costs about nine and a
+ * quarter cycles a byte at 48 MHz behind two wait states (438 cycles for
+ * a run of 8, 512 for 16, the call and the pump included); memcpy, past
+ * its fixed cost, about one and a quarter cycles a byte when the ends
+ * share their alignment and three to three and a half when they do not
+ * (its copy across alignments, rt/rt.cpp). At 20 bytes the run costs 489
+ * cycles at the one aligned source offset and 559 to 571 at the other
+ * three, 547 taken over the four, against some 549 for the loop (its 9.25
+ * a byte carried on from 16) - the two meet there.
  */
 inline constexpr uint32_t uart_copy_crossover = 20;
 
@@ -1713,11 +1716,10 @@ class Uart {
     // the loss and the first after it.
     //
     // BOTH RINGS START ON A WORD BOUNDARY (alignas(4): a Ring opens with
-    // its slots, and a SkipRing with its Ring): the run copy takes memcpy's word path only when
-    // its two ends share their alignment in the word (copy_run()), and a
-    // word-aligned source then meets a run starting at any slot index that
-    // is a multiple of four - instead of whatever alignment the linker's
-    // placement of the statics happened to give.
+    // its slots, and a SkipRing with its Ring): a run starting at a slot
+    // index that is a multiple of four is then word-aligned, and memcpy
+    // copies it with no head byte (copy_run()) - instead of whatever
+    // alignment the linker's placement of the statics happened to give.
     alignas(4) static inline SkipRing<uint8_t, rx_size, SamPlatform> m_rx{};
     alignas(4) static inline Ring<uint8_t, tx_size, SamPlatform> m_tx{};
 
@@ -2094,8 +2096,8 @@ public:
      * run.
      *
      * THE COPY is copy_run(): the runtime's memcpy for a run of at least
-     * uart_copy_crossover bytes whose ends share their word alignment, the
-     * inline byte loop otherwise (the measurement is there).
+     * uart_copy_crossover bytes, the inline byte loop below it (the
+     * measurement is there).
      */
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         check_one_writer<Uart>();   // debug builds: the claimed transport's one writer
@@ -2425,15 +2427,11 @@ private:
     /// The copy into the transmit ring's free run and out of the receive
     /// ring's ready one: two pointers and the test at the bottom - a load,
     /// a store, two steps and one branch a byte - unless the run is at
-    /// least uart_copy_crossover long AND its two ends share their
-    /// alignment in the word, where the runtime's memcpy moves it on its
-    /// word path; across a misalignment memcpy's byte path is this loop
-    /// out of line, a call dearer (rt/rt.cpp). `len` is at least one.
+    /// least uart_copy_crossover long, where the runtime's memcpy moves it
+    /// in words whatever the alignment of its two ends (rt/rt.cpp). `len`
+    /// is at least one.
     [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t len) {
-        constexpr uintptr_t word_mask = sizeof(uint32_t) - 1u;
-        if (len >= uart_copy_crossover &&
-            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & word_mask) ==
-                0u) {
+        if (len >= uart_copy_crossover) {
             std::memcpy(to, from, len);
             return;
         }

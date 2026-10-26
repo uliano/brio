@@ -23,7 +23,7 @@ read, so that they know the chip without including any of its headers:
 | the host suite | `SimPl011` | `brio/host/sim_pl011.hpp` | none: the suite names the templates itself |
 
 On both chips the traits give two instances, 32-entry FIFOs, a copy
-crossover of 12 bytes, and UARTCLK as `clk_peri` (the clock type's
+crossover of 20 bytes, and UARTCLK as `clk_peri` (the clock type's
 `pclk_hz`). The smallest use, the console on the RP2040 as its own
 document spells it (an excerpt of [../rp2040/uart.md](../rp2040/uart.md),
 "How to use it"; the RP2350's is the same source):
@@ -158,7 +158,7 @@ The constants:
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
 | `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the PL011 and therefore the family's fact, not this file's; the receive level the transport programs, half of it, is what an entry for the level reads blind |
-| `copy_crossover` | the run length from which `write_bulk()` copies into the transmit ring with the runtime's `memcpy` (its two ends aligned alike) rather than its byte loop: a fact of the core and of the memory the code runs from, measured by the family's bench app (letter `u`) |
+| `copy_crossover` | the run length from which `write_bulk()` copies into the transmit ring with the runtime's `memcpy`, whatever the alignment of its two ends, rather than its byte loop: a fact of the core and of the memory the code runs from, measured by the family's bench app (letter `u`) |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a

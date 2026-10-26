@@ -177,6 +177,7 @@
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abcdef,gh,opqrs
+// build: groups.v203c8 = abcdefgh,opqrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>

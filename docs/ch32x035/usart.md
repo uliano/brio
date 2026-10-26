@@ -703,6 +703,12 @@ Implemented but not bench-verified, each with what would measure it:
   CH32V006's suite measured that shape ([../ch32v00x/usart.md](../ch32v00x/usart.md)),
   and here channel 8's other requesters are TIM2's trigger and COM
   events, whose held request no letter stages yet.
+- **The run copy's crossover** (`copy_threshold`, 16 bytes: under a
+  transmit engine, the runtime's `memcpy` for a run that long or longer
+  whatever the alignment of its two ends, the plain transport copying a
+  byte at a time): no copy table runs on this part; a letter timing the
+  transport's byte loop against `memcpy` over 1 to 128 bytes, the two
+  ends aligned alike and apart, would set it.
 - **USART1 and USART3, and the other packages' columns**: USART1 has no
   usable column on the QFN20 and USART3's only one is the debug port's,
   so neither has carried a byte here; a board of another package would

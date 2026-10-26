@@ -96,6 +96,15 @@
 //      run. ON A PART WITH 8 KBYTES OF SRAM (the STM32G031K8, SRAM_SIZE_MAX
 //      in its header) the largest size is 2048: two 4096-byte buffers
 //      would be the whole of its RAM.
+//      Then the copy at 60 bytes (a printed line's run) and across
+//      alignments - memcpy.d1s0, memcpy.d0s1 and memcpy.d1s2, the
+//      destination and the source that many bytes past a word - at every
+//      size and at 60, against the same floor; then strlen and memchr (the
+//      NUL within 64 bytes, as print() asks, or within n + 1 past that)
+//      over strings of 15, 50 and the largest size bytes starting on a word and one
+//      past it (strlen.s1, memchr.s1), against a load a word, 4 bytes a
+//      cycle.
+//      The transport's copy table is letter u's.
 //   p  a print of 1, 16, 256 and 4096 bytes - print(serial, s) with s a
 //      static string in flash of that length (rows of 62 digits and a
 //      CRLF; the 1-byte one is the final LF) - then the drain. The
@@ -595,8 +604,8 @@ void tr_ruler() {
 // =============================================================================
 // m - memcpy and memset
 // =============================================================================
-alignas(4) uint8_t mem_src[mem_max];
-alignas(4) uint8_t mem_dst[mem_max];
+alignas(4) uint8_t mem_src[mem_max + 4u];
+alignas(4) uint8_t mem_dst[mem_max + 4u];
 volatile uint32_t mem_len = 0;
 
 void run_memory(const OpNames& ops) {
@@ -617,8 +626,81 @@ void run_memory(const OpNames& ops) {
     }
 }
 
+/// The copy's rows across alignments: the destination and the source each
+/// this many bytes past a word.
+struct CopyAlignment {
+    const char* op;
+    uint8_t dst;
+    uint8_t src;
+};
+constexpr CopyAlignment copy_alignments[] = {{"memcpy.d1s0", 1, 0}, {"memcpy.d0s1", 0, 1}, {"memcpy.d1s2", 1, 2}};
+/// The run a printed line of 60 bytes hands the transport.
+constexpr uint32_t line_run_bytes = 60;
+/// The scans' lengths: two of the writer's texts and letter p's longest
+/// the buffer holds.
+constexpr uint32_t scan_sizes[] = {15, 50, mem_max};
+volatile size_t scan_sink = 0;
+
+/// One copy of `n` bytes from mem_src + so to mem_dst + dof.
+BenchSample copy_at(uint32_t n, uint32_t dof, uint32_t so) {
+    return best_of_8([n, dof, so] {
+        uint8_t* d = mem_dst + dof;
+        const uint8_t* s = mem_src + so;
+        uint32_t len = n;
+        __asm__ volatile("" : "+r"(len), "+r"(d), "+r"(s));   // a run-time call, never a builtin's expansion
+        (void)std::memcpy(d, s, len);
+    });
+}
+
+/// The copy at 60 bytes and across the three alignments, at every size
+/// and at 60.
+void copy_alignment_lines() {
+    bench_line(serial, "memcpy", line_run_bytes, copy_at(line_run_bytes, 0, 0), Ruler::hz(), memcpy_wire_bps);
+    (void)drain();
+    for (const CopyAlignment& a : copy_alignments) {
+        for (const uint32_t n : mem_sizes) {
+            bench_line(serial, a.op, n, copy_at(n, a.dst, a.src), Ruler::hz(), memcpy_wire_bps);
+            (void)drain();
+        }
+        bench_line(serial, a.op, line_run_bytes, copy_at(line_run_bytes, a.dst, a.src), Ruler::hz(), memcpy_wire_bps);
+        (void)drain();
+    }
+}
+
+/// strlen and memchr over a string of n bytes starting `off` past a word:
+/// bytes above 0x7F and a NUL at n. memchr is asked for the NUL within 64
+/// bytes, as print() asks it, or within n + 1 past that.
+void scan_lines(uint32_t off, const char* strlen_op, const char* memchr_op) {
+    const uint32_t scan_wire = 4u * Ruler::hz();   // a load a word: 4 bytes a cycle
+    for (const uint32_t n : scan_sizes) {
+        for (uint32_t i = 0; i < n; ++i) {
+            mem_src[off + i] = static_cast<uint8_t>(0x80u | (i * 7u + 1u));
+        }
+        mem_src[off + n] = 0u;
+        const BenchSample a = best_of_8([off] {
+            const char* p = reinterpret_cast<const char*>(mem_src + off);
+            __asm__ volatile("" : "+r"(p));
+            scan_sink = strlen(p);
+        });
+        bench_line(serial, strlen_op, n, a, Ruler::hz(), scan_wire);
+        (void)drain();
+        const uint32_t bound = n < 64u ? 64u : n + 1u;
+        const BenchSample b = best_of_8([off, bound] {
+            const void* p = mem_src + off;
+            uint32_t len = bound;
+            __asm__ volatile("" : "+r"(p), "+r"(len));
+            scan_sink = reinterpret_cast<size_t>(memchr(p, 0, len));
+        });
+        bench_line(serial, memchr_op, n, b, Ruler::hz(), scan_wire);
+        (void)drain();
+    }
+}
+
 void tm_memory() {
     run_memory(plain_ops);
+    copy_alignment_lines();
+    scan_lines(0, "strlen", "memchr");
+    scan_lines(1, "strlen.s1", "memchr.s1");
     bench.verdict("ran", true);
 }
 
@@ -1476,7 +1558,7 @@ void run_copy_crossover() {
     }
     print(serial, "  write_bulk's copy, cycles a copy (byte loop / memcpy), aligned and "
           "dst+1:", crlf);
-    for (const uint32_t k : {1u, 2u, 4u, 8u, 12u, 16u, 24u, 32u, 48u, 64u, 128u}) {
+    for (const uint32_t k : {1u, 2u, 4u, 8u, 12u, 16u, 20u, 24u, 32u, 48u, 64u, 128u}) {
         copy_len = k;
         uint32_t best[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
         for (uint8_t i = 0; i < 8u; ++i) {

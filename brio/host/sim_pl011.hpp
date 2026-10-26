@@ -285,7 +285,7 @@ struct SimPl011 {
     static constexpr uint8_t fifo_depth = 32;
     /// write_bulk()'s memcpy crossover: no core is measured here, and the
     /// value only decides which of the two copies a host case takes - a
-    /// run of sixteen or more with its ends aligned alike goes to memcpy.
+    /// run of sixteen or more goes to memcpy.
     static constexpr uint32_t copy_crossover = 16;
 
     /// The two blocks, and the reset values the block comes up with:

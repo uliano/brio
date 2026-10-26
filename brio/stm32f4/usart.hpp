@@ -989,14 +989,16 @@ class Uart {
     static inline volatile bool m_rx_ore_counted = false;
 
     /// write_bulk()'s copy into the ring: the runtime's memcpy for a run
-    /// of at least this many bytes whose source and destination share
-    /// their alignment modulo the word - rt/rt.cpp's word path, a
-    /// load-multiple turn of 64 bytes - and the byte loop otherwise, where
-    /// memcpy would run the same byte loop behind a call. Counted on the
-    /// F446 (bench_stm32f4 letter m, the listing): the byte loop is four
-    /// instructions, about six cycles a byte; memcpy co-aligned is 35
-    /// cycles for one byte, 78 for 16 and 238 for 256, the call included.
-    static constexpr uint32_t copy_threshold = 16;
+    /// of at least this many bytes, whatever the alignment of its two ends
+    /// (the ring's head is wherever the last run left it), and the byte
+    /// loop below it. Measured on the F446 at 180 MHz (bench_stm32f4
+    /// letter m, its copy table, cycles a copy): the byte loop - four
+    /// instructions - is 6 cycles a byte, 97 for 16 bytes and 121 for 20;
+    /// memcpy is 78 and 84 with the two ends aligned alike, 113 and 115
+    /// with the destination a byte past a word (rt/rt.cpp's copy across
+    /// alignments, its three head bytes the dearest case). From 20 bytes
+    /// memcpy is ahead at either alignment.
+    static constexpr uint32_t copy_threshold = 20;
 
 public:
     constexpr Uart() = default;
@@ -1447,8 +1449,10 @@ public:
             // the room is not empty and the run is not done.
             const uint8_t* from = src.data() + queued;
             uint8_t* to = dst.data();
-            if (chunk >= copy_threshold &&
-                ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+            // A ring shorter than copy_threshold never takes memcpy: the
+            // test's first half is a constant, and no copy is compiled past
+            // the ring's end.
+            if (tx_size >= copy_threshold && chunk >= copy_threshold) {
                 (void)memcpy(to, from, chunk);
             } else {
                 uint8_t* const end = to + chunk;

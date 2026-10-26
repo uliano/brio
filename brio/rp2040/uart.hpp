@@ -152,11 +152,14 @@ struct Rp2040Pl011 {
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 32;
     /// write_bulk()'s memcpy crossover on this core (bench_rp2040 letter
-    /// u, the Cortex-M0+ at 125 MHz from the XIP cache): the byte loop is
-    /// 2 cycles and 9 a byte, the runtime's memcpy about 54 and under one
-    /// a byte when the two ends share their word alignment - the loop
-    /// still ahead at 8 bytes, memcpy at 12.
-    static constexpr uint32_t copy_crossover = 12;
+    /// u, the Cortex-M0+ at 125 MHz from the XIP cache, cycles a copy): the
+    /// byte loop is 2 cycles and 9 a byte, 146 for 16 bytes and 182 for 20;
+    /// the runtime's memcpy 87 and 95 when the two ends share their word
+    /// alignment, 189 and 199 with the destination a byte past a word (its
+    /// copy across alignments, three head bytes, the dearest case). The
+    /// ring's head is at any offset of its word, the ends aligned alike one
+    /// time in four: taken so, memcpy is ahead from 20 bytes.
+    static constexpr uint32_t copy_crossover = 20;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? UART0 : UART1); }

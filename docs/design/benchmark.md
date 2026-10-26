@@ -139,7 +139,15 @@ beyond the console:
 
 - `r`: the ruler's self-check and the instrument's cost.
 - `m`: `memcpy` and `memset` at the four sizes: the runtime
-  ([runtime.md](runtime.md)) against the core's own load/store floor.
+  ([runtime.md](runtime.md)) against the core's own load/store floor;
+  then `memcpy` at 60 bytes (a printed line's run) and across
+  alignments at every size, `strlen` and `memchr` over strings of 15,
+  50 and the largest size, and, where no other letter carries it, the
+  copy table a transport's crossover is set from: its byte loop
+  against `memcpy` over 1 to 128 bytes, the two ends aligned alike and
+  apart, in a letter `c` of its own where letter m's image would not
+  fit the family's smallest part (runtime.md, "The copy across
+  alignments" and "The scans", has the figures).
 - `p`: a print of the four sizes through the console transport at the
   console's rate: the path every family's print takes, a run at a time
   ([serial.md](serial.md)).
@@ -617,28 +625,28 @@ as they stand.
 
 | (STM32F446RE, 180 MHz, 5 WS, ST's flash accelerator on; console 115200; ten passes of 16, three of letter l) | cycles |
 |---|---|
-| the line through the writer, from an object's dispatch, cold (one entry of the transmit handler inside, below) / warm, the line right behind the cold one (one entry inside) | 2004 to 2244 / 1918 to 2118 |
-| the same, warm and masked (no entry inside) | 1785 to 1937 |
-| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
-| `print()` straight into the transport, warm and masked, the same image | 1436 to 1644 |
-| letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`: two entries of the transmit handler, 152 cycles inside them) / warm (`irq=0`) | 2045 to 2153 / 1702 to 1750 |
-| the transport's run alone, warm and masked: 2 bytes / 60 bytes (letter j) | 188 to 196 / 376 to 612 |
-| letter l: the same, 2 bytes / 60 bytes | 182 to 190 / 557 to 605 |
+| the line through the writer, from an object's dispatch, cold (one entry of the transmit handler inside, below) / warm, the line right behind the cold one (one entry inside) | 2050 to 2261 / 1960 to 2124 |
+| the same, warm and masked (no entry inside) | 1822 to 1986 |
+| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1126 to 1198 / 688 to 850 |
+| `print()` straight into the transport, warm and masked, the same image | 1446 to 1606 |
+| letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`: two entries of the transmit handler, 152 cycles inside them) / warm (`irq=0`) | 1933 to 2101 / 1562 to 1698 |
+| the transport's run alone, warm and masked: 2 bytes / 60 bytes (letter j) | 188 to 196 / 377 to 513 |
+| letter l: the same, 2 bytes / 60 bytes | 182 to 190 / 349 to 497 |
 
 Like against like: the writer's masked line against the direct print
-masked in the same image, 1785 to 1937 against 1436 to 1644, some 300
-to 350 cycles more, a fifth; its warm line against letter l's warm
-direct print, 1918 to 2118 against 1702 to 1750, some 200 to 370 more.
-What the writer adds: the stage's resolution at each text, its take and
-the lock, and every byte copied twice, into the stage and then into the
-ring. The line's end is mostly the transport's run of 60 bytes, bimodal
-by the ring's alignment (the runtime's `memcpy` copies words between
-buffers aligned alike and bytes otherwise: 376 to 512 against 564 to
-612 in letter j). The cold line and the warm one behind it each carry
-one entry of the transport's transmit handler, counted by letter j
-around each line (the most over 16 runs: 1, 1, 0, 0 for the cold, the
-warm, the masked and the split line; the kernel tick fell inside a line
-once in 48 runs). The mechanism, from `stm32f4/usart.hpp`'s transmit
+masked in the same image, 1822 to 1986 against 1446 to 1606, some 380
+cycles more, a quarter; its warm line against letter l's warm direct
+print, 1960 to 2124 against 1562 to 1698, some 400 to 430 more. What
+the writer adds: the stage's resolution at each text, its take and the
+lock, and every byte copied twice, into the stage and then into the
+ring. The line's end is mostly the transport's run of 60 bytes, which
+the runtime's `memcpy` copies in words whatever the ring's alignment
+([runtime.md](runtime.md), "The copy across alignments"). The cold
+line and the warm one behind it each carry one entry of the transport's
+transmit handler, counted by letter j around each line (the most over
+16 runs: 1, 1, 0, 0 for the cold, the warm, the masked and the split
+line, in every pass; the kernel tick fell inside a line in five passes
+of the ten, once in each). The mechanism, from `stm32f4/usart.hpp`'s transmit
 path: a run that starts an idle transmitter pushes its first byte and
 arms the transmit interrupt, which fires at once and hands the
 transmitter that byte, inside the cold line; the transmitter takes the
@@ -646,12 +654,12 @@ byte into its shift register within one bit time, 8.7 us at 115200,
 some 1560 cycles, and the interrupt fires again, inside the line that
 follows, and hands it the second byte; the third comes a byte time
 after that, 15600 cycles, past the four lines. So the warm line's
-figure is the core's cycles and one handler entry, about 180 cycles
-(2042 against 1861 at the least of one run), and the masked line's is
+figure is the core's cycles and one handler entry, about 140 cycles
+(1960 against 1822 at the least of one pass), and the masked line's is
 the core's alone. Letter l's cold direct print counts two entries
 (`irq=2`, 152 cycles inside them): its first run is the two-byte text at
 the line's start, and both the first and the second interrupt fall
-inside its 2045 cycles; its warm line, right behind, counts none.
+inside its 1933 cycles; its warm line, right behind, counts none.
 
 ## Not covered yet
 
@@ -659,20 +667,20 @@ Gaps, each with what would explain or measure it:
 
 - The STM32F446RE transport's run costs some 180 cycles before its
   first byte, warm and masked (letters j and l: a run of 2 bytes 182 to
-  196, of 60 bytes 376 to 612), against a listing of a call, the ring's
+  196, of 60 bytes 349 to 513), against a listing of a call, the ring's
   indices, one push and two bit-band stores. Not split; what would: the
   DWT's LSU and fold counters around one run, and the run with its
   second store taken out.
-- The direct line measures 1702 to 1750 in letter l and 1436 to 1644 in
-  letter j, a gap of 60 to 300 cycles. Two differences are known and
-  neither is measured: the C-string verb is inlined in the suite's image
-  and a call in the instrument's, and the ring's alignment at the line's
-  longest run differs between the two (letter j's direct line is itself
-  bimodal, 1436 to 1568 or 1596 to 1644 by pass, and its mode does not
-  follow the mode of the 60-byte run measured beside it). What would:
-  the line timed with the flash accelerator's caches reset before it in
-  both images, the ring's head read before each line, and the code
-  placed at one address in both.
+- The direct line measures 1562 to 1698 in letter l and 1446 to 1606 in
+  letter j, a gap of some 100 cycles. The ring's alignment at the
+  line's longest run moves a line by some 60 cycles at most, that run
+  being copied in words at any alignment (60 bytes take 120 cycles
+  aligned alike, 165 to 182 across); what else differs is known and not
+  measured: the C-string verb is inlined in the suite's image and a call
+  in the instrument's, and the code lies at other addresses, the
+  accelerator's lines with it. What would: the line timed with the flash
+  accelerator's caches reset before it in both images, the ring's head
+  read before each line, and the code placed at one address in both.
 
 - `bench_vx03`'s letter i run after its letter u in one session stalls
   at its first tenure, on the CH32V203C8 (whose two images keep the

@@ -21,6 +21,9 @@
 
 #include <cstring>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -215,6 +218,73 @@ TEST_CASE("memchr: every position, absent values, unsigned char comparison, the 
     REQUIRE(rt_memchr(&s.b[guard], -61, 110) == &s.b[guard + 100]);
     REQUIRE(rt_memchr(&s.b[guard], 0x1C3, 110) == &s.b[guard + 100]);
     REQUIRE(rt_memchr(&s.b[guard], -61, 100) == nullptr);  // one short of it
+}
+
+// Sources at the very edges of mapped memory: a page with no page mapped on
+// either side of it, the source's first byte the page's first or its last
+// byte the page's last. The merging copy and the scans read the aligned
+// word that holds such a byte (rt.cpp's header: why that is sound); a read
+// one word past it, or before it, faults here instead of passing.
+namespace {
+
+struct GuardedPage {
+    uint8_t* base = nullptr;   // the readable page, between two unmapped ones
+    size_t size = 0;
+    GuardedPage() {
+        size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        void* m = mmap(nullptr, 3 * size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        REQUIRE(m != MAP_FAILED);
+        base = static_cast<uint8_t*>(m) + size;
+        REQUIRE(mprotect(base, size, PROT_READ | PROT_WRITE) == 0);
+    }
+    ~GuardedPage() { munmap(base - size, 3 * size); }
+};
+
+}  // namespace
+
+TEST_CASE("memcpy and memmove: a source at either edge of a page, every misalignment and length") {
+    GuardedPage page;
+    Buffer dst;
+    for (size_t i = 0; i < page.size; ++i) {
+        page.base[i] = pattern(i);
+    }
+    for (size_t dof = 0; dof < max_offset; ++dof) {
+        for (size_t n = 1; n <= max_length; ++n) {
+            const uint8_t* const sources[] = {page.base, page.base + page.size - n};
+            for (const uint8_t* src : sources) {
+                for (auto* f : {&rt_memcpy, &rt_memmove}) {
+                    fill_guard(dst);
+                    void* r = f(&dst.b[guard + dof], src, n);
+                    REQUIRE(r == &dst.b[guard + dof]);
+                    for (size_t i = 0; i < n; ++i) {
+                        REQUIRE(dst.b[guard + dof + i] == src[i]);
+                    }
+                    REQUIRE(guards_intact(dst, guard + dof, n));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("strlen and memchr: a string ending on a page's last byte, every misalignment and length") {
+    GuardedPage page;
+    for (size_t n = 0; n <= max_length; ++n) {
+        for (size_t i = 0; i < page.size; ++i) {
+            page.base[i] = static_cast<uint8_t>(0x80u | (pattern(i) & 0x7Fu));
+        }
+        // The NUL on the page's last byte; the string starts n before it,
+        // at every residue as n runs.
+        page.base[page.size - 1] = 0u;
+        const auto* str = reinterpret_cast<const char*>(page.base + page.size - 1 - n);
+        REQUIRE(rt_strlen(str) == n);
+        REQUIRE(rt_memchr(str, 0, n + 1) == page.base + page.size - 1);
+        // Absent within a bound that ends on the page's last byte.
+        REQUIRE(rt_memchr(str, 0x7F, n + 1) == nullptr);
+        // From the page's first byte, the NUL at n.
+        page.base[n] = 0u;
+        REQUIRE(rt_strlen(reinterpret_cast<const char*>(page.base)) == n);
+        REQUIRE(rt_memchr(page.base, 0, n + 1) == page.base + n);
+    }
 }
 
 // The cases every 32-bit platform suite runs on its chip (rt/selftest.hpp),

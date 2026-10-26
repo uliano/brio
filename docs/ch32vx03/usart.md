@@ -786,9 +786,14 @@ edges and one DMA beat an edge.
   error threw away, and receive channels given up on a frame they never
   took). `tx_idle()` is the
   wire's: the ring empty, no block in flight, and TC, cleared as every
-  transmit block starts. `write_bulk()` copies a run of 16 bytes or more
-  whose source and ring slot share their alignment with the runtime's
-  memcpy, any other with its byte loop. The frame is its own parameter
+  transmit block starts. `write_bulk()` copies a run of 20 bytes or more
+  with the runtime's memcpy whatever the alignment of its two ends, a
+  shorter one with its byte loop: at 144 MHz the loop is 7 cycles a
+  byte, 145 for 20 bytes, `memcpy` 79 on the CH32V203 and 63 on the
+  CH32V303 with the two ends aligned alike, 134 and 119 with the
+  destination a byte past a word, and taken over the four offsets the
+  ring's head may have, `memcpy` is ahead from 20 bytes on the first
+  and from 16 on the second. The frame is its own parameter
   here, ahead of the engine slots, and `UartOptions` - the trailing one -
   carries what is left: `half_duplex` (the TX pad as an alternate-function
   open drain, the RX pad untouched), `rts`/`cts` (the column's pads,

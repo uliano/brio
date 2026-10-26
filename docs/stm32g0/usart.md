@@ -569,12 +569,16 @@ flight, and TC - which the handler's TDR stores clear and a transmit
 block clears through ICR when it starts (33.5.19's step 6), so a TC
 left by the previous block never answers for this one.
 
-**THE COPY INTO THE RING.** `write_bulk()` copies a run of 16 bytes or
-more whose two ends share their word alignment with the runtime's
-`memcpy` and anything else with its byte loop: measured with letter `u`,
-the loop is 4 cycles and 9 a byte, `memcpy` 70 and under one a byte
-co-aligned - the two even near 13 - and on ends aligned differently
-`memcpy`'s own byte path, 62 cycles behind the loop at every length.
+**THE COPY INTO THE RING.** `write_bulk()` copies a run of 24 bytes or
+more with the runtime's `memcpy` whatever the alignment of its two ends,
+which copies words across alignments too
+([design/runtime.md](../design/runtime.md)), and a shorter one with its
+byte loop. Measured with letter `u` on the STM32G0B1RE at 64 MHz, two
+wait states: the loop is 4 cycles and 9 a byte, 184 for 20 bytes and
+220 for 24; `memcpy` 125 and 132 with the two ends aligned alike, 228
+and 238 with the destination a byte past a word. The ring's head is at
+any offset of its word, so the ends are aligned alike one time in four,
+and taken so `memcpy` is ahead from 24 bytes.
 
 **AGAINST THE VENDOR**, ST's HAL v1.4.7 on the same board and loop in a
 scratch program (brio's crt, clock and console around it): its FIFO

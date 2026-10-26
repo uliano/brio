@@ -273,7 +273,11 @@ public:
 
     /// A C string onto the caller's line: one resolution of the stage and
     /// one pass that scans and copies together, stopping where the stage
-    /// ends (the line is then refused whole at its end). Any context.
+    /// ends (the line is then refused whole at its end). Any context. The
+    /// length found by the runtime's memchr and the text copied by its
+    /// memcpy measured dearer on the STM32F446 (the Rubato suite's letter
+    /// j: its line's four texts 1302 to 1365 cycles against 1126 to 1198),
+    /// two calls' fixed cost on texts of two and four bytes.
     [[gnu::noinline]] static void text(const char* p) {
         Stage* const s = stage_of_caller();
         if (s == nullptr) {

@@ -293,10 +293,10 @@ concept Pl011Chip =
         { C::instances } -> std::convertible_to<uint8_t>;
         { C::fifo_depth } -> std::convertible_to<uint8_t>;
         /// The run length from which the runtime's memcpy copies a run
-        /// into the transmit ring faster than a byte loop, its two ends
-        /// sharing their word alignment: a fact of the core and the
-        /// memory the code runs from, measured on each family (its bench
-        /// app's letter u), never this file's.
+        /// into the transmit ring faster than a byte loop, whatever the
+        /// alignment of its two ends: a fact of the core and the memory
+        /// the code runs from, measured on each family (its bench app's
+        /// letter u), never this file's.
         { C::copy_crossover } -> std::convertible_to<uint32_t>;
     } &&
     Platform<typename C::Platform> &&
@@ -1398,13 +1398,15 @@ private:
 
     /// write_bulk()'s copy into the ring's free run: THE RUNTIME'S memcpy
     /// WHERE ITS FIXED COST PAYS - a run of the family's `copy_crossover`
-    /// bytes or more whose two ends share their word alignment, which is
-    /// when its word block runs at all - and the byte loop below it: two
+    /// bytes or more, whatever the alignment of its two ends (rt/rt.cpp
+    /// copies words across alignments) - and the byte loop below it: two
     /// pointers and no index, the test at the bottom, a load, a store,
     /// two steps and one branch a byte. `count` is at least one.
     [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t count) {
-        if (count >= Chip::copy_crossover &&
-            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+        // A ring shorter than the crossover never takes memcpy: the test's
+        // first half is a constant, and no copy is compiled past the
+        // ring's end.
+        if (tx_size >= Chip::copy_crossover && count >= Chip::copy_crossover) {
             std::memcpy(to, from, count);
             return;
         }
