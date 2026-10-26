@@ -24,10 +24,10 @@
  * here; the end of a line that closes with nothing to a LineWriter).
  *
  * The first argument may instead be a LineWriter (util/line_writer.hpp),
- * the one writer of a transport: then the same call posts its arguments
- * to the writer, which formats them later with the verbs below, and the
- * delivery policy is the writer's (whole lines, or refused and
- * counted), not the one that follows.
+ * the one writer of a transport: a sink like a transport, which takes
+ * the bytes these verbs format into the caller's own line and writes the
+ * line whole at its end. Its delivery policy is its own (whole lines, or
+ * refused and counted), not the one that follows.
  *
  * Extension point: print() dispatches each argument to an unqualified
  * print_one(sink, value) call, so a new type becomes printable by providing
@@ -694,18 +694,11 @@ inline constexpr crlf_t crlf{};  ///< print(serial, ..., crlf) -> "\r\n"
 
 /// The end of a line that writes nothing: a prompt ("> ") is a line the
 /// reader must see before any end of line comes. On a transport it
-/// prints nothing at all; to a LineWriter (util/line_writer.hpp), as the
-/// last argument, it ends the line the way crlf does but closes it with
-/// no bytes, so the text leaves at once instead of waiting for an end.
+/// prints nothing at all; to a LineWriter (util/line_writer.hpp) it ends
+/// the line the way crlf does but closes it with no bytes, so the text
+/// leaves at once instead of waiting for an end.
 struct flush_line_t {};
 inline constexpr flush_line_t flush_line{};
-
-/// A type that print() hands its arguments to as one message, to be
-/// formatted later, instead of formatting them onto a ByteSink:
-/// util/line_writer.hpp's LineWriter says so with `takes_messages`. The
-/// print() that takes such a type is line_writer.hpp's.
-template <typename W>
-concept MessageSink = requires { requires W::takes_messages; };
 
 struct Hex { uint32_t value; };
 /// Hexadecimal integer with 0x prefix and no leading zeros:

@@ -151,7 +151,8 @@ receive run; an I2C tenure) join the application as the driver they
 measure is reworked, each with its own document carrying the numbers.
 A service whose cost depends on the kernel it runs under is measured in
 the suite that runs it: the line writer's in the STM32F446RE's Rubato
-suite (letter j, below).
+suite (letter j, below), against the same line printed straight to the
+console by `bench_stm32f4` (its letter l, below).
 
 ## The skeleton's numbers
 
@@ -588,47 +589,75 @@ What the rows say:
   images from SRAM, warm and cold side by side in the two families'
   platform documents ("A handler in SRAM").
 
-## Letter j: the line writer
+## Letter j: the line writer, and letter l: the line without it
 
 `util/line_writer.hpp`'s writer ([serial.md](serial.md), "LineWriter")
-moves a print's formatting from the caller into its own dispatch, so
-its cost is two numbers and a ratio: what a `print()` to it costs the
-object that prints (the pack and the post), what the writer's dispatch
-costs to write the line into the ring, and how far the bound it sizes
-its room by stands above what it writes. The STM32F446RE's Rubato suite
-measures them over a verdict-shaped line, 60 bytes in five runs, with
-the ruler (the DWT's CYCCNT, one load), each figure the least and most
-of 16, the ruler's own two reads taken off; the oracle is the same line
-printed straight into the transport, as every line was before the
-writer, in the same letter.
+formats a print at the call into the caller's own buffer and hands the
+line to the transport whole at its end, so its cost is one number: what
+the line costs the object that prints it, there being no dispatch after
+it. The STM32F446RE's Rubato suite measures it over a verdict-shaped
+line, 60 bytes in four texts and the end, printed from an object's
+dispatch, with the ruler (the DWT's CYCCNT, one load), each figure the
+least and most of 16, the ruler's own two reads taken off; the oracle,
+the same line printed straight into the transport, is measured in the
+same letter. `bench_stm32f4`'s letter l prints the same line straight to
+the console in an image with no writer - the cost a program under the
+cooperative kernel pays, where a line printed to the transport is whole
+by construction - cold (right after the console drained) and warm
+(right behind), and the transport's run alone, each in the bench line
+of its least wall (raw: one ruler read inside) and the least and most
+of 16.
 
-| (STM32F446RE, 180 MHz, 5 WS, ART on; console 115200; ten passes of 16) | cycles |
+| (STM32F446RE, 180 MHz, 5 WS, ART on; console 115200; ten passes of 16, three of letter l) | cycles |
 |---|---|
-| `print()` from an object's dispatch, the first after other work | 421 to 478 |
-| the same, right behind it | 324 |
-| the writer's dispatch writing it into an empty ring, the UART's handler inside | 2046 to 2238 |
-| the same right behind another, interrupts enabled / masked | 1735 to 1947 / 1738 to 1898 |
-| `print()` straight into the transport, masked, right behind another | 1516 to 1725 |
-| the transport's run alone: 2 bytes / 50 bytes | 177 to 185 / 335 to 539 |
+| the line through the writer, from an object's dispatch, cold (the UART's handler inside, see below) / warm, the line right behind the cold one | 2004 to 2244 / 1918 to 2118 |
+| the same, warm and masked | 1785 to 1937 |
+| of a warm one: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
+| `print()` straight into the transport, warm and masked, the same image | 1436 to 1644 |
+| letter l: `print()` straight into the transport, no writer in the image, cold (`irq=2 isr=152`) / warm (`irq=0`) | 2041 to 2153 / 1702 to 1750 |
+| the transport's run alone, warm and masked: 2 bytes / 60 bytes (letter j) | 188 to 196 / 376 to 612 |
+| letter l: the same, 2 bytes / 60 bytes | 182 to 190 / 557 to 605 |
 
-The writer's dispatch is the direct print and about a tenth more (the
-take, the chain, the drain's room and release, the mark's check); both
-are the transport's runs, some 175 cycles each before its bytes and
-about seven a byte. The bound over the suite's own lines, ten passes of
-its every letter: 113 202 against 103 596 bytes formatted, 1.09; the
-transmit edges the writer waited for at the console's rate, 1277 over
-1643 lines, the suite printing faster than the wire.
+The writer's line is the direct print and a tenth to a quarter more,
+by which direct figure it is set against: the stage's resolution at
+each text, its take and the lock, and every byte copied twice, into the
+stage and then into the ring. The line's end is
+mostly the transport's run of 60 bytes, bimodal by the ring's alignment
+(the runtime's `memcpy` copies words between buffers aligned alike and
+bytes otherwise). The cold line carries the transport's own interrupts:
+a run that starts an idle transmitter arms TXE, whose handler hands it
+the first byte, finds the ring empty behind it and disarms, and is
+armed again when the rest is published - three entries, letter l's
+`irq=2` the direct print's two. The same direct line measures 1702 to
+1750 in letter l against 1436 to 1644 in letter j, the print's code the
+same: letter l's run of 60 bytes copies bytes every time (557 to 605,
+the slow mode of letter j's 376 to 612), which is most of the gap, and
+the alignment the ring's head happens to have in each image is where
+it comes from.
 
 ## Not covered yet
 
 Gaps, each with what would explain or measure it:
 
-- The STM32F446RE transport's run costs some 175 cycles before its
-  first byte, warm and masked (letter j: a run of 2 bytes 177 to 185,
-  of 50 bytes 335 to 539), against a listing of a call, the ring's
+- The STM32F446RE transport's run costs some 180 cycles before its
+  first byte, warm and masked (letters j and l: a run of 2 bytes 182 to
+  196, of 60 bytes 376 to 612), against a listing of a call, the ring's
   indices, one push and two bit-band stores. Not split; what would: the
   DWT's LSU and fold counters around one run, and the run with its
   second store taken out.
+- The writer's line right behind the cold one costs some 180 cycles
+  more than the same line a moment later (letter j: 1918 to 2118 against
+  1785 to 1937 masked, and against the line split in two halves, 1102
+  plus 667 to 864, printed with interrupts enabled right after it). The
+  transport's next TXE comes a byte time after the cold line's first
+  byte, 15600 cycles later, so it is not that handler. Not explained;
+  what would: a count of handler entries read around each of the four
+  lines, and the ART's miss counter beside it.
+- Of the direct line's gap between the two images, the 60 to 100
+  cycles that the run's copy mode leaves (letter l's 1702 to 1750
+  against the byte-copying runs of letter j, 1596 to 1644) are not
+  explained; what would: the line timed with the ART's caches reset
+  before it in both images, and the code placed at one address in both.
 
 - `bench_vx03`'s letter i run after its letter u in one session stalls
   at its first tenure, on the CH32V203C8 (whose two images keep the

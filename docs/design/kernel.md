@@ -684,12 +684,7 @@ The queue itself only counts; whether a program keeps running on an
 overflow or panics on it is the layer above's decision, and
 `PanicCode::queue_overflow` exists for a program that reads the counter
 and chooses to panic. There is no bool-returning post spreading
-untested error branches. One producer must know, and keep a slot free
-for another kind of event: a port's writer (`util/line_writer.hpp`),
-whose clients' lines must never crowd out the transmit edge that wakes
-it. It pushes through `push_keeping(event, spare)`, the same masked
-copy, which refuses (and counts) when no more than `spare` slots are
-free and answers whether it built the event; `post()` stays as it is.
+untested error branches.
 
 **The queue belongs to one core.** Its critical section masks the
 interrupts of the core that takes it, so on a chip with two cores a
@@ -875,8 +870,8 @@ The loop (`run()`), one turn:
    outside every dispatch), so a service called from inside a dispatch
    knows which object called it without the object naming itself (the
    first such service is a port's writer, `util/line_writer.hpp`'s
-   `LineWriter`, which keeps the pieces of each object's line apart by
-   that index, [serial.md, "LineWriter"](serial.md#linewriter-utilline_writerhpp)); the
+   `LineWriter`, which keeps each object's open line in a buffer of its
+   own by that index, [serial.md, "LineWriter"](serial.md#linewriter-utilline_writerhpp)); the
    same step under Rubato sets the inner object's index for a nested
    dispatch and puts the outer one's back after it. An interrupt
    handler reads the index of the dispatch it interrupted, which is why
@@ -1447,14 +1442,6 @@ Hazard3 reads
 again before the return, so that inside a critical section the answer
 is "a handler" too, and no service asks under a guard.
 
-A second optional member serves a debug check alone: `stack_span()`,
-the live stack, from the stack pointer to the stack's top, which a
-debug build of `util/line_writer.hpp` reads to refuse a text that lives
-in a frame still running (the writer keeps a text's pointer, never its
-characters). The STM32F4 platform has it, the linker's `__stack_top`
-its top; a platform without it is checked by nothing, and a release
-build reads it nowhere.
-
 Two more optional members belong to a platform that is one core of
 several, one platform type per core, since the kernel's statics are
 keyed by `P` and the type is therefore the core's identity:
@@ -1610,8 +1597,8 @@ balancing. The host proves the protocol deterministically
 | Entity | Header | Role |
 |--------|--------|------|
 | `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>`, `serve_one<Ao, P>(index)`, `dispatching<P>`, `no_dispatch` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held; the kernels' step, which keeps the index of the object being dispatched |
-| `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `in_handler`, `stack_span`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
-| `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; `push_keeping()`, the push that answers and leaves slots to others; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
+| `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `in_handler`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
+| `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, the state machine base, `Event`, `Status` |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is `util/inbox.hpp`'s, [two cores](#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)) |
 | `Borrowed<T, Lease>`, `Lease`, `lend`, `Held<E>` | `borrowed.hpp` | pointer payloads with their lease in the type; a held queue slot's number with `Lease::hold` in its type |

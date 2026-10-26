@@ -193,7 +193,7 @@ inline constexpr bool debug_checks = true;
 /// LineWriter, whose init() claims its transport): from then on the
 /// writer is the one caller of the transport's write verbs, and in a
 /// debug build those verbs call `violated` when anything else writes -
-/// the writer raises `writing` around its own writes. `violated` is the
+/// the writer raises `writing` while it publishes. `violated` is the
 /// writer's (a panic); a host test may replace it to record the call.
 /// One instance per transport type; nothing of it is touched in a
 /// release build.

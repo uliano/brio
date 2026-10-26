@@ -1,122 +1,119 @@
 /*
  * line_writer.hpp
  *
- * LineWriter: the active object that is the one writer of a transport.
- * Every other part of the program prints through it: a print() call names
- * the writer instead of the transport, its argument list travels to the
- * writer as one event, unformatted, and the writer formats it in its own
- * dispatch, straight into the transport's transmit ring, with the same
- * print_one() verbs print() uses on a transport (util/print.hpp). The
- * bytes that reach the wire for a print() are the bytes print() writes
- * to the transport itself. What the writer adds is that the lines of
- * different callers never mix, whichever preempts which, and that a
- * caller never waits on the wire. LineWriter is pure logic over its
- * Transport template parameter, the twin of util/line_reader.hpp's
- * LineReader, and the host suite drives it over two simulated transports
- * (test/test_line_writer). The stack it belongs to is
- * docs/design/serial.md, "LineWriter".
+ * LineWriter: the one writer of a transport, for a program in which one
+ * printer can run in the middle of another's line - the objects of a
+ * Rubato kernel (kernel/rubato.hpp), where a higher object's dispatch
+ * preempts a lower one's, and an interrupt handler that prints. Every
+ * line printed to it reaches the wire whole, the lines in the order they
+ * were completed, or is refused whole and counted. It is not an active
+ * object and has no queue: it is a sink type, like a transport, whose
+ * verbs format each print() at the call, with the print_one() verbs of
+ * util/print.hpp, into a buffer the caller's line owns (its STAGE), and
+ * hand the whole line to the transport in one run when the line ends.
+ * The transport's own transmit ring is the only queue. The stack it
+ * belongs to is docs/design/serial.md, "LineWriter"; the host suite
+ * drives it under the preempting kernel (test/test_line_writer).
  *
  * The smallest use names the writer over a transport of the family,
- * lists it LAST among the program's active objects, posts TxActivity from
- * the transport's interrupt glue, and prints to it:
+ * claims the transport once from main() before the kernel runs, and
+ * prints to it wherever the program prints:
  *
- *     using Log = brio::LineWriter<Serial, P>;           // depth 8, 32-byte messages
- *     brio::Tenuto<P, App, Log>::run();                  // the writer last
+ *     using Log = brio::LineWriter<Serial, P>;      // one stage of 192, two of 96
+ *     ...
+ *     Log::init();                                   // in main(), before run()
+ *     brio::Rubato<P, App, Console>::run();
+ *     ...
+ *     brio::print(Log{}, "count = ", count, brio::crlf);   // anywhere
  *
- *     // in the program's handler for the transport's vector:
- *     if (Serial::tx_drained()) { brio::post<Log>(brio::TxActivity{}); }
+ * Under Tenuto (kernel/tenuto.hpp) a program needs none of this: one
+ * dispatch runs at a time, so a line printed straight to the transport
+ * is whole by construction, and the program writes `using Log = Serial;`
+ * and pays nothing. A Tenuto image compiles no byte of this header.
  *
- *     // anywhere:
- *     brio::print(Log{}, "count = ", count, brio::crlf);
+ * SOURCES AND STAGES. A line belongs to its SOURCE: the active object
+ * being dispatched (dispatching<P>, kernel/active_object.hpp), main
+ * context outside every dispatch (no_dispatch), or `handler_source` for
+ * every interrupt handler alike (P::in_handler(), kernel/platform.hpp).
+ * A table of a byte per source (`max_sources` entries: the pack's
+ * indices from 0, main context and the handlers in the last two) says
+ * which stage holds the source's open line. The stages are a fixed pool:
+ * one LONG stage (`long_size` bytes) kept for the sources allowed to
+ * wait - main context, and the one object `wait_from` names, a bench
+ * console - which they take before a small one, and `small_stages`
+ * small ones (`small_size` bytes) for every source. A line's first byte
+ * takes a free stage, the one decision made with interrupts masked (a
+ * preemptor landing between the look and the claim would take the same
+ * stage); a line that finds none is refused whole, and its later bytes
+ * are dropped up to its end.
  *
- * THE MESSAGE. A print() to a writer packs its arguments as they are into
- * one Message, the writer's event: a text (a `const char*` or a
- * std::string_view) as its pointer and its length, measured at the call;
- * every other value by value; `crlf` as the last argument as a flag, the
- * line's end. With them go a pointer to the format function the compiler
- * instantiates for that list of types, the caller's SOURCE (the index of
- * the active object being dispatched, kernel/active_object.hpp's
- * dispatching<P>, or `handler_source` from an interrupt handler) and the
- * message's BOUND: the most bytes it can produce, the measured length of
- * its texts plus each other argument's worst case (print_bound below: a
- * uint32_t is ten bytes, a hex() ten, a fixed() 59). A list whose packed
- * bytes do not fit the message (`slot` bytes, the header included), or
- * whose bound the transport's ring could never hold, does not compile; a
- * text that makes the bound pass 255 or the ring is refused at the call
- * and counted. The texts are the caller's: the pointer is kept, never the
- * characters, so a text must still hold what it held when the writer
- * dispatches - a literal, a constant, a buffer that outlives the line. It
- * is the caller's duty, and in a debug build a text on the stack panics
- * at the call where the platform tells its stack (`P::stack_span()`, an
- * optional member).
+ * A LINE AND ITS END. print() formats each argument into the caller's
+ * stage at the call: a C string scanned and copied in one pass, stopping
+ * where the stage ends; a std::string_view copied as one run; every
+ * number formatted by print.hpp's verbs and copied the same way. EVERY
+ * `crlf` ends a line, wherever it stands in the argument list - a verb
+ * cannot know its position - so `print(Log{}, "a", crlf, "b", crlf)` is
+ * two lines, and a program that wants a line break inside one line
+ * writes it as text ("\r\n"). `flush_line` ends a line with no bytes, the
+ * shape of a prompt that must leave before an end of line comes. A line
+ * may be printed in several calls, across dispatches too: the stage stays
+ * its source's until the end. The text is consumed at the call, so a
+ * buffer on the caller's stack is as good as a literal.
  *
- * LINES IN PIECES. A line may be printed in several calls, the last one
- * ending with crlf. Each call is a message and a PIECE of the line; the
- * writer holds the pieces of each source in their queue slots, chained
- * by slot number (kernel/event_queue.hpp's hold()), and writes the line
- * only when its last piece arrives, the pieces in order. So a line from
- * an active object that a higher one preempts, or that an interrupt
- * handler's line lands in the middle of, still reaches the wire whole,
- * after the line that overtook it. The end of a line is the TYPE crlf_t
- * as the last argument, never a byte: a "\n" inside a text is text, and a
- * crlf that is not the last argument is written as the two bytes it is.
- * `flush_line` as the last argument ends a line too, closed by nothing:
- * the shape of a prompt, which must leave before its line ends.
+ * THE LINE'S END PUBLISHES it: the stage's bytes into the transport as
+ * one write_bulk(), under a LOCK, a flag meaning "a publisher is
+ * copying". Taking the lock and finding it held are decided with
+ * interrupts masked; the copy runs with them enabled. A line completed
+ * while another publisher holds the lock - by a higher object that
+ * preempted it, or by a handler - is marked PENDING with a sequence
+ * number and its caller returns: under the kernel's nesting (a preemptor
+ * finishes before the preempted resumes, a handler runs to completion)
+ * the holder resumes after it, writes its own line, then the pending
+ * ones oldest first, and releases the lock. So lines reach the wire in
+ * the order they were completed. The source's slot is freed at its
+ * line's end, so its next line takes a fresh stage while the last one
+ * pends. The only masked sections are the stage's take, the lock's take
+ * and the release-and-relay step that frees a written stage and picks
+ * the next pending one, each a few stores and a scan of the pool.
  *
- * Who calls what, and from where:
- *  - print(Writer{}, ...) from any context. It never waits but in the
- *    serving context (below), and masks interrupts only for the queue's
- *    own push and for the counters below; it returns false when the
- *    message was refused. From an interrupt
- *    handler a message must end its line (a handler's piece has no
- *    source that will reliably end it): a piece from a handler is
- *    refused. ONE context may also SERVE the writer: from it (by default
- *    main context outside every dispatch, `dispatching<P> == no_dispatch`;
- *    the `inline_from` option names another) print() posts and then runs
- *    the writer's dispatches itself until its queue is empty and every
- *    complete line is in the ring, polling the ring's room when a line
- *    does not fit yet - print() to a transport, waiting as it waits, in
- *    the writer's dress. Only one context may, because two would run one
- *    dispatch inside the other; on a preemptive platform the serving
- *    context holds the ceiling at the writer's own index meanwhile, so
- *    the kernel does not start the writer over it;
- *  - the program's interrupt glue posts TxActivity when the transport's
- *    tx_drained() answers true (util/stream.hpp's EdgeSink), as it posts
- *    RxActivity for a LineReader;
- *  - the writer's dispatch, in main context: it chains the message's
- *    slot to its source's open line, moves a line whose end arrived to
- *    the queue of complete lines, then DRAINS: each complete line's
- *    messages are formatted into the ring in order, a message only when
- *    the ring's room holds its bound (and the line's closing, for its
- *    last), each slot released as its message is written. A message that
- *    does not fit stops the drain and counts a wait (once per edge waited
- *    for); the transmit edge's TxActivity brings the next dispatch. The
- *    dispatch formats and copies and never waits on the wire.
+ * Who waits. A line is written when the transport's room holds it
+ * whole. The sources allowed to wait - main context and `wait_from` -
+ * spin on tx_room() for it while they hold the lock, as print() to a
+ * transport spins (the transmit interrupt drains the ring under the
+ * spin), and the holder waits the same way for a pending line of such a
+ * source and, when it may wait itself, for every pending line it relays.
+ * Every other line that finds no room is refused whole and counted. A
+ * handler never waits.
  *
- * Refusals and tears. A message is refused when the queue has one free
- * slot or none (the last is kept for a TxActivity, so that the edge, and
- * the wake a tear posts, always find a place), when its bound is too
- * large, or when it is a piece from a handler; nobody waits for a slot,
- * so the queue cannot lock whatever the callers do. A whole line refused
- * is a line LOST. A piece refused TEARS its line: the caller's further
- * pieces of that line are refused until its end passes (not posted
- * either), and the pieces the writer holds are released unwritten at its
- * next dispatch. Both are counted in lines, never retried: lost() counts
- * every line lost or torn, torn_lines() the torn among them, waits() the
- * transmit edges the writer waited for. And the wire shows where lines are
- * missing: after a loss the writer writes a line of its own, "lost N",
- * the losses since the last such mark, once the lines before it are out.
- * The queue must be deeper than the longest line in pieces, and the ring
- * longer than the largest message bound; a program sizes both by these
- * counters (docs/design/serial.md has the procedure).
+ * The counters and the mark. lost() counts every line refused - no
+ * stage free, no room, a line that outgrew its stage, a source past the
+ * table - saturating, in lines, never retried. The wire shows where
+ * lines are missing: the next holder of the lock writes "lost N" and
+ * CRLF before its own line, the losses since the last mark, when the room
+ * holds both (a source that may wait waits for it; for any other the
+ * mark stays owed). With the `peak` option the writer also counts the
+ * most stages held at once (peak_stages()) and the lines and bytes it
+ * published; a program sizes the pool and the ring by these.
  *
- * The one-writer rule. init() claims the transport (util/stream.hpp's
- * WriterClaim): in a debug build any write to it from anywhere but the
- * writer panics, at the first such write; a release build compiles none
- * of it. What stays outside the writer is what runs outside the kernel:
- * a banner main() prints before the writer's init(), and the panic path,
- * which drains the writer into the transport itself (drain_to_port() and
- * LineWriterReporter below).
+ * Interrupt handlers. A handler's print() formats in the handler, so
+ * every other interrupt waits for the whole print: a C string's bytes
+ * scanned and copied, each number converted, the run handed to the
+ * transport - for a line of 60 bytes on the STM32F446RE at 180 MHz,
+ * 1785 to 1937 cycles measured with interrupts masked, some 10 us
+ * (docs/design/serial.md, "LineWriter", "The cost"). The
+ * handlers share one source and one stage, so a handler ends the line it
+ * starts (the caller's duty: two handlers composing pieces would mix
+ * them). A handler that must stay short posts a value to an object
+ * instead, and the object prints it.
+ *
+ * Who calls what. print(Writer{}, ...) from any context; it masks
+ * interrupts only for the three decisions above and waits only where
+ * the caller may wait. init() once, from main() before the kernel runs:
+ * it claims the transport (util/stream.hpp's WriterClaim), so that in a
+ * debug build a write to the transport from anywhere but the writer
+ * panics; a release build compiles none of it. A banner printed before
+ * init() goes to the transport directly. drain_to_port() and
+ * LineWriterReporter are the panic path, plain code with the kernel dead.
  */
 
 #pragma once
@@ -124,306 +121,73 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <atomic>
-#include <bit>
+#include <array>
 #include <concepts>
 #include <span>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
 
 #include "kernel/active_object.hpp"
-#include "kernel/event_queue.hpp"
-#include "kernel/fsm.hpp"
 #include "kernel/panic.hpp"
 #include "kernel/platform.hpp"
-#include "kernel/post.hpp"
 #include "util/print.hpp"
 #include "util/stream.hpp"
 
 namespace brio {
 
-/// The transport ran its transmit ring dry: there is room again. Posted
-/// by the program's interrupt glue when the transport's tx_drained()
-/// answers true.
-struct TxActivity {};
-
-/// The source a message from an interrupt handler carries, beside the
-/// pack indices and no_dispatch (kernel/active_object.hpp).
+/// The source an interrupt handler's line belongs to, beside the pack
+/// indices and no_dispatch (kernel/active_object.hpp).
 inline constexpr uint8_t handler_source = 254;
 
-/// The interpretation codes: how the writer closes a line. A text line
-/// (console text, the bench grammar) is closed with CRLF; a bare one
-/// (a line ended by flush_line) with nothing.
-inline constexpr uint8_t code_text = 0;
-inline constexpr uint8_t code_bare = 1;
-
-/// The bytes the closing of a line of `code` writes.
-constexpr uint8_t closing_bytes(uint8_t code) { return code == code_text ? 2u : 0u; }
-
-/// What the writer's options name beyond its depth and its slot.
-///  - max_sources: the entries of the per-source table - the pack's
-///    objects, main context and the handlers - and so the pack size it
-///    serves: indices from 0 to max_sources - 3, main context and the
-///    handlers in the last two. A message from an index past them is
-///    refused and counted;
-///  - inline_from: the one context that serves the writer inline (the
-///    header): no_dispatch, main context outside every dispatch, or the
-///    pack index of an object whose dispatch runs main-context work (a
-///    bench console);
-///  - measured: count the bytes written and the bound they were written
-///    under (bytes_written(), bound_written()), at one add a run.
+/// What a LineWriter is sized and allowed by.
+///  - max_sources: the entries of the source table - the pack's objects,
+///    main context and the handlers - and so the pack it serves: indices
+///    0 to max_sources - 3, main context and the handlers in the last
+///    two. A line from an index past them is refused and counted;
+///  - wait_from: the one object, by its pack index, whose lines may wait
+///    for the transport's room (a bench console whose dispatch runs
+///    main-context work); no_dispatch, the default, names none, main
+///    context waiting anyway;
+///  - long_size: the long stage, kept for main context and wait_from;
+///  - small_stages, small_size: the pool every source takes from;
+///  - peak: count the most stages held at once and the lines and bytes
+///    published (peak_stages(), lines_written(), bytes_written()); off,
+///    nothing of it is compiled.
+/// The stage sizes are bytes, each at most 255 and at most the
+/// transport's tx_capacity(): a source that waits spins until its whole
+/// line fits, which must be possible.
 struct LineWriterOptions {
     uint8_t max_sources = 16;
-    uint8_t inline_from = no_dispatch;
-    bool measured = false;
+    uint8_t wait_from = no_dispatch;
+    uint16_t long_size = 192;
+    uint8_t small_stages = 2;
+    uint16_t small_size = 96;
+    bool peak = false;
 };
 
-// ---- the bound -----------------------------------------------------------------
-
-/// The extension point of the bound: a program that prints a type of its
-/// own (its print_one overload, util/print.hpp) states the most bytes one
-/// value prints, as `static constexpr uint16_t value`.
-template <typename T>
-struct PrintBound;
-
-/// The most bytes one value of T prints, for every type print.hpp
-/// prints: a char and a bool one, an integer the digits of its type's
-/// extreme with the sign, hex() 10 and its 64-bit form 18, fixed() the
-/// widest field it is kept to (print_fixed_text less the NUL), a float
-/// or sci() fifteen, a TimeStamp fifteen (ten digits of seconds, the
-/// point, three of millis, the 's'). A text's bound is its length, known
-/// at the call only, so 0 here.
-template <typename T>
-constexpr uint16_t print_bound() {
-    if constexpr (std::is_same_v<T, char> || std::is_same_v<T, bool>) {
-        return 1;
-    } else if constexpr (std::is_integral_v<T>) {
-        constexpr uint16_t unsigned_digits[] = {0, 3, 5, 0, 10, 0, 0, 0, 20};
-        constexpr uint16_t signed_digits[] = {0, 4, 6, 0, 11, 0, 0, 0, 20};
-        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
-        return std::is_signed_v<T> ? signed_digits[sizeof(T)] : unsigned_digits[sizeof(T)];
-    } else if constexpr (std::is_same_v<T, Hex>) {
-        return 10;
-    } else if constexpr (std::is_same_v<T, Hex64>) {
-        return 18;
-    } else if constexpr (std::is_same_v<T, Fixed<float>> || std::is_same_v<T, Fixed<double>>) {
-        return print_fixed_text - 1u;
-    } else if constexpr (std::is_same_v<T, Sci<float>> || std::is_same_v<T, Sci<double>> ||
-                         std::is_floating_point_v<T>) {
-        return 15;
-    } else if constexpr (std::is_same_v<T, TimeStamp>) {
-        return 15;
-    } else if constexpr (std::is_same_v<T, crlf_t> || std::is_same_v<T, flush_line_t>) {
-        return 0;
-    } else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, char*> ||
-                         std::is_same_v<T, std::string_view>) {
-        return 0;
-    } else {
-        static_assert(requires { PrintBound<T>::value; },
-                      "print to a LineWriter: this type has no bound - state the most bytes "
-                      "one value prints in brio::PrintBound<T>::value");
-        return PrintBound<T>::value;
-    }
-}
-
-namespace line_writer_detail {
-
-template <typename T>
-inline constexpr bool is_text =
-    std::is_same_v<T, const char*> || std::is_same_v<T, char*> || std::is_same_v<T, std::string_view>;
-
-template <typename T>
-inline constexpr bool is_end = std::is_same_v<T, crlf_t> || std::is_same_v<T, flush_line_t>;
-
-/// A text argument's length, measured at the call (a literal's folded by
-/// the compiler); 0 for every other argument.
-template <typename A>
-[[gnu::always_inline]] inline size_t text_length(const A& arg) {
-    using T = std::decay_t<A>;
-    if constexpr (std::is_same_v<T, std::string_view>) {
-        return arg.size();
-    } else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, char*>) {
-        return __builtin_strlen(arg);
-    } else {
-        return 0;
-    }
-}
-
-/// The bytes one argument packs into: a text its pointer and a length
-/// byte, an end of line nothing, every other value itself.
-template <typename T>
-constexpr uint16_t packed_size() {
-    if constexpr (is_end<T>) {
-        return 0;
-    } else if constexpr (is_text<T>) {
-        return sizeof(const char*) + 1u;
-    } else {
-        static_assert(std::is_trivially_copyable_v<T>,
-                      "print to a LineWriter: a value travels by value in the message, so its "
-                      "type must be trivially copyable");
-        return sizeof(T);
-    }
-}
-
-/// Where each argument starts in the packed bytes, and where they end.
-template <size_t n>
-struct Offsets {
-    uint16_t at[n + 1];
-};
-
-/// The facts of one argument list, all known when it is compiled.
-template <typename... Ts>
-struct Layout {
-    static constexpr size_t count = sizeof...(Ts);
-    using Last = typename decltype((std::type_identity<Ts>{}, ...))::type;
-    /// The list ends its line: its last argument is crlf or flush_line.
-    static constexpr bool ends = is_end<Last>;
-    static constexpr uint8_t code = std::is_same_v<Last, flush_line_t> ? code_bare : code_text;
-
-    static constexpr Offsets<count> offsets = [] {
-        Offsets<count> o{};
-        uint16_t at = 0;
-        size_t i = 0;
-        ((o.at[i++] = at, at = static_cast<uint16_t>(at + packed_size<Ts>())), ...);
-        o.at[count] = at;
-        return o;
-    }();
-    static constexpr uint16_t size = offsets.at[count];
-
-    /// The bound of everything but the texts: a crlf that is not the last
-    /// argument is two bytes written, the last one the line's closing.
-    static constexpr uint16_t static_bound = [] {
-        uint16_t b = 0;
-        size_t i = 0;
-        ((b = static_cast<uint16_t>(b + (std::is_same_v<Ts, crlf_t> ? (i + 1 == count ? 0u : 2u)
-                                                                    : print_bound<Ts>())),
-          ++i),
-         ...);
-        return b;
-    }();
-};
-
-/// A value back out of the packed bytes, which are not aligned.
-template <typename T>
-[[gnu::always_inline]] inline T unpack(const uint8_t* p) {
-    struct Raw {
-        uint8_t b[sizeof(T)];
-    } raw;
-    __builtin_memcpy(raw.b, p, sizeof(T));
-    return std::bit_cast<T>(raw);
-}
-
-/// One argument out of the packed bytes and onto the sink, through the
-/// print_one() overload print() would call for it. A text goes as one
-/// run, its length known; a crlf that is not the last argument as its
-/// two bytes; the last one, the line's end, is the writer's to close.
-template <typename Sink, typename T, bool last>
-[[gnu::always_inline]] inline void emit(const uint8_t* p) {
-    if constexpr (std::is_same_v<T, crlf_t>) {
-        if constexpr (!last) {
-            print_one(Sink{}, crlf);
-        }
-    } else if constexpr (std::is_same_v<T, flush_line_t>) {
-    } else if constexpr (is_text<T>) {
-        const char* const text = unpack<const char*>(p);
-        print_one(Sink{}, std::string_view(text, p[sizeof(const char*)]));
-    } else {
-        const T value = unpack<T>(p);
-        print_one(Sink{}, value);
-    }
-}
-
-template <typename Sink, typename... Ts, size_t... I>
-[[gnu::always_inline]] inline void format_in_order(const uint8_t* packed, std::index_sequence<I...>) {
-    using L = Layout<Ts...>;
-    (emit<Sink, Ts, I + 1 == sizeof...(Ts)>(packed + L::offsets.at[I]), ...);
-}
-
-/// The format function of one argument list: what a Message points at.
-template <typename Sink, typename... Ts>
-void format(const uint8_t* packed) {
-    format_in_order<Sink, Ts...>(packed, std::index_sequence_for<Ts...>{});
-}
-
-/// The writer's sink when it is measured: the transport, with the bytes
-/// it takes counted.
-template <typename Transport>
-struct CountingSink {
-    static inline uint32_t bytes = 0;
-
-    static bool write_byte(uint8_t b) {
-        if (!Transport::write_byte(b)) {
-            return false;
-        }
-        ++bytes;
-        return true;
-    }
-    static uint32_t write_bulk(std::span<const uint8_t> run)
-        requires BulkSink<Transport>
-    {
-        const uint32_t n = Transport::write_bulk(run);
-        bytes += n;
-        return n;
-    }
-};
-
-/// A byte another context writes: read fresh.
-[[gnu::always_inline]] inline uint8_t load_shared(const uint8_t& b) {
-    return *const_cast<const volatile uint8_t*>(&b);
-}
-
-} // namespace line_writer_detail
-
-/// The writer's event: one print() call's arguments, packed (the header,
-/// "The message"). `slot` bytes, the header's four bytes and the format
-/// function's pointer included.
-template <uint8_t slot>
-struct LineMessage {
-    using Format = void (*)(const uint8_t*);
-    static constexpr uint8_t header =
-        static_cast<uint8_t>((4u + alignof(Format) - 1u) / alignof(Format) * alignof(Format) + sizeof(Format));
-    static_assert(slot > header, "a LineWriter's slot holds its message's header and some arguments");
-    /// The bytes of arguments a message holds.
-    static constexpr uint8_t room = static_cast<uint8_t>(slot - header);
-
-    uint8_t source;   ///< dispatching<P>, no_dispatch, or handler_source
-    uint8_t code;     ///< how the line is closed: code_text, code_bare
-    uint8_t bound;    ///< the most bytes format() writes
-    uint8_t flags;    ///< bit 0: the line ends here; bits 1..7: the source's tear epoch
-    Format format;
-    uint8_t packed[room];
-};
-
-template <typename Transport, Platform P, uint8_t depth = 8, uint8_t slot = 32,
-          LineWriterOptions opts = LineWriterOptions{}>
+template <typename Transport, Platform P, LineWriterOptions opts = LineWriterOptions{}>
 class LineWriter {
-    static_assert(EdgeSink<Transport>,
-                  "a LineWriter's transport tells its room and its transmit edge: tx_room() "
-                  "and tx_drained() (util/stream.hpp)");
+    static_assert(BulkSink<Transport> && RoomSink<Transport>,
+                  "a LineWriter's transport takes a run and tells its room: write_bulk() and "
+                  "tx_room() (util/stream.hpp)");
     static_assert(requires { { Transport::tx_capacity() } -> std::convertible_to<uint32_t>; },
                   "a LineWriter's transport tells its transmit ring's capacity: tx_capacity()");
     static_assert(HandlerAware<P>,
-                  "a LineWriter tells a handler's message from a dispatch's: P::in_handler() "
+                  "a LineWriter tells a handler's line from a dispatch's: P::in_handler() "
                   "(kernel/platform.hpp)");
-    static_assert(depth >= 2, "a LineWriter's queue keeps one slot for the transmit edge");
     static_assert(opts.max_sources >= 3 && opts.max_sources <= 128,
                   "the source table holds main context, the handlers and at least one object");
-
-    using Sink = std::conditional_t<opts.measured, line_writer_detail::CountingSink<Transport>, Transport>;
+    static_assert(opts.wait_from == no_dispatch || opts.wait_from < opts.max_sources - 2u,
+                  "wait_from names an object of the source table, or no_dispatch for none");
+    static_assert(opts.small_stages >= 1 && opts.small_stages <= 7, "a pool of one to seven small stages");
+    static_assert(opts.long_size >= 2 && opts.small_size >= 2,
+                  "a stage holds at least a line's CRLF");
+    static_assert(opts.long_size <= 255 && opts.small_size <= 255,
+                  "a stage's length is a byte: at most 255");
+    static_assert(opts.long_size <= Transport::tx_capacity() && opts.small_size <= Transport::tx_capacity(),
+                  "a stage larger than the transport's ring could never be written whole");
 
 public:
-    using Message = LineMessage<slot>;
-    using Event = std::variant<Message, TxActivity>;
-    static inline EventQueue<Event, depth, P> queue;
-
-    /// print()'s mark: arguments for this type travel as a message.
-    static constexpr bool takes_messages = true;
-
     /// The why of a debug panic (PanicCode::assert_failed's context).
-    static constexpr uint8_t misuse_stack_text = 0xA1;   ///< a text on the stack
-    static constexpr uint8_t misuse_direct_write = 0xA2; ///< a write to the claimed transport
+    static constexpr uint8_t misuse_direct_write = 0xA2;   ///< a write to the claimed transport
 
     /// The default of on_misuse below: panic<P>(), the why its context.
     static void panic_on_misuse(uint8_t why) { panic<P>(PanicCode::assert_failed, why); }
@@ -432,133 +196,171 @@ public:
     /// a host test may point it at a recorder. Debug builds only.
     static inline void (*on_misuse)(uint8_t why) = &panic_on_misuse;
 
-    /// Called by the kernel before the first event is served: claims the
-    /// transport (a debug build checks the claim) and starts with no line
-    /// open and nothing complete. A full reset: the slots a previous life
-    /// holds go back to the queue unwritten; messages still waiting in the
-    /// queue are kept and served.
+    /// Claims the transport: from here on, in a debug build, a write to
+    /// it from anywhere but the writer is a misuse (the header). Main
+    /// context, once, before the kernel runs; nothing else is set up here.
     static void init() {
-        for (uint8_t s = 0; s < opts.max_sources; ++s) {
-            release_chain(head_[s]);
-            head_[s] = 0;
-            epoch_[s] = line_writer_detail::load_shared(tears_[s]);
-        }
-        while (completed_count_ != 0u) {
-            release_chain(completed_[completed_head_]);
-            pop_completed();
-        }
-        seen_tears_ = line_writer_detail::load_shared(tear_events_);
         if constexpr (debug_checks) {
             WriterClaim<Transport>::violated = &direct_write;
             WriterClaim<Transport>::claimed = true;
         }
     }
 
-    /// The writer's dispatch, the kernel's or the inline service's call:
-    /// the tears seen, the message chained, the complete lines drained.
-    static void dispatch(const Event& e) {
-        sweep_tears();
-        match(e, [](const Message& m) { on_message(m); }, [](TxActivity) {});
-        drain();
+    // ---- print()'s verbs: a program calls print(), these are its sink --------
+
+    /// One byte onto the caller's line. True always: a refused line drops
+    /// its bytes, and print() must never spin on it. Any context.
+    [[gnu::noinline]] static bool write_byte(uint8_t b) {
+        if (Stage* const s = stage_of_caller()) {
+            if (s->len < s->cap) {
+                s->data[s->len] = b;
+                s->len = static_cast<uint8_t>(s->len + 1u);
+            } else {
+                s->overflow = true;
+            }
+        }
+        return true;
     }
 
-    /// The client's verb behind print(Writer{}, ...): pack, bound, post,
-    /// and, from the serving context, serve. True when the message was
-    /// taken; false when it was refused (counted in lost(), the header's
-    /// "Refusals and tears"). Any context; never waits but in the serving
-    /// context, where it waits as print() on a transport waits.
-    template <typename... Args>
-    [[gnu::always_inline]] static bool post_message(const Args&... args) {
-        static_assert(sizeof...(Args) > 0, "print to a LineWriter: nothing to print");
-        using L = line_writer_detail::Layout<std::decay_t<const Args>...>;
-        static_assert(L::size <= Message::room,
-                      "print to a LineWriter: these arguments do not fit one message - split the "
-                      "line into several prints (the pieces of one line), or raise the writer's slot");
-        static_assert(L::static_bound <= limit(L::ends, L::code),
-                      "print to a LineWriter: this line's bound exceeds what the transport's ring "
-                      "holds (or 255): it would never fit - split it, or lengthen the ring");
-        // The texts' lengths at the call, where the compiler folds a
-        // literal's; the rest out of line, so that a dispatch that prints
-        // carries no message in its own frame.
-        const size_t lengths[] = {line_writer_detail::text_length(args)...};
-        return pack_and_post<std::decay_t<const Args>...>(lengths, static_cast<std::decay_t<const Args>>(args)...);
+    /// A run onto the caller's line, copied whole or not at all (a run
+    /// that does not fit what is left of the stage refuses the line at its
+    /// end). Returns the run's length always, for print()'s loop. Any
+    /// context.
+    [[gnu::noinline]] static uint32_t write_bulk(std::span<const uint8_t> run) {
+        const uint32_t n = static_cast<uint32_t>(run.size());
+        if (Stage* const s = stage_of_caller()) {
+            if (static_cast<uint32_t>(s->cap - s->len) >= n) {
+                __builtin_memcpy(s->data + s->len, run.data(), n);
+                s->len = static_cast<uint8_t>(s->len + n);
+            } else {
+                s->overflow = true;
+            }
+        }
+        return n;
     }
 
-    /// Lines lost - refused whole, or torn - since the program started;
-    /// saturating. Any context.
+    /// A C string onto the caller's line: one resolution of the stage and
+    /// one pass that scans and copies together, stopping where the stage
+    /// ends (the line is then refused whole at its end). Any context.
+    [[gnu::noinline]] static void text(const char* p) {
+        Stage* const s = stage_of_caller();
+        if (s == nullptr) {
+            return;
+        }
+        uint8_t* const start = s->data;
+        uint8_t* at = start + s->len;
+        uint8_t* const end = start + s->cap;
+        uint8_t c;
+        while ((c = static_cast<uint8_t>(*p++)) != 0u) {
+            if (at == end) {
+                s->overflow = true;   // the text goes on past the stage's end
+                break;
+            }
+            *at++ = c;
+        }
+        s->len = static_cast<uint8_t>(at - start);
+    }
+
+    /// The caller's line ends: `crlf` appends its two bytes, flush_line
+    /// (false) nothing. A line that fit its stage is published (the
+    /// header); one that outgrew it is counted lost and dropped whole; a
+    /// crlf with nothing open is an empty line. Any context; waits only
+    /// where the caller may wait.
+    [[gnu::noinline]] static void end_line(bool crlf) {
+        const uint8_t src = source();
+        const uint8_t e = entry_of(src);
+        if (e == no_entry) {
+            count_loss();   // a source past the table: its line refused here
+            return;
+        }
+        const uint8_t slot = slots_[e];
+        Stage* s;
+        if (static_cast<uint8_t>(slot - 1u) < count) {
+            s = &stages_[slot - 1u];
+        } else if (slot == slot_refused) {
+            slots_[e] = slot_none;   // the refused line ends; counted when it was refused
+            return;
+        } else {
+            if (!crlf) {
+                return;   // flush_line with nothing open
+            }
+            s = take(src, e);
+            if (s == nullptr) {
+                slots_[e] = slot_none;
+                return;
+            }
+        }
+        if (crlf) {
+            if (static_cast<uint8_t>(s->cap - s->len) >= 2u) {
+                s->data[s->len] = '\r';
+                s->data[s->len + 1u] = '\n';
+                s->len = static_cast<uint8_t>(s->len + 2u);
+            } else {
+                s->overflow = true;
+            }
+        }
+        slots_[e] = slot_none;   // the source's next line takes a stage of its own
+        if (s->overflow) {
+            typename P::CriticalSection cs;
+            free_stage(*s);
+            note_loss();
+            return;
+        }
+        publish(*s, src);
+    }
+
+    // ---- the counters ---------------------------------------------------------
+
+    /// Lines refused since the program started, saturating at 65535 (the
+    /// header). Any context.
     static uint16_t lost() {
         typename P::CriticalSection cs;
         return lost_;
     }
-    /// The torn lines among them: a piece refused, the line's held
-    /// pieces released unwritten. Main context, where it is written.
-    static uint16_t torn_lines() { return torn_lines_; }
-    /// Transmit edges waited for: each time a drain stopped because the
-    /// ring could not hold the next message (or the mark), counted once
-    /// until something is written again. Main context.
-    static uint32_t waits() { return waits_; }
-    /// With `measured`: the bytes written into the ring and the sum of
-    /// the bounds they were written under (the gap marks excluded), and
-    /// the lines. Zero otherwise. Main context.
-    static uint32_t bytes_written() {
-        if constexpr (opts.measured) {
-            return Sink::bytes;
-        } else {
-            return 0;
-        }
-    }
-    static uint32_t bound_written() { return bound_written_; }
-    static uint32_t lines_written() { return lines_written_; }
 
-    /// Whether the writer has nothing left: no complete line waiting for
-    /// the ring, no mark owed, nothing in its queue. Lines still open
-    /// (pieces held, waiting for their end) do not count. Main context.
-    static bool idle() {
-        return completed_count_ == 0u && !mark_owed() && queue.empty();
+    /// With `peak`: the most stages held at once since the program
+    /// started, the pool's high-water mark. Any context.
+    static uint8_t peak_stages()
+        requires(opts.peak)
+    {
+        return load_shared(peak_);
     }
 
-    /// The panic path's drain: every line the writer still has, written
-    /// into the transport in order - the complete lines, then the open
-    /// lines as they are (closed by their code), then the messages still
-    /// waiting in the queue - waiting for the ring's room before each
-    /// message by calling `pump` while it is short. With interrupts
-    /// enabled the transmitter drains the ring by itself and the pump may
-    /// do nothing; with them masked (a panic) the pump must move the
-    /// ring itself, by running the transport's interrupt body. Any
-    /// context that may write the transport; the writer's state is
-    /// consumed.
+    /// With `peak`: the lines and the bytes published into the transport
+    /// since the program started (the "lost N" marks not counted). Written
+    /// by the lock's holder alone; read as a snapshot.
+    static uint32_t lines_written()
+        requires(opts.peak)
+    {
+        return lines_;
+    }
+    static uint32_t bytes_written()
+        requires(opts.peak)
+    {
+        return bytes_;
+    }
+
+    // ---- the panic path -------------------------------------------------------
+
+    /// Everything the writer holds, written into the transport by plain
+    /// code: the line being published (from its start, so a line a panic
+    /// cut in its copy shows its first bytes twice), the pending lines in
+    /// the order they were completed, then the open lines as they stand.
+    /// `pump` is called while the ring's room is short: with interrupts
+    /// enabled the transmitter drains by itself and it may do nothing;
+    /// with them masked for good (a panic) it must move the ring itself,
+    /// by running the transport's interrupt body. Any context that may
+    /// write the transport; the writer's state is consumed.
     template <typename Pump>
     static void drain_to_port(Pump pump) {
         writing(true);
-        while (completed_count_ != 0u) {
-            write_chain_waiting(completed_[completed_head_], true, pump);
-            pop_completed();
+        drain_stages<st_publishing>(pump);
+        drain_stages<st_pending>(pump);
+        drain_stages<st_open>(pump);
+        for (uint8_t& slot : slots_) {
+            slot = slot_none;
         }
-        for (uint8_t s = 0; s < opts.max_sources; ++s) {
-            if (head_[s] != 0u) {
-                write_chain_waiting(head_[s], true, pump);
-                head_[s] = 0;
-            }
-        }
-        for (;;) {
-            const uint8_t h = queue.take();
-            if (h == decltype(queue)::none) {
-                break;
-            }
-            // The alternative asked by its index, not by get_if()'s null
-            // test: avr-gcc 16.2 fails on that test of a slot's address
-            // (an unrecognizable insn), the index the same question.
-            if (queue.at(h).index() == 0u) {
-                const Message& m = message(h);
-                const bool last = (m.flags & ends_line) != 0u;
-                wait_room(need(m, last), pump);
-                m.format(m.packed);
-                if (last) {
-                    close_line(m.code);
-                }
-            }
-            queue.release(h);
-        }
+        busy_ = false;
         writing(false);
     }
     static void drain_to_port() {
@@ -566,448 +368,248 @@ public:
     }
 
 private:
-    static constexpr uint8_t ends_line = 0x01;
-    static constexpr uint8_t no_entry = 0xFF;
-    static constexpr uint8_t epoch_mask = 0x7F;
-    static constexpr uint8_t mark_bound = 5u + 5u + 2u;   // "lost ", a uint16_t, CRLF
-
-    // ---- the client's side ----------------------------------------------------
-
-    /// The largest bound a message may carry: what one byte holds, and
-    /// what the ring holds with the line's closing beside it.
-    static constexpr uint16_t limit(bool ends, uint8_t code) {
-        const uint32_t ring = static_cast<uint32_t>(Transport::tx_capacity());
-        const uint32_t closing = ends ? closing_bytes(code) : 0u;
-        const uint32_t most = ring > closing ? ring - closing : 0u;
-        return static_cast<uint16_t>(most < 255u ? most : 255u);
+    /// The panic drain's pass over the stages in one state.
+    template <uint8_t state, typename Pump>
+    static void drain_stages(Pump& pump) {
+        while (Stage* const s = oldest_in<state>()) {
+            while (Transport::tx_room() < s->len) {
+                pump();
+            }
+            put(s->data, s->len);
+            free_stage(*s);
+        }
     }
 
-    /// The source table's entry for a source: the pack indices first,
-    /// then main context, then the handlers; no_entry past the table.
-    static uint8_t entry_of(uint8_t source) {
-        if (source == handler_source) {
+    static constexpr uint8_t count = static_cast<uint8_t>(opts.small_stages + 1u);   ///< stage 0 the long one
+    // A source's slot: slot_none, its open line's stage index plus one,
+    // or slot_refused - zero at reset, so the table needs no initializer.
+    static constexpr uint8_t slot_none = 0;         ///< no line open
+    static constexpr uint8_t slot_refused = 0xFF;   ///< its line refused: dropped through its end
+    static constexpr uint8_t no_entry = 0xFF;
+    static constexpr uint8_t mark_size = 12;        ///< "lost 65535" and CRLF
+    static_assert(Transport::tx_capacity() >= mark_size, "the transport's ring holds the \"lost N\" mark");
+
+    enum : uint8_t { st_free = 0, st_open = 1, st_pending = 2, st_publishing = 3 };
+
+    /// A stage: its buffer, its line's length, and who holds it. `owner`
+    /// and `state` change under the guard; `len`, `overflow` and the bytes
+    /// are written by the owner's context alone while the line is open,
+    /// read by the publisher after the line's end.
+    struct Stage {
+        uint8_t* data;
+        uint8_t cap;
+        uint8_t len;
+        uint8_t owner;      ///< the source composing or holding it
+        uint8_t state;      ///< st_free, st_open, st_pending, st_publishing
+        uint8_t seq;        ///< the order a pending line was completed in
+        bool overflow;      ///< the line outgrew the stage: refused whole at its end
+    };
+
+    /// A byte another context writes: read fresh.
+    [[gnu::always_inline]] static uint8_t load_shared(const uint8_t& b) {
+        return *const_cast<const volatile uint8_t*>(&b);
+    }
+
+    [[gnu::always_inline]] static uint8_t source() {
+        return P::in_handler() ? handler_source : dispatching<P>;
+    }
+
+    static constexpr bool may_wait(uint8_t src) { return src == no_dispatch || src == opts.wait_from; }
+
+    /// The source table's entry: the pack indices first, then main
+    /// context, then the handlers; no_entry past the table.
+    [[gnu::always_inline]] static uint8_t entry_of(uint8_t src) {
+        if (src == handler_source) {
             return static_cast<uint8_t>(opts.max_sources - 1u);
         }
-        if (source == no_dispatch) {
+        if (src == no_dispatch) {
             return static_cast<uint8_t>(opts.max_sources - 2u);
         }
-        return source < opts.max_sources - 2u ? source : no_entry;
+        return src < opts.max_sources - 2u ? src : no_entry;
     }
 
-    /// The message of one argument list, built and posted: one function
-    /// per list of types, its frame holding the message.
-    template <typename... Ts>
-    [[gnu::noinline]] static bool pack_and_post(const size_t* lengths, const Ts&... args) {
-        using L = line_writer_detail::Layout<Ts...>;
-        Message m;
-        m.code = L::code;
-        m.format = &line_writer_detail::format<Sink, Ts...>;
-        uint16_t bound = L::static_bound;
-        bool fits = true;
-        pack_all<Ts...>(m.packed, lengths, bound, fits, std::index_sequence_for<Ts...>{}, args...);
-        fits = fits && bound <= limit(L::ends, L::code);
-        m.bound = static_cast<uint8_t>(bound);
-        return post_built(m, L::ends, fits);
+    /// The caller's open line's stage, or a fresh one for it; null while
+    /// its line is refused (nothing is formatted into nowhere, the bytes
+    /// drop) and for a source past the table (counted at its line's end).
+    [[gnu::noinline]] static Stage* stage_of_caller() {
+        const uint8_t src = source();
+        const uint8_t e = entry_of(src);
+        if (e == no_entry) {
+            return nullptr;
+        }
+        const uint8_t slot = slots_[e];
+        if (static_cast<uint8_t>(slot - 1u) < count) {
+            return &stages_[slot - 1u];
+        }
+        if (slot == slot_refused) {
+            return nullptr;
+        }
+        return take(src, e);
     }
 
-    /// The part every list shares: the source, the decision, the service.
-    [[gnu::noinline]] static bool post_built(Message& m, bool ends, bool fits) {
-        const bool from_handler = P::in_handler();
-        const uint8_t source = from_handler ? handler_source : dispatching<P>;
-        m.source = source;
-        if (!from_handler && source == opts.inline_from) {
-            const uint8_t outer = hold_ceiling();
-            const bool taken = admit(source, false, ends, fits, m);
-            serve_inline();
-            restore_ceiling(outer);
-            return taken;
-        }
-        return admit(source, from_handler, ends, fits, m);
-    }
-
-    template <typename... Ts, size_t... I>
-    [[gnu::always_inline]] static void pack_all(uint8_t* packed, const size_t* lengths, uint16_t& bound,
-                                                bool& fits, std::index_sequence<I...>, const Ts&... args) {
-        using L = line_writer_detail::Layout<Ts...>;
-        (pack_one<Ts>(packed + L::offsets.at[I], args, lengths[I], bound, fits), ...);
-    }
-
-    template <typename T>
-    [[gnu::always_inline]] static void pack_one(uint8_t* at, const T& arg, size_t length, uint16_t& bound,
-                                                bool& fits) {
-        if constexpr (line_writer_detail::is_end<T>) {
-        } else if constexpr (line_writer_detail::is_text<T>) {
-            const char* text;
-            if constexpr (std::is_same_v<T, std::string_view>) {
-                text = arg.data();
-            } else {
-                text = arg;
-            }
-            if constexpr (debug_checks) {
-                if constexpr (requires { P::stack_span(); }) {
-                    const std::span<const uint8_t> stack = P::stack_span();
-                    const uintptr_t a = reinterpret_cast<uintptr_t>(text);
-                    const uintptr_t lo = reinterpret_cast<uintptr_t>(stack.data());
-                    if (a >= lo && a < lo + stack.size()) {
-                        on_misuse(misuse_stack_text);
-                    }
-                }
-            }
-            if (length > 255u) {
-                fits = false;
-                length = 0;
-            }
-            bound = static_cast<uint16_t>(bound + length);
-            __builtin_memcpy(at, &text, sizeof text);
-            at[sizeof text] = static_cast<uint8_t>(length);
-        } else {
-            __builtin_memcpy(at, &arg, sizeof arg);
-        }
-    }
-
-    /// The decision: post, refuse, or tear (the header's "Refusals and
-    /// tears"). The per-source flags are written by their own source's
-    /// context alone - an object is never preempted by itself, a handler
-    /// by another handler - so only the shared counters take the guard.
-    static bool admit(uint8_t source, bool from_handler, bool ends, bool fits, Message& m) {
-        const uint8_t s = entry_of(source);
-        if (s == no_entry) {
-            count_loss(false, 0);
-            return false;
-        }
-        if (from_handler) {
-            m.flags = static_cast<uint8_t>(ends_line | (tears_[s] << 1u));
-            if (!ends || !fits || !push(m)) {
-                count_loss(false, s);
-                return false;
-            }
-            return true;
-        }
-        if (torn_[s]) {
-            // A piece of this line was refused: the rest of it is refused
-            // unposted, its end included, which ends the tear.
-            if (ends) {
-                torn_[s] = false;
-            }
-            return false;
-        }
-        m.flags = static_cast<uint8_t>((ends ? ends_line : 0u) | (tears_[s] << 1u));
-        if (fits && push(m)) {
-            composing_[s] = !ends;
-            return true;
-        }
-        const bool tear = !ends || composing_[s];
-        torn_[s] = !ends;
-        composing_[s] = false;
-        count_loss(tear, s);
-        if (tear) {
-            wake();
-        }
-        return false;
-    }
-
-    /// A tear wakes the writer in the slot the clients keep: the pieces it
-    /// holds for the torn line may be all the clients' slots, and only a
-    /// dispatch releases them. A wake that finds even that slot taken is
-    /// not needed - whatever holds it brings the dispatch.
-    static void wake() {
-        if (queue.push_keeping(TxActivity{}, 0u)) {
-            if constexpr (Preemptive<P>) {
-                if (queue.priority() < P::ceiling) {
-                    P::pend_schedule();
-                }
-            }
-        }
-    }
-
-    /// The push that keeps one slot for TxActivity, and on a preemptive
-    /// platform the scheduling question post() asks (kernel/post.hpp).
-    static bool push(const Message& m) {
-        if (!queue.push_keeping(m, 1u)) {
-            return false;
-        }
-        if constexpr (Preemptive<P>) {
-            if (queue.priority() < P::ceiling) {
-                P::pend_schedule();
-            }
-        }
-        return true;
-    }
-
-    /// A line lost, and a tear of source entry `s` when it was torn: the
-    /// tear moves the source's epoch, which tells the writer to release
-    /// the held pieces and to drop the line's pieces still queued.
-    static void count_loss(bool tear, uint8_t s) {
-        typename P::CriticalSection cs;
-        if (lost_ != UINT16_MAX) {
-            ++lost_;
-        }
-        if (tear) {
-            tears_[s] = static_cast<uint8_t>((tears_[s] + 1u) & epoch_mask);
-            tear_events_ = static_cast<uint8_t>(tear_events_ + 1u);
-        }
-    }
-
-    /// The serving context holds the ceiling at the writer's index on a
-    /// preemptive platform, so that the kernel does not start the writer
-    /// over the dispatches the caller runs; the previous ceiling returned.
-    static uint8_t hold_ceiling() {
-        if constexpr (Preemptive<P>) {
-            const uint8_t outer = P::ceiling;
-            const uint8_t own = queue.priority();
-            if (own < outer) {
-                P::ceiling = own;
-            }
-            std::atomic_signal_fence(std::memory_order_seq_cst);
-            return outer;
-        } else {
-            return 0;
-        }
-    }
-
-    /// The ceiling back, and a scheduling request when something arrived
-    /// for the writer meanwhile that the restored ceiling now lets run.
-    static void restore_ceiling([[maybe_unused]] uint8_t outer) {
-        if constexpr (Preemptive<P>) {
-            std::atomic_signal_fence(std::memory_order_seq_cst);
-            P::ceiling = outer;
-            if (!queue.empty() && queue.priority() < outer) {
-                P::pend_schedule();
-            }
-        }
-    }
-
-    /// The inline service: the writer's dispatches run here until its
-    /// queue is empty and every complete line is in the ring, the ring's
-    /// room polled while the next message does not fit.
-    static void serve_inline() {
-        for (;;) {
-            while (serve_one<LineWriter>()) {
-            }
-            if (completed_count_ == 0u && !mark_owed()) {
-                return;
-            }
-            const uint32_t wanted = completed_count_ != 0u ? head_need() : mark_bound;
-            while (Transport::tx_room() < wanted) {
-            }
-            drain();
-        }
-    }
-
-    // ---- the writer's side ----------------------------------------------------
-
-    static const Message& message(uint8_t h) {
-        const Message* m = std::get_if<Message>(&queue.at(h));
-        if (m == nullptr) {
-            __builtin_unreachable();   // every slot the writer keeps holds a Message
-        }
-        return *m;
-    }
-
-    /// The bytes a message needs in the ring: its bound, and the closing
-    /// when it is the last of its line.
-    static uint32_t need(const Message& m, bool last) {
-        return static_cast<uint32_t>(m.bound) + (last ? closing_bytes(m.code) : 0u);
-    }
-
-    static uint32_t head_need() {
-        const uint8_t h = completed_[completed_head_];
-        return need(message(h), next_[h] == 0u);
-    }
-
-    static bool mark_owed() {
-        typename P::CriticalSection cs;
-        return lost_ != marked_;
-    }
-
-    /// A tear moved some source's epoch since the last look: every source
-    /// is looked at, and the held pieces of a torn line released.
-    static void sweep_tears() {
-        const uint8_t t = line_writer_detail::load_shared(tear_events_);
-        if (t == seen_tears_) {
-            return;
-        }
-        seen_tears_ = t;
-        for (uint8_t s = 0; s < opts.max_sources; ++s) {
-            sync(s);
-        }
-    }
-
-    /// Source entry `s`'s epoch read: when it moved, the line open there
-    /// was torn - its held pieces released unwritten, counted.
-    static void sync(uint8_t s) {
-        const uint8_t t = line_writer_detail::load_shared(tears_[s]);
-        if (t != epoch_[s]) {
-            release_chain(head_[s]);
-            head_[s] = 0;
-            torn_lines_ = static_cast<uint16_t>(
-                saturate(static_cast<uint32_t>(torn_lines_) + ((t - epoch_[s]) & epoch_mask)));
-            epoch_[s] = t;
-        }
-    }
-
-    static void on_message(const Message& m) {
-        const uint8_t s = entry_of(m.source);
-        sync(s);
-        if ((m.flags >> 1u) != epoch_[s]) {
-            return;   // a piece of a line torn since: dropped, the kernel releases its slot
-        }
-        const uint8_t h = queue.hold().handle();
-        next_[h] = 0;
-        if (head_[s] == 0u) {
-            head_[s] = h;
-        } else {
-            next_[tail_[s]] = h;
-        }
-        tail_[s] = h;
-        if ((m.flags & ends_line) != 0u) {
-            uint8_t at = static_cast<uint8_t>(completed_head_ + completed_count_);
-            if (at >= depth) {
-                at = static_cast<uint8_t>(at - depth);
-            }
-            completed_[at] = head_[s];
-            ++completed_count_;
-            head_[s] = 0;
-        }
-    }
-
-    /// The complete lines into the ring, in order, a message at a time
-    /// while the room holds it; then the gap mark, when one is owed and
-    /// the lines are out. The room is read once and spent by the bounds,
-    /// read again only when it runs short: what the ring really took is
-    /// at most the bound, and the room only grows behind the writer.
-    static void drain() {
-        writing(true);
-        uint32_t room = Transport::tx_room();
-        while (completed_count_ != 0u) {
-            uint8_t h = completed_[completed_head_];
-            for (;;) {
-                const Message& m = message(h);
-                const uint8_t after = next_[h];
-                const uint32_t wanted = need(m, after == 0u);
-                if (wanted > room) {
-                    room = Transport::tx_room();
-                    if (wanted > room) {
-                        completed_[completed_head_] = h;   // the line resumes here
-                        count_wait();
-                        writing(false);
-                        return;
-                    }
-                }
-                room -= wanted;
-                waiting_ = false;
-                write(m, after == 0u);
-                queue.release(h);
-                if (after == 0u) {
-                    break;
-                }
-                h = after;
-            }
-            pop_completed();
-        }
-        write_mark(room);
-        writing(false);
-    }
-
-    static void write(const Message& m, bool last) {
-        m.format(m.packed);
-        if constexpr (opts.measured) {
-            bound_written_ += m.bound;
-        }
-        if (last) {
-            close_line(m.code);
-            if constexpr (opts.measured) {
-                ++lines_written_;
-            }
-        }
-    }
-
-    /// The closing of a line, by its code.
-    static void close_line(uint8_t code) {
-        switch (code) {
-        case code_text:
-            print_one(Transport{}, crlf);
-            break;
-        default:
-            break;   // code_bare: nothing
-        }
-    }
-
-    /// "lost N", the losses since the last mark, when one is owed, no
-    /// message waits in the queue (it may have been posted before the
-    /// loss) and the mark fits; otherwise the next drain tries again.
-    static void write_mark(uint32_t room) {
-        uint16_t now;
+    /// A free stage for a new line of `src`, entry `e`: the long one first
+    /// for a source that may wait, the small ones for every source. The
+    /// claim is the decision under the guard; none free refuses the line.
+    [[gnu::noinline]] static Stage* take(uint8_t src, uint8_t e) {
+        uint8_t i = may_wait(src) ? 0u : 1u;
         {
             typename P::CriticalSection cs;
-            now = lost_;
-        }
-        if (now == marked_ || !queue.empty()) {
-            return;   // none owed, or lines posted before the loss may still be waiting
-        }
-        if (room < mark_bound) {
-            room = Transport::tx_room();
-            if (room < mark_bound) {
-                count_wait();
-                return;
+            for (; i < count; ++i) {
+                if (stages_[i].state == st_free) {
+                    stages_[i].state = st_open;
+                    break;
+                }
+            }
+            if (i == count) {
+                note_loss();
+            } else if constexpr (opts.peak) {
+                held_ = static_cast<uint8_t>(held_ + 1u);
+                if (held_ > peak_) {
+                    peak_ = held_;
+                }
             }
         }
-        waiting_ = false;
-        print_one(Transport{}, std::string_view("lost ", 5));
-        print_one(Transport{}, static_cast<uint16_t>(now - marked_));
-        close_line(code_text);
+        if (i == count) {
+            slots_[e] = slot_refused;
+            return nullptr;
+        }
+        Stage& got = stages_[i];
+        got.owner = src;
+        got.len = 0;
+        got.overflow = false;
+        slots_[e] = static_cast<uint8_t>(i + 1u);
+        return &got;
+    }
+
+    /// A stage given back. Under the guard, or in the panic path.
+    [[gnu::always_inline]] static void free_stage(Stage& s) {
+        s.state = st_free;
+        if constexpr (opts.peak) {
+            held_ = static_cast<uint8_t>(held_ - 1u);
+        }
+    }
+
+    /// A line refused, counted: under the guard.
+    [[gnu::always_inline]] static void note_loss() {
+        if (lost_ != UINT16_MAX) {
+            lost_ = static_cast<uint16_t>(lost_ + 1u);
+        }
+    }
+
+    static void count_loss() {
+        typename P::CriticalSection cs;
+        note_loss();
+    }
+
+    /// A stage in `state`: for st_pending the one completed first (the
+    /// lowest sequence number, read across its wrap), for the others the
+    /// first in the pool. Under the guard, or in the panic path.
+    template <uint8_t state>
+    static Stage* oldest_in() {
+        Stage* s = nullptr;
+        for (Stage& t : stages_) {
+            if (t.state != state) {
+                continue;
+            }
+            if constexpr (state == st_pending) {
+                if (s == nullptr || static_cast<int8_t>(t.seq - s->seq) < 0) {
+                    s = &t;
+                }
+            } else {
+                return &t;
+            }
+        }
+        return s;
+    }
+
+    /// A run into the transport. The caller has seen the room for it, and
+    /// the room only grows behind the lock's holder, so one call takes it.
+    static void put(const uint8_t* data, uint32_t n) {
+        std::span<const uint8_t> run(data, n);
+        while (!run.empty()) {
+            run = run.subspan(Transport::write_bulk(run));
+        }
+    }
+
+    /// "lost N" and CRLF, N the losses since the last mark, before the
+    /// holder's own line of `line` bytes: written when the room holds
+    /// both, waited for by a holder that may wait, owed otherwise.
+    static void write_mark(uint16_t owed, uint16_t now, bool waits, uint32_t line) {
+        char mark[mark_size + 1] = "lost ";   // the digits' NUL beside the CRLF's room
+        (void)ultoa(owed, mark + 5, 10);
+        uint8_t n = 5;
+        while (mark[n] != '\0') {
+            ++n;
+        }
+        mark[n++] = '\r';
+        mark[n++] = '\n';
+        if (waits) {
+            while (Transport::tx_room() < n) {
+            }
+        } else if (Transport::tx_room() < n + line) {
+            return;
+        }
+        put(reinterpret_cast<const uint8_t*>(mark), n);
         marked_ = now;
     }
 
-    /// A drain stopped for the ring: counted once per edge waited for,
-    /// however many dispatches find the ring still short before it comes.
-    static void count_wait() {
-        if (!waiting_) {
-            waiting_ = true;
-            if (waits_ != UINT32_MAX) {
-                ++waits_;
+    /// The line of stage `first`, completed by `src`, into the transport
+    /// (the header, "The line's end publishes"): the lock taken, or the
+    /// line left pending for its holder; then the mark when one is owed,
+    /// the line, and every line that pended meanwhile, oldest first, each
+    /// written whole when the room holds it - waited for when the holder
+    /// or the line's own source may wait - or refused and counted.
+    [[gnu::noinline]] static void publish(Stage& first, uint8_t src) {
+        uint16_t now;
+        {
+            typename P::CriticalSection cs;
+            if (busy_) {
+                first.state = st_pending;
+                first.seq = seq_;
+                seq_ = static_cast<uint8_t>(seq_ + 1u);
+                return;
             }
+            busy_ = true;
+            first.state = st_publishing;
+            now = lost_;
         }
-    }
-
-    template <typename Pump>
-    static void wait_room(uint32_t wanted, Pump& pump) {
-        while (Transport::tx_room() < wanted) {
-            pump();
+        writing(true);
+        const bool holder_waits = may_wait(src);
+        if (now != marked_) {
+            write_mark(static_cast<uint16_t>(now - marked_), now, holder_waits, first.len);
         }
-    }
-
-    /// A chain written whole, closed by its last message's code, its
-    /// slots released: the panic drain's.
-    template <typename Pump>
-    static void write_chain_waiting(uint8_t h, bool close, Pump& pump) {
-        while (h != 0u) {
-            const Message& m = message(h);
-            const uint8_t after = next_[h];
-            wait_room(need(m, close && after == 0u), pump);
-            m.format(m.packed);
-            if (close && after == 0u) {
-                close_line(m.code);
+        Stage* s = &first;
+        for (;;) {
+            const uint32_t n = s->len;
+            // A handler holding the lock never waits, and nothing pends
+            // while it holds it (no handler nests over another).
+            const bool waits = holder_waits || (src != handler_source && may_wait(s->owner));
+            if (waits) {
+                while (Transport::tx_room() < n) {
+                }
             }
-            queue.release(h);
-            h = after;
+            const bool fits = waits || Transport::tx_room() >= n;
+            if (fits) {
+                put(s->data, n);
+                if constexpr (opts.peak) {
+                    lines_ = lines_ + 1u;
+                    bytes_ = bytes_ + n;
+                }
+            }
+            typename P::CriticalSection cs;
+            if (!fits) {
+                note_loss();
+            }
+            free_stage(*s);
+            s = oldest_in<st_pending>();
+            if (s == nullptr) {
+                writing(false);
+                busy_ = false;
+                return;
+            }
+            s->state = st_publishing;
         }
     }
-
-    static void release_chain(uint8_t h) {
-        while (h != 0u) {
-            const uint8_t after = next_[h];
-            queue.release(h);
-            h = after;
-        }
-    }
-
-    static void pop_completed() {
-        completed_head_ = static_cast<uint8_t>(completed_head_ + 1u == depth ? 0u : completed_head_ + 1u);
-        --completed_count_;
-    }
-
-    static constexpr uint32_t saturate(uint32_t v) { return v > UINT16_MAX ? UINT16_MAX : v; }
 
     /// The writer's own writes, told to the transport's debug check.
     static void writing(bool on) {
@@ -1019,41 +621,48 @@ private:
     /// A write to the claimed transport from anyone but the writer.
     static void direct_write() { on_misuse(misuse_direct_write); }
 
-    // ---- the writer's state: main context only, written by its dispatch -------
-    static inline uint8_t next_[depth + 2u]{};               ///< slot links, 0 the end
-    static inline uint8_t head_[opts.max_sources]{};          ///< each source's open line, 0 none
-    static inline uint8_t tail_[opts.max_sources]{};
-    static inline uint8_t epoch_[opts.max_sources]{};         ///< the tear epoch its open line belongs to
-    static inline uint8_t completed_[depth]{};                ///< heads of complete lines, oldest first
-    static inline uint8_t completed_head_ = 0;
-    static inline uint8_t completed_count_ = 0;
-    static inline uint8_t seen_tears_ = 0;
-    static inline uint16_t torn_lines_ = 0;
-    static inline uint16_t marked_ = 0;                       ///< lost_ when the last mark was written
-    static inline uint32_t waits_ = 0;
-    static inline bool waiting_ = false;                     ///< a drain stopped, no write since
-    static inline uint32_t bound_written_ = 0;
-    static inline uint32_t lines_written_ = 0;
+    // ---- the state ------------------------------------------------------------
+    alignas(4) static inline uint8_t long_store_[opts.long_size];
+    alignas(4) static inline uint8_t small_store_[opts.small_stages][opts.small_size];
 
-    // ---- the clients' side: each source's flags written by its own context ----
-    static inline bool torn_[opts.max_sources]{};             ///< a piece refused, the line not ended
-    static inline bool composing_[opts.max_sources]{};        ///< a piece taken, the line not ended
-    static inline uint8_t tears_[opts.max_sources]{};         ///< the tear epoch, 7 bits
-    static inline uint8_t tear_events_ = 0;                   ///< every tear, under the guard
-    static inline uint16_t lost_ = 0;                         ///< under the guard
+    static constexpr std::array<Stage, count> initial_stages() {
+        std::array<Stage, count> a{};
+        a[0] = Stage{long_store_, static_cast<uint8_t>(opts.long_size), 0, no_dispatch, st_free, 0, false};
+        for (uint8_t i = 0; i < opts.small_stages; ++i) {
+            a[i + 1u] = Stage{small_store_[i], static_cast<uint8_t>(opts.small_size), 0, no_dispatch, st_free, 0,
+                              false};
+        }
+        return a;
+    }
+    static inline std::array<Stage, count> stages_ = initial_stages();
+    /// A byte per source: its open line's stage, slot_none or
+    /// slot_refused. Each entry written by its own source's context alone
+    /// (an object is never preempted by itself, a handler by another
+    /// handler), and by the panic path.
+    static inline uint8_t slots_[opts.max_sources] = {};
+    static inline bool busy_ = false;     ///< the lock: a publisher is copying
+    static inline uint8_t seq_ = 0;       ///< the next pending line's number
+    static inline uint16_t lost_ = 0;     ///< under the guard
+    static inline uint16_t marked_ = 0;   ///< lost_ at the last mark; the lock's holder's
+    static inline uint8_t held_ = 0;      ///< with `peak`: stages not free, under the guard
+    static inline uint8_t peak_ = 0;
+    static inline uint32_t lines_ = 0;    ///< with `peak`: the lock's holder's
+    static inline uint32_t bytes_ = 0;
 };
 
-/// Whether a type is a LineWriter: print() to it posts a message.
-template <typename W>
-concept LineWriterType = MessageSink<W> && requires { typename W::Message; };
+template <typename T, Platform P, LineWriterOptions o>
+inline void print_one(LineWriter<T, P, o>, const char* text) {
+    LineWriter<T, P, o>::text(text);
+}
 
-/// print() to a LineWriter: the writer's client verb, post_message() (the
-/// header). True when the message was taken. Always inlined, as the front
-/// of post_message() is: the texts' lengths are measured where the call
-/// is written, so a literal's is a constant.
-template <LineWriterType W, typename... Args>
-[[gnu::always_inline]] inline bool print(W, const Args&... args) {
-    return W::post_message(args...);
+template <typename T, Platform P, LineWriterOptions o>
+inline void print_one(LineWriter<T, P, o>, crlf_t) {
+    LineWriter<T, P, o>::end_line(true);
+}
+
+template <typename T, Platform P, LineWriterOptions o>
+inline void print_one(LineWriter<T, P, o>, flush_line_t) {
+    LineWriter<T, P, o>::end_line(false);
 }
 
 /// A panic reporter that drains a writer into its transport first

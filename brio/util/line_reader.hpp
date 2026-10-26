@@ -69,13 +69,14 @@
  * `using LendsTo = Subscribers<LineSink>` and Tenuto refuses, when the
  * program is compiled, a list in which the sink comes after the reader.
  *
- * Transmit is another object's, or nobody's. util/line_writer.hpp's
- * LineWriter is the one writer of a port: a print() to it posts the
- * arguments, and the writer writes whole lines in its own dispatch, the
- * lines of objects that preempt one another never mixed. Without one,
- * print() (util/print.hpp) goes straight to the transport, from main
- * context only (print.hpp says why), and waits until the transmit ring
- * has taken every byte: the wait is zero while the message fits the
+ * Transmit has no active object. util/line_writer.hpp's LineWriter is
+ * the one writer of a port where printers preempt one another: a print()
+ * to it formats into the caller's own line and the line goes to the
+ * transport whole at its end, the lines of objects that preempt one
+ * another never mixed. Without one, print() (util/print.hpp) goes
+ * straight to the transport, from main context only (print.hpp says
+ * why), and waits until the transmit ring has taken every byte: the
+ * wait is zero while the message fits the
  * ring's room, and otherwise one byte time for each byte that does not
  * yet fit. A byte is ten bit times at 8N1, 21.7 us at 460800 baud and
  * 87 us at 115200, so a message that finds the transmit ring full waits

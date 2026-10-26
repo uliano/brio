@@ -182,27 +182,24 @@ void usart_resource_verbs() {
 }
 
 // The console through its LineWriter (util/line_writer.hpp): the writer
-// over this family's transport, a line and a line in pieces printed to
-// it, the transmit edge's glue, the bench grammar over it and the panic
-// path's drain, compiled for every part.
+// over this family's transport, a line, a line in pieces and a prompt
+// printed to it, the bench grammar over it and the panic path's drain,
+// compiled for every part.
 #include "ch32v00x/platform.hpp"
 #include "util/line_writer.hpp"
 #include "util/testbench.hpp"
 
-using ConsoleLog = LineWriter<Serial, P>;
+// A 64-byte transmit ring (63 bytes of room): the stages sized under it.
+using ConsoleLog = LineWriter<Serial, P, LineWriterOptions{.long_size = 63, .small_size = 48}>;
 TestBench<ConsoleLog> console_log_bench;
 
 void console_log_use() {
     ConsoleLog::init();
-    (void)print(ConsoleLog{}, "count = ", uint32_t{7}, ' ', hex(0xBEEFu), crlf);
-    (void)print(ConsoleLog{}, "a piece");
-    (void)print(ConsoleLog{}, " and its end", crlf);
-    if (Serial::tx_drained()) {
-        post<ConsoleLog>(TxActivity{});
-    }
+    print(ConsoleLog{}, "count = ", uint32_t{7}, ' ', hex(0xBEEFu), crlf);
+    print(ConsoleLog{}, "a piece");
+    print(ConsoleLog{}, " and its end", crlf);
+    print(ConsoleLog{}, "> ", flush_line);
     console_log_bench.verdict("a verdict through the writer", true);
     console_log_bench.prompt();
-    while (serve_one<ConsoleLog>()) {
-    }
     ConsoleLog::drain_to_port();
 }

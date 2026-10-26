@@ -429,25 +429,21 @@ extern "C" void DMA2_Stream6_IRQHandler() { (void)Link::dma_isr(); }      // tra
 
 A console whose lines go through a writer
 ([design/serial.md](../design/serial.md), "LineWriter": one writer of
-the port, the last active object of the program) reads the transmit
-edge in the same vector, right after the body that raises it, and
-posts it to the writer; an excerpt, `Log` the program's
+the port, for a program whose printers preempt one another) needs no
+glue of its own in the vector: the writer asks the transport for its
+room and nothing else. An excerpt, `Log` the program's
 `brio::LineWriter<Serial, P>` and `Lines` its `LineReader`:
 
 ```cpp
 extern "C" void USART1_IRQHandler() {
     if (Serial::isr()) { brio::post<Lines>(brio::RxActivity{}); }
-    if (Serial::tx_drained()) { brio::post<Log>(brio::TxActivity{}); }
 }
 brio::print(Log{}, "hello", brio::crlf);           // through the writer
 ```
 
-With a transmit engine the edge is raised in the transmit stream's
-vector instead, by `dma_isr()`, and read there. `tx_capacity()` is the
-transmit ring's capacity (255 bytes for the default ring of 256): a
-message whose bound, with its line's closing, exceeds it is refused by
-the writer, at compile time where the compiler knows the bound and at
-the call where a text makes it so.
+`tx_capacity()` is the transmit ring's capacity (255 bytes for the
+default ring of 256): a writer whose stage is longer does not compile,
+since a line that must wait for its room could never find it.
 
 A mode beyond the
 transport - a LIN break, a muted receiver - through `brio::Usart<1>`'s

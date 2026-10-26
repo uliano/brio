@@ -1,6 +1,6 @@
 """The console protocol of the bench suites (single-char commands, the
-"> " prompt, the "ALL: N pass, M fail" summary, with ", L lost, T torn"
-when the suite prints through a LineWriter that lost lines, and the lines
+"> " prompt, the "ALL: N pass, M fail" summary, with ", L lost" when the
+suite prints through a LineWriter that lost lines, and the lines
 a suite marks "#<T ... :T>#" for the judge to read whole) and the verbs
 over it: brio run, brio console, brio duo."""
 
@@ -94,20 +94,23 @@ def verdict(text, marker):
 
 
 def losses(text, marker):
-    """(lost, torn) the run's tally reports: the summary line's two
-    optional fields, or the letters' tallies summed; (0, 0) when no tally
-    carries them (a suite printing to a transport, or a writer that lost
-    nothing)."""
+    """The lines the run's writer lost: the summary line's optional field,
+    or the letters' tallies summed - and, when no tally carries one, the
+    "lost N" marks the writer wrote on the wire, summed; 0 when there is
+    none (a suite printing to a transport, or a writer that lost nothing)."""
     for line in text.splitlines():
         if marker and marker in line:
             m = LOSS_RE.search(line)
             if m:
-                return int(m.group(3)), int(m.group(4))
-    lost = torn = 0
-    for m in LOSS_RE.finditer(text):
-        lost += int(m.group(3))
-        torn += int(m.group(4))
-    return lost, torn
+                return int(m.group(3))
+    lost = sum(int(m.group(3)) for m in LOSS_RE.finditer(text))
+    if lost:
+        return lost
+    for line in text.splitlines():
+        m = LOST_MARK_RE.fullmatch(line.strip())
+        if m:
+            lost += int(m.group(1))
+    return lost
 
 
 def marked_lines(text):
@@ -146,14 +149,14 @@ def judge(text, marker, strict, name):
         print("bench: %d marked line(s) read whole" % whole)
     for p in problems:
         print("bench: %s" % p)
-    lost, torn = losses(text, marker)
-    if lost or torn:
-        print("bench: the writer lost %d line(s), %d torn" % (lost, torn))
+    lost = losses(text, marker)
+    if lost:
+        print("bench: the writer lost %d line(s)" % lost)
     if fails:
         die("board %s reported %d failure(s)" % (name, fails))
     if problems:
         die("board %s: %d marked-line problem(s)" % (name, len(problems)))
-    if strict and (lost or torn):
+    if strict and lost:
         die("board %s: lines lost under --strict" % name)
 
 

@@ -93,6 +93,21 @@
 //      no FIFO on this block, and one more that finds the ring dry and
 //      disarms TXE) and the ticks that fell in the run.
 //
+//   l  A LINE PRINTED STRAIGHT TO THE CONSOLE, as a program under the
+//      cooperative kernel prints one (print() to its transport, one
+//      dispatch at a time, every line whole by construction): the
+//      verdict-shaped line of the Rubato suite's writer letter, its four
+//      texts and crlf, 60 bytes, the console drained first and the line
+//      printed twice back to back - the first after the drain (cold) and
+//      the second right behind it (warm) - in 16 runs, each print timed on
+//      a Stopwatch with the counters read around it, the transport's
+//      handler inside when it lands; then the transport's run alone, of 2
+//      and of 60 bytes, warm and masked as that letter measures them. Each
+//      bench line is the run of the least wall, and the plain line after
+//      it says the least and the most wall of the 16. THE WIRE is the
+//      console's: the print returns when the ring has the line, long
+//      before it leaves, so x is far under 1 and says only that.
+//
 //   t  the tick's floor: one second - 1000 kernel ticks - of
 //      BenchIdle::idle() turns with nothing else to do, the console
 //      drained first. wall is the second on the ruler, irq the ticks, isr
@@ -261,6 +276,7 @@
 
 #include <array>
 #include <span>
+#include <string_view>
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
@@ -611,6 +627,80 @@ void tp_print() {
         }
         bench_line(serial, "print", n, bench_sample(w, c0, c1), Ruler::hz(), console_wire_bps);
     }
+    bench.verdict("ran", true);
+}
+
+// =============================================================================
+// l - a line printed straight to the console
+// =============================================================================
+/// The Rubato suite writer letter's line: "  cost  <50 characters>" and
+/// CRLF, 60 bytes on the wire, in four texts and the end.
+const char* const line_name = "the ruler reads delay_us(999) at least hz x 999 us";
+/// The same 60 bytes as one run.
+const char line_run[] = "  cost  the ruler reads delay_us(999) at least hz x 999 us\r\n";
+static_assert(sizeof line_run == 61u, "the line is 60 bytes and its NUL");
+
+/// The run of the least wall among a letter's runs, and the most wall.
+struct LeastRun {
+    BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
+    uint32_t most = 0;
+    void add(const BenchSample& m) {
+        if (m.wall < best.wall) {
+            best = m;
+        }
+        most = m.wall > most ? m.wall : most;
+    }
+};
+
+void line_report(const char* op, uint32_t n, const LeastRun& r) {
+    bench_line(serial, op, n, r.best, Ruler::hz(), console_wire_bps);
+    print(serial, "  ", op, " over 16 runs: wall ", r.best.wall, "..", r.most, crlf);
+}
+
+void tl_line() {
+    ruler_on();
+    LeastRun cold;
+    LeastRun warm;
+    LeastRun two;
+    LeastRun sixty;
+    for (int i = 0; i < 16; ++i) {
+        (void)console_drain();
+        const BenchCounters c0 = counters();
+        Stopwatch<Ruler> sw;
+        sw.start();
+        print(serial, "  ", "cost", "  ", line_name, crlf);
+        uint32_t w = sw.elapsed();
+        const BenchCounters c1 = counters();
+        sw.start();
+        print(serial, "  ", "cost", "  ", line_name, crlf);
+        const uint32_t w2 = sw.elapsed();
+        const BenchCounters c2 = counters();
+        cold.add(bench_sample(w, c0, c1));
+        warm.add(bench_sample(w2, c1, c2));
+        // The transport's run alone, warm and masked: the second of two.
+        (void)console_drain();
+        for (uint32_t k = 0; k < 2u; ++k) {
+            P::CriticalSection cs;
+            const BenchCounters d0 = counters();
+            sw.start();
+            print(serial, std::string_view("  ", 2));
+            w = sw.elapsed();
+            const BenchCounters d1 = counters();
+            sw.start();
+            print(serial, std::string_view(line_run, 60));
+            const uint32_t w60 = sw.elapsed();
+            const BenchCounters d2 = counters();
+            if (k == 1u) {
+                two.add(bench_sample(w, d0, d1));
+                sixty.add(bench_sample(w60, d1, d2));
+            }
+        }
+        print(serial, crlf);
+    }
+    line_report("line.cold", 60, cold);
+    line_report("line.warm", 60, warm);
+    line_report("run.2", 2, two);
+    line_report("run.60", 60, sixty);
     bench.verdict("ran", true);
 }
 
@@ -2275,6 +2365,7 @@ int main() {
     bench.letter('r', "the ruler's self-check and the instrument's cost", tr_ruler);
     bench.letter('m', "memcpy and memset against the core's load/store floor", tm_memory);
     bench.letter('p', "a print through the console, to the wire's end", tp_print);
+    bench.letter('l', "a line printed straight to the console: cold, warm, the transport's runs", tl_line);
     bench.letter('t', "the tick's floor: a second of idle", tt_tick);
     bench.letter('d', "the DMA: copy and fill, a paced transfer, an engined SPI request", td_dma);
     bench.letter('e', "the SPI host above the wire: polled, pumped, and a short request's fixed cost",

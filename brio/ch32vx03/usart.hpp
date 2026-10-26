@@ -1805,8 +1805,8 @@ struct Uart {
     static uint32_t tx_room() { return m_tx.room(); }
 
     /// The transmit ring's capacity: tx_room() when nothing is queued, the
-    /// most a writer can ever find free (util/line_writer.hpp sizes its
-    /// messages' bound by it).
+    /// most a writer can ever find free (util/line_writer.hpp keeps its
+    /// stages within it).
     static constexpr uint32_t tx_capacity() { return decltype(m_tx)::capacity(); }
 
     /// The transmit edge, told once (util/stream.hpp's EdgeSink): true when the
