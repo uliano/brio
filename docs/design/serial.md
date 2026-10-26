@@ -5,7 +5,8 @@ every family writes under one surface (bytes in a run, interrupt
 handler bodies the application binds, counters), the two services over
 it (`LineReader`, which turns received bytes into `LineReceived` events
 for an active object, and `LineWriter`, the one writer of a port whose
-printers preempt one another, which puts every line on the wire whole),
+printers preempt one another, which puts every line on the wire whole or
+refuses it whole and counts it),
 the output policy (a line is written whole or refused and counted,
 received bytes are dropped and counted), and how numbers become text. It is
 written for an embedded programmer who wants a console on a board:
@@ -17,8 +18,9 @@ over it, an active object (a component with its own event queue,
 [kernel.md](kernel.md)) which drains the receive ring and posts each
 complete line to another active object of the program's, the line
 sink; and either `print(uart, ...)` straight into the transport, or,
-under the preemptive kernel, a `LineWriter` over it and
-`print(Writer{}, ...)` wherever text goes out. The first rule that
+under the preemptive kernel (`Rubato`, [kernel.md](kernel.md); the
+cooperative one is `Tenuto`), a `LineWriter` over it and
+`print(Log{}, ...)` wherever text goes out. The first rule that
 decides correctness: **the line sink must come before `LineReader` in
 the list of active objects the application gives the kernel**, because
 the line is lent to the sink for one dispatch (one call of the sink's
@@ -29,9 +31,10 @@ program is compiled. The second: **a port with a writer has one
 writer**, and every line goes through it. And one cost to know: `print`
 straight into a transport waits until the transport has accepted every
 byte, so a long message on a slow port stalls every other active object
-for that time; through a writer only main context and the one object
-the writer names wait, and every other line that finds no room is
-refused and counted.
+for that time; through a writer the sources allowed to wait (main
+context and the one object the writer names) wait for their own lines
+and for those lines alone, and every other line that finds no room is
+refused whole and counted.
 
 ## The Uart task
 
@@ -40,7 +43,8 @@ stratum spells the same way: a single-producer single-consumer ring on
 each side ([ring.md](ring.md)), interrupt handler bodies the
 application binds to its vectors, and the error counters as named
 statics, inspectable from gdb. The rings default to 64 bytes for
-receive and 256 for transmit, with 8-bit indices on both sides, so
+receive and 256 for transmit (64 on the three WCH families, whose
+transports default smaller), with 8-bit indices on both sides, so
 publishing an index needs no interrupt masking on any stratum, the AVR
 included ([ring.md](ring.md)). That is a property of the ring, not of
 the whole transport: `write_byte` may still mask interrupts briefly -
@@ -443,10 +447,10 @@ formats each argument at the call, with the very `print_one()` verbs
 `print(uart, ...)` uses, into a buffer that belongs to the caller's
 line, its STAGE, and the line's end hands the stage to the transport as
 one run. The bytes on the wire are the bytes `print(uart, ...)` writes
-(the host suite holds twenty lines of every printable type to that,
-byte for byte). The smallest use, an excerpt of a program whose clock,
-transport and platform `P` are set up and whose objects `App` and
-`Console` print:
+(the host suite holds twenty prints, one of every printable type and
+shape, to that, byte for byte). The smallest use, an excerpt of a
+program whose clock, transport and platform `P` are set up and whose
+objects `App` and `Console` print:
 
 ```cpp
 using Log = brio::LineWriter<Serial, P>;   // a long stage of 192 bytes, two of 96
@@ -464,57 +468,71 @@ brio::print(Log{}, "count = ", count, brio::crlf);
 Under Tenuto the same program writes `using Log = Serial;` and keeps
 its `print(Log{}, ...)` calls: one dispatch runs at a time there, so a
 line printed straight into the transport is whole by construction, and
-the image compiles nothing of the writer (a handler does not print to a
-transport, `util/print.hpp` says why).
+a template no program instantiates compiles to nothing, so the image
+carries no byte of the writer. (A handler does not print there: a print
+to a transport is main context's alone, [`util/print.hpp`](../../brio/util/print.hpp)'s
+opening comment says why; the excerpt's "in a handler" is the writer's.)
 
-**What decides correctness.** Four duties, none of which the release
-build checks:
+**What decides correctness.** Four things the programmer must get
+right; the debug build checks the first, nothing checks the others:
 
 - One writer. `init()`, called once from `main()` before the kernel
   runs, claims the transport; in a debug build (one without `NDEBUG`,
   which every cross project's release configuration defines) the
   transport's `write_byte()` and `write_bulk()` panic at the first write
   from anywhere but the writer. What stays direct is a banner printed
-  before `init()` and the panic path.
+  before `init()` and the panic path after the drain.
 - Who may wait. A line is written when the transport's room holds it
-  whole. Main context and the one object the `wait_from` option names (a
-  bench console whose dispatch runs main-context work) wait for that
+  whole. Main context (the code outside every dispatch and every
+  handler: `main()` before the kernel runs and the kernel's idle turn
+  after) and the one object the `wait_from` option names wait for that
   room, spinning on `tx_room()` as `print` to a transport spins, the
   transmit interrupt draining under them; every other line that finds
-  no room is refused whole and counted. The transport's ring is the only
-  queue, so a program whose other objects print faster than the wire
-  sizes the ring for their bursts.
+  no room is refused whole and counted. The holder of the lock (below)
+  also waits for a pending line of a waiting source it relays, so
+  `wait_from` names the lowest object that prints, a console whose
+  dispatch prints the long reports: nothing below it can hold its line
+  pending, and nothing that may not wait ever spins for it. The
+  transport's ring is the only queue, so a program whose other objects
+  print faster than the wire sizes the ring for their bursts.
 - Every `crlf` ends a line, wherever it stands in the argument list (a
   verb cannot know its position): `print(Log{}, "a", crlf, "b", crlf)`
-  is two lines, and a line break inside one line is written as text,
+  is two lines, each published as its `crlf` comes and each taking a
+  stage of its own, and a line break inside one line is written as text,
   `"\r\n"`. `flush_line` ends a line with no bytes, the shape of a
   prompt that must leave before an end of line comes.
 - A handler ends the line it starts. Every interrupt handler is one
-  source with one stage, so two handlers composing pieces of lines would
-  mix them.
+  source, with one open line at a time among them all, so two handlers
+  composing pieces of lines would mix them.
 
 A text is consumed at the call: a literal, a constant table and a buffer
 on the caller's stack are all fine.
 
 **Sources and stages.** A line belongs to its SOURCE: the object being
-dispatched (the kernel's `dispatching<P>`), main context outside every
-dispatch, or every interrupt handler alike (`P::in_handler()`). A table
-of a byte per source (`max_sources` entries, 16 by default: the pack's
-indices from 0, main context and the handlers in the last two) says
-which stage holds the source's open line; a line from an index past the
-table is refused and counted. The stages are a fixed pool: one long
-stage (`long_size`, 192 bytes by default) kept for the sources allowed
-to wait, which take it before a small one, and `small_stages` small
-ones (two of `small_size`, 96 bytes, by default) for every source. A
-line's first byte takes a free stage, the one decision made with
-interrupts masked, since a preemptor landing between the look and the
-claim would take the same stage; a line that finds none is refused
-whole, its later bytes dropped up to its end. A line may be printed in
-several calls, across dispatches too: the stage stays its source's
-until the end. Each stage is at most 255 bytes and at most the
-transport's `tx_capacity()`, `small_stages` one to seven and
-`max_sources` at least three; a writer that breaks one of these does
-not compile.
+dispatched (the kernel's `dispatching<P>`, the object's index in the
+list the program gives the kernel, the first object 0 and the highest
+priority), main context, or every interrupt handler alike
+(`P::in_handler()`). A table of a byte per source (`max_sources`
+entries, 16 by default: the objects' indices from 0, main context and
+the handlers in the last two) says which stage holds the source's open
+line; a line from an index past the table is refused and counted. The
+stages are a fixed pool: one long stage (`long_size`, 192 bytes by
+default) for the sources allowed to wait, which take it before a small
+one and which no other source ever gets, and `small_stages` small ones
+(two of `small_size`, 96 bytes, by default) for every source; so a line
+of any other source is bounded by `small_size`, the CRLF included, and
+a longer one is refused every time. A line's first print takes a free
+stage, the one decision made with interrupts masked, since a preemptor
+landing between the look and the claim would take the same stage; a
+line that finds none is refused whole, its later bytes dropped up to
+its end. A line may be printed in several calls, across dispatches too:
+the stage stays its source's until the end, and a line never ended
+keeps it for good. Among the checks the compiler makes: each stage at
+most 255 bytes and at most the transport's `tx_capacity()`,
+`small_stages` one to seven, `max_sources` at least three, `wait_from`
+inside the table. The first bites where the transport's ring is 64
+bytes (the three WCH families' default): there the stages are sized
+under it, 63 and 48 say, or the ring is grown.
 
 **The line's end publishes.** The stage's bytes go into the transport
 as one `write_bulk()` under a LOCK, a flag meaning "a publisher is
@@ -529,99 +547,117 @@ of the object it preempted, which follows at its end, and a handler's
 line lands between two lines, never inside one. The holder waits for a
 relayed line's room when it may wait itself or the line's source may,
 and refuses it otherwise; a handler holding the lock relays nothing,
-because nothing runs inside a handler. The source's slot is freed at
-its line's end, so its next line takes a fresh stage while the last one
-pends. Three sections run with interrupts masked - the stage's take,
-the lock's take and the release-and-relay step that frees a written
-stage and picks the next pending one, each a few stores and a scan of
-the pool - and every copy into the transport runs with interrupts
-enabled (the host suite reads the mask's depth in the copy).
+because nothing preempts a handler. The source's slot is freed at its
+line's end, so its next line takes a fresh stage while the last one
+pends. The sections that run with interrupts masked are the stage's
+take (a scan of the pool for a free one), the lock's take (a flag
+tested and set), the release-and-relay step (a written stage freed, the
+pool scanned for the oldest pending one) and the counting of a refused
+line, each a few loads and stores; every copy into the transport runs
+with interrupts enabled (the host suite's simulated transport records
+whether a copy ever ran inside a critical section).
 
 **The counters and the mark.** `lost()` counts every line refused - no
 stage free, no room, a line that outgrew its stage, a source past the
-table - in lines, saturating, never retried. The wire shows where lines
-are missing: the next holder of the lock writes `lost N` and CRLF before
-its own line, N the losses since the last mark, when the room holds
-both; a source that may wait waits for it, and for any other the mark
-stays owed to the next line. `util/testbench.hpp`'s bench grammar prints
-through a writer as through a transport, its prompt ended with
-`flush_line` and its tallies carrying `L lost` when the writer lost
-lines during the letter or the run, and `bin/brio run --strict` fails
-such a run.
+table - in lines, saturating, never retried; one counter, so a loss is
+diagnosed one knob at a time. The wire shows where lines are missing:
+the next holder of the lock writes `lost N` and CRLF before its own
+line, N the losses since the last mark, when the room holds the mark and
+the line; a source that may wait waits for the mark's room, and for any
+other the mark stays owed to the next line. The bench grammar of
+`util/testbench.hpp` (the letter menu and the pass/fail tallies the
+test suites print) prints through a writer as through a transport, its
+prompt ended with `flush_line` and its tallies carrying `L lost` when
+the writer lost lines, and the bench's judge fails such a run under
+`--strict`.
 
 **Sizing.** With the `peak` option the writer also counts the most
 stages held at once (`peak_stages()`) and the lines and bytes it
 published (`lines_written()`, `bytes_written()`); without it none of
-this is compiled. The pool is sized by `peak_stages()` against the
-stages a program's deepest preemption holds at once (each source with a
-line open, plus every line pending behind a waiting holder) and the
-stages by the longest line of each source; `lost()` says when either is
-short, and when the ring is.
+this is compiled. `peak_stages()` sizes the pool: the stages held at
+once at the program's deepest preemption, each source with a line open
+plus every line pending behind a waiting holder. The longest line of
+each source sizes the stages. `lost()` says that one of the three - the
+pool, a stage, the ring - is short, not which.
 
 **The panic path.** `drain_to_port(pump)` writes what the writer holds
 into the transport by plain code - the line being published (from its
 start, so a line a panic cut inside its copy shows its first bytes
 twice), the pending lines in their order, then the open lines as they
-stand - calling `pump` while the ring is short; `LineWriterReporter<Writer,
-pump, Then>` is a panic reporter ([kernel.md](kernel.md)) that does it
-before handing over. A panic masks interrupts for good, so the pump the
-program names runs the transport's interrupt body by hand (on the
-STM32F4, `Serial::isr()`); and the reporter runs where panic()'s
-reporter runs, after `break_here()`, which on the Cortex-M families
-faults when no debugger holds the core, so there the drain is reached
-only under a debugger. Validated on the host alone (`test_line_writer`).
+stand - calling `pump` while the ring is short, and releases the
+transport's claim, so what prints after it prints to the transport;
+`LineWriterReporter<Writer, pump, Then>` is a panic reporter
+([kernel.md](kernel.md)) that does it before handing over to `Then`. A
+panic masks interrupts for good, so the pump the program names is a
+function of its own that runs the transport's interrupt body by hand
+(on the STM32F4, one that calls `Serial::isr()` and drops its answer).
+The reporter runs where panic()'s reporter runs, after `break_here()`.
+On the Cortex-M families `break_here()` faults when no debugger holds
+the core: there a deployed board never reaches the drain, and the lines
+the writer held are lost with the panic. Validated on the host alone
+(`test_line_writer`).
 
-**The cost**, measured on the STM32F446RE at 180 MHz (five wait states,
-the ART on), the console at 115200 baud, over a verdict-shaped line of
-60 bytes in four texts and the end (the Rubato suite's letter j, each
-figure the least and the most of 16, the union over ten passes; the
-direct figures from `bench_stm32f4`'s letter l, the same line on the
-same chip in an image with no writer, [benchmark.md](benchmark.md)):
+**The cost**, measured on the STM32F446RE at 180 MHz (five flash wait
+states, ST's flash accelerator on), the console at 115200 baud, over a
+line of 60 bytes in four texts and the end (the shape of the bench
+grammar's verdict lines), in the preemptive suite's image - a writer
+with `max_sources = 8`, the console as `wait_from`, `peak` on, the
+default pool - each figure the least and the most of 16, the union over
+ten passes; and the same line printed straight into the transport by the
+benchmark instrument's image, which has no writer, three passes of 16
+([benchmark.md](benchmark.md), letters j and l):
 
 | | cycles |
 |---|---|
-| the line printed from an object's dispatch, cold (the transport's three TXE entries inside: the run starts the idle transmitter) / warm, the line right behind the cold one | 2004 to 2244 / 1918 to 2118 |
-| the same, warm, with interrupts masked: the core's own cycles, and what a handler's print costs | 1785 to 1937 |
-| of a warm one: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
+| the line printed from an object's dispatch, cold (the first after the console drained: the run starts the idle transmitter, and the transmit handler's entries fall inside) / warm, the line right behind the cold one | 2004 to 2244 / 1918 to 2118 |
+| the same, warm, with interrupts masked: the core's own cycles | 1785 to 1937 |
+| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1102 to 1108 / 667 to 864 |
 | `print()` straight into the transport, warm and masked, in the same image | 1436 to 1644 |
-| `print()` straight into the transport in an image with no writer, cold (two handlers inside) / warm | 2041 to 2153 / 1702 to 1750 |
+| `print()` straight into the transport in the image with no writer, cold (two entries of the transmit handler inside, 152 cycles) / warm | 2045 to 2153 / 1702 to 1750 |
 | the transport's run alone, warm and masked: 2 bytes / 60 bytes | 188 to 196 / 376 to 612 |
 
-The writer's line is the whole cost: nothing runs after the call. It
-costs some 300 cycles more than the same line printed straight into the
-transport, warm, a tenth to a quarter by which direct figure it is set
-against: the stage's resolution at each text
-(the source, its slot), the stage's take and the lock, and a copy of
-every byte into the stage before the copy into the ring, at some twelve
-cycles a byte from flash and eleven from RAM (gcc lays the scan-and-copy
-loop out with two taken branches a byte). The line's end is mostly the transport's run of
-60 bytes, whose own cost is bimodal by the ring's alignment (376 to 504
-where the runtime's `memcpy` copies words, 564 to 612 where it copies
-bytes); the line right behind the cold one costs some 180 cycles more
-than the same line a moment later, which [benchmark.md](benchmark.md)
-lists among what is not explained. A handler's print of this line holds every other interrupt for
-the masked figure, about 10 us; a handler that must stay short posts a
-value to an object instead. The masked sections, counted in the release
-listing at the core's table counts with each taken branch's refill at
-its three cycles: the stage's take about 50 cycles at most, the lock's
-take about 16, the release-and-relay step about 80 at most (a refused
-line and a scan of three stages); none copies. Flash: no code per
-argument list, the call sites within a few bytes of the direct print's
-(a call per argument), 1046 bytes of the writer's own code and 88 of
-the bench grammar's tally over it - 1132 bytes more than the same
-suite's letters printing straight into the transport. RAM beside the
-ring: 444 bytes, the three stages' 384, their descriptors' 36 and 24 of
-state with the `peak` counters.
+The writer's line is the whole cost: nothing runs after the call. Like
+against like, the writer's masked line against the direct print masked
+in the same image is 1785 to 1937 against 1436 to 1644, some 300 to 350
+cycles more, a fifth; its warm line against the instrument's warm direct
+print is 1918 to 2118 against 1702 to 1750, some 200 to 370 more. What
+the writer adds: the stage's resolution at each text (the source, its
+slot), the stage's take and the lock, and a copy of every byte into the
+stage before the copy into the ring, at some twelve cycles a byte from
+flash and eleven from RAM (gcc lays the scan-and-copy loop out with two
+taken branches a byte; read in a diagnostic build's listing, not kept).
+The line's end is mostly the transport's run of 60 bytes, whose own
+cost is bimodal by the ring's alignment (376 to 512 where the runtime's
+`memcpy` copies words, 564 to 612 where it copies bytes). The line
+right behind the cold one costs some 180 cycles more than the third and
+fourth lines of the same run, which [benchmark.md](benchmark.md) lists
+among what is not explained. A handler's print of this line holds every
+other interrupt for about the masked figure, some 10 us, a cost inferred
+from the dispatch's masked line and not measured from a handler; a
+handler that must stay short posts a value to an object instead. The
+masked sections, counted in the release listing at the Cortex-M4's
+instruction timings with each taken branch's refill at three cycles: the
+stage's take about 50 cycles at most, the lock's take about 16, the
+release-and-relay step about 80 at most (a refused line and a scan of
+three stages); none copies a byte. Flash: no code per argument list, the
+call sites within a few bytes of the direct print's (a call per
+argument), 1046 bytes of the writer's own code and 88 of the bench
+grammar's tally over it; the whole suite, with the call sites, measures
+1132 bytes more than the same letters printing straight into the
+transport. RAM beside the ring: 444 bytes, the three stages' 384, their
+descriptors' 36 and 24 of state (the eight slots and the counters, the
+`peak` ones included).
 
 ## Output policy: whole or refused, counted
 
 A line goes out whole or not at all, and a line that does not is
 counted. Through a writer this is its own rule (above): a line is
-written only when its end has arrived and the ring's room holds it
-whole, and a line with no stage free, no room, or more bytes than its
-stage is refused through its end, counted and marked on the wire. The
-one wait left is the waiting sources' (main context and the object the
-writer names), which poll the ring's room as `print` does.
+written only once its end has arrived, as one run the ring's room
+holds whole, and a line with no stage free, no room, or more bytes than
+its stage is refused through its end, counted and marked on the wire.
+The one wait left is for the lines of the waiting sources (main
+context and the object the writer names), which poll the ring's room as
+`print` does.
 
 Straight into a transport, `print` keeps its wait: the drain side is
 an interrupt handler, which runs even while the caller spins, so the
@@ -643,8 +679,8 @@ latched, so its transport writes an idle FIFO directly and arms the
 interrupt only behind a full one; every queued byte then has an edge
 coming or one latched, and a refused byte or run writes nothing
 ([the PL011 page](../pl011/README.md)). Measured cost of `write_byte`
-on the AVR's console: about 45 to 50 cycles per byte with a guarded
-ring, under 10 % of the 21.7 us wire time per byte at 460800 baud;
+on the AVR's console at 24 MHz: about 45 to 50 cycles per byte with a
+guarded ring, about 2 us, under 10 % of the 21.7 us wire time per byte at 460800 baud;
 with the lock-free ring the hot path is 15 instructions against 23 for
 a guarded one, with no status-register save, `cli` and restore
 ([ring.md](ring.md)). A printed string takes the run instead (above).
@@ -654,9 +690,11 @@ exists anyway), so the policy is pure failure semantics, chosen per
 direction:
 
 - **Receive drops and counts**: the world cannot be paused.
-- **Transmit writes whole lines or refuses and counts them**: half a
-  line is worse than a missing one the wire marks, and a caller that
-  waits on the wire inside a dispatch holds every object below it.
+- **Transmit, through a writer, writes whole lines or refuses and
+  counts them**: half a line is worse than a missing one the wire marks,
+  and a caller that waits on the wire inside a dispatch holds every
+  object that cannot preempt it - every object under the cooperative
+  kernel. Straight into a transport, `print` waits (above).
 
 ## Numbers as text (`util/print.hpp`)
 

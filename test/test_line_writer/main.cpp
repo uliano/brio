@@ -590,6 +590,9 @@ TEST_CASE("the panic reporter drains the writer, pumping the ring, before it han
     CHECK(escaped);
     CHECK(T10b::taken() == std::string(40, '.') + "open before the panic: twenty-nine");
     CHECK(RP::panic_record().context == 9u);
+    // The drain released the claim: a reporter that prints to the
+    // transport after it is no misuse.
+    CHECK_FALSE(WriterClaim<T10b>::claimed);
 }
 
 // =============================================================================

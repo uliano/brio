@@ -29,91 +29,117 @@
  * Under Tenuto (kernel/tenuto.hpp) a program needs none of this: one
  * dispatch runs at a time, so a line printed straight to the transport
  * is whole by construction, and the program writes `using Log = Serial;`
- * and pays nothing. A Tenuto image compiles no byte of this header.
+ * and keeps its print(Log{}, ...) calls. A header's template that no
+ * program instantiates compiles to nothing, so that image carries no
+ * byte of the writer. (A handler does not print there: a print to a
+ * transport is main context's alone, util/print.hpp says why.)
  *
- * SOURCES AND STAGES. A line belongs to its SOURCE: the active object
- * being dispatched (dispatching<P>, kernel/active_object.hpp), main
- * context outside every dispatch (no_dispatch), or `handler_source` for
- * every interrupt handler alike (P::in_handler(), kernel/platform.hpp).
- * A table of a byte per source (`max_sources` entries: the pack's
- * indices from 0, main context and the handlers in the last two) says
- * which stage holds the source's open line. The stages are a fixed pool:
- * one LONG stage (`long_size` bytes) kept for the sources allowed to
- * wait - main context, and the one object `wait_from` names, a bench
- * console - which they take before a small one, and `small_stages`
- * small ones (`small_size` bytes) for every source. A line's first byte
- * takes a free stage, the one decision made with interrupts masked (a
- * preemptor landing between the look and the claim would take the same
- * stage); a line that finds none is refused whole, and its later bytes
- * are dropped up to its end.
+ * Sources and stages. A line belongs to its source: the active object
+ * being dispatched (dispatching<P>, kernel/active_object.hpp: the
+ * object's index in the list the program gives the kernel, the first
+ * object 0 and the highest priority), main context (the code that runs
+ * outside every dispatch and every handler: main() before the kernel
+ * runs, and the kernel's idle turn after; no_dispatch), or
+ * `handler_source` for every interrupt handler alike (P::in_handler(),
+ * kernel/platform.hpp). A table of a byte per source (`max_sources`
+ * entries: the objects' indices from 0, main context and the handlers in
+ * the last two) says which stage holds the source's open line. The
+ * stages are a fixed pool: one long stage (`long_size` bytes) for the
+ * sources allowed to wait - main context, and the one object `wait_from`
+ * names - which they take before a small one and which no other source
+ * ever gets, and `small_stages` small ones (`small_size` bytes) for every
+ * source; so a line of any other source is bounded by `small_size`, the
+ * CRLF included. A line's first print takes a free stage, the one
+ * decision made with interrupts masked (a preemptor landing between the
+ * look and the claim would take the same stage); a line that finds none
+ * is refused whole, and its later bytes are dropped up to its end. A
+ * line never ended keeps its stage: a forgotten crlf takes a stage out
+ * of the pool for good.
  *
- * A LINE AND ITS END. print() formats each argument into the caller's
+ * A line and its end. print() formats each argument into the caller's
  * stage at the call: a C string scanned and copied in one pass, stopping
- * where the stage ends; a std::string_view copied as one run; every
- * number formatted by print.hpp's verbs and copied the same way. EVERY
- * `crlf` ends a line, wherever it stands in the argument list - a verb
- * cannot know its position - so `print(Log{}, "a", crlf, "b", crlf)` is
- * two lines, and a program that wants a line break inside one line
- * writes it as text ("\r\n"). `flush_line` ends a line with no bytes, the
- * shape of a prompt that must leave before an end of line comes. A line
- * may be printed in several calls, across dispatches too: the stage stays
- * its source's until the end. The text is consumed at the call, so a
- * buffer on the caller's stack is as good as a literal.
+ * where the stage ends; a std::string_view copied as one run; a number
+ * converted by print.hpp's verbs into a short buffer and copied as a C
+ * string. Every `crlf` ends a line, wherever it stands in the argument
+ * list - a verb cannot know its position - so `print(Log{}, "a", crlf,
+ * "b", crlf)` is two lines, each published as its crlf comes and each
+ * taking a stage of its own, and a program that wants a line break
+ * inside one line writes it as text ("\r\n"). `flush_line` ends a line
+ * with no bytes, the shape of a prompt that must leave before an end of
+ * line comes. A line may be printed in several calls, across dispatches
+ * too: the stage stays its source's until the end. The text is consumed
+ * at the call, so a buffer on the caller's stack is as good as a
+ * literal.
  *
- * THE LINE'S END PUBLISHES it: the stage's bytes into the transport as
- * one write_bulk(), under a LOCK, a flag meaning "a publisher is
+ * The line's end publishes it: the stage's bytes into the transport as
+ * one write_bulk(), under a lock, a flag meaning "a publisher is
  * copying". Taking the lock and finding it held are decided with
  * interrupts masked; the copy runs with them enabled. A line completed
  * while another publisher holds the lock - by a higher object that
- * preempted it, or by a handler - is marked PENDING with a sequence
+ * preempted it, or by a handler - is marked pending with a sequence
  * number and its caller returns: under the kernel's nesting (a preemptor
  * finishes before the preempted resumes, a handler runs to completion)
  * the holder resumes after it, writes its own line, then the pending
  * ones oldest first, and releases the lock. So lines reach the wire in
  * the order they were completed. The source's slot is freed at its
  * line's end, so its next line takes a fresh stage while the last one
- * pends. The only masked sections are the stage's take, the lock's take
- * and the release-and-relay step that frees a written stage and picks
- * the next pending one, each a few stores and a scan of the pool.
+ * pends. The sections that run with interrupts masked: the stage's take
+ * (a scan of the pool for a free one), the lock's take (a flag tested
+ * and set), the release-and-relay step (a written stage freed, the pool
+ * scanned for the oldest pending one), and the counting of a refused
+ * line; each a few loads and stores, none copies a byte.
  *
  * Who waits. A line is written when the transport's room holds it
  * whole. The sources allowed to wait - main context and `wait_from` -
  * spin on tx_room() for it while they hold the lock, as print() to a
- * transport spins (the transmit interrupt drains the ring under the
- * spin), and the holder waits the same way for a pending line of such a
- * source and, when it may wait itself, for every pending line it relays.
- * Every other line that finds no room is refused whole and counted. A
- * handler never waits.
+ * transport spins; the transmit interrupt drains the ring under the
+ * spin, so a waiting source that prints with interrupts masked spins for
+ * ever. The holder of the lock waits the same way for a pending line of
+ * such a source, and, when it may wait itself, for every pending line it
+ * relays. A line of a waiting source pends only while a holder it
+ * preempted copies, so an object that may not wait can be made to spin
+ * only by a `wait_from` above it in the list: a program names as
+ * `wait_from` its lowest printing object (a console that prints the
+ * long reports), and nothing below it ever relays its lines. Every other
+ * line that finds no room is refused whole and counted. A handler never
+ * waits.
  *
  * The counters and the mark. lost() counts every line refused - no
  * stage free, no room, a line that outgrew its stage, a source past the
- * table - saturating, in lines, never retried. The wire shows where
- * lines are missing: the next holder of the lock writes "lost N" and
- * CRLF before its own line, the losses since the last mark, when the room
- * holds both (a source that may wait waits for it; for any other the
- * mark stays owed). With the `peak` option the writer also counts the
- * most stages held at once (peak_stages()) and the lines and bytes it
+ * table - saturating, in lines, never retried; one counter, so a loss is
+ * diagnosed one knob at a time (the pool, the stage sizes, the ring).
+ * The wire shows where lines are missing: the next holder of the lock
+ * writes "lost N" and CRLF before its own line, the losses since the last
+ * mark, when the room holds the mark and the line (a source that may
+ * wait waits for the mark's room; for any other the mark stays owed to
+ * the next line). With the `peak` option the writer also counts the most
+ * stages held at once (peak_stages()) and the lines and bytes it
  * published; a program sizes the pool and the ring by these.
  *
  * Interrupt handlers. A handler's print() formats in the handler, so
  * every other interrupt waits for the whole print: a C string's bytes
  * scanned and copied, each number converted, the run handed to the
- * transport - for a line of 60 bytes on the STM32F446RE at 180 MHz,
- * 1785 to 1937 cycles measured with interrupts masked, some 10 us
- * (docs/design/serial.md, "LineWriter", "The cost"). The
- * handlers share one source and one stage, so a handler ends the line it
- * starts (the caller's duty: two handlers composing pieces would mix
- * them). A handler that must stay short posts a value to an object
- * instead, and the object prints it.
+ * transport. The cost is inferred from the same line printed from a
+ * dispatch with interrupts masked - for a line of 60 bytes on the
+ * STM32F446RE at 180 MHz, 1785 to 1937 cycles, some 10 us
+ * (docs/design/serial.md, "LineWriter", "The cost") - not measured
+ * from a handler. The handlers share one source, so one line open at a
+ * time among them all: a handler ends the line it starts (the caller's
+ * duty: two handlers composing pieces would mix them). A handler that
+ * must stay short posts a value to an object instead, and the object
+ * prints it.
  *
- * Who calls what. print(Writer{}, ...) from any context; it masks
- * interrupts only for the three decisions above and waits only where
- * the caller may wait. init() once, from main() before the kernel runs:
- * it claims the transport (util/stream.hpp's WriterClaim), so that in a
- * debug build a write to the transport from anywhere but the writer
- * panics; a release build compiles none of it. A banner printed before
- * init() goes to the transport directly. drain_to_port() and
- * LineWriterReporter are the panic path, plain code with the kernel dead.
+ * Who calls what. print(Log{}, ...) from any context; it masks
+ * interrupts only for the sections above and waits only where the
+ * caller may wait or relays a line whose source may. init() once, from
+ * main() before the kernel runs: it claims the transport (util/stream.hpp's
+ * WriterClaim), so that in a debug build a write to the transport from
+ * anywhere but the writer panics; a release build compiles none of it.
+ * It sets up nothing else: a print to the writer before init() works,
+ * and a print to the transport itself before init() (a banner) is legal
+ * where after it is a misuse. drain_to_port() and LineWriterReporter are
+ * the panic path, plain code with the kernel dead; the drain releases the
+ * claim, so a reporter that prints to the transport after it may.
  */
 
 #pragma once
@@ -142,18 +168,24 @@ inline constexpr uint8_t handler_source = 254;
 ///    main context and the handlers - and so the pack it serves: indices
 ///    0 to max_sources - 3, main context and the handlers in the last
 ///    two. A line from an index past them is refused and counted;
-///  - wait_from: the one object, by its pack index, whose lines may wait
-///    for the transport's room (a bench console whose dispatch runs
-///    main-context work); no_dispatch, the default, names none, main
-///    context waiting anyway;
-///  - long_size: the long stage, kept for main context and wait_from;
-///  - small_stages, small_size: the pool every source takes from;
+///  - wait_from: the one object, by its index in the list the program
+///    gives the kernel (the first object 0), whose lines may wait for the
+///    transport's room: the lowest object that prints, a console whose
+///    dispatch prints the long reports (the header, "Who waits");
+///    no_dispatch, the default, names none, main context waiting anyway;
+///  - long_size: the long stage, main context's and wait_from's alone;
+///  - small_stages, small_size: the pool every source takes from, the
+///    bound of every other source's line;
 ///  - peak: count the most stages held at once and the lines and bytes
 ///    published (peak_stages(), lines_written(), bytes_written()); off,
 ///    nothing of it is compiled.
 /// The stage sizes are bytes, each at most 255 and at most the
 /// transport's tx_capacity(): a source that waits spins until its whole
-/// line fits, which must be possible.
+/// line fits, which must be possible. So a transport with a 64-byte ring
+/// (the three WCH families' default) takes stages sized under it, 63 and
+/// 48 say, or a larger ring. The two sizes are 16-bit fields so that a
+/// size over 255 is refused by the check below, with its reason, and not
+/// by a narrowing error.
 struct LineWriterOptions {
     uint8_t max_sources = 16;
     uint8_t wait_from = no_dispatch;
@@ -265,7 +297,7 @@ public:
     /// (false) nothing. A line that fit its stage is published (the
     /// header); one that outgrew it is counted lost and dropped whole; a
     /// crlf with nothing open is an empty line. Any context; waits only
-    /// where the caller may wait.
+    /// where the caller may wait, or relays a line whose source may.
     [[gnu::noinline]] static void end_line(bool crlf) {
         const uint8_t src = source();
         const uint8_t e = entry_of(src);
@@ -350,7 +382,9 @@ public:
     /// enabled the transmitter drains by itself and it may do nothing;
     /// with them masked for good (a panic) it must move the ring itself,
     /// by running the transport's interrupt body. Any context that may
-    /// write the transport; the writer's state is consumed.
+    /// write the transport; the writer's state is consumed, and the
+    /// transport's claim released: what prints after the drain (a panic
+    /// reporter) prints to the transport itself.
     template <typename Pump>
     static void drain_to_port(Pump pump) {
         writing(true);
@@ -362,6 +396,9 @@ public:
         }
         busy_ = false;
         writing(false);
+        if constexpr (debug_checks) {
+            WriterClaim<Transport>::claimed = false;
+        }
     }
     static void drain_to_port() {
         drain_to_port([] {});
@@ -641,7 +678,7 @@ private:
     /// handler), and by the panic path.
     static inline uint8_t slots_[opts.max_sources] = {};
     static inline bool busy_ = false;     ///< the lock: a publisher is copying
-    static inline uint8_t seq_ = 0;       ///< the next pending line's number
+    static inline uint8_t seq_ = 0;       ///< the next pending line's number (at most `count` lines pend, so its wrap is never ambiguous)
     static inline uint16_t lost_ = 0;     ///< under the guard
     static inline uint16_t marked_ = 0;   ///< lost_ at the last mark; the lock's holder's
     static inline uint8_t held_ = 0;      ///< with `peak`: stages not free, under the guard
