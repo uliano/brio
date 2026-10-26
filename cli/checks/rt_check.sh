@@ -8,9 +8,10 @@
 #   brio/rt/rt.cpp must compile warning-free with the family's flags, at the
 #   -Os the images use AND at -O3, where GCC's loop recognition turns the
 #   file's copy and fill loops into calls to memcpy and memset when the
-#   file's guard is missing (measured) - and in both objects no call
-#   relocation may name one of the seven functions the file defines: that
-#   would be a function calling itself.
+#   file's guard is missing (measured) - and in both objects no function
+#   may call one of the seven functions the file defines, itself or
+#   another. The calls are read in the disassembly with its relocations,
+#   so a failure names the caller.
 #
 # ram_text_check <label> <cxx> <tu> <flags...>
 #   A family whose flash driver runs code from RAM while the flash is
@@ -22,12 +23,31 @@
 
 RT_SEVEN='memcpy|memmove|memset|memcmp|strlen|memchr|abort'
 
-# The readelf beside a compiler: <prefix>-g++ -> <prefix>-readelf.
+# The readelf and the objdump beside a compiler: <prefix>-g++ -> <prefix>-readelf.
 rt_readelf() { printf '%s\n' "${1%g++}readelf"; }
+rt_objdump() { printf '%s\n' "${1%g++}objdump"; }
+
+# The calls any function of the object makes to one of the seven, as
+# "caller->callee", read from the disassembly with its relocations: a line
+# "<name>:" opens a function, a call relocation inside it names its target.
+rt_calls_among_seven() {
+    "$1" -dr "$2" \
+        | awk -v seven="$RT_SEVEN" '
+            /^[0-9a-f]+ <[^>]+>:$/ {
+                match($0, /<[^>]+>/); name = substr($0, RSTART + 1, RLENGTH - 2)
+                if (name !~ /^\.L/) cur = name   # a local label inside a function is not a new one
+                next
+            }
+            /R_(ARM_THM_CALL|ARM_THM_JUMP24|ARM_CALL|ARM_JUMP24|RISCV_CALL|RISCV_CALL_PLT|RISCV_JAL)/ {
+                sym = $NF; sub(/[+-].*/, "", sym)
+                if (sym ~ ("^(" seven ")$")) print cur "->" sym
+            }' \
+        | sort -u | tr '\n' ' '
+}
 
 rt_check() {
     local label="$1" cxx="$2"; shift 2
-    local re; re="$(rt_readelf "$cxx")"
+    local od; od="$(rt_objdump "$cxx")"
     local obj=/tmp/brio_rt_check.o line="RT $label:" ok=0 opt calls
     for opt in -Os -O3; do
         if ! "$cxx" "$@" "$opt" -c brio/rt/rt.cpp -o "$obj" 2>/tmp/brio_rt_check_err; then
@@ -35,11 +55,9 @@ rt_check() {
             sed "s/^/    /" /tmp/brio_rt_check_err | head -15
             continue
         fi
-        calls="$("$re" -rW "$obj" \
-            | grep -E 'R_(ARM_THM_CALL|ARM_THM_JUMP24|ARM_CALL|ARM_JUMP24|RISCV_CALL|RISCV_CALL_PLT|RISCV_JAL)' \
-            | grep -o -w -E "$RT_SEVEN" | sort -u | tr '\n' ' ')"
+        calls="$(rt_calls_among_seven "$od" "$obj")"
         if [ -n "$calls" ]; then
-            line="$line $opt:CALLS-ITSELF($calls)"; ok=1
+            line="$line $opt:CALLS-ONE-OF-THE-SEVEN($calls)"; ok=1
         else
             line="$line $opt"
         fi

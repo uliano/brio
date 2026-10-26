@@ -872,10 +872,11 @@ struct Faults {
 
     /// CCR.UNALIGN_TRP: make an unaligned word or halfword access a
     /// UsageFault instead of letting the bus split it. The runtime's
-    /// memcpy reads a misaligned source with unaligned word loads on this
-    /// core (rt/rt.cpp, the copy across alignments): with the trap on,
-    /// every copy of 8 bytes or more whose ends are not aligned alike - a
-    /// transport's run of 20 bytes or more at three ring offsets in four -
+    /// memcpy reads its source with word and halfword loads at the
+    /// source's own offset on this core (rt/rt.cpp, the one leaf): with
+    /// the trap on, every copy of two bytes or more whose source is not
+    /// on the boundary its loads want - a transport's run of 12 bytes or
+    /// more into a ring whose head is off a word, three offsets in four -
     /// is a UsageFault.
     static void unaligned_trap(bool on) { ccr_bit(SCB_CCR_UNALIGN_TRP_Msk, on); }
     static bool unaligned_trap() { return (SCB->CCR & SCB_CCR_UNALIGN_TRP_Msk) != 0u; }

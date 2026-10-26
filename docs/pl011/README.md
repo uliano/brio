@@ -23,7 +23,8 @@ read, so that they know the chip without including any of its headers:
 | the host suite | `SimPl011` | `brio/host/sim_pl011.hpp` | none: the suite names the templates itself |
 
 On both chips the traits give two instances, 32-entry FIFOs, a copy
-crossover of 20 bytes, and UARTCLK as `clk_peri` (the clock type's
+crossover (20 bytes on the RP2040; the RP2350's is its core's, 12 on
+the M33 and 20 on Hazard3), and UARTCLK as `clk_peri` (the clock type's
 `pclk_hz`). The smallest use, the console on the RP2040 as its own
 document spells it (an excerpt of [../rp2040/uart.md](../rp2040/uart.md),
 "How to use it"; the RP2350's is the same source):

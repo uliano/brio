@@ -206,17 +206,20 @@ struct Rp2350Pl011 {
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 32;
     /// write_bulk()'s memcpy crossover (bench_rp2350 letter u at 150 MHz
-    /// from the XIP cache, cycles a copy), one for both cores: the byte
-    /// loop is 6 cycles a byte on the M33 and Hazard3 alike, 96 and 99 for
-    /// 16 bytes, 120 and 123 for 20. The runtime's memcpy with the two ends
-    /// aligned alike is 61 and 56 for 16 bytes; with the destination a
-    /// byte past a word (its copy across alignments, three head bytes, the
-    /// dearest case) 91 and 117 for 16, 90 and 115 for 20 - the M33's
-    /// unaligned loads ahead of Hazard3's merged words. The ring's head is
-    /// at any offset of its word, the ends aligned alike one time in four:
-    /// taken so, memcpy is ahead from 16 bytes on the M33 and from 20 on
-    /// Hazard3, and 20 serves both.
-    static constexpr uint32_t copy_crossover = 20;
+    /// from the XIP cache, cycles a copy), one per core, decided on
+    /// core.hpp's constant: the byte loop is 6 cycles a byte on the M33 and
+    /// Hazard3 alike, 48 and 51 for 8 bytes, 72 and 75 for 12, 96 and 99
+    /// for 16, 120 and 123 for 20. The runtime's memcpy on the M33 (its
+    /// one leaf, rt/rt.cpp) is 51, 51 and 59 for 8, 12 and 16 bytes with
+    /// the two ends aligned alike and 47, 52 and 53 with the destination a
+    /// byte past a word: ahead from 12 bytes at either alignment, and at
+    /// 8 within three cycles of the loop either way. On Hazard3 (the copy
+    /// that merges aligned words, three head bytes the dearest case)
+    /// memcpy is 56 and 63 for 16 and 20 bytes aligned alike, 117 and 115
+    /// with the destination a byte past a word: the ring's head at any
+    /// offset of its word, the ends aligned alike one time in four, memcpy
+    /// is ahead from 20.
+    static constexpr uint32_t copy_crossover = core_kind == CoreKind::cortex_m33 ? 12 : 20;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? UART0 : UART1); }

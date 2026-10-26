@@ -993,12 +993,16 @@ class Uart {
     /// (the ring's head is wherever the last run left it), and the byte
     /// loop below it. Measured on the F446 at 180 MHz (bench_stm32f4
     /// letter m, its copy table, cycles a copy): the byte loop - four
-    /// instructions - is 6 cycles a byte, 97 for 16 bytes and 121 for 20;
-    /// memcpy is 78 and 84 with the two ends aligned alike, 113 and 115
-    /// with the destination a byte past a word (rt/rt.cpp's copy across
-    /// alignments, its three head bytes the dearest case). From 20 bytes
-    /// memcpy is ahead at either alignment.
-    static constexpr uint32_t copy_threshold = 20;
+    /// instructions - is 6 cycles a byte, 49 for 8 bytes, 73 for 12 and 97
+    /// for 16; memcpy is 56, 56 and 64 with the two ends aligned alike,
+    /// 55, 62 and 64 with the destination a byte past a word (rt/rt.cpp's
+    /// one leaf). From 12 bytes memcpy is ahead at either alignment; at 8
+    /// the byte loop still is, by 6 and 7 cycles. The leaf's dearest case
+    /// is the source a byte past a word with the destination on one, which
+    /// the table does not time: letter m's rows put it 8 cycles over the
+    /// destination's case at 16 bytes (72 against 64), which carried to 12
+    /// leaves memcpy some 3 cycles ahead of the loop there.
+    static constexpr uint32_t copy_threshold = 12;
 
 public:
     constexpr Uart() = default;

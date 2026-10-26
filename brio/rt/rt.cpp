@@ -26,30 +26,42 @@
  * are hand-written assembly, small and fast at once.
  *
  * THE WORD PATH. A copy moves words once its destination is on a word
- * boundary: bytes up to that boundary, then words, then the tail. When
- * source and destination share their alignment modulo the word the words
- * go in blocks of four (below), then singly; when they do not, the copy
- * runs ACROSS ALIGNMENTS (next paragraph), for a copy of rt_shift_min
- * bytes or more - a shorter one stays a byte loop, the across path's fixed
- * cost being more than its bytes. A copy into a transport's ring meets
- * every alignment (the ring's head is wherever the last run left it), so
- * the across path is no rare case.
+ * boundary: bytes up to that boundary, then words, then the tail. A copy
+ * into a transport's ring meets every alignment of its two ends (the
+ * ring's head is wherever the last run left it), so the ends aligned
+ * alike are one case in four, and the copy takes the form each core's
+ * manual allows for the other three.
  *
- * THE COPY ACROSS ALIGNMENTS takes the form each core's manual allows.
- * The Cortex-M4 and the M33 load a word from any address (ARMv7-M ARM
- * A3.2.1, the RP2350 datasheet 3.7.4.3.2 for the M33; LDM, LDRD and the
- * rest still fault, and so does LDR itself if CCR.UNALIGN_TRP is set -
- * no crt of brio's sets it, and a program that sets it to find stray
- * unaligned accesses finds this copy's too, as it finds the compiler's
- * own): there the source is read with plain loads at its own offset,
- * four a turn, and the core splits each into aligned bus accesses, one
- * or two cycles dearer than an aligned load (DDI 0439B 3.3.2). Measured
- * on the STM32F446 and the RP2350's M33, that beats merging aligned words
- * by shifts at every length. Everywhere else an unaligned word access is
- * a fault or a trap - ARMv6-M faults on one, Hazard3 "requires natural
- * alignment of all accesses" (the RP2350 datasheet 3.8.9, MCAUSE codes 4
- * and 6), and the QingKe V2 and V4 manuals list load and store address
- * misalignment as exceptions (2.1, table 2-1, codes 4 and 6) - so the
+ * THE ONE LEAF OF THE CORTEX-M4 AND THE M33. These cores load a word or a
+ * halfword from any address (ARMv7-M ARM A3.2.1, the RP2350 datasheet
+ * 3.7.4.3.2 for the M33; LDM, LDRD and the rest still fault, and so does
+ * LDR itself if CCR.UNALIGN_TRP is set - no crt of brio's sets it, and a
+ * program that sets it to find stray unaligned accesses finds this copy's
+ * too, as it finds the compiler's own): the core splits the access into
+ * aligned bus accesses, one or two cycles dearer than an aligned one (DDI
+ * 0439B 3.3.2). So there the copy never asks whether its two ends are
+ * aligned alike: it brings the destination to a word boundary and reads
+ * the source at whatever offset it has, with the same instructions at
+ * every alignment. What a short copy pays is then one fixed cost, and the
+ * leaf keeps it to a prologue that saves three registers: no loop in the
+ * head or the tail (a byte and a halfword each, conditional), the blocks
+ * under 64 bytes through one data register, and the long turns out of
+ * line, their call paid once for 64 bytes or more. Measured on the
+ * STM32F446 (letter m of its bench suite), a copy of 60 bytes takes 95
+ * cycles with the two ends aligned alike and 125 across, where the copy
+ * that asked took 120 and 165 to 182, and newlib's assembly, which saves
+ * no register, 110 to 116. Merging aligned words by shifts, the other
+ * cores' form, measured slower on both cores at every length.
+ *
+ * THE COPY ACROSS ALIGNMENTS BY MERGING, everywhere else, where an
+ * unaligned word access is a fault or a trap - ARMv6-M faults on one,
+ * Hazard3 "requires natural alignment of all accesses" (the RP2350
+ * datasheet 3.8.9, MCAUSE codes 4 and 6), and the QingKe V2 and V4
+ * manuals list load and store address misalignment as exceptions (2.1,
+ * table 2-1, codes 4 and 6). When source and destination share their
+ * alignment the words go in blocks of four (below), then singly; when
+ * they do not, for a copy of rt_shift_min bytes or more - a shorter one
+ * stays a byte loop, the fixed cost being more than its bytes - the
  * source is read as ALIGNED words, the word that holds its next byte
  * first, and each word stored is merged from two of them by shifts
  * (little-endian: the low word shifted right by 8k bits, the high one
@@ -74,7 +86,9 @@
  * objects byte by byte would see those reads; the host suite's arenas
  * carry the slack around every source (test/test_rt/), and a source that
  * ends at the last byte of a page, with no readable page after it, is one
- * of its cases.
+ * of its cases. The one leaf of the M4 and the M33 reads no byte outside
+ * its source: every load is at the source's own address, of the bytes
+ * asked for.
  *
  * THE SCANS. strlen and memchr read bytes up to a word boundary, then
  * aligned words, testing each for a zero byte with the carry trick -
@@ -86,9 +100,13 @@
  * words in one instruction: a load or store multiple of N registers takes
  * 1 + N cycles, where a single load or store takes two (and on the M4 a
  * run of STR or STRD is two cycles a word, its write buffer holding one
- * store). There a block is one LDM and one STM of four registers, and a
- * copy or a fill of 64 bytes or more runs turns of four blocks with one
- * branch a turn. GCC is not asked for these instructions, because it does
+ * store). There a fill's block is one STM of four registers, and a copy's
+ * one LDM and one STM on the M0+ - on the M4 and the M33 four single
+ * loads, which read the source at any offset and pipeline to the same
+ * 1 + N from an aligned one, and one STM; a copy or a fill of 64 bytes or
+ * more runs turns of four blocks with one branch a turn. The pairs the
+ * leaf copies its blocks with under 64 bytes are written out too, for the
+ * registers' sake (at rt_copy_rest). GCC is not asked for these instructions, because it does
  * not produce them well: an aggregate copied by value is expanded into
  * LDM/STM pairs that recompute both addresses every block, and becomes a
  * call to memcpy on RISC-V at -Os; and for a fill it forms no STM at all,
@@ -195,10 +213,13 @@ constexpr size_t rt_block_bytes = 4u * rt_word_bytes;
 // registers ("l"), as every Thumb-1 load and store multiple needs.
 constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
 
+#if !defined(__ARM_FEATURE_UNALIGNED)
+
 // The whole blocks of n from s to d, both advanced: turns of 64 bytes,
 // then up to three blocks. Inline in the copy: a block wants four data
 // registers whatever instruction moves it, so the copy's frame is the one
-// the scalar block needs.
+// the scalar block needs. The Cortex-M0+'s; the M4 and the M33 move their
+// blocks in the one leaf below, which reads the source at any offset.
 [[gnu::always_inline]] inline void rt_copy_blocks(unsigned char*& d, const unsigned char*& s, const size_t n) {
     if (n >= rt_turn_bytes) {
         const unsigned char* const turns = d + (n & ~(rt_turn_bytes - 1u));
@@ -232,11 +253,13 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
     }
 }
 
+#endif
+
 // A fill of 64 bytes or more from its first word boundary: the turns, then
 // the rest; returns dst. OUT OF LINE, unlike the copy's loops: inline,
 // memset would keep its destination and count live across r3..r6, and GCC
 // saves registers for them at memset's entry, on every fill - a one-byte
-// fill takes 38 cycles on the STM32F446 that way, 20 this way. A fill this
+// fill takes 38 cycles on the STM32F446 that way, 21 this way. A fill this
 // long pays one call. The parameters come in this order so that memset's
 // short path keeps its byte in r1 and needs no register saved at all.
 [[gnu::noinline]] void* rt_fill_turns(unsigned char* d, const RtWord w, const size_t n, void* const dst) {
@@ -302,60 +325,172 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
 
 #endif
 
-// THE COPY ACROSS ALIGNMENTS (the file's header says why each form).
-// rt_shift_min is the shortest copy that takes it: where its fixed cost
-// (up to three head bytes, the setup, the call on a core that makes one)
-// is paid back against the byte loop, the destination's offset in its
-// word taken as equally likely. Measured with the bench suites' letter m
-// and its copy table: 8 where unaligned loads do the work (the across
-// copy of 8 bytes as dear as the bytes on the STM32F446, cheaper on the
-// M33); 16 where words are merged (a copy of 16 bytes is cheaper than
-// the bytes with no head byte and dearer with three on the STM32G0, the
-// SAM C21, the CH32V203 and Hazard3, about even taken over the four, and
-// cheaper at every head on the RP2040, the CH32V303 and the CH32V006). It
-// leaves at least one word after the head bytes.
+// THE COPY. Two forms, by what the core allows (the file's header).
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the copy and the scans read words little-endian");
 
 #if defined(__ARM_FEATURE_UNALIGNED)
 
-constexpr size_t rt_shift_min = 8;
+// THE ONE LEAF of the Cortex-M4 and the M33 (the file's header says why).
+// The destination is brought to a word boundary and the source is read at
+// whatever offset it has, so no path asks whether the two ends are aligned
+// alike, and what a short copy pays is one fixed cost: a prologue that
+// saves three registers, a head and a tail with no loop (a byte and a
+// halfword each, conditional), the blocks under 64 bytes through one data
+// register, and the long turns out of line, their call paid once for 64
+// bytes or more.
 
-// A word loaded from any address: the compiler emits a plain LDR, which
-// the core splits.
+// A word or a halfword at any address: the compiler emits a plain LDR,
+// LDRH, STR or STRH, which the core splits into aligned bus accesses.
 using RtWordUnaligned = uint32_t __attribute__((__may_alias__, __aligned__(1)));
+using RtHalfUnaligned = uint16_t __attribute__((__may_alias__, __aligned__(1)));
 
-// The words of n from s to a word-aligned d, both advanced: four loads at
-// s's own offset a turn, then single words.
-[[gnu::always_inline]] inline void rt_copy_words_across(unsigned char*& d, const unsigned char*& s, size_t n) {
-    const size_t span = n & ~(rt_block_bytes - 1u);
-    if (span != 0u) {
-        unsigned char* const blocks = d + span;
-        do {
-            const RtWord w0 = reinterpret_cast<const RtWordUnaligned*>(s)[0];
-            const RtWord w1 = reinterpret_cast<const RtWordUnaligned*>(s)[1];
-            const RtWord w2 = reinterpret_cast<const RtWordUnaligned*>(s)[2];
-            const RtWord w3 = reinterpret_cast<const RtWordUnaligned*>(s)[3];
-            reinterpret_cast<RtWord*>(d)[0] = w0;
-            reinterpret_cast<RtWord*>(d)[1] = w1;
-            reinterpret_cast<RtWord*>(d)[2] = w2;
-            reinterpret_cast<RtWord*>(d)[3] = w3;
-            d += rt_block_bytes;
-            s += rt_block_bytes;
-        } while (d != blocks);
+// The tail of a copy, the bits of n below the word: a halfword, then a
+// byte, each behind a condition and not a loop.
+[[gnu::always_inline]] inline void rt_copy_tail(unsigned char* d, const unsigned char* s, const size_t n) {
+    if ((n & 2u) != 0u) {
+        *reinterpret_cast<RtHalfUnaligned*>(d) = *reinterpret_cast<const RtHalfUnaligned*>(s);
+        d += 2;
+        s += 2;
     }
-    n &= rt_block_bytes - 1u;
+    if ((n & 1u) != 0u) {
+        *d = *s;
+    }
+}
+
+// The rest of a copy to a word-aligned d, under 64 bytes: blocks of 16 as
+// four load/store pairs through one data register, then two words, one
+// word and the tail by the bits of n. The pairs are written in the
+// instructions: the Thumb-2 load and store with an immediate offset, 16-bit
+// encodings, which read the source at its own offset and store aligned
+// words; left to GCC, the loop ran on an end pointer and a remaining count
+// recomputed every turn, two registers more, and memcpy saved four
+// registers at its entry instead of three (read in the listing). The
+// count runs down below zero and is put back afterwards, so one
+// instruction a turn decides the loop.
+[[gnu::always_inline]] inline void rt_copy_rest(unsigned char* d, const unsigned char* s, size_t n) {
+    if (n >= rt_block_bytes) {
+        n -= rt_block_bytes;
+        __asm__ volatile(
+            "1:\n\t"
+            "ldr r3, [%1]\n\t"
+            "str r3, [%0]\n\t"
+            "ldr r3, [%1, #4]\n\t"
+            "str r3, [%0, #4]\n\t"
+            "ldr r3, [%1, #8]\n\t"
+            "str r3, [%0, #8]\n\t"
+            "ldr r3, [%1, #12]\n\t"
+            "str r3, [%0, #12]\n\t"
+            "adds %1, #16\n\t"
+            "adds %0, #16\n\t"
+            "subs %2, #16\n\t"
+            "bhs 1b"
+            : "+l"(d), "+l"(s), "+l"(n)
+            :
+            : "r3", "cc", "memory");
+        n += rt_block_bytes;
+    }
+    if ((n & 8u) != 0u) {
+        reinterpret_cast<RtWord*>(d)[0] = reinterpret_cast<const RtWordUnaligned*>(s)[0];
+        reinterpret_cast<RtWord*>(d)[1] = reinterpret_cast<const RtWordUnaligned*>(s)[1];
+        d += 8;
+        s += 8;
+    }
+    if ((n & 4u) != 0u) {
+        *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWordUnaligned*>(s);
+        d += 4;
+        s += 4;
+    }
+    rt_copy_tail(d, s, n);
+}
+
+// A copy of 64 bytes or more past the head, out of line: turns of four
+// blocks, a block four loads at the source's own offset and one store
+// multiple of the four words, one branch a turn; then the rest; returns
+// dst. Out of line for memset's reason: inline, the four data registers
+// would be saved on every copy, where a copy this long pays one call. The
+// parameters come in this order so memcpy's tail call is two moves and no
+// stack. A load multiple would want the source on a word, and asking whether
+// it is would make two paths of one: four single loads from an aligned
+// source pipeline to the same 1 + N cycles, and the store multiple keeps
+// the stores at 1 + N where a run of STR costs two a word (DDI 0439B
+// 3.3.1; the fixed cost the leaf gives back for that is in
+// design/runtime.md).
+[[gnu::noinline, gnu::aligned(4)]] void* rt_copy_turns(unsigned char* d, const unsigned char* s, const size_t n,
+                                                       void* const dst) {
+    const unsigned char* const turns = d + (n & ~(rt_turn_bytes - 1u));
+    __asm__ volatile(
+        "1:\n\t"
+        "ldr r3, [%1]\n\t"
+        "ldr r4, [%1, #4]\n\t"
+        "ldr r5, [%1, #8]\n\t"
+        "ldr r6, [%1, #12]\n\t"
+        "stmia %0!, {r3, r4, r5, r6}\n\t"
+        "ldr r3, [%1, #16]\n\t"
+        "ldr r4, [%1, #20]\n\t"
+        "ldr r5, [%1, #24]\n\t"
+        "ldr r6, [%1, #28]\n\t"
+        "stmia %0!, {r3, r4, r5, r6}\n\t"
+        "ldr r3, [%1, #32]\n\t"
+        "ldr r4, [%1, #36]\n\t"
+        "ldr r5, [%1, #40]\n\t"
+        "ldr r6, [%1, #44]\n\t"
+        "stmia %0!, {r3, r4, r5, r6}\n\t"
+        "ldr r3, [%1, #48]\n\t"
+        "ldr r4, [%1, #52]\n\t"
+        "ldr r5, [%1, #56]\n\t"
+        "ldr r6, [%1, #60]\n\t"
+        "stmia %0!, {r3, r4, r5, r6}\n\t"
+        "adds %1, #64\n\t"
+        "cmp %0, %2\n\t"
+        "bne 1b"
+        : "+l"(d), "+l"(s)
+        : "l"(turns)
+        : "r3", "r4", "r5", "r6", "cc", "memory");
+    rt_copy_rest(d, s, n & (rt_turn_bytes - 1u));
+    return dst;
+}
+
+// The copy, inline in memcpy: a copy under four bytes is its tail; one of
+// four or more brings the destination to a word boundary by a byte and a
+// halfword, then takes the turns or the rest. The head's two conditions
+// and the tail's halfword compile to IT blocks, the tail's byte to a short
+// branch (read in the listing).
+[[gnu::always_inline]] inline void* rt_memcpy(void* const dst, const void* const src, size_t n) {
+    auto* d = static_cast<unsigned char*>(dst);
+    const auto* s = static_cast<const unsigned char*>(src);
     if (n >= rt_word_bytes) {
-        unsigned char* const words = d + (n & ~rt_word_mask);
-        do {
-            *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWordUnaligned*>(s);
-            d += rt_word_bytes;
-            s += rt_word_bytes;
-        } while (d != words);
+        const size_t head = (0u - rt_address(d)) & rt_word_mask;
+        if ((head & 1u) != 0u) {
+            *d++ = *s++;
+        }
+        if ((head & 2u) != 0u) {
+            *reinterpret_cast<RtHalfUnaligned*>(d) = *reinterpret_cast<const RtHalfUnaligned*>(s);
+            d += 2;
+            s += 2;
+        }
+        n -= head;
+        if (n >= rt_turn_bytes) {
+            return rt_copy_turns(d, s, n, dst);
+        }
+        rt_copy_rest(d, s, n);
+        return dst;
     }
+    rt_copy_tail(d, s, n);
+    return dst;
 }
 
 #else
 
+// THE COPY ACROSS ALIGNMENTS by merging (the file's header says why).
+// rt_shift_min is the shortest copy that takes it: where its fixed cost
+// (up to three head bytes, the setup, the call) is paid back against the
+// byte loop, the destination's offset in its word taken as equally likely.
+// Measured with the bench suites' letter m and its copy table: a copy of
+// 16 bytes is cheaper than the bytes with no head byte and dearer with
+// three on the STM32G0, the SAM C21, the CH32V203 and Hazard3, about even
+// taken over the four, and cheaper at every head on the RP2040, the
+// CH32V303 and the CH32V006. It leaves at least one word after the head
+// bytes.
 constexpr size_t rt_shift_min = 16;
 
 // The words of n (four or more) to a word-aligned d out of aligned source
@@ -424,35 +559,18 @@ template <unsigned K>
     }
 }
 
-#endif
 
 static_assert(rt_shift_min >= rt_word_bytes + rt_word_mask, "a word past the head bytes");
 
+
 // A copy across alignments of rt_shift_min bytes or more: bytes up to d's
-// word boundary, the words, the tail. Inline on the cores that load
-// unaligned words, whose form needs few registers; elsewhere out of line,
-// so its registers are its own and the co-aligned copy's frame does not
-// grow (a tail call on RISC-V, a call on Thumb-1).
-#if defined(__ARM_FEATURE_UNALIGNED)
-[[gnu::always_inline]] inline
-#else
-[[gnu::noinline, gnu::aligned(4)]]
-#endif
-void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
-#if defined(__ARM_FEATURE_UNALIGNED)
-    // Inline, the head is the co-aligned copy's own loop: counted, it made
-    // GCC keep both pointers' first values live through rt_copy_forward,
-    // a register and two moves more on every copy of four bytes or more
-    // (4 to 7 cycles, measured on the STM32F446).
-    while ((rt_address(d) & rt_word_mask) != 0u) {
-        *d++ = *s++;
-        --n;
-    }
-#else
-    // Out of line, the head is counted: the test on the count, one branch
-    // a byte (the file's header), where the pointer test made two - 14
-    // cycles on a copy of 16 bytes to a destination one past a word, on
-    // the CH32V203.
+// word boundary, the words, the tail. Out of line, so its registers are
+// its own and the co-aligned copy's frame does not grow (a tail call on
+// RISC-V, a call on Thumb-1). The head is counted: the test on the count,
+// one branch a byte (the file's header), where the pointer test made two -
+// 14 cycles on a copy of 16 bytes to a destination one past a word, on the
+// CH32V203.
+[[gnu::noinline, gnu::aligned(4)]] void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
     const size_t head = (0u - rt_address(d)) & rt_word_mask;
     if (head != 0u) {
         unsigned char* const boundary = d + head;
@@ -461,7 +579,6 @@ void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
             *d++ = *s++;
         } while (d != boundary);
     }
-#endif
     rt_copy_words_across(d, s, n);
     n &= rt_word_mask;
     if (n != 0u) {
@@ -477,8 +594,18 @@ void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
 // and memchr: where the C extension packs code at halfwords, a 32-bit
 // instruction across a word costs a fetch, and the QingKe V4B's co-aligned
 // copy of 4096 bytes measured 3412 cycles with its loop at an odd
-// halfword against 3156 on a word.
-[[gnu::aligned(4)]] void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
+// halfword against 3156 on a word. OUT OF LINE, memcpy a frame around its
+// call (two pushes, a call and a return: some 13 cycles on the Cortex-M0+
+// and 6 to 8 on the RISC-V cores, counted in the listings), because the
+// forms that spend less were read and measured worse: inlined into memcpy,
+// which must keep dst for its return, GCC on the M0+ saved eight registers
+// and kept the count on the stack (within a few cycles of this form either
+// way in letter m), and the QingKe V4B's block loop moved to an odd
+// halfword, 3156 to 3410 cycles at 4096 bytes aligned alike; handed dst to
+// return itself, so that memcpy is a tail call, the M0+ spilled it and
+// made no tail call (GCC makes none on Thumb-1), and the V4B's loop moved
+// again.
+[[gnu::noinline, gnu::aligned(4)]] void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
     if (n >= rt_word_bytes && ((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
         while ((rt_address(d) & rt_word_mask) != 0u) {
             *d++ = *s++;
@@ -507,6 +634,13 @@ void rt_copy_across(unsigned char* d, const unsigned char* s, size_t n) {
         } while (d != last);
     }
 }
+
+[[gnu::always_inline]] inline void* rt_memcpy(void* dst, const void* src, size_t n) {
+    rt_copy_forward(static_cast<unsigned char*>(dst), static_cast<const unsigned char*>(src), n);
+    return dst;
+}
+
+#endif
 
 // Backward copy, from the end: correct for a destination above an
 // overlapping source. The same shape, mirrored, a word a turn, and bytes
@@ -540,21 +674,20 @@ void rt_copy_backward(unsigned char* d, const unsigned char* s, size_t n) {
     }
 }
 
-void* rt_memcpy(void* dst, const void* src, size_t n) {
-    rt_copy_forward(static_cast<unsigned char*>(dst), static_cast<const unsigned char*>(src), n);
-    return dst;
-}
-
 void* rt_memmove(void* dst, const void* src, size_t n) {
     auto* d = static_cast<unsigned char*>(dst);
     const auto* s = static_cast<const unsigned char*>(src);
     // Compared as integers: the pointers may belong to different objects,
     // where a pointer comparison has no meaning in the language.
     if (rt_address(d) <= rt_address(s) || rt_address(d) >= rt_address(s) + n) {
-        rt_copy_forward(d, s, n);
-    } else {
-        rt_copy_backward(d, s, n);
+        // memcpy's own body, inline here and not a call to memcpy: memcpy's
+        // parameters are restrict-qualified, and a forward copy of two
+        // overlapping ranges must keep every store behind the loads above
+        // it, which that qualifier would let the compiler reorder. On the
+        // merge cores this is the frame around rt_copy_forward, as before.
+        return rt_memcpy(dst, src, n);
     }
+    rt_copy_backward(d, s, n);
     return dst;
 }
 
@@ -668,6 +801,11 @@ void* rt_memchr(const void* s, int c, size_t n) {
 
 extern "C" {
 
+// On the M4 and the M33 memcpy is the leaf itself and takes the word
+// boundary; elsewhere it is a frame around rt_copy_forward, which has it.
+#if defined(__ARM_FEATURE_UNALIGNED)
+[[gnu::aligned(4)]]
+#endif
 void* memcpy(void* __restrict dst, const void* __restrict src, size_t n) {
     return rt_memcpy(dst, src, n);
 }

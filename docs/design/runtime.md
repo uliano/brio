@@ -116,18 +116,24 @@ for every package, and expects every one refused.
 
 ## The seven functions
 
-- `memcpy` and `memmove` copy bytes up to the destination's word
-  boundary, then words, then the tail. When source and destination
-  share their alignment modulo the word, the words go in blocks of
-  four, then singly: on a Thumb core (the M0+, the M4, the M33) a block
-  is one load-multiple and one store-multiple of four registers, and 64
-  bytes or more run in turns of four blocks; on a RISC-V core a block is
-  four loads and four stores, a block a turn. When they do not, a copy
-  of 8 bytes or more on the M4 and the M33, 16 or more elsewhere, runs
-  across alignments (below), and a shorter one copies bytes. `memmove`
-  copies backwards when the destination overlaps the source from above,
-  a word a turn when the two share their alignment and bytes when they
-  do not.
+- `memcpy` copies bytes up to the destination's word boundary, then
+  words, then the tail, in one of two forms by what the core allows.
+  On the Cortex-M4 and the M33, which load a word from any address, it
+  is one leaf for every alignment of its two ends: the head a byte and
+  a halfword behind conditions, the source read at its own offset, the
+  blocks under 64 bytes four load/store pairs through one register,
+  64 bytes or more in turns of four blocks out of line, the tail a
+  halfword and a byte (below, "The copy across alignments"). Elsewhere
+  the copy asks whether source and destination share their alignment
+  modulo the word: when they do, the words go in blocks of four, then
+  singly - on the M0+ a block one load-multiple and one store-multiple
+  of four registers, 64 bytes or more in turns of four blocks; on a
+  RISC-V core four loads and four stores, a block a turn - and when they
+  do not, a copy of 16 bytes or more merges aligned source words by
+  shifts (below) and a shorter one copies bytes. `memmove`'s forward
+  copy is `memcpy`'s body; it copies backwards when the destination
+  overlaps the source from above, a word a turn when the two share their
+  alignment and bytes when they do not.
 - `memset` fills bytes up to a word boundary, then the byte replicated
   across blocks of four words, then single words, then the tail; with
   one pointer, the word path is always reachable. On a Thumb core a
@@ -150,16 +156,20 @@ at an address that is not a multiple of the word: ARMv6-M faults on
 one, Hazard3 requires natural alignment of every access (the RP2350
 datasheet 3.8.9), and the QingKe V2 and V4 manuals list a misaligned
 load or store as an exception (2.1, table 2-1). On the M4 and the M33
-the copy across alignments loads its source at the source's own
-offset, which the ARMv7-M architecture allows for a single load
-(ARMv7-M ARM A3.2.1; the RP2350 datasheet 3.7.4.3.2 for the M33) unless
-CCR.UNALIGN_TRP is set; no startup code of brio's sets it, and a
-program that sets it to catch unaligned accesses catches this one too.
+the copy loads its source words, and its head's and tail's halfword, at
+the source's own offset, which the ARMv7-M architecture allows for a
+single load or store (ARMv7-M ARM A3.2.1; the RP2350 datasheet
+3.7.4.3.2 for the M33) unless CCR.UNALIGN_TRP is set; no startup code
+of brio's sets it, and a program that sets it to catch unaligned
+accesses catches this copy's too.
 
 Every loop that moves a run of data runs to an end pointer with its
 test at the bottom, one branch a turn, and the test that it has a turn
 at all is made on the byte count, never on the end pointer (the at most
-three head bytes before a word boundary are the exception). Written as a plain
+three head bytes before a word boundary are the exception; the M4's
+and the M33's leaf has no such loop, its head and tail each a byte and
+a halfword behind a condition, and its block loop runs its count down
+below zero and puts it back, one instruction deciding each turn). Written as a plain
 while loop, or with the same pointer test before the loop and at its
 foot (GCC at -Os merges the two), it comes out with the test at the
 top and a jump at the bottom, two branches a turn, and a taken branch
@@ -183,9 +193,12 @@ its block comes from: a load or store multiple of N registers takes
 for the M4, DDI 0432C table 3-1 for the Cortex-M0; the M33's manual
 gives no cycle table), and on the M4 a run of STR or STRD is two
 cycles a word, measured below, its write buffer holding one store. So
-on the M0+, the M4 and the M33 a block is one LDM and one STM of four
-registers, and a copy or a fill of 64 bytes or more runs turns of four
-blocks, one branch a turn. Measured on the STM32F446 at 180 MHz
+a fill's block is one STM of four registers on the M0+, the M4 and the
+M33; a copy's is one LDM and one STM on the M0+, and on the M4 and the
+M33 four single loads and one STM, the loads reading the source at any
+offset (below) and pipelining to the same 1 + N cycles when it is on a
+word; a copy or a fill of 64 bytes or more runs turns of four blocks,
+one branch a turn. Measured on the STM32F446 at 180 MHz
 (`bench_stm32f4`, letter m: 4096 bytes between two word-aligned SRAM1
 buffers, the core's floor two bytes a cycle for a copy and four for a
 fill, `x` the wall over that floor):
@@ -196,14 +209,18 @@ fill, `x` the wall over that floor):
 | newlib 4.6.0, `memcpy-armv7m.S` (LDR/STR pairs, 64 bytes a turn) and its C `memset` (STRD, one branch) | 3226 (x 1.57) | 2860 (x 2.79) |
 | an aggregate of 64 bytes copied by value (GCC's LDM/STM expansion) | 3107 (x 1.51) | - |
 | LDM/STM of four, 16 bytes a turn | 3370 (x 1.64) | 2348 (x 2.29) |
-| LDM/STM of four, 64 bytes a turn: the runtime | 2820 (x 1.37) | 1541 (x 1.50) |
+| LDM/STM of four, 64 bytes a turn: the runtime's fill, and the M0+'s copy | 2820 (x 1.37) | 1541 (x 1.50) |
+| four LDR and one STM, 64 bytes a turn: the runtime's copy on the M4 and the M33, the one leaf | 2894 (x 1.41) | - |
 | LDM/STM of eight (r3..r10), 32 bytes a turn: no Thumb-1 encoding | 2730 (x 1.33) | 1712 (x 1.67) |
 
 The fill's second branch cost it nothing there: four stores of two
 cycles bound the turn, which is why only the store-multiple moves it.
-At the bench's shorter sizes the runtime takes 36, 80 and 240 cycles
-to copy 1, 16 and 256 bytes (35, 86 and 341 in LDRD/STRD) and 21, 51
-and 161 to fill them (19, 61 and 226).
+The copy's four single loads cost 74 cycles over the load-multiple at
+4096 bytes, one a turn and the call its turns are reached by; what they
+buy is a copy that asks nothing about its source's alignment, measured
+below. At the bench's shorter sizes the runtime takes 34, 65 and 254
+cycles to copy 1, 16 and 256 bytes (35, 86 and 341 in LDRD/STRD) and
+21, 51 and 161 to fill them (19, 61 and 226).
 
 GCC is not asked for these instructions, because it does not produce
 them well. Copied as an aggregate, a block becomes LDM/STM pairs
@@ -223,14 +240,16 @@ and STM among its exception-continuable instructions), and the M0+
 abandons it and starts it again, which loads or stores the same words
 a second time.
 
-The copy's loops are inline: a block needs four data registers
-whatever moves it, so the copy's frame does not grow. The fill's are
-not: inline, `memset` would keep its destination and count live across
-the four registers, and GCC saves registers at its entry for every
-fill; a one-byte fill takes 38 cycles that way on the STM32F446, 20
-this way. So the turns, with the rest of a long fill, are a function
-of their own that `memset` reaches for 64 bytes or more (a tail call
-on the M4 and the M33, a call on the M0+). The price is code, counted
+On the M0+ the copy's loops are inline: a block needs four data
+registers whatever moves it, so the copy's frame does not grow. The
+fill's are not: inline, `memset` would keep its destination and count
+live across the four registers, and GCC saves registers at its entry
+for every fill; a one-byte fill takes 38 cycles that way on the
+STM32F446, 21 this way. So the turns, with the rest of a long fill, are
+a function of their own that `memset` reaches for 64 bytes or more (a
+tail call on the M4 and the M33, a call on the M0+); on the M4 and the
+M33 the copy's turns are out of line for the same reason, its short
+path keeping three saved registers (below). The price is code, counted
 below with the copy across alignments.
 
 The file protects itself against GCC's loop recognition, which would
@@ -249,16 +268,26 @@ fails if any of the seven calls one of the seven.
 A copy into a transport's transmit ring starts wherever the ring's head
 is, so its two ends share their alignment one time in four; the other
 three are the common case, not the rare one, and this is the copy for
-them. The destination is brought to a word boundary by bytes, then the
-words are copied in the form each core's manual allows:
+them. The destination is brought to a word boundary, then the words are
+copied in the form each core's manual allows:
 
-- On the Cortex-M4 and the M33 the source is read with single loads at
-  its own offset, four a turn, and stored as aligned words; the core
-  splits each load into aligned bus accesses, on the M4 one cycle dearer
-  than an aligned load from a halfword offset and two from a byte offset
-  (DDI 0439B 3.3.2; the M33's manual gives no figure, and its measured
-  turn is in the table below). Merging aligned words by shifts measured
-  slower at every length on both cores.
+- On the Cortex-M4 and the M33 there is no second path: one leaf serves
+  every alignment. The source is read at its own offset, the core
+  splitting each load into aligned bus accesses, on the M4 one cycle
+  dearer than an aligned load from a halfword offset and two from a byte
+  offset (DDI 0439B 3.3.2; the M33's manual gives no figure, and its
+  measured turn is in the table below), and stored as aligned words;
+  the head and the tail are a byte and a halfword each, read and written
+  at their own addresses behind a condition apiece, no loop; under
+  64 bytes a block of 16 is four load/store pairs through one data
+  register, so the leaf's prologue saves three registers and no more;
+  from 64 bytes the turns of four loads and a store multiple are a
+  function of their own, reached by a tail call that costs the one call
+  once. What a short copy pays is that fixed cost: a copy of 60 bytes
+  takes 95 cycles aligned alike and 125 across on the STM32F446, where a
+  copy that asked whether its ends were aligned alike, with its head a
+  byte loop and its two paths, took 120 and 165 to 182. Merging aligned
+  words by shifts measured slower at every length on both cores.
 - Everywhere else the source is read as aligned words, the word holding
   its next byte first, and each word stored is merged from two of them
   by shifts. The shift counts are constants, one copy of the loop for
@@ -284,20 +313,21 @@ Device memory faults (ARMv7-M ARM A3.2.1). The host suite proves the
 reads' bounds for the form it compiles, four words a turn, and for the
 scans below, with a source at either edge of a page whose neighbours
 are mapped with no access; the word-a-turn merge of the M0+ and the
-QingKe V2 and the M4's and M33's unaligned form rest on the same
-arithmetic and on letter t's values, which cannot see an over-read.
+QingKe V2 rests on the same arithmetic and on letter t's values, which
+cannot see an over-read. The M4's and the M33's leaf reads no byte
+outside its source: every load is at the source's own address, of the
+bytes asked for.
 
-The fixed cost (up to three head bytes, the setup, on the M0+ and the
-RISC-V cores a call) decides where the copy across alignments starts:
-at 8 bytes on the M4 and the M33, where it is as cheap as the bytes
-already, and at 16 elsewhere: a copy of 16 bytes is cheaper than the
-bytes with no head byte and dearer with three on the STM32G0, the
-SAM C21, the CH32V203 and Hazard3, about even taken over the four
-destination offsets, and cheaper at every head on the RP2040, the
-CH32V303 and the CH32V006. Measured with the bench suites' letter m,
-the runtime's `memcpy` between static SRAM buffers, the best of eight
-runs and the least of three passes, the call included, against the
-core's floor (two bytes a cycle);
+The fixed cost (up to three head bytes, the setup, a call) decides
+where the merging copy starts, at 16 bytes: a copy of 16 bytes is
+cheaper than the bytes with no head byte and dearer with three on the
+STM32G0, the SAM C21, the CH32V203 and Hazard3, about even taken over
+the four destination offsets, and cheaper at every head on the RP2040,
+the CH32V303 and the CH32V006. The leaf of the M4 and the M33 has no
+such threshold: a copy of any length takes it. Measured with the bench
+suites' letter m, the runtime's `memcpy` between static SRAM buffers,
+the best of eight runs and the least of three passes, the call
+included, against the core's floor (two bytes a cycle);
 "across" is the three cases the letter times, the destination one past
 a word with the source on a word, the source one past a word with the
 destination on one, and the destination one and the source two past a
@@ -305,8 +335,8 @@ word:
 
 | core (board, clock) | 60 bytes, aligned alike / across | 4096 bytes, aligned alike / across (x) | the copy across, the turn in the listing |
 |---|---|---|---|
-| Cortex-M4F (STM32F446RE, 180 MHz) | 120 / 165 to 182 | 2820 (1.37) / 6465 to 6490 (3.16) | four unaligned loads, two STRD, two steps, a compare and a branch: 25 cycles a turn of 16 bytes |
-| Cortex-M33 (RP2350, 150 MHz) | 99 / 127 to 141 | 2295 (1.12) / 4661 to 4684 (2.28) | the same instructions: 18 cycles a turn |
+| Cortex-M4F (STM32F446RE, 180 MHz) | 95 / 125 | 2894 (1.41) / 4940 to 4952 (2.41) | the leaf's turn of 64 bytes, four blocks of four unaligned loads and a store multiple, one branch: 77 cycles across, 45 aligned alike; under 64 bytes a block of four load/store pairs |
+| Cortex-M33 (RP2350, 150 MHz) | 90 / 103 to 105 | 2374 (1.15) / 3395 to 3402 (1.65) | the same instructions: 53 cycles a turn across, 37 aligned alike |
 | Cortex-M0+ (STM32G0B1RE, 64 MHz, two wait states) | 204 / 322 to 367 | 2899 (1.41) / 10412 to 10457 (5.10) | LDM of one, two shifts and an OR, STM of one, compare, branch: 10 cycles a word |
 | Cortex-M0+ (SAM C21J18A, 48 MHz, two wait states) | 241 / 367 to 425 | 2950 (1.44) / 10457 to 10515 (5.13) | the same: 10 cycles a word |
 | Cortex-M0+ (RP2040, 125 MHz) | 176 / 296 to 340 | 2869 (1.40) / 10386 to 10430 (5.09) | the same: 10 cycles a word |
@@ -321,15 +351,21 @@ QingKe V2, by where the loop lies behind the flash's wait states (the
 transports' copy tables, [benchmark.md](benchmark.md): letter u on the
 STM32G0, SAM C21, RP2040 and RP2350, letter m on the STM32F4 and the
 CH32V203 and CH32V303, letter c on the CH32V00x). On
-the M4 and the M33 the unaligned load sets the turn: four of them at
-four cycles from a byte offset are 16 of its 25 cycles on the M4.
-newlib 4.6.0's `memcpy-armv7m.S`, which aligns the destination and
-then reads the source with the same unaligned loads in 64-byte turns,
-copies 4096 bytes across alignments in 5114 to 5176 cycles on the
-STM32F446 and 60 bytes in 110 to 116: its long turn saves a fifth at
-4096, and one leaf function that never asks whether the two ends are
-aligned alike, its head and tail conditional instructions rather than
-loops, is what it saves at 60.
+the M4 and the M33 the unaligned load sets the turn: sixteen of them
+at three and a quarter cycles from a byte offset (DDI 0439B 3.3.2: a
+byte-aligned load adds two cycles, and a load after a load loses one)
+are 52 of the turn's 77 cycles on the M4, the four store multiples 20.
+newlib 4.6.0's `memcpy-armv7m.S` reads the source with the same
+unaligned loads in 64-byte turns of load/store pairs and does its head
+and tail with conditional instructions, but it is not one leaf: it asks
+whether the ends are aligned alike, stores unaligned words when only
+the source is on a word, and runs a byte loop under 8 bytes across
+alignments. It copies 4096 bytes across alignments in 5114 to 5176
+cycles on the STM32F446, where the runtime's store multiples bring it
+to 4940 to 4952, and 60 bytes in 110 to 116 against the runtime's 125:
+newlib's assembly saves no register and counts down with the carry,
+where GCC saves and restores three registers around the leaf, some 8
+cycles, and tests the count's bits through shifted copies of it.
 
 ### The scans
 
@@ -374,11 +410,12 @@ start one past a word its `memchr` is 8 cycles dearer and its `strlen`
 ### What the functions cost in code
 
 Measured with `nm` on the object at -Os with each family's flags:
-`memcpy` and `memset` with the functions behind them take 484 bytes on
-the M4 and the M33, 556 on the M0+, 566 on the QingKe V2 and 814 to
-826 on Hazard3 and the QingKe V4, whose copy across alignments is
-three loops of four words a turn (516 bytes); `strlen` takes 56 to 74
-bytes and `memchr` 88 to 114. An image links only what it calls.
+`memcpy` and `memset` with the functions behind them take 534 bytes on
+the M4 and 550 on the M33 (the leaf 166 and 176, its turns 154 and
+160), 556 on the M0+, 566 on the QingKe V2 and 814 to 826 on Hazard3
+and the QingKe V4, whose copy across alignments is three loops of four
+words a turn (516 bytes); `strlen` takes 56 to 74 bytes and `memchr`
+88 to 114. An image links only what it calls.
 
 ## Why events need no alignment of their own
 
@@ -442,9 +479,8 @@ the seven.
 - The host compiles what the RISC-V cores with 32 registers run: the
   block of four loads and four stores and the copy across alignments
   merging four words a turn. The Thumb block loops are instructions it
-  cannot run, and the other forms of the copy across alignments (the
-  M4's and the M33's unaligned loads, the word a turn of the M0+ and
-  the QingKe V2) are code it does not compile, so on those cores letter
-  t is what proves them. Its lengths reach 150 bytes: two turns of 64
-  and the blocks, words and bytes after them, at every misalignment of
-  both pointers.
+  cannot run, and the other forms of the copy (the M4's and the M33's
+  one leaf, the word a turn of the M0+ and the QingKe V2) are code it
+  does not compile, so on those cores letter t is what proves them. Its
+  lengths reach 150 bytes: two turns of 64 and the blocks, words and
+  bytes after them, at every misalignment of both pointers.

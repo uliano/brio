@@ -197,11 +197,12 @@ HardFault with HFSR.FORCED set - which is what a program that never calls
 `Faults::enable()` sees. Two conditions are not faults at all unless CCR asks for
 them: a divide by zero (DIV_0_TRP) and an unaligned access
 (UNALIGN_TRP). The second trap catches the runtime's own copy: `memcpy`
-reads a misaligned source with unaligned word loads on this core
-([design/runtime.md](../design/runtime.md), "The copy across
-alignments"), so with UNALIGN_TRP on every copy of 8 bytes or more
-between ends not aligned alike - a transport's run of 20 bytes or more
-at three ring offsets in four - is a UsageFault. `Faults` is the switch and the status; the record it
+reads its source with word and halfword loads at the source's own
+offset on this core ([design/runtime.md](../design/runtime.md), "The
+copy across alignments"), so with UNALIGN_TRP on every copy of two
+bytes or more whose source is off the boundary its loads want - a
+transport's run of 12 bytes or more into a ring whose head is off a
+word, three offsets in four - is a UsageFault. `Faults` is the switch and the status; the record it
 reads is twelve bytes and the driver owns no storage for it, because
 where a wreck goes across a reset is the application's business, exactly
 as the kernel's PanicRecord is the platform's.

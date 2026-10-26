@@ -115,9 +115,12 @@ to a word boundary, is paid back by its word moves. The run's two ends
 need not share their alignment: the runtime copies words across
 alignments too, and the ring's head is at any offset of its word, so
 the length is set where `memcpy` is ahead with the two ends aligned
-alike and with the dearest head (the destination a byte past a word),
-the dearest charged to the three offsets in four that are not aligned
-alike. It is each family's, measured with its benchmark instrument and
+alike and with the destination a byte past a word, the dearest case for
+the copy that merges aligned words (three head bytes) and charged to
+the three offsets in four that are not aligned alike; the Cortex-M4's
+and M33's leaf is dearest with the source a byte past a word instead,
+a case the tables do not time and the transports' pages bound from
+letter m's rows. It is each family's, measured with its benchmark instrument and
 stated in its serial document (the CH32X035's unmeasured, in its gap
 list); below it the byte loop wins, and a console's typical print is
 below it.
@@ -267,7 +270,7 @@ family's port has that the others' has not.
 | ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a remap code (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel is the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a bus and not a loop on this silicon, the flow-control pair, the receive engine's level `rx_priority`, very_high by default, [dma.md](dma.md)); BRR is PCLK over the baud, whole, with no separate fractional field and no kernel-clock multiplexer; the receive engine circular over a `HardwareRing`, and under it the CPU never reads DATAR (the clear by a status read and the channel's next read, as the CH32V203's), the edge the vector's, IDLE or the first frame, and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start |
 | ch32vx03 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32vx03/usart.hpp`), n = 1..8 | the pins are the instance's own under a remap code (`afio.hpp`'s columns, the code a template parameter; a code of 0 writes no register at all, and a column on the debug port's pads is refused by `init()` while the probe's port is alive); the frame is a template parameter of its own here, ahead of the engines, where the CH32V00x carries it inside its options; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the slot (controller and channel) the request table gives the instance (UART4..UART8's are DMA2's on the CH32V303); the channel is the request on this family too, an engine elsewhere refused at compile time; `UartOptions` as the trailing parameter (a single wire that is a bus and not a loop, the flow-control pair on a full instance, the receive engine's level `rx_priority`, very_high by default, [dma.md](dma.md)); the divisor is the instance's own bus over the baud, whole (USART1 asks PCLK2 and every other port PCLK1), and which instances a part offers, and which are full, is the datasheet's table and not a header's: the fourth port is a USART4 on the CH32V203C8 alone, so the smartcard and the synchronous clock exist there and are compile errors on a UART; the CH32V303's lot-keyed MARK/SPACE parity and short words are functions that ask the die; under a receive engine the CPU never reads DATAR: a status read here arms a clear of every flag standing at the next data read, the channel's, so no byte is taken and the IDLE of a one-frame burst is forgotten with it; the vector takes RXNE once a burst beside the channel, two USART entries a burst, its edge IDLE or that frame and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start ([the CH32V203/CH32V303 USART page](../ch32vx03/usart.md)) |
 | ch32x035 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32x035/usart.hpp`), n = 1..4 | the CH32V203's parameter list and surface, verbatim: the pins the instance's own under a remap code (`afio.hpp`'s columns, a code of 0 writes no register, a column whose TX or RX sits on the debug port's pads refused by `init()` while the probe owns them, one whose TX pad shares its package pin with another refused at compile time); the frame a template parameter of its own; one vector and `isr()`; the two engine slots take `NoDmaEngine` alone, the DMA chapter not being written here, so `dma_isr()`, `harvest()` and `dma_faults()` answer false and zero; every instance counts its divisor in HCLK, the series having no bus prescaler, and which instances a part offers is read off its pins (the CH32X035F8U6 has no USART1) |
-| rp2040 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2040/uart.hpp`), the family's alias of the IP stratum's `Pl011Transport` (`pl011/uart.hpp`) | the PL011 with its 32-deep FIFOs: the pins are GPIO numbers under function 2, and table 279 decides which of them carry which instance; one vector and `isr()`; `write_byte()` and `write_bulk()` write an idle FIFO directly and arm the transmit interrupt only behind a full one, because the PL011's transmit interrupt is an edge that stays latched and not a level, so an idle transmitter takes 32 bytes with no interrupt, a long print takes one per FIFO level, and a refused byte writes nothing; the divisor's integer and fractional halves are latched by the LCR_H write that follows them; the same engine slots (`rp2040/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`, on any two distinct channels) with `dma_isr()`, `dma_faults()`, `harvest()`, `read_bulk()`, the receive run read off TRANS_COUNT by `harvest()`, the FIFO emptied and the credits cleared before a run, a run's completion onto a drained ring the engine's edge; the receive level's entry reads its sixteen entries without asking the flag register, the receive time-out (RT) the burst's tail; the four error interrupts armed and counted in `isr()` under an engine too, an overrun's sticky UARTRSR cleared there and its source masked until the next publish; the receive engine at HIGH_PRIORITY, the transmit at normal, and no level option, one bit, nothing above the ring ([dma.md](dma.md)); the run copy's crossover a member of the chip's traits (`copy_crossover`, 20 on both RP families) ([the RP2040 UART page](../rp2040/uart.md)) |
+| rp2040 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2040/uart.hpp`), the family's alias of the IP stratum's `Pl011Transport` (`pl011/uart.hpp`) | the PL011 with its 32-deep FIFOs: the pins are GPIO numbers under function 2, and table 279 decides which of them carry which instance; one vector and `isr()`; `write_byte()` and `write_bulk()` write an idle FIFO directly and arm the transmit interrupt only behind a full one, because the PL011's transmit interrupt is an edge that stays latched and not a level, so an idle transmitter takes 32 bytes with no interrupt, a long print takes one per FIFO level, and a refused byte writes nothing; the divisor's integer and fractional halves are latched by the LCR_H write that follows them; the same engine slots (`rp2040/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`, on any two distinct channels) with `dma_isr()`, `dma_faults()`, `harvest()`, `read_bulk()`, the receive run read off TRANS_COUNT by `harvest()`, the FIFO emptied and the credits cleared before a run, a run's completion onto a drained ring the engine's edge; the receive level's entry reads its sixteen entries without asking the flag register, the receive time-out (RT) the burst's tail; the four error interrupts armed and counted in `isr()` under an engine too, an overrun's sticky UARTRSR cleared there and its source masked until the next publish; the receive engine at HIGH_PRIORITY, the transmit at normal, and no level option, one bit, nothing above the ring ([dma.md](dma.md)); the run copy's crossover a member of the chip's traits (`copy_crossover`, 20 on the RP2040; the RP2350's is its core's, 12 on the M33 and 20 on Hazard3) ([the RP2040 UART page](../rp2040/uart.md)) |
 | rp2350 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2350/uart.hpp`) | the same PL011 and the same driver: the resource and the transport are the RP2040's verbatim because they are neither family's; they live in the IP stratum (`pl011/uart.hpp`), and what each family writes is a traits type. So everything the row above says of the transport holds here, and what this file adds is the chip's: the pads march in groups of four as on the RP2040 but over a longer bank, and every group's flow-control pads carry data too under a second function code (the CTS pad is also that instance's TX, the RTS pad also its RX), so a pad's function code is not a choice but a property of the pad, which is why the IP file keeps that code opaque and this file makes it a type; UARTCLK is clk_peri as before; and the one interrupt line per instance is bound under one name on both of this chip's processor architectures, the interrupt numbering being shared between them ([the RP2350 UART page](../rp2350/uart.md), [the PL011 page](../pl011/README.md)) |
 | host | none | `LineReader` is host-tested over a scripted `ByteTransport` and over a transport lending a real ring's run, every case through both drains (`test_line_reader`); the IP stratum's own driver is tested against a PL011 made of RAM (`test_pl011`, `host/sim_pl011.hpp`), which is the second realization that proves it knows no chip |
 
@@ -609,24 +612,24 @@ line of 60 bytes in four texts and the end (the shape of the bench
 grammar's verdict lines), in the preemptive suite's image - a writer
 with `max_sources = 8`, the console as `wait_from`, `peak` on, the
 default pool - each figure the least and the most of 16, the union over
-ten passes; and the same line printed straight into the transport by the
+five passes; and the same line printed straight into the transport by the
 benchmark instrument's image, which has no writer, three passes of 16
 ([benchmark.md](benchmark.md), letters j and l):
 
 | | cycles |
 |---|---|
-| the line printed from an object's dispatch, cold (the first after the console drained: its run starts the idle transmitter, and one entry of the transmit handler falls inside) / warm, the line right behind the cold one (the handler's second entry falls inside: the transmitter takes the first byte into its shift register a bit time later) | 2050 to 2261 / 1960 to 2124 |
-| the same, warm, with interrupts masked: the core's own cycles, no handler inside | 1822 to 1986 |
-| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1126 to 1198 / 688 to 850 |
-| `print()` straight into the transport, warm and masked, in the same image | 1446 to 1606 |
-| `print()` straight into the transport in the image with no writer, cold (two entries of the transmit handler inside, 152 cycles) / warm | 1877 to 2049 / 1498 to 1678 |
-| the transport's run alone, warm and masked: 2 bytes / 60 bytes | 188 to 196 / 377 to 513 |
+| the line printed from an object's dispatch, cold (the first after the console drained: its run starts the idle transmitter, and one entry of the transmit handler falls inside) / warm, the line right behind the cold one (the handler's second entry falls inside: the transmitter takes the first byte into its shift register a bit time later) | 1988 to 2104 / 1889 to 2005 |
+| the same, warm, with interrupts masked: the core's own cycles, no handler inside | 1746 to 1878 |
+| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1101 to 1126 / 635 to 747 |
+| `print()` straight into the transport, warm and masked, in the same image | 1414 to 1538 |
+| `print()` straight into the transport in the image with no writer, cold (two entries of the transmit handler inside, 144 cycles) / warm | 1861 to 1981 / 1536 to 1652 |
+| the transport's run alone, warm and masked: 2 bytes / 60 bytes | 187 to 195 / 337 to 437 |
 
 The writer's line is the whole cost: nothing runs after the call. Like
 against like, the writer's masked line against the direct print masked
-in the same image is 1822 to 1986 against 1446 to 1606, some 380 cycles
-more, a quarter; its warm line against the instrument's warm direct
-print is 1960 to 2124 against 1498 to 1678, some 450 more. What
+in the same image is 1746 to 1878 against 1414 to 1538, some 330 cycles
+more, over a fifth; its warm line against the instrument's warm direct
+print is 1889 to 2005 against 1536 to 1652, some 350 more. What
 the writer adds: the stage's resolution at each text (the source, its
 slot), the stage's take and the lock, and a copy of every byte into the
 stage before the copy into the ring, at some twelve cycles a byte from
@@ -637,8 +640,8 @@ The text measured with the runtime's `memchr` and copied with its
 calls' fixed cost on each of the texts of two and four bytes is more
 than their bytes. The line's end is mostly the transport's run of 60
 bytes, which the runtime's `memcpy` copies in words whatever the
-ring's alignment: 120 cycles for the copy itself with the run's two
-ends aligned alike, 165 to 182 across alignments
+ring's alignment: 95 cycles for the copy itself with the run's two
+ends aligned alike, 125 across alignments
 ([runtime.md](runtime.md), "The copy across alignments"). The line
 right behind the cold one costs some 140 cycles more than the third and
 fourth lines of the same run: the transmit handler's second entry, which

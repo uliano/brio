@@ -409,14 +409,17 @@ a number is given for each.
   on both architectures, through the interrupt transmitter and the
   transmit engine alike.
 - THE COPY INTO THE RING: the byte loop 6 cycles a byte on both cores,
-  96 and 99 for 16 bytes, 120 and 123 for 20; the runtime's `memcpy`
-  with the two ends aligned alike 61 (M33) and 56 (Hazard3) for 16
-  bytes, with the destination a byte past a word 91 and 117 for 16, 90
-  and 115 for 20 (the M33 loads unaligned words, Hazard3 merges aligned
-  ones, [design/runtime.md](../design/runtime.md)). The ring's head is
-  at any offset of its word, the ends aligned alike one time in four:
-  taken so, `memcpy` is ahead from 16 bytes on the M33 and from 20 on
-  Hazard3, and 20 is the one `copy_crossover` for the chip.
+  48 and 51 for 8 bytes, 72 and 75 for 12, 96 and 99 for 16, 120 and
+  123 for 20. On the M33 the runtime's `memcpy` is one leaf that reads
+  the source at any offset ([design/runtime.md](../design/runtime.md),
+  "The copy across alignments"): 51, 51 and 59 for 8, 12 and 16 bytes
+  with the two ends aligned alike, 47, 52 and 53 with the destination a
+  byte past a word, ahead from 12 bytes at either alignment. On Hazard3
+  it merges aligned source words: 56 and 63 for 16 and 20 bytes aligned
+  alike, 117 and 115 with the destination a byte past a word; the ring's
+  head at any offset of its word, the ends aligned alike one time in
+  four, it is ahead from 20. So `copy_crossover` is the core's, 12 on
+  the M33 and 20 on Hazard3, decided on `core.hpp`'s constant.
 - A FRAME NOBODY SENT, from the pad and not from the loop-back: brought
   up on its pad and switched to the loop-back after, the instance held a
   byte in its receive FIFO before one was written - a 0xFC in six

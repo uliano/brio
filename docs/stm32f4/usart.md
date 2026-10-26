@@ -385,15 +385,20 @@ TX and RX inside the chip and leaves the RX pad alone.
   nothing twice. It reads neither SR nor DR, and it binds again a stream
   a transfer error stopped (as every read verb does: the restart is the
   consumer's, the view being its).
-- `write_bulk()` COPIES WITH memcpy where it pays: a run of 20 bytes or
+- `write_bulk()` COPIES WITH memcpy where it pays: a run of 12 bytes or
   more takes the runtime's `memcpy` whatever the alignment of its two
-  ends, which copies words across alignments too
-  ([design/runtime.md](../design/runtime.md)), and a shorter one the
-  four-instruction byte loop. On the STM32F446RE at 180 MHz the loop is
-  6 cycles a byte, 97 for 16 bytes and 121 for 20; `memcpy` takes 78
-  and 84 with the two ends aligned alike, 113 and 115 with the
-  destination a byte past a word: from 20 bytes it is ahead at either
-  alignment.
+  ends - on this core one leaf that reads the source at any offset
+  ([design/runtime.md](../design/runtime.md), "The copy across
+  alignments") - and a shorter one the four-instruction byte loop. On
+  the STM32F446RE at 180 MHz the loop is 6 cycles a byte, 49 for 8
+  bytes, 73 for 12 and 97 for 16; `memcpy` takes 56, 56 and 64 with the
+  two ends aligned alike, 55, 62 and 64 with the destination a byte past
+  a word: from 12 bytes it is ahead at either alignment, and at 8 the
+  loop still is, by 6 and 7 cycles. The leaf's dearest case, the source
+  a byte past a word with the destination on one, is not in that table;
+  letter m's rows put it 8 cycles over the destination's case at 16
+  bytes (72 against 64), which carried to 12 leaves `memcpy` some 3
+  cycles ahead of the loop there.
 
 ## How to use it
 
