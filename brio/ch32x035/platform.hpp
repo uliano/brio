@@ -39,9 +39,14 @@
  * CriticalSection is ch32x035/pfic.hpp's InterruptGuard: read-and-clear
  * mstatus.MIE in one instruction, restore what was there on scope exit.
  * All-or-nothing masking. This core does have a priority threshold and
- * two levels of interrupt nesting, and brio uses neither: an interrupt
- * handler's body runs to completion here as everywhere
- * (docs/design/kernel.md section 1, "The model in one page").
+ * two levels of interrupt nesting, and under Tenuto brio uses neither:
+ * an interrupt handler's body runs to completion here as everywhere
+ * (docs/design/kernel.md section 1, "The model in one page"). The one
+ * program that turns the nesting on is a Rubato one, through
+ * ch32x035/schedule.hpp's scheduler_init(): its scheduling request, the
+ * software interrupt, is put one preemption level below every peripheral
+ * line, which still never nest among themselves (Ch32x035RubatoPlatform,
+ * at the end of this file).
  *
  * What is not here, and is deliberate rather than forgotten: no
  * idle_until() - this platform is not tickless, its timebase is the core
@@ -71,6 +76,7 @@
 #include "ch32x035/device.hpp"
 #include "ch32x035/dma.hpp"
 #include "ch32x035/pfic.hpp"
+#include "ch32x035/schedule.hpp"
 #include "ch32x035/ticker.hpp"
 #include "kernel/platform.hpp"
 
@@ -282,5 +288,55 @@ inline uint32_t stack_untouched() {
 }
 
 static_assert(Platform<Ch32x035Platform<>> && HandlerAware<Ch32x035Platform<>>);
+
+/**
+ * Ch32x035RubatoPlatform<TB>: the platform a Rubato kernel runs on
+ * (kernel/rubato.hpp), the preemptive one. It is Ch32x035Platform<TB>
+ * whole - the same critical section, idle, timebase, breakpoint and panic
+ * storage - plus the three members kernel/platform.hpp's Preemptive
+ * concept asks for:
+ *
+ *     using P = brio::Ch32x035RubatoPlatform<>;
+ *     using K = brio::Rubato<P, Sensor, Logger>;
+ *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
+ *
+ *  - `preemptive`, true;
+ *  - `ceiling`, the byte the kernel keeps: the pack index of the object
+ *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    so of the program: one kernel per platform type, which on this
+ *    single-core family is one kernel;
+ *  - `pend_schedule()`, the request for the scheduler: ch32x035/
+ *    schedule.hpp's software interrupt, below every other line, with
+ *    interrupt nesting turned on so that the peripheral handlers, at one
+ *    level among themselves, interrupt it. The software interrupt
+ *    returns into the scheduler in thread mode, and the scheduler leaves
+ *    through the machine-mode environment call; that file says how, with
+ *    the block each level of preemption leaves on the stack.
+ *
+ * The CriticalSection is still mstatus.MIE alone, and the promise that an
+ * interrupt handler is not interrupted by another keeps its meaning for
+ * the peripheral handlers, which share one preemption level and never
+ * nest among themselves; the scheduler's interrupt sits below them all,
+ * and they do interrupt it. A program on this platform binds two vectors
+ * more than a Tenuto program, the software interrupt's and the
+ * machine-mode environment call's, both naked, executes no `ecall` of
+ * its own, and calls scheduler_init() before it enables interrupts.
+ */
+template <class TB = Ticker>
+struct Ch32x035RubatoPlatform : Ch32x035Platform<TB> {
+    static constexpr bool preemptive = true;
+
+    /// The index of the object being dispatched; 255 at the loop's base.
+    static inline uint8_t ceiling = 255;
+
+    /// The request for the scheduler (ch32x035/schedule.hpp).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+};
+
+static_assert(Platform<Ch32x035RubatoPlatform<>> && HandlerAware<Ch32x035RubatoPlatform<>>);
+static_assert(Preemptive<Ch32x035RubatoPlatform<>>);
+static_assert(!Preemptive<Ch32x035Platform<>>);
 
 } // namespace brio

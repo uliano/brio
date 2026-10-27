@@ -180,7 +180,7 @@ chapters, which boards, which gaps) is in its guide.
 | STM32F4 (`stm32f4/`) | STM32F429I-DISC1, Nucleo-F446RE, STM32F411CE black pill, 32F469IDISCOVERY | supported | [docs/stm32f4/](docs/stm32f4/README.md) |
 | CH32V00x (`ch32v00x/`) | CH32V006K8U6 module, CH32V003F4P6 board | supported; the smallest parts brio runs on (16 KB flash, 2 KB RAM on the CH32V003) | [docs/ch32v00x/](docs/ch32v00x/README.md) |
 | CH32V203 and CH32V303 (`ch32vx03/`) | WeAct CH32V203C8T6, WCH CH32V303 evaluation board | CH32V203 supported; CH32V303 in bring-up; CAN not implemented | [docs/ch32vx03/](docs/ch32vx03/README.md) |
-| CH32X035 (`ch32x035/`) | WCH CH32X035F8U6 evaluation board | in bring-up: platform, clock, pins and USARTs only | [docs/ch32x035/](docs/ch32x035/README.md) |
+| CH32X035 (`ch32x035/`) | WCH CH32X035F8U6 evaluation board | in bring-up: platform (both kernels), clock, pins, USARTs, I2C, SPI, timers and DMA | [docs/ch32x035/](docs/ch32x035/README.md) |
 | RP2040 (`rp2040/`) | Raspberry Pi Pico, WeAct RP2040 | supported; two cores run two kernels | [docs/rp2040/](docs/rp2040/README.md) |
 | RP2350 (`rp2350/`) | WeAct RP2350B | in bring-up: one source built for the Cortex-M33 pair and for the Hazard3 pair, every driver's test suite passing on both; no HSTX, no M33 coprocessors | [docs/rp2350/](docs/rp2350/README.md) |
 | host (`host/`) | the host itself | supported: the test suites and the simulators | [docs/host/](docs/host/README.md) |

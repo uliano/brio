@@ -444,8 +444,9 @@ horizon itself, one entry each.
   PWR_CTLR's retention bits starting at zero at every boot, and the
   reference manual's V2.5 for promotion (docs/ch32vx03/vendor/README.md).
 - **The CH32X035 stratum**: `in bring-up` on the CH32X035F8U6, the
-  register map, the part table, the platform, the clock, the pins and
-  the USARTs with their suites green; what the silicon taught is in
+  register map, the part table, the platform under both kernels, the
+  clock, the pins, the USARTs, the I2C, the SPI, two timers and the DMA
+  with their suites green; what the silicon taught is in
   docs/ch32x035/README.md. Owed: the hardware prologue's pair, the
   HSI's accuracy, the lock, every part but the F8U6. Then, by the user's
   pick, one chapter new to brio (the USB PD sink, or the host/device

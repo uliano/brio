@@ -237,9 +237,53 @@ and both carry `no_icf`: gcc's identical code folding turns the second
 of two handlers of one body into a handler that CALLS the first, which
 ends in MRET, so the call never returns and the caller's frame stays on
 the stack (measured on the CH32V303VCT6,
-[../ch32vx03/platform.md](../ch32vx03/platform.md)). Interrupt nesting
-is never enabled: the kernel's rule
-([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
+[../ch32vx03/platform.md](../ch32vx03/platform.md)). Under Tenuto
+interrupt nesting is never enabled: the kernel's rule
+([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page));
+the preemptive platform below turns it on for its scheduling request
+alone.
+
+`Ch32x035RubatoPlatform<TB>` (the same header) is
+`Ch32x035Platform<TB>` whole plus the three members of a preemptive
+platform, the one the preemptive kernel `Rubato` runs on
+([../design/kernel.md](../design/kernel.md), "Rubato"): `preemptive`,
+`ceiling` (the index of the object being dispatched, 255 at the loop's
+base) and `pend_schedule()`, which is
+[brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp)'s
+`request_scheduler()`: the software interrupt (line 14 of the vector
+table, RM 7.3) pended through PFIC_IPSR1 (RM 7.5.2.25) and a `fence.i`,
+five instructions out of line. `scheduler_init()` puts the software
+interrupt's priority byte at 0x80 and sets INTSYSCR.INESTEN with one
+preemption bit (the QingKe V4 manual 3.2), so every peripheral line, at
+the reset priority 0, sits at one level above it: the peripheral
+handlers still never nest among themselves, and every one of them
+interrupts the software interrupt's; the V4C's two nesting levels and
+two-deep hardware prologue (table 1-1) are exactly that depth. The
+scheduler runs in THREAD MODE: the software interrupt's body,
+`scheduler_trap<K>()`, pushes a 16-byte block with the trap's mepc and
+mstatus, writes the entry's address into mepc and returns (nine
+instructions); the entry, `scheduler_thread<K>()`, stores the sixteen
+caller-saved integer registers the hardware prologue just popped back
+into the register file - the interrupted code's -, sets MIE, calls
+`K::activate()`, loads them back and executes `ecall`; and the
+machine-mode environment call's body, `scheduler_return()`, puts mepc
+and mstatus back from the block, pops it and returns into the
+interrupted code (six instructions). Without the hardware prologue the
+two bodies save their one scratch register in the block themselves.
+This core has no FPU, so the entry has nothing else to save. The two
+vectors are bound with `BRIO_CH32_SCHEDULER_VECTOR(name)`: naked,
+`no_icf`, aligned to four like every vector of this stratum, and marked
+a leaf (`__brio_leaf_<name>`), which they are: no call, nothing saved in
+software. A program executes no `ecall` of its own. The file is the
+CH32V203's and the CH32V303's
+([brio/ch32vx03/schedule.hpp](../../brio/ch32vx03/schedule.hpp)) with
+the f-register shape left out, the request's `fence.i` included: on the
+V4B three instructions retire behind the pending store unless the fence
+closes them, while this core takes the trap at the instruction after
+the store with or without it (measured with hand-placed assembly
+reading mepc in the handler), so here the fence closes nothing and
+costs 8 cycles on a road-2 post's return; it stays while the three
+QingKe families' request is one text.
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -300,6 +344,28 @@ probe finds it and where the breadcrumb waits for the next boot's
 `take_panic_record<P>()` if a reset comes before the power goes - a
 reset something else causes: no verb of this stratum performs one (the
 gap list below).
+
+The same program under the preemptive kernel: the platform type, the
+two naked vectors and one call more.
+
+```cpp
+#include "kernel/rubato.hpp"
+
+using P = brio::Ch32x035RubatoPlatform<>;
+using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
+
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+
+int main() {
+    SysClock::init();
+    brio::Ticker::init(clock);
+    brio::scheduler_init();         // nesting on, the software interrupt below every line
+    brio::enable_interrupts();
+    K::run();
+}
+```
 
 ## Bench findings
 
@@ -438,6 +504,76 @@ the consume was measured before and after. What it measured:
   and the pin suite's, and 19416 after the USART suite's, of the part's
   20 KB.
 
+**The preemptive kernel** - `test_x035_rubato`, 40 verdicts in `z` on
+the CH32X035F8U6 at 48 MHz, ten runs of `z` alike in the image built
+with the hardware prologue and ten in the one built without it: a
+Rubato pack of five objects, the Console the lowest and the letters'
+runner, TIM2's capture-compare line the interrupt the road-1 letters
+land, the STK's CNTL read bare the ruler (two reads 3 cycles apart,
+against 76 cycles for the ticker's composed `cycles()`, the two
+agreeing over half a millisecond and more within 12), nothing wired and
+nothing lit. Road 1 preempts at any depth: an interrupt's post to High
+inside Low's dispatch runs High to its end before Low resumes, ten runs
+alike, every object reading its own index as the ceiling and the UART's
+interrupt the base's 255; road 2 nests High inside Mid inside Low, each
+inside the post that asked; at depth 2 an interrupt over High's
+dispatch, started by either road, runs Top before High resumes; three
+timers matured in one turn are posted with the ceiling at 0 and served
+highest first, and High preempting Low's loop of `arm()` and `disarm()`
+(in the loop's sixth turn of 200) leaves the list whole; a post under
+the mask pends the software interrupt, the receiver runs when the
+section ends, before the statement after it. INTSYSCR reads 0x3 once
+the nesting is on (0x2 without the prologue): PMTCFG's bit reads back
+zero, as on the CH32V203. Every timing below is within the bound its
+letter derives over the release listing with this core's fetch, which
+the suite's letter c states and which was calibrated with hand-placed
+assembly timed on the STK (not a letter of any suite: the gap list) -
+straight-line code a word every 4 cycles, a taken transfer 8 to its
+target (12 to a 32-bit target across two words), a trap's entry 20
+cycles from the instruction that raises it, an MRET into code 8 and
+into a pending interrupt 24, the same with the hardware prologue and
+without it - and the branch predictor corecfgr's 0x1F turns on, whose
+wrong guess costs up to 4 cycles a branch, call, jump or return: the
+least of each figure is that model's count to the cycle, the road-2
+post's aside (12 over), and the spread above it is the predictor's:
+
+| HCLK cycles | CH32X035F8U6 | without the prologue | CH32V203C8T6 (144 MHz) |
+|---|---|---|---|
+| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..376 | 392..408 | 131..133 |
+| road 1 at depth 2, over a preempting dispatch | 292..376 | 328..416 | 110..112 |
+| a post that asks nothing | **141** | 155 | 55 |
+| a road-2 post, the receiver's empty dispatch inside | **897**..905 | 935..947 | 337 |
+| `activate()` over four empty queues | 309 | 315..323 | 120 |
+| one `arm()`, its masked window inside | 145..165 | 147 | 51..61 |
+| a post under the mask: the section's end to the receiver's first | 405..485 | 407..435 | 150..152 |
+| stack high-water of the suite's deepest chain (bytes) | 1000 | 1076 | 1000 |
+
+Road 1 is the TIM2 handler's tail, its MRET straight into the pending
+software interrupt, that body's nine instructions and its MRET, the
+entry's nineteen and `activate()`'s visits to Top and High: 101
+instructions, the CH32V203's code, and 356 cycles by the model,
+measured 356 at the fastest event of every run: 7.4 us at 48 MHz
+against the CH32V203's 0.9 us at 144, the fetch's 4 cycles a word
+making the difference, not the instructions. A tick landed in one or
+two events of 100 in each run (up to 452 cycles, read inside each). The
+road-2 post's scheduling share, 756 cycles, is two traps from thread
+mode - the pend and the `ecall` - their two returns around the entry's
+37 instructions and the rescan, and the request's `fence.i` run a
+second time after the return: on this core the software interrupt is
+taken at the instruction after the store that pends it, and after the
+`csrsi` that unmasks it, so no instruction retires behind either and
+the `fence.i` closes nothing (the types and verbs above). The stack's
+1000 bytes are the deepest chain's frames plus the block and the
+entry's 64 bytes at each level of preemption, as on the CH32V203. In
+the image built without the hardware prologue (CH32X035_HPE=OFF) the
+traps cost the same and the handlers that save in software pay it: road
+1 392 cycles (TIM2's sixteen reloads, the software interrupt's scratch
+save), a road-2 post 935 to 947. With corecfgr cleared in a probe image
+every path of the suite ran the same cycle count at every event, the
+model's; the register's 0x1F buys nothing on these paths and the
+platform suite's letter f already has it making a data-dependent loop
+7 per cent slower.
+
 ## A handler in SRAM
 
 **What the silicon does.** At 48 MHz the code flash answers behind two
@@ -569,9 +705,11 @@ Driver gaps, each with its reason:
   survives into the next boot and a fault body that records its cause
   wait for it; the reset flags are `Rcc`'s verbs meanwhile
   ([clock.md](clock.md)).
-- **The PFIC's priorities, its nesting and its four vector-table-free
-  channels** (RM 7.5.2.9, 7.5.2.12 to 7.5.2.16, 7.5.2.37): no user, and
-  nesting declined by the kernel's rule.
+- **The PFIC's priority threshold, its four vector-table-free channels
+  and any priority byte but the scheduler's** (RM 7.5.2.9, 7.5.2.12 to
+  7.5.2.16, 7.5.2.37): no user; the nesting is the preemptive
+  platform's alone, two levels, every peripheral line at the reset
+  priority.
 - **The physical memory protection unit** (RM 7.5.4): no user.
 - **The core deadlock reset's switch, PFIC_SCTLR.RSTEN**: left at its
   reset value, the reset on. Which traps raise it is a measurement - an
@@ -581,8 +719,28 @@ Driver gaps, each with its reason:
   no verb reads or writes them - on the CH32V203 a `csrw` to that CSR
   from the running program resets the part
   ([../ch32vx03/sleep.md](../ch32vx03/sleep.md)).
+- **The scheduler's path in SRAM**: the two naked vectors, the entry,
+  `activate()`, the queues' out-of-line verbs and the request run from
+  the flash, 4 cycles a word; by the figures of "A handler in SRAM"
+  below a `.fast_text` placement would cut road 1 by about half. Not
+  tried: a placement the preemptive platform chooses for a program is a
+  decision of its own.
+- **The request's `fence.i` on this core**: it closes nothing here and
+  costs 8 cycles on a road-2 post (the types and verbs above); kept while
+  the three QingKe families' request is one text, a fold posed with the
+  `qingke/` stratum ([README.md](README.md)).
 
 Implemented but not bench-verified, each with what would measure it:
+
+- **The fetch and trap cost model the Rubato suite's bounds rest on**
+  (a word every 4 cycles, a transfer 8, a trap's entry 20, an MRET 8 or
+  24, the predictor's 4 a wrong guess): calibrated with hand-placed
+  assembly timed on the STK outside every suite; a letter of the
+  platform suite owning those figures would put them in the tree.
+- **Rubato on the other six parts**: the platform, its request and the
+  two vector bodies compile for all seven, with and without the hardware
+  prologue (the family fixture); the suite is built and run for the
+  CH32X035F8U6 alone.
 
 - **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
   is the manual's, compiled for
