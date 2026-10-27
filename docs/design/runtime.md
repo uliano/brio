@@ -128,10 +128,11 @@ for every package, and expects every one refused.
   modulo the word: when they do, the words go in blocks of four, then
   singly - on the M0+ a block one load-multiple and one store-multiple
   of four registers, 64 bytes or more in turns of four blocks; on a
-  RISC-V core four loads and four stores, a block a turn - and when they
-  do not, a copy of 16 bytes or more merges aligned source words by
-  shifts (below) and a shorter one copies bytes. `memmove`'s forward
-  copy is `memcpy`'s body; it copies backwards when the destination
+  RISC-V core loads and stores, eight words a turn on a core with 32
+  registers and then a block of four in line, four a turn on the QingKe
+  V2 - and when they do not, a copy of 16 bytes or more merges aligned
+  source words by shifts (below) and a shorter one copies bytes.
+  `memmove`'s forward copy is `memcpy`'s body; it copies backwards when the destination
   overlaps the source from above, a word a turn when the two share their
   alignment and bytes when they do not.
 - `memset` fills bytes up to a word boundary, then the byte replicated
@@ -179,13 +180,30 @@ is dear on the cores that call these functions for an event: at -Os
 the Cortex-M4F and the M33 copy an event inline, while the M0+,
 Hazard3 and the QingKe cores call `memcpy` for one of 52 bytes (the
 kernel's queue compiled for each). Measured on the QingKe V4B at
-144 MHz, a 52-byte copy between word-aligned buffers: 215 cycles in
-the while shape, 101 in this one, against 91 for the full newlib's
-`memcpy`, which moves nine words a turn in 226 bytes of code where
-this `memcpy` takes 194, its copy across alignments 516 more out of
-line. Four words a block is the point where a
-52-byte event, the largest the census below found, is three blocks and
-one word.
+144 MHz with four words a turn, a 52-byte copy between word-aligned
+buffers: 215 cycles in the while shape, 101 in this one, against 91 for
+the full newlib's `memcpy`, which moves nine words a turn in 226 bytes
+of code where this `memcpy` takes 254 (the wrapper and the forward
+copy, its turn of eight words below), its copy across alignments 238
+more out of line. Four words a block is the point where a 52-byte
+event, the largest the census below found, is three blocks and one
+word - on a RISC-V core with 32 registers a turn of eight, a block and
+a word.
+
+On the RISC-V cores every loop that moves words starts on a word
+boundary, by an alignment directive the file asks of the assembler
+before each (GCC at -Os aligns no loop, whatever `-falign-loops` or its
+pragma asks). What a loop at an odd halfword costs is measured with
+letter m: the QingKe V4 pays a cycle for every taken branch to a 32-bit
+instruction there (the CH32V203's co-aligned copy of 4096 bytes, 3413
+cycles against 3156), the QingKe V2 a fetch of three cycles for every
+word of code the loop spans (the CH32V006's `strlen` of 4096 bytes,
+21610 against 18538), and Hazard3 nothing in a loop, its branch
+predictor hiding the cycle its datasheet gives a branch to a misaligned
+32-bit instruction (the RP2350 datasheet 3.8.7.4 and 3.8.7.10). The
+directive is placed so that the loop's first instruction follows it,
+which is read in the listing: no check verifies it, and a compiler that
+put a register copy between the two would cost the cycle again.
 
 ### The block on a Thumb core
 
@@ -292,14 +310,19 @@ copied in the form each core's manual allows:
   words by shifts measured slower at every length on both cores.
 - Everywhere else the source is read as aligned words, the word holding
   its next byte first, and each word stored is merged from two of them
-  by shifts. The shift counts are constants, one copy of the loop for
-  each of the three offsets: with the counts in registers the loop
-  spills to the stack on the Cortex-M0+, whose Thumb-1 instructions
-  reach eight registers, and on the QingKe V2 (RV32E, sixteen). The
-  M0+ and the QingKe V2 merge a word a turn, four a turn spilling again
-  on the first and costing some 300 bytes on the second, whose
-  smallest part (the CH32V003) has 15 KB for an image; the other RISC-V
-  cores merge four words a turn.
+  by shifts. On a RISC-V core with 32 registers the two shift counts
+  are registers and the loop is one for the three offsets: a shift by a
+  register costs what one by an immediate does (the RP2350 datasheet
+  3.8.7.1 for Hazard3; the CH32V203 measured level), and the three
+  loops the constants want cost 516 bytes where the one costs 238.
+  Where the registers are few the counts are constants and there is one
+  loop per offset: with the counts in registers the loop spills to the
+  stack on the Cortex-M0+, whose Thumb-1 instructions reach eight
+  registers, and on the QingKe V2 (RV32E, sixteen). The M0+ and the
+  QingKe V2 merge a word a turn, four a turn spilling again on the
+  first and costing some 300 bytes on the second, whose smallest part
+  (the CH32V003) has 15 KB for an image; the other RISC-V cores merge
+  four words a turn.
 
 The merging copy reads the aligned word that holds the source's first
 byte and, at its end, the one that holds the last byte its words move,
@@ -342,10 +365,13 @@ word:
 | Cortex-M0+ (STM32G0B1RE, 64 MHz, two wait states) | 204 / 322 to 367 | 2899 (1.41) / 10412 to 10457 (5.10) | LDM of one, two shifts and an OR, STM of one, compare, branch: 10 cycles a word |
 | Cortex-M0+ (SAM C21J18A, 48 MHz, two wait states) | 241 / 367 to 425 | 2950 (1.44) / 10457 to 10515 (5.13) | the same: 10 cycles a word |
 | Cortex-M0+ (RP2040, 125 MHz) | 176 / 296 to 340 | 2869 (1.40) / 10386 to 10430 (5.09) | the same: 10 cycles a word |
-| Hazard3 (RP2350, 150 MHz) | 101 / 156 to 186 | 2868 (1.40) / 5949 to 5990 (2.92) | four loads, eight shifts, four ORs, four stores, two steps and a branch: 23 cycles a turn of 16 bytes |
-| QingKe V4B (CH32V203C8, 144 MHz) | 142 / 197 to 236 | 3156 (1.54) / 6242 to 6294 (3.07) | the same 23 instructions: 24 cycles a turn |
-| QingKe V4F (CH32V303VC, 144 MHz) | 117 / 174 to 205 | 3137 (1.53) / 6225 to 6263 (3.05) | the same: 24 cycles a turn |
-| QingKe V2 (CH32V006K8, 48 MHz, two wait states) | 307 / 532 to 595 | 2048 bytes: 4598 (4.49) / 12460 to 12523 (12.2) | a word a turn, eight instructions: 24 cycles a word, the fetch behind two wait states the rest |
+| Hazard3 (RP2350, 150 MHz) | 97 / 160 to 182 | 2485 (1.21) / 5953 to 5986 (2.92) | four loads, eight shifts by two registers, four ORs, four stores, two steps and a branch: 23 cycles a turn of 16 bytes |
+| QingKe V4B (CH32V203C8, 144 MHz) | 136 / 199 to 222 | 2649 (1.29) / 6244 to 6279 (3.07) | the same 23 instructions: 24 cycles a turn |
+| QingKe V2 (CH32V006K8, 48 MHz, two wait states) | 290 / 533 to 596 | 2048 bytes: 4200 (4.10) / 12461 to 12524 (12.2) | a word a turn, eight instructions: 24 cycles a word, the fetch behind two wait states the rest |
+
+The QingKe V4F of the CH32V303 runs the same instructions as the V4B
+(its ISA adds the floating-point unit, which none of the seven touches)
+and is not in these tables.
 
 A byte loop moves a byte in 6 cycles on the M4, the M33 and Hazard3,
 in 7 on the QingKe V4, in 9 on the M0+ parts and in 15 to 18 on the
@@ -391,15 +417,14 @@ NUL within 64 bytes or, for the longest, within n + 1:
 
 | core | `strlen` 15 / 50 / 4096 | `memchr` 15 / 50 / 4096 | loop in the listing, a word |
 |---|---|---|---|
-| Cortex-M4F (STM32F446RE) | 83 to 93 / 148 to 178 / 8230 | 121 to 139 / 211 to 254 / 11316 | six instructions and nine |
-| Cortex-M33 (RP2350) | 73 to 79 / 139 to 161 / 8223 | 105 to 114 / 196 to 226 / 11301 | the same |
+| Cortex-M4F (STM32F446RE) | 70 to 79 / 126 to 156 / 7196 | 121 to 139 / 211 to 254 / 11316 | five instructions and nine |
+| Cortex-M33 (RP2350) | 64 to 70 / 121 to 144 / 7193 | 105 to 114 / 196 to 226 / 11301 | the same |
 | Cortex-M0+ (STM32G0B1RE) | 152 to 185 / 253 to 302 / 12383 | 185 to 204 / 311 to 352 / 15462 | seven and ten, one constant reloaded from the literal pool every word |
 | Cortex-M0+ (SAM C21J18A) | 190 to 207 / 273 to 308 / 10377 | 236 to 279 / 380 to 442 / 17551 | the same |
 | Cortex-M0+ (RP2040) | 129 to 144 / 212 to 245 / 10318 | 161 to 176 / 269 to 307 / 13396 | the same |
-| Hazard3 (RP2350) | 37 to 70 / 73 to 102 / 4121 | 55 to 91 / 118 to 147 / 7198 | four and six, the Zbb form: a load, `orc.b`, a compare, the step; `memchr` adds the exclusive or and the bound's branch |
-| QingKe V4B (CH32V203C8) | 116 to 137 / 188 to 236 / 9278 | 145 to 163 / 231 to 290 / 11328 | eight and nine |
-| QingKe V4F (CH32V303VC) | 95 to 110 / 173 to 206 / 9269 | 119 to 128 / 212 to 244 / 11319 | the same |
-| QingKe V2 (CH32V006K8) | 223 to 259 / 394 to 481 / 21610 | 276 to 285 / 471 to 540 / 24693 | the same, behind two wait states |
+| Hazard3 (RP2350) | 38 to 71 / 74 to 103 / 4122 | 56 to 92 / 119 to 148 / 7199 | four and six, the Zbb form: a load, `orc.b`, a compare, the step; `memchr` adds the exclusive or and the bound's branch |
+| QingKe V4B (CH32V203C8) | 105 to 132 / 171 to 214 / 8255 | 146 to 164 / 232 to 291 / 11329 | seven and nine |
+| QingKe V2 (CH32V006K8) | 193 to 247 / 346 to 418 / 18544 | 267 to 285 / 465 to 531 / 24693 | the same, behind two wait states |
 
 A byte at a time, the same scans of 4096 bytes take 6 to 9 cycles a
 byte on the M4, the M33, Hazard3 and the QingKe V4F (`strlen` the 6 or
@@ -410,7 +435,7 @@ the word scan is ahead at 15 bytes on every core but in one case,
 against 256). The spread of each short figure is the start's offset:
 from one past a word the three bytes to the boundary go through the
 byte loop before the words, which on Hazard3 costs 33 cycles at 15
-(70 against 37), 11 a byte, three taken branches in the six
+(71 against 38), 11 a byte, three taken branches in the six
 instructions GCC makes of it; the Zbb form pays no byte after the hit,
 so there the whole spread is the head's. On the STM32F446 newlib's
 `strlen` and `memchr` read eight bytes a load and test four bytes an
@@ -439,9 +464,9 @@ form, `orc.b` and `ctz`, as the runtime's are there.
 
 | core (board) | | `memcpy` aligned alike, 16 / 60 / 4096 | `memcpy` across, 60 / 4096 | `strlen` 15 / 4096 | `memchr` 15 / 4096 |
 |---|---|---|---|---|---|
-| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 83 / 8230 | 121 / 11316 |
+| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 70 / 7196 | 121 / 11316 |
 | | newlib | 38 / 71 / 3059 | 110 to 116 / 5114 to 5176 | 57 / 5552 | 82 / 6709 |
-| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 73 / 8223 | 105 / 11301 |
+| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 64 / 7193 | 105 / 11301 |
 | | newlib | 39 / 73 / 2394 | 94 to 108 / 3421 to 4444 | 62 / 8230 | 103 / 13345 |
 | Cortex-M0+ (STM32G0B1RE) | runtime | 160 / 204 / 2899 | 322 to 367 / 10412 to 10457 | 152 / 12383 | 185 / 15462 |
 | | newlib | 148 / 217 / 5503 | 590 / 32878 | 147 / 11871 | 200 / 21601 |
@@ -449,11 +474,11 @@ form, `orc.b` and `ctz`, as the runtime's are there.
 | | newlib | 201 / 277 / 5558 | 622 / 32910 | 192 / 9874 | 245 / 17566 |
 | Cortex-M0+ (RP2040) | runtime | 127 / 176 / 2869 | 296 to 340 / 10386 to 10430 | 129 / 10318 | 161 / 13396 |
 | | newlib | 128 / 204 / 5483 | 571 / 32859 | 119 / 9801 | 166 / 17487 |
-| Hazard3 (RP2350) | runtime | 61 / 101 / 2868 | 156 to 186 / 5949 to 5990 | 37 / 4121 | 55 / 7198 |
+| Hazard3 (RP2350) | runtime | 58 / 97 / 2485 | 160 to 182 / 5953 to 5986 | 38 / 4122 | 56 / 7199 |
 | | newlib | 111 / 175 / 2663 | 252 to 260 / 14378 to 14386 | 38 / 4122 | 57 / 7203 |
-| QingKe V4B (CH32V203C8) | runtime | 96 / 142 / 3156 | 197 to 236 / 6242 to 6294 | 116 / 9278 | 145 / 11328 |
+| QingKe V4B (CH32V203C8) | runtime | 94 / 136 / 2649 | 199 to 222 / 6244 to 6279 | 105 / 8255 | 146 / 11329 |
 | | newlib | 87 / 132 / 2714 | 409 / 24625 | 92 / 8257 | 128 / 12357 |
-| QingKe V2 (CH32V006K8), 2048 for 4096 | runtime | 184 / 307 / 4598 | 532 to 595 / 12460 to 12523 | 223 / 21610 | 276 / 24693 |
+| QingKe V2 (CH32V006K8), 2048 for 4096 | runtime | 167 / 290 / 4200 | 533 to 596 / 12461 to 12524 | 193 / 18544 | 267 / 24693 |
 | | newlib | 175 / 280 / 4160 | 988 / 30808 | 169 / 18541 | 252 / 27759 |
 
 Where the runtime is ahead, it is by the shape it was written for: the
@@ -464,21 +489,31 @@ load/store pairs a turn, with no load multiple, take 1.9 times the
 runtime's at 4096 aligned alike; `memchr` scans a word a turn where
 the portable one scans bytes, 1.3 to 1.4 times the runtime's on the
 RP2040 and the STM32G0 at 4096 (on the SAM C21 the two are level,
-17551 against 17566). On Hazard3 the scans are level at every size
-(`strlen` 37 and 4121 against 38 and 4122, `memchr` 55 and 7198
-against 57 and 7203): the same Zbb loop in both, four instructions a
-word for `strlen` and six for `memchr`, one taken branch a word. Where
-newlib is ahead, each gap has its cause in the two listings:
+17551 against 17566); and on Hazard3 and the QingKe V4B the
+aligned-alike copy of 4096 bytes, by the turn of eight words where
+newlib's is nine (2485 against 2663, 2649 against 2714), level on the
+QingKe V2 (4200 against 4160), whose turn stays four words; and
+`strlen` on the M33 at 4096 (7193 against 8230), where newlib's word
+loop keeps a copy of its pointer for the tail, one instruction a word,
+and the runtime's does not (an empty asm statement after the loop
+starts the tail from the pointer as the loop left it, on every core
+but the Thumb-1 ones, where the copy is the load-multiple's base and
+the statement changes neither the count nor the cycles). On Hazard3
+the scans are level at every size (`strlen` 38 and 4122 against 38 and
+4122, `memchr` 56 and 7199 against 57 and 7203): the same Zbb loop in
+both, four instructions a word for `strlen` and six for `memchr`, one
+taken branch a word. Where newlib is ahead, each gap has its cause in
+the two listings:
 
-- The shortest copies on three merging cores, up to 12 cycles (STM32G0
-  148 against 160 at 16 bytes, Hazard3 25 against 36 at 1, RP2040 90
-  against 95 at 1; the SAM C21 level): the wrapper's call to the copy
-  out of line, the cost the merging cores pay for the frame that keeps
-  their loop in registers ("The copy across alignments").
-- The aligned-alike copy on the QingKe cores at every size, 5 to 17 %
-  (V4B 2714 against 3156 at 4096): nine words a turn against four, one
-  compare and branch per 36 bytes instead of 16, and the wrapper
-  below 64.
+- The shortest copies on the merging cores, up to 16 cycles (STM32G0
+  148 against 160 at 16 bytes, Hazard3 25 against 35 at 1, the QingKe
+  V4B 56 against 66 and the V2 100 against 116 at 1, RP2040 90 against
+  95 at 1; the SAM C21 level): the wrapper's call to the copy out of
+  line, the cost the merging cores pay for the frame that keeps their
+  loop in registers ("The copy across alignments").
+- The aligned-alike copy of 16 and 60 bytes on the QingKe cores, 4 to
+  10 cycles (V4B 87 against 94 and 132 against 136, V2 280 against 290
+  at 60, and ahead at 16, 167 against 175): the same wrapper.
 - The aligned-alike copy of 16 to 256 bytes on the M33 and the M4, 17
   to 40 cycles on the M33 (39 / 73 / 174 against 64 / 90 / 214 at 16 /
   60 / 256) and 27, 24 and 87 on the M4: newlib's leaf tests the two
@@ -496,11 +531,14 @@ newlib is ahead, each gap has its cause in the two listings:
   the M33; across alignments with the destination off a word, where
   newlib stores unaligned words, the leaf is ahead by 23 % on the M33
   (3401 against 4444) and level or ahead elsewhere.
-- `strlen` on the QingKe cores, 11 to 14 % less at 4096 and a fifth to
-  a quarter less at 15 bytes (V2 169 against 223): the same seven
-  instructions a word, then newlib's tail tests the hit word's three
-  bytes in line where the runtime's steps a byte with two taken jumps
-  each, dear behind the V2's two wait states.
+- `strlen` on the QingKe cores at 15 bytes, 12 to 14 % (V4B 92 against
+  105, V2 169 against 193; level at 4096, 8257 against 8255 and 18541
+  against 18544): the same seven instructions a word, then newlib's
+  tail tests the hit word's three bytes in line where the runtime's
+  steps a byte with two taken jumps each, dear behind the V2's two wait
+  states. Testing the bytes in the register instead measured 18 cycles
+  less at 15 bytes on the V2 and 34 bytes more of code, and the loop
+  kept.
 - `strlen` on the M0+ parts, 4 to 5 % less at 4096: both loops reload
   a constant from the literal pool every word (the scans' table), and
   newlib's is unrolled by two, one taken branch every two words
@@ -512,10 +550,18 @@ newlib is ahead, each gap has its cause in the two listings:
 Measured with `nm` on the object at -Os with each family's flags:
 `memcpy` and `memset` with the functions behind them take 534 bytes on
 the M4 and 550 on the M33 (the leaf 166 and 176, its turns 154 and
-160), 556 on the M0+, 566 on the QingKe V2 and 814 to 826 on Hazard3
-and the QingKe V4, whose copy across alignments is three loops of four
-words a turn (516 bytes); `strlen` takes 54 to 74 bytes and `memchr`
-88 to 114. An image links only what it calls.
+160), 556 on the M0+, 506 on the QingKe V2 (its copy across alignments
+198, a word a turn in three loops) and 598 on Hazard3 and 610 on the
+QingKe V4 (the copy across alignments 238, one loop of four words a
+turn with the shift counts in registers; the forward copy 230 and 232
+with its turn of eight words); `strlen` takes 54 to 68 bytes and
+`memchr` 88 to 118. An image links only what it calls. Against the
+full newlib's three functions linked in place of the runtime's, a bench
+image is 92 bytes larger on the Cortex-M0+ (STM32G0B1), the same size
+on the M33, 76 larger on Hazard3, 224 on the QingKe V4B and 132 on the
+V2: the runtime's `strlen` and `memchr` are no larger than newlib's on
+any core, and its `memcpy` is larger by the copy across alignments,
+which newlib has not.
 
 ## Why events need no alignment of their own
 
@@ -577,10 +623,13 @@ the seven.
   project for the integration; the platform suite does both in one
   run.
 - The host compiles what the RISC-V cores with 32 registers run: the
-  block of four loads and four stores and the copy across alignments
-  merging four words a turn. The Thumb block loops are instructions it
-  cannot run, and the other forms of the copy (the M4's and the M33's
-  one leaf, the word a turn of the M0+ and the QingKe V2) are code it
-  does not compile, so on those cores letter t is what proves them. Its
-  lengths reach 150 bytes: two turns of 64 and the blocks, words and
-  bytes after them, at every misalignment of both pointers.
+  co-aligned copy's turn of eight words and the block of four after it,
+  and the copy across alignments merging four words a turn with the
+  shift counts in registers; the alignment directives are the RISC-V
+  assembler's and compile to nothing on the host. The Thumb block loops
+  are instructions it cannot run, and the other forms of the copy (the
+  M4's and the M33's one leaf, the word a turn of the M0+ and the QingKe
+  V2) are code it does not compile, so on those cores letter t is what
+  proves them. Its lengths reach 150 bytes: two turns of 64 and the
+  blocks, words and bytes after them, at every misalignment of both
+  pointers.

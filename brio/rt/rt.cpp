@@ -65,9 +65,11 @@
  * source is read as ALIGNED words, the word that holds its next byte
  * first, and each word stored is merged from two of them by shifts
  * (little-endian: the low word shifted right by 8k bits, the high one
- * left by 32 - 8k, k the source's offset in its word, 1 to 3). There no
- * function here performs a word access at an address that is not a
- * multiple of the word.
+ * left by 32 - 8k, k the source's offset in its word, 1 to 3) - the two
+ * counts in registers on a RISC-V core with 32 registers, one loop for
+ * the three offsets, and constants where the registers are few, one loop
+ * per offset (at rt_merge_words). There no function here performs a word
+ * access at an address that is not a multiple of the word.
  *
  * WHY READING WHOLE WORDS IS SOUND. The merging copy reads the aligned
  * word that holds the source's first byte and, at its end, the one that
@@ -122,8 +124,10 @@
  * the instruction set, under __thumb__: the Thumb-1 subset every Thumb
  * core decodes - low registers, writeback - in instructions that GCC's
  * divided syntax (its inline assembly on ARMv6-M) and unified syntax read
- * alike. A RISC-V core has no such instruction; there a block is four
- * loads and four stores.
+ * alike. A RISC-V core has no such instruction; there a block is loads
+ * and stores - eight words a turn in the co-aligned copy of a core with
+ * 32 registers, then a block of four in line, four a turn everywhere else
+ * (at rt_copy_blocks).
  *
  * THE SHAPE OF THE LOOPS. Every loop that moves data runs to an end
  * pointer with its test at the bottom: one branch a turn. The test that a
@@ -133,6 +137,14 @@
  * and a jump at the bottom, two branches a turn, which on the QingKe V4B
  * cost a 52-byte copy twice the cycles (design/runtime.md has the
  * numbers).
+ *
+ * THE HOT LOOPS ON A WORD BOUNDARY. On the RISC-V cores every loop that
+ * moves words is entered through an alignment directive, so that its
+ * first instruction lies on a word: the QingKe V4 pays a cycle for a
+ * taken branch to a 32-bit instruction at an odd halfword, the QingKe V2
+ * a fetch for every word of code the loop spans, and GCC at -Os aligns no
+ * loop whatever it is told (the measurements and the mechanism at
+ * rt_loop_on_word).
  *
  * THE SELF-CALL TRAP. GCC recognizes a byte loop that copies or fills and
  * replaces it with a call to memcpy or memset - here, a call to the very
@@ -181,20 +193,81 @@ uintptr_t rt_address(const void* p) {
 // A block of the word path: four words.
 constexpr size_t rt_block_bytes = 4u * rt_word_bytes;
 
+// THE HOT LOOPS ON A WORD BOUNDARY (RISC-V). Every loop below that moves
+// words is entered through this: a `.balign 4` directive, so that the
+// loop's first instruction lies on a word. What a core pays without it,
+// by its manual and by letter m of the bench suites: the QingKe V4 pays
+// a cycle for a taken branch to a 32-bit instruction at an odd halfword
+// (the CH32V203's co-aligned copy of 4096 bytes, 3413 cycles with its
+// block loop's first load at an odd halfword against 3156 on a word; the
+// merging copy 6532 against 6279; a loop whose first instruction is a
+// 16-bit one pays nothing), the QingKe V2 pays a fetch, three cycles
+// behind its flash's two wait states, for every word of code the loop
+// spans (the CH32V006's strlen of 4096 bytes, 21610 cycles with its loop
+// spanning six words against 18538 spanning five; its co-aligned copy of
+// 2048 bytes 4598 against 4221), and Hazard3 documents a cycle for a
+// branch to a 32-bit instruction that is not word-aligned (the RP2350
+// datasheet 3.8.7.4), which its branch predictor hides in a loop (3.8.7.10,
+// the two fetch paths stitched when the branch is predicted; measured
+// level either way). GCC at -Os aligns no loop, whatever -falign-loops or
+// the align-loops pragma asks (measured with both: its alignment pass
+// stands down when optimizing for size), so the directive is asked of
+// the assembler, as an asm statement that names the loop's variables as
+// its operands: the register copies GCC makes to enter a loop then come
+// before it, and the loops below advance the caller's pointers first and
+// run on copies of their own, so that nothing is left to copy between the
+// directive and the loop's first instruction - a placement read in the
+// listings of both compilers (the upstream GCC 16.2 and WCH's 15.2) and
+// checked by no tool (design/runtime.md). The linker keeps the alignment
+// through its relaxation. Three arities, because neither RISC-V compiler
+// accepts a parameter pack expanded in an asm's operands; on the other
+// cores the statement is empty (the Thumb blocks are instructions of
+// their own, and the Arm cores are not measured for it).
+template <typename A>
+[[gnu::always_inline]] inline void rt_loop_on_word(A& a) {
+#if defined(__riscv)
+    __asm__ volatile(".balign 4" : "+r"(a));
+#else
+    static_cast<void>(a);
+#endif
+}
+template <typename A, typename B>
+[[gnu::always_inline]] inline void rt_loop_on_word(A& a, B& b) {
+#if defined(__riscv)
+    __asm__ volatile(".balign 4" : "+r"(a), "+r"(b));
+#else
+    static_cast<void>(a);
+    static_cast<void>(b);
+#endif
+}
+template <typename A, typename B, typename C>
+[[gnu::always_inline]] inline void rt_loop_on_word(A& a, B& b, C& c) {
+#if defined(__riscv)
+    __asm__ volatile(".balign 4" : "+r"(a), "+r"(b), "+r"(c));
+#else
+    static_cast<void>(a);
+    static_cast<void>(b);
+    static_cast<void>(c);
+#endif
+}
+
 // The fill from its first word boundary to its end: whole blocks, then
 // words, then bytes - the byte being the word's low one. On a Thumb core
-// what is left after the turns; on another, all of it.
+// what is left after the turns; on another, all of it. The block loop
+// runs on a copy of d, advanced past the blocks first (rt_loop_on_word).
 [[gnu::always_inline]] inline void rt_fill_rest(unsigned char* d, const RtWord w, size_t n) {
     const size_t span = n & ~(rt_block_bytes - 1u);
     if (span != 0u) {
-        unsigned char* const blocks = d + span;
+        unsigned char* dd = d;
+        d += span;
+        rt_loop_on_word(dd);
         do {
-            reinterpret_cast<RtWord*>(d)[0] = w;
-            reinterpret_cast<RtWord*>(d)[1] = w;
-            reinterpret_cast<RtWord*>(d)[2] = w;
-            reinterpret_cast<RtWord*>(d)[3] = w;
-            d += rt_block_bytes;
-        } while (d != blocks);
+            reinterpret_cast<RtWord*>(dd)[0] = w;
+            reinterpret_cast<RtWord*>(dd)[1] = w;
+            reinterpret_cast<RtWord*>(dd)[2] = w;
+            reinterpret_cast<RtWord*>(dd)[3] = w;
+            dd += rt_block_bytes;
+        } while (dd != d);
     }
     n &= rt_block_bytes - 1u;
     if (n >= rt_word_bytes) {
@@ -305,13 +378,65 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
 
 #else
 
-// The whole blocks of n from s to d, both advanced: four loads and four
-// stores a turn.
+// The co-aligned copy's turn: eight words where the registers allow,
+// four on RV32E (the reasons below).
+#if defined(__riscv_e)
+constexpr size_t rt_copy_turn_bytes = rt_block_bytes;
+#else
+constexpr size_t rt_copy_turn_bytes = 2u * rt_block_bytes;
+#endif
+
+// The whole turns of n from s to d, both advanced: loads and stores,
+// rt_copy_turn_bytes a turn, then one block of four in line where the
+// turn is two blocks. Eight words a turn on a RISC-V core with 32
+// registers: with four, the branch a turn put this copy behind newlib's
+// nine words a turn (the CH32V203 at 4096 bytes, 3156 cycles with four a
+// turn, 2649 with eight, newlib 2714; Hazard3 2866, 2485 and 2663), and
+// the block in line keeps a copy of 16 to 31 bytes past the turns out of
+// the word loop (60 bytes: 136 against 142 on the CH32V203, 97 against
+// 103 on Hazard3). Not on RV32E: eight words and the pointers do not fit
+// its sixteen registers (read in the listing, two of the words spilled
+// and reloaded every turn), so the QingKe V2 keeps a block a turn. The
+// loop runs on copies of d and s, advanced past the turns first
+// (rt_loop_on_word).
 [[gnu::always_inline]] inline void rt_copy_blocks(unsigned char*& d, const unsigned char*& s, const size_t n) {
-    const size_t span = n & ~(rt_block_bytes - 1u);
+    const size_t span = n & ~(rt_copy_turn_bytes - 1u);
     if (span != 0u) {
-        unsigned char* const blocks = d + span;
+        unsigned char* dd = d;
+        const unsigned char* ss = s;
+        d += span;
+        s += span;
+        rt_loop_on_word(dd, ss);
         do {
+            const RtWord w0 = reinterpret_cast<const RtWord*>(ss)[0];
+            const RtWord w1 = reinterpret_cast<const RtWord*>(ss)[1];
+            const RtWord w2 = reinterpret_cast<const RtWord*>(ss)[2];
+            const RtWord w3 = reinterpret_cast<const RtWord*>(ss)[3];
+            if constexpr (rt_copy_turn_bytes == 2u * rt_block_bytes) {
+                const RtWord w4 = reinterpret_cast<const RtWord*>(ss)[4];
+                const RtWord w5 = reinterpret_cast<const RtWord*>(ss)[5];
+                const RtWord w6 = reinterpret_cast<const RtWord*>(ss)[6];
+                const RtWord w7 = reinterpret_cast<const RtWord*>(ss)[7];
+                reinterpret_cast<RtWord*>(dd)[0] = w0;
+                reinterpret_cast<RtWord*>(dd)[1] = w1;
+                reinterpret_cast<RtWord*>(dd)[2] = w2;
+                reinterpret_cast<RtWord*>(dd)[3] = w3;
+                reinterpret_cast<RtWord*>(dd)[4] = w4;
+                reinterpret_cast<RtWord*>(dd)[5] = w5;
+                reinterpret_cast<RtWord*>(dd)[6] = w6;
+                reinterpret_cast<RtWord*>(dd)[7] = w7;
+            } else {
+                reinterpret_cast<RtWord*>(dd)[0] = w0;
+                reinterpret_cast<RtWord*>(dd)[1] = w1;
+                reinterpret_cast<RtWord*>(dd)[2] = w2;
+                reinterpret_cast<RtWord*>(dd)[3] = w3;
+            }
+            dd += rt_copy_turn_bytes;
+            ss += rt_copy_turn_bytes;
+        } while (dd != d);
+    }
+    if constexpr (rt_copy_turn_bytes != rt_block_bytes) {
+        if ((n & rt_block_bytes) != 0u) {
             const RtWord w0 = reinterpret_cast<const RtWord*>(s)[0];
             const RtWord w1 = reinterpret_cast<const RtWord*>(s)[1];
             const RtWord w2 = reinterpret_cast<const RtWord*>(s)[2];
@@ -322,7 +447,7 @@ constexpr size_t rt_turn_bytes = 4u * rt_block_bytes;
             reinterpret_cast<RtWord*>(d)[3] = w3;
             d += rt_block_bytes;
             s += rt_block_bytes;
-        } while (d != blocks);
+        }
     }
 }
 
@@ -505,37 +630,47 @@ constexpr size_t rt_shift_min = 16;
 
 // The words of n (four or more) to a word-aligned d out of aligned source
 // words, `lo` the one already read, `from` the next: each word stored is
-// lo >> 8K | hi << (32 - 8K), K the source's offset in its word. The
-// shifts are constants, one instance per offset: with the shifts in
-// registers the loop spills to the stack on the Cortex-M0+ (whose Thumb-1
-// instructions reach eight registers) and on the QingKe V2 (RV32E, sixteen),
-// and a constant shift is no instruction more than a variable one. Thumb-1
-// runs a word a turn (four a turn spill again, measured slower on the
-// STM32G0), and so does RV32E, the QingKe V2 of the CH32V00x parts: there
-// four a turn cost some 300 bytes, which the 15 KB image of the CH32V003
-// does not have to spare, for 10 to 16 per cent at 60 bytes on the
-// CH32V006. The other RISC-V cores run four a turn, then single words.
-template <unsigned K>
-[[gnu::always_inline]] inline void rt_merge_words(unsigned char*& d, const RtWord* from, RtWord lo, size_t n) {
-    constexpr unsigned right = 8u * K;
-    constexpr unsigned left = 32u - right;
+// lo >> right | hi << left, right = 8K and left = 32 - 8K for K the
+// source's offset in its word. Where the registers are few the two counts
+// are constants and the loop has one instance per offset: with the counts
+// in registers the loop spills to the stack on the Cortex-M0+ (whose
+// Thumb-1 instructions reach eight registers) and on the QingKe V2
+// (RV32E, sixteen: read in the listing, a count reloaded from the stack
+// every word), and a constant shift is no instruction more than a
+// variable one. On a RISC-V core with 32 registers the counts are two
+// registers and the loop is one: a shift by a register costs what a shift
+// by an immediate does (the RP2350 datasheet 3.8.7.1 for Hazard3; the
+// QingKe V4 manual gives no cycle table, and the CH32V203 measured 6279
+// cycles for 4096 bytes against 6294 with the constants), and the three
+// instances cost 516 bytes on Hazard3 and the QingKe V4B where the one
+// costs 238. Thumb-1 runs a word a turn (four a turn spill again, measured
+// slower on the STM32G0), and so does RV32E, the QingKe V2 of the CH32V00x
+// parts: there four a turn cost some 300 bytes, which the 15 KB image of
+// the CH32V003 does not have to spare, for 10 to 16 per cent at 60 bytes
+// on the CH32V006. The other RISC-V cores run four a turn, then single
+// words; the block loop runs on a copy of d, advanced past the blocks
+// first (rt_loop_on_word).
+[[gnu::always_inline]] inline void rt_merge_words(unsigned char*& d, const RtWord* from, RtWord lo, size_t n,
+                                                  const unsigned right, const unsigned left) {
 #if !defined(__thumb__) && !defined(__riscv_e)
     const size_t span = n & ~(rt_block_bytes - 1u);
     if (span != 0u) {
-        unsigned char* const blocks = d + span;
+        unsigned char* dd = d;
+        d += span;
+        rt_loop_on_word(dd, from, lo);
         do {
             const RtWord w0 = from[0];
             const RtWord w1 = from[1];
             const RtWord w2 = from[2];
             const RtWord w3 = from[3];
-            reinterpret_cast<RtWord*>(d)[0] = (lo >> right) | (w0 << left);
-            reinterpret_cast<RtWord*>(d)[1] = (w0 >> right) | (w1 << left);
-            reinterpret_cast<RtWord*>(d)[2] = (w1 >> right) | (w2 << left);
-            reinterpret_cast<RtWord*>(d)[3] = (w2 >> right) | (w3 << left);
+            reinterpret_cast<RtWord*>(dd)[0] = (lo >> right) | (w0 << left);
+            reinterpret_cast<RtWord*>(dd)[1] = (w0 >> right) | (w1 << left);
+            reinterpret_cast<RtWord*>(dd)[2] = (w1 >> right) | (w2 << left);
+            reinterpret_cast<RtWord*>(dd)[3] = (w2 >> right) | (w3 << left);
             lo = w3;
             from += 4;
-            d += rt_block_bytes;
-        } while (d != blocks);
+            dd += rt_block_bytes;
+        } while (dd != d);
     }
     n &= rt_block_bytes - 1u;
     if (n < rt_word_bytes) {
@@ -554,19 +689,25 @@ template <unsigned K>
 // The words of n (four or more) from an s that is not word-aligned to a
 // word-aligned d, both advanced. The first read is the aligned word that
 // holds s's first byte, the last the one that holds the last byte these
-// words move (the file's header: why that is sound).
+// words move (the file's header: why that is sound). The shift counts are
+// constants or registers by the core's register count (rt_merge_words).
 [[gnu::always_inline]] inline void rt_copy_words_across(unsigned char*& d, const unsigned char*& s, size_t n) {
     const uintptr_t k = rt_address(s) & rt_word_mask;
     const RtWord* const from = reinterpret_cast<const RtWord*>(s - k);
     const RtWord lo = from[0];
     s += n & ~rt_word_mask;
+#if defined(__thumb__) || defined(__riscv_e)
     if (k == 1u) {
-        rt_merge_words<1>(d, from + 1, lo, n);
+        rt_merge_words(d, from + 1, lo, n, 8u, 24u);
     } else if (k == 2u) {
-        rt_merge_words<2>(d, from + 1, lo, n);
+        rt_merge_words(d, from + 1, lo, n, 16u, 16u);
     } else {
-        rt_merge_words<3>(d, from + 1, lo, n);
+        rt_merge_words(d, from + 1, lo, n, 24u, 8u);
     }
+#else
+    const unsigned right = 8u * static_cast<unsigned>(k);
+    rt_merge_words(d, from + 1, lo, n, right, 32u - right);
+#endif
 }
 
 
@@ -601,20 +742,16 @@ static_assert(rt_shift_min >= rt_word_bytes + rt_word_mask, "a word past the hea
 
 // Forward copy: correct for disjoint ranges and for a destination below
 // an overlapping source. On a word boundary, like rt_copy_across, strlen
-// and memchr: where the C extension packs code at halfwords, a 32-bit
-// instruction across a word costs a fetch, and the QingKe V4B's co-aligned
-// copy of 4096 bytes measured 3412 cycles with its loop at an odd
-// halfword against 3156 on a word. OUT OF LINE, memcpy a frame around its
-// call (two pushes, a call and a return: some 13 cycles on the Cortex-M0+
-// and 6 to 8 on the RISC-V cores, counted in the listings), because the
-// forms that spend less were read and measured worse: inlined into memcpy,
-// which must keep dst for its return, GCC on the M0+ saved eight registers
-// and kept the count on the stack (within a few cycles of this form either
-// way in letter m), and the QingKe V4B's block loop moved to an odd
-// halfword, 3156 to 3410 cycles at 4096 bytes aligned alike; handed dst to
+// and memchr, for the short loops at its start (its word loops are entered
+// through rt_loop_on_word, which says what an odd halfword costs). OUT OF
+// LINE, memcpy a frame around its call (two pushes, a call and a return:
+// some 13 cycles on the Cortex-M0+ and 6 to 8 on the RISC-V cores, counted
+// in the listings), because the forms that spend less were read and
+// measured worse: inlined into memcpy, which must keep dst for its return,
+// GCC on the M0+ saved eight registers and kept the count on the stack
+// (within a few cycles of this form either way in letter m); handed dst to
 // return itself, so that memcpy is a tail call, the M0+ spilled it and
-// made no tail call (GCC makes none on Thumb-1), and the V4B's loop moved
-// again.
+// made no tail call (GCC makes none on Thumb-1).
 [[gnu::noinline, gnu::aligned(4)]] void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
     if (n >= rt_word_bytes && ((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
         while ((rt_address(d) & rt_word_mask) != 0u) {
@@ -773,6 +910,7 @@ size_t rt_strlen(const char* s) {
     const RtWord* w = reinterpret_cast<const RtWord*>(p);
 #if defined(__riscv_zbb)
     RtWord m;
+    rt_loop_on_word(w);
     do {
         m = rt_byte_marks(*w++);
     } while (m == rt_no_zero_marks);
@@ -782,10 +920,24 @@ size_t rt_strlen(const char* s) {
     return static_cast<size_t>(reinterpret_cast<const char*>(w) - s) - rt_word_bytes + rt_lowest_zero(m);
 #else
     RtWord x;
+    rt_loop_on_word(w);
     do {
         x = *w++;
     } while (!rt_has_zero(x));
-    p = reinterpret_cast<const char*>(w - 1);
+#if !defined(__thumb__) || defined(__thumb2__)
+    // The tail starts from w as the loop left it: without this barrier GCC
+    // keeps a copy of w from before the step inside the loop, one
+    // instruction a word (the CH32V203 at 4096 bytes: 9276 cycles against
+    // 8255, newlib's loop of the same seven instructions 8257; the
+    // STM32F446's Cortex-M4 8230 against 7196, the RP2350's M33 8223
+    // against 7193, their loop five instructions where it was six). Not
+    // on Thumb-1: there the copy is the loop's load-multiple's base, and
+    // the barrier turns it into a load and an add, seven instructions
+    // either way; 8 bytes more of layout and the same cycles (measured
+    // on the STM32G0B1, 12383 against 12384 at 4096 bytes).
+    __asm__ volatile("" : "+r"(w));
+#endif
+    p = reinterpret_cast<const char*>(w) - rt_word_bytes;
     while (*p != '\0') {
         ++p;
     }
@@ -828,6 +980,7 @@ void* rt_memchr(const void* s, int c, size_t n) {
         // its two exits, the hit was the fall-through and every turn took
         // two taken branches, 9 cycles a word against 7 (measured).
         RtWord m;
+        rt_loop_on_word(w, pattern);
         for (;;) {
             m = rt_byte_marks(*w ^ pattern);
             if (m != rt_no_zero_marks) {
@@ -840,6 +993,7 @@ void* rt_memchr(const void* s, int c, size_t n) {
         return const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(w) + rt_lowest_zero(m));
     bytes:
 #else
+        rt_loop_on_word(w, pattern);
         do {
             if (rt_has_zero(*w ^ pattern)) {
                 break;
