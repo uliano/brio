@@ -96,13 +96,25 @@
  * aligned words, testing each for a zero byte with the carry trick -
  * (w - 0x01010101) & ~w & 0x80808080, no multiply, which the CH32V003's
  * QingKe V2 has none of - memchr after an exclusive or with its byte
- * replicated across the word, then the bytes of the word that hit. A
- * RISC-V core with the Zbb extension (__riscv_zbb: Hazard3 has it, the
- * QingKe cores have not) tests the word with orc.b instead, which writes
- * every byte of its result as 0xFF where the byte read is not zero and
- * 0x00 where it is: the zero bytes marked exactly in one instruction,
- * the lowest one's position the count of the marks' trailing ones
- * divided by eight (ctz of the complement), no byte loop after the hit.
+ * replicated across the word, then the bytes of the word that hit. Two
+ * cores mark the bytes instead: a RISC-V core with the Zbb extension
+ * (__riscv_zbb: Hazard3 has it, the QingKe cores have not) with orc.b,
+ * which writes every byte of its result as 0xFF where the byte read is
+ * not zero and 0x00 where it is, and the Cortex-M4 and M33
+ * (__ARM_FEATURE_SIMD32) with UADD8 and SEL, which do the same in two.
+ * With the marks the lowest zero byte's position is the count of the
+ * marks' trailing ones divided by eight (ctz of the complement), so no
+ * byte loop follows the hit, and none precedes the words either: the
+ * scan starts at the word that holds its first byte, read whole, with
+ * the bytes before that byte forced to 0xFF. The M4 and the M33 read
+ * their words in pairs at addresses that are multiples of eight (LDRD),
+ * the second word's marks laid over the first's by SEL, one branch for
+ * eight bytes. What a scan with marks reads beyond the bytes asked for
+ * lies within the aligned word, or the aligned pair, that holds the
+ * first byte and the one that holds the last (for memchr, the first and
+ * the words before the bound's own): never across a boundary of eight
+ * bytes, so never into another page or another region of the memory
+ * protection unit.
  *
  * THE BLOCK ON A THUMB CORE. The Cortex-M0+, M4 and M33 move several
  * words in one instruction: a load or store multiple of N registers takes
@@ -171,6 +183,8 @@
 #include <cstring>
 #if defined(__riscv_zbb)
 #include <riscv_bitmanip.h>
+#elif defined(__ARM_FEATURE_SIMD32)
+#include <arm_acle.h>
 #endif
 
 #pragma GCC push_options
@@ -879,12 +893,23 @@ int rt_memcmp(const void* a, const void* b, size_t n) {
     return ((w - RtWord{0x01010101u}) & ~w & RtWord{0x80808080u}) != 0u;
 }
 
-#if defined(__riscv_zbb)
-// THE SCANS WITH THE ZBB EXTENSION (the file's header says what orc.b
-// does). The marks of a word: 0xFF for every byte that is not zero, 0x00
-// for every zero byte; a word with no zero byte marks as all ones.
+#if defined(__riscv_zbb) || defined(__ARM_FEATURE_SIMD32)
+#define RT_MARKS 1
+// THE SCANS WITH MARKS (the file's header: the Zbb extension's orc.b, the
+// DSP extension's UADD8 and SEL). The marks of a word: 0xFF for every
+// byte that is not zero, 0x00 for every zero byte; a word with no zero
+// byte marks as all ones.
 [[gnu::always_inline]] inline RtWord rt_byte_marks(const RtWord w) {
+#if defined(__riscv_zbb)
     return __riscv_orc_b_32(w);
+#else
+    // UADD8 adds 0xFF to every byte and sets that byte's GE flag where
+    // the sum carried, where the byte is not zero; SEL then takes, byte
+    // by byte, 0xFF where the flag is set and the word's own byte, a
+    // zero, where it is not.
+    static_cast<void>(__uadd8(w, ~RtWord{0}));
+    return __sel(~RtWord{0}, w);
+#endif
 }
 
 constexpr RtWord rt_no_zero_marks = ~RtWord{0};
@@ -892,14 +917,94 @@ constexpr RtWord rt_no_zero_marks = ~RtWord{0};
 // The index of the lowest zero byte of a word that has one, from its
 // marks: the complement's trailing zeros are eight per byte below it.
 [[gnu::always_inline]] inline size_t rt_lowest_zero(const RtWord marks) {
-    return static_cast<size_t>(__riscv_ctz_32(~marks)) >> 3;
+    return static_cast<size_t>(__builtin_ctz(~marks)) >> 3;
+}
+
+// A word with the bytes below an address in it forced to 0xFF: a scan
+// with marks starts at the word that holds its first byte, read whole,
+// and the bytes before that byte can hold no zero and match no pattern:
+// the word ORed with the mask of its bytes below the offset, all ones
+// shifted up by the offset's bytes and complemented.
+[[gnu::always_inline]] inline RtWord rt_head_masked(const RtWord w, const size_t offset) {
+    return w | ~(~RtWord{0} << (8u * offset));
 }
 #endif
 
-// The length of a zero-terminated string: bytes up to a word boundary,
-// then aligned words until one holds a zero byte, then its bytes - or,
-// under Zbb, the zero byte's index in the word that hit.
+#if defined(__ARM_FEATURE_SIMD32)
+// THE SCANS BY PAIRS OF WORDS (Cortex-M4, M33). The marks of the second
+// word laid over the first's: SEL takes the first's marks where the
+// second's byte is not zero and the second's byte, a zero, where it is,
+// so the pair marks as all ones exactly when neither word holds a zero -
+// one compare and one branch for eight bytes, which the two words' loads
+// share in one LDRD. The pair is read at an address that is a multiple
+// of eight, so it never crosses a boundary of 32 bytes: the memory
+// protection unit's smallest region, and every page's.
+[[gnu::always_inline]] inline RtWord rt_marks_over(const RtWord first, const RtWord w) {
+    static_cast<void>(__uadd8(w, ~RtWord{0}));
+    return __sel(first, w);
+}
+
+constexpr uintptr_t rt_pair_mask = 2u * rt_word_bytes - 1u;
+
+// A pair with the bytes below an offset in it (0 to 7) forced to 0xFF:
+// the bytes below the offset in its word, as a mask ORed into the word
+// the offset falls in (ORN on these cores); the word below it, if any,
+// whole. GCC makes an IT block of the choice.
+[[gnu::always_inline]] inline void rt_pair_head_masked(RtWord& lo, RtWord& hi, const size_t offset) {
+    const RtWord low_bytes = ~(~RtWord{0} << (8u * (offset & rt_word_mask)));
+    lo |= low_bytes;
+    if ((offset & rt_word_bytes) != 0u) {
+        hi |= low_bytes;
+        lo = ~RtWord{0};
+    }
+}
+#endif
+
+// The length of a zero-terminated string. With marks: the word (the pair
+// on the DSP cores) that holds the first byte, read whole from its
+// boundary with the bytes before the first forced non-zero, then words
+// (pairs) until one holds a zero byte, whose index the marks give.
+// Otherwise: bytes up to a word boundary, then aligned words until one
+// holds a zero byte, then its bytes.
 size_t rt_strlen(const char* s) {
+#if defined(__ARM_FEATURE_SIMD32)
+    const RtWord* w = reinterpret_cast<const RtWord*>(rt_address(s) & ~rt_pair_mask);
+    RtWord lo = w[0];
+    RtWord hi = w[1];
+    rt_pair_head_masked(lo, hi, rt_address(s) & rt_pair_mask);
+    RtWord first = rt_byte_marks(lo);
+    RtWord both = rt_marks_over(first, hi);
+    if (both == rt_no_zero_marks) {
+        do {
+            w += 2;
+            lo = w[0];
+            hi = w[1];
+            first = rt_byte_marks(lo);
+            both = rt_marks_over(first, hi);
+        } while (both == rt_no_zero_marks);
+    }
+    // The pair that hit: the zero in its first word, or in its second,
+    // whose marks the pair's are when the first has none.
+    const char* q = reinterpret_cast<const char*>(w);
+    if (first == rt_no_zero_marks) {
+        q += rt_word_bytes;
+        first = both;
+    }
+    return static_cast<size_t>(q - s) + rt_lowest_zero(first);
+#elif defined(RT_MARKS)
+    const RtWord* w = reinterpret_cast<const RtWord*>(rt_address(s) & ~rt_word_mask);
+    // Written from w, stepped past the word read, for the loop GCC makes
+    // of it: the load, the step, orc.b, the compare; keeping the hit
+    // word's address costs a fifth instruction a word.
+    RtWord m = rt_byte_marks(rt_head_masked(*w++, rt_address(s) & rt_word_mask));
+    if (m == rt_no_zero_marks) {
+        rt_loop_on_word(w);
+        do {
+            m = rt_byte_marks(*w++);
+        } while (m == rt_no_zero_marks);
+    }
+    return static_cast<size_t>(reinterpret_cast<const char*>(w) - s) - rt_word_bytes + rt_lowest_zero(m);
+#else
     const char* p = s;
     while ((rt_address(p) & rt_word_mask) != 0u) {
         if (*p == '\0') {
@@ -908,17 +1013,6 @@ size_t rt_strlen(const char* s) {
         ++p;
     }
     const RtWord* w = reinterpret_cast<const RtWord*>(p);
-#if defined(__riscv_zbb)
-    RtWord m;
-    rt_loop_on_word(w);
-    do {
-        m = rt_byte_marks(*w++);
-    } while (m == rt_no_zero_marks);
-    // Written from w, not from w - 1, for the loop GCC makes of it: four
-    // instructions a word (the load, the step, orc.b, the compare), where
-    // keeping the hit word's address costs a fifth.
-    return static_cast<size_t>(reinterpret_cast<const char*>(w) - s) - rt_word_bytes + rt_lowest_zero(m);
-#else
     RtWord x;
     rt_loop_on_word(w);
     do {
@@ -928,32 +1022,107 @@ size_t rt_strlen(const char* s) {
     // The tail starts from w as the loop left it: without this barrier GCC
     // keeps a copy of w from before the step inside the loop, one
     // instruction a word (the CH32V203 at 4096 bytes: 9276 cycles against
-    // 8255, newlib's loop of the same seven instructions 8257; the
-    // STM32F446's Cortex-M4 8230 against 7196, the RP2350's M33 8223
-    // against 7193, their loop five instructions where it was six). Not
-    // on Thumb-1: there the copy is the loop's load-multiple's base, and
-    // the barrier turns it into a load and an add, seven instructions
-    // either way; 8 bytes more of layout and the same cycles (measured
-    // on the STM32G0B1, 12383 against 12384 at 4096 bytes).
+    // 8255, newlib's loop of the same seven instructions 8257). Not on
+    // Thumb-1: there the copy is the loop's load-multiple's base, and the
+    // barrier turns it into a load and an add, seven instructions either
+    // way; 8 bytes more of layout and the same cycles (measured on the
+    // STM32G0B1, 12383 against 12384 at 4096 bytes).
     __asm__ volatile("" : "+r"(w));
 #endif
     p = reinterpret_cast<const char*>(w) - rt_word_bytes;
     while (*p != '\0') {
         ++p;
     }
-#endif
     return static_cast<size_t>(p - s);
+#endif
 }
 
-// The first byte equal to (unsigned char)c within n bytes, or nothing:
-// bytes up to a word boundary, then aligned words, each xored with the
-// byte replicated, until one holds a zero byte, then the bytes from it to
-// the bound - under Zbb, the zero byte's index in the word that hit,
-// which lies within the bound because the words end where the bound's
-// own word begins.
+// The first byte equal to (unsigned char)c within n bytes, or nothing.
+// With marks: the word (the pair on the DSP cores) that holds the first
+// byte, read whole with the bytes before it forced to no match, then
+// words (pairs) up to the one that holds the bound, each xored with the
+// byte replicated, until one holds a zero byte - whose index the marks
+// give, within the bound because every word scanned lies before the
+// bound's own - or the words run out, then the bytes to the bound.
+// Otherwise: bytes up to a word boundary, then the words, then the bytes
+// of the word that hit, or the bound's.
 void* rt_memchr(const void* s, int c, size_t n) {
     const auto* p = static_cast<const unsigned char*>(s);
     const auto v = static_cast<unsigned char>(c);
+#if defined(__ARM_FEATURE_SIMD32)
+    const unsigned char* const last = p + n;
+    const RtWord* w = reinterpret_cast<const RtWord*>(rt_address(p) & ~rt_pair_mask);
+    const RtWord* const pairs = reinterpret_cast<const RtWord*>(rt_address(last) & ~rt_pair_mask);
+    if (w != pairs) {
+        RtWord pattern = v;
+        pattern |= pattern << 8;
+        pattern |= pattern << 16;
+        RtWord lo = w[0] ^ pattern;
+        RtWord hi = w[1] ^ pattern;
+        rt_pair_head_masked(lo, hi, rt_address(p) & rt_pair_mask);
+        RtWord first = rt_byte_marks(lo);
+        RtWord both = rt_marks_over(first, hi);
+        if (both == rt_no_zero_marks) {
+            // The loop's one exit is the hit; the bound steps out by a
+            // jump (the Zbb loop below says why).
+            for (;;) {
+                w += 2;
+                if (w == pairs) {
+                    p = reinterpret_cast<const unsigned char*>(w);
+                    goto bytes;
+                }
+                lo = w[0] ^ pattern;
+                hi = w[1] ^ pattern;
+                first = rt_byte_marks(lo);
+                both = rt_marks_over(first, hi);
+                if (both != rt_no_zero_marks) {
+                    break;
+                }
+            }
+        }
+        {
+            // The pair that hit: the zero in its first word, or in its
+            // second, whose marks the pair's are when the first has none.
+            const unsigned char* q = reinterpret_cast<const unsigned char*>(w);
+            if (first == rt_no_zero_marks) {
+                q += rt_word_bytes;
+                first = both;
+            }
+            return const_cast<unsigned char*>(q + rt_lowest_zero(first));
+        }
+    bytes:;
+    }
+#elif defined(RT_MARKS)
+    const unsigned char* const last = p + n;
+    const RtWord* w = reinterpret_cast<const RtWord*>(rt_address(p) & ~rt_word_mask);
+    const RtWord* const words = reinterpret_cast<const RtWord*>(rt_address(last) & ~rt_word_mask);
+    if (w != words) {
+        RtWord pattern = v;
+        pattern |= pattern << 8;
+        pattern |= pattern << 16;
+        RtWord m = rt_byte_marks(rt_head_masked(*w ^ pattern, rt_address(p) & rt_word_mask));
+        if (m == rt_no_zero_marks) {
+            // The loop's one exit is the hit; the bound steps out by a
+            // jump. So shaped, GCC lays it out with one taken branch a
+            // word; as a do-while with its two exits, the hit was the
+            // fall-through and every turn took two, 9 cycles a word
+            // against 7 (measured on Hazard3).
+            rt_loop_on_word(w, pattern);
+            for (;;) {
+                if (++w == words) {
+                    p = reinterpret_cast<const unsigned char*>(w);
+                    goto bytes;
+                }
+                m = rt_byte_marks(*w ^ pattern);
+                if (m != rt_no_zero_marks) {
+                    break;
+                }
+            }
+        }
+        return const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(w) + rt_lowest_zero(m));
+    bytes:;
+    }
+#else
     while ((rt_address(p) & rt_word_mask) != 0u) {
         if (n == 0u) {
             return nullptr;
@@ -972,27 +1141,6 @@ void* rt_memchr(const void* s, int c, size_t n) {
         // p is on a word boundary: its words end where last's word begins.
         const RtWord* w = reinterpret_cast<const RtWord*>(p);
         const RtWord* const words = reinterpret_cast<const RtWord*>(rt_address(last) & ~rt_word_mask);
-#if defined(__riscv_zbb)
-        // The loop's one exit is the hit; the bound steps out by a jump.
-        // So shaped, GCC lays it out as the load, the exclusive or,
-        // orc.b, a compare not taken, the step and the branch back: six
-        // instructions and one taken branch a word. As a do-while with
-        // its two exits, the hit was the fall-through and every turn took
-        // two taken branches, 9 cycles a word against 7 (measured).
-        RtWord m;
-        rt_loop_on_word(w, pattern);
-        for (;;) {
-            m = rt_byte_marks(*w ^ pattern);
-            if (m != rt_no_zero_marks) {
-                break;
-            }
-            if (++w == words) {
-                goto bytes;
-            }
-        }
-        return const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(w) + rt_lowest_zero(m));
-    bytes:
-#else
         rt_loop_on_word(w, pattern);
         do {
             if (rt_has_zero(*w ^ pattern)) {
@@ -1000,9 +1148,9 @@ void* rt_memchr(const void* s, int c, size_t n) {
             }
             ++w;
         } while (w != words);
-#endif
         p = reinterpret_cast<const unsigned char*>(w);
     }
+#endif
     for (; p != last; ++p) {
         if (*p == v) {
             return const_cast<unsigned char*>(p);

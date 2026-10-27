@@ -403,26 +403,37 @@ a zero byte exactly when (w - 0x01010101) & ~w & 0x80808080 is not
 zero. It needs no multiply, which the QingKe V2 of the CH32V003 lacks;
 `memchr` first takes an exclusive or with its byte replicated across
 the word (shifts and ORs in the source, a multiply where the compiler
-has one to fold them into). Then the bytes of the word that hit. On a
-RISC-V core with the Zbb extension (Hazard3; the QingKe cores have
-none) the word is tested with `orc.b` instead, which writes every byte
-of its result as 0xFF where the byte read is not zero and 0x00 where it
-is: the zero bytes marked exactly in one instruction, and the lowest
-one's index is the count of the marks' trailing ones divided by eight
-(`ctz` of the complement), so no byte follows the hit. The last word
-read is the one that holds the string's last byte, the argument of the
-copy above. Measured with letter m on strings of bytes above 0x7F in
-SRAM, a word-aligned start and one past a word, `memchr` asked for the
-NUL within 64 bytes or, for the longest, within n + 1:
+has one to fold them into). Then the bytes of the word that hit. Two
+cores mark the bytes instead of testing the word: a RISC-V core with
+the Zbb extension (Hazard3; the QingKe cores have none) with `orc.b`,
+which writes every byte of its result as 0xFF where the byte read is
+not zero and 0x00 where it is, and the Cortex-M4 and M33 with the DSP
+extension's UADD8 and SEL, which do the same in two instructions. With
+the marks the lowest zero byte's index is the count of the marks'
+trailing ones divided by eight (`ctz` of the complement), so no byte
+follows the hit, and none precedes the words: the scan starts at the
+word that holds its first byte, read whole, with the bytes before that
+byte forced to 0xFF (the word ORed with a mask of those bytes). The M4
+and the M33 read their words in pairs at
+addresses that are multiples of eight, the second word's marks laid
+over the first's by SEL, so that one compare and one branch judge eight
+bytes. What a scan with marks reads beyond the bytes asked for lies in
+the aligned word, or pair, that holds the first byte and in the one
+that holds the last - for `memchr`, the first and the words before the
+bound's own - never across a boundary of eight bytes, so never into
+another page or another region of the memory protection unit; the
+argument of the copy above. Measured with letter m on strings of bytes
+above 0x7F in SRAM, a word-aligned start and one past a word, `memchr`
+asked for the NUL within 64 bytes or, for the longest, within n + 1:
 
 | core | `strlen` 15 / 50 / 4096 | `memchr` 15 / 50 / 4096 | loop in the listing, a word |
 |---|---|---|---|
-| Cortex-M4F (STM32F446RE) | 70 to 79 / 126 to 156 / 7196 | 121 to 139 / 211 to 254 / 11316 | five instructions and nine |
-| Cortex-M33 (RP2350) | 64 to 70 / 121 to 144 / 7193 | 105 to 114 / 196 to 226 / 11301 | the same |
+| Cortex-M4F (STM32F446RE) | 64 to 76 / 124 / 6196 | 88 to 103 / 163 / 7744 | a pair of words a turn: two loads, UADD8 and SEL twice, the compare and the branch, eight instructions; `memchr` the two exclusive ors, the step and the bound's compare and branch, thirteen |
+| Cortex-M33 (RP2350) | 66 / 110 / 5676 | 88 / 144 / 7247 | the same |
 | Cortex-M0+ (STM32G0B1RE) | 152 to 185 / 253 to 302 / 12383 | 185 to 204 / 311 to 352 / 15462 | seven and ten, one constant reloaded from the literal pool every word |
 | Cortex-M0+ (SAM C21J18A) | 190 to 207 / 273 to 308 / 10377 | 236 to 279 / 380 to 442 / 17551 | the same |
 | Cortex-M0+ (RP2040) | 129 to 144 / 212 to 245 / 10318 | 161 to 176 / 269 to 307 / 13396 | the same |
-| Hazard3 (RP2350) | 38 to 71 / 74 to 103 / 4122 | 56 to 92 / 119 to 148 / 7199 | four and six, the Zbb form: a load, `orc.b`, a compare, the step; `memchr` adds the exclusive or and the bound's branch |
+| Hazard3 (RP2350) | 40 to 44 / 76 / 4124 | 58 to 65 / 121 / 7205 | four and six, the Zbb form: a load, `orc.b`, a compare, the step; `memchr` adds the exclusive or and the bound's branch |
 | QingKe V4B (CH32V203C8) | 105 to 132 / 171 to 214 / 8255 | 146 to 164 / 232 to 291 / 11329 | seven and nine |
 | QingKe V2 (CH32V006K8) | 193 to 247 / 346 to 418 / 18544 | 267 to 285 / 465 to 531 / 24693 | the same, behind two wait states |
 
@@ -432,16 +443,14 @@ byte on the M4, the M33, Hazard3 and the QingKe V4F (`strlen` the 6 or
 M0+ parts and 18 on the QingKe V2, and of 15 bytes 106 to 354 cycles;
 the word scan is ahead at 15 bytes on every core but in one case,
 `memchr` on the SAM C21 from a start one past a word (279 cycles
-against 256). The spread of each short figure is the start's offset:
-from one past a word the three bytes to the boundary go through the
-byte loop before the words, which on Hazard3 costs 33 cycles at 15
-(71 against 38), 11 a byte, three taken branches in the six
-instructions GCC makes of it; the Zbb form pays no byte after the hit,
-so there the whole spread is the head's. On the STM32F446 newlib's
-`strlen` and `memchr` read eight bytes a load and test four bytes an
-instruction with the DSP extension's UADD8 and SEL: a third to two
-fifths less at 4096 (the table below), from instructions the other
-cores do not have.
+against 256). The spread of each short figure is the start's offset.
+On the cores that test the word, from one past a word the three bytes
+to the boundary go through the byte loop before the words, 9 to 11
+cycles a byte (the QingKe V4B 27 cycles at 15, the M0+ 33, the QingKe
+V2 54): GCC makes six instructions of that loop, three of them taken
+branches. On the cores that mark the bytes the first word is read whole
+and the spread is the mask's, 4 cycles on Hazard3 and up to 15 on the
+M4, whose pair takes a mask of two words.
 
 ### Against the C library's
 
@@ -458,15 +467,17 @@ destination unless the source already is, then runs the same blocks
 with unaligned loads or unaligned stores. Every other core gets the
 portable C `memcpy`: words when the two ends are aligned alike, four a
 turn on the M0+ and nine a turn on RISC-V, and a byte loop otherwise.
-Its scans are C word scans of the runtime's own shape on every core but
-two: the M4's are the DSP assembly above, and Hazard3's are the Zbb
-form, `orc.b` and `ctz`, as the runtime's are there.
+Its scans are C word scans with a byte loop at each end on every core
+but two: the M4's are assembly over UADD8 and SEL, eight bytes a load
+and four pairs a branch, and Hazard3's are the Zbb form, `orc.b` and
+`ctz`, as the runtime's are there; its build for the M33 does not use
+that core's DSP extension.
 
 | core (board) | | `memcpy` aligned alike, 16 / 60 / 4096 | `memcpy` across, 60 / 4096 | `strlen` 15 / 4096 | `memchr` 15 / 4096 |
 |---|---|---|---|---|---|
-| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 70 / 7196 | 121 / 11316 |
+| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 64 / 6196 | 88 / 7744 |
 | | newlib | 38 / 71 / 3059 | 110 to 116 / 5114 to 5176 | 57 / 5552 | 82 / 6709 |
-| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 64 / 7193 | 105 / 11301 |
+| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 66 / 5676 | 88 / 7247 |
 | | newlib | 39 / 73 / 2394 | 94 to 108 / 3421 to 4444 | 62 / 8230 | 103 / 13345 |
 | Cortex-M0+ (STM32G0B1RE) | runtime | 160 / 204 / 2899 | 322 to 367 / 10412 to 10457 | 152 / 12383 | 185 / 15462 |
 | | newlib | 148 / 217 / 5503 | 590 / 32878 | 147 / 11871 | 200 / 21601 |
@@ -474,7 +485,7 @@ form, `orc.b` and `ctz`, as the runtime's are there.
 | | newlib | 201 / 277 / 5558 | 622 / 32910 | 192 / 9874 | 245 / 17566 |
 | Cortex-M0+ (RP2040) | runtime | 127 / 176 / 2869 | 296 to 340 / 10386 to 10430 | 129 / 10318 | 161 / 13396 |
 | | newlib | 128 / 204 / 5483 | 571 / 32859 | 119 / 9801 | 166 / 17487 |
-| Hazard3 (RP2350) | runtime | 58 / 97 / 2485 | 160 to 182 / 5953 to 5986 | 38 / 4122 | 56 / 7199 |
+| Hazard3 (RP2350) | runtime | 58 / 97 / 2485 | 160 to 182 / 5953 to 5986 | 40 / 4124 | 58 / 7205 |
 | | newlib | 111 / 175 / 2663 | 252 to 260 / 14378 to 14386 | 38 / 4122 | 57 / 7203 |
 | QingKe V4B (CH32V203C8) | runtime | 94 / 136 / 2649 | 199 to 222 / 6244 to 6279 | 105 / 8255 | 146 / 11329 |
 | | newlib | 87 / 132 / 2714 | 409 / 24625 | 92 / 8257 | 128 / 12357 |
@@ -492,18 +503,18 @@ RP2040 and the STM32G0 at 4096 (on the SAM C21 the two are level,
 17551 against 17566); and on Hazard3 and the QingKe V4B the
 aligned-alike copy of 4096 bytes, by the turn of eight words where
 newlib's is nine (2485 against 2663, 2649 against 2714), level on the
-QingKe V2 (4200 against 4160), whose turn stays four words; and
-`strlen` on the M33 at 4096 (7193 against 8230), where newlib's word
-loop keeps a copy of its pointer for the tail, one instruction a word,
-and the runtime's does not (an empty asm statement after the loop
-starts the tail from the pointer as the loop left it, on every core
-but the Thumb-1 ones, where the copy is the load-multiple's base and
-the statement changes neither the count nor the cycles). On Hazard3
-the scans are level at every size (`strlen` 38 and 4122 against 38 and
-4122, `memchr` 56 and 7199 against 57 and 7203): the same Zbb loop in
-both, four instructions a word for `strlen` and six for `memchr`, one
-taken branch a word. Where newlib is ahead, each gap has its cause in
-the two listings:
+QingKe V2 (4200 against 4160), whose turn stays four words; and the
+scans on the M33 at 4096 (`strlen` 5676 against 8230, `memchr` 7247
+against 13345), where newlib's are the portable word scans and the
+runtime's the pairs over UADD8 and SEL, the core having the DSP
+extension that newlib's build for it does not use. On Hazard3 the scans
+are level from a word (`strlen` 40 and 4124 against 38 and 4122,
+`memchr` 58 and 7205 against 57 and 7203: the same Zbb loop in both,
+four instructions a word for `strlen` and six for `memchr`, one taken
+branch a word, the runtime's first word masked where newlib's three
+bytes go through a byte loop) and ahead from one past a word (44
+against 56, 65 against 79). Where newlib is ahead, each gap has its
+cause in the two listings:
 
 - The shortest copies on the merging cores, up to 16 cycles (STM32G0
   148 against 160 at 16 bytes, Hazard3 25 against 35 at 1, the QingKe
@@ -543,7 +554,13 @@ the two listings:
   a constant from the literal pool every word (the scans' table), and
   newlib's is unrolled by two, one taken branch every two words
   against the runtime's one a word.
-- The DSP scans on the M4 are the paragraph above.
+- The scans on the M4, 12 and 7 % at 15 bytes (`strlen` 64 against
+  57, `memchr` 88 against 82) and 12 and 15 % at 4096 (6196 against
+  5552, 7744 against 6709): the same UADD8 and SEL over pairs of words
+  in both, newlib's loop unrolled to four pairs with one branch for 32
+  bytes where the runtime's takes one for eight, and newlib's head nine
+  instructions where GCC makes fourteen of the runtime's mask of the
+  first pair.
 
 ### What the functions cost in code
 
@@ -554,14 +571,17 @@ the M4 and 550 on the M33 (the leaf 166 and 176, its turns 154 and
 198, a word a turn in three loops) and 598 on Hazard3 and 610 on the
 QingKe V4 (the copy across alignments 238, one loop of four words a
 turn with the shift counts in registers; the forward copy 230 and 232
-with its turn of eight words); `strlen` takes 54 to 68 bytes and
-`memchr` 88 to 118. An image links only what it calls. Against the
-full newlib's three functions linked in place of the runtime's, a bench
-image is 92 bytes larger on the Cortex-M0+ (STM32G0B1), the same size
-on the M33, 76 larger on Hazard3, 224 on the QingKe V4B and 132 on the
+with its turn of eight words); `strlen` takes 60 to 68 bytes and
+`memchr` 96 to 118 where a word is scanned a turn, 124 and 182 on the
+M4 and 126 and 184 on the M33 (the pairs and the mask of the first).
+An image links only what it calls. Against the full newlib's three
+functions linked in place of the runtime's, a bench image is 92 bytes
+larger on the Cortex-M0+ (STM32G0B1), 96 smaller on the M4, 168 larger
+on the M33, 92 larger on Hazard3, 224 on the QingKe V4B and 132 on the
 V2: the runtime's `strlen` and `memchr` are no larger than newlib's on
-any core, and its `memcpy` is larger by the copy across alignments,
-which newlib has not.
+any core but the M33, where newlib's are the portable word scans (92
+and 146 bytes) and the runtime's the pairs; its `memcpy` is larger by
+the copy across alignments, which newlib has not.
 
 ## Why events need no alignment of their own
 
