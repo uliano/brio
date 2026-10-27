@@ -141,7 +141,9 @@ for every package, and expects every one refused.
   line (below).
 - `memcmp` compares bytes; its callers are rare and short.
 - `strlen` and `memchr` scan bytes up to a word boundary, then aligned
-  words, then the bytes of the word that holds the end (below).
+  words, then the bytes of the word that holds the end - on a RISC-V
+  core with the Zbb extension, the end's index in that word from one
+  instruction (below).
 - `abort` spins forever. A breakpoint instruction would be the other
   choice, but on ARMv6-M a breakpoint with no debugger attached
   escalates to a HardFault and the frame that got there is lost; a
@@ -375,11 +377,17 @@ a zero byte exactly when (w - 0x01010101) & ~w & 0x80808080 is not
 zero. It needs no multiply, which the QingKe V2 of the CH32V003 lacks;
 `memchr` first takes an exclusive or with its byte replicated across
 the word (shifts and ORs in the source, a multiply where the compiler
-has one to fold them into). Then the bytes of the word that hit. The
-last word read is the one that holds the string's last byte, the
-argument of the copy above. Measured with letter m on strings of bytes
-above 0x7F in SRAM, a word-aligned start and one past a word, `memchr`
-asked for the NUL within 64 bytes or, for the longest, within n + 1:
+has one to fold them into). Then the bytes of the word that hit. On a
+RISC-V core with the Zbb extension (Hazard3; the QingKe cores have
+none) the word is tested with `orc.b` instead, which writes every byte
+of its result as 0xFF where the byte read is not zero and 0x00 where it
+is: the zero bytes marked exactly in one instruction, and the lowest
+one's index is the count of the marks' trailing ones divided by eight
+(`ctz` of the complement), so no byte follows the hit. The last word
+read is the one that holds the string's last byte, the argument of the
+copy above. Measured with letter m on strings of bytes above 0x7F in
+SRAM, a word-aligned start and one past a word, `memchr` asked for the
+NUL within 64 bytes or, for the longest, within n + 1:
 
 | core | `strlen` 15 / 50 / 4096 | `memchr` 15 / 50 / 4096 | loop in the listing, a word |
 |---|---|---|---|
@@ -388,7 +396,7 @@ asked for the NUL within 64 bytes or, for the longest, within n + 1:
 | Cortex-M0+ (STM32G0B1RE) | 152 to 185 / 253 to 302 / 12383 | 185 to 204 / 311 to 352 / 15462 | seven and ten, one constant reloaded from the literal pool every word |
 | Cortex-M0+ (SAM C21J18A) | 190 to 207 / 273 to 308 / 10377 | 236 to 279 / 380 to 442 / 17551 | the same |
 | Cortex-M0+ (RP2040) | 129 to 144 / 212 to 245 / 10318 | 161 to 176 / 269 to 307 / 13396 | the same |
-| Hazard3 (RP2350) | 72 to 87 / 128 to 164 / 7198 | 92 to 104 / 165 to 200 / 9250 | seven and eight (the bit-manipulation extension's and-not instruction folds the complement) |
+| Hazard3 (RP2350) | 37 to 70 / 73 to 102 / 4121 | 55 to 91 / 118 to 147 / 7198 | four and six, the Zbb form: a load, `orc.b`, a compare, the step; `memchr` adds the exclusive or and the bound's branch |
 | QingKe V4B (CH32V203C8) | 116 to 137 / 188 to 236 / 9278 | 145 to 163 / 231 to 290 / 11328 | eight and nine |
 | QingKe V4F (CH32V303VC) | 95 to 110 / 173 to 206 / 9269 | 119 to 128 / 212 to 244 / 11319 | the same |
 | QingKe V2 (CH32V006K8) | 223 to 259 / 394 to 481 / 21610 | 276 to 285 / 471 to 540 / 24693 | the same, behind two wait states |
@@ -399,10 +407,16 @@ byte on the M4, the M33, Hazard3 and the QingKe V4F (`strlen` the 6 or
 M0+ parts and 18 on the QingKe V2, and of 15 bytes 106 to 354 cycles;
 the word scan is ahead at 15 bytes on every core but in one case,
 `memchr` on the SAM C21 from a start one past a word (279 cycles
-against 256). On the STM32F446 newlib's `strlen` and `memchr` read
-eight bytes a load and test four bytes an instruction with the DSP
-extension's UADD8 and SEL: a third to two fifths less at 4096 (the
-table below), from instructions the other cores do not have.
+against 256). The spread of each short figure is the start's offset:
+from one past a word the three bytes to the boundary go through the
+byte loop before the words, which on Hazard3 costs 33 cycles at 15
+(70 against 37), 11 a byte, three taken branches in the six
+instructions GCC makes of it; the Zbb form pays no byte after the hit,
+so there the whole spread is the head's. On the STM32F446 newlib's
+`strlen` and `memchr` read eight bytes a load and test four bytes an
+instruction with the DSP extension's UADD8 and SEL: a third to two
+fifths less at 4096 (the table below), from instructions the other
+cores do not have.
 
 ### Against the C library's
 
@@ -420,9 +434,8 @@ with unaligned loads or unaligned stores. Every other core gets the
 portable C `memcpy`: words when the two ends are aligned alike, four a
 turn on the M0+ and nine a turn on RISC-V, and a byte loop otherwise.
 Its scans are C word scans of the runtime's own shape on every core but
-two: the M4's are the DSP assembly above, and Hazard3's use the
-bit-manipulation extension's `orc.b`, which marks a word's zero bytes
-in one instruction.
+two: the M4's are the DSP assembly above, and Hazard3's are the Zbb
+form, `orc.b` and `ctz`, as the runtime's are there.
 
 | core (board) | | `memcpy` aligned alike, 16 / 60 / 4096 | `memcpy` across, 60 / 4096 | `strlen` 15 / 4096 | `memchr` 15 / 4096 |
 |---|---|---|---|---|---|
@@ -436,7 +449,7 @@ in one instruction.
 | | newlib | 201 / 277 / 5558 | 622 / 32910 | 192 / 9874 | 245 / 17566 |
 | Cortex-M0+ (RP2040) | runtime | 127 / 176 / 2869 | 296 to 340 / 10386 to 10430 | 129 / 10318 | 161 / 13396 |
 | | newlib | 128 / 204 / 5483 | 571 / 32859 | 119 / 9801 | 166 / 17487 |
-| Hazard3 (RP2350) | runtime | 61 / 101 / 2868 | 156 to 186 / 5949 to 5990 | 72 / 7198 | 92 / 9250 |
+| Hazard3 (RP2350) | runtime | 61 / 101 / 2868 | 156 to 186 / 5949 to 5990 | 37 / 4121 | 55 / 7198 |
 | | newlib | 111 / 175 / 2663 | 252 to 260 / 14378 to 14386 | 38 / 4122 | 57 / 7203 |
 | QingKe V4B (CH32V203C8) | runtime | 96 / 142 / 3156 | 197 to 236 / 6242 to 6294 | 116 / 9278 | 145 / 11328 |
 | | newlib | 87 / 132 / 2714 | 409 / 24625 | 92 / 8257 | 128 / 12357 |
@@ -451,8 +464,11 @@ load/store pairs a turn, with no load multiple, take 1.9 times the
 runtime's at 4096 aligned alike; `memchr` scans a word a turn where
 the portable one scans bytes, 1.3 to 1.4 times the runtime's on the
 RP2040 and the STM32G0 at 4096 (on the SAM C21 the two are level,
-17551 against 17566). Where newlib is ahead, each gap has its cause in
-the two listings:
+17551 against 17566). On Hazard3 the scans are level at every size
+(`strlen` 37 and 4121 against 38 and 4122, `memchr` 55 and 7198
+against 57 and 7203): the same Zbb loop in both, four instructions a
+word for `strlen` and six for `memchr`, one taken branch a word. Where
+newlib is ahead, each gap has its cause in the two listings:
 
 - The shortest copies on three merging cores, up to 12 cycles (STM32G0
   148 against 160 at 16 bytes, Hazard3 25 against 36 at 1, RP2040 90
@@ -480,14 +496,6 @@ the two listings:
   the M33; across alignments with the destination off a word, where
   newlib stores unaligned words, the leaf is ahead by 23 % on the M33
   (3401 against 4444) and level or ahead elsewhere.
-- The scans on Hazard3, `strlen` 43 % less at 4096 and half at 15
-  bytes (4122 against 7198, 38 against 72), `memchr` 22 % less (7203
-  against 9250): newlib's loop is four instructions, a load, a step,
-  `orc.b` and a compare, against the runtime's seven; the zero byte's
-  position then falls out of a count-trailing-zeros. The runtime's
-  scans are one form for every RISC-V core, and the QingKe cores have
-  no bit-manipulation extension; a form under `__riscv_zbb` for the
-  cores that have one is not written, a gap this measurement opened.
 - `strlen` on the QingKe cores, 11 to 14 % less at 4096 and a fifth to
   a quarter less at 15 bytes (V2 169 against 223): the same seven
   instructions a word, then newlib's tail tests the hit word's three
@@ -506,7 +514,7 @@ Measured with `nm` on the object at -Os with each family's flags:
 the M4 and 550 on the M33 (the leaf 166 and 176, its turns 154 and
 160), 556 on the M0+, 566 on the QingKe V2 and 814 to 826 on Hazard3
 and the QingKe V4, whose copy across alignments is three loops of four
-words a turn (516 bytes); `strlen` takes 56 to 74 bytes and `memchr`
+words a turn (516 bytes); `strlen` takes 54 to 74 bytes and `memchr`
 88 to 114. An image links only what it calls.
 
 ## Why events need no alignment of their own

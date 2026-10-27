@@ -94,7 +94,13 @@
  * aligned words, testing each for a zero byte with the carry trick -
  * (w - 0x01010101) & ~w & 0x80808080, no multiply, which the CH32V003's
  * QingKe V2 has none of - memchr after an exclusive or with its byte
- * replicated across the word, then the bytes of the word that hit.
+ * replicated across the word, then the bytes of the word that hit. A
+ * RISC-V core with the Zbb extension (__riscv_zbb: Hazard3 has it, the
+ * QingKe cores have not) tests the word with orc.b instead, which writes
+ * every byte of its result as 0xFF where the byte read is not zero and
+ * 0x00 where it is: the zero bytes marked exactly in one instruction,
+ * the lowest one's position the count of the marks' trailing ones
+ * divided by eight (ctz of the complement), no byte loop after the hit.
  *
  * THE BLOCK ON A THUMB CORE. The Cortex-M0+, M4 and M33 move several
  * words in one instruction: a load or store multiple of N registers takes
@@ -139,17 +145,21 @@
  * the seven.
  *
  * On the host, test/test_rt/ includes this file with BRIO_RT_HOST_TEST
- * defined: the implementations are compiled and tested as the RISC-V
+ * defined: the implementations are compiled and tested as the QingKe
  * targets compile them, and the C-linkage definitions - which would
  * replace the host C library's own - are left out. The Thumb block loops
- * are instructions the host cannot run; letter t of every platform suite
- * runs the cases on the chip (design/runtime.md, "How it is proven").
+ * and the Zbb scans are instructions the host cannot run; letter t of
+ * every platform suite runs the cases on the chip (design/runtime.md,
+ * "How it is proven").
  */
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#if defined(__riscv_zbb)
+#include <riscv_bitmanip.h>
+#endif
 
 #pragma GCC push_options
 #pragma GCC optimize("no-tree-loop-distribute-patterns")
@@ -732,8 +742,26 @@ int rt_memcmp(const void* a, const void* b, size_t n) {
     return ((w - RtWord{0x01010101u}) & ~w & RtWord{0x80808080u}) != 0u;
 }
 
+#if defined(__riscv_zbb)
+// THE SCANS WITH THE ZBB EXTENSION (the file's header says what orc.b
+// does). The marks of a word: 0xFF for every byte that is not zero, 0x00
+// for every zero byte; a word with no zero byte marks as all ones.
+[[gnu::always_inline]] inline RtWord rt_byte_marks(const RtWord w) {
+    return __riscv_orc_b_32(w);
+}
+
+constexpr RtWord rt_no_zero_marks = ~RtWord{0};
+
+// The index of the lowest zero byte of a word that has one, from its
+// marks: the complement's trailing zeros are eight per byte below it.
+[[gnu::always_inline]] inline size_t rt_lowest_zero(const RtWord marks) {
+    return static_cast<size_t>(__riscv_ctz_32(~marks)) >> 3;
+}
+#endif
+
 // The length of a zero-terminated string: bytes up to a word boundary,
-// then aligned words until one holds a zero byte, then its bytes.
+// then aligned words until one holds a zero byte, then its bytes - or,
+// under Zbb, the zero byte's index in the word that hit.
 size_t rt_strlen(const char* s) {
     const char* p = s;
     while ((rt_address(p) & rt_word_mask) != 0u) {
@@ -743,6 +771,16 @@ size_t rt_strlen(const char* s) {
         ++p;
     }
     const RtWord* w = reinterpret_cast<const RtWord*>(p);
+#if defined(__riscv_zbb)
+    RtWord m;
+    do {
+        m = rt_byte_marks(*w++);
+    } while (m == rt_no_zero_marks);
+    // Written from w, not from w - 1, for the loop GCC makes of it: four
+    // instructions a word (the load, the step, orc.b, the compare), where
+    // keeping the hit word's address costs a fifth.
+    return static_cast<size_t>(reinterpret_cast<const char*>(w) - s) - rt_word_bytes + rt_lowest_zero(m);
+#else
     RtWord x;
     do {
         x = *w++;
@@ -751,13 +789,16 @@ size_t rt_strlen(const char* s) {
     while (*p != '\0') {
         ++p;
     }
+#endif
     return static_cast<size_t>(p - s);
 }
 
 // The first byte equal to (unsigned char)c within n bytes, or nothing:
 // bytes up to a word boundary, then aligned words, each xored with the
 // byte replicated, until one holds a zero byte, then the bytes from it to
-// the bound.
+// the bound - under Zbb, the zero byte's index in the word that hit,
+// which lies within the bound because the words end where the bound's
+// own word begins.
 void* rt_memchr(const void* s, int c, size_t n) {
     const auto* p = static_cast<const unsigned char*>(s);
     const auto v = static_cast<unsigned char>(c);
@@ -779,12 +820,33 @@ void* rt_memchr(const void* s, int c, size_t n) {
         // p is on a word boundary: its words end where last's word begins.
         const RtWord* w = reinterpret_cast<const RtWord*>(p);
         const RtWord* const words = reinterpret_cast<const RtWord*>(rt_address(last) & ~rt_word_mask);
+#if defined(__riscv_zbb)
+        // The loop's one exit is the hit; the bound steps out by a jump.
+        // So shaped, GCC lays it out as the load, the exclusive or,
+        // orc.b, a compare not taken, the step and the branch back: six
+        // instructions and one taken branch a word. As a do-while with
+        // its two exits, the hit was the fall-through and every turn took
+        // two taken branches, 9 cycles a word against 7 (measured).
+        RtWord m;
+        for (;;) {
+            m = rt_byte_marks(*w ^ pattern);
+            if (m != rt_no_zero_marks) {
+                break;
+            }
+            if (++w == words) {
+                goto bytes;
+            }
+        }
+        return const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(w) + rt_lowest_zero(m));
+    bytes:
+#else
         do {
             if (rt_has_zero(*w ^ pattern)) {
                 break;
             }
             ++w;
         } while (w != words);
+#endif
         p = reinterpret_cast<const unsigned char*>(w);
     }
     for (; p != last; ++p) {
