@@ -298,16 +298,21 @@ copied in the form each core's manual allows:
   offset (DDI 0439B 3.3.2; the M33's manual gives no figure, and its
   measured turn is in the table below), and stored as aligned words;
   the head and the tail are a byte and a halfword each, read and written
-  at their own addresses behind a condition apiece, no loop; under
-  64 bytes a block of 16 is four load/store pairs through one data
+  at their own addresses behind a condition apiece, no loop, and the
+  whole head is skipped by one branch when the destination is on a word
+  already, the whole tail when the count has no bits below 16 (a
+  conditional instruction skipped by an IT block still costs its cycle:
+  the two sequences unconditional cost a copy of 16 bytes aligned alike
+  16 cycles of 65 on the STM32F446 and 22 of 64 on the RP2350's M33);
+  under 64 bytes a block of 16 is four load/store pairs through one data
   register, so the leaf's prologue saves three registers and no more;
   from 64 bytes the turns of four loads and a store multiple are a
   function of their own, reached by a tail call that costs the one call
   once. What a short copy pays is that fixed cost: a copy of 60 bytes
-  takes 95 cycles aligned alike and 125 across on the STM32F446, where a
-  copy that asked whether its ends were aligned alike, with its head a
-  byte loop and its two paths, took 120 and 165 to 182. Merging aligned
-  words by shifts measured slower at every length on both cores.
+  takes 91 cycles aligned alike and 121 to 128 across on the STM32F446,
+  where a copy that asked whether its ends were aligned alike, with its
+  head a byte loop and its two paths, took 120 and 165 to 182. Merging
+  aligned words by shifts measured slower at every length on both cores.
 - Everywhere else the source is read as aligned words, the word holding
   its next byte first, and each word stored is merged from two of them
   by shifts. On a RISC-V core with 32 registers the two shift counts
@@ -360,8 +365,8 @@ word:
 
 | core (board, clock) | 60 bytes, aligned alike / across | 4096 bytes, aligned alike / across (x) | the copy across, the turn in the listing |
 |---|---|---|---|
-| Cortex-M4F (STM32F446RE, 180 MHz) | 95 / 125 | 2894 (1.41) / 4940 to 4952 (2.41) | the leaf's turn of 64 bytes, four blocks of four unaligned loads and a store multiple, one branch: 77 cycles across, 45 aligned alike; under 64 bytes a block of four load/store pairs |
-| Cortex-M33 (RP2350, 150 MHz) | 90 / 103 to 105 | 2374 (1.15) / 3395 to 3402 (1.65) | the same instructions: 53 cycles a turn across, 37 aligned alike |
+| Cortex-M4F (STM32F446RE, 180 MHz) | 91 / 121 to 128 | 2878 (1.41) / 4924 to 4955 (2.41) | the leaf's turn of 64 bytes, four blocks of four unaligned loads and a store multiple, one branch: 77 cycles across, 45 aligned alike; under 64 bytes a block of four load/store pairs |
+| Cortex-M33 (RP2350, 150 MHz) | 80 / 95 to 102 | 2356 (1.15) / 3377 to 3401 (1.65) | the same instructions: 53 cycles a turn across, 37 aligned alike |
 | Cortex-M0+ (STM32G0B1RE, 64 MHz, two wait states) | 204 / 322 to 367 | 2899 (1.41) / 10412 to 10457 (5.10) | LDM of one, two shifts and an OR, STM of one, compare, branch: 10 cycles a word |
 | Cortex-M0+ (SAM C21J18A, 48 MHz, two wait states) | 241 / 367 to 425 | 2950 (1.44) / 10457 to 10515 (5.13) | the same: 10 cycles a word |
 | Cortex-M0+ (RP2040, 125 MHz) | 176 / 296 to 340 | 2869 (1.40) / 10386 to 10430 (5.09) | the same: 10 cycles a word |
@@ -475,9 +480,9 @@ that core's DSP extension.
 
 | core (board) | | `memcpy` aligned alike, 16 / 60 / 4096 | `memcpy` across, 60 / 4096 | `strlen` 15 / 4096 | `memchr` 15 / 4096 |
 |---|---|---|---|---|---|
-| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 64 / 6196 | 88 / 7744 |
+| Cortex-M4F (STM32F446RE) | runtime | 49 / 91 / 2878 | 121 to 128 / 4924 to 4955 | 64 / 6196 | 88 / 7744 |
 | | newlib | 38 / 71 / 3059 | 110 to 116 / 5114 to 5176 | 57 / 5552 | 82 / 6709 |
-| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 66 / 5676 | 88 / 7247 |
+| Cortex-M33 (RP2350) | runtime | 42 / 80 / 2356 | 95 to 102 / 3377 to 3401 | 66 / 5676 | 88 / 7247 |
 | | newlib | 39 / 73 / 2394 | 94 to 108 / 3421 to 4444 | 62 / 8230 | 103 / 13345 |
 | Cortex-M0+ (STM32G0B1RE) | runtime | 160 / 204 / 2899 | 322 to 367 / 10412 to 10457 | 152 / 12383 | 185 / 15462 |
 | | newlib | 148 / 217 / 5503 | 590 / 32878 | 147 / 11871 | 200 / 21601 |
@@ -525,23 +530,23 @@ cause in the two listings:
 - The aligned-alike copy of 16 and 60 bytes on the QingKe cores, 4 to
   10 cycles (V4B 87 against 94 and 132 against 136, V2 280 against 290
   at 60, and ahead at 16, 167 against 175): the same wrapper.
-- The aligned-alike copy of 16 to 256 bytes on the M33 and the M4, 17
-  to 40 cycles on the M33 (39 / 73 / 174 against 64 / 90 / 214 at 16 /
-  60 / 256) and 27, 24 and 87 on the M4: newlib's leaf tests the two
-  ends once and its co-aligned path has no head, its tail taking only
-  the blocks the count holds; the runtime's leaf has one path, so its
-  head and tail run on every call, and a conditional instruction
-  skipped by an IT block still costs its cycle: 14 instructions in the
-  head when the destination is already on a word, 13 in the tail when
-  the count is a multiple of 16, two of them taken branches, and the
-  three registers GCC saves around the leaf, 8 cycles more. That
-  accounts for the M33's gap and for the M4's at 16 and 60; the M4's
-  87 at 256 adds the turns' own frame of five registers and a
-  remainder this reading does not split. At 4096 the leaf's store
-  multiples put it ahead on the M4 (2894 against 3059) and level on
-  the M33; across alignments with the destination off a word, where
-  newlib stores unaligned words, the leaf is ahead by 23 % on the M33
-  (3401 against 4444) and level or ahead elsewhere.
+- The aligned-alike copy of 16 to 256 bytes on the M4, 11, 20 and 71
+  cycles (38 / 71 / 167 against 49 / 91 / 238 at 16 / 60 / 256; on the
+  M33 3, 7 and 22, 39 / 73 / 174 against 42 / 80 / 196): newlib's leaf
+  saves no register and its co-aligned path runs straight into its
+  loop; the runtime's saves three around the blocks under 64 bytes (8
+  cycles) and tests the destination's alignment and the count's low
+  bits once each (the head and the tail it skips), and from 64 bytes
+  reaches its turns by a tail call into a second frame of five
+  registers, four taken branches in all where newlib's path has none
+  until its loop's end. On the STM32F446 each of those is a fetch from
+  the flash behind its accelerator, which is what the M4 pays over the
+  M33 for the same instructions; the M4's 71 at 256 is not split
+  further. At 4096 the leaf's store multiples put it ahead on the M4
+  (2878 against 3059) and level on the M33; across alignments with the
+  destination off a word, where newlib stores unaligned words, the leaf
+  is ahead by 23 % on the M33 (3401 against 4444) and level or ahead
+  elsewhere.
 - `strlen` on the QingKe cores at 15 bytes, 12 to 14 % (V4B 92 against
   105, V2 169 against 193; level at 4096, 8257 against 8255 and 18541
   against 18544): the same seven instructions a word, then newlib's

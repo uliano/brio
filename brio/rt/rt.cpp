@@ -44,13 +44,15 @@
  * the source at whatever offset it has, with the same instructions at
  * every alignment. What a short copy pays is then one fixed cost, and the
  * leaf keeps it to a prologue that saves three registers: no loop in the
- * head or the tail (a byte and a halfword each, conditional), the blocks
- * under 64 bytes through one data register, and the long turns out of
- * line, their call paid once for 64 bytes or more. Measured on the
- * STM32F446 (letter m of its bench suite), a copy of 60 bytes takes 95
- * cycles with the two ends aligned alike and 125 across, where the copy
- * that asked took 120 and 165 to 182, and newlib's assembly, which saves
- * no register, 110 to 116. Merging aligned words by shifts, the other
+ * head or the tail (a byte and a halfword each, conditional, and the whole
+ * head skipped by one branch when the destination is on a word, the
+ * whole tail when the count has no bits below 16), the blocks under 64
+ * bytes through one data register, and the long turns out of line, their
+ * call paid once for 64 bytes or more. Measured on the STM32F446 (letter
+ * m of its bench suite), a copy of 60 bytes takes 91 cycles with the two
+ * ends aligned alike and 121 to 128 across, where the copy that asked
+ * took 120 and 165 to 182, and newlib's assembly, which saves no
+ * register, 71 and 110 to 116. Merging aligned words by shifts, the other
  * cores' form, measured slower on both cores at every length.
  *
  * THE COPY ACROSS ALIGNMENTS BY MERGING, everywhere else, where an
@@ -538,18 +540,20 @@ using RtHalfUnaligned = uint16_t __attribute__((__may_alias__, __aligned__(1)));
             : "r3", "cc", "memory");
         n += rt_block_bytes;
     }
-    if ((n & 8u) != 0u) {
-        reinterpret_cast<RtWord*>(d)[0] = reinterpret_cast<const RtWordUnaligned*>(s)[0];
-        reinterpret_cast<RtWord*>(d)[1] = reinterpret_cast<const RtWordUnaligned*>(s)[1];
-        d += 8;
-        s += 8;
+    if ((n & (rt_block_bytes - 1u)) != 0u) {
+        if ((n & 8u) != 0u) {
+            reinterpret_cast<RtWord*>(d)[0] = reinterpret_cast<const RtWordUnaligned*>(s)[0];
+            reinterpret_cast<RtWord*>(d)[1] = reinterpret_cast<const RtWordUnaligned*>(s)[1];
+            d += 8;
+            s += 8;
+        }
+        if ((n & 4u) != 0u) {
+            *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWordUnaligned*>(s);
+            d += 4;
+            s += 4;
+        }
+        rt_copy_tail(d, s, n);
     }
-    if ((n & 4u) != 0u) {
-        *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWordUnaligned*>(s);
-        d += 4;
-        s += 4;
-    }
-    rt_copy_tail(d, s, n);
 }
 
 // A copy of 64 bytes or more past the head, out of line: turns of four
@@ -601,23 +605,30 @@ using RtHalfUnaligned = uint16_t __attribute__((__may_alias__, __aligned__(1)));
 
 // The copy, inline in memcpy: a copy under four bytes is its tail; one of
 // four or more brings the destination to a word boundary by a byte and a
-// halfword, then takes the turns or the rest. The head's two conditions
-// and the tail's halfword compile to IT blocks, the tail's byte to a short
-// branch (read in the listing).
+// halfword, then takes the turns or the rest. The head is behind one
+// branch, taken when the destination is on a word already, and so is the
+// rest's tail when the count has no bits below 16: a conditional
+// instruction skipped by an IT block still costs its cycle, and the two
+// unconditional sequences cost a copy of 16 bytes aligned alike 16 cycles
+// of 65 on the STM32F446, 22 of 64 on the RP2350's M33 (measured). Inside,
+// the head's two conditions and the tail's halfword compile to IT blocks,
+// the tail's byte to a short branch (read in the listing).
 [[gnu::always_inline]] inline void* rt_memcpy(void* const dst, const void* const src, size_t n) {
     auto* d = static_cast<unsigned char*>(dst);
     const auto* s = static_cast<const unsigned char*>(src);
     if (n >= rt_word_bytes) {
         const size_t head = (0u - rt_address(d)) & rt_word_mask;
-        if ((head & 1u) != 0u) {
-            *d++ = *s++;
+        if (head != 0u) {
+            if ((head & 1u) != 0u) {
+                *d++ = *s++;
+            }
+            if ((head & 2u) != 0u) {
+                *reinterpret_cast<RtHalfUnaligned*>(d) = *reinterpret_cast<const RtHalfUnaligned*>(s);
+                d += 2;
+                s += 2;
+            }
+            n -= head;
         }
-        if ((head & 2u) != 0u) {
-            *reinterpret_cast<RtHalfUnaligned*>(d) = *reinterpret_cast<const RtHalfUnaligned*>(s);
-            d += 2;
-            s += 2;
-        }
-        n -= head;
         if (n >= rt_turn_bytes) {
             return rt_copy_turns(d, s, n, dst);
         }
