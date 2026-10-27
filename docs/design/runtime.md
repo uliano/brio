@@ -399,13 +399,105 @@ byte on the M4, the M33, Hazard3 and the QingKe V4F (`strlen` the 6 or
 M0+ parts and 18 on the QingKe V2, and of 15 bytes 106 to 354 cycles;
 the word scan is ahead at 15 bytes on every core but in one case,
 `memchr` on the SAM C21 from a start one past a word (279 cycles
-against 256). On the STM32F446 newlib 4.6.0's `strlen` and `memchr`,
-which read eight bytes a load and test four bytes an instruction with
-the DSP extension's UADD8 and SEL, take 57 to 78 and 82 to 147 cycles
-for 15 bytes and 5552 and 6709 for 4096: a third to two fifths less at
-4096, from instructions the other cores do not have; at 15 bytes from a
-start one past a word its `memchr` is 8 cycles dearer and its `strlen`
-15 cheaper.
+against 256). On the STM32F446 newlib's `strlen` and `memchr` read
+eight bytes a load and test four bytes an instruction with the DSP
+extension's UADD8 and SEL: a third to two fifths less at 4096 (the
+table below), from instructions the other cores do not have.
+
+### Against the C library's
+
+The reference the seven functions are judged against is the full
+newlib each toolchain ships (4.6.0 for the Arm cores and Hazard3, WCH's
+4.5.0 for the QingKe cores), measured with letter m on the same board
+and clock as the tables above: newlib's `memcpy`, `strlen` and `memchr`
+linked into the suite's image in place of the runtime's three. Its
+`memcpy` has two forms. The Thumb-2 cores (the M4, the M33) get an
+assembly leaf, `memcpy-armv7m.S`: a test of the two ends once, a
+co-aligned path with no head whose 64, 16 and 4-byte blocks are taken
+on the count's borrow, and a path across alignments that aligns the
+destination unless the source already is, then runs the same blocks
+with unaligned loads or unaligned stores. Every other core gets the
+portable C `memcpy`: words when the two ends are aligned alike, four a
+turn on the M0+ and nine a turn on RISC-V, and a byte loop otherwise.
+Its scans are C word scans of the runtime's own shape on every core but
+two: the M4's are the DSP assembly above, and Hazard3's use the
+bit-manipulation extension's `orc.b`, which marks a word's zero bytes
+in one instruction.
+
+| core (board) | | `memcpy` aligned alike, 16 / 60 / 4096 | `memcpy` across, 60 / 4096 | `strlen` 15 / 4096 | `memchr` 15 / 4096 |
+|---|---|---|---|---|---|
+| Cortex-M4F (STM32F446RE) | runtime | 65 / 95 / 2894 | 125 / 4940 to 4952 | 83 / 8230 | 121 / 11316 |
+| | newlib | 38 / 71 / 3059 | 110 to 116 / 5114 to 5176 | 57 / 5552 | 82 / 6709 |
+| Cortex-M33 (RP2350) | runtime | 64 / 90 / 2374 | 103 to 105 / 3395 to 3402 | 73 / 8223 | 105 / 11301 |
+| | newlib | 39 / 73 / 2394 | 94 to 108 / 3421 to 4444 | 62 / 8230 | 103 / 13345 |
+| Cortex-M0+ (STM32G0B1RE) | runtime | 160 / 204 / 2899 | 322 to 367 / 10412 to 10457 | 152 / 12383 | 185 / 15462 |
+| | newlib | 148 / 217 / 5503 | 590 / 32878 | 147 / 11871 | 200 / 21601 |
+| Cortex-M0+ (SAM C21J18A) | runtime | 200 / 241 / 2950 | 367 to 425 / 10457 to 10515 | 190 / 10377 | 236 / 17551 |
+| | newlib | 201 / 277 / 5558 | 622 / 32910 | 192 / 9874 | 245 / 17566 |
+| Cortex-M0+ (RP2040) | runtime | 127 / 176 / 2869 | 296 to 340 / 10386 to 10430 | 129 / 10318 | 161 / 13396 |
+| | newlib | 128 / 204 / 5483 | 571 / 32859 | 119 / 9801 | 166 / 17487 |
+| Hazard3 (RP2350) | runtime | 61 / 101 / 2868 | 156 to 186 / 5949 to 5990 | 72 / 7198 | 92 / 9250 |
+| | newlib | 111 / 175 / 2663 | 252 to 260 / 14378 to 14386 | 38 / 4122 | 57 / 7203 |
+| QingKe V4B (CH32V203C8) | runtime | 96 / 142 / 3156 | 197 to 236 / 6242 to 6294 | 116 / 9278 | 145 / 11328 |
+| | newlib | 87 / 132 / 2714 | 409 / 24625 | 92 / 8257 | 128 / 12357 |
+| QingKe V2 (CH32V006K8), 2048 for 4096 | runtime | 184 / 307 / 4598 | 532 to 595 / 12460 to 12523 | 223 / 21610 | 276 / 24693 |
+| | newlib | 175 / 280 / 4160 | 988 / 30808 | 169 / 18541 | 252 / 27759 |
+
+Where the runtime is ahead, it is by the shape it was written for: the
+copy across alignments, where the portable `memcpy` moves bytes, takes
+2.4 (Hazard3) to 3.9 (QingKe V4B) times the runtime's cycles at 4096
+and 1.4 to 2.1 times at 60 on every merging core; the M0+'s four
+load/store pairs a turn, with no load multiple, take 1.9 times the
+runtime's at 4096 aligned alike; `memchr` scans a word a turn where
+the portable one scans bytes, 1.3 to 1.4 times the runtime's on the
+RP2040 and the STM32G0 at 4096 (on the SAM C21 the two are level,
+17551 against 17566). Where newlib is ahead, each gap has its cause in
+the two listings:
+
+- The shortest copies on three merging cores, up to 12 cycles (STM32G0
+  148 against 160 at 16 bytes, Hazard3 25 against 36 at 1, RP2040 90
+  against 95 at 1; the SAM C21 level): the wrapper's call to the copy
+  out of line, the cost the merging cores pay for the frame that keeps
+  their loop in registers ("The copy across alignments").
+- The aligned-alike copy on the QingKe cores at every size, 5 to 17 %
+  (V4B 2714 against 3156 at 4096): nine words a turn against four, one
+  compare and branch per 36 bytes instead of 16, and the wrapper
+  below 64.
+- The aligned-alike copy of 16 to 256 bytes on the M33 and the M4, 17
+  to 40 cycles on the M33 (39 / 73 / 174 against 64 / 90 / 214 at 16 /
+  60 / 256) and 27, 24 and 87 on the M4: newlib's leaf tests the two
+  ends once and its co-aligned path has no head, its tail taking only
+  the blocks the count holds; the runtime's leaf has one path, so its
+  head and tail run on every call, and a conditional instruction
+  skipped by an IT block still costs its cycle: 14 instructions in the
+  head when the destination is already on a word, 13 in the tail when
+  the count is a multiple of 16, two of them taken branches, and the
+  three registers GCC saves around the leaf, 8 cycles more. That
+  accounts for the M33's gap and for the M4's at 16 and 60; the M4's
+  87 at 256 adds the turns' own frame of five registers and a
+  remainder this reading does not split. At 4096 the leaf's store
+  multiples put it ahead on the M4 (2894 against 3059) and level on
+  the M33; across alignments with the destination off a word, where
+  newlib stores unaligned words, the leaf is ahead by 23 % on the M33
+  (3401 against 4444) and level or ahead elsewhere.
+- The scans on Hazard3, `strlen` 43 % less at 4096 and half at 15
+  bytes (4122 against 7198, 38 against 72), `memchr` 22 % less (7203
+  against 9250): newlib's loop is four instructions, a load, a step,
+  `orc.b` and a compare, against the runtime's seven; the zero byte's
+  position then falls out of a count-trailing-zeros. The runtime's
+  scans are one form for every RISC-V core, and the QingKe cores have
+  no bit-manipulation extension; a form under `__riscv_zbb` for the
+  cores that have one is not written, a gap this measurement opened.
+- `strlen` on the QingKe cores, 11 to 14 % less at 4096 and a fifth to
+  a quarter less at 15 bytes (V2 169 against 223): the same seven
+  instructions a word, then newlib's tail tests the hit word's three
+  bytes in line where the runtime's steps a byte with two taken jumps
+  each, dear behind the V2's two wait states.
+- `strlen` on the M0+ parts, 4 to 5 % less at 4096: both loops reload
+  a constant from the literal pool every word (the scans' table), and
+  newlib's is unrolled by two, one taken branch every two words
+  against the runtime's one a word.
+- The DSP scans on the M4 are the paragraph above.
 
 ### What the functions cost in code
 
