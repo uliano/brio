@@ -52,7 +52,9 @@
  * and a return, and in a flash behind wait states each taken branch is a
  * fetch the core waits for: measured on the CH32X035 behind the SPI
  * pump's vector, 300.5 cycles a frame with the flash instance out of line
- * against 268.5 inline (docs/ch32x035/spi.md).
+ * against 268.5 inline, in one image whose vectors were not aligned to
+ * four (docs/ch32x035/spi.md gives the current image's inline figure,
+ * 256.5).
  *
  * Why `.fast_text.brio` and `noclone`. The instance is a template's, so
  * GCC emits it in a COMDAT group, and refuses one section name for a

@@ -483,7 +483,7 @@ reports. What it measured:
   within its first 16 to 128 bytes (the receive ring full behind the
   main loop, or an overrun) and at 3 Mbaud within its first 21, and the
   echo at 3 Mbaud came back two to eight bytes of eight from run to run;
-  with the port's body placed (`InRam`, 488 bytes for the suite's
+  with the port's body placed (`InRam`, 518 bytes for the suite's
   engined port) and the vector in the flash, whole to 2.4 Mbaud, and at
   3 Mbaud 32 bytes before an overrun. The transport takes one vector
   entry a frame - the hardware prologue's round trip and a receive body
@@ -549,7 +549,7 @@ reports. What it measured:
   idle nothing, and one cycle a block at 3 Mbaud is 73 ppm - and -2 to 3
   cycles a block at 3 Mbaud, USART4's own vector never entered during a
   blast; 129 to 132 cycles of body between its first and last statement
-  (154 at most), 326 bytes of SRAM a port
+  (154 at most), 356 bytes of SRAM a port
   (`.fast_text.brio`), a transfer error's path a call out of it. The
   margin, measured by delaying the suite's vector before the body: 16
   cycles more left the 3 Mbaud blast within the instrument's spread, 24

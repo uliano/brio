@@ -39,7 +39,7 @@
  * granularity: measured, delay_us(100) spends 4871 cycles for 4800 asked
  * on the CH32V006K8U6 at 48 MHz (twenty delay_us(500) take exactly ten
  * ticks; test_ch32_platform letter d), some 40 cycles late on both
- * CH32V203 and CH32V303 bench parts at 144 MHz, and 112 to 148 cycles
+ * CH32V203 and CH32V303 bench parts at 144 MHz, and 108 to 140 cycles
  * late on the CH32X035F8U6 at 48 MHz (docs/ch32vx03/platform.md and
  * docs/ch32x035/platform.md, "Bench findings").
  *

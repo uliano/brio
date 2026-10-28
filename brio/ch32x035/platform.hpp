@@ -31,13 +31,15 @@
  * it open; a count kept by the engines would cost their hot paths a
  * guarded increment for an answer the registers already hold. The USB
  * controllers, the other bus masters of the series, have no driver here.
- * The platform adds `places_fast_text`: the seven linker scripts place
+ * The platform adds `places_fast_text`: the series' section layout
+ * (ch32x035/ld/sections.ld), which every part's image links, places
  * `.fast_text`.
  *
  * Who calls what is QingkePlatform's. A program binds the timebase's
  * interrupt vector itself (systick_handler to Ticker::tick(), with the
  * binding BRIO_CH32_VECTOR, pfic.hpp); the kernel binds no vector, and a
- * program that forgets it never advances time. No verb of this stratum
+ * program that forgets it stops in the crt's spin for unbound vectors at
+ * the first tick after interrupts are enabled. No verb of this stratum
  * sets SLEEPDEEP; a program that does has armed a Stop or a Standby (RM
  * 2.3.3, 2.3.4), and idle() then takes the deep path.
  */
@@ -75,8 +77,9 @@ namespace brio {
 
 template <class TB = Ticker>
 struct Ch32x035Platform : QingkePlatform<Ch32x035Qingke, TB> {
-    /// This family places `.fast_text` in SRAM: the seven linker scripts
-    /// collect it first in .data, which the crt copies before main(), and
+    /// This family places `.fast_text` in SRAM: the series' section layout
+    /// (ch32x035/ld/sections.ld) collects it in .data, after the scheduler
+    /// path where an image places it, which the crt copies before main(), and
     /// the vector table holds absolute addresses, so code there is entered
     /// and called without a veneer (docs/ch32x035/platform.md, "A handler
     /// in SRAM"). A driver of this stratum may therefore be given

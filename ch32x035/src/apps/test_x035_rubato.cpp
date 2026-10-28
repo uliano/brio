@@ -580,7 +580,7 @@ constexpr uint32_t latency_events = 100;
 ///   take() to its return, the stamp's load (25)                       92
 ///                                                                    ---
 ///                                                                    356
-/// (101 instructions, 10 taken transfers; the queue's ring wrapping in
+/// (100 instructions, 10 taken transfers; the queue's ring wrapping in
 /// take() changes the instructions and not the cycles.) On top of it: the
 /// predictor's spread at the path's 14 predicted sites (7 conditional
 /// branches, 4 calls, 3 returns), 56; and at most one tick landing in the
@@ -659,7 +659,7 @@ constexpr uint32_t latency_events = 100;
 ///   load (25)                                                            36
 ///                                                                       ---
 ///                                                                       172
-/// (101 instructions, letter c's flash path with the code after TIM2's
+/// (100 instructions, letter c's flash path with the code after TIM2's
 /// MRET in SRAM.) On top of it: the predictor's spread at the 14 sites,
 /// all in SRAM, 42; and at most one tick landing in the path - its entry
 /// from SRAM code into its handler in the flash (14), its thirteen

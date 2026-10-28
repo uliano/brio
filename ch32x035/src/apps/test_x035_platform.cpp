@@ -1589,8 +1589,8 @@ namespace {
 //     the spreads move in steps of 3: so every row is judged as letter i
 //     judges its own, by an allowance at each predicted site of the window
 //     - the pattern's, the harness's call and return - of 3 in SRAM and
-//     letter i's 4 in the flash. 3 and not the 2 a site the Rubato bounds
-//     allow in SRAM: sixteen not-taken branches, guessed taken, measured a
+//     letter i's 4 in the flash. 3, the allowance the Rubato bounds take
+//     in SRAM too: sixteen not-taken branches, guessed taken, measured a
 //     spread of up to 42 cycles over their window's 18 sites.
 // Every figure is measured twice, with corecfgr as the crt left it and with
 // it cleared (written and restored with interrupts masked, as letter i

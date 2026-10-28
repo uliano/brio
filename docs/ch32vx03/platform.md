@@ -233,8 +233,8 @@ reboots the board three times).
   measurement.
 - **The hardware prologue/epilogue (HPE)** saves sixteen caller-saved
   registers (x1, x5..x7, x10..x17, x28..x31) in one cycle to an
-  internal stack the program cannot see, three levels deep, and pops
-  them on MRET (3.4). This is where the two QingKe cores differ: the V2C
+  internal stack the program cannot see, two levels deep on the V4B and
+  three on the V4F (table 1-1), and pops them on MRET (3.4). This is where the two QingKe cores differ: the V2C
   of the CH32V00x pushes its ten registers to the user stack, so there
   the hardware buys only the fetch of a prologue, while here it buys
   the pushes themselves (measured below: 64 bytes of stack and 10

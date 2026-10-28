@@ -4,8 +4,9 @@
  * What the brio kernel stands on when it runs on a QingKe core: the
  * realization of the kernel's Platform concept (the compiler-checked set
  * of requirements kernel/platform.hpp states), written once for the
- * CH32V00x (the QingKe V2C of the CH32V006, the V2A of the CH32V003,
- * both RV32EC), the CH32V203 and the CH32V303 (the V4B, RV32IMAC, and the
+ * CH32V00x (the QingKe V2C of the CH32V006, RV32EC with the multiply-only
+ * Zmmul, and the V2A of the CH32V003, RV32EC), the CH32V203 and the
+ * CH32V303 (the V4B, RV32IMAC, and the
  * V4F, the same core with a single-precision floating-point unit,
  * RV32IMAFC) and the CH32X035 (the V4C, RV32IMAC: the V4B with a faster
  * divider and the physical memory protection unit, the reference
@@ -104,9 +105,12 @@
  * sleep.hpp (the CH32V00x's and the CH32V203's); which reset happened,
  * the fault body and the watchdogs are their reset.hpp.
  *
- * Include-order contract: the family's device header, pfic.hpp and
- * ticker.hpp first (and on a V4 family its schedule.hpp), then the chip
- * traits, which the family's platform.hpp defines before this file.
+ * Include-order contract: the family's device header first, without
+ * which qingke/pfic.hpp and qingke/ticker.hpp, included below, refuse to
+ * compile. The chip traits need not be defined before this file: they are
+ * QingkePlatform's first template argument, checked by the QingkeChip
+ * concept where the family's platform type instantiates it; the family's
+ * platform.hpp defines them beside its include of this file.
  */
 
 #pragma once

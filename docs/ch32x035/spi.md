@@ -455,7 +455,7 @@ the frames within 10 per cent of it and the fixed costs within 30:
   the hardware prologue's entry and exit and its vector's own work in the
   flash, 256.5 inline in that vector.
 - **What `InRam` costs in SRAM** (the map, `.fast_text.brio`): the pump's
-  entry 302 bytes (332 with engines bound), the polled loops 798 bytes a
+  entry 302 bytes (332 with engines bound), the polled loops 998 bytes a
   host type - eight instances, the two widths with and without an out
   buffer and the two loops, of 76 to 198 bytes each; under `InFlash`,
   nothing. Two host types on one instance (this suite's plain and
