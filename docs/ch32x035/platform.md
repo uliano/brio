@@ -173,8 +173,11 @@ question.
   CH32V203's V4B the five bits bought two cycles in 36811 of a timed
   loop; on the CH32V303's V4F that loop ran slightly slower with them
   ([../ch32vx03/platform.md](../ch32vx03/platform.md)); on this core a
-  loop of the platform suite's own runs 7.3 to 7.4 per cent slower with
-  them than with the register cleared (measured).
+  loop of the platform suite's own runs 7.3 per cent slower with them
+  than with the register cleared, while a taken branch or a jump
+  through a register that shares its fetch word with a load or a store
+  before it costs 4 cycles less with them, the predictor they turn on
+  sending the fetch ahead (both measured).
 - **A reset request is PFIC_CFGR.SYSRST written with KEY3 (0xBEEF in
   the high half), or PFIC_SCTLR.SYSRST with no key** (RM 3.2.2,
   7.5.2.10, 7.5.2.38). And with PFIC_SCTLR.RSTEN at its reset value of
@@ -280,9 +283,8 @@ CH32V203's and the CH32V303's
 the f-register shape left out and the request's `fence.i` dropped: on
 the V4B three instructions retire behind the pending store unless the
 fence closes them, while this core takes the trap at the instruction
-after the store, with or without a fence (measured with hand-placed
-assembly reading mepc in the handler), so here the request is the
-store alone.
+after the store (the platform suite's letter `i` reads mepc in the
+handler), so here the request is the store alone.
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -368,7 +370,7 @@ int main() {
 
 ## Bench findings
 
-The reference suite is `test_x035_platform` (51 verdicts in `z`, nothing
+The reference suite is `test_x035_platform` (105 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, in the image built with the hardware prologue, the board's
@@ -418,14 +420,14 @@ the consume was measured before and after. What it measured:
   `idle()` that the latch returns at once costs 23 cycles, two counter
   reads included (24). At 48 MHz, two wait states in the fetch, the same
   walk loses none and none is late in the four cases; the edge reaches
-  the handler in 43 cycles and the loop in 167 to 170, and an `idle()` the
-  latch returns at once costs 76 to 84 - the higher figures the image
-  whose idle path asks the DMA controller's gate first.
+  the handler in 43 cycles and the loop in 167, and an `idle()` the
+  latch returns at once costs 92, two counter reads included, its idle
+  path asking the DMA controller's gate first.
 - **One turn per wake** (letter `k`). A Tenuto pack of three quiet AOs,
   two holding a periodic time event that does not fire in the window,
   turned as `Tenuto::run()` turns it over 100 ticks with the tick the
   only interrupt: 101 kernel turns, in two runs at 8 MHz and two at 48
-  (a quiet turn 372 to 388 cycles there, 126 at 8 MHz). Without the consume
+  (a quiet turn 416 cycles at 48 MHz). Without the consume
   the same pack turned 200 times, in two runs: the waking edge left
   latched ended every second `idle()` at once. That wasted turn costs
   126 cycles, two counter reads included; the consume costs three
@@ -440,9 +442,10 @@ the consume was measured before and after. What it measured:
   CNT-delta accumulation `delay_us` rests on came to 9599716 and 9599852
   cycles against 9600000: 284 and 148 cycles short, 30 and 15 ppm.
 - **`delay_us` is late by a constant, never early** (letter `d`). 100 us
-  spent 4924 and 4912 HCLK cycles for 4800 asked, and 900 us - the
-  longest wait that still fits a tick period - 43312 and 43316 for 43200:
-  112 to 124 cycles late at both lengths, not a proportional error.
+  spent 4912 to 4944 HCLK cycles for 4800 asked over twelve runs, and
+  900 us - the longest wait that still fits a tick period - 43320 to
+  43348 for 43200: 112 to 148 cycles late at both lengths, not a
+  proportional error.
   Twenty waits of 500 us took exactly 10 ticks; 1000 us, 50 ms and the
   65536 us gate are refused, and a zero wait is served.
 - **The interrupt round trip, in HCLK cycles** (letter `e`): the
@@ -453,7 +456,7 @@ the consume was measured before and after. What it measured:
   exit 34 with one iteration of the raiser's spin in it, the whole trip
   96 to 100 - the image built with the hardware prologue
   (`CH32X035_HPE=ON`, the default). In an image built with
-  `CH32X035_HPE=OFF` (its `z` green, 51 verdicts, ten runs of the letter):
+  `CH32X035_HPE=OFF` (its `z` green, 105 verdicts; ten runs of the letter):
   entry 42, body 28, exit 50, the trip 120 to 128 - the prologue buys 24
   to 28 cycles on the minimal handler, the sixteen registers saved and
   restored by gcc's own code instead. The user stack the image never
@@ -479,12 +482,15 @@ the consume was measured before and after. What it measured:
   factory calibration and the trim's centre, which the desk's crystal
   measured too ([clock.md](clock.md)); the arrival jitter of the probe's
   bridge is a millisecond or so, some 200 ppm of a 5 s bracket.
-- **corecfgr's 0x1F makes this core slower** (letter `f`). The crt left
-  0x1F in the register; 2000 iterations of a loop with a load and a
-  data-dependent branch over a 64-byte pseudo-random table took 24204
-  and 24224 HCLK cycles with it, and 22548 in both runs with the
-  register cleared - 7.3 and 7.4 per cent more with the vendor's bits -
-  the register reading back zero for the cleared loop and 0x1F after it.
+- **corecfgr's 0x1F makes a data-dependent loop slower** (letter
+  `f`). The crt left 0x1F in the register; 2000 iterations of a loop
+  with a load and a data-dependent branch over a 64-byte pseudo-random
+  table took 24192 to 24200 HCLK cycles with it over thirteen runs, and
+  22544 in every run with the register cleared - 7.3 per cent more with
+  the vendor's bits - the register reading back zero for the cleared
+  loop and 0x1F after it. The figure moves with the loop's address
+  modulo four: at another placement of the same loop the gap read 25
+  per cent (23716 against 18924).
   The crt writes the value WCH's own startup file writes.
 - **What the crt left in the core** (letter `h`): INTSYSCR = 0x1, the
   hardware stack on and nesting off; mtvec = 0x3, the table at the
@@ -498,10 +504,75 @@ the consume was measured before and after. What it measured:
   and not as the privileged specification does, whose MRET drops MPP to
   the least-privileged mode the core implements - user mode here, by
   misa.
-- **The RAM ledger answers.** `stack_untouched()` read 19556 bytes never
+- **The RAM ledger answers.** `stack_untouched()` read 18460 bytes never
   touched after this suite's whole `z`, 19616 after the clock suite's
   and the pin suite's, and 19416 after the USART suite's, of the part's
   20 KB.
+
+**The fetch and trap cost model** - letter `i`, 54 verdicts, ten runs of
+the letter alike: the figures `test_x035_rubato`'s bounds are drawn
+with (below), measured on hand-placed assembly timed on the STK's CNTL
+read bare, at 48 MHz from the flash. A fetch figure is a pattern of N
+units timed against the same pattern of 2N, each the least of 32 calls
+made with interrupts masked, so the difference is N units and nothing
+else; a trap figure is the difference of two stamps, one 32-bit load of
+the counter each, the first one word ahead of the instruction that
+raises the trap and the second the handler's first instruction, less
+the stamp's own word - two loads back to back read 4 cycles apart -
+judged in every one of 256 trips, the few a tick landed in dropped. The
+software interrupt is letter `e`'s vector, so for its rows mtvec points
+at a copy of the crt's table, elsewhere in the flash, with that one
+entry replaced; TIM2's capture-compare line, pended by a store and
+timed through both tables, says the table's place costs nothing. The
+figures, in HCLK cycles, with corecfgr as the crt leaves it and again
+with it cleared - each fetch and trap figure judged to the cycle, the
+predictor's rows (the extra a call costs right after the other way's
+training, against its trained cost) against the allowance below:
+
+| figure | 0x1F | cleared |
+|---|---|---|
+| a 32-bit instruction, on a word or half a word off | 4 | 4 |
+| a compressed instruction | 2 | 2 |
+| a taken `c.j`, `j` or conditional branch, its target in one word | 8 | 8 |
+| a `j` to a 32-bit instruction across two words | 12 | 12 |
+| a conditional branch not taken | 4 | 4 |
+| a call and its return, both targets on a word | 16 | 16 |
+| a store and a taken branch in one fetch word | 8 | 12 |
+| a load and a call through a register in one fetch word, the return included | 16 | 20 |
+| a store pending the software interrupt, to its handler's first instruction | 20 | 20 |
+| a store pending TIM2's line, through the crt's table and through the copy | 20, 20 | 20, 20 |
+| an `ecall`, to its handler's first instruction | 20 | 20 |
+| the `csrsi` that finds the software interrupt pending, to its handler | 20 | 20 |
+| an MRET into code, to its target | 8 | 8 |
+| an MRET into a pending interrupt, to that handler's first instruction | 24 | 24 |
+| one compressed branch on a word, falling through right after a taken training | 8 more | 0 |
+| one 32-bit branch half a word off, the same | 0 or 8 more | 0 |
+| one 32-bit branch on a word, the same | 0 to 4 more | 0 |
+| sixteen 32-bit branches, the same | 12 to 20 more | 0 |
+| sixteen compressed branches, the same | 56 to 64 more | 0 |
+| any of them taken right after a fall-through training; sixteen calls through a register to the other of two leaves | 0 | 0 |
+
+mepc reads the instruction after the store and after the `csrsi`: the
+trap is taken there, and nothing retires behind either. The predictor
+corecfgr's 0x1F turns on costs nothing when it guesses right. A branch
+it guessed taken that falls through costs up to 8 cycles more, one it
+guessed to fall through that is taken nothing, and sixteen in a row cost
+at most 64 more, 4 a branch; and over the 32 timed calls of a row of
+not-taken branches the slowest exceeded the least by up to 44 cycles
+with sixteen branches, 80 with thirty-two. The Rubato bounds allow
+4 cycles at each predicted site of a path, its calls and returns
+counted, and every row here is judged so and within it; the allowance
+holds over a path, not at each site: one wrong guess alone can cost
+8, twice a site's share. With the register cleared no call of a pattern differs from
+another, and every figure is the same but one pairing: a transfer the
+core resolves when it executes - a taken branch, a jump through a
+register - that shares its fetch word with a load or a store before it
+waits 4 cycles more; a direct jump, resolved at its decode, does not,
+and with 0x1F the predictor sends the fetch to the target before the
+transfer executes. In the image built without the hardware prologue
+(`CH32X035_HPE=OFF`, its `z` green with 105 verdicts, five runs of the
+letter) every fetch and trap figure is the same to the cycle: the core's
+push and pop cost a trap nothing measurable.
 
 **The preemptive kernel** - `test_x035_rubato`, 40 verdicts in `z` on
 the CH32X035F8U6 at 48 MHz, ten runs of `z` alike in the image built
@@ -525,8 +596,8 @@ section ends, before the statement after it. INTSYSCR reads 0x3 once
 the nesting is on (0x2 without the prologue): PMTCFG's bit reads back
 zero, as on the CH32V203. Every timing below is within the bound its
 letter derives over the release listing with this core's fetch, which
-the suite's letter c states and which was calibrated with hand-placed
-assembly timed on the STK (not a letter of any suite: the gap list) -
+the suite's letter c states and `test_x035_platform`'s letter `i`
+measures (above) -
 straight-line code a word every 4 cycles, a taken transfer 8 to its
 target (12 to a 32-bit target across two words), a trap's entry 20
 cycles from the instruction that raises it, an MRET into code 8 and
@@ -727,11 +798,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The fetch and trap cost model the Rubato suite's bounds rest on**
-  (a word every 4 cycles, a transfer 8, a trap's entry 20, an MRET 8 or
-  24, the predictor's 4 a wrong guess): calibrated with hand-placed
-  assembly timed on the STK outside every suite; a letter of the
-  platform suite owning those figures would put them in the tree.
 - **Rubato on the other six parts**: the platform, its request and the
   two vector bodies compile for all seven, with and without the hardware
   prologue (the family fixture); the suite is built and run for the

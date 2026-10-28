@@ -53,6 +53,15 @@
 //   h  what the crt left in the core: INTSYSCR's hardware stack as the
 //      build asked and its nesting OFF, mtvec on the table with both mode
 //      bits, mstatus in machine mode, and misa as the core reports it
+//   i  THE FETCH AND TRAP COST MODEL test_x035_rubato's bounds are drawn
+//      with (its letter c), on hand-placed assembly timed on the bare STK:
+//      straight-line code a word every 4 cycles, a taken transfer 8 to a
+//      target in one word and 12 to a 32-bit one across two, a not-taken
+//      branch 4, a trap's entry 20 from the store, the ecall or the unmask
+//      that raises it (taken at the next instruction, mepc read), an MRET
+//      8 into code and 24 into a pending interrupt, and what the branch
+//      predictor's wrong guess costs - each figure judged to the cycle,
+//      with corecfgr as the crt left it and again with it cleared
 //   w  THE IDLE HOOK AGAINST THE TICK'S EDGE, PLACED TO THE CYCLE: with
 //      the STK running as the timebase, its CNTL written so the compare
 //      comes D cycles later, D = 0..599, then the kernel's own shape - a
@@ -880,6 +889,650 @@ void tt_runtime() {
 
 }  // namespace
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// i - the fetch and trap cost model
+// ---------------------------------------------------------------------------
+// THE NUMBERS test_x035_rubato's bounds are drawn with (that suite's letter
+// c states the model, and every bound of it counts a path of its release
+// listing with these figures), each measured here on hand-placed assembly
+// timed on the STK's CNTL read bare, at 48 MHz with the flash at two wait
+// states (RM 20.3.1):
+//   - straight-line code issues a word every 4 cycles: a 32-bit
+//     instruction 4, at either alignment, a compressed one 2;
+//   - a taken transfer issues its target 8 cycles after it when the target
+//     sits in one word (a compressed instruction, or a 32-bit one on a
+//     word), 12 when the target is a 32-bit instruction across two words;
+//     a not-taken conditional branch costs its word, 4; a call and its
+//     return 8 each;
+//   - a trap issues the handler's first instruction 20 cycles after the
+//     instruction that raises it: the store that pends the software
+//     interrupt or a peripheral line, an ecall, the unmask that finds the
+//     software interrupt pending - and is taken at the instruction after
+//     the store or the unmask, so nothing retires behind either
+//     (ch32x035/schedule.hpp's request rests on that);
+//   - an MRET issues its target 8 cycles after it, and the first
+//     instruction of a handler whose line it finds pending (the tail) 24;
+//   - the branch predictor corecfgr's 0x1F turns on: right, it costs
+//     nothing against the figures above; wrong, it costs the cycles this
+//     letter prints - one branch that falls through after being guessed
+//     taken up to 8, one taken after being guessed to fall through
+//     nothing - and the Rubato bounds allow 4 at each predicted site of a
+//     path, calls and returns counted, which is how each row is judged.
+// The same figures are then measured with corecfgr cleared (written and
+// restored with interrupts masked, as letter f does): every one the same
+// but where a transfer the core resolves when it executes - a taken
+// conditional branch, a jump through a register - shares its fetch word
+// with a load or a store before it, which costs 4 more without the
+// predictor (two rows show it, both settings judged). With 0x1F and the
+// guess right, that pairing costs what the model says, which is what the
+// Rubato bounds count.
+//
+// HOW EACH IS READ. A run of N units and a run of 2N units of the same
+// pattern, each the least of 32 timed calls with interrupts masked: the
+// call, the return and the two reads are the same in both, so the
+// difference is N units and nothing else, and it is judged to the cycle.
+// The trap sequences hold the counter's address in a register before the
+// trigger, so a stamp is one 32-bit load: the stamp before the trigger is
+// one word ahead of it, and the stamp in the handler is its first
+// instruction; the ruler row measures that word (two loads back to back)
+// and each trap figure is the stamps' difference less it. Every trip of a
+// trap sequence is judged, not only the least: no predicted site lies in
+// those windows, so nothing may move them. A trip the tick landed in is
+// dropped (the tick count read around it).
+//
+// WHERE THE TRAPS LAND. The ecall and TIM2's capture-compare line (no
+// timer runs: the line is pended by a store, TIM2's clock stays gated)
+// are bound in the crt's table to the handlers below. The software
+// interrupt is letter e's, bound to a C handler; to time it from its first
+// instruction, mtvec is pointed for the measurement at the letter's own
+// table in the flash - the crt's with entry 14 replaced - and put back.
+// TIM2's line timed through both tables says what the table's place
+// costs: nothing.
+//
+// The handlers run only over the letter's own sequences, which keep in
+// registers what the handlers need (a5 the STK, a4 the record, a3 the
+// PFIC's pending banks, a2 and a1 the two lines' bits, a6 the return, a7
+// the tail asked for) and leave the handlers t3 and s2..s5 (saved and
+// restored around each sequence); with the hardware prologue the core
+// saves the caller-saved registers, and without it nothing the handlers
+// clobber is live, so the letter runs in both images.
+//
+// WHERE THE LETTER'S OWN CODE LIES: after every other function of the
+// image. On this core an instruction's cost depends on its address modulo
+// four (docs/ch32x035/platform.md, "A handler in SRAM"), so code added in
+// front of another letter's would move that letter's figures. The linker
+// script lays every `.text` input section first and `.rodata` after them
+// (ch32x035/ld/ch32x035f8.ld), so the letter's functions and its assembly
+// share one section named under `.rodata` with the code flags ("ax"):
+// still code in the flash, behind everything else. main() reaches it
+// through one call, four bytes, which keeps every function after main()
+// at its address modulo four. And what the letter calls leaves the
+// compiler's layout of the others as it was: its verdicts take the bench's
+// one-name overload (Named, below), and no print of it has the argument
+// types of letter f's first print - one that did moved letter f to
+// another place in the image, read in the listing.
+#define COST_PLACED gnu::section(".rodata.cost_letter")
+
+static_assert(static_cast<uint8_t>(Irq::software) == 14u && static_cast<uint8_t>(Irq::tim2_cc) == 51u,
+              "the letter's assembly pends line 14 (IPSR0 bit 14) and line 51 (IPSR1 bit 19)");
+static_assert(static_cast<uint8_t>(Irq::ecall_machine) == 5u && static_cast<uint8_t>(Irq::systick) == 12u &&
+                  static_cast<uint8_t>(Irq::usart2) == 39u && static_cast<uint8_t>(Irq::tim3) == 54u &&
+                  vector_count == 55u,
+              "the letter's table binds these entries where the crt's does");
+static_assert(__builtin_offsetof(StkRegs, CNTL) == 8u && __builtin_offsetof(PficRegs, IPSR) == 0x200u &&
+                  __builtin_offsetof(PficRegs, IPRR) == 0x280u,
+              "the letter's assembly addresses CNTL at 0xE000F008 and the pending banks at 0xE000E200/280");
+
+/// One timed pattern: `count` units after `prefix`, then `suffix` and the
+/// return, a compressed `c.jr ra` - at the same alignment in both lengths
+/// of a pattern, since every unit is a whole number of words.
+#define COST_SEQ(name, prefix, count, unit, suffix)                                   \
+    ".balign 4\n.globl " #name "\n.type " #name ", @function\n" #name ":\n" prefix    \
+    ".rept " #count "\n" unit ".endr\n" suffix ".option rvc\nc.jr ra\n"
+#define COST_PAIR(name, prefix, n, n2, unit, suffix) \
+    COST_SEQ(name##_n, prefix, n, unit, suffix) COST_SEQ(name##_2n, prefix, n2, unit, suffix)
+
+/// A trap sequence's opening: s2..s5 saved, set to the "never stamped"
+/// value, the registers the handlers read loaded, the return label (9:)
+/// in a6. `tail` = 1 asks TIM2's handler to pend the software interrupt.
+#define COST_TRAP_OPEN(name, tail)                                                     \
+    ".balign 4\n.globl " #name "\n.type " #name ", @function\n" #name ":\n.option rvc\n" \
+    "addi sp, sp, -16\nsw s2, 0(sp)\nsw s3, 4(sp)\nsw s4, 8(sp)\nsw s5, 12(sp)\n"       \
+    "li s2, -1\nli s3, -1\nli s4, -1\nli s5, -1\nmv a4, a0\n"                           \
+    "li a5, 0xE000F000\nli a3, 0xE000E200\nlui a2, 0x4\nlui a1, 0x80\nli a7, " #tail     \
+    "\nla a6, 9f\n.balign 4\n.option norvc\n"
+/// Its close: sixteen compressed no-ops the core would run if it took the
+/// trap late (it does not: the handlers record mepc), the return label,
+/// the stamp there, the record written, s2..s5 restored.
+#define COST_TRAP_CLOSE                                                                 \
+    ".option rvc\n.rept 16\nc.nop\n.endr\n.balign 4\n9:\n.option norvc\nlw t2, 8(a5)\n"  \
+    ".option rvc\nsw t0, 0(a4)\nsw s2, 4(a4)\nsw s3, 8(a4)\nsw t2, 12(a4)\nsw s4, 16(a4)\n" \
+    "sw s5, 20(a4)\nlw s2, 0(sp)\nlw s3, 4(sp)\nlw s4, 8(sp)\nlw s5, 12(sp)\n"           \
+    "addi sp, sp, 16\nc.jr ra\n"
+
+__asm__(".pushsection .rodata.cost_letter,\"ax\",@progbits\n"
+        ".option push\n"
+        ".option norelax\n"
+        // The ruler: two loads of CNTL back to back, one word apart.
+        ".balign 4\n.globl cost_ruler\n.type cost_ruler, @function\ncost_ruler:\n.option rvc\n"
+        "li a5, 0xE000F000\n.balign 4\n.option norvc\nlw t0, 8(a5)\nlw t1, 8(a5)\n"
+        ".option rvc\nsw t0, 0(a0)\nsw t1, 4(a0)\nc.jr ra\n"
+        // Straight-line code: 32-bit on a word, 32-bit half a word off, compressed.
+        COST_PAIR(cost_w32, ".option norvc\n", 32, 64, "addi t0, t0, 1\n", "")
+        COST_PAIR(cost_w32h, ".option rvc\nc.nop\n.option norvc\n", 32, 64, "addi t0, t0, 1\n", "")
+        COST_PAIR(cost_w16, ".option rvc\n", 32, 64, "c.addi t0, 1\n", "")
+        // Taken transfers: a c.j to a compressed target, a j to a 32-bit
+        // target on a word and across two words, a taken conditional branch.
+        COST_PAIR(cost_jc, ".option rvc\n", 16, 32, "c.j 1f\n.2byte 0\n1:\n", "")
+        COST_PAIR(cost_jw, ".option norvc\n", 16, 32, "j 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(cost_jx, ".option rvc\nc.nop\n.option norvc\n", 16, 32, "j 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(cost_bt, ".option norvc\n", 16, 32, "beqz zero, 1f\n.4byte 0\n1:\n", "")
+        // A not-taken conditional branch.
+        COST_PAIR(cost_bn, ".option norvc\n", 16, 32, "bnez zero, 2f\n", "2:\n")
+        // A call to a leaf on a word and its return to a 32-bit instruction on a word.
+        COST_PAIR(cost_call, ".option norvc\naddi t1, ra, 0\n", 16, 32, "jal ra, cost_leaf\n",
+                  "addi ra, t1, 0\n")
+        ".balign 4\n.globl cost_leaf\n.type cost_leaf, @function\ncost_leaf:\n.option rvc\nc.jr ra\n"
+        // The pairing the two settings part on: a taken conditional branch
+        // sharing its word with a store before it (the store below the
+        // stack pointer, where nothing lives), and a call through a
+        // register sharing its word with a load before it.
+        COST_PAIR(cost_stb, ".option rvc\nc.li a4, 0\n.option norvc\naddi a3, sp, -16\n.option rvc\nc.nop\n",
+                  16, 32, "c.sw a4, 0(a3)\nc.beqz a4, 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(cost_ldj, ".option norvc\naddi t1, ra, 0\naddi a3, sp, -16\nla a5, cost_leaf\n.option rvc\n",
+                  16, 32, "c.lw a2, 0(a3)\nc.jalr a5\n", ".option norvc\naddi ra, t1, 0\n")
+        // The predictor: sixteen conditional branches whose direction is
+        // a0 (32-bit over a 32-bit instruction; compressed over two
+        // compressed ones), and sixteen calls through a0 to one of two leaves.
+        ".balign 4\n.globl cost_pred_b32\n.type cost_pred_b32, @function\ncost_pred_b32:\n"
+        ".option norvc\n.rept 16\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.endr\n.option rvc\nc.jr ra\n"
+        ".balign 4\n.globl cost_pred_b16\n.type cost_pred_b16, @function\ncost_pred_b16:\n"
+        ".option rvc\n.rept 16\nc.bnez a0, 1f\nc.nop\nc.nop\n1:\n.endr\nc.jr ra\n"
+        // One branch alone, in three layouts: compressed on a word over two
+        // compressed instructions; 32-bit half a word off, and on a word,
+        // over a 32-bit instruction. Four compressed no-ops follow, so
+        // both ways reach the return through the same words.
+        ".balign 4\n.globl cost_pred_one16\n.type cost_pred_one16, @function\ncost_pred_one16:\n"
+        ".option rvc\nc.bnez a0, 1f\nc.nop\nc.nop\n1:\n.rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl cost_pred_one32h\n.type cost_pred_one32h, @function\ncost_pred_one32h:\n"
+        ".option rvc\nc.nop\n.option norvc\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.option rvc\n"
+        ".rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl cost_pred_one32\n.type cost_pred_one32, @function\ncost_pred_one32:\n"
+        ".option norvc\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.option rvc\n"
+        ".rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl cost_pred_jalr\n.type cost_pred_jalr, @function\ncost_pred_jalr:\n"
+        ".option norvc\naddi t1, ra, 0\n.rept 16\njalr ra, 0(a0)\n.endr\naddi ra, t1, 0\n"
+        ".option rvc\nc.jr ra\n"
+        ".balign 4\n.globl cost_leaf_a\n.type cost_leaf_a, @function\ncost_leaf_a:\n.option rvc\nc.jr ra\n"
+        ".balign 4\n.globl cost_leaf_b\n.type cost_leaf_b, @function\ncost_leaf_b:\n.option rvc\nc.jr ra\n"
+        // The traps. A store pends the software interrupt (IPSR0, bit 14).
+        COST_TRAP_OPEN(cost_trap_sw, 0)
+        "lw t0, 8(a5)\nsw a2, 0(a3)\n.globl cost_after_sw_store\ncost_after_sw_store:\n"
+        COST_TRAP_CLOSE
+        // A store pends TIM2's capture-compare line (IPSR1, bit 19).
+        COST_TRAP_OPEN(cost_trap_line, 0)
+        "lw t0, 8(a5)\nsw a1, 4(a3)\n"
+        COST_TRAP_CLOSE
+        // The same, its handler pending the software interrupt before its MRET.
+        COST_TRAP_OPEN(cost_trap_tail, 1)
+        "lw t0, 8(a5)\nsw a1, 4(a3)\n"
+        COST_TRAP_CLOSE
+        // An environment call.
+        COST_TRAP_OPEN(cost_trap_ecall, 0)
+        "lw t0, 8(a5)\necall\n"
+        COST_TRAP_CLOSE
+        // The software interrupt pended under the mask, taken at the unmask.
+        COST_TRAP_OPEN(cost_trap_unmask, 0)
+        "csrci mstatus, 8\nsw a2, 0(a3)\nlw t0, 8(a5)\ncsrsi mstatus, 8\n"
+        ".globl cost_after_unmask\ncost_after_unmask:\n"
+        COST_TRAP_CLOSE
+        // The software interrupt's handler in the letter's table: the
+        // first stamp, mepc recorded and pointed at the return, the line's
+        // pending bit cleared (IPRR0), the last stamp, MRET.
+        ".balign 4\n.globl cost_software\n.type cost_software, @function\ncost_software:\n"
+        ".option norvc\nlw s2, 8(a5)\ncsrr t3, mepc\nsw t3, 24(a4)\ncsrw mepc, a6\n"
+        "sw a2, 0x80(a3)\nlw s3, 8(a5)\nmret\n"
+        // The ecall's, in both tables.
+        ".balign 4\n.globl ecall_m_handler\n.type ecall_m_handler, @function\necall_m_handler:\n"
+        ".option norvc\nlw s2, 8(a5)\ncsrr t3, mepc\nsw t3, 24(a4)\ncsrw mepc, a6\nlw s3, 8(a5)\nmret\n"
+        // TIM2's capture-compare line's, in both tables: its own pending
+        // bit cleared (IPRR1), the software interrupt pended if a7 asks.
+        ".balign 4\n.globl tim2_cc_handler\n.type tim2_cc_handler, @function\ntim2_cc_handler:\n"
+        ".option norvc\nlw s4, 8(a5)\ncsrw mepc, a6\nsw a1, 0x84(a3)\nbeqz a7, 8f\nsw a2, 0(a3)\n"
+        "8:\nlw s5, 8(a5)\nmret\n"
+        // The letter's table: the crt's 55 words with entry 14 replaced
+        // (every entry the crt aliases to default_handler is that here;
+        // entry 0, the crt's jump, is never read through mtvec).
+        ".balign 4\n.globl cost_vectors\ncost_vectors:\n"
+        ".word 0, 0, nmi_handler, fault_handler, 0, ecall_m_handler, 0, 0\n"
+        ".word ecall_u_handler, breakpoint_handler, 0, 0, systick_handler, 0, cost_software, 0\n"
+        ".word default_handler, default_handler, default_handler, 0\n"   // 16..19
+        ".rept 19\n.word default_handler\n.endr\n"        // 20..38
+        ".word usart2_handler\n"                          // 39
+        ".rept 11\n.word default_handler\n.endr\n"        // 40..50
+        ".word tim2_cc_handler, default_handler, default_handler, tim3_handler\n"   // 51..54
+        ".option pop\n"
+        ".popsection\n");
+
+#undef COST_TRAP_CLOSE
+#undef COST_TRAP_OPEN
+#undef COST_PAIR
+#undef COST_SEQ
+
+}  // namespace
+
+// The letter's assembly, by its symbols (C linkage, outside the unnamed namespace).
+extern "C" {
+void cost_ruler(uint32_t* two);
+void cost_w32_n();
+void cost_w32_2n();
+void cost_w32h_n();
+void cost_w32h_2n();
+void cost_w16_n();
+void cost_w16_2n();
+void cost_jc_n();
+void cost_jc_2n();
+void cost_jw_n();
+void cost_jw_2n();
+void cost_jx_n();
+void cost_jx_2n();
+void cost_bt_n();
+void cost_bt_2n();
+void cost_bn_n();
+void cost_bn_2n();
+void cost_stb_n();
+void cost_stb_2n();
+void cost_ldj_n();
+void cost_ldj_2n();
+void cost_call_n();
+void cost_call_2n();
+void cost_pred_b32(uint32_t);
+void cost_pred_b16(uint32_t);
+void cost_pred_jalr(uint32_t);
+void cost_pred_one16(uint32_t);
+void cost_pred_one32h(uint32_t);
+void cost_pred_one32(uint32_t);
+void cost_leaf_a();
+void cost_leaf_b();
+void cost_trap_sw(void* stamps);
+void cost_trap_line(void* stamps);
+void cost_trap_tail(void* stamps);
+void cost_trap_ecall(void* stamps);
+void cost_trap_unmask(void* stamps);
+void cost_after_sw_store();
+void cost_after_unmask();
+extern const uint32_t cost_vectors[];
+}
+
+namespace {
+
+/// What a trap sequence writes: the four stamps of the thread and the
+/// software interrupt's (or the ecall's) handler, TIM2's two, and the
+/// mepc the handler found. 0xFFFFFFFF is "never stamped": CNTL never
+/// reaches it under the ticker's compare.
+struct CostStamps {
+    uint32_t before;       ///< the thread, one word before the trigger
+    uint32_t first;        ///< the software interrupt's or the ecall's handler, first instruction
+    uint32_t last;         ///< its last stamp, the word before its MRET
+    uint32_t after;        ///< the thread, the return label's first instruction
+    uint32_t line_first;   ///< TIM2's handler, first instruction
+    uint32_t line_last;    ///< its last stamp, the word before its MRET
+    uint32_t mepc;         ///< what the software interrupt's or the ecall's handler read
+};
+static_assert(sizeof(CostStamps) == 28u, "the assembly writes offsets 0..24");
+constexpr uint32_t never_stamped = 0xFFFF'FFFFu;
+
+/// A verdict's name in its two spellings, one a setting, built at compile
+/// time: the letter runs every figure twice, and a name assembled at run
+/// time would take the bench's other verdict overload, an instantiation
+/// the rest of the image does not have (the placement above).
+struct Named {
+    const char* base;
+    const char* on;    ///< corecfgr 0x1F
+    const char* off;   ///< corecfgr cleared
+    const char* pick(bool predictor_on) const { return predictor_on ? on : off; }
+};
+#define COST_NAMED(s) Named{s, s " (corecfgr 0x1F)", s " (corecfgr 0)"}
+
+struct Span {
+    uint32_t least = 0xFFFF'FFFFu;
+    uint32_t most = 0;
+    void add(uint32_t v) {
+        if (v < least) { least = v; }
+        if (v > most) { most = v; }
+    }
+};
+
+/// The least and most of 32 calls of a pattern, interrupts masked, the
+/// counter read either side of the call. One instance, so both lengths
+/// of a pattern are timed by the same instructions.
+[[gnu::noinline, COST_PLACED]] Span cost_time(void (*f)()) {
+    Span s;
+    for (uint32_t i = 0; i < 32u; ++i) {
+        P::CriticalSection cs;
+        const uint32_t a = stk()->CNTL;
+        f();
+        const uint32_t b = stk()->CNTL;
+        s.add(cycles_between(a, b));
+    }
+    return s;
+}
+
+/// One call of a predictor pattern with its argument, timed the same way.
+[[gnu::noinline, COST_PLACED]] uint32_t cost_time_once(void (*f)(uint32_t), uint32_t arg) {
+    P::CriticalSection cs;
+    const uint32_t a = stk()->CNTL;
+    f(arg);
+    const uint32_t b = stk()->CNTL;
+    return cycles_between(a, b);
+}
+
+struct CostRow {
+    Named name;
+    void (*n)();
+    void (*n2)();
+    uint32_t units;       ///< how many more units the second run has
+    uint32_t model;       ///< cycles a unit, by the model, corecfgr 0x1F
+    uint32_t model_off;   ///< and with corecfgr cleared
+    uint32_t sites;       ///< predicted sites a unit (transfers and branches)
+};
+
+constexpr CostRow cost_rows[] = {
+    {COST_NAMED("32-bit instructions on a word"), cost_w32_n, cost_w32_2n, 32, 4, 4, 0},
+    {COST_NAMED("32-bit instructions half a word off"), cost_w32h_n, cost_w32h_2n, 32, 4, 4, 0},
+    {COST_NAMED("compressed instructions"), cost_w16_n, cost_w16_2n, 32, 2, 2, 0},
+    {COST_NAMED("a c.j to a target in one word"), cost_jc_n, cost_jc_2n, 16, 8, 8, 1},
+    {COST_NAMED("a j to a 32-bit target on a word"), cost_jw_n, cost_jw_2n, 16, 8, 8, 1},
+    {COST_NAMED("a j to a 32-bit target across two words"), cost_jx_n, cost_jx_2n, 16, 12, 12, 1},
+    {COST_NAMED("a taken conditional branch, its target on a word"), cost_bt_n, cost_bt_2n, 16, 8, 8, 1},
+    {COST_NAMED("a not-taken conditional branch"), cost_bn_n, cost_bn_2n, 16, 4, 4, 1},
+    {COST_NAMED("a call and its return, both targets on a word"), cost_call_n, cost_call_2n, 16, 16, 16, 2},
+    // A transfer the core resolves when it executes - a conditional
+    // branch, a jump through a register - waits 4 cycles more behind a
+    // load or a store fetched in the same word, unless the predictor has
+    // already sent the fetch to the target: so 8 with corecfgr's 0x1F,
+    // 12 with it cleared (a direct jump, resolved at its decode, does not
+    // wait). The store and its branch, one word, then the target's word.
+    {COST_NAMED("a store and a taken branch in one word"), cost_stb_n, cost_stb_2n, 16, 8, 12, 1},
+    // The load and its call, one word: the call 8 (12 cleared), the
+    // leaf's return to the next unit 8.
+    {COST_NAMED("a load and a call through a register in one word"), cost_ldj_n, cost_ldj_2n, 16, 16, 20, 2},
+};
+
+/// The fetch rows: the difference of the two lengths' least judged to the
+/// cycle; each length's spread judged against the predictor's allowance,
+/// 4 at each predicted site of the window - the pattern's own and the
+/// call into it and its return - and, with the predictor off, nothing:
+/// no guess, so no history, so every call alike.
+[[COST_PLACED]] void cost_fetch(bool predictor_on) {
+    for (const CostRow& r : cost_rows) {
+        const Span a = cost_time(r.n);
+        const Span b = cost_time(r.n2);
+        const uint32_t diff = b.least - a.least;
+        const uint32_t model = predictor_on ? r.model : r.model_off;
+        print(serial, "  ", r.name.base, ": ", r.units, " units ", a.least, "..", a.most, ", ",
+              2u * r.units, " units ", b.least, "..", b.most, ": ", diff, " for the ", r.units,
+              " more, the model ", r.units * model, " (", model, " each)", crlf);
+        const uint32_t per_site = predictor_on ? 4u : 0u;
+        const uint32_t spread_a = per_site * (2u + r.units * r.sites);
+        const uint32_t spread_b = per_site * (2u + 2u * r.units * r.sites);
+        bench.verdict(r.name.pick(predictor_on),
+                      diff == r.units * model && a.most - a.least <= spread_a &&
+                          b.most - b.least <= spread_b);
+    }
+}
+
+/// One trap sequence, 256 trips, interrupts enabled: the console drained,
+/// the two lines enabled, mtvec on the letter's table if asked, every
+/// change undone after. Trips a tick landed in are dropped.
+struct TrapRun {
+    Span entry;        ///< first - before
+    Span line_entry;   ///< line_first - before
+    Span mret;         ///< after - last
+    Span tail;         ///< first - line_last
+    uint32_t kept = 0;
+    uint32_t ticked = 0;
+    uint32_t untaken = 0;
+    uint32_t mepc = 0;
+    bool mepc_steady = true;
+};
+
+[[COST_PLACED]] TrapRun cost_trap(void (*f)(void*), bool letter_table) {
+    TrapRun r;
+    const uint32_t crt_mtvec = read_csr_mtvec();
+    console_drain();
+    {
+        P::CriticalSection cs;
+        if (letter_table) {
+            __asm__ volatile("csrw mtvec, %0" ::"r"(reinterpret_cast<uint32_t>(cost_vectors) | 3u)
+                             : "memory");
+        }
+        Pfic::clear_pending(Irq::software);
+        Pfic::clear_pending(Irq::tim2_cc);
+        Pfic::enable(Irq::software);
+        Pfic::enable(Irq::tim2_cc);
+    }
+    for (uint32_t i = 0; i < 256u; ++i) {
+        CostStamps s{};
+        s.mepc = 0;
+        const uint32_t t = Ticker::ticks();
+        f(&s);
+        if (Ticker::ticks() != t) {
+            ++r.ticked;
+            continue;
+        }
+        const bool sw_side = s.first != never_stamped && s.last != never_stamped;
+        const bool line_side = s.line_first != never_stamped && s.line_last != never_stamped;
+        if (!sw_side && !line_side) {
+            ++r.untaken;
+            continue;
+        }
+        ++r.kept;
+        if (sw_side) {
+            r.entry.add(cycles_between(s.before, s.first));
+            r.mret.add(cycles_between(s.last, s.after));
+            if (r.kept > 1u && s.mepc != r.mepc) {
+                r.mepc_steady = false;
+            }
+            r.mepc = s.mepc;
+        }
+        if (line_side) {
+            r.line_entry.add(cycles_between(s.before, s.line_first));
+            if (sw_side) {
+                r.tail.add(cycles_between(s.line_last, s.first));
+            } else {
+                r.mret.add(cycles_between(s.line_last, s.after));
+            }
+        }
+    }
+    {
+        P::CriticalSection cs;
+        Pfic::disable(Irq::software);
+        Pfic::disable(Irq::tim2_cc);
+        Pfic::clear_pending(Irq::software);
+        Pfic::clear_pending(Irq::tim2_cc);
+        __asm__ volatile("csrw mtvec, %0" ::"r"(crt_mtvec) : "memory");
+    }
+    return r;
+}
+
+/// A trap figure: the span less the ruler's word, every kept trip the
+/// model's.
+[[COST_PLACED]] bool trap_figure(const Named& name, bool predictor_on, const TrapRun& r,
+                                 const Span& s, uint32_t ruler, uint32_t model) {
+    const uint32_t least = s.least - ruler;
+    const uint32_t most = s.most - ruler;
+    print(serial, "  ", name.base, ": ", least, "..", most, " over ", r.kept, " trips (", r.ticked,
+          " with a tick, dropped; ", r.untaken, " not taken), the model ", model, crlf);
+    const bool ok = r.kept > 0u && r.untaken == 0u && least == model && most == model;
+    bench.verdict(name.pick(predictor_on), ok);
+    return ok;
+}
+
+/// The predictor rows: trained 32 calls one way, one call the other way,
+/// then 32 calls that way (its trained cost the least of them), sixteen
+/// rounds of both directions; the extra a direction costs right after the
+/// other's training, against its trained cost.
+struct PredictorRow {
+    Named name;
+    void (*f)(uint32_t);
+    uint32_t arg[2];
+    const char* way[2];
+    uint32_t sites;   ///< the pattern's predicted sites
+};
+
+[[COST_PLACED]] void cost_predictor(const PredictorRow& row, bool predictor_on) {
+    uint32_t trained[2] = {0xFFFF'FFFFu, 0xFFFF'FFFFu};
+    uint32_t flipped_least[2] = {0xFFFF'FFFFu, 0xFFFF'FFFFu};
+    uint32_t flipped_most[2] = {0, 0};
+    for (uint32_t round = 0; round < 16u; ++round) {
+        for (uint32_t dir = 0; dir < 2u; ++dir) {
+            for (uint32_t k = 0; k < 32u; ++k) {
+                (void)cost_time_once(row.f, row.arg[1u - dir]);   // the other way's training
+            }
+            const uint32_t fl = cost_time_once(row.f, row.arg[dir]);
+            if (fl < flipped_least[dir]) { flipped_least[dir] = fl; }
+            if (fl > flipped_most[dir]) { flipped_most[dir] = fl; }
+            for (uint32_t k = 0; k < 32u; ++k) {
+                const uint32_t c = cost_time_once(row.f, row.arg[dir]);
+                if (c < trained[dir]) { trained[dir] = c; }
+            }
+        }
+    }
+    bool ok = true;
+    uint32_t worst = 0;
+    for (uint32_t dir = 0; dir < 2u; ++dir) {
+        const bool below = flipped_least[dir] < trained[dir];
+        const uint32_t lo = below ? 0u : flipped_least[dir] - trained[dir];
+        const uint32_t hi = flipped_most[dir] - trained[dir];
+        print(serial, "  ", row.name.base, ", ", row.way[dir], ": trained ", trained[dir],
+              ", right after the other way's training +", lo, "..+", hi, crlf);
+        if (below) {
+            ok = false;   // the trained least must be the least
+        }
+        if (hi > worst) { worst = hi; }
+    }
+    // With the predictor on: 4 at each of the window's predicted sites,
+    // the pattern's and the call into it and its return - the allowance
+    // the Rubato bounds carry, counted as they count it, over a path's
+    // sites. With it off: no guess, so no history, so nothing extra.
+    const uint32_t allowance = predictor_on ? 4u * (row.sites + 2u) : 0u;
+    print(serial, "  ", row.name.base, ": the most the wrong guesses cost, ", worst,
+          " cycles at ", row.sites, " site(s) of the pattern; the allowance ", allowance, crlf);
+    bench.verdict(row.name.pick(predictor_on), ok && worst <= allowance);
+}
+
+constexpr PredictorRow predictor_rows[] = {
+    {COST_NAMED("16 32-bit branches over a 32-bit instruction"), cost_pred_b32, {1u, 0u},
+     {"taken", "not taken"}, 16},
+    {COST_NAMED("16 compressed branches over two compressed instructions"), cost_pred_b16, {1u, 0u},
+     {"taken", "not taken"}, 16},
+    {COST_NAMED("one compressed branch on a word over two compressed instructions"), cost_pred_one16,
+     {1u, 0u}, {"taken", "not taken"}, 1},
+    {COST_NAMED("one 32-bit branch half a word off over a 32-bit instruction"), cost_pred_one32h,
+     {1u, 0u}, {"taken", "not taken"}, 1},
+    {COST_NAMED("one 32-bit branch on a word over a 32-bit instruction"), cost_pred_one32, {1u, 0u},
+     {"taken", "not taken"}, 1},
+};
+
+[[COST_PLACED]] void cost_pass(bool predictor_on) {
+    uint32_t two[2] = {0, 0};
+    uint32_t ruler = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        {
+            P::CriticalSection cs;
+            cost_ruler(two);
+        }
+        if (cycles_between(two[0], two[1]) < ruler) {
+            ruler = cycles_between(two[0], two[1]);
+        }
+    }
+    print(serial, "  the ruler: two loads of CNTL one word apart read ", ruler,
+          " cycles apart (the model 4: a 32-bit load is its word)", crlf);
+    bench.verdict(COST_NAMED("the ruler's two bare reads are a word, 4 cycles, apart")
+                      .pick(predictor_on),
+                  ruler == 4u);
+
+    cost_fetch(predictor_on);
+
+    const TrapRun sw = cost_trap(cost_trap_sw, true);
+    trap_figure(COST_NAMED("a store pends the software interrupt: to the handler's first instruction"),
+                predictor_on, sw, sw.entry, ruler, 20u);
+    trap_figure(COST_NAMED("an MRET into code: to its target"), predictor_on, sw, sw.mret, ruler,
+                8u);
+    const TrapRun line_crt = cost_trap(cost_trap_line, false);
+    trap_figure(COST_NAMED("a store pends TIM2's line, through the crt's table"), predictor_on,
+                line_crt, line_crt.line_entry, ruler, 20u);
+    const TrapRun line_own = cost_trap(cost_trap_line, true);
+    trap_figure(COST_NAMED("the same through the letter's table"), predictor_on, line_own,
+                line_own.line_entry, ruler, 20u);
+    const TrapRun ecall = cost_trap(cost_trap_ecall, false);
+    trap_figure(COST_NAMED("an ecall: to its handler's first instruction"), predictor_on, ecall,
+                ecall.entry, ruler, 20u);
+    const TrapRun unmask = cost_trap(cost_trap_unmask, true);
+    trap_figure(COST_NAMED("the unmask that finds the software interrupt pending: to its handler"),
+                predictor_on, unmask, unmask.entry, ruler, 20u);
+    const TrapRun tail = cost_trap(cost_trap_tail, true);
+    trap_figure(COST_NAMED("an MRET into a pending interrupt: to that handler's first instruction"),
+                predictor_on, tail, tail.tail, ruler, 24u);
+
+    const uint32_t after_store = reinterpret_cast<uint32_t>(&cost_after_sw_store);
+    const uint32_t after_unmask = reinterpret_cast<uint32_t>(&cost_after_unmask);
+    print(serial, "  mepc in the handler: ", hex(sw.mepc), " after the store at ",
+          hex(after_store - 4u), ", ", hex(unmask.mepc), " after the unmask at ",
+          hex(after_unmask - 4u), crlf);
+    bench.verdict(COST_NAMED("the trap is taken at the instruction after the store, and after the "
+                             "unmask")
+                      .pick(predictor_on),
+                  sw.mepc_steady && unmask.mepc_steady && sw.mepc == after_store &&
+                      unmask.mepc == after_unmask);
+
+    for (const PredictorRow& row : predictor_rows) {
+        cost_predictor(row, predictor_on);
+    }
+    const PredictorRow jalr{COST_NAMED("16 calls through a register"),
+                            cost_pred_jalr,
+                            {reinterpret_cast<uint32_t>(&cost_leaf_a),
+                             reinterpret_cast<uint32_t>(&cost_leaf_b)},
+                            {"to one leaf", "to the other"},
+                            16};
+    cost_predictor(jalr, predictor_on);
+}
+
+[[COST_PLACED]] void ti_cost() {
+    const uint32_t as_found = read_corecfgr();
+    print(serial, "  corecfgr as the crt left it: ", hex(as_found), ", WCH's value 0x1F", crlf);
+    bench.verdict("corecfgr holds the crt's 0x1F", as_found == 0x1Fu);
+    print(serial, "  with corecfgr as the crt left it:", crlf);
+    cost_pass(true);
+
+    print(serial, "  with corecfgr cleared:", crlf);
+    uint32_t cleared = 0;
+    {
+        P::CriticalSection cs;
+        write_corecfgr(0);
+        cleared = read_corecfgr();
+    }
+    cost_pass(false);
+    {
+        P::CriticalSection cs;
+        write_corecfgr(as_found);
+    }
+    const uint32_t restored = read_corecfgr();
+    print(serial, "  corecfgr read ", hex(cleared), " cleared and ", hex(restored), " after", crlf);
+    bench.verdict("the register took the zero and is back to what the crt wrote",
+                  cleared == 0u && restored == as_found);
+}
+
+/// main()'s one call into the letter (the placement above says why).
+[[gnu::noinline, COST_PLACED]] void register_cost_letter() {
+    bench.letter('i', "the fetch and trap cost model the Rubato bounds use", ti_cost);
+}
+
+}  // namespace
+
 int main() {
     boot_flags = brio::Rcc::reset_flags();
     const bool clock_ok = SysClock::init();
@@ -895,6 +1548,7 @@ int main() {
     bench.letter('f', "corecfgr, as the crt left it and cleared", tf_corecfgr);
     bench.letter('g', "the tick against the host's clock", tg_bracket);
     bench.letter('h', "what the crt left in the core's registers", th_core);
+    register_cost_letter();
     bench.letter('w', "the idle hook against the tick's edge, placed to the cycle", tw_edge);
     bench.letter('k', "the kernel's turn: how many per interrupt, what one costs", tk_turns);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);

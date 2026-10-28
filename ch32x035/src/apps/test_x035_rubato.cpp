@@ -526,17 +526,22 @@ constexpr uint32_t latency_events = 100;
 /// ecall, an interrupt line) issues the handler's first instruction 20
 /// cycles after the instruction that triggers it, and an MRET into a
 /// pending interrupt (the tail) 24 after the MRET. Those figures are this
-/// core's, measured with hand-placed sequences timed on the bare STK, the
-/// same in two thousand trips each and the same with the hardware prologue
-/// and without it (its push costs nothing measurable here); the platform
-/// suite's letter e agrees with them to the cycle (its entry, 36, is the
-/// raiser's own 12 and 24 into the handler).
+/// core's, and test_x035_platform's letter i measures them - hand-placed
+/// sequences timed on the bare STK, each judged to the cycle, every trap
+/// the same in 256 trips, the same with the hardware prologue and without
+/// it (its push costs nothing measurable here); the fence.i's 8 is the one
+/// figure above that letter does not time, and no path below runs one. The
+/// platform suite's letter e agrees with them to the cycle (its entry, 36,
+/// is the raiser's own 12 and 24 into the handler).
 ///
 /// ONE THING THE MODEL LEAVES OUT: the branch predictor corecfgr's 0x1F
 /// turns on (the crt writes WCH's value; docs/ch32x035/platform.md). Its
-/// right guess costs nothing against the model, and its wrong one at most
-/// the word it fetched on the wrong path, 4 cycles, at a branch, a jump, a
-/// call or a return: measured on this core, road 1 below took the same
+/// right guess costs nothing against the model, and its wrong one, by the
+/// platform suite's letter i, up to 8 cycles at one branch (one guessed
+/// taken that falls through) and within 4 a predicted site over every
+/// window that letter times, its call and return counted - the allowance
+/// below, a sum over a path's sites and not a figure of each: measured on
+/// this core, road 1 below took the same
 /// cycles in every event with corecfgr cleared and up to 16 more with 0x1F,
 /// in steps of 4, as the predictor's history (another code's branches
 /// aliasing the path's) stood at each event. So every run's figure is the
