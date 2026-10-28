@@ -82,6 +82,13 @@
 
 namespace brio {
 
+/// The question idle() asks before it sleeps: whether a bus master other
+/// than the core is working, which the Sleep would stall (the file
+/// header) - here a DMA channel, `Dma::any_working()`, the controller's
+/// own registers. Idle path only; one load with the gate closed, two a
+/// channel with it open.
+inline bool bus_masters_working() { return Dma::any_working(); }
+
 template <class TB = Ticker>
 struct Ch32x035Platform {
     using CriticalSection = InterruptGuard;
@@ -165,7 +172,7 @@ struct Ch32x035Platform {
      * and the path is then idle_deep(), out of line.
      */
     static void idle() {
-        if (Dma::any_working()) {
+        if (bus_masters_working()) {
             // A channel at work: no sleep of any depth (the file header).
             enable_interrupts();
             return;

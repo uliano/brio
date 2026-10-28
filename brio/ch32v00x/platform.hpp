@@ -78,6 +78,14 @@
 
 namespace brio {
 
+/// The question idle() asks before it sleeps: whether a bus master other
+/// than the core is working that the Sleep would stall - a DMA channel on
+/// the CH32V003, whose V2A's Sleep stalls it (device::
+/// sleep_stops_bus_masters, parts/ch32v003.hpp); never on the CH32V006,
+/// whose Sleep the DMA works through, so there the answer is a constant
+/// and the question compiles to nothing. Idle path only.
+inline bool bus_masters_working() { return device::sleep_stops_bus_masters && Dma::any_working(); }
+
 template <class TB = Ticker>
 struct Ch32v00xPlatform {
     using CriticalSection = InterruptGuard;
@@ -214,7 +222,7 @@ struct Ch32v00xPlatform {
             // tick's match is too close to keep its edge off the entry.
             const PficRegs* const p = pfic();
             if (((p->IPR[0] & p->ISR[0]) | (p->IPR[1] & p->ISR[1])) == 0u &&
-                !(device::sleep_stops_bus_masters && Dma::any_working()) &&
+                !bus_masters_working() &&
                 TB::cycles_to_tick() >= sram_sleep_tick_guard_cycles) {
                 pfic_sctlr() = wfe;
                 wfi_from_sram();

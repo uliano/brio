@@ -88,6 +88,12 @@
 
 namespace brio {
 
+/// The question idle() asks before it sleeps: whether a bus master other
+/// than the core is working - a DMA channel or a USB controller, the count
+/// this family's drivers keep (ch32vx03/bus_activity.hpp) - which a sleep
+/// of any depth here would break rather than slow. Any context; one load.
+inline bool bus_masters_working() { return BusActivity::active() != 0u; }
+
 template <class TB = Ticker>
 struct Ch32vx03Platform {
     using CriticalSection = InterruptGuard;
@@ -224,7 +230,7 @@ struct Ch32vx03Platform {
      * restriction.
      */
     static void idle() {
-        if (BusActivity::active() != 0u) {
+        if (bus_masters_working()) {
             enable_interrupts();
             return;
         }
