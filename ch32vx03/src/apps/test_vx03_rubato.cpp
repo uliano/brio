@@ -1408,10 +1408,21 @@ void tj_fpu() {
         // 33 cycles of entry over a leaf's; its fcsr written back, twenty
         // loads, the frame - 23 - 26 cycles of exit over a leaf's): the
         // save here is the same 23 and FS cleaned (two), 35; the restore
-        // the same 23 and the jump over the clean path (two), 28; 42 and
-        // 34 with a fifth.
-        bench.verdict("the save within 42 cycles and the restore within 34",
-                      in_dirty - in_clean <= 42u && out_dirty - out_clean <= 34u);
+        // the same 23 and the jump over the clean path (two), 28. Each is
+        // the difference of two paths' least, and the two paths are two
+        // layouts, not one path with a block skipped: the Dirty path takes
+        // its jump where the Clean one falls through, and its branch falls
+        // through where the Clean one's is taken, so each least carries
+        // its own transfers' alignment and predictor state - the spread
+        // letter c derives for a path on this core, latency_spread (18),
+        // which the difference inherits. Measured, the restore read 20 to
+        // 35 and the save 25 to 33 across three images of this suite that
+        // differ in their layout alone, the model inside both ranges. So:
+        // the model and that spread, 53 and 46.
+        bench.verdict("the save within 53 cycles and the restore within 46 (the model and the "
+                      "layout spread)",
+                      in_dirty - in_clean <= 35u + latency_spread &&
+                          out_dirty - out_clean <= 28u + latency_spread);
 #else
         // Without the hardware prologue the edge's handler is the plain
         // attributed one, which saves the twenty caller-saved f-registers in
