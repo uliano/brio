@@ -141,7 +141,21 @@ shuffled, a 128-byte block's tail standing in for another's, later text
 appearing a block early, the same way at every attempt (measured: the
 suite's help text, 1710 bytes, clean after a fresh enumeration,
 interleaved after one open-write-close of 30 ms, and interleaved the
-same at every read after that). The same reset of the probe over USB
+same at every read after that). A burst into the closed port did as
+much with no close in the middle, after a programming that did not
+reset the probe, the image's boot banner going into the closed port:
+on the CH32V203C8T6's probe a suite's 5833-byte answer arrived shuffled
+at every capture, in each 64 bytes the last 18 standing in from 192
+bytes later, the same at every attempt and under two builds of the
+suite; on the CH32V303VCT6's a 645-byte answer arrived whole but led by
+the last 100 bytes of the answer before, its own last 100 held
+(measured, both probes the CH549 kind at 2.12). Neither target held
+anything back: read over the debug port with the console closed, its
+transmit ring was empty with the final prompt in its storage, STATR's
+TC set and the transmit interrupt disarmed. So a console on this probe
+that loses the end of every answer, or interleaves pieces of different
+lines, is the bridge's state until a capture after the reset below says
+otherwise. The same reset of the probe over USB
 (`USBDEVFS_RESET` on its device node) clears both states and drops the
 held bytes; `brio flash` sends it after every programming, and a tool
 that closes the port on a timer rather than on the prompt should send it
