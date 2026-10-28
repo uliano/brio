@@ -62,6 +62,17 @@
 //      8 into code and 24 into a pending interrupt, and what the branch
 //      predictor's wrong guess costs - each figure judged to the cycle,
 //      with corecfgr as the crt left it and again with it cleared
+//   j  THE SRAM COST MODEL the same bounds are drawn with for the image
+//      that runs the scheduler path from SRAM: letter i's patterns,
+//      handlers and harness placed in SRAM - an instruction a cycle, a
+//      taken transfer 2 or 3, a load 2, a store as its neighbours make it,
+//      a trap's entry 10 through a vector table in SRAM - and the
+//      crossings between the two memories, the calls, the traps and the
+//      MRETs from one into the other through a table in either, what
+//      retires behind a store or an unmask run from SRAM (mepc read), and
+//      the predictor's wrong guesses there; each figure judged to the
+//      cycle, both corecfgr settings. Registered before main(), so listed
+//      first
 //   w  THE IDLE HOOK AGAINST THE TICK'S EDGE, PLACED TO THE CYCLE: with
 //      the STK running as the timebase, its CNTL written so the compare
 //      comes D cycles later, D = 0..599, then the kernel's own shape - a
@@ -1116,10 +1127,8 @@ __asm__(".pushsection .rodata.cost_letter,\"ax\",@progbits\n"
         ".option pop\n"
         ".popsection\n");
 
-#undef COST_TRAP_CLOSE
-#undef COST_TRAP_OPEN
-#undef COST_PAIR
-#undef COST_SEQ
+// COST_SEQ, COST_PAIR and the trap macros stay defined for letter j's
+// assembly, below, and are undefined after it.
 
 }  // namespace
 
@@ -1530,6 +1539,789 @@ constexpr PredictorRow predictor_rows[] = {
 [[gnu::noinline, COST_PLACED]] void register_cost_letter() {
     bench.letter('i', "the fetch and trap cost model the Rubato bounds use", ti_cost);
 }
+
+}  // namespace
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// j - the SRAM cost model
+// ---------------------------------------------------------------------------
+// THE SRAM'S NUMBERS: the figures test_x035_rubato's bounds are drawn with
+// for the image that runs the scheduler path from SRAM (that suite's letter
+// c, "THE SRAM COST MODEL"), measured as letter i measures the flash's -
+// the same hand-placed patterns and stamps, placed in SRAM with three
+// handlers and the harness that calls and times them - at 48 MHz, the SRAM
+// answering without wait states. Each row prints its figure and is judged
+// to it; what they say, in short:
+//   - straight-line code issues an instruction a cycle, 32-bit or
+//     compressed, at either alignment; a taken transfer issues its target
+//     2 cycles after it, 3 when the target is a 32-bit instruction across
+//     two words; a not-taken branch costs 1; a call and its return 6;
+//   - what the flash's fetch hid is paid: a load 2 cycles, from SRAM or
+//     from a peripheral, in a run or alone; a store to a peripheral alone
+//     1, and to SRAM a compressed one alone among compressed instructions
+//     1 and a 32-bit one alone among 32-bit instructions 3 - the write and
+//     the fetch of the code around it sharing the SRAM, by inference - and
+//     in runs about 1.65 and 2.25 (the compressed run printed at both
+//     alignments, its layout moving it);
+//   - a trap through a vector table in SRAM issues the handler 10 cycles
+//     after the store that pends the software interrupt or the unmask that
+//     finds it pending (12 with a fence.i after the store), 9 after an
+//     ecall; an MRET issues its target 5 cycles after it in SRAM code, 9 in
+//     flash code, and a pending interrupt's handler 11; through a table in
+//     the flash the entry is fetched over the flash's wait states;
+//   - where the code crosses the two memories: a call from the flash into
+//     SRAM and its return 16 the pair, the call's word included; a store
+//     or an unmask in the flash pending the software interrupt, and a flash
+//     handler's MRET into it pending, 12 to its handler in SRAM through the
+//     table in SRAM; a store in SRAM pending a line whose handler is in the
+//     flash 14;
+//   - from SRAM the store that pends the software interrupt is posted:
+//     instructions after it retire before the trap (mepc read in the
+//     handler), three compressed ones with corecfgr's 0x1F and two with it
+//     cleared, and two after the csrsi that unmasks it pending; a fence.i
+//     after the store closes them (ch32x035/schedule.hpp's request rests on
+//     that), while from the flash nothing retires behind either;
+//   - the branch predictor's wrong guess costs 3 cycles in SRAM where it
+//     costs up to 8 in the flash (a branch it guessed taken that falls
+//     through; 4 at most at one site, a 32-bit branch half a word off), and
+//     the spreads move in steps of 3: so every row is judged as letter i
+//     judges its own, by an allowance at each predicted site of the window
+//     - the pattern's, the harness's call and return - of 3 in SRAM and
+//     letter i's 4 in the flash. 3 and not the 2 a site the Rubato bounds
+//     allow in SRAM: sixteen not-taken branches, guessed taken, measured a
+//     spread of up to 42 cycles over their window's 18 sites.
+// Every figure is measured twice, with corecfgr as the crt left it and with
+// it cleared (written and restored with interrupts masked, as letter i
+// does), and judged against its own model in each.
+//
+// HOW EACH IS READ: as letter i reads its own (N units against 2N, the
+// least of 32 masked calls, the difference judged to the cycle; a trap the
+// stamps' difference less a ruler, every one of 256 trips judged). The
+// harness, `sram_time_call`, is assembly in SRAM that reads CNTL, calls the
+// pattern and reads CNTL again, its state in saved registers no pattern
+// touches; the loop around it, in the flash, masks interrupts for each
+// call. The ruler is that of the memory the FIRST stamp is in: two loads of
+// CNTL back to back in SRAM read 1 cycle apart (2 with corecfgr cleared),
+// and letter i's ruler, its two loads in the flash, 4. So a trap from SRAM
+// code is the difference less SRAM's ruler, a trap raised in the flash or a
+// tail from a flash handler less the flash's - the convention the Rubato
+// bounds count with.
+//
+// WHERE THE TRAPS LAND. The letter owns two vector tables: `sram_vectors`,
+// 55 words in SRAM filled from the crt's table at the letter's start and
+// pointed to by mtvec for the rows through a table in SRAM, entry 5 (the
+// ecall), 14 (the software interrupt) and 51 (TIM2's capture-compare line)
+// replaced, 51 per row; and `cross_vectors` in the flash, the crt's words
+// with entry 14 replaced, for the rows through a table in the flash (the
+// crt's own entry 14 is letter e's handler). mtvec is put back on the crt's
+// table after every row. The handlers in SRAM are twins of letter i's; the
+// line's handler in the flash is letter i's own (`tim2_cc_handler`, which
+// the crt's table binds), and so is the flash ruler (`cost_ruler`).
+//
+// WHERE THE LETTER'S OWN CODE LIES, and why nothing of the other letters
+// moves. Its code for SRAM, and its table there, are one section,
+// `.fast_text.cost_sram_letter`, which the layout places in .data
+// (ch32x035/ld/sections.ld): the only code this image places there, ahead
+// of its variables, and a multiple of 8 bytes long, so the variables and
+// the global pointer move up by its size and keep their distances - the
+// table is not in .bss because an object added there moves the variables
+// after it against the global pointer, and the linker then relaxes other
+// code differently (measured: the crt and the runtime's self-test moved).
+// Its code for the flash is `.rodata.cost_sram_letter`, after letter i's
+// section and so after every function of the image. It reaches the menu
+// through a static constructor, which the crt calls before main(), so
+// main() is the same bytes and the letter is listed first. It calls no C++
+// function of letter i's (its loops are twins, kept apart from letter i's
+// by no_icf), and it has its own Span: a second user of letter i's moved
+// Span::add out of line and every function after it. Every function of the
+// image but the letter's own is at the address and of the size it had
+// without the letter (read in the two maps).
+#define CROSS_PLACED gnu::section(".rodata.cost_sram_letter")
+
+__asm__(".pushsection .fast_text.cost_sram_letter,\"ax\",@progbits\n"
+        ".option push\n"
+        ".option norelax\n"
+        // The ruler in SRAM: two loads of CNTL back to back, one word apart.
+        ".balign 4\n.globl sram_ruler\n.type sram_ruler, @function\nsram_ruler:\n.option rvc\n"
+        "li a5, 0xE000F000\n.balign 4\n.option norvc\nlw t0, 8(a5)\nlw t1, 8(a5)\n"
+        ".option rvc\nsw t0, 0(a0)\nsw t1, 4(a0)\nc.jr ra\n"
+        // The harness: sram_time_call(f, arg, two) calls f(arg) between two
+        // loads of CNTL and writes them to two[0] and two[1]. Its state is
+        // in saved registers, which no pattern touches; the caller masks.
+        ".balign 4\n.globl sram_time_call\n.type sram_time_call, @function\nsram_time_call:\n"
+        ".option norvc\naddi sp, sp, -32\nsw ra, 28(sp)\nsw s0, 24(sp)\nsw s1, 20(sp)\nsw s2, 16(sp)\n"
+        "sw s3, 12(sp)\nmv s0, a0\nmv s2, a2\nli s1, 0xE000F000\nmv a0, a1\nlw s3, 8(s1)\n"
+        "jalr ra, 0(s0)\nlw t0, 8(s1)\nsw s3, 0(s2)\nsw t0, 4(s2)\nlw ra, 28(sp)\nlw s0, 24(sp)\n"
+        "lw s1, 20(sp)\nlw s2, 16(sp)\nlw s3, 12(sp)\naddi sp, sp, 32\nret\n"
+        // Letter i's fetch patterns, in SRAM.
+        COST_PAIR(sram_w32, ".option norvc\n", 32, 64, "addi t0, t0, 1\n", "")
+        COST_PAIR(sram_w32h, ".option rvc\nc.nop\n.option norvc\n", 32, 64, "addi t0, t0, 1\n", "")
+        COST_PAIR(sram_w16, ".option rvc\n", 32, 64, "c.addi t0, 1\n", "")
+        COST_PAIR(sram_jc, ".option rvc\n", 16, 32, "c.j 1f\n.2byte 0\n1:\n", "")
+        COST_PAIR(sram_jw, ".option norvc\n", 16, 32, "j 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(sram_jx, ".option rvc\nc.nop\n.option norvc\n", 16, 32, "j 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(sram_bt, ".option norvc\n", 16, 32, "beqz zero, 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(sram_bn, ".option norvc\n", 16, 32, "bnez zero, 2f\n", "2:\n")
+        COST_PAIR(sram_call, ".option norvc\naddi t1, ra, 0\n", 16, 32, "jal ra, sram_leaf\n",
+                  "addi ra, t1, 0\n")
+        ".balign 4\n.globl sram_leaf\n.type sram_leaf, @function\nsram_leaf:\n.option rvc\nc.jr ra\n"
+        COST_PAIR(sram_stb, ".option rvc\nc.li a4, 0\n.option norvc\naddi a3, sp, -16\n.option rvc\nc.nop\n",
+                  16, 32, "c.sw a4, 0(a3)\nc.beqz a4, 1f\n.4byte 0\n1:\n", "")
+        COST_PAIR(sram_ldj, ".option norvc\naddi t1, ra, 0\naddi a3, sp, -16\nla a5, sram_leaf\n.option rvc\n",
+                  16, 32, "c.lw a2, 0(a3)\nc.jalr a5\n", ".option norvc\naddi ra, t1, 0\n")
+        // A call through a register on a word, the 32-bit jalr, and the
+        // leaf's return.
+        COST_PAIR(sram_jalr, ".option norvc\naddi t1, ra, 0\nla a5, sram_leaf\n", 16, 32,
+                  "jalr ra, 0(a5)\n", "addi ra, t1, 0\n")
+        // Loads and stores, in runs and alone (three ALU instructions after
+        // each), below the stack pointer, where nothing lives: the
+        // patterns run with interrupts masked.
+        COST_PAIR(sram_lw, ".option norvc\naddi a3, sp, -64\n", 16, 32, "lw a2, 0(a3)\n", "")
+        COST_PAIR(sram_lwp, ".option norvc\nli a3, 0xE000F000\n", 16, 32, "lw a2, 8(a3)\n", "")
+        COST_PAIR(sram_lw1, ".option norvc\naddi a3, sp, -64\n", 16, 32,
+                  "lw a2, 0(a3)\naddi t0, t0, 1\naddi t0, t0, 1\naddi t0, t0, 1\n", "")
+        COST_PAIR(sram_sw1, ".option norvc\naddi a3, sp, -64\nli a4, 0\n", 16, 32,
+                  "sw a4, 0(a3)\naddi t0, t0, 1\naddi t0, t0, 1\naddi t0, t0, 1\n", "")
+        COST_PAIR(sram_csw1, ".option norvc\naddi a3, sp, -64\n.option rvc\nc.li a4, 0\nc.nop\n", 16, 32,
+                  "c.sw a4, 0(a3)\nc.addi t0, 1\nc.addi t0, 1\nc.addi t0, 1\n", "")
+        // The two stores alone again, to a peripheral: zeros to PFIC_IPRR0
+        // (a one written there clears a line's pending bit, a zero
+        // nothing), the SRAM left to the fetch.
+        COST_PAIR(sram_swp1, ".option norvc\nli a3, 0xE000E280\nli a4, 0\n", 16, 32,
+                  "sw a4, 0(a3)\naddi t0, t0, 1\naddi t0, t0, 1\naddi t0, t0, 1\n", "")
+        COST_PAIR(sram_cswp1, ".option norvc\nli a3, 0xE000E280\n.option rvc\nc.li a4, 0\nc.nop\n", 16, 32,
+                  "c.sw a4, 0(a3)\nc.addi t0, 1\nc.addi t0, 1\nc.addi t0, 1\n", "")
+        COST_PAIR(sram_csw2, ".option norvc\naddi a3, sp, -64\n.option rvc\nc.li a4, 0\nc.nop\n", 16, 32,
+                  "c.sw a4, 0(a3)\nc.sw a4, 4(a3)\n", "")
+        COST_PAIR(sram_csw2h, ".option norvc\naddi a3, sp, -64\n.option rvc\nc.li a4, 0\n", 16, 32,
+                  "c.sw a4, 0(a3)\nc.sw a4, 4(a3)\n", "")
+        COST_PAIR(sram_sw32, ".option norvc\naddi a3, sp, -64\nli a4, 0\n", 16, 32, "sw a4, 0(a3)\n", "")
+        // Letter i's predictor patterns, in SRAM, and two leaves of their own.
+        ".balign 4\n.globl sram_pred_b32\n.type sram_pred_b32, @function\nsram_pred_b32:\n"
+        ".option norvc\n.rept 16\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.endr\n.option rvc\nc.jr ra\n"
+        ".balign 4\n.globl sram_pred_b16\n.type sram_pred_b16, @function\nsram_pred_b16:\n"
+        ".option rvc\n.rept 16\nc.bnez a0, 1f\nc.nop\nc.nop\n1:\n.endr\nc.jr ra\n"
+        ".balign 4\n.globl sram_pred_one16\n.type sram_pred_one16, @function\nsram_pred_one16:\n"
+        ".option rvc\nc.bnez a0, 1f\nc.nop\nc.nop\n1:\n.rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl sram_pred_one32h\n.type sram_pred_one32h, @function\nsram_pred_one32h:\n"
+        ".option rvc\nc.nop\n.option norvc\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.option rvc\n"
+        ".rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl sram_pred_one32\n.type sram_pred_one32, @function\nsram_pred_one32:\n"
+        ".option norvc\nbnez a0, 1f\naddi zero, zero, 0\n1:\n.option rvc\n"
+        ".rept 4\nc.nop\n.endr\n.balign 4\nc.jr ra\n"
+        ".balign 4\n.globl sram_pred_jalr\n.type sram_pred_jalr, @function\nsram_pred_jalr:\n"
+        ".option norvc\naddi t1, ra, 0\n.rept 16\njalr ra, 0(a0)\n.endr\naddi ra, t1, 0\n"
+        ".option rvc\nc.jr ra\n"
+        ".balign 4\n.globl sram_leaf_a\n.type sram_leaf_a, @function\nsram_leaf_a:\n.option rvc\nc.jr ra\n"
+        ".balign 4\n.globl sram_leaf_b\n.type sram_leaf_b, @function\nsram_leaf_b:\n.option rvc\nc.jr ra\n"
+        // The traps raised in SRAM: a store pends the software interrupt;
+        // the same with a fence.i after it; the unmask finds it pending; an
+        // ecall; a store pends TIM2's line, whose handler pends the
+        // software interrupt before its MRET.
+        COST_TRAP_OPEN(sram_trap_sw, 0)
+        "lw t0, 8(a5)\nsw a2, 0(a3)\n.globl sram_after_sw_store\nsram_after_sw_store:\n"
+        COST_TRAP_CLOSE
+        COST_TRAP_OPEN(sram_trap_fence, 0)
+        "lw t0, 8(a5)\nsw a2, 0(a3)\nfence.i\n.globl sram_after_fence\nsram_after_fence:\n"
+        COST_TRAP_CLOSE
+        COST_TRAP_OPEN(sram_trap_unmask, 0)
+        "csrci mstatus, 8\nsw a2, 0(a3)\nlw t0, 8(a5)\ncsrsi mstatus, 8\n"
+        ".globl sram_after_unmask\nsram_after_unmask:\n"
+        COST_TRAP_CLOSE
+        COST_TRAP_OPEN(sram_trap_ecall, 0)
+        "lw t0, 8(a5)\necall\n"
+        COST_TRAP_CLOSE
+        COST_TRAP_OPEN(sram_trap_tail, 1)
+        "lw t0, 8(a5)\nsw a1, 4(a3)\n"
+        COST_TRAP_CLOSE
+        // The handlers in SRAM, letter i's three twins.
+        ".balign 4\n.globl sram_software\n.type sram_software, @function\nsram_software:\n"
+        ".option norvc\nlw s2, 8(a5)\ncsrr t3, mepc\nsw t3, 24(a4)\ncsrw mepc, a6\n"
+        "sw a2, 0x80(a3)\nlw s3, 8(a5)\nmret\n"
+        ".balign 4\n.globl sram_ecall\n.type sram_ecall, @function\nsram_ecall:\n"
+        ".option norvc\nlw s2, 8(a5)\ncsrr t3, mepc\nsw t3, 24(a4)\ncsrw mepc, a6\nlw s3, 8(a5)\nmret\n"
+        ".balign 4\n.globl sram_tim2\n.type sram_tim2, @function\nsram_tim2:\n"
+        ".option norvc\nlw s4, 8(a5)\ncsrw mepc, a6\nsw a1, 0x84(a3)\nbeqz a7, 8f\nsw a2, 0(a3)\n"
+        "8:\nlw s5, 8(a5)\nmret\n"
+        // The letter's vector table in SRAM: 55 words, filled at the
+        // letter's start from the crt's table, three entries replaced (the
+        // letter's header); mtvec's base field takes a word-aligned address
+        // (RM 7.5.3.2). It is part of this section, and so of .data, rather
+        // than of .bss: an object added to .bss moves the image's other
+        // variables against the global pointer, and the linker then relaxes
+        // other code differently (measured: the crt and the runtime's
+        // self-test moved). The section ends on a multiple of 8, so the
+        // variables after it, and the global pointer, move by its size and
+        // keep their distances.
+        ".balign 4\n.globl sram_vectors\nsram_vectors:\n.space 220\n"
+        ".balign 8\n"
+        ".option pop\n"
+        ".popsection\n");
+
+__asm__(".pushsection .rodata.cost_sram_letter,\"ax\",@progbits\n"
+        ".option push\n"
+        ".option norelax\n"
+        // From the flash: a call into SRAM through a register, its word
+        // shared with a compressed no-op, and the SRAM leaf's return.
+        COST_PAIR(cross_call, ".option norvc\naddi t1, ra, 0\nla a5, sram_leaf\n.option rvc\n", 16, 32,
+                  "c.jalr a5\nc.nop\n", ".option norvc\naddi ra, t1, 0\n")
+        // The traps raised in the flash into a handler in SRAM: a store
+        // pends the software interrupt; the unmask finds it pending.
+        COST_TRAP_OPEN(cross_trap_sw, 0)
+        "lw t0, 8(a5)\nsw a2, 0(a3)\n.globl cross_after_sw_store\ncross_after_sw_store:\n"
+        COST_TRAP_CLOSE
+        COST_TRAP_OPEN(cross_trap_unmask, 0)
+        "csrci mstatus, 8\nsw a2, 0(a3)\nlw t0, 8(a5)\ncsrsi mstatus, 8\n"
+        ".globl cross_after_unmask\ncross_after_unmask:\n"
+        COST_TRAP_CLOSE
+        // The letter's table in the flash: the crt's 55 words with entry 14
+        // the software interrupt's handler in SRAM, and TIM2's line letter
+        // i's handler, as the crt binds it.
+        ".balign 4\n.globl cross_vectors\ncross_vectors:\n"
+        ".word 0, 0, nmi_handler, fault_handler, 0, ecall_m_handler, 0, 0\n"
+        ".word ecall_u_handler, breakpoint_handler, 0, 0, systick_handler, 0, sram_software, 0\n"
+        ".word default_handler, default_handler, default_handler, 0\n"   // 16..19
+        ".rept 19\n.word default_handler\n.endr\n"        // 20..38
+        ".word usart2_handler\n"                          // 39
+        ".rept 11\n.word default_handler\n.endr\n"        // 40..50
+        ".word tim2_cc_handler, default_handler, default_handler, tim3_handler\n"   // 51..54
+        ".option pop\n"
+        ".popsection\n");
+
+#undef COST_TRAP_CLOSE
+#undef COST_TRAP_OPEN
+#undef COST_PAIR
+#undef COST_SEQ
+
+}  // namespace
+
+// Letter j's assembly, by its symbols (C linkage, outside the unnamed namespace).
+extern "C" {
+void sram_ruler(uint32_t* two);
+void sram_time_call(uint32_t f, uint32_t arg, uint32_t* two);
+void sram_w32_n();
+void sram_w32_2n();
+void sram_w32h_n();
+void sram_w32h_2n();
+void sram_w16_n();
+void sram_w16_2n();
+void sram_jc_n();
+void sram_jc_2n();
+void sram_jw_n();
+void sram_jw_2n();
+void sram_jx_n();
+void sram_jx_2n();
+void sram_bt_n();
+void sram_bt_2n();
+void sram_bn_n();
+void sram_bn_2n();
+void sram_call_n();
+void sram_call_2n();
+void sram_stb_n();
+void sram_stb_2n();
+void sram_ldj_n();
+void sram_ldj_2n();
+void sram_jalr_n();
+void sram_jalr_2n();
+void sram_lw_n();
+void sram_lw_2n();
+void sram_lwp_n();
+void sram_lwp_2n();
+void sram_lw1_n();
+void sram_lw1_2n();
+void sram_sw1_n();
+void sram_sw1_2n();
+void sram_csw1_n();
+void sram_csw1_2n();
+void sram_swp1_n();
+void sram_swp1_2n();
+void sram_cswp1_n();
+void sram_cswp1_2n();
+void sram_csw2_n();
+void sram_csw2_2n();
+void sram_csw2h_n();
+void sram_csw2h_2n();
+void sram_sw32_n();
+void sram_sw32_2n();
+void sram_pred_b32(uint32_t);
+void sram_pred_b16(uint32_t);
+void sram_pred_one16(uint32_t);
+void sram_pred_one32h(uint32_t);
+void sram_pred_one32(uint32_t);
+void sram_pred_jalr(uint32_t);
+void sram_leaf_a();
+void sram_leaf_b();
+void sram_trap_sw(void* stamps);
+void sram_trap_fence(void* stamps);
+void sram_trap_unmask(void* stamps);
+void sram_trap_ecall(void* stamps);
+void sram_trap_tail(void* stamps);
+void sram_after_sw_store();
+void sram_after_fence();
+void sram_after_unmask();
+void sram_software();
+void sram_ecall();
+void sram_tim2();
+void cross_call_n();
+void cross_call_2n();
+void cross_trap_sw(void* stamps);
+void cross_trap_unmask(void* stamps);
+void cross_after_sw_store();
+void cross_after_unmask();
+extern const uint32_t cross_vectors[];
+extern uint32_t sram_vectors[];
+void tim2_cc_handler();
+}
+
+namespace {
+
+
+[[gnu::always_inline]] inline uint32_t address_of(void (*f)()) { return reinterpret_cast<uint32_t>(f); }
+
+/// Letter i's Span for the letter's own use, its fold always inline: a
+/// second user of Span::add moved it out of line, and every function of
+/// the image after it.
+struct SramSpan {
+    uint32_t least = 0xFFFF'FFFFu;
+    uint32_t most = 0;
+    [[gnu::always_inline]] void add(uint32_t v) {
+        if (v < least) { least = v; }
+        if (v > most) { most = v; }
+    }
+};
+
+/// Letter i's TrapRun over SramSpan.
+struct SramTrapRun {
+    SramSpan entry;        ///< first - before
+    SramSpan line_entry;   ///< line_first - before
+    SramSpan mret;         ///< after - last
+    SramSpan tail;         ///< first - line_last
+    uint32_t kept = 0;
+    uint32_t ticked = 0;
+    uint32_t untaken = 0;
+    uint32_t mepc = 0;
+    bool mepc_steady = true;
+};
+
+/// The timing loops: letter i's cost_time and cost_time_once, twinned.
+/// A pattern in SRAM is called and timed by the assembly harness in SRAM
+/// (`sram_time_call`, the counter read either side of the call), the loop
+/// around it in the flash.
+[[gnu::noinline, gnu::no_icf, CROSS_PLACED]] SramSpan sram_time(void (*f)()) {
+    SramSpan s;
+    for (uint32_t i = 0; i < 32u; ++i) {
+        uint32_t two[2] = {0, 0};
+        {
+            P::CriticalSection cs;
+            sram_time_call(address_of(f), 0u, two);
+        }
+        s.add(cycles_between(two[0], two[1]));
+    }
+    return s;
+}
+
+[[gnu::noinline, gnu::no_icf, CROSS_PLACED]] uint32_t sram_time_once(void (*f)(uint32_t), uint32_t arg) {
+    uint32_t two[2] = {0, 0};
+    {
+        P::CriticalSection cs;
+        sram_time_call(reinterpret_cast<uint32_t>(f), arg, two);
+    }
+    return cycles_between(two[0], two[1]);
+}
+
+/// The harness in the flash, for the pattern that calls from the flash
+/// into SRAM: the same twin, in the letter's flash section.
+[[gnu::noinline, gnu::no_icf, CROSS_PLACED]] SramSpan cross_time(void (*f)()) {
+    SramSpan s;
+    for (uint32_t i = 0; i < 32u; ++i) {
+        P::CriticalSection cs;
+        const uint32_t a = stk()->CNTL;
+        f();
+        const uint32_t b = stk()->CNTL;
+        s.add(cycles_between(a, b));
+    }
+    return s;
+}
+
+/// A fetch row: `units` more in the second run, which cost `extra` cycles
+/// by the model with corecfgr 0x1F and `extra_off` with it cleared - a
+/// total, since a store's cost in a run is not a whole number of cycles a
+/// unit. The spread each length may show with the predictor on: the
+/// allowance a unit (3 a predicted site in SRAM, 4 in the flash) times the
+/// units, and `frame`, the harness's call into the pattern and its return.
+/// And with the predictor on, a row whose pattern has predicted sites
+/// takes the difference of the two leasts within one wrong guess of the
+/// model, `guess` (3 in SRAM, letter i's 8 in the flash): the least of 32
+/// calls carries the predictor's history when one of the pattern's sites
+/// shares the predictor's entry with a branch of the loop around the call,
+/// the only code that runs between two calls, and so is wrong in every
+/// call - measured twice in 52 runs, both times a taken branch's row
+/// whose second least carried 2 cycles. With the predictor off there is no history,
+/// and every row is judged to the cycle.
+struct SramRow {
+    Named name;
+    void (*n)();
+    void (*n2)();
+    uint32_t units;
+    uint32_t extra;
+    uint32_t extra_off;
+    uint32_t allow_unit;
+    uint32_t frame;
+    bool from_flash;   ///< timed by the flash harness
+};
+
+constexpr SramRow sram_rows[] = {
+    {COST_NAMED("SRAM: 32-bit instructions on a word"), sram_w32_n, sram_w32_2n, 32, 32, 32, 0, 6, false},
+    {COST_NAMED("SRAM: 32-bit instructions half a word off"), sram_w32h_n, sram_w32h_2n, 32, 32, 32, 0, 6, false},
+    {COST_NAMED("SRAM: compressed instructions"), sram_w16_n, sram_w16_2n, 32, 32, 32, 0, 6, false},
+    {COST_NAMED("SRAM: a c.j to a target in one word"), sram_jc_n, sram_jc_2n, 16, 32, 32, 3, 6, false},
+    {COST_NAMED("SRAM: a j to a 32-bit target on a word"), sram_jw_n, sram_jw_2n, 16, 32, 32, 3, 6, false},
+    {COST_NAMED("SRAM: a j to a 32-bit target across two words"), sram_jx_n, sram_jx_2n, 16, 48, 48, 3, 6, false},
+    // A taken conditional branch waits for its execution without the
+    // predictor: 2 with corecfgr's 0x1F, 4 cleared.
+    {COST_NAMED("SRAM: a taken conditional branch, its target on a word"), sram_bt_n, sram_bt_2n, 16, 32, 64, 3, 6, false},
+    {COST_NAMED("SRAM: a not-taken conditional branch"), sram_bn_n, sram_bn_2n, 16, 16, 16, 3, 6, false},
+    {COST_NAMED("SRAM: a call and its return, both targets on a word"), sram_call_n, sram_call_2n, 16, 96, 96, 6, 6, false},
+    {COST_NAMED("SRAM: a store and a taken branch in one word"), sram_stb_n, sram_stb_2n, 16, 80, 96, 3, 6, false},
+    {COST_NAMED("SRAM: a load and a call through a register in one word"), sram_ldj_n, sram_ldj_2n, 16, 112, 160, 6, 6, false},
+    {COST_NAMED("SRAM: a jalr on a word and the leaf's return"), sram_jalr_n, sram_jalr_2n, 16, 96, 128, 6, 6, false},
+    {COST_NAMED("SRAM: a load from SRAM in a run"), sram_lw_n, sram_lw_2n, 16, 32, 32, 0, 6, false},
+    {COST_NAMED("SRAM: a load from a peripheral (the STK) in a run"), sram_lwp_n, sram_lwp_2n, 16, 32, 32, 0, 6, false},
+    {COST_NAMED("SRAM: a load from SRAM alone, three ALU instructions after it"), sram_lw1_n, sram_lw1_2n, 16, 80, 80, 0, 6, false},
+    {COST_NAMED("SRAM: a 32-bit store alone, three ALU instructions after it"), sram_sw1_n, sram_sw1_2n, 16, 96, 96, 0, 6, false},
+    {COST_NAMED("SRAM: a compressed store alone, three ALU instructions after it"), sram_csw1_n, sram_csw1_2n, 16, 64, 80, 0, 6, false},
+    {COST_NAMED("SRAM: a 32-bit store to a peripheral alone, three ALU instructions after it"), sram_swp1_n, sram_swp1_2n, 16, 64, 80, 0, 6, false},
+    {COST_NAMED("SRAM: a compressed store to a peripheral alone, three ALU instructions after it"), sram_cswp1_n, sram_cswp1_2n, 16, 64, 80, 0, 6, false},
+    {COST_NAMED("SRAM: compressed stores in a run, two a word"), sram_csw2_n, sram_csw2_2n, 16, 54, 80, 0, 6, false},
+    {COST_NAMED("SRAM: compressed stores in a run, two a word, half a word off"), sram_csw2h_n, sram_csw2h_2n, 16, 52, 80, 0, 6, false},
+    {COST_NAMED("SRAM: 32-bit stores in a run"), sram_sw32_n, sram_sw32_2n, 16, 36, 48, 0, 6, false},
+    // From the flash: the c.jalr's word (the flash's 4), the transfer into
+    // SRAM, the leaf's return into the flash; its sites one in the flash
+    // and one in SRAM, its frame the flash harness's.
+    {COST_NAMED("from the flash: a call into SRAM and its return, the call's word included"), cross_call_n, cross_call_2n, 16, 256, 288, 7, 8, true},
+};
+
+/// The fetch rows: as letter i's, each in its harness.
+[[CROSS_PLACED]] void sram_fetch(bool predictor_on) {
+    for (const SramRow& r : sram_rows) {
+        const SramSpan a = r.from_flash ? cross_time(r.n) : sram_time(r.n);
+        const SramSpan b = r.from_flash ? cross_time(r.n2) : sram_time(r.n2);
+        const uint32_t diff = b.least - a.least;
+        const uint32_t model = predictor_on ? r.extra : r.extra_off;
+        const uint32_t guess = (predictor_on && r.allow_unit != 0u) ? (r.from_flash ? 8u : 3u) : 0u;
+        print(serial, "  ", r.name.base, ": ", r.units, " units ", a.least, "..", a.most, ", ",
+              2u * r.units, " units ", b.least, "..", b.most, ": ", diff, " for the ", r.units,
+              " more, the model ", model, " (within ", guess, ")", crlf);
+        const uint32_t allow_unit = predictor_on ? r.allow_unit : 0u;
+        const uint32_t frame = predictor_on ? r.frame : 0u;
+        bench.verdict(r.name.pick(predictor_on),
+                      diff + guess >= model && diff <= model + guess &&
+                          a.most - a.least <= frame + r.units * allow_unit &&
+                          b.most - b.least <= frame + 2u * r.units * allow_unit);
+    }
+}
+
+/// One trap sequence, 256 trips, as letter i's cost_trap runs one, with
+/// mtvec on `table` - the letter's table in SRAM or in the flash - for the
+/// run and back on the crt's table after it.
+[[gnu::no_icf, CROSS_PLACED]] SramTrapRun sram_trap(void (*f)(void*), const uint32_t* table) {
+    SramTrapRun r;
+    const uint32_t crt_mtvec = read_csr_mtvec();
+    console_drain();
+    {
+        P::CriticalSection cs;
+        __asm__ volatile("csrw mtvec, %0" ::"r"(reinterpret_cast<uint32_t>(table) | 3u) : "memory");
+        Pfic::clear_pending(Irq::software);
+        Pfic::clear_pending(Irq::tim2_cc);
+        Pfic::enable(Irq::software);
+        Pfic::enable(Irq::tim2_cc);
+    }
+    for (uint32_t i = 0; i < 256u; ++i) {
+        CostStamps s{};
+        s.mepc = 0;
+        const uint32_t t = Ticker::ticks();
+        f(&s);
+        if (Ticker::ticks() != t) {
+            ++r.ticked;
+            continue;
+        }
+        const bool sw_side = s.first != never_stamped && s.last != never_stamped;
+        const bool line_side = s.line_first != never_stamped && s.line_last != never_stamped;
+        if (!sw_side && !line_side) {
+            ++r.untaken;
+            continue;
+        }
+        ++r.kept;
+        if (sw_side) {
+            r.entry.add(cycles_between(s.before, s.first));
+            r.mret.add(cycles_between(s.last, s.after));
+            if (r.kept > 1u && s.mepc != r.mepc) {
+                r.mepc_steady = false;
+            }
+            r.mepc = s.mepc;
+        }
+        if (line_side) {
+            r.line_entry.add(cycles_between(s.before, s.line_first));
+            if (sw_side) {
+                r.tail.add(cycles_between(s.line_last, s.first));
+            } else {
+                r.mret.add(cycles_between(s.line_last, s.after));
+            }
+        }
+    }
+    {
+        P::CriticalSection cs;
+        Pfic::disable(Irq::software);
+        Pfic::disable(Irq::tim2_cc);
+        Pfic::clear_pending(Irq::software);
+        Pfic::clear_pending(Irq::tim2_cc);
+        __asm__ volatile("csrw mtvec, %0" ::"r"(crt_mtvec) : "memory");
+    }
+    return r;
+}
+
+/// A trap figure: the span less the ruler of the memory its first stamp is
+/// in, every kept trip the model's - `model` with corecfgr 0x1F,
+/// `model_off` with it cleared.
+[[gnu::no_icf, CROSS_PLACED]] void sram_figure(const Named& name, bool predictor_on, const SramTrapRun& r,
+                                               const SramSpan& s, uint32_t ruler, uint32_t model,
+                                               uint32_t model_off) {
+    const uint32_t m = predictor_on ? model : model_off;
+    const uint32_t least = s.least - ruler;
+    const uint32_t most = s.most - ruler;
+    print(serial, "  ", name.base, ": ", least, "..", most, " over ", r.kept, " trips (", r.ticked,
+          " with a tick, dropped; ", r.untaken, " not taken), less a ruler of ", ruler, ", the model ",
+          m, crlf);
+    bench.verdict(name.pick(predictor_on), r.kept > 0u && r.untaken == 0u && least == m && most == m);
+}
+
+/// The predictor rows: letter i's cost_predictor over the SRAM patterns,
+/// the allowance 3 cycles at each predicted site, the pattern's and the
+/// harness's call into it and its return.
+[[CROSS_PLACED]] void sram_predictor(const PredictorRow& row, bool predictor_on) {
+    uint32_t trained[2] = {0xFFFF'FFFFu, 0xFFFF'FFFFu};
+    uint32_t flipped_least[2] = {0xFFFF'FFFFu, 0xFFFF'FFFFu};
+    uint32_t flipped_most[2] = {0, 0};
+    for (uint32_t round = 0; round < 16u; ++round) {
+        for (uint32_t dir = 0; dir < 2u; ++dir) {
+            for (uint32_t k = 0; k < 32u; ++k) {
+                (void)sram_time_once(row.f, row.arg[1u - dir]);   // the other way's training
+            }
+            const uint32_t fl = sram_time_once(row.f, row.arg[dir]);
+            if (fl < flipped_least[dir]) { flipped_least[dir] = fl; }
+            if (fl > flipped_most[dir]) { flipped_most[dir] = fl; }
+            for (uint32_t k = 0; k < 32u; ++k) {
+                const uint32_t c = sram_time_once(row.f, row.arg[dir]);
+                if (c < trained[dir]) { trained[dir] = c; }
+            }
+        }
+    }
+    bool ok = true;
+    uint32_t worst = 0;
+    for (uint32_t dir = 0; dir < 2u; ++dir) {
+        const bool below = flipped_least[dir] < trained[dir];
+        const uint32_t lo = below ? 0u : flipped_least[dir] - trained[dir];
+        const uint32_t hi = flipped_most[dir] - trained[dir];
+        print(serial, "  ", row.name.base, ", ", row.way[dir], ": trained ", trained[dir],
+              ", right after the other way's training +", lo, "..+", hi, " cycles", crlf);
+        if (below) {
+            ok = false;   // the trained least must be the least
+        }
+        if (hi > worst) { worst = hi; }
+    }
+    const uint32_t allowance = predictor_on ? 3u * (row.sites + 2u) : 0u;
+    print(serial, "  ", row.name.base, ": the wrong guesses cost at most ", worst,
+          " cycles at ", row.sites, " site(s) of the pattern; the allowance ", allowance, crlf);
+    bench.verdict(row.name.pick(predictor_on), ok && worst <= allowance);
+}
+
+constexpr PredictorRow sram_predictor_rows[] = {
+    {COST_NAMED("SRAM: 16 32-bit branches over a 32-bit instruction"), sram_pred_b32, {1u, 0u},
+     {"taken", "not taken"}, 16},
+    {COST_NAMED("SRAM: 16 compressed branches over two compressed instructions"), sram_pred_b16, {1u, 0u},
+     {"taken", "not taken"}, 16},
+    {COST_NAMED("SRAM: one compressed branch on a word over two compressed instructions"),
+     sram_pred_one16, {1u, 0u}, {"taken", "not taken"}, 1},
+    {COST_NAMED("SRAM: one 32-bit branch half a word off over a 32-bit instruction"), sram_pred_one32h,
+     {1u, 0u}, {"taken", "not taken"}, 1},
+    {COST_NAMED("SRAM: one 32-bit branch on a word over a 32-bit instruction"), sram_pred_one32,
+     {1u, 0u}, {"taken", "not taken"}, 1},
+};
+
+/// The least of 16 readings of a ruler, interrupts masked.
+[[CROSS_PLACED]] uint32_t ruler_of(void (*ruler)(uint32_t*)) {
+    uint32_t two[2] = {0, 0};
+    uint32_t least = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        {
+            P::CriticalSection cs;
+            ruler(two);
+        }
+        if (cycles_between(two[0], two[1]) < least) {
+            least = cycles_between(two[0], two[1]);
+        }
+    }
+    return least;
+}
+
+[[CROSS_PLACED]] void sram_pass(bool predictor_on) {
+    const uint32_t sram_ruler_cycles = ruler_of(sram_ruler);
+    const uint32_t flash_ruler_cycles = ruler_of(cost_ruler);
+    print(serial, "  the rulers: two loads of CNTL back to back read ", sram_ruler_cycles,
+          " cycles apart in SRAM and ", flash_ruler_cycles, " in the flash", crlf);
+    bench.verdict(COST_NAMED("SRAM's ruler: two bare reads 1 cycle apart (2 with corecfgr cleared)")
+                      .pick(predictor_on),
+                  sram_ruler_cycles == (predictor_on ? 1u : 2u));
+    bench.verdict(COST_NAMED("the flash's ruler, letter i's: 4 cycles apart").pick(predictor_on),
+                  flash_ruler_cycles == 4u);
+
+    sram_fetch(predictor_on);
+
+    const uint32_t sr = sram_ruler_cycles;
+    const uint32_t fr = flash_ruler_cycles;
+
+    // The traps raised in SRAM, their handlers in SRAM.
+    sram_vectors[51] = address_of(sram_tim2);
+    const SramTrapRun sw = sram_trap(sram_trap_sw, sram_vectors);
+    sram_figure(COST_NAMED("SRAM: a store pends the software interrupt, the table in SRAM: to its handler"),
+                predictor_on, sw, sw.entry, sr, 10u, 10u);
+    sram_figure(COST_NAMED("SRAM: an MRET into SRAM code: to its target"), predictor_on, sw, sw.mret,
+                sr, 5u, 4u);
+    const SramTrapRun sw_ft = sram_trap(sram_trap_sw, cross_vectors);
+    sram_figure(COST_NAMED("SRAM: the same store through a table in the flash"), predictor_on, sw_ft,
+                sw_ft.entry, sr, 18u, 18u);
+    const SramTrapRun fence = sram_trap(sram_trap_fence, sram_vectors);
+    sram_figure(COST_NAMED("SRAM: the same store with a fence.i after it, the table in SRAM"),
+                predictor_on, fence, fence.entry, sr, 12u, 12u);
+    const SramTrapRun unmask = sram_trap(sram_trap_unmask, sram_vectors);
+    sram_figure(COST_NAMED("SRAM: the unmask that finds the software interrupt pending, the table in SRAM"),
+                predictor_on, unmask, unmask.entry, sr, 10u, 9u);
+    const SramTrapRun ecall = sram_trap(sram_trap_ecall, sram_vectors);
+    sram_figure(COST_NAMED("SRAM: an ecall, the table in SRAM: to its handler"), predictor_on, ecall,
+                ecall.entry, sr, 9u, 8u);
+    const SramTrapRun tail = sram_trap(sram_trap_tail, sram_vectors);
+    sram_figure(COST_NAMED("SRAM: an MRET into a pending interrupt, the table in SRAM: to that handler"),
+                predictor_on, tail, tail.tail, sr, 11u, 10u);
+
+    // What retires behind the trigger: mepc read in the handler.
+    const uint32_t after_store = address_of(sram_after_sw_store);
+    const uint32_t after_fence = address_of(sram_after_fence);
+    const uint32_t after_unmask = address_of(sram_after_unmask);
+    const uint32_t posted = predictor_on ? 6u : 4u;   // three compressed instructions, or two
+    print(serial, "  mepc from SRAM: ", hex(sw.mepc), " after the store at ", hex(after_store - 4u),
+          ", ", hex(fence.mepc), " after the fence.i at ", hex(after_fence - 4u), ", ",
+          hex(unmask.mepc), " after the csrsi at ", hex(after_unmask - 4u), crlf);
+    bench.verdict(COST_NAMED("SRAM: the store is posted - three compressed instructions retire behind it "
+                             "(two with corecfgr cleared)")
+                      .pick(predictor_on),
+                  sw.mepc_steady && sw.mepc == after_store + posted);
+    bench.verdict(COST_NAMED("SRAM: a fence.i after the store closes them: the trap taken after the fence")
+                      .pick(predictor_on),
+                  fence.mepc_steady && fence.mepc == after_fence);
+    bench.verdict(COST_NAMED("SRAM: two compressed instructions retire behind the unmask").pick(predictor_on),
+                  unmask.mepc_steady && unmask.mepc == after_unmask + 4u);
+
+    // The crossings: a store and an unmask in the flash, the handler in
+    // SRAM, through either table; the handler's MRET into the flash.
+    const SramTrapRun xsw = sram_trap(cross_trap_sw, sram_vectors);
+    sram_figure(COST_NAMED("from the flash: a store pends the software interrupt, the handler and the table "
+                           "in SRAM"),
+                predictor_on, xsw, xsw.entry, fr, 12u, 12u);
+    sram_figure(COST_NAMED("SRAM: the handler's MRET into flash code: to its target"), predictor_on, xsw,
+                xsw.mret, sr, 9u, 8u);
+    const SramTrapRun xsw_ft = sram_trap(cross_trap_sw, cross_vectors);
+    sram_figure(COST_NAMED("from the flash: the same store through a table in the flash"), predictor_on, xsw_ft,
+                xsw_ft.entry, fr, 18u, 18u);
+    const SramTrapRun xun = sram_trap(cross_trap_unmask, sram_vectors);
+    sram_figure(COST_NAMED("from the flash: the unmask that finds it pending, the handler and the table in "
+                           "SRAM"),
+                predictor_on, xun, xun.entry, fr, 12u, 12u);
+    const SramTrapRun xun_ft = sram_trap(cross_trap_unmask, cross_vectors);
+    sram_figure(COST_NAMED("from the flash: the same unmask through a table in the flash"), predictor_on, xun_ft,
+                xun_ft.entry, fr, 18u, 18u);
+    const uint32_t x_after_store = address_of(cross_after_sw_store);
+    const uint32_t x_after_unmask = address_of(cross_after_unmask);
+    print(serial, "  mepc from the flash: ", hex(xsw.mepc), " after the store at ", hex(x_after_store - 4u),
+          ", ", hex(xun.mepc), " after the csrsi at ", hex(x_after_unmask - 4u), crlf);
+    bench.verdict(COST_NAMED("from the flash nothing retires behind the store or the unmask, the handler in "
+                             "SRAM")
+                      .pick(predictor_on),
+                  xsw.mepc_steady && xun.mepc_steady && xsw.mepc == x_after_store &&
+                      xun.mepc == x_after_unmask);
+
+    // A store in SRAM pends TIM2's line, whose handler is letter i's in the
+    // flash and pends the software interrupt, whose handler is in SRAM.
+    sram_vectors[51] = address_of(tim2_cc_handler);
+    const SramTrapRun xtail = sram_trap(sram_trap_tail, sram_vectors);
+    sram_figure(COST_NAMED("from the flash: a handler's MRET into the pending software interrupt, its handler "
+                           "and the table in SRAM"),
+                predictor_on, xtail, xtail.tail, fr, 12u, 12u);
+    sram_figure(COST_NAMED("SRAM: a store pends a line whose handler is in the flash, the table in SRAM"),
+                predictor_on, xtail, xtail.line_entry, sr, 14u, 14u);
+    const SramTrapRun xtail_ft = sram_trap(sram_trap_tail, cross_vectors);
+    sram_figure(COST_NAMED("from the flash: the same MRET through a table in the flash"), predictor_on, xtail_ft,
+                xtail_ft.tail, fr, 20u, 20u);
+    sram_figure(COST_NAMED("SRAM: the same store to the line through a table in the flash"), predictor_on, xtail_ft,
+                xtail_ft.line_entry, sr, 20u, 20u);
+
+    for (const PredictorRow& row : sram_predictor_rows) {
+        sram_predictor(row, predictor_on);
+    }
+    const PredictorRow jalr{COST_NAMED("SRAM: 16 calls through a register"),
+                            sram_pred_jalr,
+                            {address_of(sram_leaf_a), address_of(sram_leaf_b)},
+                            {"to one leaf", "to the other"},
+                            16};
+    sram_predictor(jalr, predictor_on);
+}
+
+[[CROSS_PLACED]] void tj_sram_cost() {
+    // The letter's table in SRAM, from the crt's (`_start`: entry 0 the
+    // reset jump, entries 1..54 the handlers' addresses).
+    const uint32_t* crt_table = reinterpret_cast<const uint32_t*>(&_start);
+    for (uint8_t i = 0; i < vector_count; ++i) {
+        sram_vectors[i] = crt_table[i];
+    }
+    sram_vectors[static_cast<uint8_t>(Irq::ecall_machine)] = address_of(sram_ecall);
+    sram_vectors[static_cast<uint8_t>(Irq::software)] = address_of(sram_software);
+
+    const uint32_t as_found = read_corecfgr();
+    print(serial, "  corecfgr as the crt left it: ", hex(as_found), "; the letter's code in SRAM from ",
+          hex(address_of(sram_w32_n)), crlf);
+    bench.verdict("SRAM: corecfgr holds the crt's 0x1F", as_found == 0x1Fu);
+    print(serial, "  with corecfgr as the crt left it:", crlf);
+    sram_pass(true);
+
+    print(serial, "  with corecfgr cleared:", crlf);
+    uint32_t cleared = 0;
+    {
+        P::CriticalSection cs;
+        write_corecfgr(0);
+        cleared = read_corecfgr();
+    }
+    sram_pass(false);
+    {
+        P::CriticalSection cs;
+        write_corecfgr(as_found);
+    }
+    const uint32_t restored = read_corecfgr();
+    print(serial, "  corecfgr read ", hex(cleared), " cleared and ", hex(restored), " after; mtvec ",
+          hex(read_csr_mtvec()), crlf);
+    bench.verdict("SRAM: the register took the zero and is back to what the crt wrote, mtvec on the crt's "
+                  "table",
+                  cleared == 0u && restored == as_found &&
+                      read_csr_mtvec() == (reinterpret_cast<uint32_t>(&_start) | 3u));
+}
+
+/// The letter's registration, a static constructor the crt runs before
+/// main() (the placement above says why): the menu lists it first.
+[[gnu::constructor, gnu::noinline, CROSS_PLACED]] void register_sram_cost_letter() {
+    bench.letter('j', "the SRAM cost model the Rubato bounds use", tj_sram_cost);
+}
+
+#undef CROSS_PLACED
 
 }  // namespace
 

@@ -33,8 +33,9 @@
  * the store alone. From SRAM the same store is posted: three compressed
  * instructions retire behind it before the trap (two with corecfgr
  * cleared), and two behind the `csrsi` that unmasks a pending request,
- * measured on the CH32X035F8U6 with the sequence placed in SRAM; a
- * `fence.i` after the store closes them, the trap then taken at the
+ * measured on the CH32X035F8U6 with the sequence placed in SRAM (the
+ * platform suite's letter j, which reads mepc in the handler on every
+ * run); a `fence.i` after the store closes them, the trap then taken at the
  * instruction after the fence, for 2 cycles (12 from the store to the
  * handler where 10 were). So under `ram` the request ends with the
  * `fence.i`, as the CH32V203's does, and a dispatch the request starts
@@ -46,7 +47,8 @@
  * goes to SRAM too. From SRAM a trap through the crt's table in the flash
  * costs 18 cycles from the store that raises it to the handler, and 10
  * through a table in SRAM - the core fetches the entry over the flash's
- * wait states (measured on the CH32X035F8U6) - so scheduler_vector_table_
+ * wait states (measured on the CH32X035F8U6, the platform suite's letter
+ * j) - so scheduler_vector_table_
  * init() copies the crt's 55 words into a table in SRAM and points mtvec
  * at the copy with both mode bits, the same entries naming the same
  * handlers: a program binds nothing new. The crt's table stays where the

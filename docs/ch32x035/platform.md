@@ -310,8 +310,8 @@ the instruction after a store run from the flash (the platform suite's
 letter `i` reads mepc in the handler), so from the flash the request is
 the store alone. The same store run from SRAM retires three compressed
 instructions before the trap (two with the branch predictor off), as the
-V4B's does, measured with the sequence placed in SRAM; there the request
-ends with the `fence.i`, after which the trap is taken at the next
+V4B's does (the platform suite's letter `j`, the same reading with the
+sequence placed in SRAM); there the request ends with the `fence.i`, after which the trap is taken at the next
 instruction, for 2 cycles more (12 from the store to the handler where
 10 were). `scheduling_request_posted`, the fact
 [brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp) gives the
@@ -345,7 +345,7 @@ program binds nothing new, and the crt's table stays where the core
 boots from, serving every trap until then. From SRAM a trap through the
 table in the flash costs 18 cycles from the store that raises it to the
 handler and 10 through the copy, the entry fetched over the flash's wait
-states (measured, the letter's sequences placed in SRAM). The copy is
+states (measured by the platform suite's letter `j`). The copy is
 `scheduler_init()`'s and not the crt's because the crt is assembled for
 every image with the image's value of the definition, a Tenuto image's
 included, and only a preemptive program calls `scheduler_init()`. What
@@ -465,7 +465,7 @@ bytes it costs are in the bench findings below.
 
 ## Bench findings
 
-The reference suite is `test_x035_platform` (105 verdicts in `z`, nothing
+The reference suite is `test_x035_platform` (209 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, in the image built with the hardware prologue, the board's
@@ -551,7 +551,7 @@ the consume was measured before and after. What it measured:
   exit 34 with one iteration of the raiser's spin in it, the whole trip
   96 to 100 - the image built with the hardware prologue
   (`CH32X035_HPE=ON`, the default). In an image built with
-  `CH32X035_HPE=OFF` (its `z` green, 105 verdicts; ten runs of the letter):
+  `CH32X035_HPE=OFF` (its `z` green, 209 verdicts; ten runs of the letter):
   entry 42, body 28, exit 50, the trip 120 to 128 - the prologue buys 24
   to 28 cycles on the minimal handler, the sixteen registers saved and
   restored by gcc's own code instead. The user stack the image never
@@ -599,8 +599,12 @@ the consume was measured before and after. What it measured:
   and not as the privileged specification does, whose MRET drops MPP to
   the least-privileged mode the core implements - user mode here, by
   misa.
-- **The RAM ledger answers.** `stack_untouched()` read 18460 bytes never
-  touched after this suite's whole `z`, 19616 after the clock suite's
+- **The RAM ledger answers.** `stack_untouched()` read 8796 bytes never
+  touched after this suite's whole `z` - its letter `j` holds 9360 bytes
+  of SRAM for its code and its vector table, and its deepest call chain
+  takes 1124 bytes of stack where the deepest of the other letters'
+  takes 820 - 19616
+  after the clock suite's
   and the pin suite's, and 19416 after the USART suite's, of the part's
   20 KB.
 
@@ -651,16 +655,15 @@ mepc reads the instruction after the store and after the `csrsi`: the
 trap is taken there, and nothing retires behind either - from the flash,
 where the letter runs; the same sequences run from SRAM retire three
 compressed instructions behind the store and two behind the `csrsi`
-(measured, not a letter of this suite). The predictor
+(letter `j`, below). The predictor
 corecfgr's 0x1F turns on costs nothing when it guesses right. A branch
 it guessed taken that falls through costs up to 8 cycles more, one it
 guessed to fall through that is taken nothing, and sixteen in a row cost
 at most 64 more, 4 a branch; and over the 32 timed calls of a row of
-not-taken branches the slowest exceeded the least by up to 44 cycles
-with sixteen branches, 80 with thirty-two. The Rubato bounds allow
-4 cycles at each predicted site of a path in the flash (2 at a site in
-SRAM, where the same rows' wrong guesses cost at most 21 cycles over
-sixteen sites and 3 at one), its calls
+not-taken branches the slowest exceeded the least by up to 48 cycles
+with sixteen branches, 84 with thirty-two. The Rubato bounds allow
+4 cycles at each predicted site of a path in the flash (3 at a site in
+SRAM, letter `j`'s figure, below), its calls
 and returns counted, and every row here is judged so and within it; the allowance
 holds over a path, not at each site: one wrong guess alone can cost
 8, twice a site's share. With the register cleared no call of a pattern differs from
@@ -670,8 +673,94 @@ register - that shares its fetch word with a load or a store before it
 waits 4 cycles more; a direct jump, resolved at its decode, does not,
 and with 0x1F the predictor sends the fetch to the target before the
 transfer executes. In the image built without the hardware prologue
-(`CH32X035_HPE=OFF`, its `z` green with 105 verdicts, five runs of the
+(`CH32X035_HPE=OFF`, its `z` green with 209 verdicts, five runs of the
 letter) every fetch and trap figure is the same to the cycle: the core's
+push and pop cost a trap nothing measurable.
+
+**The SRAM cost model** - letter `j`, 104 verdicts, ten runs of the
+letter alike and ten of `z`: the figures `test_x035_rubato`'s bounds are
+drawn with for the image that runs the scheduler path from SRAM (below),
+measured as letter `i` measures the flash's, its patterns, three twins
+of its handlers and the harness that calls and times them placed in
+SRAM with `.fast_text` (the only code this suite places there; a twin
+of letter `i`'s ruler, two loads of CNTL back to back, reads 1 cycle
+from SRAM and 2 with corecfgr cleared, letter `i`'s own 4 from the
+flash). A trap figure is the stamps' difference less the ruler of the
+memory its first stamp is in. The rows through a vector table in SRAM
+point mtvec at a copy of the crt's table the letter fills at its start,
+in SRAM beside its code; the rows through a table in the flash at a
+copy of the crt's table in the flash whose software-interrupt entry
+points into SRAM; TIM2's line, pended by a store, reaches letter `i`'s
+handler in the flash or a twin in SRAM. The figures, in HCLK cycles,
+each judged to the cycle in every run, a trap's in every one of 256
+trips - but for one allowance: with corecfgr's 0x1F a row whose
+pattern has predicted sites is judged within one wrong guess, 3 cycles,
+because the least of its 32 calls can carry the predictor's history
+when one of its sites shares a predictor entry with a branch of the loop
+around the call (twice in 52 runs, both times a taken branch's row
+whose longer pattern's least carried 2):
+
+| figure | 0x1F | cleared |
+|---|---|---|
+| an instruction, 32-bit on a word or half a word off, or compressed | 1 | 1 |
+| a taken `c.j` or `j`, its target in one word | 2 | 2 |
+| a `j` to a 32-bit instruction across two words | 3 | 3 |
+| a taken conditional branch, its target on a word | 2 | 4 |
+| a conditional branch not taken | 1 | 1 |
+| a call and its return, both targets on a word: by `jal`, by `jalr` | 6, 6 | 6, 8 |
+| a store and a taken branch in one fetch word | 5 | 6 |
+| a load and a call through a register in one fetch word, the return included | 7 | 10 |
+| a load from SRAM or from a peripheral, alone or in a run | 2 | 2 |
+| a store to a peripheral alone, 32-bit or compressed | 1 | 2 |
+| a 32-bit store to SRAM alone among 32-bit instructions; in a run | 3; 2.25 | 3; 3 |
+| a compressed store to SRAM alone among compressed instructions; in a run of two a word | 1; 1.6875 (1.625 the run half a word off) | 2; 2.5 |
+| from the flash, a call into SRAM through a register and its return, the call's word included | 16 | 18 |
+| a store pending the software interrupt, to its handler in SRAM: through the table in SRAM, through one in the flash | 10, 18 | 10, 18 |
+| the same with a `fence.i` after the store, the table in SRAM | 12 | 12 |
+| the `csrsi` that finds it pending, the table in SRAM | 10 | 9 |
+| an `ecall`, to its handler, the table in SRAM | 9 | 8 |
+| an MRET into SRAM code; into flash code | 5; 9 | 4; 8 |
+| an MRET into a pending interrupt, to that handler, all in SRAM | 11 | 10 |
+| from the flash, a store or the `csrsi` pending the software interrupt, its handler in SRAM: the table in SRAM, in the flash | 12, 18 | 12, 18 |
+| from the flash, a handler's MRET into the pending software interrupt, its handler in SRAM: the table in SRAM, in the flash | 12, 20 | 12, 20 |
+| a store in SRAM pending a line whose handler is in the flash: the table in SRAM, in the flash | 14, 20 | 14, 20 |
+| one branch, falling through right after a taken training | 0 to 4 more | 0 |
+| sixteen branches, the same: 32-bit, compressed | up to 24, up to 24 more | 0 |
+| one branch taken right after a fall-through training; sixteen, 32-bit and compressed | 0 to 2; up to 20 and 18 more | 0 |
+| sixteen calls through a register to the other of two leaves | 0 | 0 |
+
+A load costs its 2 cycles wherever it reads. A store alone to a
+peripheral costs 1, 32-bit or compressed; to SRAM a compressed store
+among compressed instructions costs the same, and a 32-bit one among
+32-bit instructions 2 more. The rows say where the difference lies but
+not why; the reading they suggest - the store's write and the fetch of
+the code around it share the SRAM, and 32-bit code, a word a cycle,
+leaves the write no free cycle where compressed code, a word every two,
+does - is an inference, the memory's arbitration being in no document
+read here. mepc read in the handler: from SRAM three
+compressed instructions retire behind the store that pends the software
+interrupt (two with corecfgr cleared) and two behind the `csrsi` that
+finds it pending; after a `fence.i` the trap is taken at the instruction
+after the fence; from the flash nothing retires behind the store or the
+`csrsi`, their handler in SRAM. The vector table's place: a table in the
+flash costs 8 cycles more for a trap from SRAM code to a handler in SRAM
+and for a flash handler's MRET into one, 6 for a trap from SRAM code to
+a handler in the flash and for a store or a `csrsi` in the flash to a
+handler in SRAM. The branch predictor's wrong guess costs 3 cycles in
+SRAM (4 at most at one site, a 32-bit branch half a word off, where the
+flash's costs up to 8), and in SRAM a branch it guessed to fall through
+that is taken costs too, where in the flash it costs nothing; the
+spreads move in steps of 3, and over the 32 timed calls of the row of
+sixteen not-taken branches the slowest exceeded the least by up to 39
+cycles, 13 wrong guesses over the window's 18 predicted sites (42 once,
+in the image built without the hardware prologue). So the letter judges
+every row with 3 cycles at each predicted site in SRAM, the allowance
+the Rubato bounds take there too (an allowance of 2 that row exceeded in
+14 runs of 73), and letter `i`'s 4 at each site in the flash.
+In the image built without the hardware prologue (`CH32X035_HPE=OFF`,
+its `z` green with 209 verdicts, three runs of the letter alone and
+three of `z`) every one of these figures is the same to the cycle, the
+traps from and into SRAM included: there, as from the flash, the core's
 push and pop cost a trap nothing measurable.
 
 **The preemptive kernel** - `test_x035_rubato`, the scheduler path in
@@ -708,15 +797,16 @@ prologue and without it - and the branch predictor corecfgr's 0x1F
 turns on, whose wrong guess costs up to 4 cycles a branch, call, jump or
 return; there the least of each figure is that model's count to the
 cycle, the road-2 post's aside (12 over), and the spread above it is
-the predictor's. From SRAM, with SRAM's figures, measured with the
-platform suite's letter `i` built with its code in SRAM (a measurement,
-not a letter of the suite): an instruction a cycle, a taken transfer 2
-or 3, a load 2 and a store 1.6 to 2.25 (what the flash's fetch hid), a
+the predictor's. From SRAM, with SRAM's figures, measured by the
+platform suite's letter `j` (above): an instruction a cycle, a taken transfer 2
+or 3, a load 2 and a store 1 to 3 by its neighbours, counted as 2 (what
+the flash's fetch hid), a
 trap's entry 10 through the table in SRAM (12 behind the request's
 `fence.i`, 9 for an `ecall`), an MRET 5 into SRAM code and 9 into the
 flash, 12 for a trap or an MRET in the flash into a handler in SRAM
-through that table, a call from the flash into SRAM and back 16; the
-predictor's wrong guesses cost up to 3 a site there. Road 1 counts 172
+through that table, a call from the flash into SRAM and back 16, and an
+allowance of 3 cycles at each predicted site in SRAM, the letter's wrong
+guess (its widest window of eighteen sites read up to 42). Road 1 counts 172
 by that model and measured 168 to 172 at each run's fastest; the paths
 that cross between the two memories count above what they measure (a
 road-2 post 458 against 442, the scan 154 against 142), because a
@@ -956,15 +1046,6 @@ Implemented but not bench-verified, each with what would measure it:
   two vector bodies compile for all seven, with and without the hardware
   prologue and with the scheduler path in either place (the family
   fixture); the suite is built and run for the CH32X035F8U6 alone.
-- **The SRAM cost model's figures** (an instruction a cycle, a trap's
-  entry 10 through the table in SRAM, the crossings between the two
-  memories): measured once with the platform suite's letter `i` built
-  with its code in SRAM, an image kept outside the tree; no letter of a
-  suite re-measures them, where the flash's figures are letter `i`'s on
-  every run, so a change of the core's or the compiler's behaviour on
-  that side would show only as a Rubato bound failing. A letter of the
-  platform suite with letter `i`'s rows placed in SRAM would own them.
-
 - **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
   is the manual's, compiled for
   the seven parts; a letter that asks it from a
