@@ -6,7 +6,7 @@
  * own system counter (STK, RM 7.5.5 and QingKe V4 manual ch. 5). A
  * program starts it after the clock and binds its vector:
  *
- *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
  *
  *     int main() {
  *         SysClock::init();

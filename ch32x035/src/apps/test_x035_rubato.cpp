@@ -1329,21 +1329,21 @@ void console_turn() {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) {
         rx_ceiling = P::ceiling;
         brio::post<Console>(ConsoleEvent{console_rx});
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
 BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
 
 /// TIM2's capture-compare line: the edge disarmed, the post, and the
 /// ruler as the last statement - letter c's near end.
-extern "C" BRIO_CH32_INTERRUPT void tim2_cc_handler() {
+BRIO_CH32_VECTOR(tim2_cc_handler) {
     Edge::interrupts(Edge::compare_interrupt(0), false);
     Edge::clear_flags(Edge::compare_flag(0));
     sample_sp(sp_low_isr);

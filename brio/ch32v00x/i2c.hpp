@@ -44,10 +44,10 @@
  *     r.reply = brio::reply_to<Sensor, brio::I2cDone>();
  *     brio::post<I2c>(r);
  *
- *     extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+ *     BRIO_CH32_VECTOR(i2c1_ev_handler) {
  *         if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
  *     }
- *     extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+ *     BRIO_CH32_VECTOR(i2c1_er_handler) {
  *         if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
  *     }
  *
@@ -1397,8 +1397,8 @@ struct I2cClientOptions {
  * tenure ends with the host's NACK (AF, on the error vector); a write
  * tenure with STOPF.
  *
- *   extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() { act(Peer::service()); }
- *   extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() { act(Peer::error_service()); }
+ *   BRIO_CH32_VECTOR(i2c1_ev_handler) { act(Peer::service()); }
+ *   BRIO_CH32_VECTOR(i2c1_er_handler) { act(Peer::error_service()); }
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins>
 class I2cClient {

@@ -2104,12 +2104,12 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// Whichever task this image carries owns SPI1's vector; a level nobody
 /// owns is disarmed rather than looped on.
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     spi_isr_entries = spi_isr_entries + 1u;
     if constexpr (image_engines) {
         if (dma_host_live) {
@@ -2144,8 +2144,8 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
         }
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { spi_dma(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { spi_dma(); }
+BRIO_CH32_VECTOR(dma1_channel2_handler) { spi_dma(); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { spi_dma(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

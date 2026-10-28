@@ -17,8 +17,8 @@
  * WEAK alias for default_handler (a spin), and an app binds one by
  * defining the strong symbol -
  *
- *   extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
- *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *   BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }
  *
  * The attribute is what makes gcc end the function with MRET, and
  * WHICH attribute is the project's CH32V00X_HPE option (BRIO_CH32_HPE

@@ -33,7 +33,7 @@ it" below:
 using Site = brio::Ch32TimedSleepSite<P, SysClock>;
 using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
 
-extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+BRIO_CH32_VECTOR(awu_handler) { Site::awu_isr(); }
 
 Site::init();                       // the LSI on and measured
 brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
@@ -188,7 +188,7 @@ the vector: an image using the timed site binds `awu_handler` to
 using Site = brio::Ch32TimedSleepSite<P, SysClock>;
 using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
 
-extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+BRIO_CH32_VECTOR(awu_handler) { Site::awu_isr(); }
 
 Site::init();                       // the LSI on and measured
 brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps

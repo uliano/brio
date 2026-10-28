@@ -38,10 +38,10 @@ r.speed = brio::I2cSpeed::fast_400k;
 r.reply = brio::reply_to<Sensor, brio::I2cDone>();
 brio::post<I2c>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
 ```
@@ -278,10 +278,10 @@ r.speed = brio::I2cSpeed::fast_400k;
 r.reply = brio::reply_to<Sensor, brio::I2cDone>();
 brio::post<I2c>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
 ```

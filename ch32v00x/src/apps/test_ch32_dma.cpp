@@ -648,21 +648,21 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 /// Channel 4 is the transmit engine's alone: every entry is a block's
 /// completion (dma_isr()'s answer is the RECEIVE edge, none of its).
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
     tx_blocks = tx_blocks + 1u;
     (void)Serial::dma_isr();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Serial::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (CopyEngine::isr() != 0u) {
         engine_completions = engine_completions + 1u;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     const uint32_t f = Copier::isr();
     if ((f & brio::DmaFlag::complete) != 0u) { copier_completions = copier_completions + 1u; }
     if ((f & brio::DmaFlag::error) != 0u) { copier_errors = copier_errors + 1u; }

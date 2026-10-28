@@ -879,9 +879,9 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void tim1_up_handler() {
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(tim1_up_handler) {
     if ((T1::isr() & T1::update_flag) != 0u) {
         t1_updates = t1_updates + 1u;
     }
@@ -889,14 +889,14 @@ extern "C" BRIO_CH32_INTERRUPT void tim1_up_handler() {
 // BIF cannot be cleared while the break input is still active (the
 // F1 lineage's rule), so a level held on the pad would re-enter this
 // handler for ever: it counts once and silences its own enable.
-extern "C" BRIO_CH32_INTERRUPT void tim1_brk_handler() {
+BRIO_CH32_VECTOR(tim1_brk_handler) {
     if ((T1::isr() & T1::break_flag) != 0u) {
         t1_breaks = t1_breaks + 1u;
         T1::interrupts(T1::break_interrupt, false);
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+BRIO_CH32_VECTOR(tim2_handler) {
     const uint16_t f = T2::isr();
     if ((f & T2::update_flag) != 0u) {
         t2_updates = t2_updates + 1u;

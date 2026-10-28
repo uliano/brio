@@ -3714,10 +3714,10 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 #if BRIO_CH32_HAS_USART2
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     u2_interrupts = u2_interrupts + 1u;
     if (const IsrFn fn = u2_isr) {
         (void)fn();
@@ -3757,8 +3757,8 @@ extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
         U2::clear_flags(usart_cts);
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)DmaUart::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)DmaUart::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (two::ring_active) {   // the two-board key's ring on column 4
         (void)two::LinkRing::dma_isr();
         return;

@@ -124,7 +124,8 @@ void all_hosts() {
 // (`.fast_text.brio`): the two names are what lets GCC take both kinds in
 // one unit (util/placement.hpp, docs/ch32v00x/platform.md, "A handler in
 // SRAM").
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void spi1_handler() {
+extern "C" [[gnu::section(".fast_text")]] void spi1_handler();
+BRIO_CH32_VECTOR(spi1_handler) {
     (void)Host::isr();
     (void)RamHost::isr();
     (void)RamHost16::isr();

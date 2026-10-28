@@ -2,11 +2,11 @@
  * pfic.hpp
  *
  * Interrupt control on the CH32V00x: the global mask that is a CSR bit,
- * the controller that holds the per-line enables, and the one attribute
- * every interrupt handler of this target is declared with. The smallest
- * use is a vector binding and its line's enable:
+ * the controller that holds the per-line enables, and the macro every
+ * interrupt handler of this target is bound with. The smallest use is a
+ * vector binding and its line's enable:
  *
- *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
  *     brio::Pfic::enable(brio::Irq::exti7_0);       // a line a driver does not open itself
  *     brio::enable_interrupts();                     // in main, before Tenuto's run()
  *
@@ -32,11 +32,12 @@
  * write of 1 to a bit acts, a 0 does nothing, so there is no
  * read-modify-write and no guard needed around it.
  *
- * The handler attribute is one spelling for the whole image.
- * BRIO_CH32_INTERRUPT is what an app puts on a vector binding, and it
- * follows the project's CH32V00X_HPE option (ch32v00x/CMakeLists.txt, a
- * CMake option chosen at configure, on by default, which defines
- * BRIO_CH32_HPE): with the core's hardware prologue/epilogue on, the
+ * The vector binding is one spelling for the whole image.
+ * BRIO_CH32_VECTOR(name) { body } is what an app writes to bind a vector
+ * (an `extern "C"` function under the crt's name for it, with the
+ * handler attribute), and it follows the project's CH32V00X_HPE option
+ * (ch32v00x/CMakeLists.txt, a CMake option chosen at configure, on by
+ * default, which defines BRIO_CH32_HPE): with the core's hardware prologue/epilogue on, the
  * crt (the startup code that runs before main(),
  * ch32v00x/src/glue/startup_ch32v00x.S) has set INTSYSCR.HWSTKEN and
  * the attribute is WCH's "WCH-Interrupt-fast" - the ten caller-saved
@@ -45,10 +46,23 @@
  * it off, the attribute is the plain `interrupt` and the handler saves
  * what it clobbers itself. The two must agree: a fast handler under an
  * HPE that is off returns into a program whose registers it clobbered.
- * One macro, one option, no way to spell them apart. Interrupt nesting
- * is off in both cases: the kernel's rule (docs/design/kernel.md,
- * section 1, "The model in one page") that an ISR body runs to
- * completion holds on this target by INTSYSCR.INESTEN never being set.
+ * One macro, one option, no way to spell them apart. The binding is the
+ * CH32V203's spelling (brio/ch32vx03/pfic.hpp), whose CH32V303 images
+ * expand it to a trampoline; this core has no floating-point unit, so
+ * its two siblings there, BRIO_CH32_LEAF_VECTOR and
+ * BRIO_CH32_VECTOR_FLOAT, are BRIO_CH32_VECTOR exactly here. A vector
+ * placed in a section of its own (`.fast_text`, docs/ch32v00x/platform.md)
+ * is declared with the section first and then bound:
+ *
+ *     extern "C" [[gnu::section(".fast_text")]] void usart2_handler();
+ *     BRIO_CH32_VECTOR(usart2_handler) { ... }
+ *
+ * and gcc merges the declaration's section into the definition (an
+ * attribute cannot be written in front of the macro, whose expansion
+ * begins with `extern "C"`). Interrupt nesting is off in both cases: the
+ * kernel's rule (docs/design/kernel.md, section 1, "The model in one
+ * page") that an ISR body runs to completion holds on this target by
+ * INTSYSCR.INESTEN never being set.
  *
  * Not here: the block's priorities and its two free vectored entries
  * (VTFIDR/VTFADDR) are real features of this core with no user yet -
@@ -61,24 +75,27 @@
 
 #include "ch32v00x/device.hpp"
 
-/// Both spellings carry `no_icf`: gcc's identical code folding would
-/// otherwise turn the second of two handlers with one body - a transport's
-/// two DMA channels, each vector calling the same dma_isr() - into a handler
-/// that calls the first, and the first ends in MRET, so the call never
-/// returns and whatever the caller pushed stays on the stack. Under the
-/// hardware prologue the caller pushes nothing and the merge was harmless
-/// by luck; under a plain `interrupt` it pushes the caller-saved registers
-/// (measured on the CH32V303VCT6, whose FPU made the frame eighty bytes).
-/// The attribute of every interrupt handler of this target (see the
-/// file header): what an app writes on a vector binding, and the one
-/// place the choice between the core's hardware prologue and gcc's is
+/// Both spellings of the attribute carry `no_icf`: gcc's identical code
+/// folding would otherwise turn the second of two handlers with one body -
+/// a transport's two DMA channels, each vector calling the same dma_isr() -
+/// into a handler that calls the first, and the first ends in MRET, so the
+/// call never returns and whatever the caller pushed stays on the stack.
+/// Under the hardware prologue the caller pushes nothing and the merge was
+/// harmless by luck; under a plain `interrupt` it pushes the caller-saved
+/// registers (measured on the CH32V303VCT6, whose FPU made the frame eighty
+/// bytes). The binding of every vector of this target (see the file
+/// header): `BRIO_CH32_VECTOR(usart1_handler) { ... }` at file scope, the
+/// one place the choice between the core's hardware prologue and gcc's is
 /// spelled. Where only the preprocessor can ask (a build option, an
-/// attribute), a macro is the honest tool.
+/// attribute, the symbol a vector table names), a macro is the honest tool.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
 #else
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf]]
 #endif
+#define BRIO_CH32_VECTOR(name) extern "C" BRIO_CH32_HANDLER_ATTRIBUTE void name()
+#define BRIO_CH32_VECTOR_FLOAT(name) BRIO_CH32_VECTOR(name)
+#define BRIO_CH32_LEAF_VECTOR(name) BRIO_CH32_VECTOR(name)
 
 namespace brio {
 

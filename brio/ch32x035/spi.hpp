@@ -32,7 +32,7 @@
  * column the QFN20 bonds, `SpiBus<Bus, P, 4>` as the arbiter in the
  * program's Tenuto, `Bus::init(clock, 8'000'000)` after the clock task
  * with a ceiling for the bus, the instance's vector bound to isr()
- * under BRIO_CH32_INTERRUPT, then a Request posted with its chip select
+ * with BRIO_CH32_VECTOR, then a Request posted with its chip select
  * and its buffers lent until the reply.
  *
  * Who calls what, and from where. init(), release(), bit_order() and
@@ -769,7 +769,7 @@ constexpr SpiClock spi_write_ahead_from(SpiDataSize bits, uint32_t hold_off_cycl
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
  *   brio::post<Spi>(r);
  *
- *   extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+ *   BRIO_CH32_VECTOR(spi1_handler) {
  *       if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
  *   }
  *

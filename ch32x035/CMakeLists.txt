@@ -91,7 +91,7 @@ endif()
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
 #     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
 #     `interrupt("WCH-Interrupt-fast")` attribute (through pfic.hpp's
-#     BRIO_CH32_INTERRUPT), so the caller-saved registers are pushed and
+#     BRIO_CH32_VECTOR), so the caller-saved registers are pushed and
 #     popped by the hardware instead of by each handler's prologue. ONE
 #     SWITCH FOR THE WHOLE IMAGE, on purpose: a fast handler under an HPE
 #     that is off corrupts the interrupted program, so the crt bit and the

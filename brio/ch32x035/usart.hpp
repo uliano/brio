@@ -26,7 +26,7 @@
  *
  * The smallest use, the console on USART2's default column, is written
  * out at Uart below: `using Serial = brio::Uart<2, P>`, the instance's
- * vector bound to Serial::isr() by the program under BRIO_CH32_INTERRUPT,
+ * vector bound to Serial::isr() by the program with BRIO_CH32_VECTOR,
  * `Serial::init(clock, 115200)` after the clock task, then print().
  *
  * Who calls what, and from where. init() and release() are setup verbs:
@@ -819,7 +819,7 @@ struct UartRxRing<true, Owner, size, Engine, P> {
  *   using Serial = brio::Uart<2, Platform>;
  *   constexpr Serial serial;                 // tag for print(serial, ...)
  *   Serial::init(clock, 115200);
- *   extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(usart2_handler) { Serial::isr(); }
  *
  * `P` is the platform, which the rings need to know whether an index can
  * be shared with a handler bare (atomic_width) or wants a guard.
@@ -1012,7 +1012,7 @@ struct Uart {
      * call it from the vector(s) the engines' channels report on, and
      * from nowhere else:
      *
-     *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { (void)Link::dma_isr(); }
+     *     BRIO_CH32_VECTOR(dma1_channel1_handler) { (void)Link::dma_isr(); }
      *
      * The flags of every channel are one register (INTFR), read ONCE here
      * for both engines; each engine takes and clears only its own channel's

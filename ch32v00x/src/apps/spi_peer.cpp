@@ -743,20 +743,20 @@ void status() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Console::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Console::isr(); }
 
 /// SPI1's line carries nothing - every window is a polled run - and both
 /// tasks' init() open it at the PFIC, so a stray level is DISARMED rather
 /// than looped on.
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     Raw::rxne_interrupt(false);
     Raw::txe_interrupt(false);
     Raw::error_interrupt(false);
 }
 /// The engines are bound with no interrupt; a stray line is cleared.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { (void)PeerRx::service(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)PeerTx::service(); }
+BRIO_CH32_VECTOR(dma1_channel2_handler) { (void)PeerRx::service(); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { (void)PeerTx::service(); }
 
 int main() {
     crystal_ok = SysClock::init();

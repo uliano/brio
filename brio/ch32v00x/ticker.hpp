@@ -6,7 +6,7 @@
  * the kernel's time events are measured in. The smallest use
  * (docs/ch32v00x/platform.md, "How to use it"):
  *
- *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
  *
  *     int main() {
  *         SysClock::init();

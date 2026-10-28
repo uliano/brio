@@ -13,7 +13,7 @@
 # Every positive is compiled BOTH WAYS the project can build an image:
 # with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
 # CH32X035_HPE option, WCH's interrupt attribute) and without it (gcc's
-# own prologue), since pfic.hpp's BRIO_CH32_INTERRUPT is one spelling with
+# own prologue), since pfic.hpp's BRIO_CH32_VECTOR is one spelling with
 # two expansions and a fixture that binds a vector proves both.
 # Negative: every test/family_ch32x035/neg/*.cpp must FAIL to compile for
 # each part named on its "// mcu: <list>" line.

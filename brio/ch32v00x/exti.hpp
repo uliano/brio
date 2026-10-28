@@ -15,7 +15,7 @@
  *     Line::interrupt(true);
  *     brio::Pfic::enable(brio::Irq::exti7_0);
  *
- *     extern "C" BRIO_CH32_INTERRUPT void exti7_0_handler() {
+ *     BRIO_CH32_VECTOR(exti7_0_handler) {
  *         if (Line::flag()) { Line::clear(); ... }
  *     }
  *

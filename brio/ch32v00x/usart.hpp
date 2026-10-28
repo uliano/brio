@@ -12,7 +12,7 @@
  *     using Serial = brio::Uart<1, P>;   // USART1 on PD5/PD6, rings 64/64
  *     constexpr Serial serial;           // tag for print(serial, ...)
  *
- *     extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+ *     BRIO_CH32_VECTOR(usart1_handler) {
  *         if (Serial::isr()) {
  *             brio::post<SerialLines>(brio::RxActivity{});
  *         }
@@ -60,7 +60,7 @@
  *    a receive engine, for a ring the engine cannot arm.
  *  - isr() is the body of the instance's vector, and dma_isr() of the
  *    vectors of the engines' DMA channels; the program binds those
- *    vectors (BRIO_CH32_INTERRUPT, ch32v00x/pfic.hpp) and calls the
+ *    vectors (BRIO_CH32_VECTOR, ch32v00x/pfic.hpp) and calls the
  *    bodies from nowhere else. A port whose vector is left unbound
  *    raises its first interrupt into the crt's default handler, a spin,
  *    and the program stops there. tx_drained(), the transmit edge, is
@@ -795,7 +795,7 @@ struct UartRxRing<true, Owner, size, Engine, P> {
  *   using Serial = brio::Uart<1, P>;
  *   constexpr Serial serial;                 // tag for print(serial, ...)
  *   Serial::init(clock, 115200);
- *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+ *   BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
  *
  * `P` is the platform, which the rings need to know whether an index
  * can be shared with a handler bare (atomic_width) or wants a guard.
@@ -985,7 +985,7 @@ struct Uart {
      * it from the vector(s) the engines' channels report on, and from
      * nowhere else:
      *
-     *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+     *     BRIO_CH32_VECTOR(dma1_channel4_handler) { (void)Serial::dma_isr(); }
      *
      * The flags of every channel are one register (INTFR), read once
      * here for both engines; each engine takes and clears only its own

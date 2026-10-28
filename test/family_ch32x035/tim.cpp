@@ -113,4 +113,4 @@ void engine() {
 }
 
 // The ISR body bound to a vector, both prologues.
-extern "C" BRIO_CH32_INTERRUPT void tim1_cc_handler() { (void)Tim<1>::isr(); }
+BRIO_CH32_VECTOR(tim1_cc_handler) { (void)Tim<1>::isr(); }

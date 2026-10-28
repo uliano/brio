@@ -29,10 +29,10 @@ r.speed = brio::I2cSpeed::fast_400k;
 r.reply = brio::reply_to<Sensor, brio::I2cDone>();
 brio::post<I2c>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
 ```
@@ -45,9 +45,9 @@ task's tag ([clock.md](clock.md)) and answers false for an HCLK under
 does not hold its timing (below); the request lends
 its two buffers (`brio::lend`) until the reply arrives, so `reg` and
 `value` must stay untouched and in scope from the post to the
-`I2cDone` event `Sensor` receives; the two `extern "C"` functions are
-the block's two interrupt handlers, as in C, under the crt's names and
-with `BRIO_CH32_INTERRUPT` in front ([platform.md](platform.md)), each
+`I2cDone` event `Sensor` receives; the two `BRIO_CH32_VECTOR` bindings
+are the block's two interrupt handlers, `extern "C"` functions as in C
+under the crt's names ([platform.md](platform.md)), each
 posting the completion to the arbiter when the engine says the tenure
 ended. What decides correctness even there: the clock task first
 (`init()` solves the bus timing from the rate the clock type claims);
@@ -247,10 +247,10 @@ r.speed = brio::I2cSpeed::fast_400k;
 r.reply = brio::reply_to<Sensor, brio::I2cDone>();
 brio::post<I2c>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
 ```
@@ -262,7 +262,8 @@ the vector placed by the program with the host as it is - the faster of
 the two (Bench findings, "The host's cost"):
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+extern "C" [[gnu::section(".fast_text")]] void i2c1_ev_handler();
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
 }
 ```

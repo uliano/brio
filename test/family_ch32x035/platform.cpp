@@ -133,5 +133,5 @@ void interrupt_verbs() {
 }
 
 // The handler attribute is one spelling, whichever way the image is built.
-extern "C" BRIO_CH32_INTERRUPT void software_handler() { Pfic::clear_pending(Irq::software); }
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { Ticker::tick(); }
+BRIO_CH32_VECTOR(software_handler) { Pfic::clear_pending(Irq::software); }
+BRIO_CH32_VECTOR(systick_handler) { Ticker::tick(); }

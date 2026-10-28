@@ -4,10 +4,10 @@
  * Interrupt control on the CH32X035, for a program and for the drivers:
  * the global interrupt enable, the critical section the kernel masks
  * with, the per-line enables of the interrupt controller (the PFIC,
- * WCH's own), and the one attribute every interrupt handler of this
- * target is declared with. A program meets all four:
+ * WCH's own), and the macro every interrupt handler of this target is
+ * bound with. A program meets all four:
  *
- *     extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+ *     BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
  *     brio::Pfic::enable(brio::Irq::usart2);     // a driver's init() does this itself
  *     brio::enable_interrupts();                  // once, before the kernel runs
  *     { brio::InterruptGuard guard; ... }         // a critical section, any context
@@ -27,7 +27,7 @@
  * interrupt arriving between the two halves. This file is the
  * CH32V203's (brio/ch32vx03/pfic.hpp) word for word where the two
  * QingKe V4 cores agree, which is everywhere this file reaches: the
- * machine-mode CSRs, the write-one enable banks, the handler attribute.
+ * machine-mode CSRs, the write-one enable banks, the handler binding.
  * With the CH32V00x's, that makes three QingKe families holding the same
  * file, and folding them into a `qingke/` core stratum is a change of its
  * own, made with every image of the three byte-identical across it.
@@ -36,10 +36,12 @@
  * registers are write-one: a write of 1 to a bit acts, a 0 does nothing,
  * so there is no read-modify-write and no guard needed around it.
  *
- * The handler attribute is one spelling for the whole image.
- * BRIO_CH32_INTERRUPT is what an app puts on a vector binding, and it
- * follows the project's CH32X035_HPE option (ch32x035/CMakeLists.txt,
- * on by default; the build passes it to the compiler as BRIO_CH32_HPE):
+ * The vector binding is one spelling for the whole image.
+ * BRIO_CH32_VECTOR(name) { body } is what an app writes to bind a vector
+ * (an `extern "C"` function under the crt's name for it, with the
+ * handler attribute), and it follows the project's CH32X035_HPE option
+ * (ch32x035/CMakeLists.txt, on by default; the build passes it to the
+ * compiler as BRIO_CH32_HPE):
  * with the core's hardware prologue/epilogue on, the crt has set
  * INTSYSCR.HWSTKEN and the attribute is WCH's "WCH-Interrupt-fast" - the
  * sixteen caller-saved integer registers pushed by the hardware on entry
@@ -48,7 +50,20 @@
  * plain `interrupt` and the handler saves what it clobbers itself. The
  * two must agree: a fast handler under an HPE that is off returns into a
  * program whose registers it clobbered. One macro, one option, no way to
- * spell them apart.
+ * spell them apart. The binding is the CH32V203's spelling
+ * (brio/ch32vx03/pfic.hpp), whose CH32V303 images expand it to a
+ * trampoline; this core has no floating-point unit, so its two siblings
+ * there, BRIO_CH32_LEAF_VECTOR and BRIO_CH32_VECTOR_FLOAT, are
+ * BRIO_CH32_VECTOR exactly here. A vector placed in a section of its own
+ * (`.fast_text`, docs/ch32x035/platform.md, "A handler in SRAM") is
+ * declared with the section first and then bound:
+ *
+ *     extern "C" [[gnu::section(".fast_text")]] void usart4_handler();
+ *     BRIO_CH32_VECTOR(usart4_handler) { ... }
+ *
+ * and gcc merges the declaration's section into the definition (an
+ * attribute cannot be written in front of the macro, whose expansion
+ * begins with `extern "C"`).
  *
  * And the macro forbids gcc to merge two handlers. Two bindings with the
  * same body are what gcc's identical code folding looks for, and gcc
@@ -73,8 +88,8 @@
 
 #include "ch32x035/device.hpp"
 
-/// The attribute of every interrupt handler of this target (see the file
-/// header): what an app writes on a vector binding, and the one place
+/// The binding of every vector of this target (see the file header):
+/// `BRIO_CH32_VECTOR(usart2_handler) { ... }` at file scope, the one place
 /// the choice between the core's hardware prologue and gcc's is spelled.
 /// Every handler is aligned to four: from the flash, code with taken
 /// branches costs what its address modulo four makes it (the fetch reads
@@ -83,10 +98,13 @@
 /// moved with whatever the image put before it, by up to ten cycles on
 /// the USART's completion. Two bytes of padding a handler at most.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf, gnu::aligned(4)]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf, gnu::aligned(4)]]
 #else
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf, gnu::aligned(4)]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf, gnu::aligned(4)]]
 #endif
+#define BRIO_CH32_VECTOR(name) extern "C" BRIO_CH32_HANDLER_ATTRIBUTE void name()
+#define BRIO_CH32_VECTOR_FLOAT(name) BRIO_CH32_VECTOR(name)
+#define BRIO_CH32_LEAF_VECTOR(name) BRIO_CH32_VECTOR(name)
 
 namespace brio {
 

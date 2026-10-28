@@ -743,7 +743,7 @@ void banner() {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     brio::Ticker::tick();
     if (net_armed) {
         brio::Iwdg::refresh();
@@ -751,7 +751,7 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
 }
 
 /// The console's vector; letter u stamps its first and last statements.
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     const uint32_t in = brio::stk()->CNT;
     (void)Serial::isr();
     if (u1_stamping) {
@@ -762,14 +762,14 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
 }
 
 /// Letter w's rescue and clock: TIM2's update, counted.
-extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+BRIO_CH32_VECTOR(tim2_handler) {
     Rescue::clear_flags(Rescue::update_flag);
     rescue_periods = rescue_periods + 1u;
 }
 
 /// The software interrupt: the first thing it does is read the cycle
 /// counter, which is letter e's whole measurement.
-extern "C" BRIO_CH32_INTERRUPT void software_handler() {
+BRIO_CH32_VECTOR(software_handler) {
     sw_entry_cycles = brio::stk()->CNT;
     brio::Pfic::clear_pending(brio::Irq::software);
     sw_hits = sw_hits + 1u;
@@ -777,7 +777,7 @@ extern "C" BRIO_CH32_INTERRUPT void software_handler() {
 }
 
 /// A crash becomes a note the next boot can read (letter i, leg 3).
-extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
+BRIO_CH32_VECTOR(fault_handler) {
     brio::fault_reset<P>(token.magic == token_magic ? token.context : 0u);
 }
 

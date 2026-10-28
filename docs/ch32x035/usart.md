@@ -27,7 +27,7 @@ using P = brio::Ch32x035Platform<>;
 using Serial = brio::Uart<2, P>;          // rings of 64 and 64, 8N1
 constexpr Serial serial;                  // the tag print() takes
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }
@@ -45,10 +45,10 @@ template argument at its default (the ring sizes, 8N1, no DMA engines,
 the reset column, the default options, the flash placement); `serial`
 is an empty tag object of that type, the argument `print` takes to pick
 the port, since the type's functions are all static and it has no
-object of its own; the `extern "C"` function is the interrupt handler,
-as in C, under the crt's name for USART2's vector and with
-`BRIO_CH32_INTERRUPT` in front (the one spelling of a handler attribute
-on this target, [platform.md](platform.md)); `isr()` is the port's
+object of its own; `BRIO_CH32_VECTOR(usart2_handler)` binds the
+interrupt handler, an `extern "C"` function as in C under the crt's name
+for USART2's vector (the one spelling of a vector binding on this
+target, [platform.md](platform.md)); `isr()` is the port's
 whole interrupt body and returns true when a received byte made the
 receive ring non-empty, the edge the program posts as `RxActivity` to
 the active object that assembles lines (`SerialLines`, a `LineReader`
@@ -321,7 +321,7 @@ using P = brio::Ch32x035Platform<>;
 using Serial = brio::Uart<2, P>;          // rings of 64 and 64, 8N1
 constexpr Serial serial;                  // the tag print() takes
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }
@@ -344,13 +344,13 @@ two, written by the channel lap after lap:
 ```cpp
 using Link = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>, brio::DmaRxEngine<8>>;
 
-extern "C" BRIO_CH32_INTERRUPT void usart4_handler() {
+BRIO_CH32_VECTOR(usart4_handler) {
     if (Link::isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() {
+BRIO_CH32_VECTOR(dma1_channel8_handler) {
     if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { (void)Link::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel1_handler) { (void)Link::dma_isr(); }
 ```
 
 The block restart in SRAM, gapless to 3 Mbaud (Bench findings, letter
@@ -557,7 +557,7 @@ reports. What it measured:
   lands some 15 to 20 cycles inside its window at 3 Mbaud - and 32 more
   idled 0 to 7 at 2.4. From the flash (`InFlash`, the default) the same
   body inline in the suite's vector takes 285 to 289 cycles (308 to 324
-  at most), the vector on a word as `BRIO_CH32_INTERRUPT` aligns every
+  at most), the vector on a word as `BRIO_CH32_VECTOR` aligns every
   vector - half a word off, the same body took 276 to 283, the vector's
   place in the flash moving its cost ([platform.md](platform.md), "A
   handler in SRAM"): the alignment buys a figure that stays, not always a

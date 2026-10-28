@@ -471,9 +471,9 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
 
 int main() {
     boot_hb_gates = brio::rcc()->AHBPCENR;

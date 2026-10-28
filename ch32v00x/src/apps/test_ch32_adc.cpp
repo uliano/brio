@@ -1169,9 +1169,9 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void adc_handler() {
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(adc_handler) {
     const uint32_t f = brio::Adc::isr();
     adc_interrupts = adc_interrupts + 1u;
     if ((f & brio::AdcFlag::watchdog) != 0u) {

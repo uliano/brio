@@ -6,7 +6,7 @@
  * boot can read, and the two watchdogs. The smallest use, beside the
  * platform's glue (docs/ch32v00x/platform.md, "How to use it"):
  *
- *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+ *     BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
  *
  * A reboot on purpose is Reset::software(); a panic that must be seen
  * at the next boot goes through panic<P, ResetReporter>(code, context)
@@ -432,7 +432,7 @@ struct ResetReporter {
 /**
  * The fault vector's body: record the wreck and reset. An app binds it:
  *
- *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
+ *     BRIO_CH32_VECTOR(fault_handler) {
  *         brio::fault_reset<brio::Ch32v00xPlatform<>>();
  *     }
  *

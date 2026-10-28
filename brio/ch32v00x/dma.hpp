@@ -17,10 +17,10 @@
  *
  *     using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine<5>>;
  *
- *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+ *     BRIO_CH32_VECTOR(dma1_channel5_handler) {
  *         if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
  *     }
- *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+ *     BRIO_CH32_VECTOR(dma1_channel4_handler) { (void)Serial::dma_isr(); }
  *
  * and a copy, its end reported by the channel's vector:
  *
@@ -28,7 +28,7 @@
  *     Copy::arm(brio::DmaPriority::high);            // interrupt on: the line enabled
  *     (void)Copy::copy(frame, tile, 1024);           // 1024 words, uint32_t* both
  *
- *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+ *     BRIO_CH32_VECTOR(dma1_channel1_handler) {
  *         if (Copy::isr() != 0u) { ... }             // the block ended (busy() is false)
  *     }
  *

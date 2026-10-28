@@ -848,7 +848,7 @@ void banner() {
 }  // namespace
 
 // The vectors this program owns.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     if (tick_probe) {
         tick_entry = brio::stk()->CNTL;
     }
@@ -856,14 +856,14 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
 }
 
 /// Letter w's rescue and clock: TIM3's update, counted.
-extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
+BRIO_CH32_VECTOR(tim3_handler) {
     Rescue::intfr() = 0;
     rescue_periods = rescue_periods + 1u;
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void software_handler() {
+BRIO_CH32_VECTOR(software_handler) {
     sw_entry_cycles = brio::stk()->CNTL;
     brio::Pfic::clear_pending(brio::Irq::software);
     sw_hits = sw_hits + 1u;

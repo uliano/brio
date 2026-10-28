@@ -32,7 +32,7 @@ below):
 using Serial = brio::Uart<1, P>;                 // USART1, PD5/PD6, 8N1
 constexpr Serial serial;
 Serial::init(clock, 115200);
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 ```
 
 Line by line: `Serial` names the transport type, `1` the instance, `P`
@@ -51,10 +51,10 @@ all static and it has no object of its own; `init()` takes the clock task's tag
 (`constexpr SysClock clock;`, declared as in [clock.md](clock.md)'s
 smallest use) and the baud rate, opens the gate, the pads and the
 receive interrupt, and answers false for a rate the clock cannot divide
-(a divisor below 16); the `extern "C"` function is the interrupt
-handler, as in C, under the startup code's name for USART1's vector and
-with `BRIO_CH32_INTERRUPT` in front (the one spelling of a handler
-attribute on this target, [platform.md](platform.md)). `isr()` is the
+(a divisor below 16); `BRIO_CH32_VECTOR(usart1_handler)` binds the
+interrupt handler, an `extern "C"` function as in C under the startup
+code's name for USART1's vector (the one spelling of a vector binding
+on this target, [platform.md](platform.md)). `isr()` is the
 port's whole interrupt body and returns true when a received byte made
 the receive ring non-empty, the edge a program posts as `RxActivity` to
 the active object that assembles lines (`SerialLines`, a `LineReader`
@@ -415,7 +415,7 @@ The console, as every app has it:
 using Serial = brio::Uart<1, P>;                 // USART1, PD5/PD6, 8N1
 constexpr Serial serial;
 Serial::init(clock, 115200);
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 ```
 
 A second port with a frame and the flow-control pair, on a column:
@@ -431,13 +431,13 @@ A stream received without the CPU, its edge from two vectors:
 
 ```cpp
 using Link = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>, 3>;
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Link::isr()) { brio::post<LinkLines>(brio::RxActivity{}); }        // idle line, first frame
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }    // the lap's marks
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Link::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)Link::dma_isr(); }
 ```
 
 The same port with its block restart in SRAM - and, for an
@@ -448,7 +448,8 @@ interrupt-driven port, its vector placed by the program instead
 using Fast = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>, 3, brio::UartOptions{},
                         brio::InRam>;
 using Irq = brio::Uart<2, P, 64, 512, brio::NoDmaEngine, brio::NoDmaEngine, 3>;
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart2_handler() { (void)Irq::isr(); }
+extern "C" [[gnu::section(".fast_text")]] void usart2_handler();
+BRIO_CH32_VECTOR(usart2_handler) { (void)Irq::isr(); }
 ```
 
 A one-wire bus (a pull-up on the wire; what this node sends, it does

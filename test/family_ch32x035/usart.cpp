@@ -175,7 +175,7 @@ void options_verbs() {
 }
 
 // Vector bindings, as an app writes them.
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
 
 // The console through its LineWriter (util/line_writer.hpp): the writer
 // over this family's transport, a line, a line in pieces and a prompt

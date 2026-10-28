@@ -1098,11 +1098,11 @@ void status() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Console::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Console::isr(); }
 /// The engines are bound with no interrupt; a stray line is cleared.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)TxEdges::service(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)RxEdges::service(); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { (void)TxEdges::service(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)RxEdges::service(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

@@ -22,13 +22,13 @@ using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine
 
 // The receive edge from the vectors: the USART's (an idle line, a
 // burst's first frame) and the receive channel's (the lap's marks).
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel4_handler) { (void)Serial::dma_isr(); }
 ```
 
 Line by line: `Serial` is the console's transport ([usart.md](usart.md))
@@ -284,13 +284,13 @@ using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine
 
 // The receive edge from the vectors: the USART's (an idle line, a
 // burst's first frame) and the receive channel's (the lap's marks).
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel4_handler) { (void)Serial::dma_isr(); }
 ```
 
 The SPI host with engines at DATAR's width, so that 16-bit frames ride
@@ -302,10 +302,10 @@ using Bus = brio::SpiHost<1, brio::spi1_default_pins,
                           brio::DmaTxEngine<3, uint16_t>, brio::DmaRxEngine<2, uint16_t>>;
 using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```
@@ -321,7 +321,7 @@ Copy::arm(brio::DmaPriority::high);                  // interrupt on: the line e
 static const uint32_t black = 0;                      // the cell the controller reads
 (void)Copy::fill(frame, &black, 1024);
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     if (Copy::isr() != 0u) { /* the block ended (busy() is false) */ }
 }
 ```

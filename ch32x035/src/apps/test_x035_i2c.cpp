@@ -2858,10 +2858,10 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (client_live) {
         const uint32_t c0 = brio::stk()->CNTL;
         ct.entries = ct.entries + 1u;
@@ -2911,7 +2911,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (client_live) {
         ct.err_entries = ct.err_entries + 1u;
         client_error();
@@ -2935,13 +2935,13 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     dma6_entries = dma6_entries + 1u;
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     dma7_entries = dma7_entries + 1u;
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
         host_done = true;

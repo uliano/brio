@@ -2881,7 +2881,7 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     const uint32_t t0 = stamp();
     brio::Ticker::tick();
     const uint32_t d = stamp_span(t0, stamp());
@@ -2890,7 +2890,7 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     const uint32_t t0 = stamp();
     (void)Serial::isr();
     const uint32_t d = stamp_span(t0, stamp());
@@ -2899,7 +2899,7 @@ extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     const uint32_t t0 = stamp();
     spi_isr_entries = spi_isr_entries + 1u;
     switch (owner) {
@@ -2980,8 +2980,8 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
         host_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { spi_dma(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { spi_dma(); }
+BRIO_CH32_VECTOR(dma1_channel2_handler) { spi_dma(); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { spi_dma(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

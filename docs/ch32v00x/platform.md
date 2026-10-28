@@ -29,8 +29,8 @@ notation, `using`, the angle brackets, `brio::`, is explained in
 ```cpp
 using P = brio::Ch32v00xPlatform<>;
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
 
 int main() {
     const auto record = brio::take_panic_record<P>();   // first, and once
@@ -79,13 +79,14 @@ clock type ticks six times too slowly until the clock task runs (the
 compare is written once, from the claimed rate, so it is right once the
 chip runs at that rate); nothing refuses it. The STK vector must be
 bound to `Ticker::tick()` by the program, as above,
-under the crt's name for it (`systick_handler`) and with
-`BRIO_CH32_INTERRUPT` in front: the kernel binds no vector, and a
+with `BRIO_CH32_VECTOR` under the crt's name for it
+(`systick_handler`): the kernel binds no vector, and a
 program that forgets it compiles, but the startup code points that
 vector at its spin for unbound vectors and `Ticker::init()` enables the
 line, so the first tick after `enable_interrupts()` enters the spin and
-the program stops there. `BRIO_CH32_INTERRUPT` is the one spelling of a
-handler attribute on this target, and it follows the project's
+the program stops there. `BRIO_CH32_VECTOR` is the one spelling of a
+vector binding on this target, and the handler attribute it writes
+follows the project's
 `CH32V00X_HPE` option, a CMake option of the `ch32v00x/` project chosen
 at configure (`-DCH32V00X_HPE=OFF` turns it off), on by default: with
 it the crt sets INTSYSCR.HWSTKEN and the attribute is
@@ -209,10 +210,10 @@ optional member, `HandlerAware`): PFIC_GISR's GACTSTA, bit 8 at offset
 reference manual 6.5.2.7, the CH32V003's 6.5.2.7, the QingKe V2 manual
 3.1) - not mstatus.MIE, which interrupt entry leaves set on this core
 ("What the silicon does") and a critical section clears.
-`BRIO_CH32_INTERRUPT` is the
-one spelling of the handler attribute, expanding to WCH's fast
+`BRIO_CH32_VECTOR` is the
+one spelling of a vector binding, its handler attribute WCH's fast
 attribute when the image is built with `CH32V00X_HPE` (the default)
-and to gcc's plain `interrupt` otherwise - one option for the whole
+and gcc's plain `interrupt` otherwise - one option for the whole
 image, because a fast handler under an HPE that is off corrupts the
 program it interrupted. Interrupt nesting is never enabled: the
 kernel's rule ([design/kernel.md, "The model in one page"](../design/kernel.md#1-the-model-in-one-page)).
@@ -251,8 +252,8 @@ attribute, and hands the fault vector the body:
 ```cpp
 using P = brio::Ch32v00xPlatform<>;
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
 
 int main() {
     const auto record = brio::take_panic_record<P>();   // first, and once
@@ -480,7 +481,7 @@ three passes of the same sweep (a scratch program) - three cycles once,
 at the entry, and none a branch, where the CH32X035's QingKe V4C pays
 four cycles a turn of that body by its address modulo four
 ([../ch32x035/platform.md](../ch32x035/platform.md)). So this stratum's
-`BRIO_CH32_INTERRUPT` does not align its handlers: the alignment would buy
+`BRIO_CH32_VECTOR` does not align its handlers: the alignment would buy
 three cycles an entry and nothing a branch. The CH32V003's V2A has not
 been swept.
 
@@ -510,10 +511,14 @@ using Link = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<
 ```
 
 A program places a function of its own - the vector it binds, above
-all - with one attribute, `.fast_text`:
+all - with one attribute, `.fast_text`, which a vector carries on a
+declaration before its binding (the binding's expansion begins with
+`extern "C"`, where no attribute can stand in front of it, and gcc
+merges the declaration's section into the definition):
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+extern "C" [[gnu::section(".fast_text")]] void i2c1_ev_handler();
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (Bus::isr()) { brio::post<I2cBus>(brio::TransferDone{Bus::status()}); }
 }
 ```

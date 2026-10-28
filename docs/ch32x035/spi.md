@@ -32,7 +32,7 @@ r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
 brio::post<Spi>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```
@@ -45,9 +45,9 @@ display stays deselected; `init()` takes the clock task's tag
 ([clock.md](clock.md)) and a ceiling for the clock, under which every
 request's rate is clamped; the request lends its two buffers
 (`brio::lend`) until the `SpiDone` event reaches `Display`, so `cmd`
-and `pixels` must stay untouched and in scope until then; the `extern
-"C"` function is the instance's interrupt handler, as in C, under the
-crt's name and with `BRIO_CH32_INTERRUPT` in front
+and `pixels` must stay untouched and in scope until then; the
+`BRIO_CH32_VECTOR` binding is the instance's interrupt handler, an
+`extern "C"` function as in C under the crt's name
 ([platform.md](platform.md)), posting the completion to the arbiter.
 What decides correctness even there: the clock task first (the ceiling
 and the chip-select setup time are computed from the rate the clock
@@ -256,7 +256,7 @@ r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
 brio::post<Spi>(r);
 
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```

@@ -16,7 +16,7 @@
  * directly:
  *
  *     using Serial = brio::Uart<2, P, 64, 128, brio::UartFormat{}, brio::DmaTxEngine<7>, brio::DmaRxEngine<6>>;
- *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+ *     BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
  *
  *     using Copy = brio::DmaCopyEngine<5>;
  *     Copy::arm();                                  // once: low priority, interrupt on

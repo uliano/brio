@@ -1911,13 +1911,13 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 // Each vector carries its meter's stamps around the ISR body the suites
 // bind: enter() first, leave() last.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     tick_meter.enter();
     brio::Ticker::tick();
     tick_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     usart_meter.enter();
     if constexpr (brio::test_letter_carried('u') || brio::test_letter_carried('w')) {
         if (console_owner != 0u) {
@@ -1978,12 +1978,12 @@ template <bool on = has_usart2 && brio::test_letter_carried('u')>
     }
 }
 } // namespace
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { loop_usart_vector<>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { loop_dma_vector<>(); }
+BRIO_CH32_VECTOR(usart2_handler) { loop_usart_vector<>(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { loop_dma_vector<>(); }
 
 // Letter d's vectors, empty in an image that does not carry the letter
 // (nothing enables their lines there).
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     if constexpr (brio::test_letter_carried('d')) {
         copy_meter.enter();
         if (Copier::isr() != 0u) {
@@ -2006,13 +2006,13 @@ namespace {
 }
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if constexpr (brio::test_letter_carried('s')) {
         spi_dma_vector();
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
     if constexpr (brio::test_letter_carried('s')) {
         spi_dma_vector();
     }
@@ -2021,7 +2021,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
 // SPI1's vector serves letter e's engineless hosts while that letter runs
 // and letter s's engined one otherwise; an image carrying neither leaves
 // it empty.
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     spi_meter.enter();
     if constexpr (brio::test_letter_carried('e')) {
         const uint8_t serves = spi1_serves;
@@ -2048,7 +2048,7 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     spi_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if constexpr (brio::test_letter_carried('u')) {
         if (console_owner == 2u) {   // letter u's console receive engine
             loop_dma_meter.enter();

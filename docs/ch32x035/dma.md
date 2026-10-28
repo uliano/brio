@@ -17,13 +17,13 @@ channel 7 and receives on 6, the channels this part wires to it:
 ```cpp
 using Serial = brio::Uart<2, P, 64, 128, brio::UartFormat{}, brio::DmaTxEngine<7>, brio::DmaRxEngine<6>>;
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
 ```
 
 Three things decide correctness even there. The channel is the request
@@ -226,13 +226,13 @@ on 6:
 ```cpp
 using Serial = brio::Uart<2, P, 64, 128, brio::UartFormat{}, brio::DmaTxEngine<7>, brio::DmaRxEngine<6>>;
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
 ```
 
 The channel named by its request rather than its number:
@@ -241,7 +241,7 @@ The channel named by its request rather than its number:
 using Rx = brio::DmaRequestOf<brio::DmaRequest::usart4_rx>;   // channel 8
 using Link = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>,
                         brio::DmaRxEngine<Rx::channel>>;
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { (void)Link::dma_isr(); }   // entry 44
+BRIO_CH32_VECTOR(dma1_channel8_handler) { (void)Link::dma_isr(); }   // entry 44
 ```
 
 A copy and a fill, the completion from the channel's vector:
@@ -254,7 +254,7 @@ Copy::arm();                                          // low, interrupt on
 static uint32_t black = 0;                            // the cell the controller reads, in SRAM
 (void)Copy::fill(frame, &black, 1024);
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (Copy::isr() != 0u) { /* the block ended (busy() is false) */ }
 }
 ```

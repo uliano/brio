@@ -8,7 +8,7 @@
  * and every kernel template is instantiated with it:
  *
  *     using P = brio::Ch32x035Platform<>;
- *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+ *     BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
  *     ...
  *     SysClock::init();
  *     brio::Ticker::init(clock);
@@ -26,7 +26,7 @@
  * and panic_record() the panic path's and the next boot's;
  * stack_untouched() is a main-context read of memory. A program binds the
  * timebase's interrupt vector itself (systick_handler to Ticker::tick(),
- * under the attribute BRIO_CH32_INTERRUPT, pfic.hpp); the kernel binds no
+ * with the binding BRIO_CH32_VECTOR, pfic.hpp); the kernel binds no
  * vector, and a program that forgets it never advances time.
  *
  * The QingKe V4C, the CH32V203's core generation: the V4C is the V4B

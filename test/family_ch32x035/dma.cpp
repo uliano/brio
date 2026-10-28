@@ -231,11 +231,12 @@ void everything() {
 // Vector bindings, as an app writes them - the console's placed in SRAM as
 // a program places one of its own plain functions (`.fast_text`), beside
 // the InRam port's placed completion (`.fast_text.brio`) in this unit.
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart2_handler() { (void)Console::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+extern "C" [[gnu::section(".fast_text")]] void usart2_handler();
+BRIO_CH32_VECTOR(usart2_handler) { (void)Console::isr(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     (void)Console::dma_isr();
     (void)RamConsole::dma_isr();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Console::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { (void)Copy8::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Copy::isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Console::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel8_handler) { (void)Copy8::isr(); }
+BRIO_CH32_VECTOR(dma1_channel5_handler) { (void)Copy::isr(); }

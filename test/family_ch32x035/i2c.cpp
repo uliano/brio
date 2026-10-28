@@ -168,18 +168,19 @@ void arbiters() {
 // the hardware prologue can be built - the event vector placed in SRAM by
 // the program (`.fast_text`) beside the InRam host's trampoline
 // (`.fast_text.brio`) in this unit.
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+extern "C" [[gnu::section(".fast_text")]] void i2c1_ev_handler();
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (HostDma::isr()) {
         post<TimedBus>(TransferDone{HostDma::status()});
     }
     (void)RamHostDma::isr();
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (HostDma::error_isr()) {
         post<TimedBus>(TransferDone{HostDma::status()});
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (HostDma::dma_isr()) {
         post<TimedBus>(TransferDone{HostDma::status()});
     }

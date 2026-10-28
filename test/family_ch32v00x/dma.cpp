@@ -258,7 +258,8 @@ void all_uarts() {
 
 // A program places one of its own plain functions (`.fast_text`) beside
 // the InRam ports' placed instances (`.fast_text.brio`) in this unit.
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void dma1_channel4_handler() {
+extern "C" [[gnu::section(".fast_text")]] void dma1_channel4_handler();
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
     (void)Both::dma_isr();
     (void)RamBoth::dma_isr();
 }

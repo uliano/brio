@@ -2454,16 +2454,17 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Serial::isr(); }
 
 /// USART4's vector IN SRAM, placed by this program (`.fast_text`, a plain
 /// function's name for it, util/placement.hpp): the interrupt transport's
 /// isr() is inline and calls nothing, so the whole per-frame path moves
 /// with the binding - what letter k's 3 Mbaud receive stands on
 /// (docs/ch32x035/usart.md).
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handler() {
+extern "C" [[gnu::section(".fast_text")]] void usart4_handler();
+BRIO_CH32_VECTOR(usart4_handler) {
     u4_entries = u4_entries + 1u;
     switch (u4_owner) {
         case U4Owner::engined: (void)Engined::isr(); break;
@@ -2505,8 +2506,8 @@ template <typename E>
         (void)RingOnly::dma_isr();
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { usart4_dma(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { usart4_dma(); }
+BRIO_CH32_VECTOR(dma1_channel1_handler) { usart4_dma(); }
+BRIO_CH32_VECTOR(dma1_channel8_handler) { usart4_dma(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

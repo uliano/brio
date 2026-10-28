@@ -12,8 +12,8 @@
  *
  *     using P = brio::Ch32v00xPlatform<>;
  *
- *     extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
- *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
+ *     BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *     BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
  *
  *     int main() {
  *         const auto record = brio::take_panic_record<P>();   // first, and once
@@ -32,8 +32,8 @@
  * at its spin for unbound vectors, Ticker::init() enables the line, and
  * the first tick after enable_interrupts() enters the spin and the
  * program stops there.
- * BRIO_CH32_INTERRUPT is the one spelling of a handler attribute on
- * this target (ch32v00x/pfic.hpp). fault_reset<P>() is the fault
+ * BRIO_CH32_VECTOR is the one spelling of a vector binding on this
+ * target (ch32v00x/pfic.hpp). fault_reset<P>() is the fault
  * vector's body (ch32v00x/reset.hpp).
  *
  * Who calls what. The kernel loop calls idle() in main-loop context,

@@ -853,15 +853,15 @@ void status() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Console::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart2_handler) { (void)Console::isr(); }
 
 /// The instance's TWO vectors. The TARGET is POLLED, so the only owner here
 /// is the HOST action's engine. Anything else that reaches a vector is
 /// DISARMED AND NOTHING IS CLEARED: every flag this instrument lives on
 /// belongs to the loop, and a handler that consumed one would take a whole
 /// tenure with it.
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (host_live) {
         if (Host::isr()) {
             host_status = Host::status();
@@ -874,7 +874,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
     Raw::buffer_interrupt(false);
 }
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     if (host_live) {
         if (Host::error_isr()) {
             host_status = Host::status();

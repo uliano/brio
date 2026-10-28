@@ -49,7 +49,7 @@
  *     r.reply = brio::reply_to<Display, brio::SpiDone>();
  *     brio::post<Spi>(r);
  *
- *     extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+ *     BRIO_CH32_VECTOR(spi1_handler) {
  *         if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
  *     }
  *

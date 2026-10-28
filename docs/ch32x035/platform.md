@@ -25,7 +25,7 @@ using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 int main() {
     const auto record = brio::take_panic_record<P>();   // first, and once
@@ -47,11 +47,11 @@ first (`SysClock::init()`, [clock.md](clock.md)): the ticker computes
 its compare value from the rate the clock type claims, and a ticker
 initialized on a chip still at its 8 MHz reset rate ticks six times too
 slowly. The STK vector must be bound to `Ticker::tick()` by the program,
-as above, under the crt's name for it (`systick_handler`) and with
-`BRIO_CH32_INTERRUPT` in front: the kernel binds no vector, and a
-program that forgets it compiles, runs and never advances time.
-`BRIO_CH32_INTERRUPT` is the one spelling of a handler attribute on
-this target, and it follows the project's `CH32X035_HPE` option, a
+as above, with `BRIO_CH32_VECTOR` under the crt's name for it
+(`systick_handler`): the kernel binds no vector, and a program that
+forgets it compiles, runs and never advances time.
+`BRIO_CH32_VECTOR` is the one spelling of a vector binding on this
+target, and the handler attribute it writes follows the project's `CH32X035_HPE` option, a
 CMake option of the `ch32x035/` project chosen at configure, on by
 default: with it the crt sets INTSYSCR.HWSTKEN and the attribute is
 WCH's fast attribute, the core's hardware prologue saving the registers
@@ -231,8 +231,9 @@ the ENABLE status and its IPR the pending one), and
 (kernel/platform.hpp's optional member, `HandlerAware`): PFIC_GISR's
 GACTSTA, bit 8 at offset 0x4C, an interrupt being executed (the
 reference manual 7.5.2.11, the QingKe V4 manual 3.1) - not mstatus.MIE,
-which a critical section clears as a trap's entry does. `BRIO_CH32_INTERRUPT` is
-the one spelling of the handler attribute: WCH's fast attribute when the
+which a critical section clears as a trap's entry does.
+`BRIO_CH32_VECTOR` is the one spelling of a vector binding, its handler
+attribute WCH's fast attribute when the
 image is built with `CH32X035_HPE` (the default), gcc's plain
 `interrupt` otherwise - one option for the whole image, because a fast
 handler under an HPE that is off corrupts the program it interrupted -
@@ -325,7 +326,7 @@ using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 int main() {
     const auto record = brio::take_panic_record<P>();   // first, and once
@@ -355,7 +356,7 @@ two naked vectors and one call more.
 using P = brio::Ch32x035RubatoPlatform<>;
 using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
 BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
 
@@ -686,11 +687,15 @@ against 371 with three calls. A third tag, or `InRam` on a platform that
 does not place `.fast_text`, does not compile
 (`test/family_ch32x035/neg/`).
 
-A program places a function of its own - the vector it binds, above all
-- with one attribute, `.fast_text`:
+A program places a function of its own - the vector it binds, above
+all - with one attribute, `.fast_text`, which a vector carries on a
+declaration before its binding (the binding's expansion begins with
+`extern "C"`, where no attribute can stand in front of it, and gcc
+merges the declaration's section into the definition):
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handler() { (void)Link::isr(); }
+extern "C" [[gnu::section(".fast_text")]] void usart4_handler();
+BRIO_CH32_VECTOR(usart4_handler) { (void)Link::isr(); }
 ```
 
 The name is two names. A function defined in a header is emitted in a
@@ -746,7 +751,7 @@ straight-line code and three-instruction loops did not move and SRAM
 moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
 fetch"). gcc aligns a function to two bytes under -Os, so a function
 that keeps a stated flash cost is `aligned(4)` - the SPI host's polled
-loops, and every vector, through `BRIO_CH32_INTERRUPT` (pfic.hpp): a
+loops, and every vector, through `BRIO_CH32_VECTOR` (pfic.hpp): a
 vector's own code costs the same wherever the image puts it, two bytes
 of padding at most, while a function it calls in the flash keeps a
 stated cost only if it is aligned itself.

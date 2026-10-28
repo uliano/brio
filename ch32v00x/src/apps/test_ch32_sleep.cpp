@@ -707,23 +707,23 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     brio::Ticker::tick();
     if (net_armed) {
         brio::Iwdg::refresh();
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The timed site's AWU wake is a level: its line enabled, this vector
 /// bound to the site's body (counted here for letter w).
-extern "C" BRIO_CH32_INTERRUPT void awu_handler() {
+BRIO_CH32_VECTOR(awu_handler) {
     awu_entries = awu_entries + 1u;
     Timed::awu_isr();
 }
 
 /// Letter w's rescue: TIM2's update, counted.
-extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+BRIO_CH32_VECTOR(tim2_handler) {
     Rescue::clear_flags(Rescue::update_flag);
     rescue_periods = rescue_periods + 1u;
 }

@@ -937,9 +937,9 @@ constexpr uint16_t supply_floor_mv = 3000;
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Console::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Console::isr(); }
 
 int main() {
     crystal_ok = SysClock::init();

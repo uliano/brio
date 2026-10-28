@@ -26,8 +26,8 @@
  * breakpoint entries a spin of its own - and an app binds one by defining
  * the strong symbol -
  *
- *   extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
- *   extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *   BRIO_CH32_VECTOR(usart2_handler) { Serial::isr(); }
  *
  * The attribute is what makes gcc end the function with MRET, and WHICH
  * attribute is the project's CH32X035_HPE option (BRIO_CH32_HPE here):

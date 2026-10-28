@@ -1016,33 +1016,33 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     tick_meter.enter();
     brio::Ticker::tick();
     tick_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     usart_meter.enter();
     (void)Serial::isr();
     usart_meter.leave();
 }
 /// Channel 7 is the transmit engine's alone: every entry is a block's
 /// completion (dma_isr()'s answer is the RECEIVE edge, none of its).
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     tx_blocks = tx_blocks + 1u;
     usart_meter.enter();
     (void)Serial::dma_isr();
     usart_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     usart_meter.enter();
     (void)Serial::dma_isr();
     usart_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     if (brio::DmaChannel<1>::isr() != 0u) { vector_hits[1] = vector_hits[1] + 1u; }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     dma_meter.enter();
     switch (role2) {
         case Role::paced:
@@ -1063,13 +1063,13 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
     }
     dma_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
     if (brio::DmaChannel<3>::isr() != 0u) { vector_hits[3] = vector_hits[3] + 1u; }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
     if (brio::DmaChannel<4>::isr() != 0u) { vector_hits[4] = vector_hits[4] + 1u; }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     dma_meter.enter();
     if (role5 == Role::copy_engine) {
         if (CopyEngine::isr() != 0u) {
@@ -1081,7 +1081,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
     }
     dma_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() {
+BRIO_CH32_VECTOR(dma1_channel8_handler) {
     if (brio::DmaChannel<8>::isr() != 0u) { vector_hits[8] = vector_hits[8] + 1u; }
 }
 

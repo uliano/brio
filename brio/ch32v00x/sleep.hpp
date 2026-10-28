@@ -18,7 +18,7 @@
  *     using Site = brio::Ch32TimedSleepSite<P, SysClock>;
  *     using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
  *
- *     extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+ *     BRIO_CH32_VECTOR(awu_handler) { Site::awu_isr(); }
  *
  *     Site::init();                       // the LSI on and measured
  *     brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
@@ -392,7 +392,7 @@ static_assert(SleepSite<Ch32SleepSite<Clock<ClockSource::pll, 48'000'000>>>);
  * The AWU's wake is a level: arm() enables line 9 in the PFIC, and the
  * app binds the AWU vector to awu_isr() -
  *
- *   extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+ *   BRIO_CH32_VECTOR(awu_handler) { Site::awu_isr(); }
  *
  * - which an image using this site must do, as it binds the tick's
  * vector (the crt's default handler is a spin). Why, on the CH32V006:

@@ -570,13 +570,13 @@ void banner() {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     tick_meter.enter();
     brio::Ticker::tick();
     tick_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     usart_meter.enter();
     (void)Serial::isr();
     usart_meter.leave();
@@ -584,7 +584,7 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
 
 // I2C1's event and error vectors and the engines' channels 6 and 7: the
 // host letter i brought up, or nothing.
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     i2c_meter.enter();
     bool done = false;
     if (i2c_mode == I2cMode::pump) {
@@ -597,7 +597,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
         i2c_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     i2c_meter.enter();
     bool done = false;
     if (i2c_mode == I2cMode::pump) {
@@ -623,8 +623,8 @@ namespace {
     }
 }
 } // namespace
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { i2c_dma_vector(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { i2c_dma_vector(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { i2c_dma_vector(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { i2c_dma_vector(); }
 
 int main() {
     const bool clock_ok = SysClock::init();   // HSI x2 -> 48 MHz
