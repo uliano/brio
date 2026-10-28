@@ -55,12 +55,19 @@
  *    instructions after the store retire before the trap, two behind a
  *    `fence` or a load of the PFIC, and NONE behind a `fence.i` - the
  *    instruction the request ends with there;
- *  - THE V4C TAKES THE TRAP AT THE INSTRUCTION AFTER THE STORE: measured
- *    on the CH32X035F8U6 with hand-placed assembly reading mepc in the
- *    handler, the store at one address and mepc the next, the same after
- *    the `csrsi` that unmasks a pending request, and the same with a
- *    `fence.i` after the store (mepc the fence itself). There the request
- *    is the store and nothing else.
+ *  - THE V4C TAKES THE TRAP AT THE INSTRUCTION AFTER THE STORE WHEN THE
+ *    STORE RUNS FROM THE FLASH: measured on the CH32X035F8U6 with
+ *    hand-placed assembly reading mepc in the handler, the store at one
+ *    address and mepc the next, the same after the `csrsi` that unmasks
+ *    a pending request, and the same with a `fence.i` after the store
+ *    (mepc the fence itself). There the request is the store and nothing
+ *    else - as that project places it, in the flash. The same store run
+ *    from SRAM is posted like the V4B's: three compressed instructions
+ *    retire behind it (two with the branch predictor off) and two behind
+ *    the unmasking `csrsi`, measured on the same part with the sequence
+ *    placed in SRAM, a `fence.i` after the store closing them for two
+ *    cycles. The fact is the family's to state because it is a fact of
+ *    where the family runs the request, not of the core alone.
  *
  * Either way a request made from thread mode with MIE set is taken before
  * the instruction that follows it: that is what "at once" means for a

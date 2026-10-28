@@ -1121,8 +1121,9 @@ same request and bodies with no f-registers to save and no `fence.i`, measured o
 CH32X035F8U6 at 48 MHz from its flash: 356, 141 and 877 cycles, 2.6
 times the CH32V203's for the same instructions, the flash's
 fetch of 4 cycles a word making the difference; the software interrupt
-there taken at the instruction after the store that pends it, so the
-request is the store alone, [the CH32X035
+there taken at the instruction after the store that pends it when the
+store runs from the flash, as every image of that project runs it, so
+the request is the store alone, [the CH32X035
 platform page](../ch32x035/platform.md)). The host
 suite (`test/test_rubato`) is the specification every target
 realization is judged by: the ceiling over

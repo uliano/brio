@@ -15,11 +15,17 @@
  *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
  *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
  *
- * This family's fact, the one the core file asks: the V4C takes the
- * trap at the instruction after the request's store - measured on the
- * CH32X035F8U6, mepc read in the handler the store's next address, and a
- * `fence.i` after the store changing nothing - so the request is the
- * store alone.
+ * This family's fact, the one the core file asks: run from the flash,
+ * where every image of this project places it, the request's store is
+ * followed by the trap at once - measured on the CH32X035F8U6 (the
+ * platform suite's letter i), mepc read in the handler the store's next
+ * address, and a `fence.i` after the store changing nothing - so the
+ * request is the store alone. That is a fact of the flash's fetch, not of
+ * the core: the same store run from SRAM retires three compressed
+ * instructions before the trap (measured on the CH32X035F8U6 with the
+ * sequence placed in SRAM), so a request placed in SRAM would carry the
+ * `fence.i` as the CH32V203's does; qingke/schedule.hpp says why the
+ * fact is the family's to state.
  */
 
 #pragma once

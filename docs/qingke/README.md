@@ -102,8 +102,9 @@ include:
   asks: true on the V4B and the V4F, where three instructions retire
   behind the pending store unless a `fence.i` closes them (measured on
   the CH32V203C8T6 and the CH32V303VCT6), false on the V4C, which takes
-  the trap at the instruction after the store (measured on the
-  CH32X035F8U6);
+  the trap at the instruction after a store run from the flash, where
+  that project places the request (measured on the CH32X035F8U6; the
+  same store run from SRAM is posted like the V4B's);
 - the platform type's public name, a struct over `QingkePlatform`
   (`Ch32v00xPlatform<TB>`, `Ch32vx03Platform<TB>`,
   `Ch32x035Platform<TB>`), which adds what is the family's alone:

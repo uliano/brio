@@ -304,9 +304,14 @@ the two bodies are the CH32V203's and the CH32V303's
 f-register shape compiling to nothing on this core and the request
 without that family's `fence.i`: on the V4B three instructions retire
 behind the pending store unless the fence closes them, while this core
-takes the trap at the instruction after the store (the platform suite's
-letter `i` reads mepc in the handler), so here the request is the store
+takes the trap at the instruction after a store run from the flash (the
+platform suite's letter `i` reads mepc in the handler), so here, where
+every image runs the request from the flash, the request is the store
 alone (`scheduling_request_posted` false, this family's schedule.hpp).
+The fact is the flash fetch's, not the core's: the same store run from
+SRAM retires three compressed instructions before the trap (two with the
+branch predictor off), measured with the sequence placed in SRAM, and a
+request placed there would carry the `fence.i`.
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -575,7 +580,10 @@ training, against its trained cost) against the allowance below:
 | any of them taken right after a fall-through training; sixteen calls through a register to the other of two leaves | 0 | 0 |
 
 mepc reads the instruction after the store and after the `csrsi`: the
-trap is taken there, and nothing retires behind either. The predictor
+trap is taken there, and nothing retires behind either - from the flash,
+where the letter runs; the same sequences run from SRAM retire three
+compressed instructions behind the store and two behind the `csrsi`
+(measured, not a letter of this suite). The predictor
 corecfgr's 0x1F turns on costs nothing when it guesses right. A branch
 it guessed taken that falls through costs up to 8 cycles more, one it
 guessed to fall through that is taken nothing, and sixteen in a row cost
