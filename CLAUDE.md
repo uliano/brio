@@ -575,6 +575,9 @@ brio list                  # serial devices, USB probes, the bench manifest
 brio flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
 brio flash C test_samc_uart # ... or OpenOCD/SWD - the BOARD TYPE decides both
 brio flash E console       # ... or OpenOCD/ST-LINK (a Nucleo in the example manifest)
+brio flash P --elf PATH    # an ELF kept outside the tree as it is, no build, the same
+                           # programmer path and resets (never a bare OpenOCD line: a
+                           # WCH-Link left unreset garbles its console, docs/probes/wch-link.md)
                            # the project to build in and the flash mechanism
 brio run C z               # drive the console, judge "ALL: N pass, M fail"
 brio console A             # device path + speed, for your own monitor

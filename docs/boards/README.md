@@ -98,7 +98,14 @@ the suite's `ALL: N pass, M fail` line; `brio console <board>` prints
 the device path and speed for a monitor of your own. On a board that
 splits a suite, `brio flash` takes the group image's name
 (`test_ch32_tim-2`) and refuses the bare name with the list of its
-images, and `brio run` judges each image's own `ALL:` line.
+images, and `brio run` judges each image's own `ALL:` line. An image
+kept outside the tree - a reference build, a step of a bisection - goes
+in with `brio flash <board> --elf PATH`, no app name and no build,
+through the same programmer path and with the same resets a built app
+gets (a WCH-Link not reset after a programming garbles its console from
+then on: [the WCH-Link page](../probes/wch-link.md)); the boards whose
+mechanism wants another format - avrdude a `.hex`, the ST-LINK's drive a
+`.bin` - take an app name only.
 
 ## The board type decides the project and the flash mechanism
 

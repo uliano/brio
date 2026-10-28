@@ -128,9 +128,17 @@ def main():
     p = sub.add_parser("list", help="serial devices, USB programmers, manifest")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("flash", help="build an app for a board and flash it over UPDI")
+    p = sub.add_parser("flash", help="build an app for a board and flash it, by the "
+                                     "board type's mechanism; or flash an ELF as it is")
     p.add_argument("name", help="board name from the manifest")
-    p.add_argument("app", help="app name (src/apps/<app>.cpp)")
+    p.add_argument("app", nargs="?",
+                   help="app name (src/apps/<app>.cpp); left out with --elf")
+    p.add_argument("--elf", metavar="PATH",
+                   help="program this ELF as it is, no build (an image kept outside "
+                        "the tree: a reference build, a bisect step), through the "
+                        "board's programmer with the same resets a built app gets; "
+                        "OpenOCD boards only - avrdude wants a .hex and the ST-LINK's "
+                        "drive a .bin, so those boards take an app")
     p.add_argument("--erase", action="store_true",
                    help="real chip erase first, EEPROM included - the only "
                         "way to wipe a flash heap (the default erases just "

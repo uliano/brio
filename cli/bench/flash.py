@@ -1,6 +1,11 @@
 """brio flash: build an app for a board and put it in, by the board type -
 avrdude over UPDI, OpenOCD over SWD or an ST-LINK, or the ST-LINK's own
-mass-storage flasher - with the flash-heap preflight on the AVR."""
+mass-storage flasher - with the flash-heap preflight on the AVR. Or, with
+--elf, put in an ELF kept outside the tree as it is (a reference image, a
+bisect step), through the same programmer path and with the same resets
+a built app gets - the probe's reset above all: a WCH-Link left unreset
+after a programming garbles the console from then on (docs/probes/
+wch-link.md), which is what a hand-written OpenOCD line forgets."""
 
 import argparse
 import fcntl
@@ -449,6 +454,40 @@ def msd_flash(prog, binfile, app):
     return 0
 
 
+def elf_image(args, spec):
+    """--elf: the image is the file given, no build. Refused where the
+    board's mechanism wants another format (avrdude a .hex, the ST-LINK's
+    drive a .bin), and with an app name beside it. Returns the path."""
+    if args.app:
+        die("--elf programs the file given: leave the app name out")
+    if spec["flash"] in ("avrdude", "stlink_msd"):
+        die("--elf is for the OpenOCD boards: this board's %s wants a %s, so it "
+            "takes an app name and builds it"
+            % ("avrdude" if spec["flash"] == "avrdude" else "ST-LINK drive",
+               ".hex" if spec["flash"] == "avrdude" else ".bin"))
+    path = os.path.abspath(args.elf)
+    if not os.path.isfile(path):
+        die("no such file: %s" % path)
+    return path
+
+
+def elf_app_name(args, spec, btype):
+    """What `brio run` should take the console speed from after an --elf:
+    the file's stem when it names an app of the board's project built for
+    this board type (a reference build of a suite), else nothing - the
+    last flashed app's speed stays, and `brio run --app` overrides it."""
+    stem = os.path.basename(args.elf)
+    stem = stem[:-4] if stem.endswith(".elf") else stem
+    base = re.sub(r"-[0-9]+$", "", stem)
+    info = apps_roster(spec["project"])["apps"].get(base)
+    if info and btype in info["boards"]:
+        return stem
+    print("bench: %s is not an app of %s/ built for this board type: the console "
+          "speed stays the last flashed app's (brio run --app overrides it)"
+          % (stem, spec["project"]))
+    return None
+
+
 def cmd_flash(args):
     btype = board_entry(args.name)["board"]
     spec = board_type(btype)
@@ -459,49 +498,57 @@ def cmd_flash(args):
             "... verify` erases exactly the sectors it writes, and there is "
             "no NvHeap on the SAM or the STM32 yet to protect from a chip "
             "erase")
-    print("bench: board %s -> %s/ preset %s, target %s"
-          % (args.name, project, preset, args.app))
-    # Cheap (a fresh roster too, in case an app's "// build:" lines or the
-    # app list itself changed since the last configure). Presets resolve
-    # against their own CMakePresets.json, so cmake runs from the owning
-    # project's directory - the repo root is not a CMake project.
-    projdir = os.path.join(ROOT, project)
-    rc = subprocess.call(["cmake", "--preset", preset], cwd=projdir)
-    if rc != 0:
-        return rc
-    # The roster is fresh now: an app whose "// build:" lines changed
-    # since the last configure resolves as it is today.
-    info, btype = resolve_app(args.name, args.app)
-    rc = subprocess.call(["cmake", "--build", "--preset", preset,
-                          "--target", args.app], cwd=projdir)
-    if rc != 0:
-        return rc
+    if args.elf:
+        elffile = elf_image(args, spec)
+        app = elf_app_name(args, spec, btype)
+        print("bench: board %s -> %s as it is, no build" % (args.name, elffile))
+    else:
+        if not args.app:
+            die("brio flash <board> <app>, or brio flash <board> --elf PATH")
+        app = args.app
+        print("bench: board %s -> %s/ preset %s, target %s"
+              % (args.name, project, preset, app))
+        # Cheap (a fresh roster too, in case an app's "// build:" lines or
+        # the app list itself changed since the last configure). Presets
+        # resolve against their own CMakePresets.json, so cmake runs from
+        # the owning project's directory - the repo root is not a CMake
+        # project.
+        projdir = os.path.join(ROOT, project)
+        rc = subprocess.call(["cmake", "--preset", preset], cwd=projdir)
+        if rc != 0:
+            return rc
+        # The roster is fresh now: an app whose "// build:" lines changed
+        # since the last configure resolves as it is today.
+        info, btype = resolve_app(args.name, app)
+        rc = subprocess.call(["cmake", "--build", "--preset", preset,
+                              "--target", app], cwd=projdir)
+        if rc != 0:
+            return rc
+        elffile = os.path.join("build-cmake", preset, app + ".elf")
+        if spec["flash"] in ("openocd", "wch_openocd", "rp2350_openocd") \
+                and not os.path.isfile(os.path.join(ROOT, elffile)):
+            die("no %s after the build" % elffile)
 
     prog = board_entry(args.name)["programmer"]
     if prog["type"] == "stlink_msd":
-        binfile = os.path.join(ROOT, "build-cmake", preset, args.app + ".bin")
+        binfile = os.path.join(ROOT, "build-cmake", preset, app + ".bin")
         if not os.path.isfile(binfile):
             die("no %s after the build" % binfile)
-        rc = msd_flash(prog, binfile, args.app)
+        rc = msd_flash(prog, binfile, app)
         if rc == 0:
-            state_write(args.name, args.app)
+            state_write(args.name, app)
         return rc
     if spec["flash"] == "rp2350_openocd":
-        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
-        if not os.path.isfile(os.path.join(ROOT, elffile)):
-            die("no %s after the build" % elffile)
         rc = 0
         for step in rp2350_openocd_argvs(prog, elffile, arm=btype == "weact2350b"):
             print("bench: " + " ".join(step))
             rc = subprocess.call(step, cwd=ROOT)
             if rc != 0:
                 return rc
-        state_write(args.name, args.app)
+        if app:
+            state_write(args.name, app)
         return rc
     if spec["flash"] == "openocd":
-        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
-        if not os.path.isfile(os.path.join(ROOT, elffile)):
-            die("no %s after the build" % elffile)
         if "rp2040" in spec["target_cfg"]:
             rescue = rp2040_rescue_args(prog, spec["target_cfg"])
             print("bench: " + " ".join(rescue))
@@ -510,12 +557,9 @@ def cmd_flash(args):
                 return rc
         argv = openocd_args(prog, elffile, spec["target_cfg"])
     elif spec["flash"] == "wch_openocd":
-        elffile = os.path.join("build-cmake", preset, args.app + ".elf")
-        if not os.path.isfile(os.path.join(ROOT, elffile)):
-            die("no %s after the build" % elffile)
         argv = wch_openocd_args(prog, elffile)
     else:
-        hexfile = os.path.join("build-cmake", preset, args.app + ".hex")
+        hexfile = os.path.join("build-cmake", preset, app + ".hex")
         if not os.path.isfile(os.path.join(ROOT, hexfile)):
             die("no %s after the build" % hexfile)
         nvheap_preflight(prog, spec["mcu"], hexfile, chip_erase=args.erase)
@@ -523,8 +567,8 @@ def cmd_flash(args):
 
     print("bench: " + " ".join(argv))
     rc = subprocess.call(argv, cwd=ROOT)
-    if rc == 0:
-        state_write(args.name, args.app)
+    if rc == 0 and app:
+        state_write(args.name, app)
     if spec["flash"] == "wch_openocd":
         # The image is already running and may have printed into a port
         # nobody holds open: clear the probe's bridge before anyone does.

@@ -157,7 +157,9 @@ that loses the end of every answer, or interleaves pieces of different
 lines, is the bridge's state until a capture after the reset below says
 otherwise. The same reset of the probe over USB
 (`USBDEVFS_RESET` on its device node) clears both states and drops the
-held bytes; `brio flash` sends it after every programming, and a tool
+held bytes; `brio flash` sends it after every programming - an image
+from outside the tree goes in through `brio flash <board> --elf PATH`
+for that reason, never through an OpenOCD line of one's own - and a tool
 that closes the port on a timer rather than on the prompt should send it
 too before the next capture is trusted.
 
