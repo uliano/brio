@@ -14,7 +14,12 @@
 # with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
 # CH32X035_HPE option, WCH's interrupt attribute) and without it (gcc's
 # own prologue), since pfic.hpp's BRIO_CH32_VECTOR is one spelling with
-# two expansions and a fixture that binds a vector proves both.
+# two expansions and a fixture that binds a vector proves both. A positive
+# that includes the preemptive kernel (kernel/rubato.hpp) is compiled both
+# places the project's `// build: scheduler` line can put the scheduler
+# path, -DBRIO_CH32_SCHEDULER_IN_RAM=1 (ram, the default) and =0 (flash),
+# since ch32x035/schedule.hpp's request and scheduler_init() follow it;
+# every other positive takes the default's value.
 # Negative: every test/family_ch32x035/neg/*.cpp must FAIL to compile for
 # each part named on its "// mcu: <list>" line.
 #
@@ -61,15 +66,21 @@ for tu in test/family_ch32x035/*.cpp; do
     line="$(basename "$tu" .cpp):"
     parts="$(sed -n 's|^// mcu:||p' "$tu")"
     [ -n "$parts" ] || parts="$PARTS"
+    scheds="1"
+    grep -q '"kernel/rubato.hpp"' "$tu" && scheds="1 0"
     for part in $parts; do
         for hpe in 0 1; do
-            if $CXX $(part_flags "$part") -DBRIO_CH32_HPE=$hpe "$tu" -o /dev/null 2>/tmp/check_ch32x035_err; then
-                line="$line $part/hpe$hpe"
-            else
-                line="$line $part/hpe$hpe:FAIL"
-                fail=1
-                sed "s/^/    /" /tmp/check_ch32x035_err | head -15
-            fi
+            for sched in $scheds; do
+                label="$part/hpe$hpe"
+                [ "$scheds" = "1" ] || { [ "$sched" = 1 ] && label="$label/ram" || label="$label/flash"; }
+                if $CXX $(part_flags "$part") -DBRIO_CH32_HPE=$hpe -DBRIO_CH32_SCHEDULER_IN_RAM=$sched "$tu" -o /dev/null 2>/tmp/check_ch32x035_err; then
+                    line="$line $label"
+                else
+                    line="$line $label:FAIL"
+                    fail=1
+                    sed "s/^/    /" /tmp/check_ch32x035_err | head -15
+                fi
+            done
         done
     done
     echo "POS $line"

@@ -142,7 +142,23 @@ set(CH32X035_OPENOCD "/sw/wch-openocd/bin/openocd" CACHE FILEPATH "WCH's OpenOCD
 set(CH32X035_OPENOCD_CFG "/sw/wch-openocd/bin/wch-riscv.cfg" CACHE FILEPATH "its RISC-V target config")
 
 # --- One app -> one executable target, one .bin/.hex, one -upload target.
-function(ch32x035_add_app name)
+#     `scheduler` is the app's "// build: scheduler" value, ram or flash
+#     (the discovery below reads and checks it): where the preemptive
+#     kernel's scheduler path runs from.
+#
+#     THE SCHEDULER'S PLACE is two things the value sets for the target.
+#     The compile definition BRIO_CH32_SCHEDULER_IN_RAM (1 or 0) tells the
+#     code where its request runs, so the request carries the fence.i a
+#     store run from SRAM needs and scheduler_init() points mtvec at a copy
+#     of the vector table in SRAM (ch32x035/schedule.hpp). And the linker's
+#     search path names the directory of the placement fragment ld/
+#     sections.ld includes into .data, ld/scheduler_ram/ or ld/
+#     scheduler_flash/, which name the path's sections or none. The -L comes
+#     before the two scripts: ld looks a script's INCLUDE up in the
+#     directories named before it. The kernel knows nothing of the choice,
+#     and an image without the preemptive kernel has none of the path's
+#     functions, so the default costs it nothing.
+function(ch32x035_add_app name scheduler)
     add_executable(${name}
         src/glue/startup_ch32x035.S
         ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
@@ -170,12 +186,22 @@ function(ch32x035_add_app name)
     # -nodefaultlibs so that no C library and no syscall layer reach the
     # link - an accidental printf or malloc fails here with its own name -
     # and libgcc named below, after the objects.
+    if(scheduler STREQUAL "ram")
+        target_compile_definitions(${name} PRIVATE BRIO_CH32_SCHEDULER_IN_RAM=1)
+    else()
+        target_compile_definitions(${name} PRIVATE BRIO_CH32_SCHEDULER_IN_RAM=0)
+    endif()
+
+    # The part's memories, then the series' sections (ld/sections.ld says
+    # why two scripts and in this order).
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
         -nostartfiles
         -nodefaultlibs
+        -L${CMAKE_SOURCE_DIR}/ld/scheduler_${scheduler}
         -T${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld
+        -T${CMAKE_SOURCE_DIR}/ld/sections.ld
         -Wl,--gc-sections
         -Wl,--no-warn-rwx-segments   # .data carries .ram_text, the code placed in SRAM: code copied there is a writable, executable segment (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
@@ -183,7 +209,9 @@ function(ch32x035_add_app name)
     )
     target_link_libraries(${name} PRIVATE gcc)
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
-        ${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld)
+        ${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld
+        ${CMAKE_SOURCE_DIR}/ld/sections.ld
+        ${CMAKE_SOURCE_DIR}/ld/scheduler_${scheduler}/scheduler_text.ld)
 
     set_target_properties(${name} PROPERTIES SUFFIX ".elf")
 
@@ -220,6 +248,11 @@ endfunction()
 #     own "// build: boards = ..." header comment (default: x035f8, the
 #     board type of WCH's evaluation board in its QFN20 edition).
 #
+#     "// build: scheduler = ram" or "= flash" says where the preemptive
+#     kernel's scheduler path runs (ch32x035_add_app() above); a file
+#     without the line is ram, and any other value stops the configure
+#     with the app's name.
+#
 #     The GROUP axis (design/overview.md, "A suite's image fits the
 #     family's smallest chip"): no part of this series is smaller than
 #     another (the file header), so CH32X035_SPLIT_BOARDS is EVERY board
@@ -246,6 +279,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
     set(_boards x035f8)
     set(_groups "")
     set(_monitor_speed "")
+    set(_scheduler "ram")
 
     file(STRINGS "${_app_path}" _build_lines REGEX "^// build:")
     foreach(_line IN LISTS _build_lines)
@@ -268,9 +302,15 @@ foreach(_app_path IN LISTS APP_SOURCES)
                 endforeach()
             elseif(_key STREQUAL "monitor_speed")
                 set(_monitor_speed "${_value}")
+            elseif(_key STREQUAL "scheduler")
+                set(_scheduler "${_value}")
             endif()
         endif()
     endforeach()
+
+    if(NOT _scheduler STREQUAL "ram" AND NOT _scheduler STREQUAL "flash")
+        message(FATAL_ERROR "${_app_path}: \"// build: scheduler = ${_scheduler}\" - the scheduler's place is ram or flash")
+    endif()
 
     if(_monitor_speed STREQUAL "")
         set(_speed_json "null")
@@ -298,7 +338,7 @@ foreach(_app_path IN LISTS APP_SOURCES)
         endforeach()
         set(_groups_json "[${_groups_json}]")
     endif()
-    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"monitor_speed\":${_speed_json}}")
+    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"monitor_speed\":${_speed_json},\"scheduler\":\"${_scheduler}\"}")
     if(_manifest_entries STREQUAL "")
         set(_manifest_entries "${_entry}")
     else()
@@ -321,11 +361,11 @@ foreach(_app_path IN LISTS APP_SOURCES)
             set(_i 0)
             foreach(_g IN LISTS _groups)
                 math(EXPR _i "${_i} + 1")
-                ch32x035_add_app(${_app}-${_i} ${_app_path})
+                ch32x035_add_app(${_app}-${_i} ${_scheduler} ${_app_path})
                 target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}${_upper_marker}\"")
             endforeach()
         else()
-            ch32x035_add_app(${_app} ${_app_path})
+            ch32x035_add_app(${_app} ${_scheduler} ${_app_path})
         endif()
     endif()
 endforeach()

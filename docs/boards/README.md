@@ -77,7 +77,12 @@ board type alone and replace the plain line there, on a splitting board
 too. The rule and its reasons are in
 [design/overview.md](../design/overview.md), "A suite's image fits the
 family's smallest chip"; those six projects are the ones with the axis.
-`brio check` links every app on every preset of its project, and
+One more line belongs to the CH32X035 project alone: a program on its
+preemptive kernel says where the kernel's scheduler path runs,
+`// build: scheduler = ram` (the default, the line absent) or
+`// build: scheduler = flash`
+([../ch32x035/platform.md](../ch32x035/platform.md), "The scheduler's
+place"). `brio check` links every app on every preset of its project, and
 `brio fit` lists each image's flash and RAM against its part's, or
 against the smaller tier its project holds it to.
 

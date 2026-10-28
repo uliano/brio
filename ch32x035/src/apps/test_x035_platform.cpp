@@ -964,7 +964,7 @@ namespace {
 // four (docs/ch32x035/platform.md, "A handler in SRAM"), so code added in
 // front of another letter's would move that letter's figures. The linker
 // script lays every `.text` input section first and `.rodata` after them
-// (ch32x035/ld/ch32x035f8.ld), so the letter's functions and its assembly
+// (ch32x035/ld/sections.ld), so the letter's functions and its assembly
 // share one section named under `.rodata` with the code flags ("ax"):
 // still code in the flash, behind everything else. main() reaches it
 // through one call, four bytes, which keeps every function after main()

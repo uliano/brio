@@ -61,26 +61,31 @@
  *    address and mepc the next, the same after the `csrsi` that unmasks
  *    a pending request, and the same with a `fence.i` after the store
  *    (mepc the fence itself). There the request is the store and nothing
- *    else - as that project places it, in the flash. The same store run
- *    from SRAM is posted like the V4B's: three compressed instructions
- *    retire behind it (two with the branch predictor off) and two behind
- *    the unmasking `csrsi`, measured on the same part with the sequence
- *    placed in SRAM, a `fence.i` after the store closing them for two
- *    cycles. The fact is the family's to state because it is a fact of
- *    where the family runs the request, not of the core alone.
+ *    else. The same store run from SRAM is posted like the V4B's: three
+ *    compressed instructions retire behind it (two with the branch
+ *    predictor off) and two behind the unmasking `csrsi`, measured on the
+ *    same part with the sequence placed in SRAM, a `fence.i` after the
+ *    store closing them for two cycles. The fact is the family's to state
+ *    because it is a fact of where the family runs the request, not of
+ *    the core alone - and the CH32X035 runs it from either memory, as the
+ *    image's build line chooses, so its value follows that choice
+ *    (ch32x035/schedule.hpp).
  *
  * Either way a request made from thread mode with MIE set is taken before
  * the instruction that follows it: that is what "at once" means for a
  * request made from a dispatch. A request made with MIE clear waits for
  * the unmask, so no dispatch ever starts inside a critical section; a
  * post made inside one serves its receiver when the section ends - on the
- * V4F and the V4C at the `csrsi` that ends it (on the CH32X035F8U6 405
- * cycles from the section's last statement to the receiver's first, at
- * 48 MHz from the flash, test_x035_rubato's letter g), on the V4B two
+ * V4F, and on the V4C where the `csrsi` that ends it runs from the flash,
+ * at that `csrsi` (on the CH32X035F8U6 at 48 MHz, from the section's last
+ * statement to the receiver's first, 184 cycles with the scheduler path
+ * in SRAM and 405 with it in the flash, test_x035_rubato's letter g,
+ * whose section is in the flash in both images); on the V4B two
  * instructions after it (measured: the same pend taken after two
- * instructions behind the `csrsi`, none behind a `fence.i` there), which
- * the platform's critical section does not pay a `fence.i` on every exit
- * to close.
+ * instructions behind the `csrsi`, none behind a `fence.i` there), and on
+ * the V4C the same two where the `csrsi` runs from SRAM (measured with
+ * the sequence placed in SRAM) - which the platform's critical section
+ * does not pay a `fence.i` on every exit to close.
  *
  * NESTING, AT RUN TIME. The crt leaves INTSYSCR.INESTEN clear (an ISR body
  * runs to completion: docs/design/kernel.md section 1), and
@@ -232,8 +237,10 @@
  * family does not include this file.
  *
  * Include-order contract: the family's device header and its pfic.hpp
- * first, and `scheduling_request_posted` defined, which the family's
- * schedule.hpp does before including this file.
+ * first, and `scheduling_request_posted` and `scheduler_vector_table_init()`
+ * defined - the family's step of scheduler_init(), which keeps the vector
+ * table where the family's image runs its scheduler path from - which the
+ * family's schedule.hpp does before including this file.
  */
 
 #pragma once
@@ -251,11 +258,17 @@ static_assert(std::is_same_v<decltype(brio::scheduling_request_posted), const bo
 
 /// The binding of the scheduler's two vectors (the file header): naked,
 /// kept whole against identical code folding, aligned to four like every
-/// vector of the stratum, and marked a leaf in the image so that the
-/// vector guard holds the body to being one.
+/// vector of the stratum, marked a leaf in the image so that the vector
+/// guard holds the body to being one, and given a section of its own,
+/// `.text.brio_scheduler_vector.<name>`, by which a family's linker script
+/// can place the scheduler's vectors apart from a handler a program binds
+/// to the same line with BRIO_CH32_VECTOR (the CH32X035's does, for its
+/// `scheduler = ram` images: ch32x035/ld/scheduler_ram/). Every other
+/// script takes it with the rest of `.text.*`.
 #define BRIO_CH32_SCHEDULER_VECTOR(name)                                  \
     __asm__(".set __brio_leaf_" #name ", 1");                             \
-    extern "C" [[gnu::naked, gnu::no_icf, gnu::aligned(4)]] void name()
+    extern "C" [[gnu::naked, gnu::no_icf, gnu::aligned(4),                \
+                 gnu::section(".text.brio_scheduler_vector." #name)]] void name()
 
 namespace brio {
 
@@ -290,8 +303,12 @@ inline constexpr uint8_t scheduler_priority = 0x80;
 }
 
 /// The software interrupt below every other line, nesting on, the line
-/// enabled. Call once in main(), before interrupts are enabled.
+/// enabled - and first the family's own step, scheduler_vector_table_init()
+/// (on the CH32X035 an image that runs the scheduler path from SRAM moves
+/// the vector table there; elsewhere it does nothing). Call once in main(),
+/// before interrupts are enabled.
 inline void scheduler_init() {
+    scheduler_vector_table_init();
     pfic()->IPRIOR[static_cast<uint8_t>(Irq::software)] = scheduler_priority;
     __asm__ volatile("csrs 0x804, %0" ::"r"(intsyscr_inesten | intsyscr_pmtcfg_two_levels)
                      : "memory");

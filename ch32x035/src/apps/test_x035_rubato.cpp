@@ -32,11 +32,21 @@
 // the waits longer than a period. TIM2 is not the console's (USART2) nor
 // the ticker's (STK).
 //
-// THE CODE RUNS FROM THE FLASH, behind two wait states at 48 MHz with no
-// prefetch buffer: a fetch reads one word, and a taken branch costs what
-// its target's address modulo four makes it (docs/ch32x035/platform.md,
-// "A handler in SRAM"). Every bound below is drawn over this image's
-// release listing with that fetch model (letter c states it).
+// WHERE THE CODE RUNS. The scheduler path - the two scheduler vectors, the
+// thread entry, the request, activate() and its queues' out-of-line verbs
+// - runs from SRAM in this image, the project's default (`// build:
+// scheduler` absent), with the vector table copied there by
+// scheduler_init(); test_x035_rubato_flash is the same source built with
+// `scheduler = flash`, the whole image in the flash (ch32x035/schedule.hpp
+// says what the line changes). Everything else - the letters, the
+// interrupt handlers, the post verb, the time events - runs from the
+// flash in both, behind two wait states at 48 MHz with no prefetch buffer:
+// a fetch reads one word, and a taken branch costs what its target's
+// address modulo four makes it (docs/ch32x035/platform.md, "A handler in
+// SRAM"). Every bound below is drawn over the release listing of the
+// image it judges, with the flash's fetch model and, where the path runs
+// from SRAM, SRAM's (letter c states both); `ram_build` says which image
+// this is.
 //
 // WHERE THE SCHEDULER RUNS is a constant of the image,
 // `scheduler_in_thread_mode` below, and the letters whose verdict depends
@@ -511,9 +521,13 @@ constexpr uint32_t latency_events = 100;
     }
 }
 
-/// THE COST MODEL every bound of this suite is drawn with, over this
-/// image's release listing (build-cmake/ch32x035f8-release/
-/// test_x035_rubato.lst). The code runs from the flash, at two wait states
+/// THE COST MODEL every bound of this suite is drawn with, over the
+/// release listing of the image it judges (build-cmake/ch32x035f8-release/
+/// test_x035_rubato.lst for the image with the scheduler path in SRAM,
+/// test_x035_rubato_flash.lst for the one with it in the flash). First the
+/// flash's, which judges the whole of the flash image and every part of
+/// the SRAM image that stays in the flash; the SRAM's after it. The code
+/// runs from the flash, at two wait states
 /// and with no prefetch buffer, and the core waits for its fetch
 /// (docs/ch32x035/platform.md, "A handler in SRAM"): straight-line code
 /// issues as fast as its words arrive, one four-byte word every 4 cycles -
@@ -593,14 +607,79 @@ constexpr uint32_t latency_events = 100;
 /// spread the same 56, and a tick landing in it 92 (its frame of sixteen
 /// saves: 56 cycles of body where 40 were): 540, and 618 with a fifth of
 /// the count.
+///
+/// THE SRAM COST MODEL, for the image that runs the scheduler path from
+/// SRAM (`ram_build`, the project's default). Code in SRAM issues one
+/// instruction a cycle, 32-bit or compressed, the SRAM answering without
+/// wait states; a taken transfer issues its target 2 cycles after it (3 to
+/// a 32-bit target across two words), a call and its return 6 the pair;
+/// and what the flash's fetch hid is paid now: a load from SRAM or a
+/// peripheral 2 cycles, a store 2 (1.625 each in a run of compressed
+/// ones, 2.25 a 32-bit one in a run). A trap's entry through the vector
+/// table in SRAM (scheduler_init() copies it there in this image) issues
+/// the handler 10 cycles after the store that pends the software
+/// interrupt, or after the unmask that finds it pending, and 12 when a
+/// fence.i follows the store - the request's, in this image - and 9 after
+/// an ecall; an MRET issues its target 5 cycles after it in SRAM code, 9
+/// in flash code, 11 into a pending interrupt. Where a path crosses the
+/// two memories: a call from the flash into SRAM and its return 16 the
+/// pair, the call's word included - the word 4, the transfer 3, the
+/// return into the flash 8, or 12 to a 32-bit target across two words;
+/// a store or an unmask in the flash that pends the software interrupt,
+/// and TIM2's MRET in the flash into it pending, 12 to the handler in
+/// SRAM, the stamp's flash word taken off as above (20 through the crt's
+/// table in the flash, the 8 the table's place costs); a trap from SRAM
+/// code into a handler in the flash 14. Those figures were measured on the
+/// CH32X035F8U6 at 48 MHz with test_x035_platform's letter i built with
+/// its code in SRAM - a scratch instrument, not a letter of either suite
+/// - each the least of 32 masked calls or the same in 256 trips. The
+/// predictor's wrong guesses there cost up to 3 cycles at one site and at
+/// most 21 over sixteen, so the allowance is 2 cycles a predicted site in
+/// SRAM and the flash's 4 at each site in the flash.
+///
+/// The road-1 path in the SRAM image, by its listing:
+///   TIM2's handler after the stamp's load, in the flash (4)              12
+///   its MRET into the pending software interrupt, the table in SRAM      12
+///   the software interrupt's body: six ALU and CSR instructions, two
+///   stores, the MRET into the entry (9)                                  15
+///   the entry's frame, sixteen compressed stores, csrsi, the call (19)   31
+///   activate()'s frame: thirteen stores, three ALU, the ceiling's load,
+///   a branch not taken, a move, the call to Top's empty() (21)           32
+///   empty(): two loads, four ALU, the return (7)                         11
+///   Top's answer: three ALU and the taken branch to High's visit (4)      5
+///   High's visit: the call, empty(), the answer and its taken branch
+///   (11)                                                                 18
+///   High's take: the ceiling's and the dispatching flag's stores, a
+///   load, the call, take() - fourteen and its return - and the stamp's
+///   load (25)                                                            36
+///                                                                       ---
+///                                                                       172
+/// (101 instructions, letter c's flash path with the code after TIM2's
+/// MRET in SRAM.) On top of it: the predictor's spread at the 14 sites,
+/// all in SRAM, 28; and at most one tick landing in the path - its entry
+/// from SRAM code into its handler in the flash (14), its thirteen
+/// instructions to the MRET (40), the MRET into SRAM code (8, the flash's
+/// MRET into code, an upper figure where the target is not fetched from
+/// the flash) and its own branch's spread (4), 66. The bound is the three,
+/// 266, and a fifth of the count, 34: 300. An event more than the spread,
+/// 28, over the fastest is one a tick landed in (a tick costs at least
+/// 54: its entry and its body). Without the hardware prologue: TIM2's
+/// sixteen reloads (44 cycles where 12 were) and the software interrupt's
+/// scratch save and reload (a store and a load, 4 more), 208; a tick its
+/// software frame (56 of body where 40 were), 82: 318, and 359 with a
+/// fifth of the count.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
 constexpr bool hpe_build = true;
 #else
 constexpr bool hpe_build = false;
 #endif
-constexpr uint32_t latency_count = hpe_build ? 356u : 392u;
-constexpr uint32_t latency_bound = hpe_build ? 559u : 618u;
-constexpr uint32_t latency_spread = 56u;
+/// Which image this is: the scheduler path in SRAM (the default) or in
+/// the flash (test_x035_rubato_flash), as ch32x035/schedule.hpp reads it
+/// from the build's `// build: scheduler` line.
+constexpr bool ram_build = scheduler_in_ram;
+constexpr uint32_t latency_count = ram_build ? (hpe_build ? 172u : 208u) : (hpe_build ? 356u : 392u);
+constexpr uint32_t latency_bound = ram_build ? (hpe_build ? 300u : 359u) : (hpe_build ? 559u : 618u);
+constexpr uint32_t latency_spread = ram_build ? 28u : 56u;
 
 void tc_latency() {
     reset_scenario();
@@ -805,7 +884,17 @@ void td_scan() {
     // instructions), 308 without the ruler; the spread at its 19 sites
     // (76) and the fifth (61): 445. Without the hardware prologue the same
     // instructions at other addresses: 316, and 455.
-    constexpr uint32_t scan_bound = hpe_build ? 445u : 455u;
+    // In the SRAM image, by the SRAM model (letter c): the read, the
+    // auipc and the jalr's words in the flash (8) and the transfer into
+    // SRAM (3); activate()'s frame and the call to Top's empty() (32),
+    // Top's visit - empty() and the answer - (16), High's and Mid's (19
+    // each), Low's, whose answer ends the pass (20), the thirteen loads of
+    // the epilogue (28), the return into the second read, a 32-bit load
+    // across two words of the flash (13): 158 (91 instructions), 154
+    // without the ruler; the spread at its 19 sites in SRAM (38) and its
+    // one in the flash (4), and the fifth (30): 226. Without the hardware
+    // prologue the flash's words fall the same: 154, and 226.
+    constexpr uint32_t scan_bound = ram_build ? 226u : (hpe_build ? 445u : 455u);
     bench.verdict("the scan of four empty queues, the least of 16, under its bound (the "
                   "arithmetic beside it)",
                   scan < scan_bound);
@@ -817,7 +906,16 @@ void td_scan() {
     // wrapping changes the instructions and not the cycles), 140 without
     // the ruler; the spread at its 9 sites (36) and the fifth (28): 204.
     // Without the hardware prologue 156, and 223.
-    constexpr uint32_t quiet_bound = hpe_build ? 204u : 223u;
+    // In the SRAM image: the read, the event's store and the call (12),
+    // post<Low>()'s frame to its jalr, five words of the flash (20), the
+    // transfer into SRAM (3), push() under its guard to the unmask and its
+    // return (29), the return into the flash, a 32-bit load across two
+    // words (12), the ceiling's compare taken and the epilogue (24), the
+    // return (8), the second read's word (4): 112 (41 instructions), 108 without
+    // the ruler; the spread at its 4 sites in the flash (16) and 4 in SRAM
+    // (8), and the fifth (21): 153. Without the hardware prologue the
+    // flash's words at other addresses come to the same 108, and 153.
+    constexpr uint32_t quiet_bound = ram_build ? 153u : (hpe_build ? 204u : 223u);
     bench.verdict("a post that asks nothing, under its bound (the push and one compare)",
                   quiet < quiet_bound);
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
@@ -838,7 +936,26 @@ void td_scan() {
     // the fifth (176): 1232. Without the hardware prologue (letter c) the two
     // bodies' scratch saves and the same instructions at other addresses:
     // 920, and 1280.
-    constexpr uint32_t road2_bound = hpe_build ? 1232u : 1280u;
+    // In the SRAM image (letter c's SRAM model): the read, post<High>()'s
+    // frame and the call to push() in the flash (32), the transfer into
+    // SRAM and push() (32), the return into the flash and the ceiling's
+    // compare not taken (24), the epilogue and the tail jump to the
+    // request (12) and the transfer into SRAM (3); the request's two
+    // instructions (2), its store, the fence.i and the trap's entry (12);
+    // the software interrupt's body (15); the thread entry (31);
+    // activate() at Mid's ceiling to High's take(): the frame, Top's
+    // visit and High's (66), High's take and dispatch with nothing to do
+    // (70), the release (15), the pass served (11); the rescan of Top and
+    // High and Mid's index ending it (43), the epilogue and its return
+    // (31); the entry's reloads and its ecall's entry (42); the exit's
+    // body and its MRET (12); the request's return into the second read,
+    // on a word of the flash (9): 462 (245 instructions, the fence.i
+    // among them), 458 without the ruler; the spread at its 38 sites in
+    // SRAM (76) and 4 in the flash (16), and the fifth (91): 641. Without
+    // the hardware prologue the two bodies' scratch saves (8) and the
+    // request's return into a 32-bit load across two words of the flash
+    // (4 more): 474, 470, and 656.
+    constexpr uint32_t road2_bound = ram_build ? (hpe_build ? 641u : 656u) : (hpe_build ? 1232u : 1280u);
     print(serial, "  bounds: the scan ", scan_bound, ", a quiet post ", quiet_bound,
           ", a road-2 post ", road2_bound, crlf);
     bench.verdict("and under its bound (the arithmetic beside it), High's empty dispatch included",
@@ -906,7 +1023,15 @@ void te_depth2() {
             // predicted sites (40), a tick landing in it (76, letter c),
             // a fifth of the count (58): 466. Without the hardware
             // prologue letter c's additions make it 328, and 525.
-            constexpr uint32_t depth2_bound = hpe_build ? 466u : 525u;
+            // In the SRAM image (letter c's SRAM model): TIM2's tail (12),
+            // its MRET into the software interrupt (12), that body (15),
+            // the thread entry (31), activate()'s frame (32) and Top's
+            // empty() answering no with the taken branch (14), Top's take
+            // and the stamp (36) - 152, 87 instructions - the spread at
+            // its 10 sites in SRAM (20), a tick (66, letter c), a fifth
+            // (30): 268. Without the hardware prologue letter c's additions
+            // make it 188, a tick 82, and 327.
+            constexpr uint32_t depth2_bound = ram_build ? (hpe_build ? 268u : 327u) : (hpe_build ? 466u : 525u);
             bench.verdict("and Top's first statement within its bound of the interrupt's last "
                           "(the arithmetic beside it)",
                           most <= depth2_bound);
@@ -1098,7 +1223,15 @@ void tf_timers() {
     // the first, over an empty list (the unlink finds no head): 144.
     // Without the hardware prologue the same instructions at other
     // addresses: 156, and 223.
-    constexpr uint32_t arm_bound = hpe_build ? 232u : 223u;
+    // In the SRAM image arm() stays in the flash, its words at other
+    // addresses: the read, a store and the call (12); the frame, the
+    // guard's csrrci and the call to the unlink (28); the unlink (52); the
+    // node's stores, the link at the list's head, the walk's test (40); the
+    // csrsi, the epilogue and the return (24); the second read's word (4):
+    // 160 (45 instructions), 156 without the ruler; the spread at its 9
+    // sites (36) and a fifth (31): 223. Without the hardware prologue the
+    // same words: 156, and 223.
+    constexpr uint32_t arm_bound = ram_build ? 223u : (hpe_build ? 232u : 223u);
     print(serial, "  the bound of one arm() ", arm_bound, " cycles", crlf);
     bench.verdict("one arm(), the least of 16, under its bound, its masked window inside (the "
                   "arithmetic beside it)",
@@ -1204,7 +1337,18 @@ void tg_mask() {
         // landing in one of the ten runs about one time in twelve: its 76
         // (letter c); a fifth of the count (80): 636. Without the hardware
         // prologue letter c's additions make it 408, and 657.
-        constexpr uint32_t section_bound = hpe_build ? 636u : 657u;
+        // In the SRAM image (letter c's SRAM model): the stamp's store,
+        // the guard's test and its csrsi, in the flash (12); the trap's
+        // entry from that unmask to the handler in SRAM (12) and the
+        // software interrupt's body (15); the thread entry (31);
+        // activate() at the Console's ceiling - the frame (32), Top's
+        // visit (16), High's (19), Mid's empty() and its answer (18), the
+        // ceiling's store, the call to take(), take() and the stamp (36):
+        // 191, 114 instructions; the spread at its 18 sites in SRAM (36)
+        // and its one in the flash (4), a tick in one of the ten runs (66),
+        // a fifth (38): 335. Without the hardware prologue letter c's
+        // additions make it 195, a tick 82, and 356.
+        constexpr uint32_t section_bound = ram_build ? (hpe_build ? 335u : 356u) : (hpe_build ? 636u : 657u);
         bench.verdict("the section's end to the receiver's first statement under its bound "
                       "(the arithmetic beside it)",
                       most < section_bound);

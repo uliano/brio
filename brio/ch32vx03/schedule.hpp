@@ -19,6 +19,9 @@
  * request's store into the PFIC is posted - measured on the CH32V203C8T6
  * and the CH32V303VCT6, three instructions retire behind it before the
  * trap - so the request ends with a `fence.i`, behind which none does.
+ * And this family's step of scheduler_init(), the other thing the core
+ * file asks: none, the vector table staying in the flash with the rest of
+ * the image.
  */
 
 #pragma once
@@ -31,6 +34,11 @@ namespace brio {
 /// The request's store is posted on the V4B and the V4F: the request ends
 /// with a fence.i (the file header).
 inline constexpr bool scheduling_request_posted = true;
+
+/// The family's step of scheduler_init(): nothing. The scheduler path runs
+/// from the flash's zero-wait window here, where the crt's vector table
+/// is, so the table stays where the crt put it.
+inline void scheduler_vector_table_init() {}
 
 } // namespace brio
 

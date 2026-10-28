@@ -15,7 +15,8 @@ own 64-bit system counter (the STK), a 1000 Hz interrupt. The page also
 covers the one spelling of an interrupt handler, what the startup code
 (the crt, the assembly file that runs before `main()`) writes into the
 core, and where code runs: the flash, or SRAM for a path a program
-places there, a driver's or its own.
+places there - a driver's, its own, or the preemptive kernel's
+scheduler path, which goes there unless the program says otherwise.
 
 The smallest use is the glue every program of this project writes, as
 the console and the test suites spell it:
@@ -276,7 +277,8 @@ base) and `pend_schedule()`, which is
 [brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp)'s
 `request_scheduler()`: the software interrupt (line 14 of the vector
 table, RM 7.3) pended through PFIC_IPSR1 (RM 7.5.2.25), four
-instructions out of line. `scheduler_init()` puts the software
+instructions out of line, five where it ends with the `fence.i`
+(below). `scheduler_init()` puts the software
 interrupt's priority byte at 0x80 and sets INTSYSCR.INESTEN with one
 preemption bit (the QingKe V4 manual 3.2), so every peripheral line, at
 the reset priority 0, sits at one level above it: the peripheral
@@ -301,17 +303,67 @@ a leaf (`__brio_leaf_<name>`), which they are: no call, nothing saved in
 software. A program executes no `ecall` of its own. The request and
 the two bodies are the CH32V203's and the CH32V303's
 ([brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp)), the
-f-register shape compiling to nothing on this core and the request
-without that family's `fence.i`: on the V4B three instructions retire
-behind the pending store unless the fence closes them, while this core
-takes the trap at the instruction after a store run from the flash (the
-platform suite's letter `i` reads mepc in the handler), so here, where
-every image runs the request from the flash, the request is the store
-alone (`scheduling_request_posted` false, this family's schedule.hpp).
-The fact is the flash fetch's, not the core's: the same store run from
-SRAM retires three compressed instructions before the trap (two with the
-branch predictor off), measured with the sequence placed in SRAM, and a
-request placed there would carry the `fence.i`.
+f-register shape compiling to nothing on this core. Whether the request
+ends with that family's `fence.i` depends on where it runs, which here
+the program chooses (the next paragraph). This core takes the trap at
+the instruction after a store run from the flash (the platform suite's
+letter `i` reads mepc in the handler), so from the flash the request is
+the store alone. The same store run from SRAM retires three compressed
+instructions before the trap (two with the branch predictor off), as the
+V4B's does, measured with the sequence placed in SRAM; there the request
+ends with the `fence.i`, after which the trap is taken at the next
+instruction, for 2 cycles more (12 from the store to the handler where
+10 were). `scheduling_request_posted`, the fact
+[brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp) gives the
+core file, follows the placement.
+
+**The scheduler's place.** The preemptive kernel's scheduler path - the
+two scheduler vectors, the thread entry, the request, `activate()` and
+the out-of-line verbs of the objects' queues - runs from SRAM or from
+the flash as the program's header says, with one line the build reads:
+`// build: scheduler = ram` or `// build: scheduler = flash`. A file
+without the line is `ram`; any other value stops the configure with the
+app's name. The line sets two things for the image
+([ch32x035/CMakeLists.txt](../../ch32x035/CMakeLists.txt)): the
+definition `BRIO_CH32_SCHEDULER_IN_RAM`, 1 or 0, from which this
+family's schedule.hpp takes the request's `fence.i` and
+`scheduler_init()`'s step below; and which placement fragment the
+series' section layout includes into `.data`
+([ch32x035/ld/sections.ld](../../ch32x035/ld/sections.ld)):
+`ld/scheduler_ram/scheduler_text.ld` names the path's sections,
+`ld/scheduler_flash/scheduler_text.ld` none, and the crt's copy of
+`.data` moves what is named into SRAM before `main()`. Each pattern
+names a function only a preemptive image holds - the platform's name is
+in it, or it is the scheduler's own, and the two vectors bound with
+`BRIO_CH32_SCHEDULER_VECTOR` have a section of their own - so the kernel
+knows nothing of the choice, and an image built with Tenuto links to the
+same bytes whatever its line says. Under `ram` the vector table moves
+too: `scheduler_init()` copies the crt's 55 words into
+`scheduler_vector_table`, 220 bytes of `.bss`, and points mtvec at the
+copy with both mode bits. The entries name the same handlers, so a
+program binds nothing new, and the crt's table stays where the core
+boots from, serving every trap until then. From SRAM a trap through the
+table in the flash costs 18 cycles from the store that raises it to the
+handler and 10 through the copy, the entry fetched over the flash's wait
+states (measured, the letter's sequences placed in SRAM). The copy is
+`scheduler_init()`'s and not the crt's because the crt is assembled for
+every image with the image's value of the definition, a Tenuto image's
+included, and only a preemptive program calls `scheduler_init()`. What
+stays in the flash under either value: the post verb itself
+(kernel/post.hpp's `post<Ao, Ev>`, whose name carries no platform, so a
+pattern for it would move a Tenuto image's posts too; its callee
+`push()` and the request are placed), the time events' service, every
+interrupt handler, and every dispatch the compiler keeps out of
+`activate()`, which a program places with `.fast_text` ("A handler in
+SRAM", below).
+
+The default is `ram` because the path's functions exist only in a
+preemptive image, so a Tenuto image pays nothing whatever the default,
+and a program that chose preemption chose latency: from SRAM road 1
+takes under half the cycles it takes from the flash (the bench
+findings). `scheduler = flash` is the opt-out for a preemptive program
+short of RAM, back to the flash's figures and to the request as the
+store alone.
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -337,8 +389,10 @@ What the crt writes, in [startup_ch32x035.S](../../ch32x035/src/glue/startup_ch3
 the global pointer and the stack, `.data` and `.bss`, the paint, then
 corecfgr = 0x1F, mstatus = 0x1880 (machine mode, MPIE set, MIE clear),
 INTSYSCR = 0x1 when the image is built with the HPE and nothing
-otherwise - never INESTEN - and mtvec = the table with both mode bits;
-then the static constructors and a call to main(). Every handler is
+otherwise - never INESTEN - and mtvec = the table with both mode bits
+(which a preemptive image with its scheduler path in SRAM points at the
+copy in SRAM later, in `scheduler_init()`); then the static constructors
+and a call to main(). Every handler is
 weak: an alias of `default_handler`, or for the exception and the
 breakpoint entries a spin of its own.
 
@@ -394,6 +448,20 @@ int main() {
     K::run();
 }
 ```
+
+That program runs its scheduler path from SRAM, the default, and
+`scheduler_init()` moves the vector table there too, before the
+interrupts are enabled. A program that cannot spare the RAM opts out
+with one line among the `// build:` lines of its header comment, the
+lines the project's build reads ([../boards/README.md](../boards/README.md)):
+
+```cpp
+// build: scheduler = flash
+```
+
+Its path then runs from the flash, the request is the store alone and
+the vector table stays the crt's. The figures each choice gives and the
+bytes it costs are in the bench findings below.
 
 ## Bench findings
 
@@ -590,8 +658,10 @@ guessed to fall through that is taken nothing, and sixteen in a row cost
 at most 64 more, 4 a branch; and over the 32 timed calls of a row of
 not-taken branches the slowest exceeded the least by up to 44 cycles
 with sixteen branches, 80 with thirty-two. The Rubato bounds allow
-4 cycles at each predicted site of a path, its calls and returns
-counted, and every row here is judged so and within it; the allowance
+4 cycles at each predicted site of a path in the flash (2 at a site in
+SRAM, where the same rows' wrong guesses cost at most 21 cycles over
+sixteen sites and 3 at one), its calls
+and returns counted, and every row here is judged so and within it; the allowance
 holds over a path, not at each site: one wrong guess alone can cost
 8, twice a site's share. With the register cleared no call of a pattern differs from
 another, and every figure is the same but one pairing: a transfer the
@@ -604,13 +674,16 @@ transfer executes. In the image built without the hardware prologue
 letter) every fetch and trap figure is the same to the cycle: the core's
 push and pop cost a trap nothing measurable.
 
-**The preemptive kernel** - `test_x035_rubato`, 40 verdicts in `z` on
-the CH32X035F8U6 at 48 MHz, ten runs of `z` alike in the image built
-with the hardware prologue and ten in the one built without it: a
-Rubato pack of five objects, the Console the lowest and the letters'
-runner, TIM2's capture-compare line the interrupt the road-1 letters
-land, the STK's CNTL read bare the ruler (two reads 3 cycles apart,
-against 76 cycles for the ticker's composed `cycles()`, the two
+**The preemptive kernel** - `test_x035_rubato`, the scheduler path in
+SRAM (the default), and `test_x035_rubato_flash`, the same letters with
+the path in the flash; 40 verdicts in `z` each on the CH32X035F8U6 at
+48 MHz, ten runs of `z` alike for each image built with the hardware
+prologue, ten for the flash image built without it, and ten for a
+measurement image with the path in SRAM and the vector table left in the
+flash: a Rubato pack of five objects, the Console the lowest and the
+letters' runner, TIM2's capture-compare line the interrupt the road-1
+letters land, the STK's CNTL read bare the ruler (two reads 3 cycles
+apart, against 76 cycles for the ticker's composed `cycles()`, the two
 agreeing over half a millisecond and more within 12), nothing wired and
 nothing lit. Road 1 preempts at any depth: an interrupt's post to High
 inside Low's dispatch runs High to its end before Low resumes, ten runs
@@ -622,57 +695,100 @@ timers matured in one turn are posted with the ceiling at 0 and served
 highest first, and High preempting Low's loop of `arm()` and `disarm()`
 (in the loop's sixth turn of 200) leaves the list whole; a post under
 the mask pends the software interrupt, the receiver runs when the
-section ends, before the statement after it. INTSYSCR reads 0x3 once
-the nesting is on (0x2 without the prologue): PMTCFG's bit reads back
-zero, as on the CH32V203. Every timing below is within the bound its
-letter derives over the release listing with this core's fetch, which
-the suite's letter c states and `test_x035_platform`'s letter `i`
-measures (above) -
-straight-line code a word every 4 cycles, a taken transfer 8 to its
-target (12 to a 32-bit target across two words), a trap's entry 20
-cycles from the instruction that raises it, an MRET into code 8 and
-into a pending interrupt 24, the same with the hardware prologue and
-without it - and the branch predictor corecfgr's 0x1F turns on, whose
-wrong guess costs up to 4 cycles a branch, call, jump or return: the
-least of each figure is that model's count to the cycle, the road-2
-post's aside (12 over), and the spread above it is the predictor's:
+section ends, before the statement after it - the same traces in every
+image. INTSYSCR reads 0x3 once the nesting is on (0x2 without the
+prologue): PMTCFG's bit reads back zero, as on the CH32V203. Every
+timing below is within the bound its letter derives over the release
+listing of its own image, which the suite's letter c states. From the
+flash, with this core's fetch as `test_x035_platform`'s letter `i`
+measures it (above): straight-line code a word every 4 cycles, a taken
+transfer 8 to its target (12 to a 32-bit target across two words), a
+trap's entry 20 cycles from the instruction that raises it, an MRET
+into code 8 and into a pending interrupt 24, the same with the hardware
+prologue and without it - and the branch predictor corecfgr's 0x1F
+turns on, whose wrong guess costs up to 4 cycles a branch, call, jump or
+return; there the least of each figure is that model's count to the
+cycle, the road-2 post's aside (12 over), and the spread above it is
+the predictor's. From SRAM, with SRAM's figures, measured with the
+platform suite's letter `i` built with its code in SRAM (a measurement,
+not a letter of the suite): an instruction a cycle, a taken transfer 2
+or 3, a load 2 and a store 1.6 to 2.25 (what the flash's fetch hid), a
+trap's entry 10 through the table in SRAM (12 behind the request's
+`fence.i`, 9 for an `ecall`), an MRET 5 into SRAM code and 9 into the
+flash, 12 for a trap or an MRET in the flash into a handler in SRAM
+through that table, a call from the flash into SRAM and back 16; the
+predictor's wrong guesses cost up to 3 a site there. Road 1 counts 172
+by that model and measured 168 to 172 at each run's fastest; the paths
+that cross between the two memories count above what they measure (a
+road-2 post 458 against 442, the scan 154 against 142), because a
+crossing's figure is a pair measured whole and split by the model, so
+there the count is the bound's starting point and not its least. In the
+table a figure past the double dots is the most of the ten runs, and
+`activate()`'s is the least of 16 in every run; road 1's most is the
+slowest event no tick landed in, in the runs whose three slowest show
+it, a tick adding 54 to 88 cycles (up to 250 in SRAM and 444 from the
+flash, the letter reading the tick around each event):
 
-| HCLK cycles | CH32X035F8U6 | without the prologue | CH32V203C8T6 (144 MHz) |
-|---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..368 | 392..400 | 135..137 |
-| road 1 at depth 2, over a preempting dispatch | 292..376 | 328..416 | 112..114 |
-| a post that asks nothing | **141**..149 | 155 | 55 |
-| a road-2 post, the receiver's empty dispatch inside | **876**..877 | 919..927 | 340 |
-| `activate()` over four empty queues | 309 | 315..323 | 121 |
-| one `arm()`, its masked window inside | 145..165 | 147 | 54..64 |
-| a post under the mask: the section's end to the receiver's first | 405..485 | 407..435 | 154..156 |
-| stack high-water of the suite's deepest chain (bytes) | 1000 | 1076 | 1000 |
+| HCLK cycles | path in SRAM (the default) | in SRAM, the table in the flash | path in the flash | in the flash, without the prologue | CH32V203C8T6 (144 MHz) |
+|---|---|---|---|---|---|
+| road 1: an interrupt's last statement to the preempting dispatch's first | **168**..184 | 174..190 | **356**..368 | 392..400 | 135..137 |
+| road 1 at depth 2, over a preempting dispatch | 149..219 | 155..226 | 292..364 | 328..416 | 112..114 |
+| a post that asks nothing | **108** | 108 | **141**..149 | 155 | 55 |
+| a road-2 post, the receiver's empty dispatch inside | **442**..444 | 454..458 | **877**..885 | 919..927 | 340 |
+| `activate()` over four empty queues | 142 | 142 | 309 | 315..323 | 121 |
+| one `arm()`, its masked window inside | 141 | 141 | 145..149 | 147 | 54..64 |
+| a post under the mask: the section's end to the receiver's first | 184..251 | 190..261 | 405..433 | 407..435 | 154..156 |
+| stack high-water of the suite's deepest chain (bytes) | 1000 | 1000 | 1000 | 1076 | 1000 |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending
 software interrupt, that body's nine instructions and its MRET, the
 entry's nineteen and `activate()`'s visits to Top and High: 101
-instructions, the CH32V203's code, and 356 cycles by the model,
-measured 356 at the fastest event of every run: 7.4 us at 48 MHz
-against the CH32V203's 0.9 us at 144, the fetch's 4 cycles a word
-making the difference, not the instructions. A tick landed in one or
-two events of 100 in each run (up to 452 cycles, read inside each). The
-road-2 post's scheduling share, 735 cycles, is two traps from thread
-mode - the pend and the `ecall` - and their two returns around the
-entry's 37 instructions and the rescan; the request is the store alone,
-because this core takes the software interrupt at the instruction after
-the store that pends it, and after the `csrsi` that unmasks it (the
-types and verbs above), where the CH32V203's request pays a `fence.i`
-for the three instructions its core lets retire. The stack's
-1000 bytes are the deepest chain's frames plus the block and the
-entry's 64 bytes at each level of preemption, as on the CH32V203. In
-the image built without the hardware prologue (CH32X035_HPE=OFF) the
-traps cost the same and the handlers that save in software pay it: road
-1 392 cycles (TIM2's sixteen reloads, the software interrupt's scratch
-save), a road-2 post 919 to 927. With corecfgr cleared in a probe image
-every path of the suite ran the same cycle count at every event, the
-model's; the register's 0x1F buys nothing on these paths and the
-platform suite's letter f already has it making a data-dependent loop
-7 per cent slower.
+instructions, the CH32V203's code. From the flash they take 356 cycles
+by the model, measured 356 at the fastest event of eight runs and 360
+in two: 7.4 us at 48 MHz against the CH32V203's 0.9 us at 144, the
+fetch's 4 cycles a word making the difference, not the instructions.
+From SRAM the same instructions take 172 by the model, 3.6 us: the
+straight line issues an instruction a cycle where the flash gave a word
+every 4, a taken transfer costs 2 or 3 where it cost 8 to 12, and the
+traps and MRETs into SRAM code cost 5 to 12 where they cost 8 to 24,
+while a load and a store pay the 2 cycles the flash's fetch hid. What
+stays in the flash is TIM2's tail, the program's own vector: 12 cycles.
+The vector table's place is worth 6 to 10 cycles on road 1 and 12 to 14
+on a road-2 post, whose two traps both go through it: from SRAM code a trap
+through the table in the flash takes 18 cycles to its handler where the
+copy takes 10. The `fence.i` the request ends with in SRAM costs 2
+cycles, inside the road-2 post; its scheduling share, 334 to 336 cycles
+in SRAM and 728 to 744 from the flash, is two traps from thread mode - the
+pend and the `ecall` - and their two returns around the entry's 37
+instructions and the rescan. The post verb itself stays in the flash
+under either value (the types and verbs above): a quiet post is 108
+cycles from SRAM's `push()` called out of the flash, where a
+measurement image with the suite's posts placed by name took 73. The
+stack's 1000 bytes are the deepest chain's frames plus the block and the
+entry's 64 bytes at each level of preemption, as on the CH32V203, in
+every image built with the hardware prologue. In the image built without the hardware prologue
+(CH32X035_HPE=OFF) the traps cost the same and the handlers that save
+in software pay it: road 1 392 cycles from the flash (TIM2's sixteen
+reloads, the software interrupt's scratch save), a road-2 post 919 to
+927. With corecfgr cleared in a probe image every path of the flash
+image ran the same cycle count at every event, the model's; the
+register's 0x1F buys nothing on these paths and the platform suite's
+letter f already has it making a data-dependent loop 7 per cent slower.
+
+What the path in SRAM costs, read in the two images' maps (`size -A`):
+1684 bytes of the 20 KB. `.data` holds 2064 bytes against the flash
+image's 600: 1464 more, the path's code - `activate()` 1150 bytes, the
+dispatches the compiler inlined into it among them (a program's
+`activate()` is as large as its inlined dispatches), the thread entry
+80, `push()` 72, `take()` 44, the two vectors 30 and 18, `release()` 26,
+`empty()` 20 (one body for every queue of the pack), the request 16 -
+and 8 bytes of alignment; `.bss` holds the vector table's copy, 220
+bytes more. The stack ledger says the same: after `z` the crt's painted
+region is 17224 bytes in the SRAM image, 17444 with the table left in
+the flash and 18908 in the flash image, 1000 of each used. The flash
+grows by 164 bytes, `.text` and the load image together (17940 against
+17776): a call between the two memories is an `auipc` and a `jalr`
+where a `jal` reached before.
 
 ## A handler in SRAM
 
@@ -686,9 +802,10 @@ vector directly, and a call between SRAM and the flash is an `auipc` and
 a `jalr`, which reach 2 GB either side of the caller: no veneer either
 way.
 
-**The option and its spelling: opt-in, per driver.** The seven linker
-scripts place the input sections `.fast_text` and `.fast_text.*` first
-in `.data` ([../../ch32x035/ld/ch32x035f8.ld](../../ch32x035/ld/ch32x035f8.ld)),
+**The option and its spelling: opt-in, per driver.** The series'
+section layout places the input sections `.fast_text` and `.fast_text.*`
+in `.data`, after the scheduler path where an image places it
+([../../ch32x035/ld/sections.ld](../../ch32x035/ld/sections.ld)),
 so the crt's copy of `.data` moves them into SRAM before `main()`, and
 the platform says so (`Ch32x035Platform::places_fast_text`). A driver of
 this stratum takes a placement, util/placement.hpp's `InFlash` (the
@@ -823,19 +940,25 @@ Driver gaps, each with its reason:
   no verb reads or writes them - on the CH32V203 a `csrw` to that CSR
   from the running program resets the part
   ([../ch32vx03/sleep.md](../ch32vx03/sleep.md)).
-- **The scheduler's path in SRAM**: the two naked vectors, the entry,
-  `activate()`, the queues' out-of-line verbs and the request run from
-  the flash, 4 cycles a word; by the figures of "A handler in SRAM"
-  below a `.fast_text` placement would cut road 1 by about half. Not
-  tried: a placement the preemptive platform chooses for a program is a
-  decision of its own.
+- **The post verb in SRAM**: under `scheduler = ram` `post<Ao, Ev>`
+  stays in the flash, its `push()` and the request placed. Declined:
+  the instance's name carries the receiver and the event and no
+  platform, so no pattern can tell a preemptive image's posts from a
+  Tenuto image's, and placing them would move every Tenuto image that
+  keeps a post out of line. Placed by name in a measurement image, the
+  suite's posts took a quiet post to 73 cycles where it takes 108.
 
 Implemented but not bench-verified, each with what would measure it:
 
 - **Rubato on the other six parts**: the platform, its request and the
   two vector bodies compile for all seven, with and without the hardware
-  prologue (the family fixture); the suite is built and run for the
-  CH32X035F8U6 alone.
+  prologue and with the scheduler path in either place (the family
+  fixture); the suite is built and run for the CH32X035F8U6 alone.
+- **The scheduler path in SRAM without the hardware prologue**
+  (`CH32X035_HPE=OFF` with `scheduler = ram`): the suite's bounds for
+  that image are drawn from its listing (its letter c), and the image is
+  built, not run; ten runs of its `z` would measure it, and the SRAM
+  trap figures without the prologue with them.
 
 - **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
   is the manual's, compiled for
