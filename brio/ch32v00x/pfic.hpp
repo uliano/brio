@@ -88,10 +88,17 @@
 /// one place the choice between the core's hardware prologue and gcc's is
 /// spelled. Where only the preprocessor can ask (a build option, an
 /// attribute, the symbol a vector table names), a macro is the honest tool.
+/// Every handler is aligned to four, as the CH32X035's are: gcc aligns a
+/// function to two under -Os, so without it a handler's cost moved with
+/// whatever the image put before it. Measured on the CH32V006K8U6 in two
+/// images that differ in the alignment alone (the platform suite, ten runs
+/// each): the software interrupt's round trip 78 cycles against 81 (letter
+/// e) and the console's USART handler's 123 against 129 (letter u), for 4
+/// to 28 bytes of padding an image across the project's images.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf, gnu::aligned(4)]]
 #else
-#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf, gnu::aligned(4)]]
 #endif
 #define BRIO_CH32_VECTOR(name) extern "C" BRIO_CH32_HANDLER_ATTRIBUTE void name()
 #define BRIO_CH32_VECTOR_FLOAT(name) BRIO_CH32_VECTOR(name)

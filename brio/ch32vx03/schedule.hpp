@@ -26,7 +26,8 @@
  * so the vector's function is that assembly and nothing else, in a
  * release build and in a debug one. BRIO_CH32_SCHEDULER_VECTOR is the
  * binding: naked, `no_icf` like every binding of this stratum (pfic.hpp
- * says why), and marked a leaf in the image (`__brio_leaf_<name>`, an
+ * says why), aligned to four like every vector of this stratum (pfic.hpp
+ * again), and marked a leaf in the image (`__brio_leaf_<name>`, an
  * absolute symbol that costs no byte), which is what it is under the
  * hardware prologue - no call, no f-register, nothing saved in software -
  * and what the stratum's vector guard then holds it to in every image
@@ -200,11 +201,12 @@
 #include "ch32vx03/pfic.hpp"
 
 /// The binding of the scheduler's two vectors (the file header): naked,
-/// kept whole against identical code folding, and marked a leaf in the
-/// image so that the vector guard holds the body to being one.
+/// kept whole against identical code folding, aligned to four like every
+/// vector of this stratum, and marked a leaf in the image so that the
+/// vector guard holds the body to being one.
 #define BRIO_CH32_SCHEDULER_VECTOR(name)                         \
     __asm__(".set __brio_leaf_" #name ", 1");                    \
-    extern "C" [[gnu::naked, gnu::no_icf]] void name()
+    extern "C" [[gnu::naked, gnu::no_icf, gnu::aligned(4)]] void name()
 
 namespace brio {
 

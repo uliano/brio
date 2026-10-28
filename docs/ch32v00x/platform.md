@@ -340,12 +340,12 @@ built with `CH32V00X_HPE=OFF` (its `z` green too). What it measured:
 
   | handler, image | entry | body | exit | whole trip |
   |---|---|---|---|---|
-  | minimal, HPE on (`CH32V00X_HPE=ON`, the default) | 28 | 20 | 33 | **81** |
+  | minimal, HPE on (`CH32V00X_HPE=ON`, the default) | 26 | 20 | 32 | **78** |
   | minimal, HPE off (gcc's own prologue) | 31 | 21 | 32 | **84** |
-  | the console's USART handler, HPE on | 27 | 55 | 47 | **129** |
-  | the console's USART handler, HPE off | 32 | 61 | 57 | **150** |
+  | the console's USART handler, HPE on | 26 | 52 | 45 | **123** |
+  | the console's USART handler, HPE off | 31 | 61 | 52 | **144** |
 
-  Three cycles on the minimal handler and 21 - 0.44 us at 48 MHz, a
+  Six cycles on the minimal handler and 21 - 0.44 us at 48 MHz, a
   seventh of the trip - on the console's: the ten registers go to the
   stack either way, and what the hardware saves is the fetch of the
   prologue and epilogue gcc writes, which grows with the registers a
@@ -401,7 +401,7 @@ the critical section, the STK timebase (CMP 47999 at 48 MHz),
 QingKe V2A takes an interrupt FASTER than the V2C: with the hardware
 prologue, 24 cycles to the handler's first statement, 16 to 17
 through a minimal body, 26 to 27 back to the raiser - 66 to 68 for
-the whole trip against the V2C's 83.
+the whole trip against the V2C's 78.
 
 **The V2A's sleep entry wedges, and `idle()` sleeps another way
 there.** Letter `w`'s edge walk, behind its IWDG net, and a scratch
@@ -480,10 +480,14 @@ offset 0 mod 4 and 3366 at every offset 2 mod 4 through 32 bytes, in
 three passes of the same sweep (a scratch program) - three cycles once,
 at the entry, and none a branch, where the CH32X035's QingKe V4C pays
 four cycles a turn of that body by its address modulo four
-([../ch32x035/platform.md](../ch32x035/platform.md)). So this stratum's
-`BRIO_CH32_VECTOR` does not align its handlers: the alignment would buy
-three cycles an entry and nothing a branch. The CH32V003's V2A has not
-been swept.
+([../ch32x035/platform.md](../ch32x035/platform.md)). The CH32V003's
+V2A has not been swept. Every vector is aligned to four all the same
+(`BRIO_CH32_VECTOR`, pfic.hpp), because what a vector costs should not
+move with what the image puts before it: in two images of the platform
+suite that differ in the alignment alone, ten runs each, the minimal
+round trip took 78 cycles against 81 and the console's USART handler
+123 against 129, for 4 to 28 bytes of padding an image across the
+project's images.
 
 **The option and its spelling: opt-in, per driver, and per vector.**
 Both linker scripts place the input sections `.fast_text` and
@@ -613,6 +617,10 @@ Implemented but not bench-verified, each with what would measure it:
   a walk of a non-tick line's edge across the shipped entry would
   measure it (the sleep suite's AWU walk does it for a line that is
   also an EXTI event, which loses none).
+- The CH32V003's round trip with every vector aligned to four: the
+  V2A figures above were read off an image whose vectors sat wherever
+  gcc's two-byte alignment put them; the platform suite's letter `e` on
+  the CH32V003F4P6 would measure the aligned one.
 - The V2A's minimum Sleep at other clocks: about 3150 cycles was
   measured at 48 MHz only; whether it is a time (66 us, about eight
   LSI periods) or a cycle count is a run of the latency stamp at a

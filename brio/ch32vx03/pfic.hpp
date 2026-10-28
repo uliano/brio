@@ -223,22 +223,30 @@
 /// prologue option and the image's floating-point ABI - with its float
 /// sibling BRIO_CH32_VECTOR_FLOAT and its leaf sibling
 /// BRIO_CH32_LEAF_VECTOR.
+///
+/// Every binding is aligned to four, as the CH32X035's are: gcc aligns a
+/// function to two under -Os, so without it a vector's cost moved with
+/// whatever the image put before it. Measured on the CH32V203C8T6 in two
+/// images that differ in the alignment alone (the platform suite, ten runs
+/// each): the software interrupt's round trip 52 cycles against 56 (letter
+/// e), for up to 36 bytes of padding an image (60 on the CH32V303VCT6's,
+/// whose trampolines are aligned too).
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf, gnu::aligned(4)]]
 #else
-#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf]]
+#define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt, gnu::no_icf, gnu::aligned(4)]]
 #endif
 
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE && defined(__riscv_flen)
 // The naked trampoline: the hardware has saved the sixteen caller-saved
 // integer registers (ra among them, which the call overwrites and MRET
 // puts back), the body saves what a callee must, MRET returns.
-#define BRIO_CH32_VECTOR(name)                                   \
-    extern "C" void name##_body();                               \
-    extern "C" [[gnu::naked, gnu::no_icf]] void name() {         \
-        __asm__("call " #name "_body\n\t"                         \
-                "mret");                                         \
-    }                                                            \
+#define BRIO_CH32_VECTOR(name)                                         \
+    extern "C" void name##_body();                                     \
+    extern "C" [[gnu::naked, gnu::no_icf, gnu::aligned(4)]] void name() { \
+        __asm__("call " #name "_body\n\t"                               \
+                "mret");                                               \
+    }                                                                  \
     extern "C" void name##_body()
 // The same trampoline for a body that does float work: the twenty
 // caller-saved f-registers (ft0..ft7 = f0..f7, fa0..fa7 = f10..f17,
@@ -251,7 +259,7 @@
 // program finds its own rounding mode and flags again after MRET.
 #define BRIO_CH32_VECTOR_FLOAT(name)                                                       \
     extern "C" void name##_body();                                                         \
-    extern "C" [[gnu::naked, gnu::no_icf]] void name() {                                   \
+    extern "C" [[gnu::naked, gnu::no_icf, gnu::aligned(4)]] void name() {                 \
         __asm__("addi sp, sp, -96\n\t"                                                     \
                 "fsw ft0, 0(sp)\n\t"  "fsw ft1, 4(sp)\n\t"  "fsw ft2, 8(sp)\n\t"           \
                 "fsw ft3, 12(sp)\n\t" "fsw ft4, 16(sp)\n\t" "fsw ft5, 20(sp)\n\t"          \

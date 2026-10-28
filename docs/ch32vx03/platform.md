@@ -684,17 +684,20 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
 
   | image | entry | body | exit | whole trip | .text | user stack |
   |---|---|---|---|---|---|---|
-  | HPE on (`CH32VX03_HPE=ON`, the default) | 16 | 12 | 25 | **53** | 12500 B | - |
-  | HPE off (gcc's own prologue) | 19 | 12 | 32 | **63** | 12652 B | 64 B more |
+  | HPE on (`CH32VX03_HPE=ON`, the default) | 15 | 12 | 25 | **52** | 31652 B | - |
+  | HPE off (gcc's own prologue) | 19 | 12 | 29 | **60** | 31796 B | 32 B more |
 
-  Ten cycles on a minimal handler - 69 ns at 144 MHz - 152 bytes of
-  flash over this image's five handlers, and SIXTY-FOUR BYTES OF USER
-  STACK that the hardware stack carries instead (`stack_untouched()`
-  after the same letter, 19540 against 19476). That last number is what
-  separates this core from the CH32V00x's, where the same feature moves
-  the pushes from the handler's code to the hardware but leaves them on
-  the user stack; and 53 cycles against that family's 83 is what a
-  bigger core does with the same measurement. Free in semantics, so it
+  Eight cycles on a minimal handler - 56 ns at 144 MHz - 144 bytes of
+  flash over this image's handlers, and USER STACK that the hardware
+  stack carries instead: the registers a handler saves, 32 bytes in
+  this suite's ledger (`stack_untouched()` after the same letter, 18896
+  against 18864). That last number is what separates this core from the
+  CH32V00x's, where the same feature moves the pushes from the handler's
+  code to the hardware but leaves them on the user stack; and 52 cycles
+  against that family's 78 is what a bigger core does with the same
+  measurement. Every vector is aligned to four (pfic.hpp): in two images
+  that differ in the alignment alone, ten runs each, the trip with the
+  hardware prologue took 52 cycles against 56. Free in semantics, so it
   is the default. The CH32V303VCT6's V4F, with the hardware prologue
   and the handler bound leaf: entry 16, body 12, exit 22, a whole trip
   of 50 to 59 cycles over 64 rounds (three runs). In two images that
