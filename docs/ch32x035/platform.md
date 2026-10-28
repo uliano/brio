@@ -251,8 +251,8 @@ platform, the one the preemptive kernel `Rubato` runs on
 base) and `pend_schedule()`, which is
 [brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp)'s
 `request_scheduler()`: the software interrupt (line 14 of the vector
-table, RM 7.3) pended through PFIC_IPSR1 (RM 7.5.2.25) and a `fence.i`,
-five instructions out of line. `scheduler_init()` puts the software
+table, RM 7.3) pended through PFIC_IPSR1 (RM 7.5.2.25), four
+instructions out of line. `scheduler_init()` puts the software
 interrupt's priority byte at 0x80 and sets INTSYSCR.INESTEN with one
 preemption bit (the QingKe V4 manual 3.2), so every peripheral line, at
 the reset priority 0, sits at one level above it: the peripheral
@@ -277,13 +277,12 @@ a leaf (`__brio_leaf_<name>`), which they are: no call, nothing saved in
 software. A program executes no `ecall` of its own. The file is the
 CH32V203's and the CH32V303's
 ([brio/ch32vx03/schedule.hpp](../../brio/ch32vx03/schedule.hpp)) with
-the f-register shape left out, the request's `fence.i` included: on the
-V4B three instructions retire behind the pending store unless the fence
-closes them, while this core takes the trap at the instruction after
-the store with or without it (measured with hand-placed assembly
-reading mepc in the handler), so here the fence closes nothing and
-costs 8 cycles on a road-2 post's return; it stays while the three
-QingKe families' request is one text.
+the f-register shape left out and the request's `fence.i` dropped: on
+the V4B three instructions retire behind the pending store unless the
+fence closes them, while this core takes the trap at the instruction
+after the store, with or without a fence (measured with hand-placed
+assembly reading mepc in the handler), so here the request is the
+store alone.
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -539,10 +538,10 @@ post's aside (12 over), and the spread above it is the predictor's:
 
 | HCLK cycles | CH32X035F8U6 | without the prologue | CH32V203C8T6 (144 MHz) |
 |---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..376 | 392..408 | 131..133 |
+| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..368 | 392..400 | 131..133 |
 | road 1 at depth 2, over a preempting dispatch | 292..376 | 328..416 | 110..112 |
-| a post that asks nothing | **141** | 155 | 55 |
-| a road-2 post, the receiver's empty dispatch inside | **897**..905 | 935..947 | 337 |
+| a post that asks nothing | **141**..149 | 155 | 55 |
+| a road-2 post, the receiver's empty dispatch inside | **876**..877 | 919..927 | 337 |
 | `activate()` over four empty queues | 309 | 315..323 | 120 |
 | one `arm()`, its masked window inside | 145..165 | 147 | 51..61 |
 | a post under the mask: the section's end to the receiver's first | 405..485 | 407..435 | 150..152 |
@@ -556,19 +555,19 @@ measured 356 at the fastest event of every run: 7.4 us at 48 MHz
 against the CH32V203's 0.9 us at 144, the fetch's 4 cycles a word
 making the difference, not the instructions. A tick landed in one or
 two events of 100 in each run (up to 452 cycles, read inside each). The
-road-2 post's scheduling share, 756 cycles, is two traps from thread
-mode - the pend and the `ecall` - their two returns around the entry's
-37 instructions and the rescan, and the request's `fence.i` run a
-second time after the return: on this core the software interrupt is
-taken at the instruction after the store that pends it, and after the
-`csrsi` that unmasks it, so no instruction retires behind either and
-the `fence.i` closes nothing (the types and verbs above). The stack's
+road-2 post's scheduling share, 735 cycles, is two traps from thread
+mode - the pend and the `ecall` - and their two returns around the
+entry's 37 instructions and the rescan; the request is the store alone,
+because this core takes the software interrupt at the instruction after
+the store that pends it, and after the `csrsi` that unmasks it (the
+types and verbs above), where the CH32V203's request pays a `fence.i`
+for the three instructions its core lets retire. The stack's
 1000 bytes are the deepest chain's frames plus the block and the
 entry's 64 bytes at each level of preemption, as on the CH32V203. In
 the image built without the hardware prologue (CH32X035_HPE=OFF) the
 traps cost the same and the handlers that save in software pay it: road
 1 392 cycles (TIM2's sixteen reloads, the software interrupt's scratch
-save), a road-2 post 935 to 947. With corecfgr cleared in a probe image
+save), a road-2 post 919 to 927. With corecfgr cleared in a probe image
 every path of the suite ran the same cycle count at every event, the
 model's; the register's 0x1F buys nothing on these paths and the
 platform suite's letter f already has it making a data-dependent loop
@@ -725,10 +724,6 @@ Driver gaps, each with its reason:
   below a `.fast_text` placement would cut road 1 by about half. Not
   tried: a placement the preemptive platform chooses for a program is a
   decision of its own.
-- **The request's `fence.i` on this core**: it closes nothing here and
-  costs 8 cycles on a road-2 post (the types and verbs above); kept while
-  the three QingKe families' request is one text, a fold posed with the
-  `qingke/` stratum ([README.md](README.md)).
 
 Implemented but not bench-verified, each with what would measure it:
 

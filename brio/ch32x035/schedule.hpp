@@ -39,24 +39,22 @@
  * V4 manual 3.1: "set directly through the interrupt pending register to
  * trigger into the interrupt"), the PFIC's own way in for every line
  * (pfic.hpp's set_pending). The pending bit falls when the line is taken,
- * so nothing withdraws it. The request ends with a `fence.i`, as the
- * CH32V203's does: there the store is posted and three instructions
- * retire before the trap unless the fence closes them
- * (brio/ch32vx03/schedule.hpp). THIS CORE TAKES THE TRAP AT THE
- * INSTRUCTION AFTER THE STORE, with or without the fence (measured on the
- * CH32X035F8U6 with hand-placed assembly reading mepc in the handler:
- * the store at one address, mepc the next; the same after the `csrsi`
- * that unmasks a pending request), so here the fence closes nothing and
- * costs 8 cycles on a road-2 post's way back, where it runs again after
- * the return; it stays while the three QingKe families' request is one
- * text (the fold into a `qingke/` stratum, posed). A request made from
- * thread mode with MIE set is taken before the instruction that follows
- * it, which is what "at once" means for a request made from a dispatch.
- * A request made with MIE clear waits for the unmask, so no dispatch ever
- * starts inside a critical section; a post made inside one serves its
- * receiver when the section ends, before the statement after it (the
- * suite's letter g: 405 cycles from the section's last statement to the
- * receiver's first, at 48 MHz from the flash).
+ * so nothing withdraws it. THIS CORE TAKES THE TRAP AT THE INSTRUCTION
+ * AFTER THE STORE: measured on the CH32X035F8U6 with hand-placed assembly
+ * reading mepc in the handler, the store at one address and mepc the
+ * next, the same after the `csrsi` that unmasks a pending request, and
+ * the same with a `fence.i` after the store (mepc the fence itself). So
+ * the request is the store and nothing else, where the CH32V203's ends
+ * with a `fence.i` because there the store is posted and three
+ * instructions retire before the trap unless the fence closes them
+ * (brio/ch32vx03/schedule.hpp): a request made from thread mode with MIE
+ * set is taken before the instruction that follows it, which is what "at
+ * once" means for a request made from a dispatch. A request made with MIE
+ * clear waits for the unmask, so no dispatch ever starts inside a
+ * critical section; a post made inside one serves its receiver when the
+ * section ends, before the statement after it (the suite's letter g: 405
+ * cycles from the section's last statement to the receiver's first, at
+ * 48 MHz from the flash).
  *
  * NESTING, AT RUN TIME. The crt leaves INTSYSCR.INESTEN clear (an ISR body
  * runs to completion: docs/design/kernel.md section 1), and
@@ -183,9 +181,10 @@ inline constexpr uint32_t intsyscr_pmtcfg_two_levels = 1UL << 2;
 /// every line at the reset priority 0.
 inline constexpr uint8_t scheduler_priority = 0x80;
 
-/// The request: the software interrupt pended, and the `fence.i` that
-/// makes it taken before the next instruction in thread mode with MIE
-/// set, at the handler's exit in a handler.
+/// The request: the software interrupt pended, taken before the next
+/// instruction in thread mode with MIE set (the file header: measured,
+/// this core needs no fence behind the store), at the handler's exit in
+/// a handler.
 ///
 /// A CALL THE COMPILER CANNOT SEE INTO, on purpose: noinline and noipa.
 /// From a dispatch the request runs other dispatches before it returns,
@@ -193,10 +192,10 @@ inline constexpr uint8_t scheduler_priority = 0x80;
 /// be a call to code that may read and write any static of the program -
 /// which an out-of-line function with no interprocedural summary is. The
 /// price is one call and return on the asking path only; a post that
-/// asks nothing never reaches it.
+/// asks nothing never reaches it. The store is volatile and the function
+/// opaque, so nothing of the caller's moves across it.
 [[gnu::noinline, gnu::noipa]] inline void request_scheduler() {
     pfic()->IPSR[0] = 1UL << static_cast<uint8_t>(Irq::software);
-    __asm__ volatile("fence.i" ::: "memory");
 }
 
 /// The software interrupt below every other line, nesting on, the line

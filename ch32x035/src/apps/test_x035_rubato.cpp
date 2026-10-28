@@ -827,13 +827,13 @@ void td_scan() {
     // (152); the rescan of Top and High and Mid's index ending it (128);
     // the epilogue (36); the entry's reloads and its ecall (44); the
     // ecall's entry (20) and the exit's body to its MRET (16); the MRET
-    // into the request's fence.i, which runs again, the return and the
-    // second read (24): 888 (245 instructions), 892 where the rings wrap
-    // (240), 888 the costlier without the ruler; the spread at its 44
-    // sites (176) and the fifth (177): 1241. Without the hardware prologue (letter c) the two
+    // into the request's return, the return and the second read (16):
+    // 880 (244 instructions), 884 where the rings wrap (239), 880 the
+    // costlier without the ruler; the spread at its 44 sites (176) and
+    // the fifth (176): 1232. Without the hardware prologue (letter c) the two
     // bodies' scratch saves and the same instructions at other addresses:
-    // 928, and 1289.
-    constexpr uint32_t road2_bound = hpe_build ? 1241u : 1289u;
+    // 920, and 1280.
+    constexpr uint32_t road2_bound = hpe_build ? 1232u : 1280u;
     print(serial, "  bounds: the scan ", scan_bound, ", a quiet post ", quiet_bound,
           ", a road-2 post ", road2_bound, crlf);
     bench.verdict("and under its bound (the arithmetic beside it), High's empty dispatch included",
