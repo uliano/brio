@@ -185,12 +185,19 @@ void ta_boot() {
                   (boot_flags & ResetFlag::software) == 0u ||
                       (boot_flags & ResetFlag::pin) == 0u);
 
+    // Two reads, then the take: what stands here is the boot's flags on
+    // the first run of this letter and nothing on every later one (the
+    // take before it cleared the register), so the reads are judged
+    // against each other, not against the boot's value - as the sibling
+    // suites judge it - and `z` is green on every run after a reset, not
+    // on the first alone.
     const uint32_t before = Reset::flags();
+    const uint32_t again = Reset::flags();
     const uint32_t taken = Reset::take_flags();
     const uint32_t after = Reset::flags();
-    print(serial, "  take_flags(): before=", hex(before), " taken=", hex(taken),
+    print(serial, "  flags()=", hex(before), " again=", hex(again), " take_flags()=", hex(taken),
           " after=", hex(after), crlf);
-    bench.verdict("flags() is non-destructive", before == boot_flags);
+    bench.verdict("flags() is non-destructive: two reads agree", before == again);
     bench.verdict("take_flags() returns what stood", taken == before);
     bench.verdict("and leaves the register clean", after == 0u);
     bench.verdict("RMVF is back at zero afterwards (a plain bit, not a strobe)",
