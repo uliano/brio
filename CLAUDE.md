@@ -45,8 +45,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 - `docs/<target>/` - one folder per target, mirroring `brio/<target>/`
   (`avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
   `ch32x035/`, `rp2040/`, `rp2350/`, `host/`), plus one per stratum that
-  is not a target (`cortexm/`, `pl011/`, `pl022/`, `dw_apb_i2c/`,
-  `devices/`). `README.md` is the operational page (toolchain, board,
+  is not a target (`cortexm/`, `qingke/`, `pl011/`, `pl022/`,
+  `dw_apb_i2c/`, `devices/`). `README.md` is the operational page (toolchain, board,
   probe, debugger and their quirks) and carries the DOCUMENT MAP - the
   state of the driver work is read there; beside it ONE document per
   peripheral in the shape docs/README.md prescribes (the reader's
@@ -112,6 +112,7 @@ its headers' business (their comments) and its documents' (the map in
 | `gfx/` | drawing, pure and kernel-free: surfaces, primitives, fonts, text, the counting surface (design/gfx.md) |
 | `devices/` | what sits OFF the chip over a link the chip provides: the DCS vocabulary, a traits type per display controller, the serial DCS link over any family's SpiHost, the panel driver; includes kernel/, util/ and gfx/, never a family |
 | `cortexm/` | the CORE stratum every Cortex-M family includes after its device header: NVIC + PRIMASK guard, the SysTick ticker, delay_us, the DWT cycle counter |
+| `qingke/` | the CORE stratum every QingKe family (ch32v00x, ch32vx03, ch32x035) includes after its device header and its facts: the PFIC, the mstatus.MIE guard and the vector bindings, the STK ticker and delay_us, the platform over the family's chip traits, the V4's scheduling request |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | the IP STRATA: ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C - a peripheral DESIGN written once over a traits type the family supplies (register block, reset, interrupt line, guard, pads, clock, DMA requests), the family keeping the public names; born at the SECOND family whose register description is IDENTICAL |
 | `avrxt/` | everything that knows `avr/io.h`: the AVR DA, DB and EA over the AVRxt core they share; bench chips AVR128DB48, AVR128DA48 and AVR64EA48 |
 | `samc21/` | everything that knows `sam.h`: SAM C21, Cortex-M0+; bench chip ATSAMC21J18A |
@@ -135,8 +136,9 @@ lives in preset names, per-chip ld/svd files and the `*_MCU` cache
 variables. A core or IP stratum is factored at the SECOND family that
 carries the block, every image byte-identical before and after, never
 earlier - Hazard3 is not a QingKe, so the RP2350's RISC-V core file
-stays its own until a second family of that shape earns one, and a
-`qingke/` core stratum is due at the CH32X035, the third QingKe family.
+stays its own until a second family of that shape earns one, and
+`qingke/` was factored at the CH32X035, the third QingKe family, the
+platform type's body with it.
 
 ## Governing rule and stability hierarchy
 
@@ -452,7 +454,8 @@ horizon itself, one entry each.
   pick, one chapter new to brio (the USB PD sink, or the host/device
   controller as the console - the CH32V303's block, to be factored into
   an IP stratum at its second family). The PIOC is out; the rest is
-  born with its first user. A `qingke/` core stratum is due.
+  born with its first user. The `qingke/` core stratum holds what it
+  shares with the two older QingKe families (docs/qingke/README.md).
 - **The optimization rounds after the retrospective review** (the
   method and the state in private/memory/'s critical-review note): the
   rulers and the platform, the util contracts, the DMA engines, the

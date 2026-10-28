@@ -188,6 +188,25 @@ question.
 
 ## Types and verbs
 
+The code below is the QingKe core stratum's, written once for the three
+QingKe families ([../qingke/README.md](../qingke/README.md)): this
+family's [pfic.hpp](../../brio/ch32x035/pfic.hpp),
+[ticker.hpp](../../brio/ch32x035/ticker.hpp) and
+[delay.hpp](../../brio/ch32x035/delay.hpp) are its device header over
+[brio/qingke/pfic.hpp](../../brio/qingke/pfic.hpp),
+[brio/qingke/ticker.hpp](../../brio/qingke/ticker.hpp) and
+[brio/qingke/delay.hpp](../../brio/qingke/delay.hpp), and its platform
+type a struct over
+[brio/qingke/platform.hpp](../../brio/qingke/platform.hpp)'s
+`QingkePlatform`, given this family's facts by a chip traits type
+(`Ch32x035Qingke`: the bus question, the DMA controller's registers)
+and, for Rubato,
+[brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp) over
+[brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp), the family's
+one fact there a request without a `fence.i`. The core files' comments
+carry the measurements of all three families' cores, each with its chip
+named.
+
 `Ch32x035Platform<TB>`
 ([brio/ch32x035/platform.hpp](../../brio/ch32x035/platform.hpp)) is the
 concept member for member: `CriticalSection` is pfic.hpp's
@@ -231,7 +250,8 @@ the ENABLE status and its IPR the pending one), and
 (kernel/platform.hpp's optional member, `HandlerAware`): PFIC_GISR's
 GACTSTA, bit 8 at offset 0x4C, an interrupt being executed (the
 reference manual 7.5.2.11, the QingKe V4 manual 3.1) - not mstatus.MIE,
-which a critical section clears as a trap's entry does.
+which a trap's entry leaves set on this core (the QingKe V4 manual 2.2)
+and a critical section clears.
 `BRIO_CH32_VECTOR` is the one spelling of a vector binding, its handler
 attribute WCH's fast attribute when the
 image is built with `CH32X035_HPE` (the default), gcc's plain
@@ -253,7 +273,7 @@ platform, the one the preemptive kernel `Rubato` runs on
 ([../design/kernel.md](../design/kernel.md), "Rubato"): `preemptive`,
 `ceiling` (the index of the object being dispatched, 255 at the loop's
 base) and `pend_schedule()`, which is
-[brio/ch32x035/schedule.hpp](../../brio/ch32x035/schedule.hpp)'s
+[brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp)'s
 `request_scheduler()`: the software interrupt (line 14 of the vector
 table, RM 7.3) pended through PFIC_IPSR1 (RM 7.5.2.25), four
 instructions out of line. `scheduler_init()` puts the software
@@ -278,14 +298,15 @@ This core has no FPU, so the entry has nothing else to save. The two
 vectors are bound with `BRIO_CH32_SCHEDULER_VECTOR(name)`: naked,
 `no_icf`, aligned to four like every vector of this stratum, and marked
 a leaf (`__brio_leaf_<name>`), which they are: no call, nothing saved in
-software. A program executes no `ecall` of its own. The file is the
-CH32V203's and the CH32V303's
-([brio/ch32vx03/schedule.hpp](../../brio/ch32vx03/schedule.hpp)) with
-the f-register shape left out and the request's `fence.i` dropped: on
-the V4B three instructions retire behind the pending store unless the
-fence closes them, while this core takes the trap at the instruction
-after the store (the platform suite's letter `i` reads mepc in the
-handler), so here the request is the store alone.
+software. A program executes no `ecall` of its own. The request and
+the two bodies are the CH32V203's and the CH32V303's
+([brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp)), the
+f-register shape compiling to nothing on this core and the request
+without that family's `fence.i`: on the V4B three instructions retire
+behind the pending store unless the fence closes them, while this core
+takes the trap at the instruction after the store (the platform suite's
+letter `i` reads mepc in the handler), so here the request is the store
+alone (`scheduling_request_posted` false, this family's schedule.hpp).
 
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -610,13 +631,13 @@ post's aside (12 over), and the spread above it is the predictor's:
 
 | HCLK cycles | CH32X035F8U6 | without the prologue | CH32V203C8T6 (144 MHz) |
 |---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..368 | 392..400 | 131..133 |
-| road 1 at depth 2, over a preempting dispatch | 292..376 | 328..416 | 110..112 |
+| road 1: an interrupt's last statement to the preempting dispatch's first | **356**..368 | 392..400 | 135..137 |
+| road 1 at depth 2, over a preempting dispatch | 292..376 | 328..416 | 112..114 |
 | a post that asks nothing | **141**..149 | 155 | 55 |
-| a road-2 post, the receiver's empty dispatch inside | **876**..877 | 919..927 | 337 |
-| `activate()` over four empty queues | 309 | 315..323 | 120 |
-| one `arm()`, its masked window inside | 145..165 | 147 | 51..61 |
-| a post under the mask: the section's end to the receiver's first | 405..485 | 407..435 | 150..152 |
+| a road-2 post, the receiver's empty dispatch inside | **876**..877 | 919..927 | 340 |
+| `activate()` over four empty queues | 309 | 315..323 | 121 |
+| one `arm()`, its masked window inside | 145..165 | 147 | 54..64 |
+| a post under the mask: the section's end to the receiver's first | 405..485 | 407..435 | 154..156 |
 | stack high-water of the suite's deepest chain (bytes) | 1000 | 1076 | 1000 |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending

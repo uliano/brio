@@ -1,0 +1,14 @@
+# The qingke core stratum has no database of its own (it is included by
+# the ch32v00x, ch32vx03 and ch32x035 strata, each after its own device
+# header); parse it against the CH32X035 project's database, a project
+# that compiles all five of its headers (the CH32V00x's takes no
+# schedule.hpp), so a family's device header resolves. Path relative to
+# this file.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/ch32x035f8-release
+  # clangd's clang knows no WCH extension: the database's -march (the
+  # part's full ISA under WCH's gcc) would make every TU fail to parse,
+  # so the editor sees the standard subset instead. The compiler still
+  # builds with xw; only the parse is narrowed.
+  Remove: [-march=*]
+  Add: [-march=rv32imac]

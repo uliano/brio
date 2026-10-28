@@ -96,8 +96,8 @@ target but the AVR it is capped below one kernel tick and refuses (a
 `bool`, nothing spent) a wait that long, a tick or more being
 `TimeEvent` territory, where the AVR's has no cap and returns nothing
 (`avrxt/delay.hpp`; `cortexm/delay.hpp` for the Cortex-M families
-that ride SysTick's counter; `ch32v00x/delay.hpp`, `ch32vx03/delay.hpp`
-and `ch32x035/delay.hpp` on the three QingKe families' STK;
+that ride SysTick's counter; `qingke/delay.hpp` for the three QingKe
+families, on their STK;
 `rp2350/delay.hpp` on a timer that is neither core's, because that
 chip's two architectures do not share one).
 
@@ -311,7 +311,7 @@ at their `init`.
 | `clock_follows<C, Driver>()` | `util/clock.hpp` | the reverse check for a driver's `init(clock)` |
 | `Clock<...>` | each family's `clock.hpp` (the realizations table) | that family's static clock, its parameters the tree's |
 | `DynamicClock<...>` | the families with one (the realizations table) | that family's dynamic clock over a boot clock or a pack of rate tuples |
-| `delay_us(clock, us)` | `avrxt/delay.hpp`, `cortexm/delay.hpp`, the three QingKe families' `delay.hpp`, `rp2350/delay.hpp` | the short wait, "at least"; `delay_rates<Clock>` in `cortexm/delay.hpp` the per-rate table of a dynamic clock |
+| `delay_us(clock, us)` | `avrxt/delay.hpp`, `cortexm/delay.hpp`, `qingke/delay.hpp`, `rp2350/delay.hpp` | the short wait, "at least"; `delay_rates<Clock>` in `cortexm/delay.hpp` the per-rate table of a dynamic clock |
 
 Target pages: [the AVR page](../avrxt/README.md),
 [the SAM C21 clock page](../samc21/clock.md),

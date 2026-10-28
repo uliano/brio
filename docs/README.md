@@ -31,8 +31,8 @@ target-independent framework; one folder per target (`avrxt/`,
 `ch32x035/`, `rp2040/`, `rp2350/`, `host/`) holds that target's
 operational page (`README.md`), one document per peripheral driver and
 its vendor documents; and one folder per stratum that is not a target
-(the core stratum `cortexm/`, the IP strata `pl011/`, `pl022/`,
-`dw_apb_i2c/`, and `devices/` for what sits off the chip). Within each,
+(the core strata `cortexm/` and `qingke/`, the IP strata `pl011/`,
+`pl022/`, `dw_apb_i2c/`, and `devices/` for what sits off the chip). Within each,
 the kernel's ideas are settled enough to build on, the services and
 drivers are here to stay but will change as targets are added, and
 the bench is disposable.
@@ -80,6 +80,7 @@ documents), and the strata that sit between `util/` and the families:
 | RP2350 (`brio/rp2350/`) | [rp2350/README.md](rp2350/README.md) - two processor architectures over one set of peripherals: the two toolchains, the four presets, the image block that decides which pair runs, the one OpenOCD that examines all four cores |
 | STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - the hard-float ABI, the four boards, ST-LINK upload, the family coverage over twenty-three headers |
 | the Cortex-M core stratum (`brio/cortexm/`) | [cortexm/README.md](cortexm/README.md) - what the Cortex-M families share whatever the vendor, and what stays per family |
+| the QingKe core stratum (`brio/qingke/`) | [qingke/README.md](qingke/README.md) - what the three QingKe families share, the platform type's body among it, and the facts each family gives it |
 | the PL011 IP stratum (`brio/pl011/`) | [pl011/README.md](pl011/README.md) - ARM's PrimeCell UART written once: what is ARM's, what a family owes it, and the rule that births an IP stratum |
 | the PL022 IP stratum (`brio/pl022/`) | [pl022/README.md](pl022/README.md) - ARM's PrimeCell SSP the same way: the SPI host engine, the client, the framings |
 | the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO, the host engine, the client |

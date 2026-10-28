@@ -188,8 +188,9 @@ from its includes.
 | `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text ([gfx.md](gfx.md)) |
 | `devices/` | `kernel/`, `util/`, `gfx/` | what sits off the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel driver over a link concept ([gfx.md](gfx.md), "The command tier") |
 | `cortexm/` | `util/`, and the CMSIS-Core symbols a family's device header brings (the family includes that header first) | what every Cortex-M family shares whatever the vendor: the interrupt controller and its guard, the SysTick ticker, the microsecond delay, the cycle counter |
+| `qingke/` | `kernel/`, `util/`, and the names a QingKe family's device header and its facts define (the family includes them first) | what the three QingKe families share: the interrupt controller and its guard, the vector bindings, the STK ticker, the microsecond delay, the platform over the family's chip traits, the V4's scheduling request ([../qingke/README.md](../qingke/README.md)) |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | `kernel/`, `util/` | peripheral blocks licensed to more than one vendor (ARM's PrimeCell UART and SSP, Synopsys's DesignWare I2C), written once over a traits type each family supplies |
-| `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | `kernel/`, `util/`, and `cortexm/` or an IP stratum where the family carries the block | one stratum per family: everything that knows the family's device header, the platform type, the clock, the pins and every peripheral driver |
+| `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | `kernel/`, `util/`, and `cortexm/` or `qingke/` or an IP stratum where the family carries the block | one stratum per family: everything that knows the family's device header, the platform type, the clock, the pins and every peripheral driver |
 | `host/` | `kernel/`, `util/`, `gfx/`, `devices/` | the native target: the host platform, the chips made of RAM, the shared-memory display, the graphics reference renderer |
 
 Two targets never meet in one binary, so every target stratum is a
@@ -347,9 +348,14 @@ layers above, not what the peripheral is.
   the startup code and the errata stay per family, because that is
   where they differ. A RISC-V family gets its own core stratum the same
   way, at its second member and never earlier: Raspberry Pi's Hazard3
-  is not WCH's QingKe, so the RP2350's RISC-V core file stays its own,
-  and a `qingke/` core stratum is due at the CH32X035, the third QingKe
-  family.
+  is not WCH's QingKe, so the RP2350's RISC-V core file stays its own.
+  `qingke/` was factored at the CH32X035, the third QingKe family, with
+  every image of the three byte-identical across the fold;
+  it holds the platform type's body too, because there the three
+  families' platforms differed only in facts each family now supplies
+  (a chip traits type: the bus masters a sleep stalls, the CH32V003's
+  sleep entry), and the vector bindings' alignment, measured on all
+  three, given to every vector ([../qingke/README.md](../qingke/README.md)).
 - **An IP stratum sits in the same place, for a peripheral.** A block
   licensed by more than one vendor and dropped into their chips
   register for register earns a directory of its own, named for the

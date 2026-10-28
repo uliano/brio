@@ -69,7 +69,7 @@ and 24 s at 180 MHz, which every operation here is well under.
 | SAM C21, STM32G0, RP2040 | `BasicTicker::cycles()` (`cortexm/ticker.hpp`) | SysTick's position in its period composed with the tick count and the pending flag (`util/cycle_count.hpp`): core cycles |
 | STM32F4 | the DWT's cycle counter (`cortexm/dwt.hpp`) | HCLK cycles in one load, the M3+ core unit |
 | RP2350, both architectures | `Timer<1>` with its source on clk_sys (`rp2350/timer.hpp`) | clk_sys cycles: one ruler for both instruction sets, as the stratum's `delay_us` is |
-| CH32V006, CH32V203, CH32V303 | `Ticker::cycles()` on the STK (`ch32v00x/ticker.hpp`, `ch32vx03/ticker.hpp`) | HCLK cycles |
+| CH32V006, CH32V203, CH32V303 | `Ticker::cycles()` on the STK (`qingke/ticker.hpp`) | HCLK cycles |
 | AVR DA/DB/EA | two TCBs cascaded at CLK_PER (`avrxt/tcb.hpp`'s `CascadedCounter`) | CLK_PER cycles, 32 bits |
 
 The self-check, letter `r` of every bench application: `delay_us(clock,

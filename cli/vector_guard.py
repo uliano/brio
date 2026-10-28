@@ -5,7 +5,7 @@ On the QingKe V4F (the CH32V303) the hardware prologue saves the sixteen
 caller-saved integer registers and no f-register, so an image built with
 the F extension binds each vector as a NAKED TRAMPOLINE - a call of an
 ordinary function, the body, then MRET - and nothing saves the
-f-registers of the program it interrupts (brio/ch32vx03/pfic.hpp,
+f-registers of the program it interrupts (brio/qingke/pfic.hpp,
 BRIO_CH32_VECTOR). The promise that makes that correct - the body and
 everything it reaches use no f-register - is checked here, in the image
 as linked, never in the source - and so is the leaf form's, the handler
@@ -47,7 +47,7 @@ checked).
 
 An entry bound LEAF (BRIO_CH32_LEAF_VECTOR, the attributed handler, or
 BRIO_CH32_SCHEDULER_VECTOR, the preemptive kernel's two naked vectors
-of brio/ch32vx03/schedule.hpp - both marked in the image by the
+of brio/qingke/schedule.hpp - both marked in the image by the
 absolute symbol `__brio_leaf_<name>`) is
 checked the other way: the handler itself must be a leaf - no call, no
 jump or branch out of it (a tail call), no indirect transfer but a jump

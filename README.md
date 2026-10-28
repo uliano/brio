@@ -153,8 +153,9 @@ and no target include leaves the target strata.
 | `gfx/` | drawing: surfaces, primitives, fonts, text ([gfx.md](docs/design/gfx.md)) | nothing of brio |
 | `devices/` | what sits off the chip over a link the chip provides: display controllers and their panel driver | `kernel/`, `util/`, `gfx/` |
 | `cortexm/` | what every Cortex-M shares: the interrupt controller and its guard, the SysTick timebase, the microsecond delay | `util/` and the family's device header |
+| `qingke/` | what every WCH QingKe core shares: the interrupt controller and its guard, the vector bindings, the STK timebase, the microsecond delay, the platform, the preemptive kernel's request | `kernel/`, `util/` and the family's device header |
 | `pl011/`, `pl022/`, `dw_apb_i2c/` | peripheral blocks licensed to more than one vendor (ARM's UART and SSP, Synopsys's I2C), written once over a traits type each family supplies | `kernel/`, `util/` |
-| `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | one stratum per family: the platform type, the clock, the pins and every peripheral driver of that family | `kernel/`, `util/`, and `cortexm/` or an IP stratum where the family carries the block |
+| `avrxt/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/` | one stratum per family: the platform type, the clock, the pins and every peripheral driver of that family | `kernel/`, `util/`, and `cortexm/` or `qingke/` or an IP stratum where the family carries the block |
 | `host/` | the native target: the host platform, simulated chips and devices, the graphics reference renderer | `kernel/`, `util/`, `gfx/`, `devices/` |
 
 What each stratum holds in detail is its own page under

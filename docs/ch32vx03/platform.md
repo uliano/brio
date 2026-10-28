@@ -360,6 +360,24 @@ both. It is what makes the same handler cheaper on the V4F
 
 ## Types and verbs
 
+The code below is the QingKe core stratum's, written once for the three
+QingKe families ([../qingke/README.md](../qingke/README.md)): this
+family's [pfic.hpp](../../brio/ch32vx03/pfic.hpp),
+[ticker.hpp](../../brio/ch32vx03/ticker.hpp) and
+[delay.hpp](../../brio/ch32vx03/delay.hpp) are its device header over
+[brio/qingke/pfic.hpp](../../brio/qingke/pfic.hpp),
+[brio/qingke/ticker.hpp](../../brio/qingke/ticker.hpp) and
+[brio/qingke/delay.hpp](../../brio/qingke/delay.hpp), and its platform
+type a struct over
+[brio/qingke/platform.hpp](../../brio/qingke/platform.hpp)'s
+`QingkePlatform`, given this family's facts by a chip traits type
+(`Ch32vx03Qingke`: the bus question, the count of working masters) and,
+for Rubato,
+[brio/ch32vx03/schedule.hpp](../../brio/ch32vx03/schedule.hpp) over
+[brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp), the family's
+one fact there the request's `fence.i`. The core files' comments carry
+the measurements of all three families' cores, each with its chip named.
+
 `Ch32vx03Platform<TB>`
 ([brio/ch32vx03/platform.hpp](../../brio/ch32vx03/platform.hpp)) is the
 concept member for member: `CriticalSection` is pfic.hpp's
@@ -466,9 +484,9 @@ platform, the one the preemptive kernel `Rubato` runs on
 ([../design/kernel.md](../design/kernel.md), "Rubato"): `preemptive`,
 `ceiling` (the index of the object being dispatched, 255 at the loop's
 base) and `pend_schedule()`, which is
-[brio/ch32vx03/schedule.hpp](../../brio/ch32vx03/schedule.hpp)'s
+[brio/qingke/schedule.hpp](../../brio/qingke/schedule.hpp)'s
 `request_scheduler()`: the software interrupt pended through PFIC_IPSR
-and a `fence.i`, five instructions out of line. `scheduler_init()` puts
+and a `fence.i` (this family's `scheduling_request_posted`), five instructions out of line. `scheduler_init()` puts
 the software interrupt's priority byte at 0x80 and sets INTSYSCR.INESTEN
 with one preemption bit, so every peripheral line, at the reset
 priority 0, sits at one level above it: the peripheral handlers still
@@ -699,8 +717,9 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   that differ in the alignment alone, ten runs each, the trip with the
   hardware prologue took 52 cycles against 56. Free in semantics, so it
   is the default. The CH32V303VCT6's V4F, with the hardware prologue
-  and the handler bound leaf: entry 16, body 12, exit 22, a whole trip
-  of 50 to 59 cycles over 64 rounds (three runs). In two images that
+  and the handler bound leaf: entry 15, body 12, exit 25, a whole trip
+  of 52 to 62 cycles over 64 rounds (ten runs; 53 to 63 in an image
+  whose vectors sat where gcc's two-byte alignment put them). In two images that
   differ in that binding alone the leaf took entry 16, exit 25 and 53
   to 66 against entry 18, exit 27 to 30 and 57 to 70 as a trampoline:
   two cycles of the call on the way in and two to five of the body's
@@ -768,15 +787,16 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   are enough.
 - **What an interrupt pays for floating point** (letter `l`): letter
   `e`'s method on three lines raised by hand, best of 32 rounds each - a
-  handler bound leaf that touches no f-register takes 50 cycles of
-  round trip (entry 14, body 12); the float trampoline with a float
-  multiply and a multiply-add in its body 126 (entry 47, body 29: the
+  handler bound leaf that touches no f-register takes 48 cycles of
+  round trip (entry 13, body 12); the float trampoline with a float
+  multiply and a multiply-add in its body 125 (entry 46, body 29: the
   twenty stores and fcsr's swap with zero ahead of the body, fcsr's
   restore and the twenty loads after it; in two images that differ in
   fcsr's four instructions alone, 123 and entry 47 against 111 and
   entry 41, twelve cycles); and a plain trampoline whose body calls a
-  function the compiler cannot see into 65 (entry 17, body 21), the
-  call costing no f-register. Bound as attributed handlers the three
+  function the compiler cannot see into 66 (entry 17, body 22), the
+  call costing no f-register (ten runs; 49, 126 and 66 in an image whose
+  vectors sat where gcc's two-byte alignment put them). Bound as attributed handlers the three
   take 54, 67 (the compiler saving the f-registers the body used, and
   fcsr not) and 100 (all twenty, for the call): the float trampoline's
   set is the price of a body that does float work, and the plain
@@ -865,29 +885,30 @@ beside the Cortex-M realizations':
 
 | HCLK cycles | CH32V203C8T6 | CH32V303VCT6 | STM32F446RE | STM32G0B1RE |
 |---|---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **131**..133 | **137**..143 | 145 | 193..194 |
-| road 1 at depth 2, over a preempting dispatch | 110..112 | 116..128 | 121..123 | 162..163 |
-| a post that asks nothing | **55** | 54..56 | 79 | 95 |
-| a road-2 post, the receiver's empty dispatch inside | **337** | 337..344 | 403 | 531 |
-| `activate()` over four empty queues | 120 | 110 | 117 | 165 |
-| one `arm()`, its masked window inside | 51..61 | 57 | 82 | 93 |
-| a post under the mask: the section's end to the receiver's first | 150..152 | 154..164 | - | 222..223 |
+| road 1: an interrupt's last statement to the preempting dispatch's first | **135**..137 | **144**..157 | 145 | 193..194 |
+| road 1 at depth 2, over a preempting dispatch | 112..114 | 123..132 | 121..123 | 162..163 |
+| a post that asks nothing | **55** | 55 | 79 | 95 |
+| a road-2 post, the receiver's empty dispatch inside | **340** | 344..347 | 403 | 531 |
+| `activate()` over four empty queues | 121 | 111 | 117 | 165 |
+| one `arm()`, its masked window inside | 54..64 | 60 | 82 | 93 |
+| a post under the mask: the section's end to the receiver's first | 154..156 | 156..193 | - | 222..223 |
 | stack high-water of the suite's deepest chain (bytes) | 1000 | 1156 | 664 | 500..520 |
-| the entry's f-register save, FS Dirty, in / out | - | 31..32 / 23..30 | (lazy, in the frame) | - |
+| the entry's f-register save, FS Dirty, in / out | - | 25..27 / 29 | (lazy, in the frame) | - |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending
 software interrupt, that body's nine instructions and its MRET, the
 entry's nineteen and `activate()`'s visits to Top and High: 95
 instructions outside the traps, 187 cycles by the letters' model with
-letter `e`'s two returns and one entry (66), against 131 measured: the
+letter `e`'s two returns and one entry (66), against 135 measured: the
 model, its trap figures above all (each carries a few instructions of
 the raiser's own), is an upper estimate, and the bound (279, 291 on the
 V4F) is loose by that much. A tick landed in one event of 1000 on the
-CH32V203C8T6 (158 cycles) and in three of 1000 on the CH32V303VCT6 (up
-to 180), read inside each. The CH32V303VCT6's six cycles more are the
-vector's trampoline (pfic.hpp: its body's return before the MRET) and
-the entry's test of mstatus.FS. The road-2 post's scheduling share, 282
-cycles, is two traps from thread mode - the pend and the `ecall` - and
+CH32V203C8T6 (161 cycles) and in three of 1000 on the CH32V303VCT6 (up
+to 181), read inside each. The CH32V303VCT6's nine cycles more are the
+vector's trampoline (pfic.hpp: its body's return before the MRET), the
+entry's test of mstatus.FS, and where the path's branch targets fall in
+their words, which costs the two cores differently (above). The road-2
+post's scheduling share, 285 cycles, is two traps from thread mode - the pend and the `ecall` - and
 their two returns around the entry's 37 instructions and the rescan;
 the stack's 1000 bytes (1156) are the deepest chain's frames plus the
 block and the entry's 64 bytes at each level of preemption (on the V4F
@@ -903,11 +924,11 @@ preemption, Low's fflags cleared before the preemption still clear
 after it though High's series raised NX in its own (0x01), Low's fcsr at
 the end as without the preemption (0x21), High finding FS Clean. The
 entry's save, timed by road 1 over Low, the least of sixteen each:
-from the edge to High's first statement 169 cycles with Low's unit
-Dirty against 137 to 138 with it Clean, from High's last statement to
-Low's first 177 to 180
-against 150 to 156 - the twenty stores and fcsr 31 to 32 cycles on the
-way in, the twenty loads and fcsr 23 to 30 on the way out, beside the
+from the edge to High's first statement 173 to 174 cycles with Low's
+unit Dirty against 147 to 149 with it Clean, from High's last statement
+to Low's first 179 to 181 against 150 to 152 - the twenty stores and
+fcsr 25 to 27 cycles on the way in, the twenty loads and fcsr 29 on the
+way out, as the letter prints them, beside the
 float trampoline's own 33 and 26 (letter `l` above).
 
 The scheduler's frame measured alone, with an image built for it

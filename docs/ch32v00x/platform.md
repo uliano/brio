@@ -182,6 +182,22 @@ such as the platform suite's resetting `i`, runs by its own key).
 
 ## Types and verbs
 
+The code below is the QingKe core stratum's, written once for the three
+QingKe families ([../qingke/README.md](../qingke/README.md)): this
+family's [pfic.hpp](../../brio/ch32v00x/pfic.hpp),
+[ticker.hpp](../../brio/ch32v00x/ticker.hpp) and
+[delay.hpp](../../brio/ch32v00x/delay.hpp) are its device header over
+[brio/qingke/pfic.hpp](../../brio/qingke/pfic.hpp),
+[brio/qingke/ticker.hpp](../../brio/qingke/ticker.hpp) and
+[brio/qingke/delay.hpp](../../brio/qingke/delay.hpp), and its platform
+type a struct over
+[brio/qingke/platform.hpp](../../brio/qingke/platform.hpp)'s
+`QingkePlatform`, given this family's facts by a chip traits type
+(`Ch32v00xQingke`: the bus question, the CH32V003's sleep entry from
+SRAM with the EXTI events of its Standby, the idle store leaving
+SLEEPONEXIT as found). The core files' comments carry the measurements
+of all three families' cores, each with its chip named.
+
 `Ch32v00xPlatform<TB>` ([brio/ch32v00x/platform.hpp](../../brio/ch32v00x/platform.hpp))
 is the concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
