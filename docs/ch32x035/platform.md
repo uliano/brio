@@ -678,9 +678,8 @@ push and pop cost a trap nothing measurable.
 SRAM (the default), and `test_x035_rubato_flash`, the same letters with
 the path in the flash; 40 verdicts in `z` each on the CH32X035F8U6 at
 48 MHz, ten runs of `z` alike for each image built with the hardware
-prologue, ten for the flash image built without it, and ten for a
-measurement image with the path in SRAM and the vector table left in the
-flash: a Rubato pack of five objects, the Console the lowest and the
+prologue, ten for each built without it, and ten for a measurement image
+with the path in SRAM and the vector table left in the flash: a Rubato pack of five objects, the Console the lowest and the
 letters' runner, TIM2's capture-compare line the interrupt the road-1
 letters land, the STK's CNTL read bare the ruler (two reads 3 cycles
 apart, against 76 cycles for the ticker's composed `cycles()`, the two
@@ -729,16 +728,16 @@ slowest event no tick landed in, in the runs whose three slowest show
 it, a tick adding 54 to 88 cycles (up to 250 in SRAM and 444 from the
 flash, the letter reading the tick around each event):
 
-| HCLK cycles | path in SRAM (the default) | in SRAM, the table in the flash | path in the flash | in the flash, without the prologue | CH32V203C8T6 (144 MHz) |
-|---|---|---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **168**..184 | 174..190 | **356**..368 | 392..400 | 135..137 |
-| road 1 at depth 2, over a preempting dispatch | 149..219 | 155..226 | 292..364 | 328..416 | 112..114 |
-| a post that asks nothing | **108** | 108 | **141**..149 | 155 | 55 |
-| a road-2 post, the receiver's empty dispatch inside | **442**..444 | 454..458 | **877**..885 | 919..927 | 340 |
-| `activate()` over four empty queues | 142 | 142 | 309 | 315..323 | 121 |
-| one `arm()`, its masked window inside | 141 | 141 | 145..149 | 147 | 54..64 |
-| a post under the mask: the section's end to the receiver's first | 184..251 | 190..261 | 405..433 | 407..435 | 154..156 |
-| stack high-water of the suite's deepest chain (bytes) | 1000 | 1000 | 1000 | 1076 | 1000 |
+| HCLK cycles | path in SRAM (the default) | in SRAM, without the prologue | in SRAM, the table in the flash | path in the flash | in the flash, without the prologue | CH32V203C8T6 (144 MHz) |
+|---|---|---|---|---|---|---|
+| road 1: an interrupt's last statement to the preempting dispatch's first | **168**..184 | 204..221 | 174..190 | **356**..368 | 392..400 | 135..137 |
+| road 1 at depth 2, over a preempting dispatch | 149..219 | 185..199 | 155..226 | 292..364 | 328..416 | 112..114 |
+| a post that asks nothing | **108** | 109..111 | 108 | **141**..149 | 155 | 55 |
+| a road-2 post, the receiver's empty dispatch inside | **442**..444 | 450..453 | 454..458 | **877**..885 | 919..927 | 340 |
+| `activate()` over four empty queues | 142 | 144 | 142 | 309 | 315..323 | 121 |
+| one `arm()`, its masked window inside | 141 | 143 | 141 | 145..149 | 147 | 54..64 |
+| a post under the mask: the section's end to the receiver's first | 184..251 | 190..202 | 190..261 | 405..433 | 407..435 | 154..156 |
+| stack high-water of the suite's deepest chain (bytes) | 1000 | 1000 | 1000 | 1000 | 1076 | 1000 |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending
 software interrupt, that body's nine instructions and its MRET, the
@@ -770,7 +769,10 @@ every image built with the hardware prologue. In the image built without the har
 (CH32X035_HPE=OFF) the traps cost the same and the handlers that save
 in software pay it: road 1 392 cycles from the flash (TIM2's sixteen
 reloads, the software interrupt's scratch save), a road-2 post 919 to
-927. With corecfgr cleared in a probe image every path of the flash
+927; from SRAM road 1 204 to 206 where the model counts 208, a road-2
+post 450 to 453 - the same 36 cycles over the prologue's image as from
+the flash, the handlers that pay them being in the flash in both. With
+corecfgr cleared in a probe image every path of the flash
 image ran the same cycle count at every event, the model's; the
 register's 0x1F buys nothing on these paths and the platform suite's
 letter f already has it making a data-dependent loop 7 per cent slower.
@@ -954,11 +956,14 @@ Implemented but not bench-verified, each with what would measure it:
   two vector bodies compile for all seven, with and without the hardware
   prologue and with the scheduler path in either place (the family
   fixture); the suite is built and run for the CH32X035F8U6 alone.
-- **The scheduler path in SRAM without the hardware prologue**
-  (`CH32X035_HPE=OFF` with `scheduler = ram`): the suite's bounds for
-  that image are drawn from its listing (its letter c), and the image is
-  built, not run; ten runs of its `z` would measure it, and the SRAM
-  trap figures without the prologue with them.
+- **The SRAM cost model's figures** (an instruction a cycle, a trap's
+  entry 10 through the table in SRAM, the crossings between the two
+  memories): measured once with the platform suite's letter `i` built
+  with its code in SRAM, an image kept outside the tree; no letter of a
+  suite re-measures them, where the flash's figures are letter `i`'s on
+  every run, so a change of the core's or the compiler's behaviour on
+  that side would show only as a Rubato bound failing. A letter of the
+  platform suite with letter `i`'s rows placed in SRAM would own them.
 
 - **`in_handler()` on this silicon**: the read of PFIC_GISR's GACTSTA
   is the manual's, compiled for
