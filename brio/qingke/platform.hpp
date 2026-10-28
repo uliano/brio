@@ -58,10 +58,7 @@
  *    verbs that make a Standby's wake sources events; absent, the entry
  *    is the ordinary one. A member left out is false rather than a
  *    member every family must spell, because the one part that has it
- *    is the one part whose entry differs;
- *  - `idle_leaves_sleeponexit`, where the idle store leaves SLEEPONEXIT
- *    as it finds it instead of clearing it: the CH32V00x's (idle(),
- *    below); absent, the store clears it, as the two V4 families' does.
+ *    is the one part whose entry differs.
  * The family's own platform struct adds what is its alone:
  * `places_fast_text` where its linker scripts place `.fast_text`, the
  * CH32V203's `bus_masters_active()`.
@@ -165,11 +162,9 @@ struct QingkePlatform {
     /// leave the member out.
     static constexpr bool sleep_entry_from_sram = requires { requires Chip::sleep_entry_from_sram; };
 
-    /// The SCTLR bits idle()'s store clears beside SETEVENT: SLEEPONEXIT,
-    /// but where the chip traits say the store leaves it as found (the
-    /// CH32V00x's, idle()).
-    static constexpr uint32_t idle_clears =
-        sctlr_setevent | (requires { requires Chip::idle_leaves_sleeponexit; } ? 0u : sctlr_sleeponexit);
+    /// The SCTLR bits idle()'s store clears beside SETEVENT: SLEEPONEXIT
+    /// (idle() says why), on every core.
+    static constexpr uint32_t idle_clears = sctlr_setevent | sctlr_sleeponexit;
 
     /**
      * The kernel's idle: entered by the loop, in main-loop context, with
@@ -245,17 +240,16 @@ struct QingkePlatform {
      * out of the sleep instead of after an unmask (measured:
      * docs/ch32vx03/platform.md).
      *
-     * On the CH32V203, the CH32V303 and the CH32X035 the store also clears
-     * SLEEPONEXIT, in the same instruction: with it set, the waking
-     * handler's mret would put the core back to sleep (the V4 manual 6.2;
-     * the V2 manual 5.2 says the same of the V2) and the caller's loop
-     * would never see what the handler posted. Nothing in brio sets it;
-     * that idle path does not rely on that. The CH32V00x's store leaves
-     * the bit as it finds it (`Chip::idle_leaves_sleeponexit`), relying on
-     * nothing in brio setting it: clearing it there too moves the
-     * CH32V003's SRAM entry by an instruction (the first SCTLR value is no
-     * longer one `ori` of what was read), and that entry's timing is what
-     * "The CH32V003" below measured. WFITOWFE stays set after a wfi - measured on the CH32V006
+     * The store also clears SLEEPONEXIT, in the same instruction, on every
+     * core: with it set, the waking handler's mret would put the core back
+     * to sleep (the V4 manual 6.2; the V2 manual 5.2 says the same of the
+     * V2) and the caller's loop would never see what the handler posted.
+     * Nothing in brio sets it; this idle path does not rely on that. On
+     * the CH32V003 the clear costs the masked entry below one `andi`
+     * before its first store (the SCTLR value is no longer one `ori` of
+     * what was read), and the entry's measurements hold with it: the
+     * platform suite's edge walk and the sleep suite's, re-run on the
+     * CH32V003F4P6 with the clear in. WFITOWFE stays set after a wfi - measured on the CH32V006
      * (WFITOWFE and SEVONPEND read back set after a wfi: the manual's "the
      * subsequent WFI" is not one-shot there) and on the CH32V203 (a wfi
      * with no store before it still waits for an event) - so the store is

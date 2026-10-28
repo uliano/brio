@@ -194,8 +194,7 @@ type a struct over
 [brio/qingke/platform.hpp](../../brio/qingke/platform.hpp)'s
 `QingkePlatform`, given this family's facts by a chip traits type
 (`Ch32v00xQingke`: the bus question, the CH32V003's sleep entry from
-SRAM with the EXTI events of its Standby, the idle store leaving
-SLEEPONEXIT as found). The core files' comments carry the measurements
+SRAM with the EXTI events of its Standby). The core files' comments carry the measurements
 of all three families' cores, each with its chip named.
 
 `Ch32v00xPlatform<TB>` ([brio/ch32v00x/platform.hpp](../../brio/ch32v00x/platform.hpp))
@@ -415,9 +414,12 @@ suite is over the part's 15 KB): the reset flags and their history,
 the critical section, the STK timebase (CMP 47999 at 48 MHz),
 `delay_us` (100 us in 4858 to 4865 cycles), and the round trip - the
 QingKe V2A takes an interrupt FASTER than the V2C: with the hardware
-prologue, 24 cycles to the handler's first statement, 16 to 17
-through a minimal body, 26 to 27 back to the raiser - 66 to 68 for
-the whole trip against the V2C's 78.
+prologue, 23 cycles to the handler's first statement, 15 through a
+minimal body, 27 back to the raiser - 65 for the whole trip against
+the V2C's 78, in ten runs of the image as it stands; the trip read 71
+and 72 in two earlier layouts of the same suite, the raiser's and the
+body's own branch targets moving with the image where the vector no
+longer does.
 
 **The V2A's sleep entry wedges, and `idle()` sleeps another way
 there.** Letter `w`'s edge walk, behind its IWDG net, and a scratch
@@ -502,8 +504,9 @@ V2A has not been swept. Every vector is aligned to four all the same
 move with what the image puts before it: in two images of the platform
 suite that differ in the alignment alone, ten runs each, the minimal
 round trip took 78 cycles against 81 and the console's USART handler
-123 against 129, for 4 to 28 bytes of padding an image across the
-project's images.
+123 against 129 on the CH32V006K8U6, and on the CH32V003F4P6 the round
+trip 72 against 71 and an `idle()` the latch returns at once 72 against
+78, for 4 to 28 bytes of padding an image across the project's images.
 
 **The option and its spelling: opt-in, per driver, and per vector.**
 Both linker scripts place the input sections `.fast_text` and
@@ -633,10 +636,6 @@ Implemented but not bench-verified, each with what would measure it:
   a walk of a non-tick line's edge across the shipped entry would
   measure it (the sleep suite's AWU walk does it for a line that is
   also an EXTI event, which loses none).
-- The CH32V003's round trip with every vector aligned to four: the
-  V2A figures above were read off an image whose vectors sat wherever
-  gcc's two-byte alignment put them; the platform suite's letter `e` on
-  the CH32V003F4P6 would measure the aligned one.
 - The V2A's minimum Sleep at other clocks: about 3150 cycles was
   measured at 48 MHz only; whether it is a time (66 us, about eight
   LSI periods) or a cycle count is a run of the latency stamp at a

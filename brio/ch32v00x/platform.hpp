@@ -41,9 +41,7 @@
  *    on the CH32V006, whose V2C's Sleep the DMA works through;
  *  - the CH32V003's sleep entry, masked from SRAM
  *    (device::sleep_entry_from_sram), and the EXTI lines that interrupt
- *    made events for a Standby's span, the wake a masked entry has;
- *  - the idle store leaving SLEEPONEXIT as it finds it, where the V4
- *    families clear it (qingke/platform.hpp says why it stays so).
+ *    made events for a Standby's span, the wake a masked entry has.
  * The platform adds `places_fast_text`: both linker scripts place
  * `.fast_text`.
  *
@@ -80,9 +78,6 @@ struct Ch32v00xQingke {
 
     /// The CH32V003's sleep entry runs masked from SRAM (its part table).
     static constexpr bool sleep_entry_from_sram = device::sleep_entry_from_sram;
-
-    /// The idle store leaves SLEEPONEXIT as it finds it.
-    static constexpr bool idle_leaves_sleeponexit = true;
 
     /// The CH32V003's Standby, entered masked: the EXTI lines that
     /// interrupt made events for its span - masked, a line's interrupt is

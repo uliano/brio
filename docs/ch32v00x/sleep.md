@@ -318,12 +318,16 @@ Implemented but not bench-verified, each with what would measure it:
   unplugged - a hand on the bench - would say whether a sleeping core's
   span does the same, and so whether the site's account is to be
   calibrated or the debug mode's doing.
-- The handler's count in the CH32V003's Standby walk: of the 11812
-  tries that called `idle()`, 11262 entered the AWU's handler, so the
-  verdict "its handler runs once per wake" fails there by 550 - no try
-  was lost, and which ended through the loop's own check of the flag
-  rather than the handler is not recorded; a stamp of how each such
-  try ended would say whether the walk or the entry is short.
+- The handler's count in the CH32V003's Standby walk: of the 10853 to
+  11143 tries that called `idle()` in a run, 10305 to 10591 entered the
+  AWU's handler, so the verdict "its handler runs once per wake" fails
+  there by some 480 to 550 in every run (and the Sleep walk's count is
+  one short in some runs) - no try was lost, and which ended through
+  the loop's own check of the flag rather than the handler is not
+  recorded; a stamp of how each such try ended would say whether the
+  walk or the entry is short. The same in an image of the suite from
+  before the vectors were aligned and the idle store cleared
+  SLEEPONEXIT: neither moved it.
 - The wake latency (the first instruction after the AWU's match to
   the PLL back): the cycle counter stops in Standby, so it is a
   scope's measurement on a pad toggled at the wake.

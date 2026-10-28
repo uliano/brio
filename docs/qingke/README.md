@@ -96,13 +96,8 @@ include:
   the CH32X035's DMA controller's own registers; the CH32V003's DMA
   controller, whose V2A Sleep stalls it; on the CH32V006, whose Sleep
   the DMA works through, a constant false), and on the CH32V00x
-  `sleep_entry_from_sram` (the CH32V003's part table), the two verbs
-  that make the EXTI lines events for a Standby's span, and
-  `idle_leaves_sleeponexit`, the one difference of interpretation left
-  between the families: the V4 families' idle store clears SLEEPONEXIT,
-  the CH32V00x's leaves it as found, because clearing it there moves the
-  CH32V003's sleep entry by an instruction and that entry's timing is
-  what its wedge was measured against;
+  `sleep_entry_from_sram` (the CH32V003's part table) and the two verbs
+  that make the EXTI lines events for a Standby's span;
 - `scheduling_request_posted`, the one fact of a V4 core the request
   asks: true on the V4B and the V4F, where three instructions retire
   behind the pending store unless a `fence.i` closes them (measured on
@@ -132,7 +127,10 @@ entry, the bus masters a sleep stalls, the vectors' alignment) or
 interpretation (the binding's name, how the bus question is asked); and
 `schedule.hpp` was the same on the two V4 families but for the alignment
 and the request's fence. The interpretation was harmonized first - one
-binding, one bus question - and the vectors' alignment, measured on the
+binding, one bus question, one idle store (the CH32V00x's left
+SLEEPONEXIT as it found it, the V4 families' cleared it; every store
+clears it now, the CH32V003's sleep-entry measurements re-run with the
+clear in) - and the vectors' alignment, measured on the
 CH32V006K8U6 and the CH32V203C8T6 to cost no cycle in the platform
 suites (a round trip of 78 cycles against 81 and 52 against 56), given
 to all three - where it moved the CH32V303VCT6's preemptive-kernel
