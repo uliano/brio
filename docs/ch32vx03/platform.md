@@ -958,6 +958,111 @@ handler that calls out saves and reloads the twenty f-registers in
 software around its body, and that reload leaves FS Dirty, so there the
 entry saves on both of letter `j`'s paths and the two cost the same.
 
+**The drivers under the preemptive kernel** - the suite is
+`test_vx03_rubato_link`, one source and two images, each board the
+other's peer with its unchanged `spi_peer` (`z`, 120 verdicts on the
+CH32V203C8T6, 121 on the CH32V303VCT6) and `usart_peer` (`y`, 111), ten
+runs of each key on each image, every verdict green. It runs the real
+SPI and UART stacks inside a Rubato pack of seven objects:
+`util/spi_bus.hpp`'s arbiter over the engined `SpiHost` (SPI2 on the
+CH32V203C8, SPI3 on its second column on the CH32V303VC, half-word
+engines on the instance's two DMA slots, [spi.md](spi.md)),
+`util/line_reader.hpp`'s `LineReader` over the link port with both its
+engines (USART3, and UART4 on its second column, [usart.md](usart.md)),
+a borrower of the reader's lines above it, and on top an object that
+TIM2's update interrupt posts to every 97, 193 or 389 us, whose dispatch
+spins 300 or 3000 cycles - at 97 us x 3000, 21 % of the core. Every
+letter runs once with TIM2 silent as its control and six times under
+that pressure, and every pass judges the pressure itself: one dispatch
+per period over the pass, none dropped. Both boards run their crystals
+at 144 MHz. The target-free half of the suite (the pack, the passes,
+the numbered lines, the window client, the UART legs) is the link
+suites' shared body, `avrxt/src/apps/rubato_link.hpp`. What it
+established:
+
+- **The polled SPI loop's limit is this host's too, and it is always
+  detected.** The loop runs inside the arbiter's dispatch, so a dispatch
+  above the arbiter holds it off for its whole length, which the host's
+  `hold_off_cycles` does not count; with one buffer each way, a receive
+  keeps two frames in flight from a frame of 256 cycles (/16 for byte
+  frames, /8 for 16-bit ones on these PB1 instances), and a hold-off
+  longer than a frame there loses one to OVR. The suite's polled windows
+  are the two shapes the engines leave to the loop: 8 16-bit frames
+  from an odd address and 2 byte frames. With TIM2 silent every rung
+  from /256 to /8 is byte-exact on both, and on the RXNE pump (16
+  16-bit frames from an odd address) and the engines (32 frames), in
+  all twenty control passes. Under pressure the pump and the engines
+  stay exact at every rung of every pass, and the polled loop is cut
+  short with `spi_overrun` - 78 rungs over 120 pressure passes - only
+  where two frames are in flight and a frame is shorter than the
+  preemption, never handing back a run with a hole: under a
+  3000-cycle spin and the scheduler's trip around it, at frames of
+  2048 cycles and under (16-bit /64 22 times, /32 24, /16 3, /8 9; byte
+  frames /128 3, /64 8, /32 6), never at 4096 or more (16-bit /128 and
+  /256, byte frames /256); under a 300-cycle spin three times in sixty
+  passes, at frames of 256 and 512 cycles (byte /16 and /32, 16-bit /8),
+  never at 1024.
+- **/4 = 18 MHz exact, /2 not, both printed.** Letter `p` judges to /8,
+  where the two datasheets' timing still holds the client's answer
+  ([spi.md](spi.md), the pair's section), and prints the two codes
+  above: /4 byte-exact on every path in every pass on both images (280
+  of 280 windows each), /2 wrong on every one (the host reading the
+  answers one bit late, as the pair's ladder finds).
+- **The matrix and the arbiter.** The four modes in both widths, LSb
+  first and a bit-order mismatch on the engines at /32, byte-exact in
+  every pass, the data windows at 954 to 1000 per mille of the control's
+  rate under pressure; three requesters of three priorities on one
+  select window - every request here at least `dma_min_frames` long, so
+  all three on the engines, the one below the arbiter polled inside its
+  dispatch - answered every one `spi_ok`, to its requester, in its
+  order, with no timeout and no rejection and the peer counting every
+  frame exact, in 10980 to 11893 us a window. The command channel needed
+  no retry in the twenty runs of `z`.
+- **The UART receive side under preemption.** Numbered lines echoed by
+  the far chip at 460800 and 921600, assembled by `LineReader` from the
+  ring and lent to the borrower: 200 a leg, none lost, out of order or
+  corrupt, every port counter zero in 210 readings on each image, 909 to
+  923 per mille of the wire at 460800 and 864 to 890 at 921600 (the
+  writer paces each line to its own last stop bit and two frame times);
+  300 lines blasted through the transmit engine into the peer's sink,
+  counted and summed exact, 1001 per mille of the wire at both rates -
+  the divisor's +1602 ppm (72 MHz over 156 and 78) at both ends.
+- **The loan under preemption.** At 921600 with the borrower spinning
+  6000 cycles a line and the lines streamed twenty ahead, every line
+  exact and lent alone, the two line buffers strictly alternating, the
+  receive engine writing during the borrower's dispatch 19 to 24 times
+  a leg and the preempting object landing inside the borrower 25 to 121
+  times a pressure pass, 873 to 894 per mille of the wire.
+- **The crystal is that letter's premise.** The far echo is a polled
+  loop with no FIFO that holds two characters of a writer's lead. On a
+  first build whose clock was the HSI's PLL (the clock type without the
+  crystal's rate), half a per cent fast of the far crystal, the paced
+  and the blasted legs passed and the streamed one failed in every
+  pass, the control included: the far receiver counted 10 to 15 framing
+  errors a leg and 25 to 27 lines a leg came back corrupt. On the
+  crystals the two ends divide one PCLK1 by one divisor and agree within
+  nine ppm ([usart.md](usart.md)), 0.13 of a character over the leg.
+- **The DMA release contract holds at every hand-over.** Each leg moves
+  the link port from the polled command channel to the Uart task and
+  back through the block's reset line ([dma.md](dma.md), "A released
+  requester"): 35 hand-overs a run of `y` with both engines bound, 700
+  over the twenty runs, every leg byte-exact from its first block on;
+  and letter `i` read, in every run, both link channels and both SPI
+  channels disabled, the SPI's request enables clear and TIM2's DMA
+  enables clear (TIM2's update is a row of DMA1's channel 2, the
+  CH32V203's link transmit channel).
+- **The V4F's float tax stays out of the link's vectors.** On the
+  CH32V303VCT6 image the vector guard walked the 8 trampolines over 26
+  functions with no floating-point instruction reached and checked the
+  9 leaf vectors, and letter `i` read mstatus.FS Clean in all ten runs:
+  the scheduler's entry saved the crt's Dirty unit once, and nothing of
+  the pack wrote a float after.
+
+The images: on the CH32V203C8 40684 bytes of text and 724 of data,
+41408 of the 60 KB the linker script gives it (67 %), and 5484 bytes
+of RAM of 20 KB (27 %); on the CH32V303VC 44432 of 252 KB (17 %) and
+5488 of 64 KB.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:

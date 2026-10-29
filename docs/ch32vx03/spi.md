@@ -1281,6 +1281,20 @@ Driver gaps:
   what no verb offers is the receive side's judgement - CRCERR after a
   block whose far end sent its CRC. Born with the first device that
   checks one over a block.
+- **The polled loop with two frames in flight under the preemptive
+  kernel**: it runs inside the arbiter's dispatch, which every dispatch
+  above the arbiter holds off for its whole length, and
+  `hold_off_cycles` counts the image's longest handler or masked window,
+  not a dispatch. Measured under Rubato on both parts against the other's
+  `spi_peer`, with an object preempting every 97 to 389 us
+  (`test_vx03_rubato_link`, letter `p`, [platform.md](platform.md)): a
+  preemption of 3000 cycles cuts short the rungs whose frame is 2048
+  cycles or shorter, one of 300 cycles those of 256 and 512, every time
+  with `spi_overrun` and never a run handed back with a hole; the pump
+  and the engines are exact at every rung. A hold-off that counts the
+  longest dispatch above the arbiter, or a polled path refused under a
+  preemptive platform, is the preemptive kernel's open question
+  ([../design/kernel.md](../design/kernel.md), "Rubato").
 - **The BR ladder under HSRXEN on the CH32V30x_D8 lots that have it**
   (FPCLK/3, /5 ... /9): declined, because a program cannot read its lot
   and /2, the one code both ladders share, is what the driver offers.
@@ -1301,7 +1315,12 @@ Implemented but not bench-verified, each with what would measure it:
 - **SPI3's own write-ahead codes**: the same PB1 share as SPI2's, which
   `bench_vx03`'s letter e measures; SPI3's pads on the CH32V303VCT6's
   board are the evaluation board's jumpers and the pair's link, and the
-  oracle run on SPI3 would close it by name.
+  oracle run on SPI3 would close it by name. The preemptive link suite
+  measures the safe side on SPI3 already: two frames in flight from
+  256-cycle frames (8-bit at /16, 16-bit at /8) through the pump and the
+  polled loop, no overrun in its control passes and the pump exact under
+  pressure ([platform.md](platform.md)); the loss on the other side of
+  the threshold is measured on SPI1 and SPI2 alone.
 - **The high-speed read at 72 MHz of SCK**, SPI1's /2 - the rate the
   mode is for - and **HSRXEN2**: on the CH32V303 board the only far end
   at that rate is SPI2 as a client on a 72 MHz bus, which does not keep
