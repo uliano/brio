@@ -197,18 +197,33 @@ constexpr uint16_t firmware_version = 0x0402;   ///< see spi_link.hpp's Ident
 /// and the console's 's' cycles the four classes for the bench.
 PinSpeed miso_speed = PinSpeed::low;
 
-/// THE CLOCK PAD'S SLEW CLASS WHEN THIS END HOSTS (Op::host_burst), AND IT
-/// IS A MEASUREMENT TOO. SpiHost's default class for SCK is very-high, and
-/// against the STM32G0B1RE's client on these wires that edge is seen
-/// twice at the far end: twelve frames at 1.406 MHz, the far client's
-/// stream one bit out of place from a random frame in every run (an edge
-/// gained or lost), and this end's read of its answers wrong with it - at
-/// very-high in 12 runs of 12, at high in 2 of 4; at medium 14 of 14 exact
-/// and at low 4 of 4 (test_stm32_spi letter r). ES0298 2.14.5's table
-/// keeps medium inside the SPI2 instance's APB1 (75 MHz of ceiling
-/// against 45), so medium is the class this end hosts at; the console's
-/// 'k' cycles the four for the bench.
+/// THE TWO DRIVEN PADS' SLEW CLASSES WHEN THIS END HOSTS (Op::host_burst),
+/// AND THEY ARE MEASUREMENTS TOO. This end holds the select (PB12) low
+/// from GPIO for the whole burst, and on these wires the edges beside it
+/// couple into it: with SpiHost's default very-high on MOSI the far
+/// STM32G0B1RE's select pad sees 4 to 19 edges a burst where 2 are sent,
+/// whatever SCK's class from medium up (an EXTI line counting both edges
+/// on the pad, ten bursts of each client shape; its pull-up changes
+/// nothing, so the line is driven, not floating). A client that takes NSS
+/// from that pad is deselected mid-frame and its bit count starts again:
+/// 65 to 79 bursts of 100 lose a frame or slip, both ends wrong from one
+/// frame on, in every direction (letter r's exchange, letter y's single
+/// line out and its receive-only run). A client under SSM, which reads
+/// the pad once to see the select fall and then ignores it, is exact in
+/// every burst that carries the same glitches - the select alone is hit.
+/// With MOSI at MEDIUM the pad sees exactly 2 edges in every burst and
+/// every shape is exact, SCK at medium, high or very-high alike (360
+/// bursts of 360; test_stm32_spi letters r and y). SCK at low cures it
+/// too, but outside ES0298 2.14.5's table 5 for this APB1 (25 MHz of APB
+/// at low against 45): medium on both pads keeps the erratum's ceiling
+/// (75 MHz), and DS10693 table 58's reach for medium (25 MHz at 50 pF)
+/// is above the fastest burst this instance can clock (PCLK1/2 = 22.5
+/// MHz; every suite asks for a division of 32 or more). The rate
+/// is not the lever: a larger division keeps the same edges. The
+/// console's 'k' cycles SCK's four classes for the bench; MOSI's has no
+/// key.
 PinSpeed burst_sck_speed = PinSpeed::medium;
+constexpr PinSpeed burst_mosi_speed = PinSpeed::medium;
 
 const char* speed_name(PinSpeed s) {
     switch (s) {
@@ -752,7 +767,8 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     if (div < 2u) div = 2u;
     const uint32_t pclk = SysClock::pclk1_hz;
     const auto code = spi_rate_for(pclk, pclk / div);
-    if (!Host::init(clock, {.sck_speed = burst_sck_speed}) || !code) {
+    if (!Host::init(clock, {.sck_speed = burst_sck_speed, .mosi_speed = burst_mosi_speed}) ||
+        !code) {
         r.flags |= spilink::report_cfg_failed;
         (void)go_dark();
         return r;

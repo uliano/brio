@@ -1073,11 +1073,11 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
 - **THE PADS ARE CORRECTNESS PARAMETERS ON THESE WIRES**, walked with
   letter x (ten bursts a mode at the command rate) and letter p:
   SCK at very-high or high is seen twice at the G0's input - x slips 15
-  bursts of 40 in every mode at high, p breaks from 351 kHz, and letter r
-  of the G0's suite (this board's `host_burst`) slips in every run at
-  very-high and in two of four at high - and is exact at medium and at
-  low. MOSI's edge slips the far client where the frames run back to
-  back: thirty bursts of 32 frames on the DMA host at PCLK1/4 = 11.25
+  bursts of 40 in every mode at high and p breaks from 351 kHz - and is
+  exact at medium and at low (the peer's `host_burst` has a reason of its
+  own for medium on both pads, its select: "`SpiClient` against the
+  STM32G0B1RE host" below). MOSI's edge slips the far client where the
+  frames run back to back: thirty bursts of 32 frames on the DMA host at PCLK1/4 = 11.25
   MHz slip in 6 to 13 of 30 at high and 16 to 23 of 30 at very-high, the
   same signature (both ends wrong from one frame on), and in none of 270
   at medium (PCLK1/2, /4 and /8, polled and engined host, the peer's DMA
@@ -1266,11 +1266,24 @@ slip statistics: 12 of 40 slip at `very_high`, 7 at `high` and 12 at
 `medium` (the falling-edge modes), 0 at `low`, the class the app keeps -
 and the ladder is exact to 16 MHz at low ("The client run"). AS THE BUS
 HOST (`host_burst`, twelve frames at PCLK1/32 = 1.406 MHz to the G0's
-client) the peer drives SCK at MEDIUM: at very-high the far client's
-stream went one bit out of place from a random frame in 12 runs of 12
-(an edge gained or lost; the ground moved onto the chips' own pins
-changed nothing), at high in 2 of 4, at medium in none of 14, at low in
-none of 4.
+client) the peer drives SCK and MOSI at MEDIUM, because on these wires
+the data edge reaches the SELECT: the peer holds PB12 low from GPIO for
+the whole burst, and with MOSI at `SpiHost`'s default very-high the G0's
+select pad counts 4 to 19 edges a burst where 2 are sent (an EXTI line on
+the pad, both edges; its pull-up changes nothing - the line is driven,
+and coupled). A client that takes NSS from the pad is deselected
+mid-frame and its bit count starts again - a frame lost or a bit
+slipped, both ends wrong from one frame on, in 65 to 79 bursts of 100,
+whatever its direction - while a client under SSM, which reads the pad
+only to see the select fall, is exact through the same glitches. With
+MOSI at medium the pad counts exactly 2 edges in 360 bursts of 360, SCK
+at medium, high or very-high alike. SCK at low cures it too, but it is
+outside ES0298 2.14.5's table 5 for APB1's 45 MHz (25 MHz of APB at
+low); medium on both pads stays inside it (75 MHz), and DS10693 table
+58's 25 MHz at 50 pF for medium is above the fastest burst this instance
+can clock (PCLK1/2 = 22.5 MHz; the suites ask for a division of 32 or
+more). A larger division keeps the same edges: the rate is not the
+remedy.
 THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`, every
 code to 16 MHz judged, 32 MHz printed): the peer's streams in half-word
 beats and its 16-bit `exchange()` run exact both ways, the answers at 32

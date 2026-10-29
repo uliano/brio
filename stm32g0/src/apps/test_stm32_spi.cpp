@@ -292,7 +292,10 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-TestBench<Serial, 24> bench;
+// The table holds every letter registered in main(), 25 of them: a
+// letter past its capacity is refused (letter() returns false), and the
+// suite does not check the return, so it would be missing in silence.
+TestBench<Serial, 25> bench;
 
 using CsPin = Pin<'A', 15>;          ///< the host's chip select, a GPIO
 using ClientNssPin = Pin<'B', 12>;   ///< the client's NSS - and letter e's witness

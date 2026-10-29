@@ -264,13 +264,12 @@ BootState boot;
 /// SpiHost's default class for SCK and MOSI is very-high (ES0298 2.14.5's
 /// table at its widest), and on these jumper wires both edges are
 /// aggressors at the far client:
-///  - SCK: with this board hosting the G0B1RE's client the client's
-///    stream goes one bit out of place from a random frame - an edge
-///    counted twice or not at all - in every run at very-high and in two
-///    of four at high (test_stm32_spi letter r, through the stm32f4
-///    spi_peer's host_burst), and here at high letter x slips 15 bursts of
-///    40 in every mode and letter p breaks from 351 kHz; at medium every
-///    one of those runs is exact. Medium is inside the erratum's table
+///  - SCK: at high letter x slips 15 bursts of 40 in every mode and
+///    letter p breaks from 351 kHz, the G0B1RE client's stream one bit
+///    out of place from a random frame; at medium every one of those runs
+///    is exact. (The stm32f4 spi_peer's host_burst drives both pads at
+///    medium too: its own comment says what MOSI's edge does to the
+///    select.) Medium is inside the erratum's table
 ///    for this instance (75 MHz of APB ceiling against APB1's 45); letter
 ///    l walks the class against the erratum itself.
 ///  - MOSI: the same slip, from the DATA edge coupled into the clock

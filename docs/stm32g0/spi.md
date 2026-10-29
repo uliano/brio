@@ -1007,15 +1007,25 @@ hardware NSS - and serves the burst with ONE CALL of `exchange()`, while
 the peer becomes the bus host for twelve frames. The burst's rate is the
 instrument's own: the command carries a DIVISION of the peer's clock, so
 the same 32 is 750 kHz from an AVR, 1.5 MHz from a SAM, 2 MHz from a G0
-and **1.406 MHz from the F446** (its PCLK1 of 45 MHz). Exact both ways -
-AND THE CURE WAS THE HOST'S CLOCK PAD: with the F446 driving SCK at
-very-high this client gained or lost one edge at a random frame in every
-run (its stream one bit out of place from there, the host's read of the
-answers wrong with it - in 12 runs of 12, on this run and on the
-per-frame loop it replaced alike, the ground moved onto the two chips'
-own pins changing nothing), at high in 2 runs of 4, and at medium in 0
-of 14 (0 of 6 on the per-frame loop), at low in 0 of 4. The F446 peer
-now hosts at medium.
+and **1.406 MHz from the F446** (its PCLK1 of 45 MHz). Exact both ways,
+in 20 runs of 20 alone and in every run of `z` - WITH THE FAR HOST'S
+DATA PAD AT MEDIUM, because on these wires its edge reaches the select.
+The F446 holds the select low from GPIO for the whole burst; with its
+MOSI at `SpiHost`'s default very-high, PA15 counts 4 to 19 edges a burst
+where 2 are sent (an EXTI line on the pad in its alternate function,
+both edges; the pad's pull-up changes nothing, so the line is driven
+and coupled, not floating). A client that takes NSS from the pad is
+DESELECTED MID-FRAME and its bit count starts again at the next edge: it
+loses a frame or slips a bit, both ends wrong from one frame on - this
+exchange, letter `y`'s single line out and its receive-only run alike,
+65 to 79 bursts of 100 - while the client under SSM (letter `y`, below),
+which reads the pad only to see the select fall, is exact through the
+same glitches. With the F446's MOSI at medium the pad counts exactly 2
+edges in 360 bursts of 360, its SCK at medium, high or very-high alike;
+its SCK at low cures it as well, outside the F446's own erratum table
+([the STM32F4's SPI page](../stm32f4/spi.md), "`SpiClient` against the
+STM32G0B1RE host"). The rate is not the remedy: a larger division
+keeps the same edges.
 
 **16-BIT FRAMES ON ALL THREE OF THIS HOST'S ENGINES, AT THE WIRE'S TIME**
 (letter `u`, spi_link's `spare_wide`): thirty-two 16-bit frames a window,
@@ -1121,8 +1131,8 @@ store's distance from the last frame's end decides, and the window is the
 silicon's.
 
 **THE SIMPLEX LINES, THE SOFTWARE SELECT AND `prime()`** (letter `y`,
-every window judged at the far end by the F446's `spi_peer`; twelve runs
-of the letter, all green):
+every window judged at the far end by the F446's `spi_peer`, its SCK and
+MOSI at medium; twenty runs of the letter alone, all green):
 
 - A CLIENT WITH NO SELECT PAD (`SpiClient` over pads whose `nss` is
   empty, `SpiNss::software`) is deaf with SSI high: the far board's
@@ -1145,6 +1155,10 @@ of the letter, all green):
   twelve answers read exact by the far host from the first frame, the
   run `closed` on the select. THE CLIENT'S RECEIVE-ONLY RUN (RXONLY,
   `drive_output = false`, `receive()`): twelve frames exact, `complete`.
+  Both take NSS from the pad, so both are deselected mid-frame by the
+  select glitches the far host's MOSI at very-high puts on that wire, as
+  letter `r`'s exchange is ("THE ROLES INVERT", above), while the SSM
+  client of the first item is not.
 - `prime()`, STAGED BY ITS ABSENCE over every ordered pair of modes (the
   host left at the first with the select high, the select then falling
   before `start()` applies the second): a pair that keeps CPOL moves no

@@ -203,7 +203,10 @@ constexpr int32_t engine_channel() {
     }
 }
 
-TestBench<Serial, 20> bench;
+// The table holds every letter registered in main(), 21 of them: a
+// letter past its capacity is refused (letter() returns false), and the
+// suite does not check the return, so it would be missing in silence.
+TestBench<Serial, 21> bench;
 
 // ---- the channels this suite plays with -------------------------------------
 using ChA = DmaChannel<1, 1>;   // m2m, the loop engine, the event source
