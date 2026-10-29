@@ -996,13 +996,14 @@ the path in the flash; 40 verdicts in `z` each, on the CH32X035F8U6 at
 48 MHz. Each was run ten times in its image built with the hardware
 prologue and ten times in its image built without it, every image built
 from the tree as it stands and judged by the bounds its letters derive
-from its own release listing (letter `c` states the arithmetic).
-Thirty-nine of the forty runs passed every verdict. One run of the flash
-image without the prologue failed letter `a`'s first verdict, which
-reads the ceiling the UART's receive interrupt saw when the letter's key
-arrived: the key landed while the loop's base turn walked the time
-events, when the kernel holds the ceiling at 0, a defect of the letter's
-reading and not of the kernel.
+from its own release listing (letter `c` states the arithmetic). Forty
+of forty runs passed every verdict. Letter `a`'s first verdict reads the
+ceiling the UART's receive interrupt saw when the letter's key arrived
+and accepts the loop's two values, 255 at its base and 0 while its base
+turn walks the time events (kernel/rubato.hpp holds it there so that a
+timer's fire only queues); a key landing in the walk is rare - one run
+in forty before the verdict knew the walk - and no dispatch of Top, whose
+index is also 0, can be open then, the suite arming nothing on Top.
 
 The pack is five objects, the Console the lowest and the letters'
 runner; TIM2's capture-compare line is the interrupt the road-1 letters
@@ -1010,15 +1011,16 @@ land, and nothing is wired or lit. The ruler is the STK's CNTL read
 bare, two reads 3 cycles apart in the images with the hardware prologue
 and 1 in the others, against 76 cycles for the ticker's composed
 `cycles()` (72 in the flash image without the prologue). Over spans of
-half a millisecond and more the two rulers agreed within 12 cycles in 39
-runs and within 72 in one, under the verdict's bound of twice the
-composed read's cost.
+half a millisecond and more the two rulers agreed within 12 cycles in
+every run, the console drained before the reads: its transmit interrupt
+landing between a pair's two reads counts as the rulers' disagreement
+(up to 72 cycles measured so, 200 to 208 with the predictor off).
 
 The traces, the same in every image: road 1 preempts at any depth - an
 interrupt's post to High inside Low's dispatch runs High to its end
 before Low resumes, ten runs alike, each object reading its own index as
 the ceiling, and the UART's handler reading 255, the value at the loop's
-base; road 2 nests High inside Mid inside Low, each inside the post that
+base, in every one of these runs; road 2 nests High inside Mid inside Low, each inside the post that
 asked; at depth 2 an interrupt over High's dispatch, started by either
 road, runs Top before High resumes. Three timers matured in one turn are
 posted while the base turn walks the time events, with the ceiling held

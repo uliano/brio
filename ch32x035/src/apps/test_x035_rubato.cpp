@@ -71,8 +71,9 @@
 //      dispatch landed - before Low resumes where road 1 is kept, after
 //      Low's end in the handler shape - and every entry reads the ceiling
 //      at its own object's index; the Console reads its own, 4, after the
-//      chain, and the UART's receive interrupt read 255 (the base) when
-//      the letter's key arrived. Ten runs, all alike.
+//      chain, and the UART's receive interrupt read the loop's ceiling
+//      when the letter's key arrived - 255 at the base, or 0 while the
+//      base turn walks the time events. Ten runs, all alike.
 //   b  ROAD 2: Low posts to Mid, Mid to High, inside the handlers; High
 //      posts to Low. The trace nests High inside Mid inside Low, and
 //      Low's second event is served after its first dispatch ends, never
@@ -411,10 +412,30 @@ constexpr uint32_t one_ms = SysClock::hz / 1000u;
 // a - the ceiling, road 1 at depth 1
 // =============================================================================
 void ta_ceiling() {
+    // The key arrives while the kernel's loop runs below every object, and
+    // the loop holds one of two ceilings there: 255, its base, or 0 while
+    // its base turn walks the matured time events (kernel/rubato.hpp,
+    // run(): a fire then only queues; init_all() holds 0 the same way
+    // around the inits). 0 is also Top's index, so a 0 would be Top's
+    // dispatch as well - but nothing can dispatch Top when this key
+    // arrives: the suite arms no time event on Top (its timers are High's,
+    // Mid's and Low's), and the one post to Top is TIM2's handler with
+    // edge_to at 0, which only letter e's High sets, arming one edge that
+    // lands inside its own spin; that handler's first statement disarms
+    // the compare interrupt, so after letter e no edge is armed, and
+    // letter i checks the line quiet before the prompt. So a 0 here is the
+    // walk, never a dispatch.
+    const bool at_base = rx_ceiling == 255u;
+    const bool in_walk = rx_ceiling == 0u;
     print(serial, "  the UART's receive interrupt read the ceiling ", rx_ceiling,
+          at_base   ? " (the loop's base)"
+          : in_walk ? " (the base turn's walk of the time events, held at 0)"
+                    : " (neither the base nor the walk)",
           " when this letter's key arrived", crlf);
-    bench.verdict("the base's ceiling is 255 (read by the receive interrupt as the key arrived)",
-                  rx_ceiling == 255u);
+    bench.verdict("the ceiling the receive interrupt read as the key arrived is the loop's: 255 "
+                  "at its base or 0 during its walk of the time events (no dispatch of Top can "
+                  "be running then)",
+                  at_base || in_walk);
     bench.verdict("the Console's dispatch reads its own index, 4", P::ceiling == console_index);
 
     // Where road 1 is kept, High's dispatch lands inside Low's spin; in the
@@ -799,6 +820,13 @@ uint32_t ticker_ruler_cost() {
 void td_scan() {
     reset_scenario();
     tracing = false;
+    // The console is still sending the last letter's lines: its transmit
+    // interrupt landing between two reads of a ruler pair would be read
+    // as the rulers' disagreement (measured, with corecfgr cleared: 200
+    // to 208 cycles of spread against the bound's 168, in eight runs of
+    // twenty; none in forty with the predictor on, the interrupt falling
+    // elsewhere there). Drained first, as letter c drains.
+    console_drain();
     const uint32_t ruler = ruler_cost();
     const uint32_t ticker_ruler = ticker_ruler_cost();
     // The two rulers over spans of 0.5 to 0.8 ms (under the period the
