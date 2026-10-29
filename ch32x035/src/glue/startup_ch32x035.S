@@ -52,9 +52,10 @@
  * sibling crt does (ch32vx03/src/glue/startup_ch32vx03.S): it is what
  * the vendor's silicon is shipped running - and because it is measured
  * to be worth keeping: against the register cleared, the bits buy the
- * preemptive kernel 7 to 26 per cent of every scheduler path run from
- * SRAM and cost its paths nothing from the flash, while a data-dependent
- * loop pays them 7 to 25 per cent (docs/ch32x035/platform.md, the bench
+ * preemptive kernel 3 to 21 per cent of every scheduler path run from
+ * SRAM and leave its paths from the flash at or under the cleared
+ * figures at their best and at most 28 cycles over at their worst, while
+ * a data-dependent loop pays them 7 to 25 per cent (docs/ch32x035/platform.md, the bench
  * findings; the platform suite's letters f, i and j measure the bits
  * both ways on every run).
  *

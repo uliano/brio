@@ -20,8 +20,9 @@
      - Rubato<Ch32x035RubatoPlatform<...>, ...>::activate(), the
        scheduler, with the dispatches the compiler inlines into it;
      - every out-of-line member of an object's queue on that platform,
-       EventQueue<..., Ch32x035RubatoPlatform<...>> - empty(), take() and
-       release() on the way to a dispatch, push() inside a post.
+       EventQueue<..., Ch32x035RubatoPlatform<...>> - take() and release()
+       on the way to a dispatch, push() inside a post (empty() is forced
+       inline into activate()).
    What stays in the flash: the post verb itself (kernel/post.hpp's
    post<Ao, Ev>, whose name carries no platform, so a pattern for it would
    move a Tenuto image's posts too), the time events' service, and every
