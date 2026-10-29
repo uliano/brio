@@ -35,7 +35,8 @@
  * reset priority 0 (cortexm/nvic.hpp). So PendSV never interrupts a
  * peripheral handler: a request made from one waits, and the core takes
  * it at the handler's exit, by tail-chaining when nothing else is pending
- * (DDI 0439B 3.9.1: six cycles on the M4). From thread mode, with PRIMASK
+ * (DDI 0439B 3.9.1: six cycles on the M4; seven on the RP2350's M33,
+ * measured by test_rp2350_platform's letter i). From thread mode, with PRIMASK
  * clear, the request is taken before the instruction after the ISB that
  * follows the write: the DSB makes the write to the System Control Space
  * complete, the ISB makes the pending exception visible to the

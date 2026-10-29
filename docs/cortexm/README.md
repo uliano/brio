@@ -92,7 +92,11 @@ architectures.
   Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
   on the WeAct RP2350B: road 1 in 106 cycles with the pair body bound,
   a Rubato on each core through the one PendSV entry,
-  [../rp2350/platform.md](../rp2350/platform.md)). The ARMv8-M facts the
+  [../rp2350/platform.md](../rp2350/platform.md)); the M33's cycle
+  figures are its own, measured by that suite's platform letter i, the
+  Cortex-M4's table being no model for it (a load 1 cycle, BL and BX 2
+  each, PUSH and POP 1 + N, a not-taken branch folded after a 16-bit
+  instruction). The ARMv8-M facts the
   M33 rests on are checked against the documents there: EXC_RETURN's
   security bits (ES, DCRS and S, all 1 in the Secure state the image
   runs in) are carried unchanged from the value PendSV entered with,

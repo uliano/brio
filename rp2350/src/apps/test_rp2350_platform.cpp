@@ -112,6 +112,26 @@
 //   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
+//   i  THE COST MODELS test_rp2350_rubato's bounds are drawn with: each
+//      primitive those bounds charge - an ALU instruction, a load and its
+//      use, a store, a literal, a taken and a not-taken branch, a call and
+//      its return, a push and a pop of a few registers and of many, the
+//      mask's instructions, the barriers, a queue visit as the kernel
+//      compiles it - timed as a run of identical units in the flash, the
+//      XIP cache warm, on TIMER1's cycles; and the exception's or the
+//      trap's own costs: an SVC's entry, a return, a tail-chain, PendSV at
+//      an unmask and at the request on the Cortex-M33, an ecall, an mret,
+//      the software interrupt at an mret, a csrsi and a store on Hazard3.
+//      Each beside the published table a count would otherwise borrow
+//      (the Cortex-M4's, 3.8.7), a FINDING printed where the two part; on the Cortex-M33
+//      every row twice, the core's dual issue on and off (ACTLR.DISFOLD).
+//      Last in `z`, out of its place in the alphabet: run in its place,
+//      it lengthened the letter after it - letter j's wake read 2 to 5 us
+//      on the Cortex-M33 and 4 to 6 on Hazard3 straight after it, against
+//      0 to 4 and 1 to 4 in the image without the letter and 0 to 4 and 3
+//      to 4 with it last, ten runs of `z` each. Its 5 kB of timed code
+//      pass through the 16 kB XIP cache, and the code they evict is the
+//      likely reason; not established
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -146,10 +166,10 @@ constexpr SysClock clock;
 using P = brio::Rp2350Platform<>;
 
 // A word in .noinit, to learn what survives which reset (the linker
-// script keeps the section NOLOAD, the crt never touches it). Inline, for
-// the reason the other strata's suites give: gcc gives an inline variable
-// with a section attribute a COMDAT group like the platform's own
-// panic_record_, and a plain one would clash.
+// script keeps the section NOLOAD, the crt never touches it). Inline,
+// because gcc gives an inline variable with a section attribute a COMDAT
+// group, as it gives the platform's own panic_record_, and a plain
+// variable in the same section would clash with that group.
 [[gnu::section(".noinit")]] inline uint32_t noinit_canary;
 inline constexpr uint32_t canary_value = 0xC3A5F00Du;
 
@@ -1182,6 +1202,596 @@ void tx_break() {
     bench.verdict("break_here() returned instead of halting or faulting", false);
 }
 
+// =============================================================================
+// i - the cost models
+// =============================================================================
+// THE FIGURES test_rp2350_rubato's bounds are drawn with (that suite's file
+// header states the two models and names this letter as their source),
+// each primitive timed on hand-written assembly in the flash, the XIP cache
+// warm (4.4.1) - the memory the preemptive kernel's paths run from; this
+// suite places no code in SRAM.
+//
+// THE RULER is TIMER1 on clk_sys (12.8.1.1's SOURCE), letters w's and o's:
+// one 32-bit load of TIMERAWL through the APB bridge, a count a clk_sys
+// cycle - the cycle both cores run on. Two loads back to back read 3 apart
+// (the bridge's three cycles, 2.2.4); that two-read cost, the least of 16,
+// is taken off every figure.
+//
+// HOW A ROW IS READ. K identical units (one instruction, or a short group
+// where an instruction cannot be repeated alone) between two ruler loads,
+// both 32-bit so that neither can pair with its neighbour; the sequence
+// called once uncounted, then 16 times with interrupts masked; the least
+// of the 16, less the ruler, is the run's cost, printed with its cost per
+// unit. K is 32 for a one-cycle unit and 16 or 8 for a longer one, so that
+// the ruler's resolution, one count, is at most a sixteenth of the run. A push and a pop of the same registers are timed in one sequence,
+// K of each between three loads. An exception or a trap is one event
+// between two loads, the second the handler's first instruction or the
+// first instruction its return lands on: those rows are the least of 16
+// events with nothing masked that would hold the event back.
+//
+// THE MODELS BESIDE THE FIGURES are the published tables a count of these
+// cores would otherwise borrow: on the Cortex-M33 the Cortex-M4's table
+// (DDI 0439B table 3-1), the nearest, since ARM's Cortex-M33 TRM (100230
+// issue 08) gives no instruction timing; on Hazard3 the datasheet's 3.8.7,
+// with an interrupt's entry, which it does not give, taken at ecall's 3. A
+// row half a cycle a unit or more off its model prints FINDING: the model
+// is what the row judges, not the figure.
+//
+// THE VERDICT checks what can be derived: each run within one count of the
+// cost this letter states as measured - a span is the difference of two
+// samples of one counter on the core's own clock, so a figure is read to
+// the cycle, and one count is the phase a load over the bridge may sample
+// a cycle late (the ruler's two loads read 3 or 4 inside a handler). The
+// stated costs are the bench's, ten runs of the letter on each half.
+//
+// THE CORTEX-M33 RUNS EVERY ROW TWICE: with ACTLR.DISFOLD (TRM 3.4) clear,
+// as the core resets and runs every program here, and with it set, which
+// disables the core's "limited dual-issue of common 16-bit instruction
+// pairs" (TRM 1.4.1). The two columns say what the dual issue is: two
+// 16-bit ALU instructions, or two 16-bit loads, never issue together; a
+// not-taken conditional branch after a 16-bit instruction and an IT cost
+// nothing with it clear and a cycle with it set. ACTLR is put back to
+// the value it was read with and read back, a verdict.
+extern "C" {
+[[gnu::used]] alignas(16) uint32_t cost_data[8];
+}
+// WHERE THE LETTER'S CODE LIES: after every other function of the image.
+// The linker script lays every `.text` input section first and `.rodata`
+// after them (rp2350/ld/rp2350_16m.ld), so the letter's assembly and its
+// functions share one section named under `.rodata` with the code flags
+// ("ax"): code in the flash still, behind everything else, so that adding
+// it moves no other letter's code by more than a word. Placed among them,
+// it moved letter h's figures: 202 us awake in four runs of `z` in ten,
+// where the image without the letter and the image with it placed here
+// read 3 us at most in every run.
+#define COST_PLACED gnu::section(".rodata.cost_letter")
+static_assert(TIMER1_BASE == 0x400B8000UL && __builtin_offsetof(TIMER0_Type, TIMERAWL) == 0x28u,
+              "the letter's assembly reads TIMER1's TIMERAWL at 0x400B8028");
+
+#if defined(BRIO_RP2350_CORE_M33)
+// A row: r1 the ruler's address, r5 the data, ip the record; r6 and r7 the
+// two stamps; r2..r4 zero. 8: and 9: are the row's two literals.
+#define CM_OPEN(name)                                                                     \
+    ".balign 4\n.globl " #name "\n.type " #name ", %function\n.thumb_func\n" #name ":\n"  \
+    "push {r4-r7, lr}\nmov ip, r0\nldr r1, =0x400B8028\nldr r5, =cost_data\n"           \
+    "movs r2, #0\nmovs r3, #0\nmovs r4, #0\n"
+#define CM_CLOSE                                                                          \
+    "ldr.w r7, [r1]\nstr.w r6, [ip]\nstr.w r7, [ip, #4]\npop {r4-r7, pc}\n"              \
+    ".balign 4\n8: .word cost_data\n9: .word 0\n.ltorg\n"
+#define CM_ROW(name, setup, place, count, unit)                                           \
+    CM_OPEN(name) setup ".balign 8\n" place "ldr.w r6, [r1]\n.rept " #count "\n" unit     \
+    ".endr\n" CM_CLOSE
+#define CM_PP(name, count, push, pop)                                                     \
+    CM_OPEN(name) ".balign 4\nldr.w r6, [r1]\n.rept " #count "\n" push ".endr\n"         \
+    "ldr.w r7, [r1]\n.rept " #count "\n" pop ".endr\nldr.w r4, [r1]\n"                    \
+    "str.w r6, [ip]\nstr.w r7, [ip, #4]\nstr.w r4, [ip, #8]\npop {r4-r7, pc}\n.ltorg\n"
+#define AT0 ""                    // the first unit on a word, 0 mod 8
+#define AT2 "nop\nnop\nnop\n"     // 2 mod 8: a 32-bit unit off its word
+#define EQ "cmp r2, r2\n"         // Z set: beq taken, bne not
+
+__asm__(".pushsection .rodata.cost_letter,\"ax\",%progbits\n"
+        ".syntax unified\n.thumb\n"
+        ".balign 4\n.globl cost_leaf_bx\n.type cost_leaf_bx, %function\n.thumb_func\ncost_leaf_bx:\nbx lr\n"
+        ".balign 4\n.globl cost_leaf_pp\n.type cost_leaf_pp, %function\n.thumb_func\ncost_leaf_pp:\n"
+        "push {r4, lr}\npop {r4, pc}\n"
+        // empty() as it was compiled out of line before the queue visit went in line
+        ".balign 4\n.globl cost_empty\n.type cost_empty, %function\n.thumb_func\ncost_empty:\n"
+        "ldrb r3, [r0, #15]\nldrb r0, [r0, #14]\nsubs r3, r0, r3\nnegs r0, r3\nadcs r0, r3\nbx lr\n"
+        CM_ROW(cm_ruler, "", AT0, 0, "")
+        CM_ROW(cm_alu16, "", AT0, 32, "adds r2, #1\n")
+        CM_ROW(cm_alu32, "", AT0, 32, "add.w r2, r2, #1\n")
+        CM_ROW(cm_ldrb, "", AT0, 32, "ldrb r2, [r5, #15]\n")
+        CM_ROW(cm_ldr, "", AT0, 32, "ldr r2, [r5]\n")
+        CM_ROW(cm_ld_alu, "", AT0, 16, "ldr r2, [r5]\nadd.w r3, r3, #1\n")
+        CM_ROW(cm_ld_use, "", AT0, 16, "ldr r2, [r5]\nadds r2, #1\n")
+        CM_ROW(cm_ld_addr, "", AT0, 16, "ldr r4, 8f\nldr r2, [r4]\n")
+        CM_ROW(cm_str, "", AT0, 32, "str r2, [r5]\n")
+        CM_ROW(cm_lit, "", AT0, 32, "ldr r2, 9f\n")
+        CM_ROW(cm_lit_alu, "", AT0, 16, "ldr r2, 9f\nadd.w r3, r3, #1\n")
+        CM_ROW(cm_bt, EQ, AT0, 16, "beq 1f\nnop\n1:\n")
+        CM_ROW(cm_bt_off, EQ, AT2, 16, "beq.w 1f\nnop\nnop\n1:\n")
+        CM_ROW(cm_b, "", AT0, 16, "b 1f\nnop\n1:\n")
+        CM_ROW(cm_alu32_bn, EQ, AT0, 16, "add.w r4, r4, #1\nbne 1f\n1:\n")
+        CM_ROW(cm_cmp_bn, "", AT0, 16, "cmp r2, r3\nbne 1f\n1:\n")
+        CM_ROW(cm_bn, EQ, AT0, 32, "bne 1f\n1:\n")
+        CM_ROW(cm_it, EQ, AT0, 16, "it eq\nmoveq r4, r2\n")
+        CM_ROW(cm_bl, "", AT0, 16, "bl 1f\n1:\n")
+        CM_ROW(cm_bl_bx, "", AT0, 16, "bl cost_leaf_bx\n")
+        CM_ROW(cm_bl_pp, "", AT0, 16, "bl cost_leaf_pp\n")
+        CM_PP(cm_pp2, 16, "push {r4, r5}\n", "pop {r4, r5}\n")
+        CM_PP(cm_pp8, 8, "push {r0, r2, r3, r4, r5, r8, r9, r10}\n", "pop {r0, r2, r3, r4, r5, r8, r9, r10}\n")
+        CM_ROW(cm_mrs_msr, "", AT0, 16, "mrs r2, primask\nmsr primask, r2\n")
+        CM_ROW(cm_dsb, "", AT0, 16, "dsb sy\n")
+        CM_ROW(cm_isb, "", AT0, 16, "isb sy\n")
+        CM_ROW(cm_cpsid, "", AT0, 16, "cpsid i\n")
+        CM_ROW(cm_sio_ld, "mov.w r4, #0xD0000000\n", AT0, 16, "ldr r2, [r4]\nadd.w r3, r3, #1\n")
+        CM_ROW(cm_request, "ldr r4, =0xE000ED04\n", AT0, 16, "str r3, [r4]\ndsb sy\nisb sy\n")
+        CM_ROW(cm_alu_pair, "", AT0, 16, "movs r2, #1\nadds r3, #1\n")
+        CM_ROW(cm_ldrb_pair, "", AT0, 16, "ldrb r2, [r5, #15]\nldrb r3, [r5, #14]\n")
+        CM_ROW(cm_visit16, "", AT0, 16, "ldrb r2, [r5, #15]\nldrb r3, [r5, #14]\ncmp r2, r3\nbne 1f\n1:\n")
+        CM_ROW(cm_visit32, "", AT0, 16,
+               "ldr.w r4, 8f\nldrb.w r2, [r4, #15]\nldrb.w r3, [r4, #14]\ncmp r2, r3\nbne 1f\n1:\n")
+        CM_ROW(cm_visit_call, "", AT0, 16, "ldr r0, 8f\nbl cost_empty\nmov r4, r0\ncmp r0, #0\nbeq 1f\n1:\n")
+        // THE EXCEPTIONS. cm_x_svc(record, mode): r6 before the SVC, r5 the
+        // SVC handler's first instruction, r4 its last before the return,
+        // r8 and r9 PendSV's first and last, r7 the instruction a return
+        // lands on. Mode 0: the handler returns by BX LR; 1: it pends
+        // PendSV first, so its BX LR tail-chains; 2: it returns by a POP of
+        // two with the PC; 3: it pends PendSV and returns by that POP.
+        // Registers r4-r11 cross an exception untouched; r0-r3 reach the
+        // handler as they were.
+        ".balign 4\n.globl cm_x_svc\n.type cm_x_svc, %function\n.thumb_func\ncm_x_svc:\n"
+        "push {r4-r11, lr}\nmov ip, r0\nmov r0, r1\nldr r1, =0x400B8028\n"
+        "movs r4, #0\nmovs r5, #0\nmov r8, r4\nmov r9, r4\nmov r10, r4\n.balign 4\n"
+        "ldr.w r6, [r1]\nsvc #0\nldr.w r7, [r1]\n"
+        "str.w r6, [ip]\nstr.w r5, [ip, #4]\nstr.w r4, [ip, #8]\nstr.w r8, [ip, #12]\n"
+        "str.w r9, [ip, #16]\nstr.w r7, [ip, #20]\nstr.w r10, [ip, #24]\npop {r4-r11, pc}\n.ltorg\n"
+        // cm_x_pend(record, how): PendSV pended and taken in thread mode. How
+        // 0: pended under PRIMASK, taken at the MSR that lifts it; 1: pended
+        // by the request's own sequence (the store, DSB, ISB) unmasked. Eight
+        // 32-bit adds follow and PendSV's handler records how many ran
+        // before it (r10); r6 is the stamp before the MSR or the store.
+        ".balign 4\n.globl cm_x_pend\n.type cm_x_pend, %function\n.thumb_func\ncm_x_pend:\n"
+        "push {r4-r11, lr}\nmov ip, r0\nmov r0, r1\nldr r1, =0x400B8028\nldr r4, =0xE000ED04\n"
+        "mov.w r2, #0x10000000\nmovs r3, #0\nmovs r5, #0\nmov r8, r5\nmov r9, r5\nmov r10, r5\nmov.w r11, #0\n"
+        "cbnz r0, 1f\ncpsid i\nstr r2, [r4]\ndsb sy\n.balign 4\nldr.w r6, [r1]\nmsr primask, r11\n"
+        ".rept 8\nadd.w r3, r3, #1\n.endr\nb 2f\n"
+        ".balign 4\n1:\nldr.w r6, [r1]\nstr r2, [r4]\ndsb sy\nisb sy\n"
+        ".rept 8\nadd.w r3, r3, #1\n.endr\n"
+        "2:\nldr.w r7, [r1]\n"
+        "str.w r6, [ip]\nstr.w r6, [ip, #4]\nstr.w r6, [ip, #8]\nstr.w r8, [ip, #12]\n"
+        "str.w r9, [ip, #16]\nstr.w r7, [ip, #20]\nstr.w r10, [ip, #24]\npop {r4-r11, pc}\n.ltorg\n"
+        ".balign 4\n.globl isr_svcall\n.type isr_svcall, %function\n.thumb_func\nisr_svcall:\n"
+        "ldr.w r5, [r1]\nlsls r2, r0, #31\nbeq 1f\nldr r3, =0xE000ED04\nmov.w r2, #0x10000000\n"
+        "str r2, [r3]\ndsb sy\n1:\ncmp r0, #2\nbhs 2f\n.balign 4\nldr.w r4, [r1]\nbx lr\n"
+        ".balign 4\n2:\npush {r2, lr}\nldr.w r4, [r1]\npop {r2, pc}\n.ltorg\n"
+        ".balign 4\n.globl isr_pendsv\n.type isr_pendsv, %function\n.thumb_func\nisr_pendsv:\n"
+        "ldr.w r8, [r1]\nmov r10, r3\nldr.w r9, [r1]\nbx lr\n"
+        ".popsection\n");
+
+extern "C" {
+#define COST_DECL(n) void n(uint32_t*);
+COST_DECL(cm_ruler) COST_DECL(cm_alu16) COST_DECL(cm_alu32) COST_DECL(cm_ldrb) COST_DECL(cm_ldr)
+COST_DECL(cm_ld_alu) COST_DECL(cm_ld_use) COST_DECL(cm_ld_addr) COST_DECL(cm_str) COST_DECL(cm_lit)
+COST_DECL(cm_lit_alu) COST_DECL(cm_bt) COST_DECL(cm_bt_off) COST_DECL(cm_b) COST_DECL(cm_alu32_bn)
+COST_DECL(cm_cmp_bn) COST_DECL(cm_bn) COST_DECL(cm_it) COST_DECL(cm_bl) COST_DECL(cm_bl_bx)
+COST_DECL(cm_bl_pp) COST_DECL(cm_pp2) COST_DECL(cm_pp8) COST_DECL(cm_mrs_msr) COST_DECL(cm_dsb)
+COST_DECL(cm_isb) COST_DECL(cm_cpsid) COST_DECL(cm_sio_ld) COST_DECL(cm_request) COST_DECL(cm_alu_pair)
+COST_DECL(cm_ldrb_pair) COST_DECL(cm_visit16) COST_DECL(cm_visit32) COST_DECL(cm_visit_call)
+#undef COST_DECL
+void cm_x_svc(uint32_t* record, uint32_t mode);
+void cm_x_pend(uint32_t* record, uint32_t how);
+}
+#define COST_RULER cm_ruler
+#else
+// A row: a1 the ruler's address, a3 the data, a2 the record; t5 and t6 the
+// two stamps; t0..t2 and a4 zero. W32 keeps a block in 32-bit encodings.
+#define W32(x) ".option push\n.option norvc\n" x ".option pop\n"
+#define RV_OPEN(name)                                                                       \
+    ".balign 4\n.globl " #name "\n.type " #name ", @function\n" #name ":\n" W32(          \
+    "addi sp, sp, -16\nsw ra, 12(sp)\nsw s0, 8(sp)\nsw s1, 4(sp)\nmv a2, a0\n"            \
+    "li a1, 0x400B8028\nla a3, cost_data\nli t0, 0\nli t1, 0\nli t2, 0\nli a4, 0\n")
+#define RV_CLOSE                                                                            \
+    W32("lw t6, 0(a1)\nsw t5, 0(a2)\nsw t6, 4(a2)\nlw ra, 12(sp)\nlw s0, 8(sp)\n"        \
+        "lw s1, 4(sp)\naddi sp, sp, 16\nret\n")
+#define RV_ROW(name, place, count, unit)                                                    \
+    RV_OPEN(name) ".balign 4\n" place W32("lw t5, 0(a1)\n") ".rept " #count "\n" unit   \
+    ".endr\n" RV_CLOSE
+#define RV_PP(name, count, push, pop)                                                       \
+    RV_OPEN(name) ".balign 4\n" W32("lw t5, 0(a1)\n") ".rept " #count "\n" push ".endr\n" \
+    W32("lw t6, 0(a1)\n") ".rept " #count "\n" pop ".endr\n"                              \
+    W32("lw t4, 0(a1)\nsw t5, 0(a2)\nsw t6, 4(a2)\nsw t4, 8(a2)\nlw ra, 12(sp)\n"       \
+        "lw s0, 8(sp)\nlw s1, 4(sp)\naddi sp, sp, 16\nret\n")
+#define AT0 ""          // the first unit on a word
+#define AT2 "c.nop\n"   // half a word off: a 32-bit unit off its word
+
+static_assert(SIO_BASE == 0xD0000000UL && __builtin_offsetof(SIO_Type, RISCV_SOFTIRQ) == 0x1A0u,
+              "the letter's assembly raises and lowers the software interrupt at 0xD00001A0");
+
+__asm__(".pushsection .rodata.cost_letter,\"ax\",@progbits\n"
+        ".option push\n.option norelax\n"
+        ".balign 4\n.globl cost_rv_leaf\n.type cost_rv_leaf, @function\ncost_rv_leaf:\nc.jr ra\n"
+        ".balign 4\n.globl cost_rv_leaf_pr1\n.type cost_rv_leaf_pr1, @function\ncost_rv_leaf_pr1:\n"
+        "cm.push {ra}, -16\ncm.popret {ra}, 16\n"
+        ".balign 4\n.globl cost_rv_leaf_pr3\n.type cost_rv_leaf_pr3, @function\ncost_rv_leaf_pr3:\n"
+        "cm.push {ra, s0-s1}, -16\ncm.popret {ra, s0-s1}, 16\n"
+        ".balign 4\n.globl cost_rv_leaf_pr13\n.type cost_rv_leaf_pr13, @function\ncost_rv_leaf_pr13:\n"
+        "cm.push {ra, s0-s11}, -64\ncm.popret {ra, s0-s11}, 64\n"
+        // empty() as it was compiled out of line before the queue visit went in line
+        ".balign 4\n.globl cost_rv_empty\n.type cost_rv_empty, @function\ncost_rv_empty:\n"
+        W32("lbu a5, 15(a0)\nlbu a0, 14(a0)\nsub a0, a0, a5\nseqz a0, a0\n") "c.jr ra\n"
+        RV_ROW(rv_ruler, AT0, 0, "")
+        RV_ROW(rv_alu32, AT0, 32, W32("addi t0, t0, 1\n"))
+        RV_ROW(rv_alu16, AT0, 32, "c.addi t0, 1\n")
+        RV_ROW(rv_lbu, AT0, 32, W32("lbu t1, 15(a3)\n"))
+        RV_ROW(rv_lw, AT0, 32, W32("lw t1, 0(a3)\n"))
+        RV_ROW(rv_lw_use, AT0, 16, W32("lw t1, 0(a3)\naddi t1, t1, 1\n"))
+        RV_ROW(rv_lw_st, AT0, 16, W32("lw t1, 0(a3)\nsw t1, 4(a3)\n"))
+        RV_ROW(rv_lw_addr, AT0, 16, W32("lw t1, 0(a3)\nlw t2, 0(t1)\n"))
+        RV_ROW(rv_lw_br, AT0, 16, W32("lw t1, 0(a3)\nbnez t1, 1f\n1:\n"))
+        RV_ROW(rv_sw, AT0, 32, W32("sw t1, 0(a3)\n"))
+        RV_ROW(rv_bt, AT0, 16, W32("beq zero, zero, 1f\naddi zero, zero, 0\n1:\n"))
+        RV_ROW(rv_bt_off, AT2, 16, W32("beq zero, zero, 1f\naddi zero, zero, 0\n1:\n"))
+        RV_ROW(rv_bn, AT0, 32, W32("bne zero, zero, 1f\n1:\n"))
+        RV_ROW(rv_j, AT0, 16, W32("j 1f\naddi zero, zero, 0\n1:\n"))
+        RV_ROW(rv_j_off, AT2, 16, W32("j 1f\naddi zero, zero, 0\n1:\n"))
+        RV_ROW(rv_jal_ret, AT0, 16, W32("jal ra, cost_rv_leaf\n"))
+        RV_ROW(rv_jal_ret_off, AT2, 16, W32("jal ra, cost_rv_leaf\n"))
+        RV_PP(rv_pp3, 16, "cm.push {ra, s0-s1}, -16\n", "cm.pop {ra, s0-s1}, 16\n")
+        RV_PP(rv_pp13, 8, "cm.push {ra, s0-s11}, -64\n", "cm.pop {ra, s0-s11}, 64\n")
+        RV_ROW(rv_popret1, AT0, 16, W32("jal ra, cost_rv_leaf_pr1\n"))
+        RV_ROW(rv_popret3, AT0, 16, W32("jal ra, cost_rv_leaf_pr3\n"))
+        RV_ROW(rv_popret13, AT0, 16, W32("jal ra, cost_rv_leaf_pr13\n"))
+        RV_ROW(rv_csr, AT0, 32, W32("csrrci zero, mstatus, 8\n"))
+        RV_ROW(rv_mie_pair, AT0, 16, W32("csrsi mstatus, 8\ncsrci mstatus, 8\n"))
+        RV_ROW(rv_sio_ld, W32("li a4, 0xD0000000\n"), 16, W32("lw t1, 0(a4)\naddi t2, t2, 1\n"))
+        RV_ROW(rv_sio_st, W32("li a4, 0xD00001A0\nli t1, 0x100\n"), 16, W32("sw t1, 0(a4)\naddi t2, t2, 1\n"))
+        RV_ROW(rv_visit, AT0, 16, W32("lbu t1, 15(a3)\nlbu t2, 14(a3)\nbne t1, t2, 1f\n1:\n"))
+        RV_ROW(rv_visit_call, AT0, 16, W32("mv a0, a3\njal ra, cost_rv_empty\nbeqz a0, 1f\n1:\n"))
+        // THE TRAPS, through the letter's own table (vectored, mtvec + 4N;
+        // put in mtvec for the event and put back): a1 the ruler, a2 the
+        // record, t3 the label every trap returns to, t2 RISCV_SOFTIRQ, a7
+        // the exception handler's mode. mie holds MSIE alone for the event.
+        ".p2align 6\n.globl cost_rv_table\ncost_rv_table:\n"
+        W32("j cost_rv_exc\nj cost_rv_exc\nj cost_rv_exc\nj cost_rv_soft\n")
+        // The exception (ecall): s0 its first instruction, mepc pointed at the
+        // label; with a7 = 1 the software interrupt raised first, so that
+        // the mret lands in it; s1 the stamp before the mret.
+        ".balign 4\n.globl cost_rv_exc\ncost_rv_exc:\n"
+        W32("lw s0, 0(a1)\ncsrw mepc, t3\nbeqz a7, 1f\nli t0, 1\nsw t0, 0(t2)\nlw t0, 0(t2)\n"
+            ".balign 4\n1:\nlw s1, 0(a1)\nmret\n")
+        // The software interrupt: s2 its first instruction, the flag lowered
+        // (and read back), mepc pointed at the label, s3, mret.
+        ".balign 4\n.globl cost_rv_soft\ncost_rv_soft:\n"
+        W32("lw s2, 0(a1)\nli t0, 0x100\nsw t0, 0(t2)\nlw t0, 0(t2)\ncsrw mepc, t3\n.balign 4\n"
+            "lw s3, 0(a1)\nmret\n")
+        // rv_x(record, mode), called masked: 0 an ecall; 1 an ecall made
+        // unmasked whose handler raises the software interrupt before its
+        // mret; 2 the software interrupt raised under the mask, taken at the
+        // csrsi; 3 raised by a store with MIE set (eight no-ops behind it).
+        // The record: t5 before, s0, s1, s2, s3, t6 the label's stamp.
+        ".balign 4\n.globl rv_x\n.type rv_x, @function\nrv_x:\n"
+        W32("addi sp, sp, -32\nsw ra, 28(sp)\nsw s0, 24(sp)\nsw s1, 20(sp)\nsw s2, 16(sp)\nsw s3, 12(sp)\n"
+            "sw s4, 8(sp)\nsw s5, 4(sp)\n"
+            "mv a2, a0\nmv a6, a1\nli a1, 0x400B8028\nli t2, 0xD00001A0\nla t3, 9f\n"
+            "li s0, 0\nli s1, 0\nli s2, 0\nli s3, 0\nli a7, 0\nli t1, 1\n"
+            "csrr s4, mtvec\nla t0, cost_rv_table\nori t0, t0, 1\ncsrw mtvec, t0\n"
+            "csrr s5, mie\nli t0, 8\ncsrw mie, t0\n"
+            "li t0, 1\nbeq a6, t0, 11f\nli t0, 2\nbeq a6, t0, 12f\nli t0, 3\nbeq a6, t0, 13f\n"
+            ".balign 4\nlw t5, 0(a1)\necall\nj 9f\n"
+            "11:\nli a7, 1\ncsrsi mstatus, 8\n.balign 4\nlw t5, 0(a1)\necall\nj 9f\n"
+            "12:\nsw t1, 0(t2)\nlw t0, 0(t2)\n.balign 4\nlw t5, 0(a1)\ncsrsi mstatus, 8\nj 9f\n"
+            "13:\ncsrsi mstatus, 8\n.balign 4\nlw t5, 0(a1)\nsw t1, 0(t2)\n"
+            ".rept 8\naddi zero, zero, 0\n.endr\nj 9f\n"
+            ".balign 4\n9:\nlw t6, 0(a1)\ncsrci mstatus, 8\ncsrw mie, s5\ncsrw mtvec, s4\n"
+            "sw t5, 0(a2)\nsw s0, 4(a2)\nsw s1, 8(a2)\nsw s2, 12(a2)\nsw s3, 16(a2)\nsw t6, 20(a2)\n"
+            "sw zero, 24(a2)\n"
+            "lw ra, 28(sp)\nlw s0, 24(sp)\nlw s1, 20(sp)\nlw s2, 16(sp)\nlw s3, 12(sp)\nlw s4, 8(sp)\n"
+            "lw s5, 4(sp)\naddi sp, sp, 32\nret\n")
+        ".option pop\n"
+        ".popsection\n");
+
+extern "C" {
+#define COST_DECL(n) void n(uint32_t*);
+COST_DECL(rv_ruler) COST_DECL(rv_alu32) COST_DECL(rv_alu16) COST_DECL(rv_lbu) COST_DECL(rv_lw)
+COST_DECL(rv_lw_use) COST_DECL(rv_lw_st) COST_DECL(rv_lw_addr) COST_DECL(rv_lw_br) COST_DECL(rv_sw)
+COST_DECL(rv_bt) COST_DECL(rv_bt_off) COST_DECL(rv_bn) COST_DECL(rv_j) COST_DECL(rv_j_off)
+COST_DECL(rv_jal_ret) COST_DECL(rv_jal_ret_off) COST_DECL(rv_pp3) COST_DECL(rv_pp13) COST_DECL(rv_popret1)
+COST_DECL(rv_popret3) COST_DECL(rv_popret13) COST_DECL(rv_csr) COST_DECL(rv_mie_pair) COST_DECL(rv_sio_ld)
+COST_DECL(rv_sio_st) COST_DECL(rv_visit) COST_DECL(rv_visit_call)
+#undef COST_DECL
+void rv_x(uint32_t* record, uint32_t mode);
+}
+#define COST_RULER rv_ruler
+#endif
+
+/// One row: K units between two stamps (or, `span` 1, the second interval
+/// of a push-then-pop sequence), the model's cycles for the whole run, and
+/// the run's cost as this letter states it measured - with DISFOLD clear
+/// and, on the Cortex-M33, set.
+struct CostRow {
+    const char* what;
+    void (*fn)(uint32_t*);
+    uint8_t units;
+    uint8_t span;
+    uint16_t model;
+    uint16_t measured[2];
+};
+
+/// One event: the record's interval `from`..`to` less the ruler, or, with
+/// from == to, the count the record holds there (an instruction count, not
+/// a span).
+struct CostEvent {
+    const char* what;
+    void (*fn)(uint32_t*);
+    uint8_t from, to;
+    uint16_t model;
+    uint16_t measured[2];
+};
+
+#if defined(BRIO_RP2350_CORE_M33)
+// The model column: the Cortex-M4's table as a count of this core would
+// borrow it - an instruction 1, a load 2, a store 1, a taken branch 3 and a not-taken
+// one 1, a BL 4, a BX 2, PUSH and POP 1 + N and 4 + N with the PC, MRS and
+// MSR 2, DSB and ISB 4, an IT 1; an exception's entry 12, its return 12, a
+// tail-chain 6.
+constexpr CostRow cost_rows[] = {
+    {"an ALU instruction, 16-bit (adds), 32 in a run", cm_alu16, 32, 0, 32, {32, 32}},
+    {"an ALU instruction, 32-bit (add.w), 32 in a run", cm_alu32, 32, 0, 32, {32, 32}},
+    {"a byte load from SRAM (ldrb), 32 in a run", cm_ldrb, 32, 0, 64, {32, 32}},
+    {"a word load from SRAM (ldr), 32 in a run", cm_ldr, 32, 0, 64, {32, 32}},
+    {"a load and an add.w that does not read it", cm_ld_alu, 16, 0, 48, {32, 32}},
+    {"a load and an adds that reads it", cm_ld_use, 16, 0, 48, {48, 48}},
+    {"a literal load and a load through it", cm_ld_addr, 16, 0, 64, {56, 56}},
+    {"a store to SRAM (str), 32 in a run", cm_str, 32, 0, 32, {32, 32}},
+    {"a literal load (ldr [pc]), 32 in a run", cm_lit, 32, 0, 64, {39, 39}},
+    {"a literal load and an add.w", cm_lit_alu, 16, 0, 48, {34, 34}},
+    {"a taken beq onto a 16-bit instruction on a word", cm_bt, 16, 0, 48, {32, 32}},
+    {"a taken beq.w onto a 32-bit instruction off its word", cm_bt_off, 16, 0, 48, {47, 47}},
+    {"a taken b onto a 16-bit instruction on a word", cm_b, 16, 0, 48, {32, 32}},
+    {"an add.w and a not-taken bne", cm_alu32_bn, 16, 0, 32, {32, 32}},
+    {"a cmp and a not-taken bne", cm_cmp_bn, 16, 0, 32, {16, 32}},
+    {"a not-taken bne, 32 in a run", cm_bn, 32, 0, 32, {16, 32}},
+    {"an IT and its moveq", cm_it, 16, 0, 32, {17, 32}},
+    {"a BL to the next instruction", cm_bl, 16, 0, 64, {32, 32}},
+    {"a BL to a BX LR, and that BX", cm_bl_bx, 16, 0, 96, {64, 64}},
+    {"a BL to a push of two and a pop of two with the PC", cm_bl_pp, 16, 0, 208, {144, 144}},
+    {"a push of two (push {r4, r5})", cm_pp2, 16, 0, 48, {32, 32}},
+    {"a pop of two", cm_pp2, 16, 1, 48, {32, 32}},
+    {"a push of eight, 32-bit", cm_pp8, 8, 0, 72, {64, 64}},
+    {"a pop of eight, 32-bit", cm_pp8, 8, 1, 72, {64, 64}},
+    {"an MRS and an MSR of PRIMASK", cm_mrs_msr, 16, 0, 64, {32, 32}},
+    {"a DSB, 16 in a run", cm_dsb, 16, 0, 64, {32, 32}},
+    {"an ISB, 16 in a run", cm_isb, 16, 0, 64, {32, 32}},
+    {"a CPSID, 16 in a run", cm_cpsid, 16, 0, 16, {16, 16}},
+    {"a load of SIO's CPUID and an add.w", cm_sio_ld, 16, 0, 48, {32, 32}},
+    {"the request's store to ICSR, DSB and ISB", cm_request, 16, 0, 144, {89, 89}},
+    {"two 16-bit ALU instructions (movs, adds)", cm_alu_pair, 16, 0, 32, {32, 32}},
+    {"two 16-bit byte loads, as a queue visit has them", cm_ldrb_pair, 16, 0, 64, {32, 32}},
+    {"a queue visit in line: ldrb, ldrb, cmp, bne not taken", cm_visit16, 16, 0, 96, {64, 80}},
+    {"a queue visit in line, 32-bit: the literal, ldrb.w, ldrb.w, cmp, bne", cm_visit32, 16, 0, 128, {96, 112}},
+    {"a queue visit through a call to empty() out of line", cm_visit_call, 16, 0, 288, {200, 232}},
+};
+
+[[COST_PLACED]] void cost_svc0(uint32_t* r) { cm_x_svc(r, 0); }
+[[COST_PLACED]] void cost_svc1(uint32_t* r) { cm_x_svc(r, 1); }
+[[COST_PLACED]] void cost_svc2(uint32_t* r) { cm_x_svc(r, 2); }
+[[COST_PLACED]] void cost_svc3(uint32_t* r) { cm_x_svc(r, 3); }
+[[COST_PLACED]] void cost_unmask(uint32_t* r) { cm_x_pend(r, 0); }
+[[COST_PLACED]] void cost_request(uint32_t* r) { cm_x_pend(r, 1); }
+
+// The record: 0 before, 1 the SVC handler's first, 2 its last, 3 PendSV's
+// first, 4 its last, 5 where the return landed, 6 PendSV's count of the
+// adds that ran before it.
+constexpr CostEvent cost_events[] = {
+    {"an SVC to its handler's first instruction", cost_svc0, 0, 1, 13, {13, 13}},
+    {"a BX LR of EXC_RETURN to the thread's next instruction", cost_svc0, 2, 5, 14, {10, 10}},
+    {"a pop of two with the PC loading EXC_RETURN, to the thread", cost_svc2, 2, 5, 18, {12, 12}},
+    {"a BX LR of EXC_RETURN into a pending PendSV, the tail-chain", cost_svc1, 2, 3, 8, {7, 7}},
+    {"a pop of two with the PC into a pending PendSV", cost_svc3, 2, 3, 12, {9, 9}},
+    {"PendSV pended under PRIMASK: the MSR that lifts it to the handler", cost_unmask, 0, 3, 15, {12, 12}},
+    {"  of the eight adds after that MSR, run before the handler", cost_unmask, 6, 6, 0, {1, 1}},
+    {"PendSV requested: the store to ICSR, DSB, ISB to the handler", cost_request, 0, 3, 21, {14, 14}},
+    {"  of the eight adds after that ISB, run before the handler", cost_request, 6, 6, 0, {0, 0}},
+    {"PendSV's BX LR to the thread after that ISB, and the eight adds there", cost_request, 4, 5, 22, {21, 21}},
+};
+#else
+// The model column: the datasheet's 3.8.7 - an instruction or a CSR access
+// 1, a load 1 and 2 when the next instruction reads it in its second stage
+// (footnote 2: not as a store's data), a store 1, jal and jalr 2, a branch
+// 1 not taken and 2 taken, each transfer one more onto a 32-bit instruction
+// off its word, cm.push and cm.pop N + 1, cm.popret N + 2 (4 for one), mret
+// 2, ecall 3 to mtvec - and an interrupt's entry, which the section does
+// not give, taken at ecall's 3.
+constexpr CostRow cost_rows[] = {
+    {"an ALU instruction, 32-bit (addi), 32 in a run", rv_alu32, 32, 0, 32, {32, 0}},
+    {"an ALU instruction, 16-bit (c.addi), 32 in a run", rv_alu16, 32, 0, 32, {32, 0}},
+    {"a byte load from SRAM (lbu), 32 in a run", rv_lbu, 32, 0, 32, {32, 0}},
+    {"a word load from SRAM (lw), 32 in a run", rv_lw, 32, 0, 32, {32, 0}},
+    {"a load and an addi that reads it", rv_lw_use, 16, 0, 48, {48, 0}},
+    {"a load and a store of its value", rv_lw_st, 16, 0, 32, {32, 0}},
+    {"a load and a load through it", rv_lw_addr, 16, 0, 48, {48, 0}},
+    {"a load and a branch on it, not taken", rv_lw_br, 16, 0, 48, {48, 0}},
+    {"a store to SRAM (sw), 32 in a run", rv_sw, 32, 0, 32, {32, 0}},
+    {"a taken branch onto a 32-bit instruction on a word", rv_bt, 16, 0, 32, {31, 0}},
+    {"a taken branch onto a 32-bit instruction off its word", rv_bt_off, 16, 0, 48, {46, 0}},
+    {"a not-taken branch, 32 in a run", rv_bn, 32, 0, 32, {32, 0}},
+    {"a j onto a 32-bit instruction on a word", rv_j, 16, 0, 32, {31, 0}},
+    {"a j onto a 32-bit instruction off its word", rv_j_off, 16, 0, 48, {46, 0}},
+    {"a jal and its c.jr ra, the return onto a word", rv_jal_ret, 16, 0, 64, {63, 0}},
+    {"a jal and its c.jr ra, the return off a word", rv_jal_ret_off, 16, 0, 80, {79, 0}},
+    {"a cm.push of three (ra, s0, s1)", rv_pp3, 16, 0, 64, {64, 0}},
+    {"a cm.pop of three", rv_pp3, 16, 1, 64, {64, 0}},
+    {"a cm.push of thirteen", rv_pp13, 8, 0, 112, {112, 0}},
+    {"a cm.pop of thirteen", rv_pp13, 8, 1, 112, {112, 0}},
+    {"a jal, a cm.push of one and a cm.popret of one", rv_popret1, 16, 0, 128, {127, 0}},
+    {"a jal, a cm.push of three and a cm.popret of three", rv_popret3, 16, 0, 176, {175, 0}},
+    {"a jal, a cm.push of thirteen and a cm.popret of thirteen", rv_popret13, 16, 0, 496, {495, 0}},
+    {"a csrrci of mstatus, 32 in a run", rv_csr, 32, 0, 32, {32, 0}},
+    {"a csrsi and a csrci of mstatus.MIE", rv_mie_pair, 16, 0, 32, {32, 0}},
+    {"a load from the SIO and an addi", rv_sio_ld, 16, 0, 32, {32, 0}},
+    {"a store to the SIO and an addi", rv_sio_st, 16, 0, 32, {32, 0}},
+    {"a queue visit in line: lbu, lbu, bne not taken", rv_visit, 16, 0, 64, {64, 0}},
+    {"a queue visit through a call to empty() out of line", rv_visit_call, 16, 0, 176, {176, 0}},
+};
+
+[[COST_PLACED]] void cost_ecall(uint32_t* r) { rv_x(r, 0); }
+[[COST_PLACED]] void cost_ecall_raise(uint32_t* r) { rv_x(r, 1); }
+[[COST_PLACED]] void cost_csrsi(uint32_t* r) { rv_x(r, 2); }
+[[COST_PLACED]] void cost_store(uint32_t* r) { rv_x(r, 3); }
+
+// The record: 0 before, 1 the exception's first, 2 its last, 3 the
+// software interrupt's first, 4 its last, 5 the label the mret lands on.
+constexpr CostEvent cost_events[] = {
+    {"an ecall to its handler's first instruction, through the table's jump", cost_ecall, 0, 1, 5, {5, 0}},
+    {"an mret to the label it points at", cost_ecall, 2, 5, 2, {3, 0}},
+    {"an mret into the pending software interrupt, through the jump", cost_ecall_raise, 2, 3, 7, {6, 0}},
+    {"the csrsi that finds it pending, to its handler through the jump", cost_csrsi, 0, 3, 6, {5, 0}},
+    {"the store that raises it with MIE set, to its handler through the jump", cost_store, 0, 3, 6, {7, 0}},
+};
+#endif
+
+/// The least of 16 masked calls (one uncounted first) of each of the row's
+/// two intervals.
+struct CostLeast {
+    uint32_t a, b;
+};
+
+[[COST_PLACED]] CostLeast cost_least(void (*fn)(uint32_t*)) {
+    uint32_t record[3] = {0, 0, 0};
+    {
+        P::CriticalSection cs;
+        fn(record);
+    }
+    CostLeast least{0xFFFF'FFFFu, 0xFFFF'FFFFu};
+    for (int i = 0; i < 16; ++i) {
+        {
+            P::CriticalSection cs;
+            fn(record);
+        }
+        const uint32_t a = record[1] - record[0];
+        const uint32_t b = record[2] - record[1];
+        least.a = a < least.a ? a : least.a;
+        least.b = b < least.b ? b : least.b;
+    }
+    return least;
+}
+
+/// The least of 16 events (one uncounted first) of one interval; with
+/// from == to, the least of the count the record holds there. The
+/// Cortex-M33's events run unmasked (an SVC under PRIMASK escalates to a
+/// HardFault, and PendSV must be taken); Hazard3's masked, the sequence
+/// itself unmasking with mie holding MSIE alone.
+[[COST_PLACED]] uint32_t cost_event(const CostEvent& e) {
+    uint32_t record[7] = {};
+    uint32_t least = 0xFFFF'FFFFu;
+    for (int i = 0; i <= 16; ++i) {
+        if constexpr (core_kind == CoreKind::hazard3) {
+            P::CriticalSection cs;
+            e.fn(record);
+        } else {
+            e.fn(record);
+        }
+        const uint32_t v = e.from == e.to ? record[e.from] : record[e.to] - record[e.from];
+        if (i > 0 && v < least) {
+            least = v;
+        }
+    }
+    return least;
+}
+
+/// "N.NN": a cost per unit in hundredths.
+[[COST_PLACED]] void print_hundredths(uint32_t v) {
+    print(serial, v / 100u, ".", (v % 100u) / 10u, v % 10u);
+}
+
+/// One figure's line: the run, its cost per unit, the model's, and FINDING
+/// where the two part by more than the run's quantization; true when the
+/// run is within one count of the value stated.
+[[COST_PLACED]] bool cost_line(const char* what, uint32_t run, uint32_t units, uint32_t model, uint32_t stated) {
+    print(serial, "    ", what, ": ", run, " cycles");
+    if (units > 1u) {
+        print(serial, " (");
+        print_hundredths(run * 100u / units);
+        print(serial, " each)");
+    }
+    print(serial, ", the model ", model);
+    // A finding is half a cycle a unit or more off the model: a run's two
+    // ends can hide a cycle or two of it behind the bridge's loads (a run
+    // of sixteen taken branches onto words reads 31, not 32), and a model
+    // counts whole cycles.
+    const uint32_t off_model = run > model ? run - model : model - run;
+    if (2u * off_model >= units) {
+        print(serial, "  FINDING");
+    }
+    const uint32_t off = run > stated ? run - stated : stated - run;
+    if (off > 1u) {
+        print(serial, "  OFF: stated ", stated);
+    }
+    print(serial, crlf);
+    return off <= 1u;
+}
+
+/// Every row and every event once; `setting` the column stated (DISFOLD
+/// clear 0, set 1). Returns the figures within one count of their stated
+/// values, and counts them in `rows`.
+[[COST_PLACED]] uint32_t cost_pass(uint8_t setting, uint32_t& rows) {
+    const uint32_t ruler = cost_least(COST_RULER).a;
+    print(serial, "    the ruler's two loads: ", ruler, " cycles", crlf);
+    uint32_t within = 0;
+    rows = 0;
+    for (const CostRow& r : cost_rows) {
+        const CostLeast l = cost_least(r.fn);
+        const uint32_t run = (r.span == 0u ? l.a : l.b) - ruler;
+        within += cost_line(r.what, run, r.units, r.model, r.measured[setting]) ? 1u : 0u;
+        ++rows;
+    }
+    for (const CostEvent& e : cost_events) {
+        const uint32_t v = cost_event(e);
+        if (e.from == e.to) {
+            // A count, not a span: judged equal to the value stated.
+            print(serial, "    ", e.what, ": ", v, crlf);
+            within += v == e.measured[setting] ? 1u : 0u;
+        } else {
+            within += cost_line(e.what, v - ruler, 1u, e.model, e.measured[setting]) ? 1u : 0u;
+        }
+        ++rows;
+    }
+    return within;
+}
+
+[[COST_PLACED]] void ti_cost() {
+    console_drain();
+#if defined(BRIO_RP2350_CORE_M33)
+    const uint32_t actlr = SCnSCB->ACTLR;
+    print(serial, "  ACTLR ", hex(actlr), ", CONTROL ", hex(__get_CONTROL()),
+          " (FPCA clear: a basic frame on every exception)", crlf);
+    print(serial, "  with ACTLR.DISFOLD clear (the dual issue on, as every program runs):", crlf);
+    uint32_t rows = 0;
+    const uint32_t clear_ok = cost_pass(0, rows);
+    bench.verdict("DISFOLD clear: every figure within one count of the value this letter states",
+                  clear_ok == rows);
+    SCnSCB->ACTLR = actlr | (1u << 2);
+    __DSB();
+    __ISB();
+    const bool set_read = (SCnSCB->ACTLR & (1u << 2)) != 0u;
+    print(serial, "  with ACTLR.DISFOLD set (the dual issue off):", crlf);
+    const uint32_t set_ok = cost_pass(1, rows);
+    SCnSCB->ACTLR = actlr;
+    __DSB();
+    __ISB();
+    bench.verdict("ACTLR.DISFOLD read back set for the second pass", set_read);
+    bench.verdict("DISFOLD set: every figure within one count of the value this letter states",
+                  set_ok == rows);
+    bench.verdict("ACTLR put back to the value it was read with, DISFOLD clear",
+                  SCnSCB->ACTLR == actlr && (actlr & (1u << 2)) == 0u);
+#else
+    uint32_t rows = 0;
+    const uint32_t ok = cost_pass(0, rows);
+    bench.verdict("every figure within one count of the value this letter states", ok == rows);
+#endif
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_platform - the RP2350 platform on ", arch_name(),
           " (datasheet 3.1, 3.8, 7.5, 12.15), clk_sys=", SysClock::hz, " Hz", crlf);
@@ -1274,6 +1884,7 @@ int main() {
                  false);
     bench.letter('x', "break_here() (stops the console)", tx_break, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
+    bench.letter('i', "the cost models the Rubato bounds are drawn with, in cycles", ti_cost);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

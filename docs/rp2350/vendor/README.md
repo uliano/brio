@@ -1,13 +1,15 @@
 # RP2350 documents of record
 
-The PDFs are local symlinks (git-ignored, `*.pdf` in this directory) to
-the user's copies; the files are Raspberry Pi's own from
-https://datasheets.raspberrypi.com/. Cite by SECTION, never by page:
+The PDFs are local copies (git-ignored, `*.pdf` in this directory) of
+the user's; the files are Raspberry Pi's own from
+https://datasheets.raspberrypi.com/, and the core's manual ARM's own from
+https://developer.arm.com/documentation/. Cite by SECTION, never by page:
 pages move between builds, section numbers do not.
 
 | Document | Build | What brio takes from it |
 |----------|-------|-------------------------|
 | RP2350 Datasheet | build d126e9e | THE document of record: 2.1 the bus fabric and the atomic register aliases (2.1.3), 3.1 SIO (3.1.2 the GPIO path, 3.1.8 the RISC-V platform timer), 3.2 the interrupt numbering both architectures share, 3.8 the Hazard3 core (3.8.4 traps and interrupts, 3.8.1.23 `wfi`, 3.8.6.1 the Xh3irq controller), 3.9 the architecture select, 3.5.8 the rescue reset, 5.1/5.9 the bootrom and the IMAGE_DEF, 7.5 subsystem resets, 8.1 clocks, 8.2 XOSC, 8.3 ROSC, 8.5 the tick generators, 8.6 the PLL, 9 GPIO, 12.15 the system control registers (SYSINFO, TBMAN) - and Appendix C (the steppings) and Appendix E (the errata) in the same book |
+| Arm Cortex-M33 Processor Technical Reference Manual | document 100230, issue 08 | 1.4.1 (the processor core: its "limited dual-issue of common 16-bit instruction pairs") and 3.4 (the Auxiliary Control Register, ACTLR, whose DISFOLD bit turns that dual issue off) - read by `test_rp2350_platform`'s cost letter. The manual gives no instruction timing: the cycle figures of this core are that letter's measurements ([../platform.md](../platform.md), "Bench findings") |
 | Hardware design with RP2350 | the 2025 build | the minimal design every board here derives from: the crystal circuit, the flash, the decoupling, the debug port |
 | Raspberry Pi Debug Probe product brief | - | the probe's two ports and its cables |
 

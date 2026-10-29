@@ -29,7 +29,8 @@ itself, `Mtime`, a 64-bit counter of microseconds that both
 architectures read. The platform's suite measures with it and with the
 two system timers of [timer.md](timer.md): `Timer<0>` in microseconds,
 the idle letter's rescue clock among its uses, and `Timer<1>` on clk_sys
-counting cycles, the unit of the rows of letters `w` and `o`.
+counting cycles, the unit of the rows of letters `w`, `o` and `i` - the
+last the cost models the preemptive kernel's bounds are drawn with.
 
 The smallest use, the start of a program, is an excerpt of the block
 under "How to use it" below:
@@ -121,8 +122,12 @@ the same), 2.2.6 (the SIO's zero-wait access), 3.8.4
 (Hazard3's trap entry and `mret`), 3.8.4.2.1 (the software interrupt and
 the SIO's RISCV_SOFTIRQ register, 3.1.11), 3.8.6.1 (Xh3irq's preemption,
 which is not used), 3.8.7 (Hazard3's instruction cycle counts) and 3.8.8
-(its configuration); and ARM's ARMv8-M Architecture Reference Manual
-(DDI 0553) for EXC_RETURN. The drivers: `brio/rp2350/platform.hpp` (the
+(its configuration); ARM's ARMv8-M Architecture Reference Manual
+(DDI 0553) for EXC_RETURN; and ARM's Cortex-M33 Technical Reference
+Manual (100230, issue 08) for 1.4.1 (the core's limited dual issue of
+16-bit instruction pairs) and 3.4 (ACTLR and its DISFOLD bit) - the
+manual gives no instruction timing, so the cycle figures of this core
+are the suite's own ("Bench findings"). The drivers: `brio/rp2350/platform.hpp` (the
 brio Platform itself, and the Rubato platform beside it), `core.hpp`
 with `core_m33.hpp` and `core_hazard3.hpp` (the one file of the stratum
 that asks which processor is in the socket, and its two halves),
@@ -545,19 +550,19 @@ architectures from one source. Where the halves differ, both numbers:
 
 | What | Cortex-M33 | Hazard3 |
 |------|-----------|---------|
-| the suite | 70 pass, 0 fail | 70 pass, 0 fail |
-| 200 kernel ticks on the ruler | 200000 us, 0 ppm | 200000 us, 0 ppm |
+| the suite | 75 pass, 0 fail | 71 pass, 0 fail |
+| 200 kernel ticks on the ruler | 200000 us, 0 ppm | 199999 to 200000 us, 0 to 5 ppm |
 | `idle()` calls covering 200 ticks | 200 | 200 |
-| awake in that span | 3 us of 199960 | 1 us of 199397 |
-| a wakeup raised INSIDE the mask | back in 3 us | back in 1 us |
+| awake in that span (about 199.1 to 200.0 ms) | 1 to 3 us | 1 to 3 us |
+| a wakeup raised INSIDE the mask | back in 0 to 4 us | back in 3 to 4 us |
 | a 5 ms masked window's ticks | 1 | 5 |
-| `Resets::release()` to RESET_DONE | 1 us | 0 us |
+| `Resets::release()` to RESET_DONE | 0 to 1 us | 0 to 1 us |
 | edge positions walked, lost / a period late | 4800, 0 / 0 | 3200, 0 / 0 |
-| the comparator's edge, the core asleep, to the handler / to the loop | 31 / 79 cycles | 31 / 90 (36 / 95 in standby) |
-| the PWM line's edge, the same | 31 / 76 cycles | 36 / 92 (41 / 97 in standby) |
+| the comparator's edge, the core asleep, to the handler / to the loop | 31 / 79 cycles | 30 / 88 (35 / 93 in standby) |
+| the PWM line's edge, the same | 31 / 76 cycles | 35 / 92 (40 / 97 in standby) |
 | SysTick's edge, the same (the Cortex-M33's tick) | 26 / 88 cycles | - |
 | kernel turns over 100 quiet ticks | 100 | 100 |
-| `idle()` with a line pending / a quiet turn that finds one | 57 / 167 cycles | 82 / 175 cycles |
+| `idle()` with a line pending / a quiet turn that finds one | 57 / 179 cycles | 84 / 185 cycles |
 
 - The chip reports manufacturer 0x493, part 0x0004 and STEPPING 0x2 - A2,
   which is what makes RP2350-E9 live here - with PACKAGE_SEL saying
@@ -582,7 +587,8 @@ architectures from one source. Where the halves differ, both numbers:
   on the Hazard3 half and loses it on the Arm half.
 - THE LOST-WAKEUP WINDOW IS NOT THERE, measured rather than assumed: a
   line made pending with interrupts masked and `idle()` entered
-  immediately after comes back in 3 us on one half and 1 us on the other,
+  immediately after comes back in 0 to 4 us on one half and 3 to 4 us on
+the other,
   with the handler served once after the unmask - where a core that
   slept through it would have waited for the next tick, up to a
   millisecond (letter `j`: a wake pending AT the call, on the
@@ -608,19 +614,19 @@ architectures from one source. Where the halves differ, both numbers:
   on the Cortex-M33 and 3200 on Hazard3 (ten runs of the letter on the
   Arm half): none took the rescue, none ended a period late; SysTick's
   edge finds the core asleep from D = 88, 81 cycles after the earliest. The edge crosses the whole path: the earliest lands 80 to
-  89 cycles before the sleep takes it (a fixed lead of bus reads sits
+  92 cycles before the sleep takes it (a fixed lead of bus reads sits
   between the placement and the loop, longer than the path from the
   loop's masked check to the sleep instruction, about 20 cycles in
-  either listing), and from D = 81 to 90 on the edge finds the core asleep.
+  either listing), and from D = 81 to 93 on the edge finds the core asleep.
 - WHAT A WAKE COSTS: from an edge that finds the core asleep to the
   handler's first statement 31 cycles on the Cortex-M33 for a line and 26
   for SysTick - its exception entry, the vector fetched with the state
-  saved - and 31 to 36 on
+  saved - and 30 to 35 on
   Hazard3, whose dispatch is the crt's own (the trap, the caller-saved
   registers, `meinext` for a line); releasing the power request adds 5
   cycles a wake there, the core waiting for its power-up acknowledge as
   3.8.9 says. To the caller's loop, the handler whole and the return: 76
-  to 88 cycles on one half, 90 to 97 on the other. The datasheet gives
+  to 88 cycles on one half, 88 to 97 on the other. The datasheet gives
   neither core's entry in cycles.
 - ONE TURN PER INTERRUPT, on both halves (letter `o`): a Tenuto pack of
   three quiet AOs, two of them with a periodic time event, turned as
@@ -628,9 +634,9 @@ architectures from one source. Where the halves differ, both numbers:
   ticks, a turn more or fewer allowed at the window's ends. On TIMER1's
   cycles, `idle()` with a line already pending (the sleep falls through,
   the unmask takes the line's handler) costs 57 cycles on the Cortex-M33
-  and 82 on Hazard3, and a quiet turn entered masked whose `idle()` finds
-  one 167 and 175: the loop's own share - the time events' `process()`,
-  the empty `step()`, the masked check - is 110 and 93 cycles. Letter `h`
+  and 84 on Hazard3, and a quiet turn entered masked whose `idle()` finds
+  one 179 and 185: the loop's own share - the time events' `process()`,
+  the empty `step()`, the masked check - is 122 and 101 cycles. Letter `h`
   (200 `idle()` calls over 200 ticks) proves the same of a bare `idle()`
   loop, without the kernel.
 - WHAT THE FULL-SPEED COMPARATOR COSTS THE LETTER: the platform timer is
@@ -670,6 +676,144 @@ architectures from one source. Where the halves differ, both numbers:
 - SYSINFO's PLATFORM register reads 0x00000000 on this part, ASIC bit
   included, while TBMAN's reads 0x00000001; the two registers and what
   each is for are in the findings above.
+
+**The cost models** - letter `i`, four verdicts on the Cortex-M33 and
+one on Hazard3, ten runs of `z` on each half with every figure the same
+in all ten: the cycle figures `test_rp2350_rubato`'s bounds are drawn
+with. Each primitive is a run of K identical units of hand-written
+assembly (K 32 for a one-cycle unit, 16 or 8 for a longer one) in the
+flash with the XIP cache warm - the memory the preemptive kernel's paths
+run from - between two loads of TIMER1's TIMERAWL, the suite's cycle
+ruler: the run called once uncounted, then 16 times masked, the least of
+the 16 less the ruler's own two loads (3 cycles). An exception or a trap
+is one event between two loads, the second the handler's first
+instruction or the instruction its return lands on, the least of 16. A
+run's two ends can hide a cycle or two behind the bridge's loads (sixteen
+taken branches read 31, not 32), so a figure is a FINDING where it is
+half a cycle a unit or more off the published table a count of the core
+would otherwise borrow - the Cortex-M4's (DDI 0439B table 3-1), the
+nearest, on one half, the datasheet's 3.8.7 on the other - and the
+letter's verdict is that every run lies
+within one count of the cost it states as measured. ARM's manual for the
+Cortex-M33 (100230) gives no instruction timing: these rows are the
+core's figures on this chip. On the Cortex-M33 every row runs twice, with
+ACTLR.DISFOLD clear, as every program runs, and set, which turns off the
+core's "limited dual-issue of common 16-bit instruction pairs" (TRM
+1.4.1, 3.4); ACTLR is put back and read back. The letter's code lies
+after every other function of the image and the letter runs last in
+`z`: run in its place, it lengthened the wake of letter `j` after it by 2
+to 3 us on both halves.
+
+| Cortex-M33, cycles a unit | DISFOLD clear | set | Cortex-M4 table |
+|---|---|---|---|
+| an ALU instruction, 16-bit or 32-bit | 1 | 1 | 1 |
+| a load from SRAM, byte or word, 32 in a run | 1 | 1 | 2 |
+| a load and an instruction that does not read it | 2 | 2 | 3 |
+| a load and an instruction that reads it | 3 | 3 | 3 |
+| a literal load, 32 in a run; with an add.w | 1.21; 2.12 | the same | 2; 3 |
+| a literal load and a load through it | 3.5 | 3.5 | 4 |
+| a store to SRAM | 1 | 1 | 1 |
+| a taken branch (beq, b) onto a 16-bit instruction on a word | 2 | 2 | 3 |
+| a taken beq.w onto a 32-bit instruction off its word | 3 | 3 | 3 |
+| a not-taken bne after a 32-bit add.w (the pair) | 2 | 2 | 2 |
+| a not-taken bne after a 16-bit cmp (the pair) | 1 | 2 | 2 |
+| a not-taken bne, 32 in a run | 0.5 | 1 | 1 |
+| an IT and its one instruction (the pair) | 1.06 | 2 | 2 |
+| a BL; a BL and its BX LR | 2; 4 | the same | 4; 6 |
+| a BL, a push of two and a pop of two with the PC | 9 | 9 | 13 |
+| a push or a pop of two; of eight | 2; 8 | the same | 3; 9 |
+| an MRS and an MSR of PRIMASK (the pair) | 2 | 2 | 4 |
+| a DSB; an ISB; a CPSID | 2; 2; 1 | the same | 4; 4; 1 |
+| a load of SIO's CPUID and an add.w | 2 | 2 | 3 |
+| the request's store to ICSR, DSB and ISB | 5.56 | 5.56 | 9 |
+| two 16-bit ALU instructions; two 16-bit byte loads | 2; 2 | the same | 2; 4 |
+| a queue visit in line: ldrb, ldrb, cmp, bne not taken | 4 | 5 | 6 |
+| the same 32-bit, its queue's address a literal | 6 | 7 | 8 |
+| a queue visit through a call to `empty()` out of line | 12.5 | 14.5 | 18 |
+| an SVC to its handler's first instruction | 13 | 13 | 13 |
+| a BX LR of EXC_RETURN, and the return to thread mode | 10 | 10 | 14 |
+| a pop of two with the PC loading EXC_RETURN, and the return | 12 | 12 | 18 |
+| a BX LR into a pending PendSV (the tail-chain) | 7 | 7 | 8 |
+| a pop of two with the PC into a pending PendSV | 9 | 9 | 12 |
+| PendSV pended under PRIMASK: the MSR that lifts it, to the handler | 12 | 12 | 15 |
+| PendSV requested: the store to ICSR, DSB, ISB, to the handler | 14 | 14 | 21 |
+| PendSV's BX LR back onto the instruction after that ISB, and eight adds | 21 | 21 | 22 |
+
+What the rows say of the Cortex-M33:
+
+- A load costs one cycle, and a second only when the next instruction
+  reads what it loaded, as an operand or an address; a store's data is
+  read late and waits for nothing. A literal load reads the flash through
+  the XIP cache, as the fetch does, and costs 1.21 cycles in a run of 32
+  and about 1 beside other instructions. The Cortex-M4's table charges 2
+  for every load.
+- A taken branch, a BL and a BX cost 2, one more onto a 32-bit instruction
+  off its word; PUSH and POP of N registers N, a POP into the PC N + 3;
+  MRS and MSR 1 each; DSB and ISB 2, the DSB after a store to the System
+  Control Space about 2.5. Every one of these is under the Cortex-M4's
+  figure.
+- THE DUAL ISSUE IS A FOLD. With DISFOLD clear, a not-taken conditional
+  branch after a 16-bit instruction costs nothing, and so does an IT;
+  two 16-bit ALU instructions, or two 16-bit loads, never issue
+  together. With DISFOLD set each of those costs its cycle, and nothing
+  else in the table moves. A queue visit as the kernel compiles it in
+  line pays its cmp and bne one cycle together.
+- THE QUEUE VISIT IN LINE SAVES 6.5 CYCLES A VISIT, read directly: 12.5
+  through a call to `empty()` (alternating 12 and 13 with the units'
+  alignment) against 6 for the 32-bit in-line visit `activate()` makes.
+  The measured model counts 13 against 6, 7; the Cortex-M4's table 18
+  against 8, 10. Built with the visit out of line and in line, the
+  preemptive suite's road 1, scan, post under the mask, road-2 post and
+  depth 2 differ by 13 cycles over two visits, 29 over four, 22 over
+  three, 31 over four and 5 over one: 5 to 7.75 a visit, which the
+  measured model predicts and the Cortex-M4's table overstates by about
+  a third.
+- THE EXCEPTIONS: an SVC reaches its handler's first instruction in 13
+  cycles, its own and the entry's 12, the Cortex-M4's figure. The return
+  is faster: 10 from the BX LR that loads EXC_RETURN to the thread's next
+  instruction (the table's 2 and 12 make 14), N + 10 from a POP of N with
+  the PC; the tail-chain 7 from the BX, N + 7 from such a POP. PendSV
+  pended under PRIMASK is taken behind one more instruction after the MSR
+  that lifts the mask, 12 cycles from the MSR to the handler; requested by
+  the store to ICSR, its DSB and its ISB, it is taken with nothing behind
+  the ISB, 14 cycles from the store, and the return onto the instruction
+  after that ISB takes 3 cycles longer than any other return measured.
+
+| Hazard3, cycles a unit | measured | 3.8.7 |
+|---|---|---|
+| an ALU instruction, 32-bit or 16-bit | 1 | 1 |
+| a load from SRAM, byte or word, 32 in a run | 1 | 1 |
+| a load and an instruction that reads it: an addi, a load's address, a branch | 3 | 3 |
+| a load and a store of its value (the pair) | 2 | 2 |
+| a store to SRAM | 1 | 1 |
+| a taken branch or a `j` onto a 32-bit instruction on its word | 1.93 | 2 |
+| the same off its word | 2.87 | 3 |
+| a not-taken branch | 1 | 1 |
+| a `jal` and its `c.jr ra`, the return onto a word; off a word | 3.93; 4.93 | 4; 5 |
+| cm.push or cm.pop of three; of thirteen | 4; 14 | 4; 14 |
+| a `jal`, a cm.push and a cm.popret of one; of three; of thirteen | 7.93; 10.93; 30.93 | 8; 11; 31 |
+| a csrrci of mstatus; a csrsi and a csrci (the pair) | 1; 2 | 1; 2 |
+| a load from the SIO, a store to it, each with an addi | 2 | 2 |
+| a queue visit in line: lbu, lbu, bne not taken | 4 | 4 |
+| a queue visit through a call to `empty()` out of line | 11 | 11 |
+| an `ecall` to its handler's first instruction, through the table's jump | 5 | 5 |
+| an `mret` to the code it points at | 3 | 2 |
+| an `mret` into a pending software interrupt, through the jump (the entry taken at `ecall`'s 3) | 6 | 7 |
+| the `csrsi` that finds it pending, to its handler through the jump (the same) | 5 | 6 |
+| the store that raises it with MIE set, to its handler through the jump (the same) | 7 | 6 |
+
+What the rows say of Hazard3: 3.8.7 holds, its footnotes included - a
+load stalls the next instruction only when that instruction reads it in
+its second stage (an addi, a load's address, a branch), not when it
+stores it; a cm.popret of N costs N + 2, 4 for one; and every transfer
+onto a 32-bit instruction off its word pays one cycle. One figure parts
+from the table: `mret` costs 3, not 2. The section gives no interrupt
+entry; measured with the table's jump, the software interrupt reaches its
+handler 6 cycles after the `mret` it lands behind, 5 after the `csrsi`
+that finds it pending and 7 after the store that raises it with MIE set,
+two instructions retiring behind that store (letter k of the preemptive
+suite) - an entry of 1 behind an `mret` and 2 behind the others, where
+`ecall`'s own is 3.
 
 **The preemptive kernel** - the reference suite is `test_rp2350_rubato`,
 one source and two images on the WeAct RP2350B at 150 MHz: 59 verdicts
@@ -713,7 +857,7 @@ cost taken off:
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
 | road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 106 / 106 / 135 | 179 / 179 / 551 |
-| road 1: the path's count by the release listing, and the bound | 130, 214 | 175, 280 |
+| road 1: the path's count by the release listing, and the bound | 102, 177 | 175, 284 |
 | road 1 at depth 2, over a preempting dispatch | 96 | 170 |
 | `activate()` over four empty queues | 65 | 67 |
 | a post that asks nothing | 60 | 53 |
@@ -723,7 +867,7 @@ cost taken off:
 | stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 652 to 688 (632 / 488) | 904 (928 / 736) |
 | core 1, road 1 from its doorbell's handler at its base, a send from core 0 | 110 | 185 |
 | core 1, road 1 from its alarm over a dispatch | 102 | 175 |
-| core 1's paths' counts, and the bounds | 138 and 128; 166 and 154 | 182 and 172; 219 and 207 |
+| core 1's paths' counts, and the bounds | 107 and 100; 129 and 120 | 181 and 171; 218 and 206 |
 | core 1's stack high-water (bytes), the deepest sample in a dispatch / in an interrupt | 236 (216 / 88) | 348 (352 / 192) |
 
 The pair body costs core 0 four cycles a scheduler entry on the
@@ -742,15 +886,29 @@ events over the fastest are the ones a tick, a refill or the console
 line landed in, and the bound judges the others: on Hazard3 this image,
 larger by core 1's letter, takes an XIP refill in one to three of the
 hundred events of every run (286 to 551 cycles), where the image with
-the single body took none. The Cortex-M33's measured paths run under
-the counts drawn with the Cortex-M4's table, the model the suite takes
-for want of the M33's own figures: 24 cycles over on road 1 and 15 to
-79 on the other paths, 26 to 28 on core 1's. On Hazard3 the model,
-3.8.7's counts with the interrupt's entry (which the section does not
-give) taken at `ecall`'s, is 3 to 4 cycles under the measurement on
-road 1, depth 2, the post under the mask and core 1's two paths, and 1
-to 2 over on the road-2 post, the scan and the quiet post. Each queue's emptiness is
-its two cursors compared in line, no call. A post under the mask
+the single body took none. Every count is drawn with the figures this
+suite's letter `i` measures ("The cost models", above). Against the
+measurement the counts lie within a cycle on the paths that start and
+end in thread mode - the scan, the quiet post, the road-2 post and
+`arm()` - and 2 to 4 cycles under it on those that start in an interrupt
+handler or under the mask and end at a dispatch's first statement: road
+1, depth 2, the post under the mask and core 1's two paths, on both
+halves. That residue is not placed: every primitive those paths add over
+the others - the tail-chain from a handler's POP of the PC, PendSV taken
+at the MSR, the software interrupt behind an `mret` and behind a
+`csrsi` - measures at its model in letter `i`. Counted with the
+Cortex-M4's table instead, the Cortex-M33's paths come out 24 cycles
+over the measurement on road 1 and 15 to 79 over on the others; with the
+core's dual issue turned off (ACTLR.DISFOLD set in a build of this suite
+kept off the tree) road 1 measured 111, the scan 69, the quiet post 62,
+the road-2 post 317, depth 2 100 and the post under the mask 124, where
+the measured model without the fold counts 105, 68, 60, 313, 95 and 119:
+the fold is 2 to 14 cycles of each path, and the Cortex-M4's counts
+(130, 80, 80, 382, 118, 144) are not reached with it off either. On
+Hazard3 the measured model is 3.8.7 with `mret` at 3 and the interrupt's
+entries measured, and its counts lie within a cycle or two of 3.8.7's.
+Each queue's emptiness is its two cursors compared in line, no call. A
+post under the mask
 lengthened by a kernel tick or an XIP refill reached 395 cycles on the
 Cortex-M33 and 257 on Hazard3, and is reported, not judged. Core 0's
 high-water marks are now those of core 1's letter, whose Low, High and
