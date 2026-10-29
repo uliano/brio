@@ -1001,11 +1001,12 @@ sleep when every queue is empty), and a preempting dispatch never
 sleeps. The two-core model is unchanged: a Rubato per core, the
 doorbell's handler an interrupt handler like any other. Where two cores
 share one vector table, as on the RP2040, the one entry of the
-scheduler's exception serves two kernels - by a body that asks which
-core took it, built, or by a table per core, not built, which of the two
-is an open decision - and the body that asks is measured on the RP2040,
-a Rubato on each core preempting at once through the one entry ([the
-RP2040 platform page](../rp2040/platform.md)).
+scheduler's exception serves two kernels through a body that asks which
+core took it, two cycles a request more than the single body; a table
+per core would spare them at the price of a second table every bound
+vector must be kept in step with, and is declined. The body that asks
+is measured on the RP2040, a Rubato on each core preempting at once
+through the one entry ([the RP2040 platform page](../rp2040/platform.md)).
 
 The loans ([payloads](#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
 A `Lease::dispatch` borrower precedes its lender in the list, so a loan

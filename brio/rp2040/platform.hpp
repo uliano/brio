@@ -258,9 +258,10 @@ static_assert(Platform<Rp2040Platform<1>>);
  * which core took it, rp2040/schedule.hpp's scheduler_exception_pair<K0,
  * K1>(), and each core calls scheduler_init() itself, before it enables
  * its interrupts (PendSV's priority is a register of each core); the SVC
- * body serves both cores as it is. Which of two ways a two-kernel program
- * should take - that body, or a vector table per core - is an open
- * decision, rp2040/schedule.hpp's header states both with their costs.
+ * body serves both cores as it is. A vector table per core would spare
+ * the question for 192 bytes and a second table to keep in step; it is
+ * declined, and rp2040/schedule.hpp's header states both ways with their
+ * costs.
  *
  * The CriticalSection is still PRIMASK alone, per core: the peripheral
  * handlers still share one priority and never nest among themselves; the

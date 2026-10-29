@@ -59,7 +59,7 @@
  * platform type). scheduler_return() needs no question: it steps over the
  * SVC frame on the stack it finds, which is the core's own.
  *
- * THE OTHER ROAD, NOT BUILT: a vector table per core. Core 1 launched
+ * THE OTHER ROAD, DECLINED: a vector table per core. Core 1 launched
  * with a table of its own (the launch protocol's VTOR word is the table
  * core 1 runs with, 2.8.2), identical to core 0's but for entry 14, which
  * would hold a single body bound to K1 - so each core's PendSV is
@@ -71,8 +71,9 @@
  * launch to take it (Core1::launch passes this core's SCB->VTOR); and a
  * second spelling of PendSV's binding that a program must keep apart
  * from the first. What it saves: the two cycles above, and the question
- * asked at every request. Which road a two-kernel program takes is an
- * open decision (docs/rp2040/platform.md, "Not covered yet").
+ * asked at every request. Two cycles a request do not pay for a second
+ * table every bound vector must be kept in step with, so the pair body is
+ * the road a two-kernel program takes.
  *
  * What this file assumes, beyond cortexm/schedule.hpp's own list: K0 is
  * a Rubato on core 0's platform type and K1 one on core 1's (checked at

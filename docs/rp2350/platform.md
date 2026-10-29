@@ -779,9 +779,10 @@ Driver gaps, each with its reason:
   more urgent on Hazard3 - which is why `Irq` carries no priority verb
   at all.
 - Rubato on core 1, on either half: both crts give a pair one table, so
-  the scheduler's vectors would serve two kernels, and the body that
-  asks the core which kernel to run is the two-kernel question the
-  RP2040 shares. Born when that question is answered; until then
+  the scheduler's vectors would serve two kernels through a body that
+  asks the core which kernel to run, the way the RP2040 takes
+  ([../rp2040/platform.md](../rp2040/platform.md), "How to use it"). That
+  body is not written for either half yet, and until it is
   `Rp2350RubatoPlatform<1>` does not compile.
 - `idle_until()`. The timebase runs while the core sleeps on either
   half, in the plain idle path and through a standby; the one rung that

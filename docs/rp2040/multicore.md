@@ -226,7 +226,7 @@ the sending core's ceiling never consulted. With a Rubato on each core
 the one PendSV entry of the shared vector table takes
 `rp2040/schedule.hpp`'s `scheduler_exception_pair<K0, K1>()`, which
 reads SIO's CPUID and returns into the scheduler of the core that took
-it; a vector table per core is the other way, not built
+it; a vector table per core, the other way, is declined
 ([platform.md](platform.md), "How to use it"). Both are measured by
 `test_rp2040_rubato` on the WeAct RP2040 at 125 MHz ("Bench findings"
 below, and [platform.md](platform.md)'s "Bench findings" for the rest of

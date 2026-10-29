@@ -316,8 +316,8 @@ extern "C" [[gnu::naked]] void isr_svcall() { brio::scheduler_return(); }
 Core 0's `main()` is the single-kernel one above with `K0`, and
 `Core1::launch(&core1_main)` before it enables its interrupts.
 
-An open decision: how one table serves two kernels. The pair body is
-one of two ways. The other is a vector table per core: core 1 launched
+Why one table serves two kernels. The pair body is one of two ways.
+The other is a vector table per core: core 1 launched
 with a table of its own (the launch protocol's VTOR word), identical to
 core 0's but for PendSV's entry, which would hold the single body bound
 to `K1` - each core's PendSV then the core stratum's thirteen
@@ -327,9 +327,10 @@ requires, every vector a program binds present in both; a crt that
 defines it and a launch that takes it (today the crt holds one table and
 `Core1::launch` passes core 0's VTOR); a second binding of PendSV a
 program must keep apart from the first. What it saves: the pair's two
-cycles and its question at every request. The pair body is what is
-built and measured ("Bench findings"); which road a two-kernel program
-takes is not decided ("Not covered yet").
+cycles and its question at every request. Two cycles a request do not
+pay for a second table that every bound vector must be kept in step
+with, so a two-kernel program takes the pair body, built and measured
+("Bench findings"), and the table per core is declined.
 
 ## Bench findings
 
@@ -643,8 +644,8 @@ Driver gaps, each with its reason:
 - The bus fabric's priorities and performance counters (BUSCTRL): a
   measurement tool, born with the two-core contention question.
 - A vector table per core, the other way two Rubato kernels could share
-  PendSV ("How to use it"): not built while the choice between it and the
-  pair body is open.
+  PendSV: declined, two cycles a request against a second table ("How to
+  use it").
 
 Implemented but not bench-verified, each with what would measure it:
 
