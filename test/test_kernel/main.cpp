@@ -1,6 +1,7 @@
 // Host tests for kernel/tenuto.hpp (+ active_object.hpp, post.hpp): priority order,
 // one-event-per-step, init ordering, idle gating, post/publish, the hold
-// (a slot kept past its dispatch, the loop releasing the rest).
+// (a slot kept past its dispatch, the loop releasing the rest), and what
+// the fixed precedence costs an object below a self-posting one.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -469,6 +470,85 @@ TEST_CASE("posts during a dispatch never touch the event being served") {
     CHECK(Burst::intact);
     CHECK(Burst::queue.overflows() == 1);   // depth waited, the one past it counted
     CHECK(trace == Trace{"bu:1", "bu:100", "bu:101", "bu:102"});
+}
+
+// ---------------------------------------------------------------------------
+// The scan order is a precedence, not a share of the processor
+// (kernel/tenuto.hpp's header): what an object below a self-posting one
+// waits for.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// An object that posts its next step to itself for as long as `spinning`
+// holds: a load of one hundred per cent, its queue never empty at a scan.
+struct Spinner : brio::Fsm<Spinner, Hit> {
+    static inline brio::EventQueue<Event, 1, HostPlatform> queue;
+    static inline bool spinning = false;
+    static inline uint32_t steps = 0;
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return handled(); },
+            [](Hit) {
+                ++steps;
+                if (spinning) {
+                    brio::post<Spinner>(Hit{0});
+                }
+                return handled();
+            },
+            [](auto) { return unhandled(); }
+        );
+    }
+};
+
+} // namespace
+
+TEST_CASE("a self-post chain above delays the object below by its whole length, then lets it run") {
+    reset();
+    using KC = brio::Tenuto<HostPlatform, Chain, Low>;
+    KC::init_all();
+    trace.clear();
+
+    // Low's event is older than the whole chain and still waits for every
+    // link: a chain of three self-posts is four dispatches ahead of it.
+    brio::post<Low>(Hit{9});
+    brio::post<Chain>(Hit{3});
+    while (KC::step()) {}
+    CHECK(trace == Trace{"ch:hit3", "ch:hit2", "ch:hit1", "ch:hit0", "lo:hit9"});
+}
+
+TEST_CASE("an endless self-post above starves the object below, and only its overflow counter says so") {
+    reset();
+    using KS = brio::Tenuto<HostPlatform, Spinner, Low>;
+    KS::init_all();
+    trace.clear();
+    const uint16_t lost_before = Low::queue.overflows();
+
+    Spinner::spinning = true;
+    Spinner::steps = 0;
+    brio::post<Spinner>(Hit{0});
+    // A post to Low every tenth turn stands for an interrupt: Low's idle
+    // queue keeps depth + 1 = 5 of the 100 and counts the other 95.
+    uint32_t served = 0;
+    for (uint32_t turn = 0; turn < 1000; ++turn) {
+        if (turn % 10 == 0) {
+            brio::post<Low>(Hit{static_cast<uint8_t>(turn / 10)});
+        }
+        if (KS::step()) {
+            ++served;
+        }
+    }
+    CHECK(served == 1000);
+    CHECK(Spinner::steps == 1000);
+    CHECK(trace.empty());
+    CHECK(Low::queue.overflows() - lost_before == 95);
+
+    // The load above stops: its last step, then Low's five oldest, in order.
+    Spinner::spinning = false;
+    while (KS::step()) {}
+    CHECK(Spinner::steps == 1001);
+    CHECK(trace == Trace{"lo:hit0", "lo:hit1", "lo:hit2", "lo:hit3", "lo:hit4"});
 }
 
 TEST_CASE("dispatching<P> is the object's list index during its dispatch and no_dispatch outside") {
