@@ -110,6 +110,10 @@ documents), and the strata that sit between `util/` and the families:
   hardware narrative (about eighty words is the signal) moves that text
   into linked prose and keeps in the row the one restriction that
   decides the reader's choice, deleting no measurement or exception.
+  The one exception is a target page's document map: its Content cell
+  is the page's summary with the measurements the page rests on, as
+  long as it needs, because the map is where the state of a target's
+  work is read.
   Precision is never traded for a simplification the code does not
   support: the conceptual rule, what the compiler checks, what a
   runtime check catches, what stays the programmer's duty and what was
