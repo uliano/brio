@@ -751,8 +751,8 @@ void sort(uint32_t* v, uint32_t n) {
 /// literals 24, its BX and return 10 and, landing on an exception return,
 /// that return abandoned and begun again 8: 54), the platform timer's trap
 /// on Hazard3 (its entry 3 and the table's jump 2, the trampoline's save
-/// and the call 20, the tick's instructions with its seconds' rollover and
-/// return 29, the restore and `mret` 20: 74). And a fifth of the path's
+/// and the call 19, the tick's instructions with its seconds' rollover and
+/// return 30, the restore and `mret` 20: 74). And a fifth of the path's
 /// count, rounded up: 21 and 35. The bound is 102 + 54 + 21 = 177 on the
 /// Cortex-M33 and 175 + 74 + 35 = 284 on Hazard3; the letter reads the
 /// kernel tick around each event, and every event over the fastest by more
@@ -763,6 +763,20 @@ constexpr uint32_t latency_bound = per_half(177u, 284u);
 /// The XIP cache's misses so far (both halves read the same counters):
 /// a refill between two reads of a span is read as letter c reads a tick.
 uint32_t xip_misses() { return Xip::accesses() - Xip::hits(); }
+
+/// Every letter is registered through this: the XIP cache's two counters
+/// cleared as the letter starts. They are 32-bit saturating counters
+/// (rp2350/flash.hpp's Xip), and xip_misses() is their difference: left
+/// uncleared, they stand at all ones after 2^32 accesses - measured, some
+/// 225 s of letter l run back to back -, the difference stops moving,
+/// and a refilled event reads as a clean one and is judged against a
+/// bound that does not allow for it. A letter lasts well under a second.
+/// Cleared for every letter, so that one added later cannot forget.
+template <void (*letter)()>
+void xip_cleared() {
+    Xip::reset_counters();
+    letter();
+}
 
 /// The console line's handler entries so far: on Hazard3 the external
 /// trap serves every pending line before its mret (3.8.6.1's meinext), so
@@ -2427,22 +2441,22 @@ int main() {
     brio::Irq::enable(Edge::irq<0>());
     brio::scheduler_init();
 
-    bench.letter('a', "the ceiling, road 1 at depth 1", ta_ceiling);
-    bench.letter('b', "road 2: the chain inside the posts", tb_road2);
-    bench.letter('c', "the latency of road 1", tc_latency);
-    bench.letter('d', "the rulers, the scan and the post, in cycles", td_scan);
-    bench.letter('e', "depth 2: an interrupt over a preempting dispatch", te_depth2);
-    bench.letter('f', "time events: the base turn's order, arm and disarm preempted", tf_timers);
-    bench.letter('g', "the request under the mask: served when the section ends", tg_mask);
+    bench.letter('a', "the ceiling, road 1 at depth 1", xip_cleared<ta_ceiling>);
+    bench.letter('b', "road 2: the chain inside the posts", xip_cleared<tb_road2>);
+    bench.letter('c', "the latency of road 1", xip_cleared<tc_latency>);
+    bench.letter('d', "the rulers, the scan and the post, in cycles", xip_cleared<td_scan>);
+    bench.letter('e', "depth 2: an interrupt over a preempting dispatch", xip_cleared<te_depth2>);
+    bench.letter('f', "time events: the base turn's order, arm and disarm preempted", xip_cleared<tf_timers>);
+    bench.letter('g', "the request under the mask: served when the section ends", xip_cleared<tg_mask>);
 #if defined(BRIO_RP2350_CORE_M33)
-    bench.letter('j', "the FPU's registers across a preemption, FPCCR's lazy save", tj_fpu);
+    bench.letter('j', "the FPU's registers across a preemption, FPCCR's lazy save", xip_cleared<tj_fpu>);
 #else
-    bench.letter('k', "the software interrupt: its latency, the registers, the flag", tk_softirq);
+    bench.letter('k', "the software interrupt: its latency, the registers, the flag", xip_cleared<tk_softirq>);
 #endif
-    bench.letter('l', "a Rubato on each core, one scheduler entry, two ceilings", tl_both_cores);
+    bench.letter('l', "a Rubato on each core, one scheduler entry, two ceilings", xip_cleared<tl_both_cores>);
     bench.letter('i', "dark: every object idle, core 1 parked, nothing lit, the request as set",
-                 ti_dark);
-    bench.letter('h', "the stack's high-water mark", th_stack);
+                 xip_cleared<ti_dark>);
+    bench.letter('h', "the stack's high-water mark", xip_cleared<th_stack>);
 
     (void)serial_ok;
     brio::enable_interrupts();

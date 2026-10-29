@@ -509,6 +509,19 @@ uint32_t ruler_cost() {
 /// landed in from one that a tick did.
 uint32_t xip_misses() { return Xip::accesses() - Xip::hits(); }
 
+/// Every letter is registered through this: the XIP cache's two counters
+/// cleared as the letter starts. They are 32-bit saturating counters
+/// (rp2040/flash.hpp's Xip), and xip_misses() is their difference: left
+/// uncleared, they stand at all ones after 2^32 accesses, the difference
+/// stops moving, and a refilled event reads as a clean one and is judged
+/// against a bound that does not allow for it. A letter lasts well under a second.
+/// Cleared for every letter, so that one added later cannot forget.
+template <void (*letter)()>
+void xip_cleared() {
+    Xip::reset_counters();
+    letter();
+}
+
 // =============================================================================
 // Core 1's launches
 // =============================================================================
@@ -1794,17 +1807,17 @@ int main() {
     Drain0::enable();
     brio::scheduler_init();
 
-    bench.letter('a', "the ceiling, road 1 at depth 1", ta_ceiling);
-    bench.letter('b', "road 2: the chain inside the posts", tb_road2);
-    bench.letter('c', "the latency of road 1", tc_latency);
-    bench.letter('d', "the ruler, the scan and the post, in cycles", td_scan);
-    bench.letter('e', "depth 2: an interrupt over a preempting dispatch", te_depth2);
-    bench.letter('f', "time events: the base turn's order, arm and disarm preempted", tf_timers);
-    bench.letter('g', "the request under PRIMASK: served when the section ends", tg_primask);
-    bench.letter('j', "road 1 across the cores: core 1's send preempts core 0's dispatch", tj_across);
-    bench.letter('k', "a Rubato on each core, one PendSV entry, two ceilings", tk_both_cores);
-    bench.letter('i', "dark: every object idle, core 1 parked, nothing lit", ti_dark);
-    bench.letter('h', "the stack's high-water mark", th_stack);
+    bench.letter('a', "the ceiling, road 1 at depth 1", xip_cleared<ta_ceiling>);
+    bench.letter('b', "road 2: the chain inside the posts", xip_cleared<tb_road2>);
+    bench.letter('c', "the latency of road 1", xip_cleared<tc_latency>);
+    bench.letter('d', "the ruler, the scan and the post, in cycles", xip_cleared<td_scan>);
+    bench.letter('e', "depth 2: an interrupt over a preempting dispatch", xip_cleared<te_depth2>);
+    bench.letter('f', "time events: the base turn's order, arm and disarm preempted", xip_cleared<tf_timers>);
+    bench.letter('g', "the request under PRIMASK: served when the section ends", xip_cleared<tg_primask>);
+    bench.letter('j', "road 1 across the cores: core 1's send preempts core 0's dispatch", xip_cleared<tj_across>);
+    bench.letter('k', "a Rubato on each core, one PendSV entry, two ceilings", xip_cleared<tk_both_cores>);
+    bench.letter('i', "dark: every object idle, core 1 parked, nothing lit", xip_cleared<ti_dark>);
+    bench.letter('h', "the stack's high-water mark", xip_cleared<th_stack>);
 
     (void)serial_ok;
     brio::enable_interrupts();

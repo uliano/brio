@@ -838,7 +838,11 @@ lengthened is told apart by counters read around it (the tick count,
 the XIP cache's miss counter, the console vector's entries) and
 reported, and each bound judges the ones nothing lengthened (road 1's
 bound allows one kernel tick, and judges the events no refill and no
-console line lengthened).
+console line lengthened). The miss counter is the difference of the
+cache's two counters, which saturate at 32 bits (4.4.5, tables 452 and
+453), so every letter starts by clearing them: left to saturate - some
+225 s of letter `l` run back to back did it - the difference stops
+moving and a refill goes unseen.
 
 On both halves road 1 preempts at any depth: an interrupt's post to
 High inside Low's dispatch runs High to its end before Low resumes,
@@ -952,7 +956,10 @@ nineteen instructions in the listing, the single body's seventeen.
   to its High, which posts to its Top (road 2): ten runs alike on both
   halves, each core's trace with its own ceilings, each core's
   preemption landing inside the other core's preempted dispatch, both
-  settled at their bases after. Inside Low1's dispatch a post to core
+  settled at their bases after. Run alone on Hazard3 420 times back to
+  back, 286 s with the cache's counters cleared at each run's start,
+  the letter settled in all 4620 of its runs and warm-ups, every verdict
+  green in every run. Inside Low1's dispatch a post to core
   0's High is refused and counted by High's queue, runs nothing, and
   leaves core 1's request down - PendSV not pending, the hart's flag low
   - in every run. Core 1's two road-1 latencies, the table's rows, are

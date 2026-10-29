@@ -369,7 +369,11 @@ struct Xip {
     static bool flush_ready() { return (stat() & XIP_STAT_FLUSH_READY_BITS) != 0u; }
 
     /// The two counters: accesses through the cached alias, and the hits
-    /// among them. Saturating, cleared by any write.
+    /// among them. Saturating, cleared by any write. They are 32 bits wide
+    /// (2.6.3.6, tables 158 and 159), so a reader that subtracts them - a
+    /// count of misses - clears them first with reset_counters(): 2^32
+    /// accesses on both stand at all ones, the difference stops moving and
+    /// every miss after goes unseen.
     static uint32_t hits() { return reg_at(XIP_CTRL_BASE, XIP_CTR_HIT_OFFSET); }
     static uint32_t accesses() { return reg_at(XIP_CTRL_BASE, XIP_CTR_ACC_OFFSET); }
     static void reset_counters() {

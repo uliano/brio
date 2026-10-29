@@ -476,7 +476,11 @@ span that a kernel tick, an XIP refill or the console line's handler
 lengthened is told apart by counters read around it (the tick count,
 the XIP cache's miss counter, the console vector's entries) and
 reported, and each bound judges the ones nothing lengthened; the first
-span after a console drain always carries a refill. clk_sys cycles:
+span after a console drain always carries a refill. The miss counter is
+the difference of the cache's two counters, which saturate at 32 bits
+(2.6.3.6, tables 158 and 159), so every letter starts by clearing them:
+left to saturate, the difference stops moving and a refill goes
+unseen. clk_sys cycles:
 
 - **The ceiling, both roads** (letters a, b, e): an alarm's post to High
   inside Low's handler runs High to its end before Low resumes, every
