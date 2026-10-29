@@ -309,11 +309,11 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   counted as a mispost and pends no PendSV on core 1. Low's send crosses
   to core 1 and the answer crosses back; core 0's doorbell handler posts
   to High, and High's dispatch starts after that handler's last
-  statement and before Low resumes, 7 to 11 us from Low's send to High's
+  statement and before Low resumes, 7 to 14 us from Low's send to High's
   first statement across core 1 and back. From the doorbell handler's
-  last statement to High's first, 209 cycles min, 210 median and max
-  over 100 crossings, none over 292 - the figure of road 1 from an
-  alarm's handler on the same core (210 median), so a crossing preempts
+  last statement to High's first, 196 cycles min and 197 median over
+  100 crossings, none over 267 - the figure of road 1 from an alarm's
+  handler on the same core (197 median), so a crossing preempts
   as any interrupt does. A crossing a kernel tick or an XIP cache refill
   lengthened is told apart by the counters read around it and reported,
   and the bound judges the ones nothing lengthened.
@@ -324,7 +324,7 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   cores preempt at the same time, each preemption landing inside the
   other core's preempted dispatch on the system timer, in 10 of 10; core
   1's ceiling is 255 at its base after; its stack's high-water mark is
-  236 bytes, the deepest sampled stack pointer 216 in a dispatch and 104
+  260 bytes, the deepest sampled stack pointer 240 in a dispatch and 112
   in its interrupt.
 
 ## Not covered yet

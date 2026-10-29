@@ -86,7 +86,7 @@ architectures.
   RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
   core, each core pending and taking its own PendSV, the one vector
   table's entry bound to `rp2040/schedule.hpp`'s pair body when both
-  cores run the kernel, measured on the WeAct RP2040: road 1 in 210
+  cores run the kernel, measured on the WeAct RP2040: road 1 in 197
   cycles, a Rubato on each core preempting at once through that entry,
   [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
   Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured

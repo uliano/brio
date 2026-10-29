@@ -457,7 +457,7 @@ with, so a two-kernel program takes the pair body, built and measured
     its ticks.
 
 **The preemptive kernel** - the reference suite is `test_rp2040_rubato`
-(55 verdicts in `z`, ten runs of `z` alike) on the WeAct RP2040 at
+(55 verdicts in `z`, every one passing in ten runs of `z`) on the WeAct RP2040 at
 125 MHz: a Rubato pack of five objects on `Rp2040RubatoPlatform<0>`,
 the Console the lowest and the letters' runner, alarm 0 of the system
 timer the interrupt the road-1 letters land, the one PendSV entry bound
@@ -465,11 +465,13 @@ to the pair body for every letter (letter k runs a Rubato on each core),
 nothing wired and nothing lit. The ruler is core 0's composed `cycles()`
 (SysTick's position and the tick count): two back-to-back reads are 55
 cycles apart, a cost taken off every span below. Against the system
-timer over four spans of 1 ms, a span whose pairs of reads missed no
-XIP line agrees within 15 to 134 cycles - the microsecond's two floors,
-125 cycles, and the skew between the pairs - while a span with a cache
-refill inside a pair of reads is off by up to 573 and is reported, not
-judged. That is the suite's method throughout: an event, a run or a
+timer over spans of 1 to 1.003 ms, taken until four are clean or
+sixteen have been taken (five to seven were taken), a span whose pairs
+of reads missed no XIP line agrees within 27 to 98 cycles - the
+microsecond's two floors, 125 cycles, and the skew between the pairs -
+while a span with a cache refill flagged inside a pair of reads is off
+by up to 223 and is reported, not judged; with four spans alone, every
+one was flagged in one run of twenty, and that run had none to judge. That is the suite's method throughout: an event, a run or a
 span that a kernel tick, an XIP refill or the console line's handler
 lengthened is told apart by counters read around it (the tick count,
 the XIP cache's miss counter, the console vector's entries) and
@@ -482,15 +484,19 @@ span after a console drain always carries a refill. clk_sys cycles:
   UART's interrupt; Low posting to Mid and Mid to High nests High inside
   Mid inside Low, each inside the post that asked; at depth 2 an
   interrupt over High's handler, started by either road, runs Top before
-  High resumes, Top's first statement 186 to 187 cycles after the
+  High resumes, Top's first statement 182 to 183 cycles after the
   handler's last.
 - **The latency of road 1** (letter c): from the alarm handler's last
-  statement to High's handler's first, 209 cycles min, 210 median and
-  max over 100 events, none missed.
+  statement to High's handler's first, 196 cycles min and 197 median
+  over 100 events, none missed, two to three cycles under the listing's
+  count of the path with every fetch a cache hit (199); in the runs
+  where a kernel tick or a cache refill landed in one event, that event
+  232 to 247 cycles, told apart by the counters read around it.
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 124 cycles; a post that asks for nothing 80;
-  a post that runs High's empty dispatch inside it 491, the scheduling's
-  share 411.
+  queues below the ceiling 88 cycles, each queue's two cursors compared
+  in line (`empty()` is forced inline); a post that asks for nothing 80;
+  a post that runs High's empty dispatch inside it 465, the scheduling's
+  share 385.
 - **Time events under preemption** (letter f): three timers matured in
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
@@ -500,7 +506,7 @@ span after a console drain always carries a refill. clk_sys cycles:
   inside a critical section pends PendSV and is served when the
   section's guard restores the mask, before the statement after it,
   from the Console's dispatch and from inside Low's; the section's last
-  statement to the receiver's first 233 cycles in every run nothing
+  statement to the receiver's first 211 cycles in every run nothing
   lengthened (in one run of ten a kernel tick or an XIP refill
   lengthened one, told apart by the counters).
 - **Road 1 across the cores** (letter j, core 1 under Tenuto running one
@@ -509,10 +515,11 @@ span after a console drain always carries a refill. clk_sys cycles:
   pends no PendSV on core 1; Low's send crosses to core 1 and Relay's
   answer crosses back, core 0's doorbell handler posts to High, and
   High's dispatch starts after that handler's last statement and before
-  Low resumes, 7 to 11 us from Low's send to High's first statement. From
-  the doorbell handler's last statement to High's first, 209 cycles
-  min, 210 median and max over 100 crossings, none over 292: the road
-  1 of letter c, a doorbell's handler in place of an alarm's.
+  Low resumes, 7 to 14 us from Low's send to High's first statement. From
+  the doorbell handler's last statement to High's first, 196 cycles
+  min and 197 median over 100 crossings, the slowest of a run 197 to
+  248, none over 267: the road 1 of letter c, a doorbell's handler in
+  place of an alarm's.
 - **A Rubato on each core** (letter k, core 1's pack of three on
   `Rp2040RubatoPlatform<1>`, both cores through the one pair body):
   core 0 traces `Ls3 Lm3 Hs1 Ts0 Te0 He1 Lr3 Le3` and core 1
@@ -522,14 +529,14 @@ span after a console drain always carries a refill. clk_sys cycles:
   the two cores preempt at once, each preemption landing inside the
   other core's preempted dispatch on the system timer, in 10 of 10;
   core 1's ceiling reads 255 at its base after; core 1's stack
-  high-water mark 236 bytes, its deepest sampled stack pointer 216 in a
-  dispatch and 104 in its interrupt.
+  high-water mark 260 bytes, its deepest sampled stack pointer 240 in a
+  dispatch and 112 in its interrupt.
 - **Dark** (letter i): every object of core 0 idle, core 1 parked in the
   bootrom, no time event and no alarm armed, GP25 not an output, the
   ceiling the Console's, interrupts enabled.
-- **The stack** (letter h): core 0's high-water mark 532 bytes for the
-  suite's deepest chain, its deepest sampled stack pointer 512 in a
-  dispatch and 368 in an interrupt.
+- **The stack** (letter h): core 0's high-water mark 532 to 576 bytes
+  for the suite's deepest chain, its deepest sampled stack pointer 512
+  in a dispatch and 344 to 368 in an interrupt.
 
 ## A handler in SRAM
 

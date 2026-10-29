@@ -716,17 +716,20 @@ void sort(uint32_t* v, uint32_t n) {
 ///   mode (12)                                                       34
 ///   the entry: cpsie, the call                                       4
 ///   activate() to High's dispatch: five registers saved, the frame,
-///   the ceiling's load and test (20); Top's visit - the call to the
-///   queue's out-of-line empty() and its return, the compare with the
-///   ceiling (22); High's empty() (18)                               60
-///   High's dispatch to its first stamp's sample: the ceiling's raise
-///   and take(), out of line (32); the slot kept and the call of
-///   cycles() (9); cycles() to its sample - its frame, three literals,
-///   LOAD, the tick count, the first ICSR read and VAL (22)          63
+///   the ceiling's address and value kept on the stack and the
+///   ceiling's test (20); Top's visit - the queue's two cursors loaded
+///   and compared in line (empty() is forced inline), the compare with
+///   the ceiling (13); High's cursors compared (9)                   42
+///   High's dispatch to its first stamp's sample: the ceiling's raise,
+///   the dispatching index's raise and the call of take() (16), take()
+///   on its longer path, the cursor not wrapping (22); the slot kept
+///   and the call of cycles() (8); cycles() to its sample - its frame,
+///   three literals, LOAD, the tick count, the first ICSR read and VAL
+///   (22)                                                            68
 ///                                                                  ---
-///                                                                  212
+///                                                                  199
 /// with every fetch a hit of the XIP cache, which answers in one cycle
-/// (2.6.3.1) - zero wait states, so 212 is the warm count. A line the
+/// (2.6.3.1) - zero wait states, so 199 is the warm count. A line the
 /// cache misses costs its fetch over the QSPI bus, 50 to 80 cycles at
 /// 125 MHz (docs/rp2040/platform.md, "A handler in SRAM"); the letter
 /// reads the cache's miss counter around each event, as it reads the
@@ -735,9 +738,9 @@ void sort(uint32_t* v, uint32_t n) {
 /// one SysTick handler landing in the path - its entry (15), its body on
 /// core 0 (27 by the listing), its return (10) and, landing on an
 /// exception return, that return begun again (12): 64; one line missed
-/// (80); and a fifth of the warm count (43): 399.
-constexpr uint32_t latency_count = 212u;
-constexpr uint32_t latency_bound = 399u;
+/// (80); and a fifth of the warm count (40): 383.
+constexpr uint32_t latency_count = 199u;
+constexpr uint32_t latency_bound = 383u;
 
 /// One latency run: `events` edges from `edge`, each followed by a wait
 /// for High's first statement; returns the misses, fills `latency[]`,
@@ -838,12 +841,22 @@ void td_scan() {
     // pair's two reads by the line's cost (measured: spans with a refill
     // in a pair 89 to 326 cycles off, spans without 4 to 35), so each
     // pair's misses are read as letter c reads them, and a span one
-    // lengthened is reported and left out of the bound.
+    // lengthened is reported and left out of the bound. Spans are taken
+    // until four are clean or sixteen have been taken: with four spans
+    // alone, a refill was flagged in every one of the four in 1 run of 20
+    // (the first span is always flagged, its second pair's code cold; of
+    // the three after it 12 in 60 were flagged, the differences of the
+    // flagged spans of that run 34 to 69 cycles), and that run had no
+    // span left to judge. The lengths step through 1, 1.001, 1.002 and
+    // 1.003 ms as before.
+    constexpr uint8_t spans_wanted = 4;
+    constexpr uint8_t spans_most = 16;
     uint32_t agree_hi = 0;        ///< the worst span whose pairs missed no line
     uint8_t spans_clean = 0;
-    uint32_t diffs[4];
-    bool clean[4];
-    for (int i = 0; i < 4; ++i) {
+    uint8_t spans_taken = 0;
+    uint32_t diffs[spans_most];
+    bool clean[spans_most];
+    for (uint8_t i = 0; i < spans_most && spans_clean < spans_wanted; ++i) {
         uint32_t c0, u0, c1, u1;
         const uint32_t m0 = xip_misses();
         {
@@ -852,7 +865,7 @@ void td_scan() {
             u0 = Timer::now_low();
         }
         const uint32_t m1 = xip_misses();
-        spin(one_ms + 1000u * static_cast<uint32_t>(i));
+        spin(one_ms + 1000u * static_cast<uint32_t>(i % 4u));
         const uint32_t m2 = xip_misses();
         {
             P::CriticalSection cs;
@@ -864,6 +877,7 @@ void td_scan() {
         const uint32_t du = (u1 - u0) * cycles_per_us;
         diffs[i] = dc > du ? dc - du : du - dc;
         clean[i] = m1 == m0 && m3 == m2;
+        ++spans_taken;
         if (clean[i]) {
             ++spans_clean;
             if (diffs[i] > agree_hi) {
@@ -871,11 +885,12 @@ void td_scan() {
             }
         }
     }
-    print(serial, "  the four spans' ruler-against-timer differences: ", diffs[0],
-          clean[0] ? "" : "*", " ", diffs[1], clean[1] ? "" : "*", " ", diffs[2],
-          clean[2] ? "" : "*", " ", diffs[3], clean[3] ? "" : "*",
-          " cycles (* a cache refill inside a pair of reads); ", spans_clean,
-          " spans clean", crlf);
+    print(serial, "  the spans' ruler-against-timer differences:");
+    for (uint8_t i = 0; i < spans_taken; ++i) {
+        print(serial, " ", diffs[i], clean[i] ? "" : "*");
+    }
+    print(serial, " cycles (* a cache refill inside a pair of reads); ", spans_taken,
+          " spans taken, ", spans_clean, " clean", crlf);
     uint32_t scan = 0xFFFF'FFFFu;
     uint32_t scan_hi = 0;
     for (int i = 0; i < 16; ++i) {
@@ -946,18 +961,19 @@ void td_scan() {
     // ruler's two-read cost taken off holds one move the measured span
     // does not, so each count below is the span's less one.
     // The scan: activate()'s frame and the ceiling's test (20); Top's
-    // visit (22); High's, Mid's and Low's, each a call to the queue's
-    // out-of-line empty() and the compare with the ceiling (21, 22, 24);
-    // the frame's release and the return (11): 120; the call and the
-    // result kept (4): 124; 149 with the fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 149 cycles",
-                  scan < 149u);
+    // visit, the queue's two cursors loaded and compared in line (8),
+    // and the compare with the ceiling (5); High's (8 and 4), Mid's (9
+    // and 4) and Low's (9, then the last compare with the ceiling and
+    // the branch out, 6); the frame's release and the return (11): 84;
+    // the call and the result kept (4): 88; 106 with the fifth.
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 106 cycles",
+                  scan < 106u);
     // The quiet post: the event's setup and the call between the two
     // reads (8), post<Low>()'s prefix (a push, a literal, two moves, the
     // call: 10), the queue's push() - the core check, an IOPORT load of
     // CPUID, then the copy under the guard's mrs, cpsid and msr (48) -
     // the ceiling's compare and the return (16): 82, less one: 81; 98
-    // with the fifth.
+    // with the fifth. Its path asks no queue whether it is empty.
     bench.verdict("a post that asks nothing costs under 98 cycles (the push and one compare)",
                   quiet < 98u);
     // The road-2 post: the setup and the call (9); post<High>()'s prefix
@@ -966,17 +982,21 @@ void td_scan() {
     // and the ISB (17, Rp2040RubatoPlatform::pend_schedule()); PendSV's
     // entry from thread mode (15); the pair body and the return into
     // thread mode (34); the entry (4); activate() at Mid's ceiling to
-    // High's dispatch (60); High's dispatch with nothing to do (180: its
-    // two stamps - the ruler's whole call, 54, its store, 4, the timer's
-    // low word over the APB bridge, whose read adds two cycles to the
-    // core's load (2.1.3), with its store, 10 - the count, the stack
-    // sample, the tests, take() and release()); the second pass, which
-    // finds Top and High empty, and the return (67); the SVC's entry, its
-    // three instructions and its return (31); the request's and the
-    // post's returns (7): 495, less one: 494; 593 with the fifth.
+    // High's dispatch (42, letter c's); High's dispatch with nothing to
+    // do (191: the two raises and take(), 38, as in letter c; the slot
+    // kept and the ruler's whole call, 8 and 51; the stamp's store, the
+    // timer's low word over the APB bridge, whose read adds two cycles
+    // to the core's load (2.1.3), its store, the count and the stack
+    // sample, 32; the tests, 19; the call of release() and release(),
+    // 23; the ceiling and the index restored and the branch to the
+    // second pass, 20); the second pass, which compares Top's and High's
+    // cursors in line and finds both empty, and the return (49); the
+    // SVC's entry, its three instructions and its return (31); the
+    // request's and the post's returns (7): 470, less one: 469; 563 with
+    // the fifth.
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    bench.verdict("and under 593 cycles, High's empty dispatch included", road2 < 593u);
+    bench.verdict("and under 563 cycles, High's empty dispatch included", road2 < 563u);
 }
 
 // =============================================================================
@@ -1262,7 +1282,7 @@ void tg_primask() {
             if (!lengthened) {
                 most_clean = d > most_clean ? d : most_clean;
             }
-            if (d > 236u) {
+            if (d > 214u) {
                 ++slow;
                 if (lengthened) {
                     ++explained;
@@ -1289,7 +1309,7 @@ void tg_primask() {
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles; runs over 236: ", slow, ", a kernel tick or an XIP refill inside ",
+          " cycles; runs over 214: ", slow, ", a kernel tick or an XIP refill inside ",
           explained, crlf);
     bench.verdict("PendSV stood pending inside every section, and no receiver ran inside one",
                   pend_inside && !ran_inside);
@@ -1303,16 +1323,16 @@ void tg_primask() {
     // literal and the saved mask's load (6) and the guard's msr that
     // lifts it (3); PendSV's entry from thread mode (15), the pair body
     // and its return into thread mode (34); the entry (4); activate() at
-    // the Console's ceiling - its frame and test (20), Top's visit (22),
-    // High's (21), Mid's to its dispatch (19); Mid's dispatch to its
-    // stamp's sample (63, High's in letter c): 236 warm; 284 with a
-    // fifth. A run a tick's handler or a refill lengthened is explained
+    // the Console's ceiling - its frame and test (20), Top's visit (13),
+    // High's (12), Mid's to its dispatch (10), each queue's cursors
+    // compared in line; Mid's dispatch to its stamp's sample (68, High's
+    // in letter c): 214 warm; 257 with a fifth. A run a tick's handler or a refill lengthened is explained
     // by the counters read around it (measured: one run of ten at 604
     // cycles, a tick inside), so the bound judges the runs nothing
     // lengthened, and every lengthened one must be explained.
-    bench.verdict("the section's end to the receiver's first statement under 284 cycles "
+    bench.verdict("the section's end to the receiver's first statement under 257 cycles "
                   "in every run nothing lengthened",
-                  most_clean < 284u);
+                  most_clean < 257u);
     bench.verdict("every run over the path's warm count had a tick or a cache refill in it",
                   slow == explained);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
@@ -1397,15 +1417,16 @@ void tj_across() {
     // handler's tail in place of the alarm's, and the tails are the same
     // by the listing - the rest of cycles() (29), the stamp's store with
     // its literal (4), a pop of four into the PC (7) - so the warm count
-    // is letter c's 212. One thing more runs beside it: core 1, which
+    // is letter c's 199. One thing more runs beside it: core 1, which
     // after its ring returns from its send and its dispatch and turns its
     // loop to the WFI, fetching from the same XIP cache, whose port
     // serves one master a cycle; so each of the path's fetches from the
-    // cache - by the listing about 70 words of instructions and 10
-    // literals - may wait one cycle behind core 1's: 80 more. An event is
-    // slow over 292, and the bound is letter c's with those 80: 479.
-    constexpr uint32_t bell_count = latency_count + 80u;
-    constexpr uint32_t bell_bound = latency_bound + 80u;
+    // cache - by the listing 58 words of instructions, 8 literals, the
+    // pair body's table entry and PendSV's vector - may wait one cycle
+    // behind core 1's: 68 more. An event is slow over 267, and the bound
+    // is letter c's with those 68: 451.
+    constexpr uint32_t bell_count = latency_count + 68u;
+    constexpr uint32_t bell_bound = latency_bound + 68u;
     tracing = false;
     console_drain();
     const Slow s = latency_run([] { send<Relay>(Fire{0, false}); }, [] { return bell_last; },
@@ -1566,7 +1587,8 @@ void tk_both_cores() {
           " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
           ", the interrupt at ", deepest_isr, crlf);
     // A dispatch's sample on core 1 is taken inside its activate(),
-    // whose eight saved registers (32 bytes) are above it. Below the
+    // whose five saved registers and 20-byte frame (40 bytes) are above
+    // it. Below the
     // deepest one lies at most, by the release listing: the dispatch's
     // action and what it calls (Low1's, 16, calling cycles() or the
     // trace's note(), 20: 36; High1's, 16, with a push, 8: 24); an
@@ -1574,9 +1596,9 @@ void tk_both_cores() {
     // and below that either the deepest handler's own frames (the
     // doorbell's 40 with a push, 8: 48; the alarm's 16 with a push: 24)
     // or, the handler gone and its post pending PendSV, PendSV's two
-    // words and an activate() frame that finds nothing (8 + 32 = 40; the
+    // words and an activate() frame that finds nothing (8 + 40 = 48; the
     // fake frame's 32 below the two words are popped before activate()
-    // pushes, 40 too). 36 + 36 + 48 = 120: core 1's high-water mark lies
+    // pushes, 48 too). 36 + 36 + 48 = 120: core 1's high-water mark lies
     // within 120 bytes of the deeper of its two samples.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("core 1's paint reached its deepest sampled stack pointer", used >= deepest);
