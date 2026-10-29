@@ -29,6 +29,22 @@
  * At boot the application calls take_panic_record<P>(): a valid record
  * is returned once and cleared. The target's reset-cause register tells
  * the rest of the story.
+ *
+ * Where the record lives is each platform's business: a static inline
+ * member of the platform type placed with gnu::section(".noinit"), a
+ * section the crt neither loads nor zeroes. That member is a COMDAT
+ * variable, and gcc 16 emits its section as `.noinit,"awG"` with no
+ * group name on every backend brio builds with (RISC-V, Arm, AVR): the
+ * assembler warns "group name for SHF_GROUP not specified", drops the
+ * group and places the record in a plain .noinit as a weak symbol -
+ * harmless in an image of one translation unit, which every brio image
+ * is (a second unit instantiating the platform would add its own copy's
+ * bytes to .noinit, the one weak symbol resolving to one of them). The
+ * warning is not silenced by gnu::noinit, which WCH's RISC-V gcc ignores
+ * and lets the record fall into .sbss, where the crt zeroes it; nor by a
+ * section name of its own, which that gcc and Arm's type PROGBITS with a
+ * warning of their own. A definition outside any template, one per
+ * image, would end it and is a design question, not a comment's.
  */
 
 #pragma once
