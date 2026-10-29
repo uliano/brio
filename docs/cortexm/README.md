@@ -80,7 +80,7 @@ architectures.
   [../stm32g0/platform.md](../stm32g0/platform.md)), the SAM C21's
   Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`, measured on
   the SAMC21J18A: road 1 from an interrupt's last statement to the
-  preempting dispatch's first in 245 cycles, the SVC vector bound by
+  preempting dispatch's first in 232 cycles, the SVC vector bound by
   that crt's name `SVCall_Handler`, a PendSV pending at the idle's WFI
   ending it, [../samc21/platform.md](../samc21/platform.md)), the
   RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
