@@ -545,31 +545,37 @@ constexpr uint32_t latency_events = 100;
 ///   stored, the entry's address into mepc (8 instructions)         8
 ///   its MRET into the entry                                        25
 ///   the entry: the frame, sixteen stores, csrsi, the call (19)     21
-///   activate(): its frame and thirteen stores, the ceiling's load,
-///   Top's visit (the call to the queue's out-of-line empty(), seven
-///   instructions with its return), High's (empty() again, the ceiling's
-///   store, the call to take(), fifteen with its return), the stamp's
-///   load (65 instructions)                                         88
+///   activate(): its frame and thirteen stores, the queues'
+///   addresses, the ceiling's load and test (20 instructions)       21
+///   Top's visit, its two cursors loaded and compared in line (5)   7
+///   the ceiling's compare for High, taken (2)                      3
+///   High's visit, in line, its branch taken (5)                    8
+///   the raise: the ceiling's store, the queue's address, the
+///   dispatching index's load and store, the call to take() (5)     8
+///   take(), fifteen with its return                               20
+///   its result tested, the stamp's address and load (5)            6
 ///                                                                 ---
-///                                                                 187
-/// (95 instructions outside the traps.) That is the CH32V203's listing; the
-/// CH32V303's, built with F, runs the same functions instruction for
-/// instruction and adds two things to every path through the entry: a
-/// vector that calls out is a trampoline there (pfic.hpp), TIM2's body
-/// reloading its return address and returning to the MRET (a load and a
-/// return, 5), and the entry tests mstatus.FS before the call (four
-/// instructions, the branch taken where there is nothing to save, 5):
-/// 197. On top of it, at most one tick landing in the path - the ticker's
-/// line is at the peripheral level, so it preempts the software
-/// interrupt's handler, the entry and activate(), never TIM2's handler:
-/// its entry (16), its twelve instructions (14) and its MRET (25), 55.
-/// The bound is the two, 242 (252), and a fifth of the path's count, 37
-/// (39): 279 (291). And the spread: two events no other interrupt touches
-/// run the same instructions, and differ by the predictor's state at the
-/// path's nine taken transfers (seven calls and returns, two branches),
-/// two cycles each at most: an event more than 18 cycles over the fastest
-/// is one a tick landed in, and the letter reads the kernel tick around
-/// each event to say so.
+///                                                                 172
+/// (87 instructions outside the traps, 57 of them in activate().) That is
+/// the CH32V203's listing; the CH32V303's, built with F, runs the same
+/// functions instruction for instruction and adds two things to every
+/// path through the entry: a vector that calls out is a trampoline there
+/// (pfic.hpp), TIM2's body reloading its return address and returning to
+/// the MRET (a load and a return, 5), and the entry tests mstatus.FS
+/// before the call (four instructions, the branch taken where there is
+/// nothing to save, 5): 182. On top of it, at most one tick landing in the
+/// path - the ticker's line is at the peripheral level, so it preempts the
+/// software interrupt's handler, the entry and activate(), never TIM2's
+/// handler: its entry (16), its twelve instructions (14) and its MRET
+/// (25), 55. The bound is the two, 227 (237), and a fifth of the path's
+/// count, 34 (36): 261 (273). And the spread: two events no other
+/// interrupt touches run the same instructions, and differ by the
+/// predictor's state at the path's taken transfers, two cycles each at
+/// most - five on the CH32V203 (the call to activate(), the call to
+/// take() and its return, High's two branches), seven on the CH32V303
+/// (the body's return and the FS test's branch besides): an event more
+/// than 10 (14) cycles over the fastest is one a tick landed in, and the
+/// letter reads the kernel tick around each event to say so.
 ///
 /// AN IMAGE BUILT WITHOUT THE HARDWARE PROLOGUE (CH32VX03_HPE=OFF) pays
 /// more on every path through a trap, and its bounds are drawn the same
@@ -580,18 +586,20 @@ constexpr uint32_t latency_events = 100;
 /// software, reloading after the stamp its sixteen integer registers on
 /// the CH32V203 (36 cycles where 4 were, 32 more) and its twenty
 /// f-registers too on the CH32V303 (79 where the trampoline's tail took
-/// 9, 70 more). Road 1 then counts 239 (287), and a tick landing in it
-/// costs 76 (its entry 19, its twenty instructions 25, its MRET 32): 363
-/// (420) with a fifth of the count.
+/// 9, 70 more). Road 1 then counts 224 (272), and a tick landing in it
+/// costs 76 (its entry 19, its twenty instructions 25, its MRET 32): 345
+/// (402) with a fifth of the count. That handler is no trampoline, so the
+/// body's return leaves the CH32V303's path: six taken transfers, a
+/// spread of 12.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
 constexpr bool hpe_build = true;
 #else
 constexpr bool hpe_build = false;
 #endif
 constexpr bool fpu_part = device::has_fpu;
-constexpr uint32_t latency_count = hpe_build ? (fpu_part ? 197u : 187u) : (fpu_part ? 287u : 239u);
-constexpr uint32_t latency_bound = hpe_build ? (fpu_part ? 291u : 279u) : (fpu_part ? 420u : 363u);
-constexpr uint32_t latency_spread = 18u;
+constexpr uint32_t latency_count = hpe_build ? (fpu_part ? 182u : 172u) : (fpu_part ? 272u : 224u);
+constexpr uint32_t latency_bound = hpe_build ? (fpu_part ? 273u : 261u) : (fpu_part ? 402u : 345u);
+constexpr uint32_t latency_spread = fpu_part ? (hpe_build ? 14u : 12u) : 10u;
 
 void tc_latency() {
     reset_scenario();
@@ -781,39 +789,48 @@ void td_scan() {
                   agree_hi <= 2u * ticker_ruler);
     // The bounds below are the release listing's count under letter c's
     // cost model, and a fifth of it as the margin.
-    // The scan: the call; activate()'s frame and thirteen stores, the
-    // ceiling's load; per empty object the call to the queue's out-of-line
-    // empty() (seven instructions with its return) and the ceiling's
-    // compare; the Console's index ending the pass; the thirteen loads and
-    // the return of the epilogue: 88 instructions, 132 cycles; 158 with
+    // The scan: the call (3); activate()'s frame and thirteen stores, the
+    // queues' addresses, the ceiling's load and test (21); per empty
+    // object its two cursors loaded and compared in line, no call (Top's
+    // and High's 7, Mid's and Low's 8 with their queue's address) and the
+    // ceiling's compare (3 taken after Top, 2 after High and Mid, 3 where
+    // the Console's index ends the pass); the thirteen loads and the
+    // return of the epilogue (31): 67 instructions, 95 cycles; 114 with
     // the fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 158 cycles",
-                  scan < 158u);
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 114 cycles",
+                  scan < 114u);
     // The quiet post: the event's store and the call (2), post<Low>()'s
     // frame and the call to the queue's push() (6), push() under its guard
     // to the unmask and the return (22), the ceiling's compare, its taken
     // branch and the epilogue (8), and the instruction before the second
-    // read: 39 instructions, 58 cycles; 70 with the fifth.
+    // read: 39 instructions, 58 cycles; 70 with the fifth. Its path asks no
+    // queue whether it is empty: the same instructions with empty() in
+    // line or out of it.
     bench.verdict("a post that asks nothing costs under 70 cycles (the push and one compare)",
                   quiet < 70u);
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    // The road-2 post, the quiet one's push plus: the compare not taken
-    // and the tail jump to the request (8), the request's four instructions
-    // to its fence.i, the trap's entry (16), the software interrupt's
-    // eight, its MRET (25), the entry's nineteen, activate() at Mid's
-    // ceiling - Top's visit, High's to its take(), High's dispatch with
-    // nothing to do and the release, the rescan of Top and High and Mid's
-    // index ending the pass, the epilogue - the entry's seventeen after the
-    // call and its ecall, the ecall's entry (16), the exit's five, its
-    // MRET (25), the request's return: 237 instructions, 344 cycles, and
-    // the four transitions 82: 426, and with the entry's FS test where
-    // there is F (letter c) 431; 511 (517) with the fifth. Without the
+    // The road-2 post: the event's store and the call, post<High>()'s
+    // frame and the call to push() (8 instructions, 12 cycles), push() as
+    // in the quiet post (22, 30), the compare not taken and the tail jump
+    // to the request (8, 13), the request's four instructions to its
+    // fence.i (4), the trap's entry (16), the software interrupt's eight
+    // (8), its MRET (25), the entry's nineteen (21); activate() at Mid's
+    // ceiling, 124 instructions and 178 cycles - the frame, Top's and
+    // High's visits in line and the raise to the call to take() (37, 47),
+    // take() (15, 20), High's dispatch with nothing to do and the call to
+    // release() with its body (34, 49), the two restores and the jump back
+    // (6, 8), the rescan of Top and High in line and Mid's index ending
+    // the pass (16, 23), the epilogue (16, 31); the entry's seventeen after
+    // the call (33), the ecall's entry (16), the exit's five (7), its MRET
+    // (25), the request's return (3): 216 instructions, 309 cycles, and
+    // the four transitions 82: 391, and with the entry's FS test where
+    // there is F (letter c) 396; 469 (475) with the fifth. Without the
     // hardware prologue (letter c) the two bodies' scratch saves (6) and
-    // the four transitions' 20 more: 452 (457), 542 (548).
+    // the four transitions' 20 more: 417 (422), 500 (506).
     constexpr uint32_t road2_bound =
-        hpe_build ? (fpu_part ? 517u : 511u) : (fpu_part ? 548u : 542u);
-    print(serial, "  bounds: the scan 158, a quiet post 70, a road-2 post ", road2_bound, crlf);
+        hpe_build ? (fpu_part ? 475u : 469u) : (fpu_part ? 506u : 500u);
+    print(serial, "  bounds: the scan 114, a quiet post 70, a road-2 post ", road2_bound, crlf);
     bench.verdict("and under its bound (the arithmetic beside it), High's empty dispatch included",
                   road2 < road2_bound);
 }
@@ -871,16 +888,18 @@ void te_depth2() {
                                       "resumes (10 runs)",
                           alike == 10u);
             // Letter c's path with activate() at High's ceiling, where
-            // Top's visit is the take: TIM2's tail, the software
-            // interrupt's eight, the entry's nineteen, activate()'s frame,
-            // Top's empty() and take() and the stamp - 81 instructions, 100
-            // cycles under letter c's model - and the three transitions
-            // (66): 166, 176 with letter c's two additions where there is F.
-            // With a tick landing in it (55) and a fifth: 254 (266). Without
-            // the hardware prologue letter c's additions make it 218 (266),
-            // and with a tick (76) and a fifth 338 (395).
+            // Top's visit is the take: TIM2's tail (4), the software
+            // interrupt's eight (8), the entry's nineteen (21), activate()'s
+            // frame to the ceiling's test (21), Top's visit in line, its
+            // branch taken (8), the raise and the call to take() (8),
+            // take() (20), its result and the stamp (6) - 80 instructions,
+            // 96 cycles under letter c's model - and the three transitions
+            // (66): 162, 172 with letter c's two additions where there is F.
+            // With a tick landing in it (55) and a fifth (32, 34): 249
+            // (261). Without the hardware prologue letter c's additions make
+            // it 214 (262), and with a tick (76) and a fifth 333 (390).
             constexpr uint32_t depth2_bound =
-                hpe_build ? (fpu_part ? 266u : 254u) : (fpu_part ? 395u : 338u);
+                hpe_build ? (fpu_part ? 261u : 249u) : (fpu_part ? 390u : 333u);
             bench.verdict("and Top's first statement within its bound of the interrupt's last "
                           "(the arithmetic beside it)",
                           most <= depth2_bound);
@@ -1164,14 +1183,15 @@ void tg_mask() {
         // trap (6, this core's shadow behind the unmask, ch32vx03/
         // schedule.hpp); the trap's entry (16), the software interrupt's
         // eight and its MRET (25); the entry's nineteen; activate() at the
-        // Console's ceiling - Top's visit, High's, Mid's to its take() and
-        // the stamp: 111 instructions, 142 cycles under letter c's model,
-        // and the two transitions 41: 183, 188 with the entry's FS test
-        // where there is F; 220 (226) with a fifth. Without the hardware
-        // prologue the software interrupt's scratch save (3) and the two
-        // transitions' 10 more: 196 (201), 235 (241).
+        // Console's ceiling - its frame to the ceiling's test, Top's,
+        // High's and Mid's visits in line, the raise, take() and the stamp
+        // (66 instructions, 84 cycles): 99 instructions, 119 cycles under
+        // letter c's model, and the two transitions 41: 160, 165 with the
+        // entry's FS test where there is F; 192 (198) with a fifth.
+        // Without the hardware prologue the software interrupt's scratch
+        // save (3) and the two transitions' 10 more: 173 (178), 208 (214).
         constexpr uint32_t section_bound =
-            hpe_build ? (fpu_part ? 226u : 220u) : (fpu_part ? 241u : 235u);
+            hpe_build ? (fpu_part ? 198u : 192u) : (fpu_part ? 214u : 208u);
         bench.verdict("the section's end to the receiver's first statement under its bound "
                       "(the arithmetic beside it)",
                       most < section_bound);
@@ -1414,12 +1434,12 @@ void tj_fpu() {
         // its jump where the Clean one falls through, and its branch falls
         // through where the Clean one's is taken, so each least carries
         // its own transfers' alignment and predictor state - the spread
-        // letter c derives for a path on this core, latency_spread (18),
-        // which the difference inherits. Measured, the restore read 20 to
+        // letter c derives for a path on this core, latency_spread (14 on
+        // this part), which the difference inherits. Measured, the restore read 20 to
         // 35 and the save 25 to 33 across three images of this suite that
         // differ in their layout alone, the model inside both ranges. So:
-        // the model and that spread, 53 and 46.
-        bench.verdict("the save within 53 cycles and the restore within 46 (the model and the "
+        // the model and that spread, 49 and 42.
+        bench.verdict("the save within 49 cycles and the restore within 42 (the model and the "
                       "layout spread)",
                       in_dirty - in_clean <= 35u + latency_spread &&
                           out_dirty - out_clean <= 28u + latency_spread);
@@ -1429,11 +1449,11 @@ void tj_fpu() {
         // software around its call and reloads them: the reload leaves FS
         // Dirty, so the entry finds it Dirty on both paths and saves on
         // both. The two paths then run the same instructions and differ by
-        // letter c's spread at most (18).
+        // letter c's spread at most (12 in this build).
         const uint32_t d_in = in_dirty > in_clean ? in_dirty - in_clean : in_clean - in_dirty;
         const uint32_t d_out = out_dirty > out_clean ? out_dirty - out_clean : out_clean - out_dirty;
         bench.verdict("without the hardware prologue the edge's handler leaves FS Dirty and the "
-                      "entry saves on both paths: the two within 18 cycles",
+                      "entry saves on both paths: the two within 12 cycles",
                       d_in <= latency_spread && d_out <= latency_spread);
 #endif
     }
