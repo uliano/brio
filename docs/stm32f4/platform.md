@@ -353,7 +353,9 @@ letters land, nothing wired and nothing lit:
   the restore are compiler barriers now (`kernel/rubato.hpp`), and the
   suite below ran clean after it.
 
-`test_stm32f4_rubato_link`, 230 verdicts on the Nucleo-F446RE against
+`test_stm32f4_rubato_link`, 230 verdicts on the Nucleo-F446RE (its
+target-free half the link suites' shared body,
+`avrxt/src/apps/rubato_link.hpp`) against
 the Nucleo-G0B1RE's unchanged `spi_peer` and `usart_peer` over the desk's
 SPI2 and USART1 wires: the real SPI and UART stacks under Rubato with
 an object above them preempting on TIM2 at 97, 193 and 389 us, its

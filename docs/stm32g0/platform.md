@@ -587,6 +587,81 @@ derives from the core's own counts over the release listing:
   the code after it and cost about three on this flash: a second
   instance of the same finding.
 
+**The drivers under the preemptive kernel** - the suite is
+`test_stm32_rubato_link`, two keys against the Nucleo-F446RE's unchanged
+`spi_peer` (`z`, 140 verdicts) and `usart_peer` (`y`, 111 verdicts), ten
+runs of each alike, every verdict green. It runs the real SPI and UART
+stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
+arbiter over the engined `SpiHost<1>` ([spi.md](spi.md); half-word
+engines on DMA1 channels 1 and 2), `util/line_reader.hpp`'s
+`LineReader` over `Uart<1>` and its receive ring on DMA1 channel 3
+([usart.md](usart.md)), a borrower of the reader's lines above it, and
+on top an object that TIM14's update interrupt posts to every 97, 193
+or 389 us, whose dispatch spins 300 or 3000 cycles - at 97 us x 3000,
+48 % of the core. Every letter runs once with TIM14 silent as its
+control and six times under that pressure, and every pass judges the
+pressure itself: one dispatch per period over the pass, none dropped.
+The target-free half of the suite (the pack, the passes, the numbered
+lines, the window client, the UART legs) is the link suites' shared
+body, `avrxt/src/apps/rubato_link.hpp`. What it established:
+
+- **The polled SPI loop under preemption loses nothing.** The loop runs
+  inside the arbiter's dispatch, so a dispatch above the arbiter holds
+  it off for its whole length - TIM14 landed there up to 360 times a
+  pass. With the RXFIFO as the write-ahead (no more frames in flight
+  than it holds, [spi.md](spi.md)), a held-off loop leaves a gap on the
+  bus and never a lost frame: the polled loop packed (8 frames) and
+  frame by frame (5), the RXNE pump in byte frames (7) and in 16-bit
+  frames (16, from an odd address) and the DMA engines (32) all
+  byte-exact at both ends at every code from PCLK/256 to PCLK/8, under
+  every pressure as in the control, and the host's OVR flag read clear
+  at every one of the replies (the receive shapes never let it rise).
+  This host has no `spi_overrun` and needs none.
+- **PCLK/4 = 16 MHz is this fitting's, not the service's.** The same
+  rungs at PCLK/4 slip between one window in twenty and one in a hundred
+  and sixty, with TIM14 silent as often as under it and on the DMA
+  engines too, which no preemption reaches
+  (the suite's letter `x`, forty windows a shape and a pressure, four
+  runs: 16-bit frames on the engines 8 of 160 windows silent and 4 of
+  160 pressed, on the pump 2 and 2, on the polled loop 1 and 1; byte
+  frames on the pump 0 and 0; 16-bit frames at PCLK/8 0 and 0). Letter
+  `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 349 of 350
+  path rungs over ten runs) and PCLK/2 (above the F446 client's
+  22.5 MHz, wrong on every path, as [spi.md](spi.md)'s peer ladder
+  finds).
+- **The matrix and the arbiter.** The four modes in both widths, LSb
+  first and a DORD mismatch on the engines at PCLK/32, byte-exact in
+  every pass, the data windows at 719 to 999 per mille of the control's
+  rate under pressure; three requesters of three priorities on one
+  select window (the Client above the arbiter on the engines, a
+  requester below it polled, the preempting object itself on the pump)
+  answered every one `spi_ok`, to its requester, in its order, with no
+  timeout, no rejection and the peer counting every frame exact.
+- **The UART receive side under preemption.** Numbered lines echoed by
+  the F446 at 460800 and 921600, assembled by `LineReader` from the
+  ring and lent to the borrower: 200 a leg, none lost, out of order or
+  corrupt, every port counter zero - the RXFT kick (`rx_kicks()`)
+  included -, 649 to 803 per mille of the wire at 460800 and 472 to 673
+  at 921600 (the writer paces each line to its own last stop bit and
+  two frame times); 300 lines blasted into the peer's sink counted and
+  summed exact, 998 to 999 per mille of the wire at 460800 and 1004 to
+  1006 at 921600 - the divisor's +0.64 % (64 MHz / 69), the ruler and
+  the USART counting one HSI16.
+- **The loan under preemption.** At 460800 with the borrower spinning
+  6000 cycles a line and the lines streamed five ahead, TIM14 landed
+  inside the borrower's dispatch 95 to 604 times a pass; every line
+  arrived exact, each lent alone, the two buffers strictly alternating,
+  and the receive stream moved inside the borrower's dispatch 21 to 32
+  times a leg. The rate is the echo's: the F446's echo has no FIFO and
+  holds two characters of a writer's lead, this end runs 1.27 % ahead of
+  it at 921600, and a streamed run of some 427 characters would leave 5
+  there; at 460800 the lead is 0.04 %.
+- **Dark** (letter `i`): every object idle, TIM14 stopped, no time event
+  armed, SPI1 idle with its engines idle (the engined host keeps CR2's
+  DMA enables set for its life, and a finished channel stays enabled
+  with its count at zero), USART1 given back, PA5 not an output, the
+  ceiling the Console's.
+
 Two kernel programs on the Nucleo-G0B1RE: two AOs under time events at
 500/250/100 ms (PA5 sampled over SWD every 100 ms shows the 500 ms cadence
 and the switch to 250 ms after three seconds), and three AOs over USART2

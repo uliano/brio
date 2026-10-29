@@ -972,7 +972,12 @@ stm32g0 one the 32 MHz of DS13560 table 76; a kind whose data sheet the
 suite has not read is judged at every rung). There the answer path
 fails on both serves: the DMA serve hears all eight characters exact
 and this end reads all eight wrong, in twelve runs of twelve; the run
-loses one. It is a figure, not a fault to fix.
+loses one. It is a figure, not a fault to fix. Longer windows find
+PCLK/4 itself marginal on this fitting: thirty-two frames on the
+engines, or sixteen 16-bit frames on any path, slip between one window
+in twenty and one in a hundred and sixty, as often with nothing else
+running as under a preempting kernel ([platform.md](platform.md), "The
+drivers under the preemptive kernel"); no shape slipped at PCLK/8.
 
 **The arbiter over a SECOND CHIP.** Letter `q` runs `SpiBus`
 (= `BusMaster`) over `SpiHost` with the F446 answering: four
