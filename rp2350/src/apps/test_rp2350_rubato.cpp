@@ -1,10 +1,11 @@
 // test_rp2350_rubato - the bench suite of Rubato, the preemptive kernel
-// (kernel/rubato.hpp), on the RP2350: Rp2350RubatoPlatform and this
+// (kernel/rubato.hpp), on the RP2350: Rp2350RubatoPlatform<core> and this
 // target's scheduling request (rp2350/schedule.hpp) on BOTH processor
 // pairs from one source - the core stratum's PendSV and SVC on the
 // Cortex-M33, the machine software interrupt through the crt's trampoline
-// and the entry's own mret on Hazard3 - against the model the host suite
-// specifies (test/test_rubato).
+// and the entry's own mret on Hazard3 - and the one scheduler entry that
+// serves a kernel on each core (the pair body), against the model the
+// host suite specifies (test/test_rubato).
 //
 // A test_<target>_<subject> suite in the bench grammar (util/testbench.hpp)
 // that runs INSIDE the kernel it tests: the program is a Rubato pack of
@@ -14,20 +15,33 @@
 // the other objects write what they saw into a trace in memory, and the
 // Console judges and prints it after. A post from a letter is therefore a
 // post from the Console's dispatch: to an object above it, the kernel's
-// road 2.
+// road 2. Core 1 is held in the bootrom for every letter but one: letter
+// l launches it into a Rubato pack of its own and puts it back when it
+// ends.
 //
 // ONE SOURCE, TWO HALVES, apart only where rp2350/core.hpp tells them
-// apart: the scheduler's vectors (one macro, BRIO_RP2350_SCHEDULER_VECTORS,
-// two vectors on one half and one on the other), the stack pointer's
-// read, the request's pending bit, and the one letter each half has alone
-// - j, the FPU across a preemption, on the Cortex-M33 (Hazard3 here has
-// no FPU); k, the software interrupt's own facts, on Hazard3.
+// apart: the scheduler's vectors (one macro,
+// BRIO_RP2350_SCHEDULER_VECTORS_PAIR, two vectors on one half and one on
+// the other), the stack pointer's read, the request's pending bit, and
+// the one letter each half has alone - j, the FPU across a preemption, on
+// the Cortex-M33 (Hazard3 here has no FPU); k, the software interrupt's
+// own facts, on Hazard3.
+//
+// THE ONE SCHEDULER ENTRY IS THE PAIR BODY in this image, for every
+// letter: letter l runs a Rubato on each core, the two cores of a pair
+// share one table, and a vector is bound once (rp2350/schedule.hpp). On
+// core 0 the pair body takes the single body's path with the core asked
+// in place of the entry's literal - four cycles more on the Cortex-M33 by
+// the model below, two on Hazard3 - and every bound below is drawn for
+// it.
 //
 // NOTHING TO WIRE, NOTHING LIT. The console is the Debug Probe's UART
 // bridge on GP0 (TX) / GP1 (RX) = UART0; the suite configures no other
 // pad, and the board's LED on GP25 is never driven (letter i checks its
-// pad). The interrupt every road-1 letter lands is TIMER1's alarm 0,
-// served by core 0 under the one name `isr_timer1_0` on both halves.
+// pad). The interrupt every road-1 letter of core 0 lands is TIMER1's
+// alarm 0, served by core 0 under the one name `isr_timer1_0` on both
+// halves; core 1's, in letter l, is TIMER1's alarm 1, enabled in core
+// 1's controller alone, and the doorbell's line, `isr_sio_bell`.
 //
 // THE RULER is TIMER1 itself with its SOURCE on clk_sys (rp2350/timer.hpp,
 // datasheet 12.8.1.1): a count a clk_sys cycle on both architectures, read
@@ -134,7 +148,7 @@
 //      instructions retire after the store that raises the flag before the
 //      trap is taken, with nothing waiting: a sled of eight stores behind
 //      the raw store, Top's dispatch counting the ones that ran - and the
-//      same sled behind request_scheduler(), where the count must be 0,
+//      same sled behind the platform's request, where the count must be 0,
 //      the request having waited. (2) The registers across an entry and a
 //      nested one: fifteen caller-saved registers loaded with patterns, the
 //      alarm landing while they are live and starting High by road 1, High
@@ -142,9 +156,30 @@
 //      found again on both levels. (3) Inside a dispatch the software
 //      interrupt started: the flag already lowered, mip.MSIP clear,
 //      mstatus.MIE set, mscratch moved by one.
-//   i  DARK: every object but the Console idle, no time event armed, the
-//      alarm disarmed and its line quiet, the LED's pad not an output, the
-//      ceiling the Console's own, interrupts enabled; and the request as
+//   l  A RUBATO ON EACH CORE: core 1 launched into a pack of three of its
+//      own (Top1, High1, Low1) on Rp2350RubatoPlatform<1>, its request set
+//      up by its own scheduler_init(), every preemption on both cores
+//      through the one pair body. Core 0's Low sends to core 1's Low1
+//      (road 1 from core 1's doorbell handler, at its base); then both
+//      cores run the same shape at once: a spin at a mark, the core's own
+//      alarm posting to its High, which posts to its Top inside its
+//      handler (road 2). Each core writes its own trace with its own
+//      ceiling; read after both settle, each shows its own indices, and
+//      the ruler shows each core's preemption landing inside the other
+//      core's preempted dispatch. Ten runs after one warm-up. Inside
+//      Low1's dispatch a post to core 0's High, which the queue refuses
+//      and counts, with core 1's request read not raised. Before those
+//      runs, with core 0 asleep, core 1's two road-1 latencies over
+//      sixteen crossings - the doorbell handler's last statement to
+//      Low1's first, alarm 1's to High1's - against their counts; on the
+//      Cortex-M33 core 1's FPCCR. Then core 1's stack: painted by its
+//      entry, its high-water mark against the deepest stack pointer its
+//      dispatches and its interrupts sampled, and core 1 back in the
+//      bootrom.
+//   i  DARK: every object of core 0 idle, core 1 in the bootrom, no time
+//      event armed, both alarms disarmed and alarm 0's line quiet, the
+//      LED's pad not an output, the ceiling the Console's own, interrupts
+//      enabled; and the request as
 //      scheduler_init() set it (PendSV at the lowest level and not pending
 //      on one half, mie.MSIE set and the flag low on the other).
 //   h  THE STACK, the last letter: main() painted the free part of core
@@ -170,10 +205,12 @@
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/flash.hpp"
+#include "rp2350/multicore.hpp"
 #include "rp2350/schedule.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
+#include "util/inbox.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -185,6 +222,7 @@ namespace {
 using namespace brio;
 
 using P = Rp2350RubatoPlatform<>;
+using P1 = Rp2350RubatoPlatform<1>;   // core 1 under Rubato (letter l)
 using Edge = Timer<1>;
 
 constexpr bool hazard3 = core_kind == CoreKind::hazard3;
@@ -252,16 +290,16 @@ void print_trace() {
     print(serial, crlf);
 }
 
-/// The trace equals `want`, written as "Ls3 Lm3 Hs1 ..." (who, what,
+/// `len` marks equal `want`, written as "Ls3 Lm3 Hs1 ..." (who, what,
 /// ceiling) with single spaces.
-bool trace_is(const char* want) {
+bool marks_are(const Mark* marks, uint8_t len, const char* want) {
     uint8_t i = 0;
     const char* p = want;
     while (*p != '\0') {
-        if (i >= trace_len) {
+        if (i >= len) {
             return false;
         }
-        const Mark& m = trace[i];
+        const Mark& m = marks[i];
         if (p[0] != m.who || p[1] != m.what || static_cast<uint8_t>(p[2] - '0') != m.ceiling) {
             return false;
         }
@@ -271,12 +309,40 @@ bool trace_is(const char* want) {
         }
         ++i;
     }
-    return i == trace_len;
+    return i == len;
 }
 
-/// The lowest stack pointer a dispatch or the interrupt saw.
+/// Core 0's trace equals `want`.
+bool trace_is(const char* want) { return marks_are(trace, trace_len, want); }
+
+/// Core 1's trace (letter l): written by core 1 alone, with core 1's
+/// ceiling and under core 1's mask, and read by core 0 once core 1 has
+/// settled at its base.
+Mark trace1[trace_capacity];
+volatile uint8_t trace1_len = 0;
+
+void note1(char who, char what) {
+    InterruptGuard g;
+    const uint8_t n = trace1_len;
+    if (n < trace_capacity) {
+        trace1[n] = Mark{who, what, P1::ceiling};
+        trace1_len = static_cast<uint8_t>(n + 1u);
+    }
+}
+
+void print_trace1() {
+    print(serial, "  core 1's trace:");
+    for (uint8_t i = 0; i < trace1_len; ++i) {
+        print(serial, " ", trace1[i].who, trace1[i].what, trace1[i].ceiling);
+    }
+    print(serial, crlf);
+}
+
+/// The lowest stack pointer a dispatch or the interrupt saw, per core.
 volatile uint32_t sp_low_dispatch = 0xFFFF'FFFFu;
 volatile uint32_t sp_low_isr = 0xFFFF'FFFFu;
+volatile uint32_t sp1_low_dispatch = 0xFFFF'FFFFu;
+volatile uint32_t sp1_low_isr = 0xFFFF'FFFFu;
 
 [[gnu::always_inline]] inline uint32_t stack_pointer() {
 #if defined(BRIO_RP2350_CORE_M33)
@@ -376,6 +442,59 @@ struct Console {
 
 using K = Rubato<P, Top, High, Mid, Low, Console>;
 constexpr uint8_t console_index = 4;
+
+// =============================================================================
+// Core 1's pack (letter l)
+// =============================================================================
+
+uint32_t xip_misses();
+
+/// Core 1's three, the shape of core 0's Node with core 1's trace and
+/// stack samples; Low1 receives across the cores, through its inbox. The
+/// XIP cache's miss counter and core 0's tick count are read right after
+/// the stamp, so that a latency on core 1 can be told lengthened by a
+/// refill or by core 0's tick handler (letter l). The
+/// action is written by core 0 and read by core 1, so it is volatile: a
+/// plain store core 0's compiler sees overwritten before anything of
+/// core 0 reads it is a dead store, and gone.
+template <uint8_t id>
+struct Node1 {
+    using Event = Hit;
+    static constexpr char name = "thl"[id];
+    static inline EventQueue<Event, 4, P1> queue;
+    static constexpr uint8_t inbox_depth = 4;
+    static inline void (*volatile action)(uint8_t) = nullptr;
+    static inline volatile uint32_t entered = 0;
+    static inline volatile uint32_t entered_misses = 0;
+    static inline volatile uint32_t entered_ticks = 0;
+    static inline volatile uint32_t runs = 0;
+
+    static void init() {}
+    static void dispatch(const Event& e) {
+        entered = Ruler::now();
+        entered_misses = xip_misses();
+        entered_ticks = Ticker::ticks();
+        runs = runs + 1u;
+        sample_sp(sp1_low_dispatch);
+        note1(name, 's');
+        if (action != nullptr) {
+            action(e.n);
+        }
+        note1(name, 'e');
+    }
+};
+
+using Top1 = Node1<0>;
+using High1 = Node1<1>;
+using Low1 = Node1<2>;
+using K1 = Rubato<P1, Top1, High1, Low1>;
+
+/// What core 1's doorbell handler drains: Low1 alone receives across.
+using Drain1 = Inboxes<Low1>;
+
+/// Which program core 1 runs: 0 none (the bootrom), 2 its Rubato.
+/// Written by core 1's entry and by core 0's park, read by core 0.
+volatile uint32_t core1_stage = 0;
 
 /// The ceiling the UART's receive interrupt read when a byte arrived.
 volatile uint8_t rx_ceiling = 0;
@@ -539,6 +658,7 @@ void tb_road2() {
 constexpr uint32_t latency_events = 100;
 uint32_t latency[latency_events];
 bool lengthened[latency_events];   ///< per event: a tick, a refill or the console line inside
+bool refilled[latency_events];     ///< per event: a refill or the console line inside
 
 void sort(uint32_t* v, uint32_t n) {
     for (uint32_t i = 1; i < n; ++i) {
@@ -560,9 +680,10 @@ void sort(uint32_t* v, uint32_t n) {
 ///   the handler's tail after the stamp (a literal, a store, the
 ///   frame's release, a pop of the PC)                               9
 ///   the tail-chain into PendSV                                      6
-///   PendSV's thirteen instructions to the BX and the BX (two pushes,
-///   two stores, a literal: 17; no barrier on this core,
-///   cortexm/schedule.hpp) and its return into thread mode (12)     29
+///   PendSV's pair body, sixteen instructions to the BX and the BX
+///   (two pushes, two stores, the SIO's CPUID and the table's entry
+///   loaded: 21; no barrier on this core, cortexm/schedule.hpp) and
+///   its return into thread mode (12)                               33
 ///   the entry: cpsie, the call                                      5
 ///   activate(): nine registers saved and the frame, two literals,
 ///   the ceiling's load and test (19), Top's visit (the queue's two
@@ -573,7 +694,7 @@ void sort(uint32_t* v, uint32_t n) {
 ///   the dispatching index's stores and the call to take(): 13;
 ///   take(): 19; the slot and the stamp's literal: 6)               77
 ///                                                                 ---
-///                                                                 126
+///                                                                 130
 ///
 /// Hazard3:
 ///   the handler's tail after the stamp (a store, cm.popret: 5), the
@@ -583,18 +704,19 @@ void sort(uint32_t* v, uint32_t n) {
 ///   (19)                                                           30
 ///   the software interrupt's entry and the table's jump (3 + 2)     5
 ///   the trampoline: the frame, sixteen stores, the call            19
-///   the body: sixteen instructions, the return                     18
+///   the pair body: eighteen instructions, the return               20
 ///   the trampoline's sixteen loads, the frame, the `mret`          19
 ///   the entry: the frame, sixteen stores, csrsi, the call          20
 ///   activate(): cm.push of thirteen (14), four setups, the ceiling's
 ///   load and test (21); Top's visit (the queue's two cursors loaded
 ///   and compared in line, the branch not taken: 4) and the index's
-///   compare with its branch taken (4); High's (5); High's serve to
-///   the stamp (the ceiling's and the dispatching index's stores and
-///   the call to take(): 6; take() with its return: 16; the slot and
-///   the stamp's address: 5)                                        61
+///   compare with its branch taken (4); High's, its branch taken onto
+///   a 32-bit instruction not 4-aligned (6); High's serve to the stamp
+///   (the ceiling's and the dispatching index's stores and the call to
+///   take(): 6; take() with its return: 16; the slot and the stamp's
+///   address: 5)                                                    62
 ///                                                                 ---
-///                                                                 172
+///                                                                 175
 /// of which the crt's two dispatches - the external interrupt's tail
 /// (30) and the trampoline's save and restore around the body (38) -
 /// are 68, and the entry's own save of the same sixteen registers 17.
@@ -606,12 +728,12 @@ void sort(uint32_t* v, uint32_t n) {
 /// on Hazard3 (its entry and jump 5, the trampoline's save 19, the tick's
 /// twenty-one instructions and return 25, the restore and `mret` 19:
 /// 68, taken as 70). And a fifth of the path's count, rounded up: 26 and
-/// 35. The bound is 126 + 58 + 26 = 210 on the Cortex-M33 and 172 + 70 +
-/// 35 = 277 on Hazard3; the letter reads the kernel tick around each
+/// 35. The bound is 130 + 58 + 26 = 214 on the Cortex-M33 and 175 + 70 +
+/// 35 = 280 on Hazard3; the letter reads the kernel tick around each
 /// event, and every event over the fastest by more than the margin below
 /// must have had a tick in it.
-constexpr uint32_t latency_count = per_half(126u, 172u);
-constexpr uint32_t latency_bound = per_half(210u, 277u);
+constexpr uint32_t latency_count = per_half(130u, 175u);
+constexpr uint32_t latency_bound = per_half(214u, 280u);
 
 /// The XIP cache's misses so far (both halves read the same counters):
 /// a refill between two reads of a span is read as letter c reads a tick.
@@ -632,6 +754,11 @@ struct Lengtheners {
     bool moved() const {
         const Lengtheners n = now();
         return n.ticks != ticks || n.misses != misses || n.uart != uart;
+    }
+    /// The two a path's bound does not allow for: a refill, the console.
+    bool refilled() const {
+        const Lengtheners n = now();
+        return n.misses != misses || n.uart != uart;
     }
 };
 
@@ -658,9 +785,11 @@ void tc_latency() {
             flush();
         }
         const bool ticked = before.moved();
+        const bool refill = before.refilled();
         if (i > 0u) {
             latency[i - 1u] = High::entered - edge_last;
             lengthened[i - 1u] = ticked;
+            refilled[i - 1u] = refill;
         }
     }
     // The events that something lengthened are told apart from the
@@ -674,12 +803,16 @@ void tc_latency() {
     for (uint32_t i = 0; i < latency_events; ++i) {
         lo_raw = latency[i] < lo_raw ? latency[i] : lo_raw;
     }
+    uint32_t hi_bounded = 0;   ///< the slowest event no refill and no console line lengthened
     for (uint32_t i = 0; i < latency_events; ++i) {
         if (latency[i] > lo_raw + 18u) {
             ++slow;
             if (lengthened[i]) {
                 ++slow_ticked;
             }
+        }
+        if (!refilled[i] && latency[i] > hi_bounded) {
+            hi_bounded = latency[i];
         }
     }
     sort(latency, latency_events);
@@ -692,13 +825,18 @@ void tc_latency() {
           " ", latency[latency_events - 2u], " ", hi, crlf);
     print(serial, "  the path's count ", latency_count, " cycles, its bound ", latency_bound,
           "; events over the fastest + 18: ", slow, ", a kernel tick, an XIP refill or the "
-          "console line's handler inside ", slow_ticked, " of them", crlf);
+          "console line's handler inside ", slow_ticked, " of them; the slowest with no refill "
+          "and no console line inside ", hi_bounded, crlf);
     bench.verdict("every interrupt's post started High within 1 ms", missed == 0u);
     bench.verdict("every event over the fastest + 18 had a tick, a cache refill or the console "
                   "line's handler in it",
                   slow == slow_ticked);
-    bench.verdict("the latency stays under the path's bound (the arithmetic beside it)",
-                  hi <= latency_bound);
+    // The bound allows for one kernel tick and not for a refill or the
+    // console line, which are reported and not judged (the suite's method,
+    // as letters e and g).
+    bench.verdict("the latency stays under the path's bound (the arithmetic beside it) in every "
+                  "event no refill and no console line lengthened",
+                  hi_bounded <= latency_bound);
     reset_scenario();
 }
 
@@ -867,9 +1005,9 @@ void td_scan() {
     // setups, the ceiling's load and test (21); Top's visit in line and
     // the index's branch taken (8); High's (6) and Mid's (7); Low's, its
     // branch taken (8); the result's move and the cm.popret of thirteen
-    // with its return onto the stamp's load, a 32-bit instruction not
-    // 4-aligned (18): 70, and with the fifth 84.
-    constexpr uint32_t scan_bound = per_half(96u, 84u);
+    // with its return onto the stamp's load, 4-aligned in this image
+    // (17): 69, and with the fifth 83.
+    constexpr uint32_t scan_bound = per_half(96u, 83u);
     // The quiet post: push() and the ceiling's compare ask no queue
     // whether it is empty. The Cortex-M33: the event's store and the
     // call (6); post<Low>()'s prefix (10); the queue's push() - the core
@@ -887,8 +1025,10 @@ void td_scan() {
     // post<High>()'s prefix and the call to push() (10); push() - the
     // core check, the guard, the cursor, the copy, msr, the pop of the
     // PC (47); the ceiling's compare, its branch not taken and the call
-    // (13); the request's store, DSB and ISB (12); PendSV's entry (12),
-    // body (17) and return into thread mode (12); the entry (5);
+    // (13); the request - the core check (the SIO's address, CPUID, the
+    // branch not taken: 4), the store, DSB and ISB (12): 16; PendSV's
+    // entry (12), the pair body (21) and the return into thread mode
+    // (12); the entry (5);
     // activate() at Mid's ceiling - the prologue and Top's visit (29),
     // High's (10), High's serve - the raises and the call to take()
     // (13), take() (19), the slot, the stamp, the count, the stack
@@ -899,26 +1039,30 @@ void td_scan() {
     // Mid's index (12) - the frame's release and the pop (15): 192; the
     // entry's FP context cleared, its ISB and the SVC (10), the SVC's
     // entry (12), three instructions (6) and return into the request
-    // (12); the request's and the post's returns (8): 374, 449 with the
+    // (12); the request's and the post's returns (8): 382, 459 with the
     // fifth. Hazard3: the event's store and the call (4); post<High>()'s
     // cm.push, the setups and the call to push() (8); push() - the core
     // check, the guard's csrrci, the cursor, the copy, csrsi, the return
     // (30); the ceiling's compare, its branch not taken, cm.pop and the
-    // tail jump (11); the request to its spin, one turn (11); the trap -
-    // its entry and the table's jump (5), the trampoline's save (19),
-    // the body (18), the restore and the `mret` (19); the entry's save
-    // (20); activate() at Mid's ceiling - the prologue and the ceiling's
-    // test (21), Top's visit and the index's branch (8), High's (5),
-    // High's serve - the raises and the call (6), take() (16), the slot,
-    // the stamp, the count, the stack sample and the trace's test (22),
-    // the action's test (4), the trace's again (2), the drop flag and
+    // tail jump (10); the request - the hart check, its branch not
+    // taken - to its spin, one turn (12); the trap - its entry and the
+    // table's jump (5), the trampoline's save (19), the pair body (20),
+    // the restore and the `mret` (19); the entry's save (20);
+    // activate() at Mid's ceiling - the prologue and the ceiling's test
+    // (21), Top's visit and the index's branch (8), High's (6), High's
+    // serve - the raises and the call (6), take() (16), the slot, the
+    // stamp, the count, the stack sample and the trace's test (21), the
+    // action's test (5), the trace's again (3), the drop flag and
     // release() (7 + 11), the restore and its branch (5) - the rescan -
     // the served flag and the jump (4), the ceiling and Top's visit (7),
     // the index's branch (4), High's, empty now, and Mid's index (7) -
-    // the result's move and the cm.popret (17): 146; the entry's
+    // the result's move and the cm.popret (17): 148; the entry's
     // restore, mstatus and mepc written, the `mret` (25); the spin's
-    // last turn and the return (4): 320, 384 with the fifth.
-    constexpr uint32_t road2_bound = per_half(449u, 384u);
+    // last turn and the return (4): 324, 389 with the fifth. (Where a
+    // branch's figure differs from the same branch elsewhere, its target
+    // is or is not a 32-bit instruction off its 4-byte alignment in this
+    // image: the model's one cycle.)
+    constexpr uint32_t road2_bound = per_half(459u, 389u);
     print(serial, "  bounds: the scan ", scan_bound, ", a quiet post ", quiet_bound,
           ", a road-2 post ", road2_bound, crlf);
     bench.verdict("the scan of four empty queues, the least of 16, under its bound", scan < scan_bound);
@@ -936,19 +1080,20 @@ void te_depth2() {
     const char* const want = "Hs1 Hm1 Ts0 Te0 Hr1 He1";
     // Letter c's path with activate() at High's ceiling, where Top's
     // visit is the take. The Cortex-M33: the handler's tail, the
-    // tail-chain, PendSV and the entry (49); activate()'s prologue and
+    // tail-chain, the pair body and the entry (53); activate()'s prologue and
     // the ceiling's test (19), Top's two cursors compared in line with
     // the branch taken (8), the ceiling's and the dispatching index's
     // stores and the call to take() (13), take() (19), the slot and the
-    // stamp's literal (6): 114; with a tick (58) and a fifth rounded up
-    // (23), 195. Hazard3: the external dispatch's tail, the software
-    // interrupt's trap, the trampoline, the body and the entry (111);
+    // stamp's literal (6): 118; with a tick (58) and a fifth rounded up
+    // (24), 200. Hazard3: the external dispatch's tail, the software
+    // interrupt's trap, the trampoline, the pair body and the entry
+    // (113);
     // activate()'s prologue and the ceiling's test (21), Top's two
     // cursors compared in line with the branch taken (5), the two
     // stores and the call (6), take() (16), the slot and the stamp's
-    // address (5): 164; with a tick (70) and a fifth rounded up (33),
-    // 267.
-    constexpr uint32_t depth2_bound = per_half(195u, 267u);
+    // address (5): 166; with a tick (70) and a fifth rounded up (34),
+    // 270.
+    constexpr uint32_t depth2_bound = per_half(200u, 270u);
     for (int road = 2; road >= 1; --road) {
         console_drain();
         uint8_t alike = 0;
@@ -1240,7 +1385,7 @@ void tg_mask() {
     const char* const want_low = "Ls3 Lm3 Lp3 Hs1 He1 La3 Le3";
     uint8_t alike_console = 0;
     uint8_t alike_low = 0;
-    constexpr uint32_t section_bound = per_half(168u, 186u);   // derived below the loop
+    constexpr uint32_t section_bound = per_half(173u, 188u);   // derived below the loop
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t most = 0;
     uint32_t most_clean = 0;   ///< the longest run no tick and no refill lengthened
@@ -1294,20 +1439,20 @@ void tg_mask() {
     // From the stamp's load to Mid's, by the release listing. The
     // Cortex-M33: the stamp's store with its literal (3), the saved
     // mask's load and the guard's msr that lifts the mask (4); PendSV's
-    // entry from thread mode (12), its body (17) and its return into
+    // entry from thread mode (12), the pair body (21) and its return into
     // thread mode (12); the entry (5); activate() at the Console's
     // ceiling - the prologue, the ceiling's test and Top's visit with
     // the index's branch (29), High's (10), Mid's with its branch taken
-    // (10), Mid's serve to the stamp (13 + 19 + 6: 38): 140, 168 with
+    // (10), Mid's serve to the stamp (13 + 19 + 6: 38): 144, 173 with
     // the fifth. Hazard3: the stamp's store, the guard's test and the
     // csrsi that lifts the mask (4), the trap taken at once on the
     // instruction after it (the pending bit has stood since the post;
     // letter k measures the raise's own latency); the trap, the
-    // trampoline, the body, the restore (61); the entry (20); activate()
-    // at the Console's ceiling - the prologue and the ceiling's test
-    // (21), Top's visit with the index's branch (8), High's (6), Mid's
-    // with its branch taken (7), Mid's serve to the stamp (7 + 16 + 5:
-    // 28): 155, 186 with the fifth.
+    // trampoline, the pair body, the restore (63); the entry (20);
+    // activate() at the Console's ceiling - the prologue and the
+    // ceiling's test (21), Top's visit with the index's branch (8),
+    // High's (6), Mid's with its branch taken (6), Mid's serve to the
+    // stamp (7 + 16 + 5: 28): 156, 188 with the fifth.
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
           " cycles (bound ", section_bound, "); runs at or over it ", slow,
           ", a kernel tick or an XIP refill inside ", explained, crlf);
@@ -1471,9 +1616,9 @@ void queue_top_quietly() {
         : "memory");
 }
 
-/// The request, then the same eight stores.
+/// The platform's request, then the same eight stores.
 [[gnu::noinline]] void request_then_sled() {
-    request_scheduler();
+    P::pend_schedule();
     __asm__ volatile(
         "sw %[one], 0(%[s])\n\t"  "sw %[one], 4(%[s])\n\t"  "sw %[one], 8(%[s])\n\t"
         "sw %[one], 12(%[s])\n\t" "sw %[one], 16(%[s])\n\t" "sw %[one], 20(%[s])\n\t"
@@ -1566,14 +1711,14 @@ void tk_softirq() {
     }
     Top::action = nullptr;
     print(serial, "  the raw raise: ", raw_lo, "..", raw_hi,
-          " of the eight stores behind it ran before the trap; behind request_scheduler(): ",
+          " of the eight stores behind it ran before the trap; behind the platform's request: ",
           req_hi, crlf);
     // The raw figure is the bus's fact the request does not depend on (rp2350/
     // schedule_hazard3.hpp): printed, and judged by nothing but the run
     // itself - every raise served once. The guarded figure is the
     // request's promise.
     bench.verdict("each raise served Top exactly once (20 raises)", each_once);
-    bench.verdict("request_scheduler() returns after the scheduler it started: no store "
+    bench.verdict("the platform's request returns after the scheduler it started: no store "
                   "behind it ran first (10 runs)",
                   req_hi == 0u);
 
@@ -1636,9 +1781,12 @@ void ti_dark() {
     bench.verdict("Top, High, Mid and Low are idle: every queue empty",
                   Top::queue.empty() && High::queue.empty() && Mid::queue.empty() &&
                       Low::queue.empty());
+    bench.verdict("core 1 is in the bootrom, no program of this image running there",
+                  core1_stage == 0u);
     bench.verdict("no time event is armed", !TE::next_deadline().has_value());
-    bench.verdict("TIMER1's alarm 0 is disarmed and its line quiet",
-                  !Edge::armed<0>() && !Edge::raised<0>() && !Irq::pending(Edge::irq<0>()));
+    bench.verdict("TIMER1's alarms 0 and 1 are disarmed, alarm 0's line quiet",
+                  !Edge::armed<0>() && !Edge::armed<1>() && !Edge::raised<0>() &&
+                      !Irq::pending(Edge::irq<0>()));
     bench.verdict("the LED's pad GP25 is not an output", !Led::is_output());
     bench.verdict("the ceiling is the Console's and interrupts are enabled",
                   P::ceiling == console_index && P::interrupts_enabled());
@@ -1697,12 +1845,437 @@ void th_stack() {
     constexpr uint32_t below = per_half(312u, 400u);
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     print(serial, "  the bound below the deepest sample ", below, " bytes", crlf);
-    bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
+    // And above it: the words of activate()'s frame below its saved
+    // registers, written only on the paths that use them - 28 bytes on the
+    // Cortex-M33 (nine registers pushed, then 28), 44 on Hazard3 (cm.push
+    // of thirteen into 96) - so the paint's edge may stand up to that far
+    // above a dispatch's sample, by the release listing (letter l's Top,
+    // at depth three, is such a sample: no path below it writes the
+    // frame's lowest words).
+    constexpr uint32_t frame_unwritten = per_half(28u, 44u);
+    bench.verdict("the paint reached the deepest sampled stack pointer, but for the words of its "
+                  "frame no path wrote",
+                  used + frame_unwritten >= deepest);
     bench.verdict("the high-water mark is within the bound of the deepest sample (the arithmetic "
                   "beside it)",
                   used <= deepest + below);
     bench.verdict("and inside the 4 KB bank, with the paint's floor untouched",
                   lowest > paint_bottom);
+}
+
+// =============================================================================
+// l - a Rubato on each core
+// =============================================================================
+volatile uint32_t paint1_top = 0;      ///< core 1's highest painted word's address + 4
+volatile uint32_t paint1_bottom = 0;   ///< core 1's lowest painted word's address
+volatile uint32_t core1_fpccr = 0;   ///< the Cortex-M33's FPCCR as core 1 read it
+
+/// Core 1's stack bank: scratch_x, 4 KB below core 1's stack top
+/// (rp2350/ld/rp2350_16m.ld).
+constexpr uint32_t core1_bank_bytes = 4096u;
+
+/// Core 1's program: its stack painted, its request set up in its own
+/// registers, alarm 1's line and the doorbell's enabled in its own
+/// controller, its kernel. No ticker of its own: core 1's pack arms no
+/// time event, and the ruler is TIMER1, which both cores read - so core 0's
+/// tick and its handler stay what letters a to k measured.
+[[noreturn]] void core1_rubato() {
+    {
+        const uint32_t sp = stack_pointer();
+        const uint32_t bottom = Core1::default_stack_top() - core1_bank_bytes + 64u;
+        const uint32_t top = (sp - 64u) & ~3u;
+        for (uint32_t a = bottom; a < top; a += 4u) {
+            *reinterpret_cast<volatile uint32_t*>(a) = paint;
+        }
+        paint1_bottom = bottom;
+        paint1_top = top;
+    }
+#if defined(BRIO_RP2350_CORE_M33)
+    core1_fpccr = FPU->FPCCR;
+#endif
+    scheduler_init();
+    Edge::clear<1>();
+    Edge::interrupt<1>(true);
+    Irq::clear_pending(Edge::irq<1>());
+    Irq::enable(Edge::irq<1>());
+    Drain1::enable();
+    core1_stage = 2;
+    enable_interrupts();
+    K1::run();
+}
+
+/// Core 1 back into the bootrom, alarm 1 quiet and Low1's inbox emptied.
+bool core1_park() {
+    Edge::interrupt<1>(false);
+    Edge::disarm<1>();
+    Edge::clear<1>();
+    const bool ok = Core1::reset();
+    core1_stage = 0;
+    Inbox<Low1>::clear();
+    return ok;
+}
+
+/// Core 1 reset, its kernel's state put back while it is held (the
+/// ceiling at the base, the trace empty), then launched into its Rubato;
+/// true when its entry reported within 10 ms.
+bool core1_launch() {
+    bool ok = Core1::reset();
+    core1_stage = 0;
+    Inbox<Low1>::clear();
+    P1::ceiling = 255;
+    trace1_len = 0;
+    ok = ok && Core1::protocol(&core1_rubato);
+    const uint32_t t0 = Ruler::now();
+    while (ok && core1_stage != 2u) {
+        if (Ruler::now() - t0 >= 10u * one_ms) {
+            return false;
+        }
+    }
+    return ok;
+}
+
+/// Core 1's ceiling read from core 0: through a volatile access, since the
+/// other core writes it.
+uint8_t core1_ceiling() { return *static_cast<volatile uint8_t*>(&P1::ceiling); }
+
+/// Both cores' windows on the ruler: the preempted dispatch's mark and its
+/// resumption, written by the core whose dispatch it is.
+volatile uint32_t w0_mark = 0;
+volatile uint32_t w0_resumed = 0;
+volatile uint32_t w1_mark = 0;
+volatile uint32_t w1_resumed = 0;
+volatile uint32_t k1_done = 0;              ///< Low1's actions ended, counted by core 1
+volatile uint32_t bell1_last = 0;           ///< the ruler at core 1's doorbell handler's last statement
+volatile uint32_t edge1_last = 0;           ///< the ruler at alarm 1's handler's last statement
+volatile uint32_t bell1_misses = 0;         ///< the XIP cache's misses before the doorbell's stamp
+volatile uint32_t edge1_misses = 0;         ///< and before alarm 1's
+volatile uint32_t bell1_ticks = 0;          ///< core 0's tick count before the doorbell's stamp
+volatile uint32_t edge1_ticks = 0;          ///< and before alarm 1's
+volatile bool mispost_raised = true;        ///< core 1's request read after its mispost
+
+/// Core 1's spin and the alarm's distance, in clk_sys cycles: an alarm 100
+/// us into a 500 us spin on each core, so that each core's preemption
+/// lands while the other core's preempted dispatch still spins - core 1's
+/// mark trails core 0's by the crossing alone, a few microseconds warm.
+constexpr uint32_t both_edge = 15'000u;
+constexpr uint32_t both_spin = 75'000u;
+
+/// What core 0 waits after core 1's last sign of a dispatch's end (Low1's
+/// counter, or its ceiling back at 255) before it sends again: the rest
+/// of core 1's way back to its base - the action's return, the trace's
+/// last entry, release(), the ceiling's restore, the rescan, activate()'s
+/// return and the scheduler entry's exit - reads as about 150 cycles in
+/// the Cortex-M33's release listing and fewer in Hazard3's (a reading,
+/// not a count instruction by instruction), and 3000 cycles (20 us) is
+/// many times that. Sent sooner, the doorbell lands in that exit, where a scheduler
+/// request nests a new entry over the old one (rp2350/
+/// schedule_hazard3.hpp, "RE-ENTRANCY"): correct, but one more level of
+/// stack per crossing while the crossings keep coming, which is not what
+/// this letter measures.
+constexpr uint32_t core1_settle = 3000u;
+
+/// Core 1's road 1 from its doorbell handler's last statement to Low1's
+/// first, at core 1's base, by the release listing under the file
+/// header's models. The Cortex-M33: the handler's tail after the stamp
+/// (a literal, a store, the frame's release, the pop of three with the
+/// PC: 11), the tail-chain into PendSV (6), the pair body (21) and its
+/// return into thread mode (12), K1's entry (5), K1's activate() - ten
+/// registers saved, two literals, the ceiling's load and test (19), Top1's
+/// two cursors compared in line, the branch not taken (6), the index's
+/// compare and its branch taken (4), High1's, its queue a literal (8),
+/// the index's compare (2), Low1's (8), the ceiling's and the
+/// dispatching index's stores and the call to take() (12), take() (19),
+/// to the stamp's literal (5): 138, and with a fifth rounded up, 166.
+/// Hazard3: the handler's tail (the store, cm.popret of six: 10), the
+/// crt's jump back, `meinext` and its branch, the sixteen loads and the
+/// `mret` (3 + 3 + 19), the software interrupt's entry and the table's
+/// jump (3 + 2), the trampoline (19), the pair body (20), the restore
+/// (19), K1's entry (20), K1's activate() - cm.push of eleven, the
+/// setups, the ceiling's test (19), Top1's (4) and the index's branch
+/// (3), High1's (4) and the index's compare (2), Low1's (5), the serve's
+/// stores and the call (7), take() (16), to the stamp's address (4): 182,
+/// and with the fifth 219. No kernel tick lands on core 1: its pack arms
+/// no time event and core 1 runs no ticker (core1_rubato()).
+constexpr uint32_t bell_bound = per_half(166u, 219u);
+/// And from alarm 1's handler's last statement to High1's first, over
+/// Low1's dispatch at K1's ceiling 2: the same with alarm 1's tail (9 on
+/// the Cortex-M33 - a pop of the PC alone -, 6 on Hazard3 - cm.popret of
+/// two) and activate() taking High1 (its branch taken: 10 and 6; the
+/// serve 12 and 6, to the stamp's literal 5 and 4): 128 and 172, and with
+/// the fifth 154 and 207.
+constexpr uint32_t alarm1_bound = per_half(154u, 207u);
+/// What lies below core 1's deepest stack sample, by the release
+/// listing. A dispatch's sample is taken inside K1's activate(), whose
+/// frame is above it. Below it at most: the dispatch's action and what it
+/// calls (the Cortex-M33's widest is Low1's action in the second phase,
+/// 24 bytes, calling note1(), 20: 44; Hazard3's Low1 and High1 actions,
+/// 32, whose callees take no frame: 32); an interrupt landing there - on
+/// the Cortex-M33 a basic frame and its alignment word (36: no FP
+/// instruction runs on core 1, by the listing, so its FP context is never
+/// active), on Hazard3 the crt's trap frame (64) -; and below that either
+/// the deepest handler's frames (the doorbell's 24 and its push()'s 8 on
+/// the Cortex-M33: 32; 48 on Hazard3, whose push() takes none) or, the
+/// handler gone and its request pending, PendSV's two words and an
+/// activate() that finds nothing (8 + 40: 48) on the Cortex-M33, and on
+/// Hazard3 in place of the trap frame and the handler the entry's frame
+/// and such an activate() (80 + 48: 128, against 64 + 48). 44 + 36 + 48
+/// = 128 on the Cortex-M33, 32 + 128 = 160 on Hazard3.
+constexpr uint32_t below1 = per_half(128u, 160u);
+
+void tl_both_cores() {
+    reset_scenario();
+    sp1_low_dispatch = 0xFFFF'FFFFu;
+    sp1_low_isr = 0xFFFF'FFFFu;
+    const bool up = core1_launch();
+    print(serial, "  core 1 launched into its Rubato pack: ", up ? "up" : "FAILED", crlf);
+    bench.verdict("core 1 came up under Rubato (its entry reported within 10 ms)", up);
+    if (!up) {
+        (void)core1_park();
+        return;
+    }
+#if defined(BRIO_RP2350_CORE_M33)
+    const bool aspen1 = (core1_fpccr & FPU_FPCCR_ASPEN_Msk) != 0u;
+    const bool lspen1 = (core1_fpccr & FPU_FPCCR_LSPEN_Msk) != 0u;
+    print(serial, "  core 1's FPCCR ", hex(static_cast<uint32_t>(core1_fpccr)), ": ASPEN ",
+          aspen1 ? 1 : 0, ", LSPEN ", lspen1 ? 1 : 0, crlf);
+    bench.verdict("core 1's FPCCR.ASPEN and LSPEN are set, as core 0's: the pair body's FP part "
+                  "rests on the same lazy save there",
+                  aspen1 && lspen1);
+#endif
+    // Core 1's two road-1 latencies first, with core 0 asleep: core 0's
+    // send to Low1, road 1 on core 1 from
+    // its doorbell handler at its base (the handler's last statement to
+    // Low1's first); then Low1 arms alarm 1 2000 cycles ahead and spins
+    // 20000, and the alarm's post starts High1 over it (alarm 1's
+    // handler's last statement to High1's first). One warm-up and sixteen,
+    // each latency lengthened when the XIP cache missed between the
+    // handler's read of the miss counter, just before its stamp, and the
+    // dispatch's, just after its own - or when core 0's kernel tick count
+    // moved between the same two points, the tick being the one interrupt
+    // that wakes core 0 here: its
+    // handler runs through the same cache and bus (measured on Hazard3
+    // before the tick was read: one crossing of 160 at 120 cycles over
+    // the others with no miss counted in its window; which of the tick's
+    // effects lengthened it is not established). With core 0 asleep, the
+    // rest is core 1's path.
+    constexpr uint8_t crossings = 16;
+    Low1::action = [](uint8_t) {
+        Edge::alarm<1>(Ruler::now() + 2000u);
+        spin(20000u);
+        k1_done = k1_done + 1u;
+    };
+    High1::action = nullptr;
+    console_drain();   // the lines above still leaving: core 0's UART handler would miss lines
+    uint32_t bell_lo = 0xFFFF'FFFFu, bell_hi = 0, bell_clean_hi = 0;
+    uint32_t alarm_lo = 0xFFFF'FFFFu, alarm_hi = 0, alarm_clean_hi = 0;
+    uint8_t bell_lengthened = 0;
+    uint8_t alarm_lengthened = 0;
+    uint8_t crossing_missed = 0;
+    for (uint8_t i = 0; i <= crossings; ++i) {
+        const uint32_t r = k1_done;
+        const uint32_t h = High1::runs;
+        send<Low1>(Hit{1});
+        // Core 0 asleep while core 1's two paths run, until its next
+        // interrupt (the kernel tick at the latest): a core 0 spinning on the ruler and on the flash measured them
+        // longer, 2 to 6 cycles on the Cortex-M33 and 11 to 14 on Hazard3,
+        // and its own fetches fell in the window of the miss counter.
+        wait_for_interrupt();
+        const bool ran = wait_runs(k1_done, r, one_ms) && High1::runs == h + 1u;
+        spin(core1_settle);
+        if (!ran) {
+            ++crossing_missed;
+            continue;
+        }
+        if (i == 0u) {
+            continue;
+        }
+        const uint32_t b = Low1::entered - bell1_last;
+        bell_lo = b < bell_lo ? b : bell_lo;
+        bell_hi = b > bell_hi ? b : bell_hi;
+        if (Low1::entered_ticks != bell1_ticks || Low1::entered_misses != bell1_misses) {
+            ++bell_lengthened;
+        } else if (b > bell_clean_hi) {
+            bell_clean_hi = b;
+        }
+        const uint32_t a = High1::entered - edge1_last;
+        alarm_lo = a < alarm_lo ? a : alarm_lo;
+        alarm_hi = a > alarm_hi ? a : alarm_hi;
+        if (High1::entered_ticks != edge1_ticks || High1::entered_misses != edge1_misses) {
+            ++alarm_lengthened;
+        } else if (a > alarm_clean_hi) {
+            alarm_clean_hi = a;
+        }
+    }
+    // Core 1's side: Low1, started by core 0's send (road 1 from core 1's
+    // doorbell handler at its base), posts to core 0's High under its own
+    // mask (refused by the queue, nothing raised), arms alarm 1 and spins;
+    // the alarm posts to High1 (road 1 over Low1), which posts to Top1
+    // inside its dispatch (road 2).
+    Low1::action = [](uint8_t) {
+        note1('l', 'm');
+        w1_mark = Ruler::now();
+        {
+            InterruptGuard g;
+            post<High>(Hit{0});
+            mispost_raised = request_pending();
+        }
+        Edge::alarm<1>(Ruler::now() + both_edge);
+        spin(both_spin);
+        w1_resumed = Ruler::now();
+        note1('l', 'r');
+        k1_done = k1_done + 1u;
+    };
+    High1::action = [](uint8_t) { post<Top1>(Hit{1}); };
+    const char* const want0 = "Ls3 Lm3 Hs1 Ts0 Te0 He1 Lr3 Le3";
+    const char* const want1 = "ls2 lm2 hs1 ts0 te0 he1 lr2 le2";
+    uint8_t alike0 = 0;
+    uint8_t alike1 = 0;
+    uint8_t overlapped = 0;
+    bool settled = true;
+    bool refused = true;          ///< every mispost counted by High's queue, High not run by it
+    bool quiet = true;            ///< and core 1's request not raised by it
+    // Run 0 is the warm-up, not judged: core 1's first crossing of a cold
+    // program pays the XIP cache's fill for both cores.
+    console_drain();
+    for (int run = 0; run <= 10; ++run) {
+        reset_scenario();
+        trace1_len = 0;          // core 1 is idle at its base: nothing writes it now
+        mispost_raised = true;
+        // Core 0's side: the same shape on alarm 0.
+        Low::action = [](uint8_t) {
+            note('L', 'm');
+            w0_mark = Ruler::now();
+            send<Low1>(Hit{1});
+            edge_to = 1;
+            edge_in(both_edge);
+            spin(both_spin);
+            w0_resumed = Ruler::now();
+            note('L', 'r');
+        };
+        High::action = [](uint8_t) { post<Top>(Hit{1}); };
+        const uint16_t mis0 = High::queue.misposts();
+        const uint32_t h0runs = High::runs;
+        const uint32_t d0 = k1_done;
+        post<Low>(Hit{1});
+        // Both settle: core 1's Low1 ended its action (within 2 ms of the
+        // post's return, its spin being 500 us), then its dispatch - the
+        // trace's last entry written before the ceiling goes back to 255,
+        // its base (kernel/rubato.hpp's visit()), within 1 ms.
+        const bool done = wait_runs(k1_done, d0, 2u * one_ms);
+        const uint32_t t0 = Ruler::now();
+        while (core1_ceiling() != 255u && Ruler::now() - t0 < one_ms) {
+        }
+        const bool back1 = core1_ceiling() == 255u;
+        const bool back0 = P::ceiling == console_index;
+        if (!(done && back1 && back0)) {   // printed for the warm-up too, judged after it
+            print(serial, "  run ", run, " did not settle: Low1's end ", done ? "seen" : "NOT seen",
+                  ", core 1's ceiling ", core1_ceiling(), ", core 0's ", P::ceiling, crlf);
+        }
+        spin(core1_settle);
+        if (run == 0) {
+            continue;
+        }
+        settled = settled && done && back1 && back0;
+        refused = refused && High::queue.misposts() == static_cast<uint16_t>(mis0 + 1u) &&
+                  High::runs == h0runs + 1u;
+        quiet = quiet && !mispost_raised;
+        if (trace_is(want0)) {
+            ++alike0;
+        } else if (alike0 + 1 == run) {
+            print_trace();
+        }
+        if (marks_are(trace1, trace1_len, want1)) {
+            ++alike1;
+        } else if (alike1 + 1 == run) {
+            print_trace1();
+        }
+        // Each core's preemption inside the other core's preempted
+        // dispatch, on the ruler both read: core 0's High started between
+        // core 1's mark and its resumption, and core 1's High1 between
+        // core 0's.
+        const uint32_t h0 = High::entered;
+        const uint32_t h1 = High1::entered;
+        const bool inside0 = h0 - w1_mark <= w1_resumed - w1_mark;
+        const bool inside1 = h1 - w0_mark <= w0_resumed - w0_mark;
+        if (inside0 && inside1) {
+            ++overlapped;
+        }
+    }
+    Low1::action = nullptr;
+    High1::action = nullptr;
+    reset_scenario();
+    print(serial, "  core 0: ", alike0, " of 10 runs traced ", want0, crlf);
+    print(serial, "  core 1: ", alike1, " of 10 runs traced ", want1, crlf);
+    print(serial, "  each core's preemption inside the other's preempted dispatch in ", overlapped,
+          " of 10 runs; core 1's ceiling read after each settle ", core1_ceiling(), crlf);
+    print(serial, "  core 1, road 1 from its doorbell at its base: the handler's last statement "
+          "to Low1's first ", bell_lo, "..", bell_hi, " cycles over ", crossings, " crossings (",
+          crossing_missed, " missed), at most ", bell_clean_hi, " on the ", crossings - bell_lengthened,
+          " no XIP refill and no tick of core 0's lengthened (bound ", bell_bound, ")", crlf);
+    print(serial, "  core 1, road 1 from alarm 1 over Low1: the handler's last statement to "
+          "High1's first ", alarm_lo, "..", alarm_hi, " cycles, at most ", alarm_clean_hi,
+          " on the ", crossings - alarm_lengthened, " no XIP refill and no tick of core 0's lengthened (bound ",
+          alarm1_bound, ")", crlf);
+    bench.verdict("core 0 under Rubato beside core 1's: road 1 then road 2, every ceiling its own "
+                  "index (10 runs)",
+                  alike0 == 10u);
+    bench.verdict("core 1 under Rubato through the same scheduler entry: road 1 from its doorbell, "
+                  "road 1 from its alarm, road 2, every ceiling its own index (10 runs)",
+                  alike1 == 10u);
+    bench.verdict("the two cores preempted at once, each inside the other's preempted dispatch "
+                  "(10 runs)",
+                  overlapped == 10u);
+    bench.verdict("both settle: core 1's ceiling 255 at its base, core 0's the Console's (10 runs)",
+                  settled);
+    bench.verdict("core 1's post to core 0's High was refused and counted by High's queue, and "
+                  "ran nothing (10 runs)",
+                  refused);
+    bench.verdict(hazard3 ? "and raised no software interrupt flag on core 1 (10 runs)"
+                          : "and left PendSV not pending on core 1 (10 runs)",
+                  quiet);
+    bench.verdict("every crossing started Low1 on core 1 and its alarm High1, within 1 ms (16 "
+                  "crossings)",
+                  crossing_missed == 0u);
+    bench.verdict("core 1's road 1 from its doorbell under its bound (the arithmetic beside it) "
+                  "in every crossing no refill and no tick lengthened, at least one",
+                  bell_lengthened < crossings && bell_clean_hi <= bell_bound);
+    bench.verdict("core 1's road 1 from alarm 1 under its bound (the arithmetic beside it) in "
+                  "every crossing no refill and no tick lengthened, at least one",
+                  alarm_lengthened < crossings && alarm_clean_hi <= alarm1_bound);
+
+    // Core 1's stack, read by core 0 with core 1 idle at its base.
+    uint32_t lowest = paint1_top;
+    for (uint32_t a = paint1_bottom; a < paint1_top; a += 4u) {
+        if (*reinterpret_cast<const uint32_t*>(a) != paint) {
+            lowest = a;
+            break;
+        }
+    }
+    const uint32_t used = paint1_top - lowest;
+    const uint32_t deepest_dispatch = paint1_top - sp1_low_dispatch;
+    const uint32_t deepest_isr = paint1_top - sp1_low_isr;
+    print(serial, "  core 1: painted ", paint1_top - paint1_bottom, " bytes below its entry's frame (",
+          hex(paint1_bottom), "..", hex(paint1_top), "); used ", used,
+          " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
+          ", an interrupt at ", deepest_isr, "; the bound below the deepest sample ", below1,
+          " bytes", crlf);
+    const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
+    // A dispatch's sample is the stack pointer inside activate(), and the
+    // words of that frame below its saved registers are written only on
+    // the paths that use them: none on the Cortex-M33 (core 1's activate()
+    // pushes ten registers, r3 for the alignment, and allocates nothing
+    // more), one on Hazard3 (cm.push of eleven registers into 48 bytes,
+    // its lowest word the alignment's). So the paint's edge may stand that
+    // far above the sample, 0 and 4 bytes, by the release listing.
+    constexpr uint32_t frame_unwritten = per_half(0u, 4u);
+    bench.verdict("core 1's paint reached its deepest sampled stack pointer, but for the words "
+                  "of its frame no path wrote",
+                  used + frame_unwritten >= deepest);
+    bench.verdict("core 1's high-water mark is within the bound of its deepest sample (the "
+                  "arithmetic beside it)",
+                  used <= deepest + below1);
+    const bool parked = core1_park();
+    bench.verdict("core 1 back in the bootrom", parked);
 }
 
 // =============================================================================
@@ -1742,7 +2315,8 @@ void console_turn() {
 // ---- target glue ------------------------------------------------------------
 //
 // ONE NAME, BOTH ARCHITECTURES, for every vector but the scheduler's, which
-// the macro binds for the half the image is built for.
+// the macro binds for the half the image is built for - the pair body, for
+// a Rubato on each core.
 extern "C" void isr_uart0() {
     uart_interrupts = uart_interrupts + 1u;
     if (Serial::isr()) {
@@ -1753,7 +2327,7 @@ extern "C" void isr_uart0() {
 
 extern "C" void isr_systick() { brio::Ticker::tick(); }
 
-BRIO_RP2350_SCHEDULER_VECTORS(K)
+BRIO_RP2350_SCHEDULER_VECTORS_PAIR(K, K1)
 
 /// TIMER1's alarm 0: the raised flag cleared, the post, and the ruler as
 /// the last statement - letter c's near end.
@@ -1772,6 +2346,30 @@ extern "C" void isr_timer1_0() {
         brio::post<High>(Hit{1});
     }
     edge_last = Ruler::now();
+}
+
+/// TIMER1's alarm 1, core 1's in letter l: the raised flag cleared, the
+/// post to High1, and the ruler as the last statement.
+extern "C" void isr_timer1_1() {
+    Edge::clear<1>();
+    sample_sp(sp1_low_isr);
+    brio::post<High1>(Hit{1});
+    edge1_misses = xip_misses();
+    edge1_ticks = brio::Ticker::ticks();
+    edge1_last = Ruler::now();
+}
+
+/// The doorbell, one name for both cores (3.1.6: SIO_IRQ_BELL is
+/// core-local): enabled on core 1 alone, whose crossing it lands as a
+/// local post to Low1, and the ruler as the last statement.
+extern "C" void isr_sio_bell() {
+    if (brio::core_id() == 1u) {
+        sample_sp(sp1_low_isr);
+        Drain1::isr();
+        bell1_misses = xip_misses();
+        bell1_ticks = brio::Ticker::ticks();
+        bell1_last = Ruler::now();
+    }
 }
 
 /// Core 0's stack: the whole of the upper unstriped bank, scratch_y, 4 KB
@@ -1813,7 +2411,9 @@ int main() {
 #else
     bench.letter('k', "the software interrupt: its latency, the registers, the flag", tk_softirq);
 #endif
-    bench.letter('i', "dark: every object idle, nothing lit, the request as set", ti_dark);
+    bench.letter('l', "a Rubato on each core, one scheduler entry, two ceilings", tl_both_cores);
+    bench.letter('i', "dark: every object idle, core 1 parked, nothing lit, the request as set",
+                 ti_dark);
     bench.letter('h', "the stack's high-water mark", th_stack);
 
     (void)serial_ok;

@@ -58,7 +58,10 @@ within its bounded waits; core 0 enables its own doorbell, unmasks, and
 would be refused and counted by `Echo`'s queue.
 
 What decides correctness even there. Each active object lives on one
-core, in that core's `Tenuto`, on that core's platform type; an event
+core, in that core's kernel - a `Tenuto` here, or a `Rubato` on
+`Rp2350RubatoPlatform<0>` and `<1>`, whose scheduler entry both cores
+share ([platform.md](platform.md), "How to use it") - on that core's
+platform type; an event
 for an active object of the other core goes through `send`, never
 `post`. Two vectors are bound once for both cores, under the crt's
 names - the bridge's doorbell and the tickers' tick - and each handler asks

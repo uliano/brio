@@ -258,7 +258,10 @@ static_assert(Platform<Rp2350Platform<1>>);
  *    the scheduler leaving through SVC; on Hazard3 the machine software
  *    interrupt, the SIO flag of the asking hart, through the crt's
  *    trampoline into the scheduler's entry, which leaves by an `mret` of
- *    its own. Both files say how, with the stack each level costs.
+ *    its own. Both files say how, with the stack each level costs. Asked
+ *    only from this platform's own core (request_scheduler_on<core>()):
+ *    a post from the other core, which the queue refuses and counts,
+ *    raises nothing on either core.
  *
  * The CriticalSection is still PRIMASK on one half and mstatus.MIE on the
  * other, and the promise that an interrupt handler is not interrupted by
@@ -271,32 +274,39 @@ static_assert(Platform<Rp2350Platform<1>>);
  * scheduler's vectors (the macro above: two on one half, one on the
  * other), executes no `svc` of its own on the Cortex-M33 and leaves
  * mscratch alone on Hazard3, and calls scheduler_init() before it
- * enables interrupts.
+ * enables interrupts, on each core that runs a Rubato.
  *
- * CORE 0 ONLY. Both crts give the two cores of a pair one table, so a
- * second Rubato on core 1 would enter the same scheduler vectors with a
- * second kernel to serve; which kernel a vector serves is the two-kernel
- * question the RP2040 shares, and until it is answered core 1 runs
- * Tenuto (rp2350/multicore.hpp).
+ * ONE PER CORE, AS Rp2350Platform. Core 1 may run a Rubato of its own
+ * beside core 0's, on Rp2350RubatoPlatform<1>, with its own ceiling. Both
+ * crts give the two cores of a pair one table, so the scheduler's
+ * vectors are one entry each for both cores, and a program with a Rubato
+ * on each core binds them to the pair body that asks the core which
+ * kernel to serve, BRIO_RP2350_SCHEDULER_VECTORS_PAIR(K0, K1) - core 1's
+ * part of the program then calls scheduler_init() in its own start-up
+ * (rp2350/schedule.hpp has the binding, the cost and the declined
+ * alternative; rp2350/multicore.hpp the launch). A program with one
+ * Rubato, on core 0, binds the single body, core 1 under Tenuto or not
+ * launched: a Tenuto kernel never asks, and a post of core 1's to an
+ * object of core 0 asks nothing (pend_schedule() below).
  */
 template <uint8_t core_index = 0, class TB = CoreTicker<core_index>>
 struct Rp2350RubatoPlatform : Rp2350Platform<core_index, TB> {
-    static_assert(core_index == 0u,
-                  "brio Rp2350RubatoPlatform: a Rubato kernel runs on core 0 alone - both cores "
-                  "of a pair enter one table of scheduler vectors, and the two-kernel body is not "
-                  "written (rp2350/schedule.hpp)");
-
     static constexpr bool preemptive = true;
 
-    /// The index of the object being dispatched; 255 at the loop's base.
+    /// The index of the object being dispatched on this core; 255 at the
+    /// loop's base.
     static inline uint8_t ceiling = 255;
 
-    /// The request for the scheduler (rp2350/schedule.hpp).
-    [[gnu::always_inline]] static void pend_schedule() { request_scheduler(); }
+    /// The request for the scheduler, made only when the calling core is
+    /// this platform's (rp2350/schedule.hpp's request_scheduler_on: a
+    /// mispost from the other core stays a count).
+    [[gnu::always_inline]] static void pend_schedule() { request_scheduler_on<core_index>(); }
 };
 
 static_assert(Platform<Rp2350RubatoPlatform<>>);
 static_assert(Preemptive<Rp2350RubatoPlatform<>>);
+static_assert(Platform<Rp2350RubatoPlatform<1>>);
+static_assert(Preemptive<Rp2350RubatoPlatform<1>>);
 static_assert(!Preemptive<Rp2350Platform<>>);
 
 } // namespace brio

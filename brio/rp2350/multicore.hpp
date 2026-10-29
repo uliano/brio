@@ -152,9 +152,13 @@
  * (`CoreTicker<1>`: its own SysTick on the Arm half, its own comparator
  * against the shared microsecond counter on the RISC-V one), the lines
  * its drivers own enabled in its controller, its bell enabled, interrupts
- * on, its kernel's run(). What it must not do: touch the clock tree
- * (core 0 owns it), or post to an active object of core 0 (the queue
- * refuses and counts).
+ * on, its kernel's run(). That kernel is a Tenuto, or a Rubato on
+ * Rp2350RubatoPlatform<1> beside core 0's, which also calls
+ * scheduler_init() on core 1 before the unmask and is served through the
+ * pair body (rp2350/schedule.hpp). What it must not do: touch the clock
+ * tree (core 0 owns it), or post to an active object of core 0 (the queue
+ * refuses and counts, and the post raises no scheduler request on either
+ * core).
  *
  * The preprocessor is asked here, about BRIO_RP2350_CORE_M33 and never
  * about the compiler's `__riscv` - the same question rp2350/ticker.hpp

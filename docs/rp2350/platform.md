@@ -15,7 +15,8 @@ for the next boot. `Rp2350Platform<core, TB>` is this chip's answer, and
 `Rp2350RubatoPlatform<core, TB>` the preemptive kernel's, the same type
 with the three members of a preemptive platform ("Types and verbs"). It
 is one type per core, because the two cores of a pair run two kernels
-([multicore.md](multicore.md)), and one type for both architectures: the
+([multicore.md](multicore.md)) - a Tenuto or a Rubato on each - and one
+type for both architectures: the
 same source compiles for the Cortex-M33 pair and for the Hazard3 pair,
 and only `core.hpp` asks the compiler which one it is built for
 (`__riscv`); the three headers that must include a different file or run
@@ -114,7 +115,9 @@ controller), 9.11 (the pad registers and their isolation latch), 12.15.1
 appendix C (the hardware revisions) and appendix E (the errata,
 RP2350-E9 among them). For the preemptive platform: 3.7.2 (the
 Cortex-M33's configuration: the Security Extension, the FPU, four
-priority bits), the M33 register list's FPCCR table (3.7.5), 3.8.4
+priority bits), the M33 register list's FPCCR table (3.7.5), 3.1.2 (SIO's
+CPUID, which the two-kernel body asks, and its note that MHARTID answers
+the same), 2.2.6 (the SIO's zero-wait access), 3.8.4
 (Hazard3's trap entry and `mret`), 3.8.4.2.1 (the software interrupt and
 the SIO's RISCV_SOFTIRQ register, 3.1.11), 3.8.6.1 (Xh3irq's preemption,
 which is not used), 3.8.7 (Hazard3's instruction cycle counts) and 3.8.8
@@ -262,6 +265,45 @@ stratum's own, written from 3.8.4:
 - Hazard3 here has no floating-point unit (3.8.8), so the entry saves no
   f-register.
 
+**TWO KERNELS SHARE ONE SCHEDULER ENTRY, AND THE ENTRY ASKS THE CORE.**
+Both crts give the two cores of a pair one table: core 1 is launched with
+core 0's vector base (VTOR on one half, mtvec on the other,
+[multicore.md](multicore.md)), so PendSV and SVCall, or the software
+interrupt's trampoline, are one entry each for both cores. A program with
+a Rubato on each core binds the pair body, which reads which core took
+the entry and indexes a table of two scheduler entries placed after it -
+no branch, one path of one length on both cores. On the Cortex-M33 the
+question is SIO's CPUID (3.1.2), one load over the core's AHB port to the
+SIO, zero wait states (2.2.6; this core has no single-cycle IO port of
+the kind the RP2040's Cortex-M0+ had), its address one MOV.W of a
+modified immediate, and the entry one load with the index scaled in the
+instruction: four instructions in place of the single body's literal
+load. On Hazard3 it is the hart's mhartid, the same answer (3.1.2's
+note), which the body reads anyway to lower the hart's flag, and the
+entry is one `sh2add` (Zba) and one load placed where no instruction
+waits on it. The core's own CPUID register in the System Control Space
+reads the same part number on both cores and cannot be the question; the
+stack pointer's bank would tell the cores apart only while each stack
+stayed where the linker script puts it. Everything else is per core
+already: PendSV's priority in each M33's SHPR3 (so `scheduler_init()`
+runs on each core), mie, mscratch and the software interrupt flag of each
+hart, each core's stack and each kernel's ceiling. A vector table per
+core would spare the question at every request for a second table every
+bound vector must be kept in step with; it is declined.
+
+**THE REQUEST IS MADE ONLY FROM THE PLATFORM'S OWN CORE.** `post()` asks
+for the scheduler after the queue's push whenever the receiver's index is
+below its platform's ceiling, and a post from the other core is one the
+push has already refused and counted. Asking then would raise the posting
+core's request - PendSV in its own ICSR, its own hart's flag - and with a
+Rubato on core 0 alone and core 1 under Tenuto, the single body taken on
+core 1 would run core 0's kernel there (the Cortex-M33), or core 1, its
+software interrupt not enabled, would spin in the request's wait for ever
+(Hazard3). `pend_schedule()` is therefore `request_scheduler_on<core>()`,
+which asks only when the calling core is the platform's: SIO's CPUID
+compared first on the Cortex-M33, the hart id the request reads anyway on
+Hazard3.
+
 **WHAT THE CORTEX-M33'S HALF RESTS ON, CHECKED AGAINST THE DOCUMENTS.**
 The core stratum's code was written for ARMv6-M and ARMv7-M; on this
 ARMv8-M core with the Security Extension (3.7.2), running Secure as the
@@ -312,21 +354,27 @@ bootrom hands over:
   [multicore.md](multicore.md)), and `panic_record()` - one `.noinit`
   record per core, a static of the template.
 - `Rp2350RubatoPlatform<core = 0, TB = CoreTicker<core>>` - the platform
-  of the preemptive kernel: `Rp2350Platform` whole, plus `preemptive`,
-  `ceiling` (the pack index being dispatched, 255 at the loop's base) and
-  `pend_schedule()`, the same text on both halves. Core 0 only - a
-  `Rp2350RubatoPlatform<1>` does not compile: both cores of a pair enter
-  one table of vectors, and which kernel a scheduler vector serves is
-  the two-kernel question not yet answered.
+  of the preemptive kernel, one per core: `Rp2350Platform` whole, plus
+  `preemptive`, `ceiling` (the pack index being dispatched on that core,
+  255 at the loop's base) and `pend_schedule()`, which is
+  `request_scheduler_on<core>()`; the same text on both halves.
 - `schedule.hpp`'s names, the same on both halves: `request_scheduler()`
-  (what `pend_schedule()` calls), `scheduler_init()` (PendSV to its
-  level on one half; the hart's flag lowered and mie.MSIE set on the
-  other), `scheduler_thread<K>()` (the entry the scheduler runs in), and
-  the binding `BRIO_RP2350_SCHEDULER_VECTORS(K)`, which defines
-  `isr_pendsv` and `isr_svcall` on the Cortex-M33 and
-  `isr_riscv_softirq` on Hazard3; behind it the bodies
-  `scheduler_exception<K>()` and `scheduler_return()` (the core
-  stratum's) and `scheduler_trap<K>()` (Hazard3's).
+  (the calling core's request, unchecked), `request_scheduler_on<core>()`
+  (the same, made only when the calling core is `core`: what
+  `pend_schedule()` calls), `scheduler_init()` (for the core that calls
+  it: PendSV to its level on one half; the hart's flag lowered and
+  mie.MSIE set on the other), `scheduler_thread<K>()` (the entry the
+  scheduler runs in), and the two bindings:
+  `BRIO_RP2350_SCHEDULER_VECTORS(K)` for one kernel, core 0's (a kernel
+  of core 1 is refused at compile time), and
+  `BRIO_RP2350_SCHEDULER_VECTORS_PAIR(K0, K1)` for a Rubato on each core
+  (the two in the other order, or either not a Rubato of its core, are
+  refused at compile time). Each defines `isr_pendsv` and `isr_svcall`
+  on the Cortex-M33 and `isr_riscv_softirq` on Hazard3; behind them the
+  bodies `scheduler_exception<K>()` and `scheduler_return()` (the core
+  stratum's), `scheduler_exception_pair<K0, K1>()` (this stratum's, the
+  Cortex-M33), and `scheduler_trap<K>()` and
+  `scheduler_trap_pair<K0, K1>()` (Hazard3's).
 - `core.hpp`'s names, the same on both halves: `InterruptGuard`,
   `enable_interrupts()`, `disable_interrupts()`, `interrupts_enabled()`,
   `in_handler()` (IPSR's exception number on the Cortex-M33;
@@ -453,8 +501,40 @@ and on Hazard3
 extern "C" [[gnu::naked]] void isr_riscv_softirq() { brio::scheduler_trap<K>(); }
 ```
 
+A Rubato on each core binds the pair body instead, and each core calls
+`scheduler_init()` in its own start-up. An excerpt - the clock, core 0's
+pack and core 0's `main()` as above; `Motor` and `Watch` stand for core
+1's active objects, `Motor` one that receives from core 0 through its
+inbox:
+
+```cpp
+using P0 = brio::Rp2350RubatoPlatform<0>;
+using P1 = brio::Rp2350RubatoPlatform<1>;
+using K0 = brio::Rubato<P0, Sensor, Logger>;
+using K1 = brio::Rubato<P1, Motor, Watch>;
+
+BRIO_RP2350_SCHEDULER_VECTORS_PAIR(K0, K1)
+
+[[noreturn]] void core1_main() {
+    brio::CoreTicker<1>::init(clock);
+    brio::scheduler_init();          // core 1's own PendSV priority, or its own hart's MSIE
+    brio::Inboxes<Motor>::enable();  // core 1's doorbell, in its own controller
+    brio::enable_interrupts();
+    K1::run();
+}
+```
+
+Core 0's `main()` calls `brio::scheduler_init()` before its own unmask
+and `brio::Core1::launch(&core1_main)`, whose answer says whether core 1
+came up ([multicore.md](multicore.md) has the launch and the doorbell's
+vector, which asks the core that took it). A post to an active object of
+the other core is refused and counted by its queue and raises no
+request on either core; an event crosses with `send()` through the
+inbox, whose doorbell handler posts on the receiving core - road 1
+there, taken at that handler's exit.
+
 A program on this platform executes no `svc` of its own on the
-Cortex-M33, leaves mscratch alone on Hazard3, and never writes the
+Cortex-M33, leaves mscratch alone on Hazard3, and never writes a
 hart's RISCV_SOFTIRQ flag.
 
 ## Bench findings
@@ -592,11 +672,13 @@ architectures from one source. Where the halves differ, both numbers:
   each is for are in the findings above.
 
 **The preemptive kernel** - the reference suite is `test_rp2350_rubato`,
-one source and two images on the WeAct RP2350B at 150 MHz: 44 verdicts
-in `z` on the Cortex-M33 and 46 on Hazard3, ten runs of `z` alike on
+one source and two images on the WeAct RP2350B at 150 MHz: 59 verdicts
+in `z` on the Cortex-M33 and 60 on Hazard3, ten runs of `z` alike on
 each half. A Rubato pack of five objects on `Rp2350RubatoPlatform<0>`,
 the Console the lowest and the letters' runner, TIMER1's alarm 0 the
-interrupt the road-1 letters land, nothing wired and nothing lit. The
+interrupt the road-1 letters land, nothing wired and nothing lit; the
+scheduler's entry is the pair body in the whole image, and one letter
+launches core 1 into a Rubato pack of its own (below). The
 ruler is TIMER1 itself with its source on clk_sys, two back-to-back
 reads 3 cycles apart on both halves; beside it the core's own counter -
 on the Cortex-M33 the kernel ticker's composed `cycles()`, two reads 41
@@ -605,12 +687,14 @@ cycle on every clean span, and on Hazard3 `mcycle`, two reads 1 cycle
 apart, agreeing within 0 cycles on every clean span. A span with an
 XIP refill inside a pair of reads is reported and not judged - the
 first of every run has one, its second pair's code cold, and reads 0
-to 50 cycles off -, so spans are taken until four are clean (five in
+to 120 cycles off -, so spans are taken until four are clean (five in
 every run). That is the suite's method throughout: an event, a run or a
 span that a kernel tick, an XIP refill or the console line's handler
 lengthened is told apart by counters read around it (the tick count,
 the XIP cache's miss counter, the console vector's entries) and
-reported, and each bound judges the ones nothing lengthened.
+reported, and each bound judges the ones nothing lengthened (road 1's
+bound allows one kernel tick, and judges the events no refill and no
+console line lengthened).
 
 On both halves road 1 preempts at any depth: an interrupt's post to
 High inside Low's dispatch runs High to its end before Low resumes,
@@ -628,40 +712,63 @@ cost taken off:
 
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 103 / 103 / 132 | 175 / 175 / 175 |
-| road 1: the path's count by the release listing, and the bound | 126, 210 | 172, 277 |
-| road 1 at depth 2, over a preempting dispatch | 93 | 167 |
-| `activate()` over four empty queues | 65 | 68 |
-| a post that asks nothing | 59 | 54 |
-| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 295 (236) | 319 (265) |
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 106 / 106 / 135 | 179 / 179 / 551 |
+| road 1: the path's count by the release listing, and the bound | 130, 214 | 175, 280 |
+| road 1 at depth 2, over a preempting dispatch | 96 | 170 |
+| `activate()` over four empty queues | 65 | 67 |
+| a post that asks nothing | 60 | 53 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 303 (243) | 323 (270) |
 | one `arm()`, its masked window inside | 61 | 45 to 51 |
-| a post under the mask: the section's end to the receiver's first | 114 | 158 |
-| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 552 to 656 (544 / 488) | 904 (864 / 736) |
+| a post under the mask: the section's end to the receiver's first | 117 | 160 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 652 to 688 (632 / 488) | 904 (928 / 736) |
+| core 1, road 1 from its doorbell's handler at its base, a send from core 0 | 110 | 185 |
+| core 1, road 1 from its alarm over a dispatch | 102 | 175 |
+| core 1's paths' counts, and the bounds | 138 and 128; 166 and 154 | 182 and 172; 219 and 207 |
+| core 1's stack high-water (bytes), the deepest sample in a dispatch / in an interrupt | 236 (216 / 88) | 348 (352 / 192) |
 
-The Cortex-M33's road-1 events over 103 are the ones a tick or a refill
-landed in, and its measured path runs under the count drawn with the
-Cortex-M4's table, the model the suite takes for want of the M33's own
-figures: the count is 23 cycles over the measurement on road 1 and 15
-to 79 over it on the other paths. On Hazard3 the model, 3.8.7's counts
-with the interrupt's entry (which the section does not give) taken at
-`ecall`'s, is 3 cycles under the measurement on road 1, depth 2 and the
-post under the mask, and 1 to 2 over it on the scan and the road-2
-post. Each queue's emptiness is its two cursors compared in line, no
-call. A post under the mask lengthened by a kernel tick or an XIP
-refill reached 746 cycles on the Cortex-M33 and 1015 on Hazard3, and is
-reported, not judged. The
-Cortex-M33's high-water mark read 552 bytes in the first three runs
-after the flash and 656 from the fourth on: the paint is laid once at
-boot, so the figure is the deepest since the flash, and both are inside
-the bound, 544 + 312. The two halves' rows part where their mechanisms
-do: on the Cortex-M33 the hardware stacks the interrupted code's
-registers, on Hazard3 the crt's trampoline and the scheduler's entry
-each save sixteen in software ("What the silicon does"), and the
-stack's levels carry those frames. The Cortex-M33's PendSV body is
-thirteen instructions and 32 bytes, without the DSB that is the
+The pair body costs core 0 four cycles a scheduler entry on the
+Cortex-M33 by the model and three measured (road 1, depth 2 and the
+post under the mask each three longer than with the single body: 103,
+93 and 114 before), two on Hazard3 by the model and two to four
+measured, where the paths' other one-cycle differences are branches
+that land on a 32-bit instruction off its 4-byte alignment in one image
+and not in the other. A road-2 post pays the request's core check too:
+four cycles on the Cortex-M33 (the SIO's address, CPUID, the branch),
+eight in all with the body, measured eight longer (295 before); one on
+Hazard3, whose request reads the hart id anyway, four in all, measured
+four longer (319 before). The quiet post, the scan and `arm()` ask
+nothing of the body and moved by a cycle at most, by layout. Road 1's
+events over the fastest are the ones a tick, a refill or the console
+line landed in, and the bound judges the others: on Hazard3 this image,
+larger by core 1's letter, takes an XIP refill in one to three of the
+hundred events of every run (286 to 551 cycles), where the image with
+the single body took none. The Cortex-M33's measured paths run under
+the counts drawn with the Cortex-M4's table, the model the suite takes
+for want of the M33's own figures: 24 cycles over on road 1 and 15 to
+79 on the other paths, 26 to 28 on core 1's. On Hazard3 the model,
+3.8.7's counts with the interrupt's entry (which the section does not
+give) taken at `ecall`'s, is 3 to 4 cycles under the measurement on
+road 1, depth 2, the post under the mask and core 1's two paths, and 1
+to 2 over on the road-2 post, the scan and the quiet post. Each queue's emptiness is
+its two cursors compared in line, no call. A post under the mask
+lengthened by a kernel tick or an XIP refill reached 395 cycles on the
+Cortex-M33 and 257 on Hazard3, and is reported, not judged. Core 0's
+high-water marks are now those of core 1's letter, whose Low, High and
+Top nest three deep over the Console; on Hazard3 the paint's edge
+stands 24 bytes above the deepest sample, the lowest words of that
+`activate()`'s frame being ones no path below it writes, and the
+letter allows that frame's 44 such bytes. Both are inside the bound
+below the deepest sample, 312 and 400 bytes. The two halves' rows part
+where their mechanisms do: on the Cortex-M33 the hardware stacks the
+interrupted code's registers, on Hazard3 the crt's trampoline and the
+scheduler's entry each save sixteen in software ("What the silicon
+does"), and the stack's levels carry those frames. The Cortex-M33's
+pair body is sixteen instructions and 44 bytes with its table, the
+single body's thirteen and 32, both without the DSB that is the
 Cortex-M4's alone ([../cortexm/README.md](../cortexm/README.md)); a
-build that kept it measured road 1 two cycles longer, the barrier's
-cost on this core.
+build of the single body that kept it measured road 1 two cycles
+longer, the barrier's cost on this core. Hazard3's pair body is
+nineteen instructions in the listing, the single body's seventeen.
 
 - **The FPU across a preemption** (letter j, the Cortex-M33 alone):
   FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's
@@ -673,11 +780,39 @@ cost on this core.
 - **The software interrupt's own facts** (letter k, Hazard3 alone):
   after the raw store that raises the hart's flag, 1 to 2 of the eight
   stores behind it retire before the trap - the latency the request
-  waits out - and behind `request_scheduler()` none; each raise serves
+  waits out - and behind the platform's request none; each raise serves
   Top exactly once (20 raises); the caller-saved registers, loaded with
   patterns, are found again across an entry and across a nested one,
   10 of 10 each; inside a dispatch the software interrupt started,
   the flag is low, mstatus.MIE set and mscratch moved by one.
+- **A Rubato on each core** (letter l, both halves): core 1 launched into
+  a pack of three of its own on `Rp2350RubatoPlatform<1>`, its request
+  set up by its own `scheduler_init()`, every preemption of both cores
+  through the one pair body. Core 0's Low sends to core 1's Low1 (road
+  1 there from the doorbell's handler, at core 1's base), and both cores
+  then run the same shape at once - a spin, the core's own alarm posting
+  to its High, which posts to its Top (road 2): ten runs alike on both
+  halves, each core's trace with its own ceilings, each core's
+  preemption landing inside the other core's preempted dispatch, both
+  settled at their bases after. Inside Low1's dispatch a post to core
+  0's High is refused and counted by High's queue, runs nothing, and
+  leaves core 1's request down - PendSV not pending, the hart's flag low
+  - in every run. Core 1's two road-1 latencies, the table's rows, are
+  read with core 0 asleep: the same letter with core 0 spinning on the
+  ruler and on the flash meanwhile read 113 to 117 and 110 cycles
+  against 111 and 105 asleep on the Cortex-M33, and 196 and 189 against
+  185 and 175 on Hazard3 - the two cores' fetches and bus accesses
+  meet, by 2 to 6 cycles on one half and 11 to 14 on the other; which
+  port they meet at is not separated. Core 1's FPCCR reads 0xC0000004,
+  ASPEN 1 and LSPEN 1, as core 0's does in its first run after a flash.
+  Sent before core 1 has left the scheduler entry of the previous
+  crossing, a doorbell lands in that entry's exit and nests a new entry
+  over it, as the Hazard3 file's re-entrancy section allows: back to
+  back, the crossings took core 1's stack 80 bytes deeper at every one
+  that landed so (1516 bytes of high-water in one run against 348
+  settled), each level unwinding when the one above it ended - the
+  letter waits 20 us after each crossing's end, many times the rest of
+  core 1's way back to its base.
 
 ## A handler in SRAM
 
@@ -788,12 +923,6 @@ Driver gaps, each with its reason:
   line. The two conventions run opposite ways - numerically higher is
   more urgent on Hazard3 - which is why `Irq` carries no priority verb
   at all.
-- Rubato on core 1, on either half: both crts give a pair one table, so
-  the scheduler's vectors would serve two kernels through a body that
-  asks the core which kernel to run, the way the RP2040 takes
-  ([../rp2040/platform.md](../rp2040/platform.md), "How to use it"). That
-  body is not written for either half yet, and until it is
-  `Rp2350RubatoPlatform<1>` does not compile.
 - `idle_until()`. The timebase runs while the core sleeps on either
   half, in the plain idle path and through a standby; the one rung that
   stops it, DORMANT, is repaired afterwards only under the timed sleep

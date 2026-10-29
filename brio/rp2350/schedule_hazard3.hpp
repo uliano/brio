@@ -8,20 +8,24 @@
  * image is built for the Hazard3 pair, and binds the vector with
  * BRIO_RP2350_SCHEDULER_VECTORS. The names are the ones every brio
  * realization of the request exports - `request_scheduler()`,
- * `scheduler_init()`, `scheduler_thread<K>()` - and the engine below them
- * is this core's, written from datasheet 3.8.4 (traps), 3.8.4.2.1 (the
- * software interrupt), 3.8.6.1 (Xh3irq) and the SIO's RISCV_SOFTIRQ
- * register (3.1.11).
+ * `request_scheduler_on<core>()`, `scheduler_init()`,
+ * `scheduler_thread<K>()` - and the engine below them is this core's,
+ * written from datasheet 3.8.4 (traps), 3.8.4.2.1 (the software
+ * interrupt), 3.8.6.1 (Xh3irq) and the SIO's RISCV_SOFTIRQ register
+ * (3.1.11).
  *
  * THE REQUEST IS THE MACHINE SOFTWARE INTERRUPT. mip.MSIP is wired to the
  * SIO's RISCV_SOFTIRQ register, one flag per hart (3.8.4.2.1): writing
  * CORE<n>_SET raises hart n's flag, writing CORE<n>_CLR lowers it, and it
  * stays raised - a LEVEL - until it is cleared. The request raises the
  * flag of the hart that asks (mhartid, which equals the core number,
- * 3.8.5.2), so it is the calling core's own, as PendSV is on the
- * Cortex-M33. scheduler_init() sets mie.MSIE (core_hazard3.hpp's
- * machine_software_interrupt) and lowers a flag a previous image may have
- * left raised.
+ * 3.1.2's note), so it is the calling core's own, as PendSV is on the
+ * Cortex-M33; the platform's request_scheduler_on<core>() raises it only
+ * when that hart is `core` (rp2350/schedule.hpp says why), and the test
+ * costs the asking path the branch alone: the hart id is read anyway, and
+ * the flag's bit becomes a constant. scheduler_init() sets mie.MSIE
+ * (core_hazard3.hpp's machine_software_interrupt) and lowers a flag a
+ * previous image may have left raised, both for the hart that calls it.
  *
  * "TAKEN BEFORE THE NEXT INSTRUCTION" IS A WAIT, NOT A BARRIER. 3.8.4
  * says when the core enters an interrupt (mstatus.MIE set, the bit
@@ -136,6 +140,23 @@
  * stack, the entry's 80 bytes and the scheduler's own frames; the
  * trampoline's 64 are given back before the entry builds its frame.
  *
+ * TWO KERNELS: THE PAIR BODY. Core 1 is launched with core 0's mtvec
+ * (rp2350/multicore.hpp), so both harts enter the one table and the one
+ * trampoline, and `isr_riscv_softirq` must serve the kernel of the hart
+ * that took it. scheduler_trap_pair<K0, K1>() is the body above with the
+ * entry's address taken from a table of two after the body, indexed by
+ * the mhartid the body reads anyway to lower the flag: the table's
+ * address built where the single body builds the entry's, one `sh2add`
+ * (Zba, which this core implements, 3.8.1, and the project's -march
+ * names) and one load, placed so that no instruction waits on it (a load
+ * is one cycle when the next instruction does not read it, 3.8.7). Two
+ * instructions and two cycles over the single body, the same path on
+ * both harts. mhartid and not SIO's CPUID: the same answer (3.1.2's
+ * note), a CSR read of one cycle that the body makes already, where the
+ * CPUID is a load from the SIO behind a second address. Everything else
+ * the body and the entry touch is the hart's own: mepc, mstatus,
+ * mscratch, the flag, the stack.
+ *
  * RE-ENTRANCY. The flag can be raised at any moment and the shapes all
  * close. Raised while a dispatch runs, it nests one level more: a new
  * trap, a trampoline frame and the body's two words below the current
@@ -181,6 +202,17 @@ inline constexpr uint32_t riscv_softirq_clear_shift = 8;
     return *reinterpret_cast<volatile uint32_t*>(riscv_softirq_address);
 }
 
+/// The raise and the wait both requests share: `set` written to
+/// RISCV_SOFTIRQ, and with MIE set the spin until mscratch moves.
+[[gnu::always_inline]] inline void raise_and_wait(uint32_t set) {
+    const uint32_t served = csr_read<RVCSR_MSCRATCH_OFFSET>();
+    riscv_softirq() = set;
+    if ((csr_read<RVCSR_MSTATUS_OFFSET>() & mstatus_mie) != 0u) {
+        while (csr_read<RVCSR_MSCRATCH_OFFSET>() == served) {
+        }
+    }
+}
+
 /// The request: the calling hart's flag raised and, with MIE set, the
 /// wait until the scheduler it starts has been served (the file header).
 ///
@@ -192,11 +224,17 @@ inline constexpr uint32_t riscv_softirq_clear_shift = 8;
 /// price is one call and return on the asking path only; a post that
 /// asks nothing never reaches it.
 [[gnu::noinline, gnu::noipa]] inline void request_scheduler() {
-    const uint32_t served = csr_read<RVCSR_MSCRATCH_OFFSET>();
-    riscv_softirq() = 1UL << csr_read<RVCSR_MHARTID_OFFSET>();
-    if ((csr_read<RVCSR_MSTATUS_OFFSET>() & mstatus_mie) != 0u) {
-        while (csr_read<RVCSR_MSCRATCH_OFFSET>() == served) {
-        }
+    raise_and_wait(1UL << csr_read<RVCSR_MHARTID_OFFSET>());
+}
+
+/// The request for hart `core`'s scheduler, made only when the calling
+/// hart is `core` (rp2350/schedule.hpp says why): what
+/// Rp2350RubatoPlatform<core>::pend_schedule() calls. Opaque for the
+/// reason request_scheduler() gives, the test inside the same call.
+template <uint8_t core>
+[[gnu::noinline, gnu::noipa]] void request_scheduler_on() {
+    if (csr_read<RVCSR_MHARTID_OFFSET>() == core) {
+        raise_and_wait(1UL << core);
     }
 }
 
@@ -244,7 +282,8 @@ template <class Kernel>
 /// MIE clear: the flag lowered, the served count moved, the interrupted
 /// code's mepc and mstatus stored below the trampoline's frame with MPIE
 /// cleared in the live mstatus, mepc pointed at scheduler_thread<K>(),
-/// and the return to the trampoline. Sixteen instructions.
+/// and the return to the trampoline. Sixteen lines of assembly, seventeen
+/// instructions in the listing (`la` is two).
 template <class Kernel>
 [[gnu::always_inline]] inline void scheduler_trap() {
     __asm__ volatile(
@@ -266,6 +305,44 @@ template <class Kernel>
         "ret\n\t"
         ::"i"(&scheduler_thread<Kernel>), "i"(1UL << riscv_softirq_clear_shift),
           "i"(riscv_softirq_address), "i"(RVCSR_MSTATUS_MPIE_BITS));
+}
+
+/// The body the program binds to isr_riscv_softirq when each hart runs a
+/// Rubato (through BRIO_RP2350_SCHEDULER_VECTORS_PAIR): scheduler_trap<K>()
+/// with mepc pointed at scheduler_thread<K0>() on hart 0 and
+/// scheduler_thread<K1>() on hart 1, from a table of two after the body
+/// indexed by mhartid (the file header, "TWO KERNELS"). Eighteen lines
+/// of assembly, nineteen instructions in the listing, the same on both
+/// harts.
+template <class K0, class K1>
+[[gnu::always_inline]] inline void scheduler_trap_pair() {
+    static_assert(rp2350_detail::kernel_pair_in_order<K0, K1>());
+    __asm__ volatile(
+        "csrr t2, mhartid\n\t"     // kept in t2 to the table's index
+        "li t0, %2\n\t"
+        "sll t0, t0, t2\n\t"
+        "lui t1, %%hi(%3)\n\t"
+        "sw t0, %%lo(%3)(t1)\n\t"   // the flag lowered: a level, cleared before the mask lifts
+        "csrr t0, mscratch\n\t"
+        "addi t0, t0, 1\n\t"
+        "csrw mscratch, t0\n\t"     // what the request waits on
+        "csrr t0, mepc\n\t"
+        "sw t0, -8(sp)\n\t"         // the entry's word 8
+        "la t3, 1f\n\t"
+        "sh2add t3, t2, t3\n\t"
+        "lw t3, 0(t3)\n\t"          // this hart's entry; the next instruction does not read it
+        "li t0, %4\n\t"
+        "csrrc t1, mstatus, t0\n\t"
+        "sw t1, -4(sp)\n\t"         // the entry's word 12, MPIE as the trap left it
+        "csrw mepc, t3\n\t"
+        "ret\n\t"
+        ".balign 4\n"
+        "1:\n\t"
+        ".word %0\n\t"              // hart 0
+        ".word %1\n\t"              // hart 1
+        ::"i"(&scheduler_thread<K0>), "i"(&scheduler_thread<K1>),
+          "i"(1UL << riscv_softirq_clear_shift), "i"(riscv_softirq_address),
+          "i"(RVCSR_MSTATUS_MPIE_BITS));
 }
 
 } // namespace brio
