@@ -982,6 +982,74 @@ nineteen instructions in the listing, the single body's seventeen.
   letter waits 20 us after each crossing's end, many times the rest of
   core 1's way back to its base.
 
+**The drivers under the preemptive kernel** - the suite is
+`test_rp2350_rubato_link`, one source and two images, two keys against
+the WeAct RP2040's unchanged `spi_peer` (`z`, 147 verdicts) and
+`uart_peer` (`y`, 55 verdicts), ten runs of each key on each half alike,
+every verdict green. It runs the real SPI and UART stacks inside a Rubato
+pack of seven objects on core 0: `util/spi_bus.hpp`'s arbiter over the
+engined `SpiHost<1>` ([spi.md](spi.md); half-word engines on DMA channels
+6 and 7, line 1), `util/line_reader.hpp`'s `LineReader` over `Uart<1>`
+and its interrupt receiver ([uart.md](uart.md)), a borrower of the
+reader's lines above it, and on top an object that TIMER1's alarm 0 posts
+to every 97, 193 or 389 us - the timer on clk_sys and re-armed in its
+handler at the last match plus the period, so the period does not drift -
+whose dispatch spins 300 or 3000 cycles: at 97 us x 3000, 21 % of the
+core. Every letter runs once with the alarm silent as its control and six
+times under that pressure, and every pass judges the pressure itself, one
+dispatch per period over the pass, none dropped. Every letter that drives
+a link pad reads the partner's rail first (`pair_power.hpp`). The
+target-free half of the suite is the link suites' shared body
+(`avrxt/src/apps/rubato_link.hpp`), what the two Raspberry Pi chips share
+over the PL022 and the PL011 is `rp2040/src/apps/rp_rubato_link.hpp`; the
+eighth pass fed by core 1 is the RP2040's suite's alone. What it
+established, on both halves:
+
+- **The polled SPI loop under preemption loses nothing.** The loop runs
+  inside the arbiter's dispatch, so a dispatch above the arbiter holds it
+  off for its whole length - the alarm landed there 36 to 188 times a
+  pass in letter `p` on the Cortex-M33 and 42 to 212 on Hazard3. The
+  FIFOs are the write-ahead on every path (no more than 8 frames in
+  flight, `brio/pl022/spi.hpp`), so a held-off loop or pump leaves a gap
+  on the bus and never a lost frame: the polled loop in 8-bit frames (9)
+  and in 16-bit frames from an odd address (32, off the engines), the
+  pump the same two ways, the engines (32 byte frames) and the engines
+  under a polled request (32 half-words), all byte-exact at both ends at
+  every even divisor from 256 to 16 (9.4 MHz, the PIO client's ceiling as
+  [spi.md](spi.md) derives it against the RP2040's 125 MHz), under every
+  pressure as in the control, the block's overrun flag clear at every
+  reply. Past that ceiling, /14 is exact on all six paths in every pass
+  of both halves and /12 on a varying few, the control's as the
+  pressures'.
+- **The matrix and the arbiter.** The four modes in both widths, the
+  client MSb and LSb first (the LSb rows an exact two-way reversal
+  against this MSb-only host) on the engines at clk_peri / 32, byte-exact
+  in every pass, the data windows at 944 to 1007 per mille of the
+  control's rate under pressure on the Cortex-M33 and 926 to 1003 on
+  Hazard3, the cache's misses over a pass as the control's (611 to 887 on
+  the Cortex-M33, 4934 to 5274 on Hazard3, the counters cleared at each
+  pass's start); three requesters of three priorities on one select
+  window answered every one `spi_ok`, to its requester, in its order,
+  with no timeout, no rejection and the peer counting every frame exact.
+- **The UART receive side under preemption, at 115200.** Numbered lines
+  echoed by the RP2040's `uart_peer`, assembled by `LineReader` from the
+  interrupt receiver's ring and lent to the borrower: 200 a leg, none
+  lost, out of order or corrupt, every port counter zero (ring overruns,
+  OE, FE, PE, BE, the ring's skips), 950 to 953 per mille of the wire (the writer
+  paces each line to its own last stop bit). The peer has one rate and no
+  report, so the key is reduced to this rate and to what this end judges
+  (Not covered yet).
+- **The loan under preemption.** With the borrower holding each line
+  sixteen character times (one receive level of the FIFO) and the lines
+  streamed five ahead, the alarm landed inside the borrower's dispatch
+  706 to 2937 times a pass and the link's vector inside every one of its 200
+  dispatches a leg; every line arrived exact, each lent alone, the two
+  buffers strictly alternating, the leg at 995 to 996 per mille of the wire.
+- **Dark** (letter `i`): every object idle, TIMER1's alarm 0 disarmed with
+  its flag low and its line quiet, no time event armed, SPI1 and UART1
+  given back with their pads at no function, the mode line released,
+  GP25 not an output, the ceiling the Console's.
+
 ## A handler in SRAM
 
 **What the silicon does.** Both architectures execute the flash in place
@@ -1113,6 +1181,13 @@ Implemented but not bench-verified, each with what would measure it:
   launched on core 1 with `Rp2350Platform<1>` and `CoreTicker<1>` (its
   own SysTick, its own comparator), the rescue enabled in core 1's
   controller, and the SIO doorbell as a third edge placed from core 0.
+- The SPI and UART stacks under preemption with the UART above 115200,
+  and a blast judged by the far end: `test_rp2350_rubato_link`'s key `y`
+  runs at 115200 alone and judges at this end, the partner's `uart_peer`
+  being a fixed-role echo at that rate with no report
+  (rp2040/src/apps/rp_uart_peer.hpp). A peer speaking the usart_link
+  protocol on the two Raspberry Pi chips would run the other families'
+  full key, its 460800 and 921600 legs and the blast into its sink.
 - The QFN-60's run-time refusals: the stratum compiles for that package
   and the suite checks the die's own PACKAGE_SEL against the build's, but
   no QFN-60 part is on the bench.

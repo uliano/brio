@@ -545,6 +545,94 @@ unseen. clk_sys cycles:
   for the suite's deepest chain, its deepest sampled stack pointer 512
   in a dispatch and 344 to 368 in an interrupt.
 
+**The drivers under the preemptive kernel** - the suite is
+`test_rp2040_rubato_link`, two keys against the WeAct RP2350B's
+unchanged `spi_peer` (`z`, 150 verdicts) and `uart_peer` (`y`, 58
+verdicts), ten runs of each alike, every verdict green. It runs the real
+SPI and UART stacks inside a Rubato pack of seven objects on core 0:
+`util/spi_bus.hpp`'s arbiter over the engined `SpiHost<1>`
+([spi.md](spi.md); half-word engines on DMA channels 6 and 7, line 1),
+`util/line_reader.hpp`'s `LineReader` over `Uart<1>` and its interrupt
+receiver ([uart.md](uart.md)), a borrower of the reader's lines above it,
+and on top an object that PWM slice 7's wrap interrupt posts to every 97,
+193 or 389 us, whose dispatch spins 300 or 3000 cycles - at 97 us x 3000,
+25 % of the core. Every letter runs once with the slice silent as its
+control and six times under that pressure, and letters `o` and `t` an
+eighth time with the pressure fed by core 1 (below); every pass judges the
+pressure itself, one dispatch per period over the pass, none dropped. The
+target-free half of the suite is the link suites' shared body
+(`avrxt/src/apps/rubato_link.hpp`), what the two Raspberry Pi chips share
+over the PL022 and the PL011 is `rp2040/src/apps/rp_rubato_link.hpp`. It
+is also the image that binds the single PendSV body, the core stratum's
+`scheduler_exception<K>()`, with core 1 under Tenuto or in the bootrom
+("How to use it"): every preemption of the suite runs through it. What it
+established:
+
+- **The polled SPI loop under preemption loses nothing.** The loop runs
+  inside the arbiter's dispatch, so a dispatch above the arbiter holds it
+  off for its whole length - the slice landed there 63 to 379 times a
+  pass in letter `p`. The FIFOs are the write-ahead on every path (no
+  more than 8 frames in flight, `brio/pl022/spi.hpp`), so a held-off loop
+  or pump leaves a gap on the bus and never a lost frame: the polled loop
+  in 8-bit frames (9) and in 16-bit frames from an odd address (32, off
+  the engines), the pump the same two ways, the engines (32 byte frames)
+  and the engines under a polled request (32 half-words), all byte-exact
+  at both ends at every even divisor from 256 to 12 (10.4 MHz, the PIO
+  client's ceiling as [spi.md](spi.md) derives it), under every pressure
+  as in the control, the block's overrun flag clear at every reply. The
+  first rung past that ceiling, /10 (a half period of 40 ns where the
+  client needs 41.7), is exact on a different subset of the six paths in
+  each pass, the control's as the pressures'; /8 on none.
+- **The matrix and the arbiter.** The four modes in both widths, the
+  client MSb and LSb first (the LSb rows an exact two-way reversal
+  against this MSb-only host) on the engines at clk_peri / 32, byte-exact
+  in every pass, the data windows at 834 to 1002 per mille of the
+  control's rate under the slice's pressure; three requesters of three
+  priorities on one select window (the Client above the arbiter and the
+  preempting object itself on the pump, a requester below it polled)
+  answered every one `spi_ok`, to its requester, in its order, with no
+  timeout, no rejection and the peer counting every frame exact.
+- **Road 1 from the other core under the traffic.** In the eighth pass
+  core 1 runs a Tenuto program of one object that alarm 1 posts to every
+  97 us and that sends to the preempting object on core 0 through its
+  inbox ([multicore.md](multicore.md)), so each preemption arrives from
+  the doorbell's handler: the count of sends judged as the slice's ticks
+  (the system timer's microsecond and clk_sys share the crystal), the
+  matrix and the echoed lines exact under it.
+- **The XIP cache, and whose code shares its sets.** Letter `o` prints the
+  cache's misses over each pass (the counters cleared at its start). On
+  the final image the slice's passes read 5908 to 6196, as the control's
+  6107 to 6252, and the core-1 pass 13733 to 13994, its windows at 684 to
+  766 per mille of the control's rate; the suite's letter `x` (outside
+  `z`, no verdict, three runs) separates the parts: core 1 idle in its
+  Tenuto loop adds 2000 to 2500 misses to the matrix's windows, core 1
+  ticking its object every 97 us 6800 to 7400, the slice's interrupt and
+  the preempting dispatch none. An earlier build of the same suite read the other way
+  round - the slice's passes some 4300 misses over the control's, the
+  core-1 pass none - which is what a two-way cache does when a path's
+  lines happen to share sets with the traffic's in one layout and not in
+  another; the layouts' sets were not compared. No verdict moves with
+  it: a refill lengthens a window and loses nothing.
+- **The UART receive side under preemption, at 115200.** Numbered lines
+  echoed by the RP2350B's `uart_peer`, assembled by `LineReader` from
+  the interrupt receiver's ring and lent to the borrower: 200 a leg, none
+  lost, out of order or corrupt, every port counter zero (ring overruns,
+  OE, FE, PE, BE, the ring's skips), 942 to 948 per mille of the wire
+  (the writer paces each line to its own last stop bit). The peer has
+  one rate and no report, so the key is reduced to this rate and to what
+  this end judges (Not covered yet).
+- **The loan under preemption.** With the borrower holding each line
+  sixteen character times (one receive level of the FIFO) and the lines
+  streamed five ahead, the slice landed inside the borrower's dispatch
+  742 to 3026 times a pass and the link's vector inside every one of its
+  200 dispatches a leg; every line arrived exact, each lent alone, the
+  two buffers strictly alternating, the leg at 995 to 996 per mille of
+  the wire.
+- **Dark** (letter `i`): every object idle, the slice stopped and its line
+  quiet, core 1 parked and alarm 1 disarmed with the inbox empty, no time
+  event armed, SPI1 and UART1 given back with their pads at no function,
+  the mode line released, GP25 not an output, the ceiling the Console's.
+
 ## A handler in SRAM
 
 **What the silicon does.** The core executes the flash in place through
@@ -668,11 +756,20 @@ Implemented but not bench-verified, each with what would measure it:
   ([../stm32f4/usart.md](../stm32f4/usart.md), letter h); a letter that
   asks it from a vector, from the main loop and under a critical section
   would measure it here, on each core.
-- The single-kernel binding, the core stratum's `scheduler_exception<K>()`
-  bound to `isr_pendsv` with core 1 under Tenuto or not launched ("How
-  to use it"): it runs in no image, `test_rp2040_rubato` binding the pair
-  body for every letter. Measured by the suite's letters but k, built
-  with the single body bound.
+- The single-kernel binding's cycle counts, the core stratum's
+  `scheduler_exception<K>()` bound to `isr_pendsv` with core 1 under
+  Tenuto or not launched ("How to use it"): it runs - every preemption of
+  `test_rp2040_rubato_link` goes through it, the drivers byte-exact under
+  it ("Bench findings") - but road 1 and the posts are counted with the
+  pair body alone. `test_rp2040_rubato` built with the single body bound
+  would count them, its letters but k.
+- The SPI and UART stacks under preemption with the UART above 115200,
+  and a blast judged by the far end: `test_rp2040_rubato_link`'s key `y`
+  runs at 115200 alone and judges at this end, the partner's `uart_peer`
+  being a fixed-role echo at that rate with no report
+  (rp2040/src/apps/rp_uart_peer.hpp). A peer speaking the usart_link
+  protocol on the two Raspberry Pi chips would run the other families'
+  full key, its 460800 and 921600 legs and the blast into its sink.
 - The preemptive kernel on the Pico: `test_rp2040_rubato` is built for
   that board too, and a `z` there would measure it.
 - Whether a pending PendSV ends a WFI as a pending NVIC line does: the

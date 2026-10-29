@@ -326,6 +326,17 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   1's ceiling is 255 at its base after; its stack's high-water mark is
   260 bytes, the deepest sampled stack pointer 240 in a dispatch and 112
   in its interrupt.
+- THE CROSSING UNDER DRIVER TRAFFIC (`test_rp2040_rubato_link`, its
+  eighth pass of letters o and t, [platform.md](platform.md) "Bench
+  findings"): core 1 under Tenuto, one object that alarm 1 posts to
+  every 97 us and that sends to core 0's preempting object through its
+  inbox, so each preemption of core 0's SPI and UART stacks is road 1
+  from the doorbell's handler - every send one dispatch, none dropped,
+  every window and every line exact. Core 1's program shares the XIP
+  cache with core 0's: on that image its idle loop adds 2000 to 2500
+  misses to the sixteen SPI exchanges of core 0's matrix and its
+  ticking 6800 to 7400 (the cache's counters, the bus fabric's not
+  read).
 
 ## Not covered yet
 
