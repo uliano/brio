@@ -90,7 +90,7 @@ architectures.
   cycles, a Rubato on each core preempting at once through that entry,
   [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
   Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
-  on the WeAct RP2350B: road 1 in 113 cycles,
+  on the WeAct RP2350B: road 1 in 103 cycles,
   [../rp2350/platform.md](../rp2350/platform.md)). The ARMv8-M facts the
   M33 rests on are checked against the documents there: EXC_RETURN's
   security bits (ES, DCRS and S, all 1 in the Secure state the image

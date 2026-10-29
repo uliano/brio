@@ -602,13 +602,15 @@ reads 3 cycles apart on both halves; beside it the core's own counter -
 on the Cortex-M33 the kernel ticker's composed `cycles()`, two reads 41
 cycles apart, agreeing with TIMER1 over 1 to 1.06 ms within 0 to 1
 cycle on every clean span, and on Hazard3 `mcycle`, two reads 1 cycle
-apart, agreeing within 0 cycles on every clean span (a span with an
-XIP refill inside a pair of reads is 110 off, reported). That is the
-suite's method throughout: an event, a run or a span that a kernel
-tick, an XIP refill or the console line's handler lengthened is told
-apart by counters read around it (the tick count, the XIP cache's miss
-counter, the console vector's entries) and reported, and each bound
-judges the ones nothing lengthened.
+apart, agreeing within 0 cycles on every clean span. A span with an
+XIP refill inside a pair of reads is reported and not judged - the
+first of every run has one, its second pair's code cold, and reads 0
+to 50 cycles off -, so spans are taken until four are clean (five in
+every run). That is the suite's method throughout: an event, a run or a
+span that a kernel tick, an XIP refill or the console line's handler
+lengthened is told apart by counters read around it (the tick count,
+the XIP cache's miss counter, the console vector's entries) and
+reported, and each bound judges the ones nothing lengthened.
 
 On both halves road 1 preempts at any depth: an interrupt's post to
 High inside Low's dispatch runs High to its end before Low resumes,
@@ -626,32 +628,40 @@ cost taken off:
 
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 113 / 113 / 142 | 188 / 188 / 188 |
-| road 1: the path's count by the release listing, and the bound | 145, 232 | 182, 289 |
-| road 1 at depth 2, over a preempting dispatch | 94 | 171 |
-| `activate()` over four empty queues | 96 | 97 |
-| a post that asks nothing | 60 | 54 |
-| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 319 (259) | 346 (292) |
-| one `arm()`, its masked window inside | 63 | 46 |
-| a post under the mask: the section's end to the receiver's first | 132 | 176 |
-| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 552 (544 / 488) | 904 (864 / 736) |
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 103 / 103 / 132 | 175 / 175 / 175 |
+| road 1: the path's count by the release listing, and the bound | 126, 210 | 172, 277 |
+| road 1 at depth 2, over a preempting dispatch | 93 | 167 |
+| `activate()` over four empty queues | 65 | 68 |
+| a post that asks nothing | 59 | 54 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 295 (236) | 319 (265) |
+| one `arm()`, its masked window inside | 61 | 45 to 51 |
+| a post under the mask: the section's end to the receiver's first | 114 | 158 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 552 to 656 (544 / 488) | 904 (864 / 736) |
 
-The Cortex-M33's road-1 events over 113 are the ones a tick or a refill
+The Cortex-M33's road-1 events over 103 are the ones a tick or a refill
 landed in, and its measured path runs under the count drawn with the
 Cortex-M4's table, the model the suite takes for want of the M33's own
-figures. On Hazard3 the model, 3.8.7's counts with the interrupt's
-entry (which the section does not give) taken at `ecall`'s, is 6 cycles
-under the measurement. A post under the mask lengthened by a kernel
-tick reached 480 cycles on the Cortex-M33 and 884 on Hazard3, and is
-reported, not judged. The two halves' rows part where their mechanisms
+figures: the count is 23 cycles over the measurement on road 1 and 15
+to 79 over it on the other paths. On Hazard3 the model, 3.8.7's counts
+with the interrupt's entry (which the section does not give) taken at
+`ecall`'s, is 3 cycles under the measurement on road 1, depth 2 and the
+post under the mask, and 1 to 2 over it on the scan and the road-2
+post. Each queue's emptiness is its two cursors compared in line, no
+call. A post under the mask lengthened by a kernel tick or an XIP
+refill reached 746 cycles on the Cortex-M33 and 1015 on Hazard3, and is
+reported, not judged. The
+Cortex-M33's high-water mark read 552 bytes in the first three runs
+after the flash and 656 from the fourth on: the paint is laid once at
+boot, so the figure is the deepest since the flash, and both are inside
+the bound, 544 + 312. The two halves' rows part where their mechanisms
 do: on the Cortex-M33 the hardware stacks the interrupted code's
 registers, on Hazard3 the crt's trampoline and the scheduler's entry
 each save sixteen in software ("What the silicon does"), and the
 stack's levels carry those frames. The Cortex-M33's PendSV body is
 thirteen instructions and 32 bytes, without the DSB that is the
 Cortex-M4's alone ([../cortexm/README.md](../cortexm/README.md)); a
-build that kept it measured road 1 at 115, two cycles more, the
-barrier's cost on this core.
+build that kept it measured road 1 two cycles longer, the barrier's
+cost on this core.
 
 - **The FPU across a preemption** (letter j, the Cortex-M33 alone):
   FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's
