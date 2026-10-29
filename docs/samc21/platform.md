@@ -638,9 +638,11 @@ SERCOM1 as the SPI host or the USART and gives it back, the pads handed
 over dark, so no `init()` runs with a pad muxed. The target-free half of
 the suite (the pack, the passes, the numbered lines, the window client,
 the UART legs) is the link suites' shared body,
-`avrxt/src/apps/rubato_link.hpp`, here over a thin adapter that carries
-the body's request names to this host's BAUD byte and owns the select.
-What it established:
+`avrxt/src/apps/rubato_link.hpp`, told by the suite that this host's
+rate is its BAUD byte, that its Request has no frame size and no
+bit-order verb, and that the select is held 30 us after each window's
+last edge - the AVR client, reset by its select rising, loses a
+character its polled loop has not fetched yet. What it established:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds

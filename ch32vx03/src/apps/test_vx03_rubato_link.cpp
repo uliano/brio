@@ -130,15 +130,21 @@
 //      overrun (spi_overrun) at a rung where two frames are in flight - never
 //      a run with a hole, never an overrun where one frame is.
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
-//      frames, two outstanding), Minor below it (10 POLLED requests of 8
-//      frames, one outstanding) and, in a pressure pass, Pressure itself (8
-//      requests of 3 frames, one outstanding), all at /256 inside ONE
-//      select window the letter holds - the peer's exchange is one burst -
-//      of constant frames. Every one of the three lengths reaches
-//      dma_min_frames, so all ride the engines here, Minor's polled inside
-//      the arbiter's dispatch. Every reply to its requester in its order,
-//      every one spi_ok, nothing rejected, the per-bus timeout never
-//      firing, the peer counting every frame exact.
+//      frames on the engines, two outstanding), Minor below it (10 POLLED
+//      requests of 2 frames, one outstanding, on the polled loop) and, in a
+//      pressure pass, Pressure itself (8 requests of 2 frames, one
+//      outstanding, on the pump), all at /256 inside ONE select window the
+//      letter holds - the peer's exchange is one burst - of constant
+//      frames. A data phase of dma_min_frames (3) or more rides the engines
+//      here, polled or not, so Minor's and Pressure's requests are two
+//      frames (the shared body's LinkTraits): the three paths the design
+//      gives the three requesters. Minor's two frames are both in flight
+//      at /256, each 4096 cycles, longer than Pressure's longest hold of
+//      the polled loop (3000 cycles, road 1's 119 and the way back): a
+//      preemption there is a gap on the bus (letter p never cut a
+//      4096-cycle frame). Every reply to its requester in its order, every
+//      one spi_ok, nothing rejected, the per-bus timeout never firing, the
+//      peer counting every frame exact.
 //   i  dark: every object idle, TIM2 stopped with its line quiet and its
 //      DMA requests off, no time event armed, the SPI host idle with the
 //      select high, its requests down and both its channels disabled, the
@@ -325,6 +331,14 @@ constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
 static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
 constexpr const char* pressure_name = "TIM2";
 constexpr const char* peer_name = v303 ? "the CH32V203C8T6" : "the CH32V303VCT6";
+
+/// Letter w's lengths on this host (the file header): Minor's polled
+/// requests and Pressure's two frames each, under dma_min_frames, so that
+/// they take the polled loop and the pump.
+struct LinkTraits {
+    static constexpr uint8_t w_minor_len = 2;
+    static constexpr uint8_t w_press_len = 2;
+};
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's link suite
 // compiles the same body around its own engines.
@@ -722,9 +736,12 @@ void tp_ladders() {
 // w - the arbiter under pressure
 // =============================================================================
 
-static_assert(w::client_len >= Host::dma_min_frames && w::minor_len >= Host::dma_min_frames &&
-                  w::press_len >= Host::dma_min_frames,
-              "letter w's three requesters all ride the engines on this host (the file header)");
+static_assert(w::client_len >= Host::dma_min_frames && w::minor_len < Host::dma_min_frames &&
+                  w::press_len < Host::dma_min_frames,
+              "letter w: the Client's requests ride the engines, Minor's polled ones the polled loop and "
+              "Pressure's the pump (the file header)");
+static_assert(8u * spi_division(w::rate) * (SysClock::hz / SysClock::pclk1_hz) == 4096u,
+              "letter w: a byte frame at its rate is 4096 cycles (the file header)");
 
 void tw_arbiter() {
     for (uint8_t p = 0; p < pass_count; ++p) {
@@ -762,7 +779,7 @@ void tw_arbiter() {
             // the protocol pays on each side of it. The bus is idle here: no
             // request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, link_clock);
+            Host::prime(SpiMode::mode0, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;

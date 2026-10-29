@@ -50,11 +50,10 @@
 //   mode 0 (its spi_peer's header: mode-0 answers come back a bit early in
 //   a window that follows another answer), so it serves spi_link's ack,
 //   nak, ident and report windows in mode 3, the protocol's alternate
-//   answer mode. The shared body clocks every answer window in mode 0; the
-//   suite's `Host` is the SpiHost with one verb wrapped, start(), which
-//   clocks the shared body's answer windows - the only requests whose out
-//   buffer is its dummy buffer - in mode 3 (the Request copied, its mode
-//   changed, the rest as posted). Every other request goes as posted.
+//   answer mode. The shared body's rendezvous finds it so (its need_peer():
+//   a ping in mode 0 fails, the next in mode 3 is answered) and clocks
+//   every answer window in mode 3 from there; the command windows stay
+//   mode 0.
 //   THE UART. USART4 on its default column, PB0 (TX) and PB1 (RX), both
 //   engines on the port's channels (RM 9.2.3: 1 transmits, 8 receives) - the
 //   receive engine a circular ring of 2048 over the whole storage, never
@@ -147,18 +146,17 @@
 //      frames, two outstanding, on the engines), Minor below it (10 POLLED
 //      requests of 8 frames, one outstanding: under dma_min_frames_polled,
 //      the polled loop) and, in a pressure pass, Pressure itself (8 requests
-//      of 3 frames, one outstanding, on the engines), all at /256 inside ONE
-//      select window the letter holds - the peer's exchange is one burst - of
-//      constant frames. AT /256 A BYTE FRAME IS 2048 CYCLES, TWO IN FLIGHT,
-//      so a 3000-cycle preemption inside Minor's polled transaction loses a
-//      frame there (p's limit): every reply to its requester once, the
-//      Client's and Pressure's spi_ok and in order, Minor's spi_ok in the
-//      control and the 300-cycle passes (300 + road 1 + the way back, under
-//      a thousand cycles, inside a frame) and spi_ok or spi_stalled in the
-//      3000-cycle ones (their count printed), nothing rejected, the per-bus
-//      timeout never firing, the peer counting every frame exact (a cut
-//      transaction still clocks all its frames) and every byte that came
-//      back the peer's (a cut transaction leaves its last slot untouched).
+//      of 1 frame, one outstanding: under dma_min_frames, the pump), all at
+//      /32 = 1.5 MHz inside ONE select window the letter holds - the peer's
+//      exchange is one burst - of constant frames. THE RATE IS w's OWN (the
+//      shared body's LinkTraits): at the command rate /256 a byte frame is
+//      2048 cycles with two in flight, and a 3000-cycle preemption inside
+//      Minor's polled transaction would lose one (p's limit), turning w into
+//      a second p; at /32 a byte frame is 256 cycles, ONE in flight (under
+//      the 437-cycle threshold), and a preemption of the polled loop is a gap
+//      on the bus. Every reply to its requester in its order, every one
+//      spi_ok, nothing rejected, the per-bus timeout never firing, the peer
+//      counting every frame exact.
 //   i  dark: every object idle, TIM2 stopped with its line quiet and its
 //      DMA requests off, no time event armed, the SPI host idle with the
 //      select high, its requests down and both its channels disabled, the
@@ -297,25 +295,7 @@ using SpiS = Spi<1>;
 /// the engines one DATAR access a frame.
 using TxEngine = DmaTxEngine<SpiS::dma_tx_channel, uint16_t>;
 using RxEngine = DmaRxEngine<SpiS::dma_rx_channel, uint16_t>;
-using LinkHost = SpiHost<1, spi1_default_pins, TxEngine, RxEngine>;
-
-/// The shared body's answer-window buffer (sl::dummy_buf), named in main():
-/// the one out buffer the wrapper below recognises.
-const uint8_t* answer_window_tx = nullptr;
-
-/// The SpiHost with start() wrapped: the shared body's answer windows in
-/// the far client's answer mode, mode 3 (the file header); every other
-/// request as posted. Every other verb is the SpiHost's.
-struct Host : LinkHost {
-    static bool start(const Request& r) {
-        if (answer_window_tx != nullptr && r.tx.get() == answer_window_tx) {
-            Request m = r;
-            m.mode = SpiMode::mode3;
-            return LinkHost::start(m);
-        }
-        return LinkHost::start(r);
-    }
-};
+using Host = SpiHost<1, spi1_default_pins, TxEngine, RxEngine>;
 using CsPin = Pin<'A', 4>;
 /// The command channel's SCK: /256 of HCLK = 187.5 kHz, 43 us a character
 /// (test_x035_spi's link_clock).
@@ -362,6 +342,14 @@ constexpr const char* peer_name = "the CH32V006K8U6";
 // THE LINK'S REVIEWED HELPERS (the UART key's command channel), in their
 // own namespace: the shared body below has a wait_ms() of the kernel's.
 #include "x035_link_dut.hpp"
+
+/// Letter w's rate and Pressure's length on this host (the file header):
+/// /32, one frame in flight, and a request of one frame, under
+/// dma_min_frames, so that it takes the pump.
+struct LinkTraits {
+    static constexpr SpiClock w_rate = SpiClock::div32;
+    static constexpr uint8_t w_press_len = 1;
+};
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's link suite
 // compiles the same body around its own engines.
@@ -755,33 +743,18 @@ void tp_ladders() {
 // w - the arbiter under pressure
 // =============================================================================
 
-static_assert(w::client_len >= Host::dma_min_frames && w::press_len >= Host::dma_min_frames &&
+static_assert(w::client_len >= Host::dma_min_frames && w::press_len < Host::dma_min_frames &&
                   w::minor_len < Host::dma_min_frames_polled,
-              "letter w: the Client's and Pressure's requests ride the engines, Minor's polled ones the "
+              "letter w: the Client's requests ride the engines, Pressure's the pump, Minor's polled ones the "
               "polled loop (the file header)");
-static_assert(spi_write_ahead_safe(link_clock, SpiDataSize::bits8, spi_default_hold_off_cycles),
-              "letter w: at the command rate a byte frame keeps two in flight (the file header)");
-
-/// Minor's requests whose last slot came back untouched: the transaction a
-/// lost frame cut short (the polled loop stores every frame that came back
-/// in order, and the one the overrun took leaves the last slot as it was).
-uint8_t minor_untouched_tails() {
-    uint8_t n = 0;
-    for (const auto& row : w::minor_rx) {
-        if (row[w::minor_len - 1u] == w::untouched) {
-            ++n;
-        }
-    }
-    return n;
-}
+static_assert(spi_write_ahead_safe(link_clock, SpiDataSize::bits8, spi_default_hold_off_cycles) &&
+                  !spi_write_ahead_safe(w::rate, SpiDataSize::bits8, spi_default_hold_off_cycles),
+              "letter w: at the command rate a byte frame keeps two in flight, at w's rate one (the file header)");
 
 void tw_arbiter() {
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
         const bool pressing = s.period_us != 0u;
-        // Pressure's hold of the arbiter's dispatch: its spin, road 1 and the
-        // way back. 300 cycles stay inside a 2048-cycle frame, 3000 do not.
-        const bool outlasts_frame = s.spin > frame_cycles(link_clock, false);
         pass_begin(s);
         if (!sl::need_peer()) {
             (void)pass_end(s);
@@ -814,7 +787,7 @@ void tw_arbiter() {
             // the protocol pays on each side of it. The bus is idle here: no
             // request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, link_clock);
+            Host::prime(SpiMode::mode0, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;
@@ -835,17 +808,9 @@ void tw_arbiter() {
         const uint32_t took = Ruler::now() - t0;
         spilink::Report r{};
         const bool rep = acted && sl::peer_report(r);
-        const uint8_t cut = minor_untouched_tails();
         uint16_t host_bad = 0;
         for (auto& row : w::client_rx) for (uint8_t b : row) host_bad = static_cast<uint16_t>(host_bad + (b != w::seed_b));
-        for (auto& row : w::minor_rx) {
-            for (uint8_t i = 0; i < w::minor_len; ++i) {
-                // A cut transaction's last slot is untouched, not wrong.
-                if (!(i + 1u == w::minor_len && row[i] == w::untouched)) {
-                    host_bad = static_cast<uint16_t>(host_bad + (row[i] != w::seed_b));
-                }
-            }
-        }
+        for (auto& row : w::minor_rx) for (uint8_t b : row) host_bad = static_cast<uint16_t>(host_bad + (b != w::seed_b));
         if (pressing) {
             for (auto& row : w::press_rx) for (uint8_t b : row) host_bad = static_cast<uint16_t>(host_bad + (b != w::seed_b));
         }
@@ -853,15 +818,13 @@ void tw_arbiter() {
         const uint8_t stale = static_cast<uint8_t>(SpiArb::stale_events() - stale0);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        const uint8_t minor_failed = static_cast<uint8_t>(w::minor.replies - w::minor.ok);
         print(serial, "    ", took / cycles_per_us, " us; Client ", w::client.replies, "/", w::client.posted,
               " replies (", w::client.ok, " ok, ", w::client.out_of_order, " out of order), Minor ",
-              w::minor.replies, "/", w::minor.posted, " (", w::minor.ok, " ok, ", minor_failed, " cut short, ",
-              cut, " with the last slot untouched, ", w::minor.out_of_order, " out of order), Pressure ",
-              w::press.replies, "/", w::press.posted, " (", w::press.ok, " ok, ", w::press.out_of_order,
-              " out of order); timeouts ", w::client.timeouts + w::minor.timeouts + w::press.timeouts,
-              ", rejected ", rejected, ", stale ", stale, "; host bytes wrong ", host_bad, "; peer count ",
-              r.count, " of ", frames, " mism ", r.mism, crlf);
+              w::minor.replies, "/", w::minor.posted, " (", w::minor.ok, " ok, ", w::minor.out_of_order,
+              " out of order), Pressure ", w::press.replies, "/", w::press.posted, " (", w::press.ok, " ok, ",
+              w::press.out_of_order, " out of order); timeouts ",
+              w::client.timeouts + w::minor.timeouts + w::press.timeouts, ", rejected ", rejected, ", stale ", stale,
+              "; host bytes wrong ", host_bad, "; peer count ", r.count, " of ", frames, " mism ", r.mism, crlf);
         if (host_bad != 0u) {
             print(serial, "    windows not the peer's:");
             for (uint8_t k = 0; k < w::client_n; ++k) {
@@ -877,24 +840,14 @@ void tw_arbiter() {
             }
             print(serial, "; peer's first wrong byte ", r.idx, " got ", hex(r.got), crlf);
         }
-        // Minor's cut-short replies are the polled loop's limit (the file
-        // header): allowed only where the preemption outlasts a frame, and
-        // then only as spi_stalled - every one with its last slot untouched.
-        const bool minor_ok = w::minor.ok == w::minor_n ||
-                              (outlasts_frame && w::minor.ok + cut == w::minor_n &&
-                               w::minor.timeouts == 0u && w::minor.rejected == 0u);
-        bench.verdict(pass_label(s), outlasts_frame
-                                         ? "every request answered once, to its own requester: the Client's and "
-                                           "Pressure's spi_ok, Minor's spi_ok or cut short (spi_stalled)"
-                                         : "every request answered spi_ok, to its own requester, once",
-                      done && w::client.ok == w::client_n && (!pressing || w::press.ok == w::press_n) && minor_ok &&
-                          w::client.replies == w::client_n && w::minor.replies == w::minor_n &&
-                          w::press.replies == (pressing ? w::press_n : 0u));
-        // Minor's order is read from its slots, which a cut leaves short.
+        const bool all_ok = done && w::client.ok == w::client_n && w::minor.ok == w::minor_n &&
+                            (!pressing || w::press.ok == w::press_n);
+        bench.verdict(pass_label(s), "every request answered spi_ok, to its own requester, once", all_ok &&
+                      w::client.replies == w::client_n && w::minor.replies == w::minor_n &&
+                      w::press.replies == (pressing ? w::press_n : 0u));
         bench.verdict(pass_label(s), "every reply in its requester's order (the Client's before its next "
-                                     "window starts; Minor's where none was cut)",
-                      w::client.out_of_order == 0u && w::press.out_of_order == 0u &&
-                          (cut != 0u || w::minor.out_of_order == 0u));
+                                     "window starts)",
+                      w::client.out_of_order == 0u && w::minor.out_of_order == 0u && w::press.out_of_order == 0u);
         bench.verdict(pass_label(s), "nothing rejected, the per-bus timeout never fired (no spi_timeout, no "
                                      "stale event)",
                       rejected == 0u && stale == 0u && w::client.timeouts == 0u && w::minor.timeouts == 0u &&
@@ -1171,7 +1124,6 @@ int main() {
     clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     tick_ok = brio::Ticker::init(clock);
-    answer_window_tx = sl::dummy_buf;
 
     // THE SUPPLY before any link pad is driven (the desk's rule).
     brio::Pwr::pvd(brio::PvdLevel::v3_0);

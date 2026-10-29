@@ -52,19 +52,20 @@
 //   is CTRLA.DORD, part of the host's configuration and not of a request
 //   (samc21/spi.hpp's apply() writes CTRLA without it): no LSb-first rows,
 //   the DORD mismatch row kept (the peer LSb, this end MSb).
-//   THE HOST ADAPTER. The shared body speaks the STM32 hosts' Request (a
-//   SpiClock rate, a frame size, a bit-order verb) and this host's Request
-//   names a BAUD byte; `Host` below is a thin adapter over SpiHost<1> that
-//   carries the body's field names and forwards each request to the
-//   driver's start() unchanged in what it moves - one Request copy a
-//   transaction, nothing a character. The adapter OWNS THE SELECT: an AVR
-//   client reset by SS rising loses a received character its polled loop
-//   has not fetched yet (test_samc_spi, "THE CHIP-SELECT HOLD": every
-//   command frame lost its checksum), and the driver raises a request's
-//   select a microsecond after the last edge, so the adapter primes the
-//   mode, lowers the select, spends cs_setup_us and starts the driver with
-//   no select of its own; the Client's reply raises it 30 us later
-//   (client_replied()), after the reply chain's own few hundred cycles.
+//   THE HOST'S VOCABULARY AND THE SELECT (the shared body's LinkTraits).
+//   This host's Request names its rate a BAUD byte and has no frame size
+//   and no bit-order verb, so the suite names SpiClock the BAUD byte and
+//   SpiDataSize its own two-value enum, and LinkTraits::bus_settings()
+//   writes a window's rate and mode into the Request's baud and mode; the
+//   shared body asks no bit order of a host without the verb. The SELECT
+//   IS HELD 30 us AFTER A WINDOW (LinkTraits::cs_hold_us): an AVR client
+//   reset by SS rising loses a received character its polled loop has not
+//   fetched yet (test_samc_spi, "THE CHIP-SELECT HOLD": every command frame
+//   lost its checksum), and the driver raises a request's select a
+//   microsecond after the last edge, so the shared body's Client frames
+//   the select itself - the mode primed, the select lowered, 30 us, the
+//   request posted with no select, and at the reply 30 us more before the
+//   rise, after the reply chain's own few hundred cycles.
 //   THE UART. Uart<1> with TxD on PAD[2] (PA18, TXPO 0x1) and RxD on
 //   PAD[0] (PA16), the crossed pair, its core on generator 0 (the task's
 //   one generator, OSC48M). The receiver is the INTERRUPT receiver into a
@@ -78,9 +79,9 @@
 //   first half of u, and the DMA TRANSMIT ENGINE (DmaTxEngine, channel 0,
 //   the stratum's one DMA user, one block for a ring run) for u's second
 //   half - the family's one engine under preemption, with no second
-//   channel live for 1.10.4 to bite. `LinkPort` below is the one name the
-//   shared body writes through, its transmit verbs forwarded to the leg's
-//   type and its receive verbs always to the interrupt transmitter's port.
+//   channel live for 1.10.4 to bite. `LinkPort`, the one port the
+//   LineReader reads, is the interrupt transmitter's; u's DMA legs name
+//   their port to the shared body's sink_leg().
 //   THE PRESSURE. TC4's overflow in MATCH FREQUENCY mode (35.6.2.6.1: CC0
 //   is TOP, the counter wraps there and raises OVF, no re-arm in the
 //   handler), 16 bits on its own generic clock channel (TC4 cannot pair,
@@ -333,7 +334,7 @@ constexpr SpiPads host_pads{
     .ss_pin = {'A', 17, PinFunction::c},
     .data_in_pin = {'A', 18, PinFunction::c},
 };
-using Hw = SpiHost<1, host_pads>;
+using Host = SpiHost<1, host_pads>;
 
 /// The shared body's names for a request's rate and frame size. The rate
 /// is this host's BAUD byte (f = 48 MHz / (2 (BAUD + 1)), 32.6.2.3), and a
@@ -348,79 +349,15 @@ constexpr SpiClock link_clock = 119;
 static_assert(spi_sck_hz(SysClock::hz, link_clock) == 200'000u);
 constexpr const char* bus_clock_name = "GCLK0";
 
-/// The adapter (the file header): the shared body's Request over
-/// SpiHost<1>'s, the select its own.
-struct Host {
-    using Resource = Hw::Resource;
-
-    struct Request {
-        PinRef cs;
-        Borrowed<const uint8_t, Lease::reply> tx;
-        Borrowed<uint8_t, Lease::reply> rx;
-        uint16_t len = 0;
-        SpiDataSize bits = SpiDataSize::bits8;
-        bool polled = false;
-        uint8_t cs_setup_us = 0;
-        SpiClock clock = link_clock;
-        SpiMode mode = SpiMode::mode0;
-        ReplyTo<SpiDone> reply;
-    };
-
-    /// The bit order is CTRLA.DORD, this host's configuration: MSb first
-    /// for every request, and a request for LSb first refused.
-    static bool lsb_first() { return false; }
-    static bool bit_order(bool lsb) { return !lsb; }
-
-    static void prime(SpiMode mode, SpiClock rate) { Hw::prime(mode, rate); }
-
-    /// The arbiter's start(): the mode primed with the select high (a CPOL
-    /// flip inside an open window is an edge for the client, Hw::prime()),
-    /// the select lowered and its setup spent here, then the driver's
-    /// start() with no select of its own, so its end of the transaction
-    /// leaves the select low until close().
-    static bool start(const Request& r) {
-        Hw::prime(r.mode, r.clock);
-        sel_ = r.cs;
-        sel_.clear();
-        if (r.cs_setup_us != 0u) {
-            spin(static_cast<uint32_t>(r.cs_setup_us) * cycles_per_us);
-        }
-        Hw::Request q{};
-        q.tx = r.tx;
-        q.rx = r.rx;
-        q.len = r.len;
-        q.polled = r.polled;
-        q.baud = r.clock;
-        q.mode = r.mode;
-        q.reply = r.reply;
-        return Hw::start(q);
+/// The shared body's defaults changed for this host (the file header):
+/// the select held 30 us after a window, and a window's rate and mode
+/// written into the Request's baud and mode (a frame is a byte here).
+struct LinkTraits {
+    static constexpr uint8_t cs_hold_us = 30;
+    static void bus_settings(Host::Request& r, SpiClock rate, SpiMode mode, SpiDataSize) {
+        r.baud = rate;
+        r.mode = mode;
     }
-
-    [[gnu::always_inline]] static bool isr() { return Hw::isr(); }
-    static uint8_t status() { return Hw::status(); }
-
-    /// The per-bus timeout's verb: the select raised first, then the
-    /// driver's own recovery.
-    static bool recover() {
-        sel_.set();
-        sel_ = PinRef{};
-        return Hw::recover();
-    }
-
-    /// The select's hold and its rise, after a window's reply: 30 us more,
-    /// test_samc_spi's measured hold, so the peer's polled loop has fetched
-    /// the window's last character before SS rises. Main context (the
-    /// Client's dispatch); a window without a select of its own passes.
-    static void close() {
-        if (!sel_.valid()) {
-            return;
-        }
-        spin(30u * cycles_per_us);
-        sel_.set();
-        sel_ = PinRef{};
-    }
-
-    static inline PinRef sel_{};
 };
 
 /// SERCOM1 is the SPI host (key z), its vector the host's pump.
@@ -445,18 +382,9 @@ using PortDma = Uart<1, link_pads, 64, 512, DmaTxEngine>;
 volatile bool link_live = false;
 volatile bool leg_dma = false;
 
-/// The one name the shared body writes through (the file header): the
-/// transmit verbs the leg's port's, the receive verbs the interrupt
-/// transmitter's port's, the one LineReader reads.
-struct LinkPort {
-    static uint32_t write_bulk(std::span<const uint8_t> s) {
-        return leg_dma ? PortDma::write_bulk(s) : PortIrq::write_bulk(s);
-    }
-    static bool tx_idle() { return leg_dma ? PortDma::tx_idle() : PortIrq::tx_idle(); }
-    static std::span<const uint8_t> read_span() { return PortIrq::read_span(); }
-    static void consume(uint32_t n) { PortIrq::consume(n); }
-    static uint32_t rx_skips() { return PortIrq::rx_skips(); }
-};
+/// The port the LineReader reads and t and v write through: the
+/// interrupt transmitter's (the file header).
+using LinkPort = PortIrq;
 
 /// What a leg's transport counted, read after the leg (init() clears the
 /// counters; the skip epoch is never cleared, so its move is counted from
@@ -511,14 +439,14 @@ uint32_t division(SpiClock c) { return 2u * (static_cast<uint32_t>(c) + 1u); }
 /// The host's BUFOVF at a reply, latched and cleared (it stands until
 /// written): the receive shapes keep no more than two characters in flight
 /// against a two-level buffer (the file header), so a set flag is a frame
-/// the host did not read. Then the select's rise (the adapter's close()).
+/// the host did not read. The shared body raises the select after this
+/// (LinkTraits::cs_hold_us).
 volatile uint32_t ovf_at_reply = 0;
 void client_replied() {
     if (Host::Resource::overflow_flag()) {
         ovf_at_reply = ovf_at_reply + 1u;
         Host::Resource::clear_status(SpiStatus::overflow);
     }
-    Host::close();
 }
 
 uint32_t skips0 = 0;
@@ -561,7 +489,7 @@ bool spi_up() {
     link_pads_dark();
     CsPin::set();
     CsPin::output();
-    host_ok = Hw::init(clock);
+    host_ok = Host::init(clock);
     spi_live = host_ok;
     return host_ok;
 }
@@ -573,7 +501,7 @@ void spi_down() {
         return;
     }
     spi_live = false;
-    Hw::release();
+    Host::release();
     link_pads_dark();
 }
 
@@ -1117,10 +1045,10 @@ void tw_arbiter() {
             // The window: the mode primed with the select high (a CPOL flip
             // inside an open window is an edge for the client), the 30 us
             // the protocol pays on each side of it - the second the hold the
-            // peer's polled loop wants before SS rises (the adapter's
-            // close()). The bus is idle here: no request is outstanding.
+            // peer's polled loop wants before SS rises (LinkTraits'
+            // cs_hold_us). The bus is idle here: no request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, link_clock);
+            Host::prime(SpiMode::mode0, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;
@@ -1205,7 +1133,7 @@ void ti_dark() {
                   !Pulse::enabled() && (Pulse::armed() & Pulse::overflow_flag) == 0u && !Nvic::pending(Pulse::irq()));
     bench.verdict("no time event is armed (the arbiter's timeout among them)", !TE::next_deadline().has_value());
     bench.verdict("SERCOM1 given back: its line off, neither personality live, the four link pads PORT inputs",
-                  !Nvic::enabled(Hw::Resource::irq()) && !spi_live && !link_live && !ul::cmd_up &&
+                  !Nvic::enabled(Host::Resource::irq()) && !spi_live && !link_live && !ul::cmd_up &&
                       pad_is_dark<RxdPin>() && pad_is_dark<CsPin>() && pad_is_dark<TxdPin>() &&
                       pad_is_dark<XckPin>());
     bench.verdict("the DMA transmit engine unclaimed", DmaTxEngine::owner() == 0u);
@@ -1222,93 +1150,6 @@ constexpr uint32_t uart_rates[] = {460'800u, 921'600u};
 constexpr uint16_t echo_lines = 200;
 constexpr uint16_t sink_lines = 300;
 
-/// t and v's leg against this peer: the shared body's echo_leg() with
-/// every CHARACTER paced, written `gap_bits` bit times after the one
-/// before (a floor: a preemption of the writer only lengthens a gap), or
-/// `burst` characters back to back every `burst` x `gap_bits`. The
-/// avrxt usart_peer's echo turns each character around alone - four bit
-/// times of turnaround guard, the character sent, its last stop bit
-/// awaited (usart_peer.cpp's run_echo_as(), line_talk(), line_listen()) -
-/// so a run written back to back overruns its two-level receive buffer
-/// within a line (measured: ovf 255, a third of a leg's bytes lost). The
-/// shared body writes a line whole; this copy differs from it in the
-/// writer's loop alone (the report's header change).
-LegResult echo_leg_paced(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window, uint8_t gap_bits,
-                         uint8_t burst = 1) {
-    static_assert(echo_lines * 72u * 400u / 1000u + 1000u <= 0xFFFFu, "the peer's deadline fits its 16 bits");
-    // One character or two at a time: the peer queues one while it turns
-    // the one before around (its receive buffer is two levels deep,
-    // docs/avrxt/usart.md).
-    LegResult g{};
-    for (uint16_t k = 0; k < lines; ++k) {
-        g.bytes += line_with_eol(static_cast<uint16_t>(seq0 + k));
-    }
-    g.bytes += 1u;   // the leading end of line
-    link::Params a{};
-    a.cfg.rate = rate;
-    a.count = static_cast<uint16_t>(g.bytes);
-    // The peer's deadline, for a leg that fails: 400 us a character and a
-    // second. A paced character's measured cost is the writer's and the
-    // reader's per-character dispatch, not the wire's - 57 to 99 us with
-    // the pressure silent (letter q), 225 us at worst under 97 us x 3000
-    // (letter t at 921600, 2.03 s for 9000 characters) - and 400 us is
-    // nearly twice that.
-    a.ms = static_cast<uint16_t>(g.bytes * 400u / 1000u + 1000u);
-    g.acted = ul::peer_act(link::Op::echo, a);
-    if (!g.acted) {
-        return g;
-    }
-    LineSink::reset(seq0);
-    const uint8_t overflows0 = LinePort::line_overflows();
-    const uint32_t torn0 = LinePort::torn_lines();
-    g.up = task_up(rate);
-    if (!g.up) {
-        return g;
-    }
-    wait_ms(6);   // the peer's echo window opens settle_ms + 2 ms after its ack
-    const uint32_t gap = static_cast<uint32_t>(gap_bits) * burst * (core_hz / rate);
-    const uint32_t t0 = Ruler::now();
-    // The bursts run across the lines' ends - a line's end of line goes out
-    // with the next line's first character -, so a character is on its way
-    // while the line before it is lent; the last burst flushed at the end.
-    char held[2] = {};
-    uint8_t held_n = 0;
-    auto put = [&held, &held_n, gap, burst](const char* s, uint8_t n) {
-        for (uint8_t i = 0; i < n; ++i) {
-            held[held_n++] = s[i];
-            if (held_n == burst) {
-                held_n = 0;
-                if (!write_line(held, burst)) {
-                    return false;
-                }
-                spin(gap);
-            }
-        }
-        return true;
-    };
-    g.wrote = put("\n", 1);
-    for (uint16_t k = 0; k < lines && g.wrote; ++k) {
-        if (window != 0u && k >= window) {
-            const uint32_t back = static_cast<uint32_t>(k - window) + 1u;
-            (void)wait_until([back] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= back; }, 20);
-        }
-        const uint8_t n = line_with_eol(static_cast<uint16_t>(seq0 + k));
-        g.wrote = put(line_buf, n);
-    }
-    if (g.wrote && held_n != 0u) {
-        g.wrote = write_line(held, held_n);
-    }
-    (void)wait_until([lines] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= lines; }, 300);
-    g.cycles = Ruler::now() - t0;
-    wait_ms(5);   // the last edge's dispatch, and anything a slip would still deliver
-    g.c.port = read_port_counters();
-    g.c.line_overflows = static_cast<uint8_t>(LinePort::line_overflows() - overflows0);
-    g.c.torn = LinePort::torn_lines() - torn0;
-    task_down();
-    g.have = ul::peer_report(g.r, 0);
-    return g;
-}
-
 /// The pace t and v write at: 32 bit times a character. The peer's
 /// turnaround of one character has a fixed part read from its source -
 /// the four-bit guard after the stop bit's middle, the start of its echo
@@ -1322,6 +1163,21 @@ LegResult echo_leg_paced(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t w
 /// 460800 and 50 at 921600 (a character's write and the reader's dispatch
 /// for its echo). The two rates' 0.4 % (the file header) moves none of it.
 constexpr uint8_t echo_gap_bits = 32;
+
+/// The peer's deadline for a paced leg that fails: 400 us a character and
+/// a second (the shared body's Pace). A paced character's measured cost is
+/// the writer's and the reader's per-character dispatch, not the wire's -
+/// 57 to 99 us with the pressure silent (letter q), 225 us at worst under
+/// 97 us x 3000 (letter t at 921600, 2.03 s for 9000 characters) - and
+/// 400 us is nearly twice that.
+constexpr uint16_t echo_char_us = 400;
+static_assert(echo_lines * 72u * echo_char_us / 1000u + 1000u <= 0xFFFFu, "the peer's deadline fits its 16 bits");
+
+/// t's writer, a character at a time, and v's, two at a time - the peer
+/// queues one while it turns the one before around (its receive buffer is
+/// two levels deep, docs/avrxt/usart.md).
+constexpr Pace t_pace{.gap_bits = echo_gap_bits, .burst = 1, .char_us = echo_char_us};
+constexpr Pace v_pace{.gap_bits = echo_gap_bits, .burst = 2, .char_us = echo_char_us};
 
 /// (OUTSIDE y, no verdict) the peer's echo against the writer's pace: 40
 /// lines a leg at both rates, written whole as the shared body writes
@@ -1346,7 +1202,7 @@ void tq_pace() {
         }
         for (const uint8_t gap : gaps) {
             LineSink::spin_cycles = 0;
-            const LegResult g = echo_leg_paced(rate, 40, 100u, 0, gap);
+            const LegResult g = echo_leg(rate, 40, 100u, 0, Pace{.gap_bits = gap, .burst = 1, .char_us = echo_char_us});
             print(serial, "  ", rate, " a character every ", gap, " bit times: peer count ", g.r.count, " of ", g.bytes,
                   " ferr ", g.r.ferr, " ovf ", g.r.ovf, "; sink ", LineSink::good, " good of 40, ", LineSink::corrupt,
                   " corrupt; ", g.cycles / cycles_per_us, " us, the wire's ", wire_cycles(g.bytes, rate) / cycles_per_us,
@@ -1369,7 +1225,7 @@ void tt_lines() {
         for (uint8_t k = 0; k < 2u; ++k) {
             LineSink::spin_cycles = 0;
             const LegResult g =
-                echo_leg_paced(uart_rates[k], echo_lines, static_cast<uint16_t>(1000u * k + 7u * p), 0, echo_gap_bits);
+                echo_leg(uart_rates[k], echo_lines, static_cast<uint16_t>(1000u * k + 7u * p), 0, t_pace);
             print_leg("echo", uart_rates[k], g);
             print_counters(g.c);
             print_sink();
@@ -1407,8 +1263,9 @@ void tu_blast() {
             leg_dma = e != 0u;
             for (uint8_t k = 0; k < 2u; ++k) {
                 const uint32_t rate = uart_rates[k];
-                const LegResult g =
-                    sink_leg(rate, sink_lines, static_cast<uint16_t>(2000u * k + 500u * e + 11u * p));
+                const uint16_t seq0 = static_cast<uint16_t>(2000u * k + 500u * e + 11u * p);
+                const LegResult g = leg_dma ? sink_leg<PortDma>(rate, sink_lines, seq0)
+                                            : sink_leg<PortIrq>(rate, sink_lines, seq0);
                 const uint8_t faults = leg_dma ? PortDma::dma_faults() : 0u;
                 print_leg(leg_dma ? "blast, DMA transmitter" : "blast, interrupt transmitter", rate, g);
                 if (p == 0u) {
@@ -1452,7 +1309,7 @@ void tv_loan() {
         leg_dma = false;
         LineSink::spin_cycles = 6000;
         const LegResult g =
-            echo_leg_paced(rate, echo_lines, static_cast<uint16_t>(3000u + 13u * p), window, echo_gap_bits, 2);
+            echo_leg(rate, echo_lines, static_cast<uint16_t>(3000u + 13u * p), window, v_pace);
         LineSink::spin_cycles = 0;
         const PassStats st = pass_end(s);
         ul::release();

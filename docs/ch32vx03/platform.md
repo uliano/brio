@@ -1012,11 +1012,14 @@ established:
   first and a bit-order mismatch on the engines at /32, byte-exact in
   every pass, the data windows at 954 to 1000 per mille of the control's
   rate under pressure; three requesters of three priorities on one
-  select window - every request here at least `dma_min_frames` long, so
-  all three on the engines, the one below the arbiter polled inside its
-  dispatch - answered every one `spi_ok`, to its requester, in its
-  order, with no timeout and no rejection and the peer counting every
-  frame exact, in 10980 to 11893 us a window. The command channel needed
+  select window - the one above the arbiter on the engines (6 frames),
+  the one below it on the polled loop and the preempting object on the
+  pump, their requests 2 frames each, under `dma_min_frames` - answered
+  every one `spi_ok`, to its requester, in its order, with no timeout
+  and no rejection and the peer counting every frame exact, in 9264 to
+  10103 us a window (three runs on each image); the polled loop keeps
+  both of its frames in flight there, 4096 cycles each at /256, longer
+  than the preemption that holds it. The command channel needed
   no retry in the twenty runs of `z`.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the

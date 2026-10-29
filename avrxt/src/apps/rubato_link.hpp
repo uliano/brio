@@ -17,34 +17,88 @@
 // in a verdict (the polled loop's limit, the matrix a peer can serve, the
 // rates a pair of divisors allows) is that suite's.
 //
-// ONE BODY, MANY FAMILIES: what is a family's the including suite states
-// before it includes this file, inside its own anonymous namespace with
-// `using namespace brio` in force, having included kernel/rubato.hpp,
+// ONE BODY, MANY FAMILIES. What is a family's the including suite states in
+// three places, all inside its own anonymous namespace with `using
+// namespace brio` in force, having included kernel/rubato.hpp,
 // kernel/borrowed.hpp, kernel/time_event.hpp, util/spi_bus.hpp,
 // util/line_reader.hpp, util/print.hpp, util/testbench.hpp, spi_link.hpp,
-// usart_link.hpp and <variant> and <span> at file scope:
+// usart_link.hpp and <variant> and <span> at file scope.
+//
+// 1. BEFORE THE INCLUDE, these names, every one required:
 //
 //   core_hz, cycles_per_us   the core clock, in which the ruler counts
 //   P                        the Rubato platform
-//   Ruler, spin(cycles)      Ruler::now() in core cycles, and a spin on it
+//   Ruler                    Ruler::now(): core cycles, MONOTONE MODULO
+//                            2^32 - the difference of two reads exact
+//                            across any span a pass takes (seconds). A
+//                            counter that restarts at a tick (the QingKe
+//                            STK every millisecond) is not one; the
+//                            ticker's composed count is.
+//   spin(cycles)             a busy wait of at least `cycles` core cycles,
+//                            for any span the suites ask (up to a few
+//                            hundred thousand cycles: a borrower's spin, a
+//                            timer's quieting); a preemption only lengthens
+//                            it. wait_us() below is spin() in microseconds.
 //   Serial, serial, bench    the console's Uart and its TwoKeyTestBench
 //   Host, CsPin              the link's SpiHost with its engines, and the
-//                            select, a GPIO
+//                            select, a GPIO. The body writes a Request's
+//                            cs, tx, rx, len, polled, cs_setup_us and
+//                            reply, and calls Host::prime(mode, rate) where
+//                            it frames a select itself (cs_hold_us below);
+//                            it asks the bit order through Host::lsb_first()
+//                            and Host::bit_order(lsb) only where the host
+//                            has them - a host without them clocks MSb
+//                            first, and its suite posts no LSb window.
+//   SpiClock, SpiDataSize    the host's rate and frame-size vocabulary:
+//                            brio's where the family's driver names them,
+//                            the suite's own otherwise (bits8 and bits16)
 //   link_clock               the command channel's SpiClock
 //   bus_clock_name           what the prints call the clock a SpiClock
 //                            divides ("PCLK1")
-//   LinkPort                 the link's Uart with its receive engine
+//   LinkPort                 the link's Uart, the one the LineReader reads
+//                            and the legs write through (write_bulk(),
+//                            tx_idle())
 //   PortCounters             the transport's counters over one leg, with
 //                            clean() - what a family's Uart counts
 //   pressure_name, peer_name what the prints call the pressure's timer
 //                            ("TIM2") and the peer board ("the STM32G0B1RE")
 //
-// and defines, after the include, the functions declared below under
-// "What the including suite defines": the pressure's timer, the receive
-// stream's position, the divisor's print, the polled command channel of
-// the UART key, the Uart task's two edges and the reply hook. The vectors
-// stay the suite's: its pressure vector clears its flag and calls
-// pressure_landed(), and its SPI, DMA and UART vectors post the
+// 2. BEFORE THE INCLUDE, OPTIONALLY, a `struct LinkTraits` whose static
+// members change this body's defaults; a member it leaves out, or a
+// LinkTraits it does not declare at all, keeps the default:
+//
+//   w_client_len, w_minor_len, w_press_len   (uint8_t; 6, 8 and 3) the
+//                            frames of each of letter w's requests, so that
+//                            a host whose engines take short runs can still
+//                            put Pressure's on the pump and Minor's on the
+//                            polled loop (at most 8 each)
+//   w_rate                   (SpiClock; link_clock) letter w's rate, so
+//                            that a host whose command rate keeps two
+//                            frames in flight can run w where one is, and
+//                            keep w about arbitration
+//   cs_hold_us               (uint8_t; 0) the select held this long after a
+//                            window's last frame before it rises: 0 leaves
+//                            the select to the host's Request (its fall,
+//                            then the protocol's 30 us, the frames, its rise
+//                            at the end); any other value has the Client
+//                            frame the select itself - the mode and rate
+//                            primed with it high, its fall, 30 us, the
+//                            request posted with no select, and at the
+//                            reply the hold and the rise - for a peer whose
+//                            client needs time after the last edge
+//   bus_settings(r, rate, mode, bits)   (static void) a request's rate,
+//                            clock mode and frame size written into a
+//                            Host::Request `r` whose fields spell them
+//                            otherwise (default: r.clock, r.mode, r.bits)
+//
+// 3. AFTER THE INCLUDE, the functions declared below under "What the
+// including suite defines": the pressure's timer, the receive stream's
+// position, the divisor's print, the polled command channel of the UART
+// key, the Uart task's two edges and the reply hook.
+//
+// The vectors stay the suite's: its pressure vector clears its flag and
+// calls pressure_landed() (or, where another mechanism makes the post,
+// note_landing() alone), and its SPI, DMA and UART vectors post the
 // arbiter's TransferDone and the port's RxActivity as the family's driver
 // headers say.
 //
@@ -68,12 +122,16 @@
 //   Client    the SPI client: it takes one select window from the Console
 //             (the Window event), posts the host's Request to the arbiter
 //             with the select in it and the protocol's 30 us between the
-//             select's fall and the first clock, and on the reply decodes
-//             the peer's checksummed answer frame (spi_link.hpp) out of the
-//             bytes that came back. Every command window comes settle_ms
-//             after the window before it, an answer window's included
-//             (spi_link.hpp: "between one chip-select window and the
-//             next"); the peer spends that time going dark again, and a
+//             select's fall and the first clock (or frames the select
+//             itself, LinkTraits::cs_hold_us above), and on the reply
+//             decodes the peer's checksummed answer frame (spi_link.hpp) out
+//             of the bytes that came back. The answer windows are clocked
+//             in the mode the peer answers in - mode 0, or mode 3 for a peer
+//             that serves the protocol's alternate answer mode, found by the
+//             rendezvous of sl::need_peer(). Every command window comes
+//             settle_ms after the window before it, an answer window's
+//             included (spi_link.hpp: "between one chip-select window and
+//             the next"); the peer spends that time going dark again, and a
 //             command frame clocked sooner after an answer window is not
 //             heard.
 //   SpiArb    util/spi_bus.hpp's SpiBus over the family's Host, pending
@@ -83,7 +141,7 @@
 //             needs that the service does not say.
 //   Minor     a second SPI client BELOW the arbiter (letter w).
 //   LinePort  LineReader<LinkPort, P, LineSink, 80> over the family's
-//             receive engine.
+//             receiver.
 //   Console   the lowest: it owns the console, runs the letters in its own
 //             dispatch, and is the only object that prints. It is also the
 //             link Uart's ONE TRANSMIT WRITER - the peer's command frames
@@ -114,7 +172,10 @@
 // for the two ends of the window, and each interrupt is one dispatch, none
 // dropped by Pressure's queue - which the family keeps true by keeping
 // Pressure's dispatch, a spin of at most 3000 cycles and the scheduler's
-// few hundred, shorter than its shortest period.
+// few hundred, shorter than its shortest period. A suite may add a pass fed
+// by another source (a PassSpec naming its `source`, which every label of
+// the pass carries), judged by the same arithmetic when that source counts
+// from the same crystal.
 
 #pragma once
 
@@ -131,9 +192,12 @@ void pressure_arm(uint16_t period_us);
 void pressure_go();
 void pressure_halt();
 void pressure_quiet();
-/// The receive stream's position, any monotone reading of the receive
-/// engine's progress (a channel's remaining count): LineSink reads it at
-/// its entry and exit to say whether the stream moved inside a dispatch.
+/// The receive stream's position: any reading that changes when the
+/// receiver writes and does not change while LineSink runs otherwise - a
+/// receive channel's remaining count, an interrupt receiver's ring count
+/// (its one consumer, the LineReader, is below LineSink), the link
+/// vector's entry count. LineSink reads it at its entry and exit to say
+/// whether the stream moved inside a dispatch.
 uint32_t rx_stream_position();
 /// A SpiClock's division of the bus clock, for the prints.
 uint32_t division(SpiClock c);
@@ -158,6 +222,89 @@ namespace ul {
 bool peer_act(link::Op op, const link::Params& a);
 bool peer_report(link::Report& r, uint16_t after_ms);
 }  // namespace ul
+
+// =============================================================================
+// What the including suite may change: LinkTraits (the file header, 2)
+// =============================================================================
+
+/// The family's LinkTraits when it declared one before the include; when
+/// it did not, this declaration names an incomplete type, which has none
+/// of the members. Every member is read only where the type has it.
+struct LinkTraits;
+
+namespace link_traits {
+
+template <typename T>
+constexpr uint8_t w_client_len() {
+    if constexpr (requires { T::w_client_len; }) {
+        return T::w_client_len;
+    } else {
+        return 6;
+    }
+}
+template <typename T>
+constexpr uint8_t w_minor_len() {
+    if constexpr (requires { T::w_minor_len; }) {
+        return T::w_minor_len;
+    } else {
+        return 8;
+    }
+}
+template <typename T>
+constexpr uint8_t w_press_len() {
+    if constexpr (requires { T::w_press_len; }) {
+        return T::w_press_len;
+    } else {
+        return 3;
+    }
+}
+template <typename T>
+constexpr SpiClock w_rate() {
+    if constexpr (requires { T::w_rate; }) {
+        return T::w_rate;
+    } else {
+        return link_clock;
+    }
+}
+template <typename T>
+constexpr uint8_t cs_hold_us() {
+    if constexpr (requires { T::cs_hold_us; }) {
+        return T::cs_hold_us;
+    } else {
+        return 0;
+    }
+}
+
+}  // namespace link_traits
+
+/// The select's hold after a window (the file header, 2).
+constexpr uint8_t cs_hold_us = link_traits::cs_hold_us<LinkTraits>();
+
+/// A request's rate, clock mode and frame size, through the family's
+/// LinkTraits::bus_settings() where it has one, else into the fields the
+/// STM32 hosts name. A template so that the branch a host's Request cannot
+/// compile is never instantiated.
+template <typename R, typename T = LinkTraits>
+void bus_settings(R& r, SpiClock rate, SpiMode mode, SpiDataSize bits) {
+    if constexpr (requires { T::bus_settings(r, rate, mode, bits); }) {
+        T::bus_settings(r, rate, mode, bits);
+    } else {
+        r.bits = bits;
+        r.clock = rate;
+        r.mode = mode;
+    }
+}
+
+/// The bus's bit order set for a window, where the host has the verb (the
+/// file header, 1); a host without it clocks MSb first.
+template <typename H>
+void window_bit_order(bool lsb) {
+    if constexpr (requires { H::lsb_first(); H::bit_order(lsb); }) {
+        if (H::lsb_first() != lsb) {
+            (void)H::bit_order(lsb);
+        }
+    }
+}
 
 // =============================================================================
 // The pack's shared vocabulary and the landing trace
@@ -209,12 +356,18 @@ constexpr uint8_t seed_a = 0x5A;   ///< what every window sends (pattern_fixed)
 constexpr uint8_t seed_b = 0xC3;   ///< what the peer answers every frame
 constexpr uint8_t untouched = 0xEE;
 
+/// The three requesters' counts, and their lengths and the letter's rate
+/// (the family's LinkTraits, the file header, 2).
 constexpr uint8_t client_n = 20;
-constexpr uint8_t client_len = 6;
+constexpr uint8_t client_len = link_traits::w_client_len<LinkTraits>();
 constexpr uint8_t minor_n = 10;
-constexpr uint8_t minor_len = 8;
+constexpr uint8_t minor_len = link_traits::w_minor_len<LinkTraits>();
 constexpr uint8_t press_n = 8;
-constexpr uint8_t press_len = 3;
+constexpr uint8_t press_len = link_traits::w_press_len<LinkTraits>();
+constexpr SpiClock rate = link_traits::w_rate<LinkTraits>();
+static_assert(client_len >= 1u && client_len <= 8u && minor_len >= 1u && minor_len <= 8u && press_len >= 1u &&
+                  press_len <= 8u,
+              "letter w's requests are 1 to 8 frames, the out buffer below");
 
 alignas(4) uint8_t tx[8] = {seed_a, seed_a, seed_a, seed_a, seed_a, seed_a, seed_a, seed_a};
 alignas(4) uint8_t client_rx[client_n][client_len];
@@ -265,20 +418,18 @@ bool fresh(const uint8_t* slot, uint8_t len) {
 /// One of letter w's transactions. THE SELECT IS THE LETTER'S, held low
 /// across the whole exchange: the peer's exchange is one burst, so every
 /// requester's transaction is a stretch of one window, and every one runs
-/// at the window's mode and rate, the command channel's - a rate change is
-/// a disable and an enable of the block, which a selected client would
-/// see.
+/// at the window's mode and rate, w::rate, at which the suite primes the
+/// host before it lowers the select - a rate change is a disable and an
+/// enable of the block, which a selected client would see.
 Host::Request request(uint8_t* rx, uint8_t len, bool polled, ReplyTo<SpiDone> reply) {
     Host::Request r{};
     r.cs = {};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
     r.rx = lend<Lease::reply>(rx);
     r.len = len;
-    r.bits = SpiDataSize::bits8;
     r.polled = polled;
     r.cs_setup_us = 0;
-    r.clock = link_clock;
-    r.mode = SpiMode::mode0;
+    bus_settings(r, rate, SpiMode::mode0, SpiDataSize::bits8);
     r.reply = reply;
     return r;
 }
@@ -359,9 +510,10 @@ struct Pressure {
     }
 };
 
-/// The pressure vector's body after the timer's flag is cleared: where it
-/// landed, and the post. Interrupt context.
-[[gnu::always_inline]] inline void pressure_landed() {
+/// Where one of the pressure's ticks found the kernel, recorded, without
+/// the post: for a source whose post another mechanism makes (a
+/// cross-core inbox's drain). Interrupt context.
+[[gnu::always_inline]] inline void note_landing() {
     const uint8_t c = P::ceiling;
     const uint8_t slot = c < landing_slots - 1u ? c : static_cast<uint8_t>(landing_slots - 1u);
     landed[slot] = landed[slot] + 1u;
@@ -375,6 +527,12 @@ struct Pressure {
         landed_sink_any = landed_sink_any + 1u;
     }
     pressure_irqs = pressure_irqs + 1u;
+}
+
+/// The pressure vector's body after the timer's flag is cleared: where it
+/// landed, and the post. Interrupt context.
+[[gnu::always_inline]] inline void pressure_landed() {
+    note_landing();
     post<Pressure>(Tick{});
 }
 
@@ -475,6 +633,9 @@ struct LineSink {
     static inline volatile uint32_t moved = 0;      ///< the receive stream wrote during the dispatch
     static inline volatile uint32_t busy = 0;       ///< cycles inside the dispatches
     static inline volatile uint32_t spin_cycles = 0;
+    /// The leg was STREAMED (echo_leg()'s window): its premise is the
+    /// stream moving inside a loan, which print_sink() reports.
+    static inline bool streamed = false;
     static inline uint16_t next = 0;
     static inline const char* last = nullptr;
     static inline const char* buffers[2] = {nullptr, nullptr};
@@ -597,24 +758,32 @@ struct Client {
                 // the bus is idle: the Console posts a window only after the
                 // last one was answered, and in these letters the Client is the
                 // bus's one requester.
-                if (Host::lsb_first() != win.lsb) {
-                    (void)Host::bit_order(win.lsb);
-                }
+                window_bit_order<Host>(win.lsb);
                 rx = win.rx.get();
                 rx_len = win.len;
                 decode = win.decode;
                 Host::Request r{};
-                r.cs = CsPin::ref();
+                if constexpr (cs_hold_us == 0u) {
+                    r.cs = CsPin::ref();
+                }
                 r.tx = win.tx;
                 r.rx = win.rx;
                 r.len = win.len;
-                r.bits = win.bits;
                 r.polled = win.polled;
-                // The 30 us the protocol pays between the select's fall and
-                // the first clock.
-                r.cs_setup_us = 30;
-                r.clock = win.clock;
-                r.mode = win.mode;
+                if constexpr (cs_hold_us == 0u) {
+                    // The 30 us the protocol pays between the select's fall
+                    // and the first clock.
+                    r.cs_setup_us = 30;
+                } else {
+                    // The Client frames the select (the file header, 2): the
+                    // mode and rate primed with it high - a CPOL flip inside
+                    // an open window is an edge for the client -, its fall,
+                    // the protocol's 30 us; the request carries no select.
+                    Host::prime(win.mode, win.clock);
+                    CsPin::clear();
+                    spin(30u * cycles_per_us);
+                }
+                bus_settings(r, win.clock, win.mode, win.bits);
                 r.reply = reply_to<Client, SpiDone>();
                 t_post = Ruler::now();
                 post<SpiArb>(r);
@@ -630,6 +799,11 @@ struct Client {
                 }
                 cycles = Ruler::now() - t_post;
                 client_replied();
+                if constexpr (cs_hold_us != 0u) {
+                    // The select the Client framed: held, then raised.
+                    spin(static_cast<uint32_t>(cs_hold_us) * cycles_per_us);
+                    CsPin::set();
+                }
                 status = d.status;
                 found = false;
                 if (decode && rx != nullptr) {
@@ -696,7 +870,7 @@ struct Minor {
     }
 
 private:
-    /// POLLED at the command rate: the request completes inside the
+    /// POLLED at letter w's rate: the request completes inside the
     /// arbiter's dispatch, which runs inside this post (the arbiter is
     /// above Minor).
     static void post_next() {
@@ -810,6 +984,10 @@ void wait_us(uint32_t us) { spin(us * cycles_per_us); }
 struct PassSpec {
     uint16_t period_us;   ///< 0: the control, the pressure's timer silent
     uint16_t spin;        ///< Pressure's dispatch, in core cycles
+    /// The pressure's source, named in the pass's label: null for the
+    /// family's own timer (pressure_name), a text for a pass a suite adds
+    /// with another source ("core 1's doorbell").
+    const char* source = nullptr;
 };
 constexpr PassSpec passes[] = {{0, 0},      {97, 300},   {193, 300}, {389, 300},
                                {97, 3000}, {193, 3000}, {389, 3000}};
@@ -830,9 +1008,10 @@ uint32_t pass_t0 = 0;
 uint32_t pass_runs0 = 0;
 uint16_t pass_overflows0 = 0;
 
-char label_buf[28];
+char label_buf[48];
 
-/// "control: " or "97 us x 300: ", the prefix of a pass's verdicts.
+/// "control: ", "97 us x 300: " or, for a pass with a source of its own,
+/// "core 1's doorbell, 97 us x 3000: ", the prefix of a pass's verdicts.
 const char* pass_label(const PassSpec& s) {
     uint8_t n = 0;
     auto put = [&n](char c) {
@@ -854,6 +1033,11 @@ const char* pass_label(const PassSpec& s) {
     if (s.period_us == 0u) {
         for (const char* p = "control: "; *p != '\0'; ++p) put(*p);
     } else {
+        if (s.source != nullptr) {
+            for (const char* p = s.source; *p != '\0'; ++p) put(*p);
+            put(',');
+            put(' ');
+        }
         put_num(s.period_us);
         for (const char* p = " us x "; *p != '\0'; ++p) put(*p);
         put_num(s.spin);
@@ -949,6 +1133,11 @@ uint8_t frame_buf[spilink::max_payload + 8];
 alignas(4) uint8_t answer_buf[spilink::answer_bytes];
 alignas(4) uint8_t dummy_buf[spilink::answer_bytes];
 bool quiet = false;
+/// The mode the answer windows are clocked in (spi_link.hpp, "THE
+/// ALTERNATE ANSWER MODE"): mode 0 until need_peer()'s rendezvous finds the
+/// peer answering in mode 3, then mode 3 for as long as it answers there.
+/// The command windows stay mode 0.
+SpiMode answer_mode = SpiMode::mode0;
 
 /// One select window through the Client and the arbiter, waited for (at
 /// most 500 ms, two orders above the longest window a letter clocks). True
@@ -996,14 +1185,15 @@ void send_frame(Op op, const uint8_t* p, uint8_t len) {
     (void)window(frame_buf, nullptr, n);
 }
 
-/// One answer window: answer_bytes dummies, the Client decoding the frame.
+/// One answer window: answer_bytes dummies in the peer's answer mode, the
+/// Client decoding the frame.
 bool recv_frame(spilink::Frame& out) {
     for (uint16_t i = 0; i < spilink::answer_bytes; ++i) {
         dummy_buf[i] = 0;
         answer_buf[i] = 0xEE;
     }
-    if (!window(dummy_buf, answer_buf, spilink::answer_bytes, link_clock, SpiMode::mode0,
-                SpiDataSize::bits8, false, false, true)) {
+    if (!window(dummy_buf, answer_buf, spilink::answer_bytes, link_clock, answer_mode, SpiDataSize::bits8, false,
+                false, true)) {
         return false;
     }
     if (!Client::found) {
@@ -1084,12 +1274,18 @@ bool peer_act(Op op, const spilink::Params& a) {
     return true;
 }
 
-/// Is the peer there? A named failure, never a hang.
+/// Is the peer there? The protocol's rendezvous: a ping in the answer mode
+/// kept, and after a ping that failed in one mode the next in the other, so
+/// a peer that answers in mode 3 alone is found at the second; a named
+/// failure, never a hang.
 bool need_peer() {
     quiet = true;
     bool ok = false;
     for (uint8_t k = 0; k < 3u && !ok; ++k) {
         ok = command(Op::ping);
+        if (!ok) {
+            answer_mode = answer_mode == SpiMode::mode0 ? SpiMode::mode3 : SpiMode::mode0;
+        }
     }
     quiet = false;
     if (!ok) {
@@ -1217,7 +1413,12 @@ struct LegCounters {
     bool clean() const { return port.clean() && line_overflows == 0u && torn == 0u; }
 };
 
-void print_counters(const LegCounters& c) {
+// The functions below serve every UART key a family may run; a family whose
+// peer has no report (or no sink) leaves some of them uncalled, so each
+// carries [[maybe_unused]] - they are functions of an unnamed namespace,
+// which -Wunused-function would otherwise name.
+
+[[maybe_unused]] void print_counters(const LegCounters& c) {
     print(serial, "    port: ");
     print_port(c.port);
     print(serial, ", line overflows ", c.line_overflows, ", torn lines ", c.torn, crlf);
@@ -1225,13 +1426,16 @@ void print_counters(const LegCounters& c) {
 
 char line_buf[line_most];
 
-/// One line out through write_bulk(), the ring topped up as it drains. False
-/// when the transmitter stopped taking bytes for 50 ms.
+/// One line out through `Port`'s write_bulk(), the ring topped up as it
+/// drains. False when the transmitter stopped taking bytes for 50 ms. A
+/// family with two transmitters on the link's instance (an interrupt one
+/// and a DMA one, two Uart types) names the leg's.
+template <typename Port = LinkPort>
 bool write_line(const char* s, uint8_t n) {
     uint32_t sent = 0;
     const uint32_t t0 = Ticker::millis();
     while (sent < n) {
-        sent += LinkPort::write_bulk(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s) + sent, n - sent));
+        sent += Port::write_bulk(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s) + sent, n - sent));
         if (sent < n && Ticker::millis() - t0 >= 50u) {
             return false;
         }
@@ -1248,21 +1452,42 @@ struct LegResult {
     link::Report r{};
 };
 
-uint8_t line_with_eol(uint16_t seq) {
+[[maybe_unused]] uint8_t line_with_eol(uint16_t seq) {
     const uint8_t n = make_line(seq, line_buf);
     line_buf[n] = '\n';
     return static_cast<uint8_t>(n + 1u);
 }
 
+/// How echo_leg()'s writer spaces its characters. WHOLE (echo_leg()
+/// without a Pace): each line written whole, for a peer whose echo keeps
+/// pace with a line back to back. PACED: `burst` characters, then `burst` x
+/// gap_bits bit times before the next burst (a floor: a preemption of the
+/// writer only lengthens a gap), the bursts running across the lines' ends
+/// - for a peer whose echo turns each character around alone and overruns
+/// on a run written back to back. A paced leg's time is set by the two
+/// ends' per-character work, not the wire, so the peer's deadline is
+/// `char_us` a character and a second; a whole leg's is twice the wire's
+/// and half a second.
+struct Pace {
+    uint8_t gap_bits;       ///< the spacing, in bit times a character
+    uint8_t burst = 1;      ///< 1 or 2 characters back to back
+    uint16_t char_us;       ///< the peer's deadline, a character
+};
+
 /// t and v's leg: `lines` numbered lines from `seq0` through the peer's echo
 /// at `rate`, the leg's first byte an end of line that empties the
-/// assembler; then the port's counters and the peer's. PACED (t): each line
-/// written after the one before has left this end's wire and two frame
-/// times more. STREAMED (v, `window` lines): line k written as soon as line
-/// k - window has come back to the sink, so the characters keep arriving
-/// while the port drains and the sink borrows; the window bounds what the
-/// peer can hold of a backlog (the including suite's arithmetic).
-LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window = 0) {
+/// assembler; then the port's counters and the peer's. LINE BY LINE (t,
+/// `window` 0, the lines whole): each line written after the one before has
+/// left this end's wire and two frame times more. STREAMED (v, `window`
+/// lines): line k written as soon as line k - window has come back to the
+/// sink, so the characters keep arriving while the port drains and the sink
+/// borrows; the window bounds what the peer can hold of a backlog (the
+/// including suite's arithmetic). `pace`, in the second form, spaces the
+/// characters themselves (Pace above), in either shape. The writer's two
+/// loops are one template's two instantiations, so an image that never
+/// paces carries only the whole one.
+template <bool paced>
+LegResult echo_leg_as(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window, const Pace& pace) {
     LegResult g{};
     for (uint16_t k = 0; k < lines; ++k) {
         g.bytes += line_with_eol(static_cast<uint16_t>(seq0 + k));
@@ -1271,12 +1496,17 @@ LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window 
     link::Params a{};
     a.cfg.rate = rate;
     a.count = static_cast<uint16_t>(g.bytes);
-    a.ms = static_cast<uint16_t>(g.bytes * 10u * 1000u * 2u / rate + 500u);
+    if constexpr (paced) {
+        a.ms = static_cast<uint16_t>(g.bytes * pace.char_us / 1000u + 1000u);
+    } else {
+        a.ms = static_cast<uint16_t>(g.bytes * 10u * 1000u * 2u / rate + 500u);
+    }
     g.acted = ul::peer_act(link::Op::echo, a);
     if (!g.acted) {
         return g;
     }
     LineSink::reset(seq0);
+    LineSink::streamed = window != 0u;
     const uint8_t overflows0 = LinePort::line_overflows();
     const uint32_t torn0 = LinePort::torn_lines();
     g.up = task_up(rate);
@@ -1284,21 +1514,59 @@ LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window 
         return g;
     }
     wait_ms(6);   // the peer's echo window opens settle_ms + 2 ms after its ack
-    const uint32_t gap = 2u * 10u * (core_hz / rate);
     const uint32_t t0 = Ruler::now();
-    g.wrote = write_line("\n", 1);
-    for (uint16_t k = 0; k < lines && g.wrote; ++k) {
-        if (window != 0u && k >= window) {
-            const uint32_t back = static_cast<uint32_t>(k - window) + 1u;
-            (void)wait_until([back] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= back; }, 20);
-        }
-        const uint8_t n = line_with_eol(static_cast<uint16_t>(seq0 + k));
-        g.wrote = write_line(line_buf, n);
-        if (window == 0u) {
-            const uint32_t m0 = Ticker::millis();
-            while (!LinkPort::tx_idle() && Ticker::millis() - m0 < 50u) {
+    if constexpr (!paced) {
+        const uint32_t gap = 2u * 10u * (core_hz / rate);
+        g.wrote = write_line("\n", 1);
+        for (uint16_t k = 0; k < lines && g.wrote; ++k) {
+            if (window != 0u && k >= window) {
+                const uint32_t back = static_cast<uint32_t>(k - window) + 1u;
+                (void)wait_until([back] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= back; },
+                                 20);
             }
-            spin(gap);
+            const uint8_t n = line_with_eol(static_cast<uint16_t>(seq0 + k));
+            g.wrote = write_line(line_buf, n);
+            if (window == 0u) {
+                const uint32_t m0 = Ticker::millis();
+                while (!LinkPort::tx_idle() && Ticker::millis() - m0 < 50u) {
+                }
+                spin(gap);
+            }
+        }
+    } else {
+        const uint8_t burst = pace.burst == 2u ? 2u : 1u;
+        const uint32_t gap = static_cast<uint32_t>(pace.gap_bits) * burst * (core_hz / rate);
+        // A burst may run across a line's end - the end of line goes out
+        // with the next line's first character -, so a character is on its
+        // way while the line before it is lent; the last one flushed at the
+        // end.
+        char held[2] = {};
+        uint8_t held_n = 0;
+        auto put = [&held, &held_n, gap, burst](const char* s, uint8_t n) {
+            for (uint8_t i = 0; i < n; ++i) {
+                held[held_n++] = s[i];
+                if (held_n == burst) {
+                    held_n = 0;
+                    if (!write_line(held, burst)) {
+                        return false;
+                    }
+                    spin(gap);
+                }
+            }
+            return true;
+        };
+        g.wrote = put("\n", 1);
+        for (uint16_t k = 0; k < lines && g.wrote; ++k) {
+            if (window != 0u && k >= window) {
+                const uint32_t back = static_cast<uint32_t>(k - window) + 1u;
+                (void)wait_until([back] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= back; },
+                                 20);
+            }
+            const uint8_t n = line_with_eol(static_cast<uint16_t>(seq0 + k));
+            g.wrote = put(line_buf, n);
+        }
+        if (g.wrote && held_n != 0u) {
+            g.wrote = write_line(held, held_n);
         }
     }
     (void)wait_until([lines] { return LineSink::good + LineSink::corrupt + LineSink::backwards >= lines; }, 300);
@@ -1312,7 +1580,16 @@ LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window 
     return g;
 }
 
-/// u's leg: `lines` numbered lines back to back into the peer's sink.
+[[maybe_unused]] LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window = 0) {
+    return echo_leg_as<false>(rate, lines, seq0, window, Pace{});
+}
+[[maybe_unused]] LegResult echo_leg(uint32_t rate, uint16_t lines, uint16_t seq0, uint8_t window, const Pace& pace) {
+    return echo_leg_as<true>(rate, lines, seq0, window, pace);
+}
+
+/// u's leg: `lines` numbered lines back to back into the peer's sink,
+/// through `Port`'s transmitter (write_line()'s).
+template <typename Port = LinkPort>
 LegResult sink_leg(uint32_t rate, uint16_t lines, uint16_t seq0) {
     LegResult g{};
     for (uint16_t k = 0; k < lines; ++k) {
@@ -1339,10 +1616,10 @@ LegResult sink_leg(uint32_t rate, uint16_t lines, uint16_t seq0) {
     g.wrote = true;
     for (uint16_t k = 0; k < lines && g.wrote; ++k) {
         const uint8_t n = line_with_eol(static_cast<uint16_t>(seq0 + k));
-        g.wrote = write_line(line_buf, n);
+        g.wrote = write_line<Port>(line_buf, n);
     }
     const uint32_t m0 = Ticker::millis();
-    while (!LinkPort::tx_idle() && Ticker::millis() - m0 < 100u) {
+    while (!Port::tx_idle() && Ticker::millis() - m0 < 100u) {
     }
     g.cycles = Ruler::now() - t0;
     task_down();
@@ -1351,11 +1628,11 @@ LegResult sink_leg(uint32_t rate, uint16_t lines, uint16_t seq0) {
 }
 
 /// The wire's time for `bytes` 8N1 characters at `rate`, in core cycles.
-uint32_t wire_cycles(uint32_t bytes, uint32_t rate) {
+[[maybe_unused]] uint32_t wire_cycles(uint32_t bytes, uint32_t rate) {
     return static_cast<uint32_t>((static_cast<uint64_t>(bytes) * 10u * core_hz) / rate);
 }
 
-void print_leg(const char* what, uint32_t rate, const LegResult& g) {
+[[maybe_unused]] void print_leg(const char* what, uint32_t rate, const LegResult& g) {
     print(serial, "    ", what, " at ", rate, ": ", g.bytes, " bytes in ", g.cycles / cycles_per_us, " us (the wire's ",
           wire_cycles(g.bytes, rate) / cycles_per_us, " us, ",
           g.cycles != 0u ? static_cast<uint32_t>(static_cast<uint64_t>(wire_cycles(g.bytes, rate)) * 1000u / g.cycles) : 0u,
@@ -1364,16 +1641,30 @@ void print_leg(const char* what, uint32_t rate, const LegResult& g) {
           g.have ? "" : " NO REPORT", crlf);
 }
 
-void print_sink() {
+/// The sink's tally of the last leg; after a STREAMED leg in which the
+/// receive stream never moved inside a loan, a line saying the leg did not
+/// stream - its lines lent between bursts, not while the next characters
+/// arrived - so that a core too slow to run the writer ahead of the echo
+/// says so instead of passing letter v without its premise (printed, not
+/// judged: it is the core's pace, not the service's correctness).
+[[maybe_unused]] void print_sink() {
     print(serial, "    sink: ", LineSink::lines, " lines (", LineSink::good, " good, ", LineSink::empties,
           " empty, ", LineSink::corrupt, " corrupt, ", LineSink::gaps, " gaps losing ", LineSink::lost, ", ",
           LineSink::backwards, " backwards), lent with another waiting ", LineSink::waiting,
           ", same buffer twice ", LineSink::same_buffer, ", nested ", LineSink::nested,
           ", the stream moved inside ", LineSink::moved, crlf);
+    if (LineSink::streamed && LineSink::moved == 0u) {
+        print(serial, "    THE LEG DID NOT STREAM: the receive stream never moved inside a loan, so no line was "
+                      "lent while the next characters arrived (v's premise not exercised)",
+              crlf);
+    }
 }
 
-/// The verdicts of one received leg, `rate` named in each.
-void judge_echo(const PassSpec& s, uint32_t rate, uint16_t lines, const LegResult& g) {
+/// The verdicts of one received leg, `rate` named in each: every line
+/// exact, the port's counters zero, and - `peer_reports`, for a peer that
+/// keeps a report - the peer's count of what it echoed.
+[[maybe_unused]] void judge_echo(const PassSpec& s, uint32_t rate, uint16_t lines, const LegResult& g,
+                                 bool peer_reports = true) {
     char what[64];
     auto say = [&what, rate](const char* tail) {
         uint8_t n = 0;
@@ -1399,6 +1690,8 @@ void judge_echo(const PassSpec& s, uint32_t rate, uint16_t lines, const LegResul
                   g.acted && g.up && g.wrote && LineSink::good == lines && LineSink::gaps == 0u &&
                       LineSink::backwards == 0u && LineSink::corrupt == 0u && LineSink::empties <= 1u);
     bench.verdict(pass_label(s), say("the port's own counters zero"), g.c.clean());
-    bench.verdict(pass_label(s), say("the peer echoed every byte, clean"),
-                  g.have && g.r.count == g.bytes && g.r.ferr == 0u && g.r.perr == 0u && g.r.ovf == 0u);
+    if (peer_reports) {
+        bench.verdict(pass_label(s), say("the peer echoed every byte, clean"),
+                      g.have && g.r.count == g.bytes && g.r.ferr == 0u && g.r.perr == 0u && g.r.ovf == 0u);
+    }
 }

@@ -179,7 +179,7 @@ TwoKeyTestBench<Serial, 'y'> bench;
 // ---- the links ---------------------------------------------------------------------
 
 constexpr SpiPins link_host_pins{.sck = 10, .tx = 11, .rx = 8};
-using HostBase = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
+using Host = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
 using CsPin = Pin<29>;
 using SckPin = Pin<10>;
 using TxPin = Pin<11>;
@@ -349,25 +349,6 @@ bool pressure_silent() {
 const char* pressure_silent_text() {
     return "PWM slice 7 stopped, its interrupt off and its line quiet; core 1 parked, alarm 1 disarmed, the inbox "
            "empty";
-}
-
-/// Where a send from core 1 landed: pressure_landed()'s record without its
-/// post, which the inbox's drain makes (the shared body's function posts
-/// itself; this is the one place the record and the post are apart).
-[[gnu::always_inline]] inline void bell_landed() {
-    const uint8_t c = P::ceiling;
-    const uint8_t slot = c < landing_slots - 1u ? c : static_cast<uint8_t>(landing_slots - 1u);
-    landed[slot] = landed[slot] + 1u;
-    if (arb_event == arb_done) {
-        landed_completion = landed_completion + 1u;
-        if (done_from_dma) {
-            landed_dma_completion = landed_dma_completion + 1u;
-        }
-    }
-    if (sink_depth != 0u) {
-        landed_sink_any = landed_sink_any + 1u;
-    }
-    pressure_irqs = pressure_irqs + 1u;
 }
 
 // =============================================================================
@@ -548,7 +529,7 @@ extern "C" void isr_sio_proc0() {
     std::atomic_thread_fence(std::memory_order_acquire);
     const uint8_t n = brio::Inbox<Pressure>::drain();
     for (uint8_t k = 0; k < n; ++k) {
-        bell_landed();
+        note_landing();   // the drain made the post
     }
 }
 

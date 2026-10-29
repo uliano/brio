@@ -576,7 +576,9 @@ Implemented but not bench-verified, each with what would measure it:
 - **The SPI stack under the preemptive kernel**: `test_x035_rubato_link`'s
   key `z` - the arbiter over the engined host against the CH32V006's
   `spi_peer`, its polled loop, pump and engines climbing /256 to /2,
-  modes 0 and 3 in both widths, three requesters on one select window,
+  modes 0 and 3 in both widths, three requesters on one select window
+  at /32 (one frame in flight, so the requester below the arbiter on the
+  polled loop sees a preemption as a gap on the bus),
   under an object preempting every 97 to 389 us, in both scheduler
   placements ([platform.md](platform.md), "The drivers under the
   preemptive kernel") - is built and not judged: the pair's SPI link

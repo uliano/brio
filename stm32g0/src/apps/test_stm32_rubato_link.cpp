@@ -871,7 +871,7 @@ void tw_arbiter() {
             // the protocol pays on each side of it. The bus is idle here: no
             // request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, link_clock);
+            Host::prime(SpiMode::mode0, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;

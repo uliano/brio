@@ -178,7 +178,7 @@ TwoKeyTestBench<Serial, 'y'> bench;
 // ---- the links ---------------------------------------------------------------------
 
 constexpr SpiPins link_host_pins{.sck = 30, .tx = 31, .rx = 28};
-using HostBase = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
+using Host = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
 using CsPin = Pin<41>;
 using SckPin = Pin<30>;
 using TxPin = Pin<31>;

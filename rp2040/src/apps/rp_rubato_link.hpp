@@ -26,7 +26,7 @@
 //   SysClock, clock, P, core_hz, cycles_per_us, Ruler, spin()
 //   Serial, serial, bench    the console (UART0 on GP0/GP1) and its
 //                            TwoKeyTestBench
-//   HostBase                 SpiHost<1, {sck, tx, rx}> with the half-word
+//   Host                     SpiHost<1, {sck, tx, rx}> with the half-word
 //                            engines on DMA channels 6 and 7, line 1
 //   CsPin, SckPin, TxPin     the link's select (a GPIO), clock and transmit
 //                            pads as Pin types
@@ -112,17 +112,6 @@ constexpr SpiClock link_clock = SpiClocks::div128;
 constexpr const char* bus_clock_name = "clk_peri";
 static_assert(SysClock::pclk_hz == SysClock::hz, "clk_peri is clk_sys: a frame's cycles are bits x the divisor");
 
-/// THE PL022 HAS NO BIT-ORDER FIELD (pl022/spi.hpp), and the shared body's
-/// Client asks every family's host lsb_first() and bit_order() before a
-/// window. This host is MSb first and nothing else: it says so and refuses
-/// LSb. (The shared body is frozen during this lane; the change it wants
-/// is the Client asking only where the host has the verb - this suite's
-/// report.) Everything else is the PL022 host's, inherited.
-struct Host : HostBase {
-    static bool lsb_first() { return false; }
-    static bool bit_order(bool lsb) { return !lsb; }
-};
-
 /// UART1 with the interrupt receiver (the file header): a ring of 1024 for
 /// what the borrower holds the reader off of, 256 to transmit.
 using LinkPort = Uart<1, uart_link_pins, 1024, 256>;
@@ -140,16 +129,10 @@ struct PortCounters {
 };
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's link suite
-// compiles the same body around its own engines. Its sink_leg(),
-// print_leg() and judge_echo() serve a peer that keeps a report and have
-// no caller here (the reduced UART key, the file header); they are
-// functions of an unnamed namespace, so -Wunused-function names them, and
-// the shared body is frozen during this lane - the warning is silenced
-// over the include alone (this suite's report proposes the change).
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
+// compiles the same body around its own engines. The PL022 has no
+// bit-order field (pl022/spi.hpp) and no bit-order verb, so the shared
+// body clocks every window MSb first and this file posts no LSb window.
 #include "../../../avrxt/src/apps/rubato_link.hpp"
-#pragma GCC diagnostic pop
 
 // =============================================================================
 // What the shared body asks of this family
@@ -292,42 +275,14 @@ void spi_down() {
 }
 
 // =============================================================================
-// The core-1 pass's label and verdict (letters o and t, where the binding
-// has it)
+// The core-1 pass (letters o and t, where the binding has it)
 // =============================================================================
 
 /// The core-1 pass: Pressure fed through the inbox's doorbell at 97 us, its
-/// dispatch spinning 3000 cycles.
-constexpr PassSpec core1_spec{97, 3000};
-
-/// A pass's prefix, the core-1 pass's its own.
-const char* label(const PassSpec& s) {
-    return pressure_core1 ? "core 1's doorbell, 97 us x 3000: " : pass_label(s);
-}
-
-/// The pass's pressure printed: the core-1 pass announced above the shared
-/// print, whose label is its period's.
-void rp_print_pass(const PassSpec& s, const PassStats& st) {
-    if (pressure_core1) {
-        print(serial, "  (the pass below: Pressure fed by core 1's sends through the doorbell)", crlf);
-    }
-    print_pass(s, st);
-}
-
-/// judge_pressure() under this file's label: the same arithmetic (the
-/// count of periods over the pass, plus or minus one for its ends, each
-/// one a dispatch, none dropped).
-void rp_judge_pressure(const PassSpec& s, const PassStats& st) {
-    if (!pressure_core1) {
-        judge_pressure(s, st);
-        return;
-    }
-    const uint32_t period = static_cast<uint32_t>(s.period_us) * cycles_per_us;
-    const uint32_t expect = st.wall / period;
-    const bool count_ok = st.irqs + 1u >= expect && st.irqs <= expect + 1u;
-    bench.verdict(label(s), "Pressure ticked once a period from core 1, each send one dispatch, none dropped",
-                  count_ok && st.runs == st.irqs && st.overflows == 0u);
-}
+/// dispatch spinning 3000 cycles, the source named in its label (the shared
+/// body's PassSpec) and judged by the shared arithmetic - the system
+/// timer's microseconds and clk_sys share the crystal.
+constexpr PassSpec core1_spec{97, 3000, "core 1's doorbell"};
 
 /// The XIP cache's misses since its counters were cleared, both cores'.
 /// The hits are read first, so the reads' own fetches land on the accesses'
@@ -426,7 +381,7 @@ void matrix_pass(const PassSpec& s, uint64_t& control_bytes, uint64_t& control_c
     const bool ping = sl::command(spilink::Op::ping);
     const uint32_t misses = xip_misses();
     const PassStats st = pass_end(s);
-    rp_print_pass(s, st);
+    print_pass(s, st);
     const uint32_t rate_x10 =
         cycles != 0u ? static_cast<uint32_t>(static_cast<uint64_t>(bytes) * core_hz / 100u / cycles) : 0u;
     if (control) {
@@ -439,11 +394,11 @@ void matrix_pass(const PassSpec& s, uint64_t& control_bytes, uint64_t& control_c
     print(serial, "    ", good, " of ", total, " exchanges exact; the data windows carried ", bytes, " bytes in ",
           cycles / cycles_per_us, " us, ", rate_x10 / 10u, ".", rate_x10 % 10u, " kB/s (", vs,
           " permille of the control's rate); XIP misses over the pass ", misses, crlf);
-    bench.verdict(label(s), "four modes x two widths x the client MSb and LSb: every window byte-exact at both "
-                            "ends on the DMA engines",
+    bench.verdict(pass_label(s), "four modes x two widths x the client MSb and LSb: every window byte-exact at "
+                                 "both ends on the DMA engines",
                   good == total && total == 16u);
-    bench.verdict(label(s), "the command channel still answers after the matrix", ping);
-    rp_judge_pressure(s, st);
+    bench.verdict(pass_label(s), "the command channel still answers after the matrix", ping);
+    judge_pressure(s, st);
 }
 
 void to_matrix() {
@@ -678,7 +633,7 @@ void tw_arbiter() {
             // the protocol pays on each side of it. The bus is idle here: no
             // request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, link_clock);
+            Host::prime(SpiMode::mode0, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;
@@ -794,15 +749,6 @@ void print_echo(const char* what, const LegResult& g) {
           " permille of it)", crlf);
 }
 
-/// The leg's verdicts at this end: judge_echo()'s first two (the peer keeps
-/// no report to give its third).
-void judge_lines(const char* lbl, const LegResult& g) {
-    bench.verdict(lbl, "115200: every line arrived, in order, exact",
-                  g.acted && g.up && g.wrote && LineSink::good == echo_lines && LineSink::gaps == 0u &&
-                      LineSink::backwards == 0u && LineSink::corrupt == 0u && LineSink::empties <= 1u);
-    bench.verdict(lbl, "115200: the port's own counters zero", g.c.clean());
-}
-
 void echo_pass(const PassSpec& s, uint8_t p) {
     pass_begin(s);
     if (!ul::ensure()) {
@@ -816,9 +762,10 @@ void echo_pass(const PassSpec& s, uint8_t p) {
     print_echo("echo", g);
     print_counters(g.c);
     print_sink();
-    rp_print_pass(s, st);
-    judge_lines(label(s), g);
-    rp_judge_pressure(s, st);
+    print_pass(s, st);
+    // The leg judged at this end: the peer keeps no report.
+    judge_echo(s, ul::peer_baud, echo_lines, g, false);
+    judge_pressure(s, st);
 }
 
 void tt_lines() {
@@ -867,7 +814,7 @@ void tv_loan() {
               "inside them ", s.period_us != 0u ? LineSink::busy / (static_cast<uint32_t>(s.period_us) * cycles_per_us) : 0u,
               crlf);
         print_pass(s, st);
-        judge_lines(pass_label(s), g);
+        judge_echo(s, ul::peer_baud, echo_lines, g, false);
         bench.verdict(pass_label(s), "every line lent alone (none waiting at the sink's entry, the sink never "
                                      "nested), the two buffers strictly alternating",
                       LineSink::waiting == 0u && LineSink::nested == 0u && LineSink::same_buffer == 0u &&
