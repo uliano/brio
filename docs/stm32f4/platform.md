@@ -296,11 +296,18 @@ letters land, nothing wired and nothing lit:
 
 - **The ceiling, both roads** (letters a, b, e): an interrupt's post to
   High inside Low's handler runs High to its end before Low resumes,
-  every handler reading its own index as the ceiling and the base's
-  255 in the UART's interrupt, ten runs alike; Low posting to Mid and
-  Mid to High nests High inside Mid inside Low, each inside the post
-  that asked; High's post to Low is served after High returns and after
-  Low's own dispatch ends; and at depth 2, an interrupt over High's
+  every handler reading its own index as the ceiling, ten runs alike;
+  the UART's interrupt reads the loop's ceiling as the letter's key
+  arrives, and the verdict accepts both values the loop holds below
+  every object - 255 at its base, 0 while its base turn walks the time
+  events (kernel/rubato.hpp holds it there so that a timer's fire only
+  queues; no dispatch of Top, whose index is also 0, can be open then,
+  nothing in the suite being able to post to Top when a key arrives) -
+  and read 255 in every run, twenty of letter `a` alone and three of
+  `z`; Low posting to Mid and Mid to High nests High inside Mid inside
+  Low, each inside the post that asked; High's post to Low is served
+  after High returns and after Low's own dispatch ends; and at depth 2,
+  an interrupt over High's
   handler (started by either road) runs Top before High resumes, Top's
   first statement 134 to 138 cycles after the handler's last. Ten runs
   of the suite time ten events by each road, twenty sets in all; in one
