@@ -1121,11 +1121,24 @@ register - and 204 to 206 from SRAM, where the model counts 208: 36
 cycles over the prologue's image in both, the handlers that pay them
 being in the flash in both. A road-2 post takes 919 to 927 from the
 flash, 42 over the prologue's image, and 452 to 457 from SRAM, 10 over.
-Whether corecfgr's 0x1F buys anything on these paths: in a probe image
-of an earlier flash path, road 1 took 344 cycles at every event with the
-register cleared, against a least of 344 and 347 and medians of 348 and
-355 with 0x1F (two runs each way); no image of the tree reproduces it.
-What the bits cost on the platform suite's letter `f` is that letter's
+What corecfgr's 0x1F buys on these paths, measured in the four images
+against the same four built with the crt writing 0 (one byte of
+difference each, ten runs of `z` for each of the eight): from SRAM the
+bits buy 8 to 69 cycles on every path of the scheduler - road 1 168 to
+176 against a flat 205, the quiet post 107 to 108 against 115 to 116,
+the road-2 post 442 to 444 against 511, the scan 140 to 142 against 177,
+the post under the mask 184 to 192 against 224 to 225, 7 to 26 per cent
+- and their wrong guesses never give that back, the slowest road 1
+without a tick, 184, staying 21 cycles under the cleared register's
+value; from the flash the two values lie within 16 cycles of each other
+on every figure, the cleared register at the model's count with no
+spread at all (road 1 356 at every event), 0x1F at that count at its
+best and up to 16 over at its worst on road 1, depth 2 and the quiet
+post, 4 to 16 under on the road-2 post, the mask and the scan; the
+images without the prologue move the same way. The crt keeps 0x1F,
+the value the CH32V203's and the CH32V303's crts write too: it costs the
+scheduler's paths nothing from the flash and buys them a fifth of their
+time from SRAM, and what it costs a data-dependent loop is letter `f`'s
 bullet in this section.
 
 What the path in SRAM costs, read in the two images' maps (`size -A`):
@@ -1349,13 +1362,6 @@ Driver gaps, each with its reason:
   and placing them would move every Tenuto image that keeps a post out
   of line. Placed by name in a measurement image, the suite's posts took
   a quiet post to 73 to 74 cycles where it takes 107 to 108.
-- **corecfgr's value**: the crt writes 0x1F, the value WCH's startup
-  writes; the platform suite measures it costing 7.3 per cent on one
-  loop at one placement and 25 at another, buying 4 cycles at a
-  store-and-branch pairing in the flash, and, in one probe image,
-  nothing on the preemptive flash path. Which value a program should
-  want is open; a decision, with the platform and preemptive suites run
-  under each, would close it.
 - **A plain `wfi` with MIE clear on this core**: whether it wakes on a
   pending interrupt, which the manual's wording leaves open and which on
   the CH32V006 and the CH32V203C8 it does not; no user, since the hook

@@ -50,10 +50,13 @@
  * it before anything else runs, as it does on the CH32V203 and the
  * CH32V303, and this crt writes the same value for the same reason the
  * sibling crt does (ch32vx03/src/glue/startup_ch32vx03.S): it is what
- * the vendor's silicon is shipped running. What the five bits buy and
- * cost on this core the platform suite's letters f and i measure
- * (docs/ch32x035/platform.md); which value a program should want is
- * open.
+ * the vendor's silicon is shipped running - and because it is measured
+ * to be worth keeping: against the register cleared, the bits buy the
+ * preemptive kernel 7 to 26 per cent of every scheduler path run from
+ * SRAM and cost its paths nothing from the flash, while a data-dependent
+ * loop pays them 7 to 25 per cent (docs/ch32x035/platform.md, the bench
+ * findings; the platform suite's letters f, i and j measure the bits
+ * both ways on every run).
  *
  * reset_handler does the minimum an image needs: the global pointer and
  * the stack, copy .data from flash, zero .bss, paint the free RAM, walk
