@@ -523,32 +523,35 @@ constexpr uint32_t latency_events = 100;
 ///   and its return into thread mode, twelve                      32
 ///   the entry: cpsie, the call                                    5
 ///   activate(): nine registers saved and its frame (11), two
-///   literals, Top's visit (the ceiling's load, the call to the
-///   queue's empty(), the branches: 42 with the frame), High's
-///   (empty() again: 25), High's dispatch up to the stamp (the
-///   ceiling's and the index's stores, the call to take(): 42)    109
+///   literals (4), the served flag cleared (1), Top's visit (the
+///   ceiling's load and test, the queue's two cursors loaded and
+///   compared in line, the branches: 14), High's (the queue's
+///   address a literal, the two cursors, the compare, the taken
+///   branch: 11), High's dispatch up to the stamp (the ceiling's
+///   and the index's stores, the call to take(): 42)              83
 ///                                                               ---
-///                                                               161
+///                                                               135
 /// at zero wait states, the code warm in the ART's cache after the
-/// uncounted first event, every refill taken at its most: an upper count.
-/// Measured, 156 or 161 by the image's layout (the ART's lines), the same
-/// count on every event of a run no other interrupt touches, inside it.
-/// The quiet path is that measured 156 to 161; an event over latency_quiet below
+/// uncounted first event, every refill taken at its most, every load at
+/// two cycles. The count is short of the path: measured, 143 on every
+/// event of a run no other interrupt touches but one or two in a hundred
+/// at 148, 8 and 13 cycles over the count. So the quiet path is the
+/// measured 143 to 148, not the count; an event over latency_quiet below
 /// is one an interrupt landed in. On top of it, at most one SysTick
-/// handler landing in the path - its entry (12), its fifteen instructions
-/// (20), its return (12) and, when it lands on an exception return, that
-/// return abandoned and started again (12): 58, measured +45 and +58 -
-/// and two of the ART's line misses (12): 161 + 58 + 12 = 231, the bound,
-/// from the count (which the slower layout's measurement equals).
+/// handler landing in the path - its entry (12), its fifteen
+/// instructions (20), its return (12) and, when it lands on an exception
+/// return, that return abandoned and started again (12): 58, measured
+/// +45 and +58 - and two of the ART's line misses (12): 148 + 58 + 12 =
+/// 218, the bound, from the quiet path's slowest measured event (the
+/// count being short of it).
 /// The letter reads the kernel tick around each event, and every event
 /// over latency_quiet must have had a tick in it.
-constexpr uint32_t latency_bound = 231u;
+constexpr uint32_t latency_bound = 218u;
 
-/// The quiet path's measured 156 to 161 and 11 to 16 cycles of margin:
-/// well below the least a tick adds (45, so 201), well above the path's
-/// own spread (none observed: every quiet event of a run is the same
-/// count).
-constexpr uint32_t latency_quiet = 172u;
+/// The quiet path's measured 143 to 148 and 11 to 16 cycles of margin:
+/// well below the least a tick adds (45, so 188), above the path's own
+/// spread (5).
+constexpr uint32_t latency_quiet = 159u;
 
 void tc_latency() {
     reset_scenario();
@@ -687,40 +690,54 @@ void td_scan() {
           " cycles; a post to High (road 2, High's dispatch inside) ", road2,
           " cycles; the scheduling's share ", road2 > quiet ? road2 - quiet : 0u, crlf);
     // The scan, as the release listing has it: activate()'s entry saves
-    // nine registers and opens a 36-byte frame, its exit closes the frame
+    // nine registers and opens a 28-byte frame, its exit closes the frame
     // and restores them with the return (10 + 1 and 1 + 13 cycles, DDI
     // 0439B table 3-1: 1 + N for an STM or LDM of N, 3 more for a load of
-    // the PC), two literal loads; per empty object a call to the queue
-    // type's out-of-line empty() - two loads, a compare, the return - the
-    // answer tested, the ceiling compared and branched on: some 20 cycles
-    // with the two pipeline refills, four times; the Console's index
-    // against the ceiling ends the pass, its taken branch 4. That is
-    // about 115 at zero wait states, and the least of 16 runs from the
-    // ART's cache: 150 is the sum with a third for refills and fetch
+    // the PC: 25), two literal loads (4), the served flag cleared and
+    // returned (2), the ceiling's load and test (3); per empty object the
+    // queue's two cursors loaded and compared in line - empty() is forced
+    // inline, no call - the compare's branch and the ceiling compared and
+    // branched on: 8 cycles at two a load, 2 more for the queue's address,
+    // a literal, on the three after Top (whose address the entry loaded),
+    // 3 more for Top's taken branch to the next visit: 11 + 10 + 10, and
+    // Low's 10 plus the taken branch that ends the pass, the Console's
+    // index against the ceiling (3): 13. That is 25 + 4 + 2 + 3 + 11 + 10
+    // + 10 + 13 = 78 at zero wait states, and the least of 16 runs from
+    // the ART's cache: 104 is the sum with a third for refills and fetch
     // beyond the table's counts.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 150 cycles",
-                  scan < 150u);
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 104 cycles",
+                  scan < 104u);
     // The quiet post: post<Low>() out of line, 13 instructions with the
     // ceiling's compare, and the queue type's push(), 17 with the guard
     // (mrs, cpsid, msr) - 30 instructions and two calls and returns, four
     // pipeline refills of up to 3 cycles: about 50 at zero wait states.
     // 100 is twice that, the ART's misses (five wait states a line) and
-    // the stores to the ruler's volatile results included.
+    // the stores to the ruler's volatile results included. No scan and
+    // no queue's empty() lie on this path: the push and the compare.
     bench.verdict("a post that asks nothing costs under 100 cycles (the push and one compare)",
                   quiet < 100u);
     // The road-2 post, the quiet one's 50 plus: the request's call, its
     // store, DSB and ISB (10); PendSV's entry, body and return into thread
     // mode (12 + 20 + 12); the entry (5); activate() at Mid's ceiling -
     // its frame (25: nine registers saved and restored with the return,
-    // the 36-byte frame opened and closed), Top's and High's visits (25 +
-    // 55), High's dispatch with nothing to do (its stamps and counters,
-    // 30), the release (15), the rescan of Top and High and Mid's index
-    // ending the pass (50); the FP context cleared and the SVC's entry,
-    // three instructions and return (7 + 12 + 6 + 12): about 330. 450 is
-    // that with a third for the refills and the ART's misses.
+    // the 28-byte frame opened and closed), Top's and High's visits, each
+    // queue's cursors compared in line (Top's 14: the ceiling's load and
+    // test, the two cursors, the compares, its taken branch; High's 41:
+    // the literal, the two cursors, the taken branch, 11, and the
+    // dispatch's start up to take()'s return, 30), High's dispatch with
+    // nothing to do (its stamps and counters, 30), the release (15), the
+    // rescan of Top and High and Mid's index ending the pass (14 + 13);
+    // the FP context cleared and the SVC's entry, three instructions and
+    // return (7 + 12 + 6 + 12): 50 + 10 + 44 + 5 + 25 + 14 + 41 + 30 + 15
+    // + 27 + 37 = 298 at zero wait states. The post's own part, the 50,
+    // is the quiet post's count, and the quiet post measures 78 to 85
+    // against it (the same instructions, the push and the compare): that
+    // part is taken at the quiet post's own bound, 100 (its arithmetic
+    // above), and the rest, 248 by the count, with a third for the
+    // refills and the ART's misses (330.7, so 331): 100 + 331 = 431.
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    bench.verdict("and under 450 cycles, High's empty dispatch included", road2 < 450u);
+    bench.verdict("and under 431 cycles, High's empty dispatch included", road2 < 431u);
 }
 
 // =============================================================================
@@ -1280,7 +1297,7 @@ void th_stack() {
           " bytes; the deepest stack pointer sampled: a dispatch at ", deepest_dispatch,
           ", the interrupt at ", deepest_isr, crlf);
     // A dispatch's sample is taken inside activate() (the dispatch is
-    // inlined there), whose nine saved registers and 36-byte frame (72
+    // inlined there), whose nine saved registers and 28-byte frame (64
     // bytes) are above it. Below the deepest one lies at most, by the
     // release listing: the letter's action and what it calls - the
     // widest is letter j's, which saves 32 bytes and prints through the
@@ -1291,14 +1308,14 @@ void th_stack() {
     // alignment word (108); and below that either the deepest handler's
     // own frames (the UART's 32, its post and push 16: 48) or, the
     // handler gone and its post pending PendSV, PendSV's two words and an
-    // activate() frame that finds nothing to serve (8 + 72 = 80; the fake
-    // frame's 32 are popped before activate() pushes). 168 + 108 + 80 =
-    // 356: the high-water mark lies within 360 bytes of the deeper of the
+    // activate() frame that finds nothing to serve (8 + 64 = 72; the fake
+    // frame's 32 are popped before activate() pushes). 168 + 108 + 72 =
+    // 348: the high-water mark lies within 350 bytes of the deeper of the
     // two samples.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
-    bench.verdict("the high-water mark is within 360 bytes of the deepest sample",
-                  used <= deepest + 360u);
+    bench.verdict("the high-water mark is within 350 bytes of the deepest sample",
+                  used <= deepest + 350u);
 }
 
 // =============================================================================
