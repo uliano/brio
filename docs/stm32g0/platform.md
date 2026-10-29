@@ -515,21 +515,24 @@ derives from the core's own counts over the release listing:
   High inside Mid inside Low, each inside the post that asked, High's
   post to Low served after Low's own dispatch ends; and at depth 2 an
   interrupt over High's handler, started by either road, runs Top
-  before High resumes, Top's first statement 166 to 167 cycles after
-  the handler's last.
+  before High resumes, Top's first statement 155 to 156 cycles after
+  the handler's last (one event of the two hundred in ten runs at 218,
+  unattributed: the letter reads no tick around it).
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 202 cycles min, 203 median
-  and max over 100 events, every run; 245 to 264 for the one event in
-  about two hundred a kernel tick lands in (six of the thousand events
-  of ten runs, a tick inside each). The path counts 159 cycles at zero
+  last statement to High's handler's first, 180 cycles min, 181 median
+  and max over 100 events, every run; 227 and 246 for the one event in
+  about five hundred a kernel tick lands in (two of the thousand events
+  of ten runs, a tick inside each). The path counts 144 cycles at zero
   wait states - the handler's exit, the tail-chain into PendSV, its
   thirteen instructions and the return through the fake frame, the
-  entry, `activate()`'s visits to Top and High - and 211 with every
-  flash refill paid; the bound, 323, adds one tick (70) and a fifth.
+  entry, `activate()`'s visits to Top and High with each queue's two
+  cursors compared in line, the raise of the ceiling, `take()` - and
+  183 with every flash refill paid; the bound, 290, adds one tick (70)
+  and a fifth.
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 154 to 156 cycles (bound 220); a post that
-  asks for nothing 95 (bound 127); a post that runs High's empty
-  dispatch inside it 557 (bound 695), the scheduling's share 462 - two
+  queues below the ceiling 111 cycles in every run (bound 138); a post
+  that asks for nothing 95 (bound 127); a post that runs High's empty
+  dispatch inside it 517 (bound 645), the scheduling's share 422 - two
   exception entries from thread mode (PendSV's and the SVC's, DDI
   0484C's 15 cycles each) and two returns, and a line of a flash at two
   wait states refilled at every call and taken branch on the way.
@@ -537,7 +540,7 @@ derives from the core's own counts over the release listing:
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
   (in the loop's tenth turn of 200) leaves the list whole, every timer
-  due fired once, the disarmed one never; one `arm()` 97 cycles (bound
+  due fired once, the disarmed one never; one `arm()` 93 cycles (bound
   135) with its masked window inside.
 - **The request under PRIMASK** (letter g, the core having no FPU to
   test): a post to a higher object inside a critical section pends
@@ -545,13 +548,13 @@ derives from the core's own counts over the release listing:
   run - and the receiver runs when the section's guard restores the
   mask, before the statement after it, from the Console's dispatch and
   from inside Low's, ten runs each; the section's last statement to the
-  receiver's first 224 to 225 cycles (bound 280). The nested guard of
+  receiver's first 192 to 193 cycles (bound 234). The nested guard of
   the trace's own `note()` inside the section restores PRIMASK set and
   takes nothing.
 - **The stack** (letter h): painted from main's frame down to the end of
   `.bss` and `.noinit` (0x20000730..0x20023F80), 500 bytes of
   high-water for the suite's deepest chain, the deepest sampled stack
-  pointer at 464 bytes in a dispatch and 328 in the interrupt, the mark
+  pointer at 464 bytes in a dispatch and 344 in the interrupt, the mark
   within the 156 bytes an action's frames, a basic exception frame and
   a handler's or a PendSV level's frames add.
 - **Dark** (letter i): every object idle, no timer armed, TIM14 quiet,
@@ -563,12 +566,17 @@ derives from the core's own counts over the release listing:
   request seven (the mask and the address, the store to ICSR, DSB, ISB,
   the return), a call the compiler cannot see into; `post<Low>()`
   thirteen on the path that asks nothing and one call more on the path
-  that asks. Two builds of the same suite that differed
-  only in comments and constants put the road-1 path at 197..198 and
-  193..194 cycles, the scan at 184 and 165, the road-2 post at 546 and
-  531: a path's cost from this flash moves with where it sits, as "Code
-  in SRAM" below finds for the drivers. Three builds of the suite that
-  differ only in PendSV's body tell the barrier from the place. With
+  that asks; `activate()` reads each queue's two cursors and compares
+  them in line, no call per queue (`EventQueue::empty()` is forced
+  inline), and `idle_if_empty()`'s masked window, from the `cpsid` to
+  the WFI, is 27 instructions and no call. Builds of the suite in which
+  `activate()` called the queue's `empty()` out of line measured the
+  rest of this paragraph. Two that differed only in comments and
+  constants put the road-1 path at 197..198 and 193..194 cycles, the
+  scan at 184 and 165, the road-2 post at 546 and 531: a path's cost
+  from this flash moves with where it sits, as "Code in SRAM" below
+  finds for the drivers. Three that differ only in PendSV's body tell
+  the barrier from the place. With
   the DSB, the body fourteen instructions and 36 bytes: road 1 at
   200..201 cycles (min..median), the road-2 post 551, the section's end
   to the receiver 223..224 (three runs). With two NOPs in the DSB's four

@@ -486,29 +486,35 @@ void sort(uint32_t* v, uint32_t n) {
 ///   the BX and the return into thread mode (12)                  32
 ///   the entry: cpsie, the call                                     4
 ///   activate(): five registers saved and the frame (8), the
-///   ceiling's load and test (11), Top's visit (the call to the
-///   queue's out-of-line empty(), ten cycles, and the branch: 19),
-///   High's (the ceiling's compare, empty() again, the ceiling's
-///   store, the call to take(), twenty-two, the stamp's address: 63)
-///                                                                101
+///   ceiling's load and test (12), Top's visit (the queue's two
+///   cursors loaded and compared in line, the branch not taken: 8),
+///   High's (the ceiling's compare and its taken branch, the cursors
+///   and the taken branch: 14), the raise of the ceiling and of the
+///   index of the object being dispatched (13), the call to take()
+///   and its body (25), take()'s result tested and the stamp's
+///   address (6)                                                   86
 ///                                                                ---
-///                                                                159
+///                                                                144
 /// at zero wait states. The flash answers at two (RM0444 3.3.4) behind
-/// the prefetch and two cache lines (3.3.5), so each of the path's 14
+/// the prefetch and two cache lines (3.3.5), so each of the path's 9
 /// discontinuities - the exception return and the vector fetch, the BX
-/// into thread mode, four calls and three returns, four taken branches
-/// - refills a line at up to 3 cycles, and each of its five
-/// literal loads reads the flash at 2: 159 + 42 + 10 = 211, the count
-/// with every refill paid (measured 197..198 on every event no other
+/// into thread mode, two calls (activate() and take()) and take()'s
+/// return, High's two taken branches and take()'s own when its cursor
+/// wraps - refills a line at up to 3 cycles, and each of its six
+/// literal loads (the handler's tail's, PendSV's, and activate()'s
+/// four: the ceiling's address, the two queues, the dispatching
+/// index's) reads the flash at 2: 144 + 27 + 12 = 183, the count with
+/// every refill paid (measured 180..181 on every event no other
 /// interrupt touches). On top of it, at most one SysTick handler landing
 /// in the path: its entry (15), its thirteen instructions with three
 /// literals (27), its return (10), its vector and first line refilled
 /// (6) and, landing on an exception return, that return abandoned and
-/// begun again (12): 70. The bound is the two, 281, and a fifth of the
-/// path's own count (42): 323. The letter reads the kernel tick around
-/// each event, and every event over 211 must have had a tick in it.
-constexpr uint32_t latency_count = 211u;
-constexpr uint32_t latency_bound = 323u;
+/// begun again (12): 70. The bound is the two, 253, and a fifth of the
+/// path's own count (36.6, taken as 37): 290. The letter reads the
+/// kernel tick around each event, and every event over 183 must have
+/// had a tick in it.
+constexpr uint32_t latency_count = 183u;
+constexpr uint32_t latency_bound = 290u;
 
 void tc_latency() {
     reset_scenario();
@@ -658,33 +664,43 @@ void td_scan() {
     // branch (two flash wait states behind the prefetch), 2 at each
     // literal load - and a fifth of the whole as the margin.
     // The scan: the call (3); activate()'s frame and the ceiling's test
-    // (19); per empty object a call to the queue's out-of-line empty()
-    // with the ceiling's compare (Top 19, High, Mid and Low 24 each); the
-    // Console's index ending the pass (5) and the return (11): 129. Its
-    // 15 discontinuities (45) and 5 literals (10): 184; 220 with the
-    // fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 220 cycles",
-                  scan < 220u);
-    // The quiet post: the event's setup and the call between the two
-    // reads (10), post<Low>()'s prefix (a push, a literal, two moves, the
-    // call: 10), the queue's push() under its guard (mrs, cpsid, msr: 47),
-    // the ceiling's compare and the return (16): 83, less the one load the
-    // ruler's cost takes off: 81. Its 7 discontinuities (21) and 2
-    // literals (4): 106; 127 with the fifth.
+    // (20); per empty object the queue's two cursors loaded and compared
+    // in line, with the ceiling's compare (Top 8, High, Mid and Low 13
+    // each); the Console's index ending the pass (6) and the return (11):
+    // 87. Its 6 discontinuities - the call, High's, Mid's and Low's taken
+    // branches, the jump to the exit, the return - (18) and 5 literals
+    // (10): 115; 138 with the fifth.
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 138 cycles",
+                  scan < 138u);
+    // The quiet post, a path that asks no queue whether it is empty: the
+    // event's setup and the call between the two reads (10), post<Low>()'s
+    // prefix (a push, a literal, two moves, the call: 10), the queue's
+    // push() under its guard (mrs, cpsid, msr: 47), the ceiling's compare
+    // and the return (16): 83, less the one load the ruler's cost takes
+    // off: 81. Its 7 discontinuities (21) and 2 literals (4): 106; 127
+    // with the fifth.
     bench.verdict("a post that asks nothing costs under 127 cycles (the push and one compare)",
                   quiet < 127u);
     // The road-2 post, the quiet one's 81 plus: the request's call and
     // body (15); PendSV's entry, body and return into thread mode (15 +
     // 20 + 12); the entry (4); activate() at Mid's ceiling - its frame and
-    // test (19), Top's visit (19), High's to the dispatch (57), High's
-    // dispatch with nothing to do and the release (81), the rescan of Top
-    // and High and Mid's index ending the pass with the return (71); the
-    // SVC's entry, three instructions and return (32); the request's and
-    // the post's returns (7): about 430. About 40 discontinuities (120)
-    // and 14 literals (28): 578; 695 with the fifth.
+    // test (20), Top's visit (8), High's to the dispatch (the visit 14,
+    // the raises of the ceiling and of the dispatching index 13, take()
+    // 25, its result and the stamp's address 6: 58), High's dispatch with
+    // nothing to do, the release and the two restores (87), the rescan of
+    // Top and High and Mid's index ending the pass with the return (49);
+    // the SVC's entry, three instructions and return (32); the request's
+    // and the post's returns (7): 408. Its 31 discontinuities at most -
+    // 15 outside activate() (the post's, the push's, the request's calls,
+    // branches and returns, the two exception entries and returns, the
+    // entry's call and activate()'s return), 16 inside it (the visits'
+    // taken branches, take() and release() each called, returning and
+    // branching on a wrapped cursor, the dispatch's four taken branches,
+    // the two jumps back to the pass) - (93) and 18 literals (36): 537;
+    // 645 with the fifth (644.4).
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    bench.verdict("and under 695 cycles, High's empty dispatch included", road2 < 695u);
+    bench.verdict("and under 645 cycles, High's empty dispatch included", road2 < 645u);
 }
 
 // =============================================================================
@@ -989,12 +1005,17 @@ void tg_primask() {
     // stamp's store with its literal (4) and the guard's msr (3) that
     // lifts the mask; PendSV's entry from thread mode (15), its body and
     // its return into thread mode (32); the entry (4); activate() at the
-    // Console's ceiling - its frame and test (19), Top's visit (19),
-    // High's (24), Mid's to the stamp (61): 181 at zero wait states. Its
-    // 14 discontinuities (42) and 5 literals (10): 233; 280 with a fifth
-    // (letter d's comment says how the bounds are drawn).
-    bench.verdict("the section's end to the receiver's first statement under 280 cycles",
-                  most < 280u);
+    // Console's ceiling - its frame and test (20), Top's visit (8),
+    // High's (13), Mid's to the stamp (the visit 14, the raises 13,
+    // take() 25, its result and the stamp's address 6: 58): 157 at zero
+    // wait states. Its 8 discontinuities - PendSV's vector and its return
+    // into thread mode, the call to activate(), High's and Mid's taken
+    // branches, take()'s call, its branch on a wrapped cursor and its
+    // return - (24) and 7 literals (the stamp's, PendSV's, the ceiling's
+    // address, three queues, the dispatching index's: 14): 195; 234 with
+    // a fifth (letter d's comment says how the bounds are drawn).
+    bench.verdict("the section's end to the receiver's first statement under 234 cycles",
+                  most < 234u);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 
