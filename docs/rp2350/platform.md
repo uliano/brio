@@ -847,7 +847,10 @@ moving and a refill goes unseen.
 On both halves road 1 preempts at any depth: an interrupt's post to
 High inside Low's dispatch runs High to its end before Low resumes,
 every object reading its own index as the ceiling and the UART's
-interrupt the base's 255; road 2 nests High inside Mid inside Low, each
+interrupt the loop's - 255 at its base, or 0 while the base turn walks
+the time events (kernel/rubato.hpp holds it there so that a timer's
+fire only queues; no dispatch of Top, whose index is also 0, can be
+open then, nothing posting to Top between letters); road 2 nests High inside Mid inside Low, each
 inside the post that asked; at depth 2 an interrupt over High's
 dispatch, started by either road, runs Top before High resumes; three
 timers matured in one turn are posted with the ceiling at 0 and served

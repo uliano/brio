@@ -484,8 +484,11 @@ unseen. clk_sys cycles:
 
 - **The ceiling, both roads** (letters a, b, e): an alarm's post to High
   inside Low's handler runs High to its end before Low resumes, every
-  handler reading its own index as the ceiling and the base's 255 in the
-  UART's interrupt; Low posting to Mid and Mid to High nests High inside
+  handler reading its own index as the ceiling and the UART's interrupt
+  the loop's: 255 at its base, or 0 while the base turn walks the time
+  events (kernel/rubato.hpp holds it there so that a timer's fire only
+  queues; no handler of Top, whose index is also 0, can be running then,
+  nothing posting to Top between letters); Low posting to Mid and Mid to High nests High inside
   Mid inside Low, each inside the post that asked; at depth 2 an
   interrupt over High's handler, started by either road, runs Top before
   High resumes, Top's first statement 182 to 183 cycles after the
