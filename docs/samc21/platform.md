@@ -619,6 +619,91 @@ lengthened:
   sits moves its cost by more than the barrier's cycle (the STM32G0's
   [platform page](../stm32g0/platform.md) measures the two apart).
 
+**The drivers under the preemptive kernel** - the suite is
+`test_samc_rubato_link`, two keys against the AVR64EA48's unchanged
+`spi_peer` (`z`, 119 verdicts) and `usart_peer` (`y`, 125 verdicts), ten
+runs of each alike, every verdict green. It runs the real SPI and UART
+stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
+arbiter over `SpiHost<1>` ([spi.md](spi.md); the polled loop and the RXC
+pump, no DMA data phase), `util/line_reader.hpp`'s `LineReader` over
+`Uart<1>` and its interrupt receiver ([sercom.md](sercom.md)), a
+borrower of the reader's lines above it, and on top an object that
+TC4's overflow in match-frequency mode posts to every 97, 193 or 389 us,
+whose dispatch spins 300 or 3000 cycles - at 97 us x 3000, 64 % of the
+core. Every letter runs once with TC4 silent as its control and six
+times under that pressure, and every pass judges the pressure itself:
+one dispatch per period over the pass, none dropped. The two keys share
+one SERCOM, the same four pads and the one vector: each letter takes
+SERCOM1 as the SPI host or the USART and gives it back, the pads handed
+over dark, so no `init()` runs with a pad muxed. The target-free half of
+the suite (the pack, the passes, the numbered lines, the window client,
+the UART legs) is the link suites' shared body,
+`avrxt/src/apps/rubato_link.hpp`, here over a thin adapter that carries
+the body's request names to this host's BAUD byte and owns the select.
+What it established:
+
+- **The polled SPI loop under preemption loses nothing.** The loop runs
+  inside the arbiter's dispatch, so a dispatch above the arbiter holds
+  it off for its whole length - TC4 landed there 15 to 167 times a pass.
+  With two characters in flight against the two-level receive buffer
+  ([spi.md](spi.md)), a held-off loop leaves a gap on the bus and never
+  a lost frame: the polled loop and the pump, 32 frames a window, both
+  byte-exact at both ends at every BAUD from 119 (200 kHz) to 11
+  (2 MHz), under every pressure as in the control, BUFOVF read clear at
+  every reply in all 70 passes, no `spi_stalled`. This host has no
+  `spi_overrun` and needs none. The polled loop at 3 and 4 MHz is
+  printed, wrong in every pass as the AVR client's ceiling makes it
+  ([spi.md](spi.md)'s peer ladder).
+- **A handler-bound pump holds the interrupt level.** At 3 and 4 MHz a
+  character (128 and 96 cycles) is shorter than the pump's handler, which
+  then re-enters at its own exit for the whole window
+  ([spi.md](spi.md)); TC4, at the same priority with a higher exception
+  number, waits that window out: the suite's letter `x` measured 9550
+  to 10458 cycles between two of its entries there against a period of
+  4656 - one tick in every 32-frame window merged into the next one's
+  flag, 40 in 40 windows - and 5310 at 2 MHz, where the handler is
+  shorter than the character. Letter `p` therefore climbs the pump to
+  2 MHz alone.
+- **The matrix and the arbiter.** The four modes and a DORD mismatch on
+  the pump at 1 MHz, byte-exact in every pass, the data windows at 516
+  to 1000 per mille of the control's rate under pressure; three
+  requesters of three priorities on one select window (the Client above
+  the arbiter on the pump, a requester below it polled, the preempting
+  object itself on the pump) answered every one `spi_ok`, to its
+  requester, in its order, with no timeout, no rejection and the peer
+  counting every frame exact.
+- **The UART receive side under preemption.** Numbered lines echoed by
+  the AVR64EA48 at 460800 and 921600, assembled by `LineReader` from
+  the interrupt receiver's ring and lent to the borrower: 200 a leg,
+  none lost, out of order or corrupt, every port counter zero (ring
+  overruns, BUFOVF, FE, PE, the skip epoch, line overflows, torn lines)
+  in all 210 readings. The peer's echo turns each character around
+  alone - a four-bit guard, the echo, its own stop bit awaited
+  (`avrxt/src/apps/usart_peer.cpp`) - and a line written back to back
+  overruns it (ovf 255, a third of the bytes lost), so the writer paces
+  its characters 32 bit times apart: 97 to 206 per mille of the wire at
+  460800 and 47 to 134 at 921600, the writer's and the reader's
+  per-character dispatches, not the wire, setting the pace. The two
+  rates of the wire: this end on OSC48M runs 0.4 % slower than the
+  peer's quartz, so no drift builds a backlog.
+- **The UART transmit side, both transmitters.** 300 lines blasted into
+  the peer's sink through the interrupt transmitter and then through
+  the DMA transmit engine (channel 0, the stratum's one DMA user),
+  counted and summed exact, no block abandoned; 998 to 999 per mille of
+  the wire with the pressure light. At 97 us x 3000 the writer, the
+  lowest object, cannot refill the ring as fast as the wire drains it:
+  911 and 379 per mille at 460800 and 921600 on the interrupt
+  transmitter, 996 and 501 on the engine, which takes the per-byte
+  interrupt off the core the writer shares.
+- **The loan under preemption.** At 921600 with the borrower spinning
+  6000 cycles a line, the lines streamed twenty ahead and the characters
+  two at a time across the lines' ends, TC4 landed inside the borrower's
+  dispatch 154 to 1983 times a pass; every line arrived exact, each lent
+  alone, the two buffers strictly alternating, and the receive stream
+  moved inside the borrower's dispatch 0 to 21 times a leg - the turn-
+  around echo puts at most one character on the wire while a line is
+  lent.
+
 ## The idle path, measured
 
 The kernel calls `idle()` masked when every queue is empty, and asks

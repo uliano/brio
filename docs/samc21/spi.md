@@ -600,9 +600,15 @@ the two spans:
   once, so a pumped transaction at a rate where a character is shorter
   than the handler is a polled one with the interrupt's price added, the
   thread starved until it ends (`launch` reads the whole transaction at
-  12 MHz: start() got the core back when it was over). The pump is for
-  rates where a character outlasts the handler; above them a program
-  wants the polled loop. WHERE THE PUMP RUNS FROM (an entry, a character
+  12 MHz: start() got the core back when it was over), and so is every
+  interrupt of the pump's priority with a higher exception number - a
+  periodic one loses ticks: under the preemptive kernel a 32-frame
+  window at 3 or 4 MHz held TC4's 97 us overflow off some 10400 cycles,
+  one tick merged into the next a window, against 5310 at 2 MHz, where
+  the handler is shorter than the character
+  ([platform.md](platform.md), "The drivers under the preemptive
+  kernel"). The pump is for rates where a character outlasts the
+  handler; above them a program wants the polled loop. WHERE THE PUMP RUNS FROM (an entry, a character
   of CPU, at 12 MHz): 252 and 391 from the flash; 223 and 356 with the
   host `InRam` behind its vector in the flash (242 and 386 in that
   build's flash image: the same source moves some ten cycles with where
