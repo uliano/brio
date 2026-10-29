@@ -553,9 +553,38 @@ Driver gaps, each with its reason:
   that long on a dead channel. A bound from the poll budget's arithmetic
   wants a margin for the channels' arbitration under a busy controller,
   which is not measured; until then the bound stays the generous one.
+- **The receive loop's overrun**: the polled receive loop watches RXNE
+  alone (`poll_duplex()` tests STATR for RXNE and TXE and never for OVR,
+  read in the release listing), where the pump reads OVR after DATAR and
+  ends the transaction `spi_overrun`. With two frames in flight a reader
+  held off longer than a frame loses one to OVR (16.2.7), and the loop
+  then waits for a frame that never comes until the transaction's budget
+  of poll turns runs out: it ends `spi_stalled`, the receive buffer
+  flushed - never `spi_ok` over a run with a hole, since it cannot count
+  the frames it asked for without the lost one, but under a status that
+  names the wrong cause and after the budget's wait. In main context the
+  hold-off covers every reader's delay; under the preemptive kernel the
+  loop runs inside the arbiter's dispatch, which a dispatch above it
+  holds off for its whole length. An OVR test in the loop is a load and a
+  branch a frame on a loop that runs at the wire; a decision for the
+  user, inside the preemptive kernel's open question on a polled path
+  under preemption ([../design/kernel.md](../design/kernel.md),
+  "Rubato").
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The SPI stack under the preemptive kernel**: `test_x035_rubato_link`'s
+  key `z` - the arbiter over the engined host against the CH32V006's
+  `spi_peer`, its polled loop, pump and engines climbing /256 to /2,
+  modes 0 and 3 in both widths, three requesters on one select window,
+  under an object preempting every 97 to 389 us, in both scheduler
+  placements ([platform.md](platform.md), "The drivers under the
+  preemptive kernel") - is built and not judged: the pair's SPI link
+  fails `test_x035_spi`'s own two-board key (its ladder from /4 and this
+  chip as client in modes 0 and 3, where modes 1 and 2 pass), the
+  reference the key needs. Key `z` ten times on each image, once that
+  reference passes, would measure it, the receive loop's overrun above
+  among what it judges.
 - **The engines' frame at /2, 1041 and 1045 thousandths of the wire in
   two runs**: letter b's ladder broke its +3 per cent there in one run of
   four and again in a later single run, the others 1006 to 1020, the engines' code the same in every build; it is

@@ -1173,6 +1173,86 @@ bytes in the SRAM image and 18908 in the flash image. The flash grows by
 call between the two memories is an `auipc` and a `jalr` where the
 flash image reaches its callee with one `jal`.
 
+**The drivers under the preemptive kernel** - the suite is
+`test_x035_rubato_link`, the scheduler path in SRAM, and its twin
+`test_x035_rubato_link_flash`, the same source with the path in the
+flash, against the CH32V006K8U6 with its unchanged `spi_peer` (key `z`)
+and `usart_peer` (key `y`). It runs the real stacks inside a Rubato
+pack of seven objects: `util/spi_bus.hpp`'s arbiter over the engined
+`SpiHost` on SPI1 ([spi.md](spi.md)), `util/line_reader.hpp`'s
+`LineReader` over USART4 with both its engines ([usart.md](usart.md)),
+a borrower of the reader's lines above it, and on top an object that
+TIM2's update interrupt posts to every 97, 193 or 389 us, whose dispatch
+spins 300 or 3000 cycles - at 97 us x 3000, 64 % of the core. Every
+letter runs once with TIM2 silent as its control and six times under
+that pressure, and every pass judges the pressure itself: one dispatch
+per period over the pass, none dropped. The target-free half of the
+suite is the link suites' shared body,
+`avrxt/src/apps/rubato_link.hpp`; the UART key's command channel and
+the HSI's calibration are `x035_link_dut.hpp`, the helpers
+`test_x035_usart` shares. Key `y` (115 verdicts) ran ten times on each
+image, every verdict green; key `z` is built and not judged ([spi.md](spi.md),
+"Not covered yet"). What it established:
+
+- **The UART receive side under preemption.** Numbered lines echoed by
+  the far chip at 460800 and 921600, assembled by `LineReader` from the
+  ring and lent to the borrower: 200 a leg, none lost, out of order or
+  corrupt, and every port counter zero in 210 readings on each image.
+  Each line is its own burst on the wire: USART4's vector is entered
+  twice a line (401 to 403 entries a leg of 201 lines, a burst's first
+  frame and its idle line), so the port is told at every line's end and
+  the ring's half and full marks never find a stream still arriving -
+  the receive engine wrote inside the borrower's dispatch once in each of
+  8 legs of 420 (the flash image's paced legs at 460800) and never in a
+  streamed one. The writer, the pack's lowest object, cannot run ahead of a
+  receive side above it that takes most of a line's wire time on this
+  core: in the SRAM image the paced legs ran at 507 to 771 per mille of
+  the wire at 460800 and 351 to 689 at 921600, the least under 97 us x
+  3000; in the flash image 365 to 727 and 209 to 631.
+- **The transmit engine under preemption.** 300 lines blasted into the
+  peer's sink, counted and summed exact at both rates in every pass: 998
+  to 1001 per mille of the wire in the SRAM image; in the flash image
+  the same except at 921600 under 97 us x 3000, 743 to 745, where the
+  writer, below an object that takes its spin and the scheduler's path
+  from the flash at every tick, no longer keeps the engine's ring
+  filled.
+- **The loan under preemption.** At 921600 with the borrower spinning
+  6000 cycles a line and the lines streamed twenty ahead, every line
+  exact and lent alone, the two line buffers strictly alternating, the
+  preempting object landing inside the borrower 65 to 666 times a
+  pressure pass in the SRAM image and 99 to 1407 in the flash image, 340
+  to 620 and 205 to 572 per mille of the wire.
+- **The HSI is the UART letters' premise.** The far echo is a polled loop
+  with no FIFO that holds two characters of a writer's lead, and both
+  ends divide 48 MHz by one divisor, so the lead is the HSI's error
+  against the far crystal: measured before every echo letter by the far
+  chip timing 3999 gapless frames of this end at 1 Mbaud, -3259 to -2580
+  ppm over the twenty runs - this end slow, the echo never backing up.
+  A lead under 38 ppm is what the letters accept (two characters over a
+  leg's 14400, less the HSI's 100 ppm of wander between runs a second
+  apart).
+- **The DMA release contract holds at every hand-over.** Each leg moves
+  USART4 from the polled command channel to the Uart task and back
+  through the block's reset line ([dma.md](dma.md), "A released
+  requester"), every leg byte-exact from its first block; letter `i`
+  read both link channels and both SPI channels disabled, the SPI's
+  request enables and every DMA enable of TIM2 clear (TIM2's update
+  request is a row of channel 2, the SPI's receive channel, and its
+  trigger's of channel 8, the ring's), once on each image.
+- **Where the code runs.** The release maps: in the SRAM image
+  `activate()` is 3058 bytes in SRAM, with the dispatches of Pressure,
+  the borrower, the SPI client, the requester below the arbiter and the
+  console inlined into it, `.data` holding 3976 bytes against the flash
+  image's 744; the arbiter's and the reader's dispatches are reached
+  through their state machines' handler pointers, in the flash in both
+  images - so is `SpiHost::start()` with its polled loops. The
+  placement moves the objects that preempt and borrow, not the polled
+  SPI loop.
+
+The images: with the path in SRAM 38592 bytes of text and 3976 of data,
+42568 of the 62 KB (67 %), and 8944 bytes of RAM of 20 KB (44 %); with
+the path in the flash 42340 (67 %) and 5492 (27 %).
+
 ## A handler in SRAM
 
 **What the silicon does.** At 48 MHz the code flash answers behind two
