@@ -391,8 +391,11 @@ public:
         return e;
     }
 
-    /// No event waits (the outstanding ones are not waiting).
-    bool empty() const {
+    /// No event waits (the outstanding ones are not waiting). Forced
+    /// inline: both kernels ask it of every queue on every pass, and at
+    /// -Os GCC keeps it out of line, the call costing more than its two
+    /// loads and a compare.
+    [[gnu::always_inline]] bool empty() const {
         return load_shared(take_) == load_shared(alloc_);
     }
 
