@@ -1044,8 +1044,8 @@ established, on both halves:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
-  off for its whole length - the alarm landed there 39 to 192 times a
-  pass in letter `p` on the Cortex-M33 and 40 to 190 on Hazard3. The
+  off for its whole length - the alarm landed there 36 to 189 times a
+  pass in letter `p` on the Cortex-M33 and 34 to 171 on Hazard3. The
   FIFOs are the write-ahead on every path (no more than 8 frames in
   flight, `brio/pl022/spi.hpp`), so a held-off loop or pump leaves a gap
   on the bus and never a lost frame: the polled loop in 8-bit frames (9)
@@ -1061,11 +1061,11 @@ established, on both halves:
 - **The matrix and the arbiter.** The four modes in both widths, the
   client MSb and LSb first (the LSb rows an exact two-way reversal
   against this MSb-only host) on the engines at clk_peri / 32, byte-exact
-  in every pass, the data windows at 939 to 1003 per mille of the
+  in every pass, the data windows at 914 to 975 per mille of the
   control's rate under pressure on the Cortex-M33 and 925 to 1005 on
-  Hazard3, the cache's misses over a pass as the control's (1750 to 1970 on
-  the Cortex-M33, 2152 to 2415 on Hazard3, the counters cleared at each
-  pass's start); three requesters of three priorities on one select
+  Hazard3, the cache's misses over a pass 1330 to 1425 in the control
+  and 3927 to 4487 under pressure on the Cortex-M33, 1972 to 2017 and
+  3815 to 4026 on Hazard3 (the counters cleared at each pass's start); three requesters of three priorities on one select
   window answered every one `spi_ok`, to its requester, in its order,
   with no timeout, no rejection and the peer counting every frame exact.
 - **The UART receive side under preemption, at 115200.** Numbered lines
@@ -1079,7 +1079,7 @@ established, on both halves:
 - **The loan under preemption.** With the borrower holding each line
   sixteen character times (one receive level of the FIFO) and the lines
   streamed five ahead, the alarm landed inside the borrower's dispatch
-  709 to 2934 times a pass and the link's vector inside every one of its 200
+  706 to 2912 times a pass and the link's vector inside every one of its 200
   dispatches a leg; every line arrived exact, each lent alone, the two
   buffers strictly alternating, the leg at 995 to 996 per mille of the wire.
 - **Dark** (letter `i`): every object idle, TIMER1's alarm 0 disarmed with

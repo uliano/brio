@@ -284,12 +284,17 @@
 //      its START at once into the held line is a whole cycle of post,
 //      dispatch, start(), completion and reply - more than a 97 us period
 //      leaves beside a 3000-cycle tick on a 48 MHz core). A flood at every
-//      tick regardless overloads such a core for good - the Console, the
-//      one object that ends the flood, never runs again - and under Rubato
-//      the stack then grows by a scheduler level at a time without bound
-//      (a kernel finding: docs/ch32x035/platform.md and
-//      docs/samc21/platform.md); paced, every level a probe's life opens
-//      unwinds when the Console turns.
+//      tick regardless overloads such a core - the Console, the one object
+//      that ends the flood, never runs while it lasts, so a letter so
+//      shaped must end the flood from elsewhere - and the stack stays
+//      within Rubato's bound all the same, a pack of n objects holding at
+//      most n runs of the scheduler (kernel/rubato.hpp, "The stack"): the
+//      SAM C21's and the CH32X035's suites flood so by name in their letter
+//      u, the window ended by the pressure's vector, and read a high-water
+//      of 1284 bytes against the 2180 their listing derives and of 1288 to
+//      1304 against 2144 (docs/samc21/platform.md, docs/ch32x035/platform.md).
+//      Paced, the flood asks only for the time the core has left over, and
+//      the letter's verdicts judge the service rather than the overload.
 //   i  dark: the queues empty, the arbiter's vote for the sleep, no time
 //      event armed, host_dark(), the ceiling the Console's.
 //   x  400 writes of fill_tx with the pressure silent and 400 under 97 us x

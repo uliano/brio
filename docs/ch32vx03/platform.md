@@ -986,7 +986,7 @@ entry saves on both of letter `j`'s paths and the two cost the same.
 **The drivers under the preemptive kernel** - the suite is
 `test_vx03_rubato_link`, one source and two images, each board the
 other's peer with its unchanged `spi_peer` (`z`, 120 verdicts on the
-CH32V203C8T6, 121 on the CH32V303VCT6) and `usart_peer` (`y`, 111), ten
+CH32V203C8T6, 121 on the CH32V303VCT6) and `usart_peer` (`y`, 111), three
 runs of each key on each image, every verdict green. It runs the real
 SPI and UART stacks inside a Rubato pack of seven objects:
 `util/spi_bus.hpp`'s arbiter over the engined `SpiHost` (SPI2 on the
@@ -1016,22 +1016,21 @@ established:
   from an odd address and 2 byte frames. With TIM2 silent every rung
   from /256 to /8 is byte-exact on both, and on the RXNE pump (16
   16-bit frames from an odd address) and the engines (32 frames), in
-  all twenty control passes. Under pressure the pump and the engines
+  all six control passes. Under pressure the pump and the engines
   stay exact at every rung of every pass, and the polled loop is cut
-  short with `spi_overrun` - 78 rungs over 120 pressure passes - only
+  short with `spi_overrun` - 17 rungs over 36 pressure passes - only
   where two frames are in flight and a frame is shorter than the
   preemption, never handing back a run with a hole: under a
   3000-cycle spin and the scheduler's trip around it, at frames of
-  2048 cycles and under (16-bit /64 22 times, /32 24, /16 3, /8 9; byte
-  frames /128 3, /64 8, /32 6), never at 4096 or more (16-bit /128 and
-  /256, byte frames /256); under a 300-cycle spin three times in sixty
-  passes, at frames of 256 and 512 cycles (byte /16 and /32, 16-bit /8),
-  never at 1024.
+  2048 cycles and under (16-bit /64 7 times, /32 4, /16 5; byte
+  frames /16 once), never at 4096 or more (16-bit /128 and
+  /256, byte frames /256); under a 300-cycle spin in none of the
+  eighteen passes.
 - **/4 = 18 MHz exact, /2 not, both printed.** Letter `p` judges to /8,
   where the two datasheets' timing still holds the client's answer
   ([spi.md](spi.md), the pair's section), and prints the two codes
-  above: /4 byte-exact on every path in every pass on both images (280
-  of 280 windows each), /2 wrong on every one (the host reading the
+  above: /4 byte-exact on every path in every pass on both images (84
+  of 84 windows each), /2 wrong on every one (the host reading the
   answers one bit late, as the pair's ladder finds).
 - **The matrix and the arbiter.** The four modes in both widths, LSb
   first and a bit-order mismatch on the engines at /32, byte-exact in
@@ -1045,12 +1044,12 @@ established:
   10103 us a window (three runs on each image); the polled loop keeps
   both of its frames in flight there, 4096 cycles each at /256, longer
   than the preemption that holds it. The command channel needed
-  no retry in the twenty runs of `z`.
+  no retry in the six runs of `z`.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the
   ring and lent to the borrower: 200 a leg, none lost, out of order or
-  corrupt, every port counter zero in 210 readings on each image, 909 to
-  923 per mille of the wire at 460800 and 864 to 890 at 921600 (the
+  corrupt, every port counter zero in 63 readings on each image, 907 to
+  922 per mille of the wire at 460800 and 863 to 889 at 921600 (the
   writer paces each line to its own last stop bit and two frame times);
   300 lines blasted through the transmit engine into the peer's sink,
   counted and summed exact, 1001 per mille of the wire at both rates -
@@ -1059,8 +1058,8 @@ established:
   6000 cycles a line and the lines streamed twenty ahead, every line
   exact and lent alone, the two line buffers strictly alternating, the
   receive engine writing during the borrower's dispatch 19 to 24 times
-  a leg and the preempting object landing inside the borrower 25 to 121
-  times a pressure pass, 873 to 894 per mille of the wire.
+  a leg and the preempting object landing inside the borrower 27 to 122
+  times a pressure pass, 871 to 894 per mille of the wire.
 - **The crystal is that letter's premise.** The far echo is a polled
   loop with no FIFO that holds two characters of a writer's lead. On the
   crystals the two ends divide one PCLK1 by one divisor and agree within
@@ -1074,8 +1073,8 @@ established:
 - **The DMA release contract holds at every hand-over.** Each leg moves
   the link port from the polled command channel to the Uart task and
   back through the block's reset line ([dma.md](dma.md), "A released
-  requester"): 35 hand-overs a run of `y` with both engines bound, 700
-  over the twenty runs, every leg byte-exact from its first block on;
+  requester"): 35 hand-overs a run of `y` with both engines bound, 210
+  over the six runs, every leg byte-exact from its first block on;
   and letter `i` read, in every run, both link channels and both SPI
   channels disabled, the SPI's request enables clear and TIM2's DMA
   enables clear (TIM2's update is a row of DMA1's channel 2, the
@@ -1083,14 +1082,14 @@ established:
 - **The V4F's float tax stays out of the link's vectors.** On the
   CH32V303VCT6 image the vector guard walked the 8 trampolines over 26
   functions with no floating-point instruction reached and checked the
-  9 leaf vectors, and letter `i` read mstatus.FS Clean in all ten runs:
+  9 leaf vectors, and letter `i` read mstatus.FS Clean in all three runs:
   the scheduler's entry saved the crt's Dirty unit once, and nothing of
   the pack wrote a float after.
 
-The images: on the CH32V203C8 41280 bytes of text and 724 of data,
-42004 of the 60 KB the linker script gives it (68 %), and 5436 bytes
-of RAM of 20 KB (27 %); on the CH32V303VC 45044 of 252 KB (17 %) and
-5440 of 64 KB.
+The images: on the CH32V203C8 41320 bytes of text and 724 of data,
+42044 of the 60 KB the linker script gives it (68 %), and 5440 bytes
+of RAM of 20 KB (27 %); on the CH32V303VC 45084 of 252 KB (17 %) and
+5444 of 64 KB.
 
 **The I2C stack under the preemptive kernel** - `test_vx03_rubato_i2c`,
 one source and two images, each board the other's peer with its
@@ -1105,26 +1104,23 @@ FREQ window asks for ([i2c.md](i2c.md)); at that clock 97, 193 and
 the core. The road at that clock, read in every pressure pass as TIM2's
 count at the entry of the preempting object's spin (from the update
 event through the vector, its post, the scheduler and the dispatch's
-first lines): 176 to 262 cycles at the least of a pass, against the 144
-of road 1 alone at 144 MHz above; at the most 1170 to 7786, above 1000
-in every pass, with TIM2's vector entered within 62 counts of the event.
-The thousand cycles every pass shows are the suites' written-out base
-turn's (`base_turn()` in the shared body, `avrxt/src/apps/rubato_passes.hpp`):
-it runs `activate()` and puts the ceiling back without comparing the
-count of quiet posts, as the platform's exit does, so a tick whose post
-lands in its last choice, the ceiling at 0, waits for the Console's next
-turn - an image whose one difference was that compare added read 296 to
-3718 at the most, above 1000 in 1 to 3 passes of 36. Those, the
-held-wire letter's (a diagnostic build, not kept, placed them at the
-moment the far end lets the line go), spend their time after the vector
-and before the dispatch, where the suite's instruments do not place it.
+first lines), over three runs of `z` on each image, 36 pressure passes
+a run: 178 to 240 cycles at the least of a pass, against the 144 of
+road 1 alone at 144 MHz above; at the most 286 to 3978, with TIM2's
+vector entered 12 to 192 counts after the event at each pass's longest
+landing. The road passed 1000 cycles in 1 to 4 passes of a run's 36,
+every one of them the held-wire
+letter's (a diagnostic build, not kept, placed them at the moment the
+far end lets the line go), with the vector entered within 62 counts:
+those spend their time after the vector and before the dispatch, where
+the suite's instruments do not place it.
 No tick was dropped in any pass. The findings
 are the I2C page's: a preemption reaches the host only before its
 START, every tenure shape exact on both paths under every pressure, and
 on a held line the first START loses and the next ones park. The
-images: on the CH32V203C8 34720 bytes of text and 428 of data, 35148
-of the 60 KB the linker script gives it (57 %), and 2108 bytes of RAM of
-20 KB (10 %); on the CH32V303VC 35524 of 252 KB (14 %) and 2108 of
+images: on the CH32V203C8 34760 bytes of text and 428 of data, 35188
+of the 60 KB the linker script gives it (57 %), and 2112 bytes of RAM of
+20 KB (10 %); on the CH32V303VC 35564 of 252 KB (14 %) and 2112 of
 64 KB.
 
 ## Not covered yet

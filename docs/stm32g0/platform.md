@@ -661,7 +661,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   runs: 16-bit frames on the engines 2 of 160 windows silent and 4 of
   160 pressed, on the pump 2 and 4, on the polled loop 1 and 0; byte
   frames on the pump 0 and 0; 16-bit frames at PCLK/8 0 and 0). Letter
-  `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 103 of 105
+  `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 105 of 105
   path rungs over three runs) and PCLK/2 (above the F446 client's
   22.5 MHz, wrong on every path, as [spi.md](spi.md)'s peer ladder
   finds).
@@ -677,7 +677,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   the F446 at 460800 and 921600, assembled by `LineReader` from the
   ring and lent to the borrower: 200 a leg, none lost, out of order or
   corrupt, every port counter zero - the RXFT kick (`rx_kicks()`)
-  included -, 649 to 803 per mille of the wire at 460800 and 472 to 673
+  included -, 640 to 801 per mille of the wire at 460800 and 460 to 670
   at 921600 (the writer paces each line to its own last stop bit and
   two frame times); 300 lines blasted into the peer's sink counted and
   summed exact, 998 to 999 per mille of the wire at 460800 and 1004 to
@@ -685,7 +685,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   the USART counting one HSI16.
 - **The loan under preemption.** At 460800 with the borrower spinning
   6000 cycles a line and the lines streamed five ahead, TIM14 landed
-  inside the borrower's dispatch 93 to 601 times a pass; every line
+  inside the borrower's dispatch 99 to 621 times a pass; every line
   arrived exact, each lent alone, the two buffers strictly alternating,
   and the receive stream moved inside the borrower's dispatch 21 to 32
   times a leg. The rate is the echo's: the F446's echo has no FIFO and

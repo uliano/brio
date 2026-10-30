@@ -47,9 +47,10 @@
 //
 // A LETTER'S WAITS ARE THE CONSOLE'S: each turn of a wait is Rubato's base
 // turn written out (the matured time events posted with the ceiling held at
-// 0, then the scheduler), because the kernel loop is below the Console and
-// does not turn while a letter runs - so an arbiter's per-bus timeout is a
-// live clock inside a letter.
+// 0, then the scheduler through the platform's entry and exit, base_turn()),
+// because the kernel loop is below the Console and does not turn while a
+// letter runs - so an arbiter's per-bus timeout is a live clock inside a
+// letter.
 //
 // THE PASSES. Every letter runs its traffic seven times: a CONTROL with the
 // pressure's timer silent, then under pressure at 97, 193 and 389 us with a
@@ -91,14 +92,33 @@ void console_turn() {
 /// One turn of Rubato::run()'s loop, written out in the Console's dispatch:
 /// the matured time events posted with the ceiling held at 0, then the
 /// scheduler entered with it still there at the Console's own ceiling, as
-/// the platform's entry hands it over (kernel/platform.hpp), and the
-/// ceiling put back.
+/// the platform's entry hands it over, and then the platform's exit
+/// (kernel/platform.hpp, the entry and the exit): the ceiling put back and
+/// the count of quiet posts compared with the one activate() hands back,
+/// both under one mask, and the scheduler run again from the ceiling at 0
+/// when the count moved. Without the compare, a post landing in the run's
+/// last choice - after its look at the receiver, with the ceiling at 0, so
+/// counted quiet and asking for nothing - waits for the Console's next
+/// turn, a whole wait turn late; and when the letter leaves its wait there
+/// (pass_end()), the dispatch falls into the next pass, whose pressure
+/// verdict then reads one over while this one reads one short. The
+/// Console's own received byte moves the count too and costs one more
+/// run, which finds nothing above the Console. The mask holds the store
+/// and the compare alone (six instructions between the mask and the
+/// unmask in the STM32G0B1RE's release listing), never activate().
 void base_turn() {
     const uint8_t c = P::ceiling;
     P::ceiling = 0;
     TE::process();
-    (void)K::activate(c);
-    P::ceiling = c;
+    for (;;) {
+        const Activation a = K::activate(c);
+        typename P::CriticalSection cs;
+        P::ceiling = c;
+        if (*const_cast<const volatile uint8_t*>(&quiet_posts<P>) == a.count) {
+            return;
+        }
+        P::ceiling = 0;
+    }
 }
 
 /// A wait's turn: the base turn, then 500 to 1523 cycles of the Console's

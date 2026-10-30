@@ -508,7 +508,7 @@ void repaint_stack() {
 ///   the post to the Client 32 that asks for a run                    608
 ///   four more runs, each the software interrupt's block (16), the
 ///   entry's sixteen registers (64) and activate()'s frame (112) -
-///   the Console's by-hand base turn (wait_turn() 16 and activate() 112)
+///   the Console's by-hand base turn (wait_turn() 32 and activate() 112)
 ///   is the smaller way to start one                                  768
 ///   the four dispatches above the Console in progress, at most one of
 ///   each object: Minor's 80 (its post_next() 48 and the post 32), the

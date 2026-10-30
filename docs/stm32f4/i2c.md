@@ -764,8 +764,8 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
   1+4 and a write of 16 byte-exact at 100 and 400 kHz (the write of 16 in
   1542 to 1565 us and 396 to 416 against the wire's 1530 and 382). The
   partner's stretch of 1000 us a byte at 100 kHz, priced from below: a
-  read of 8 in 9194 to 9237 us against its nine holds (the address's and
-  one before each byte it gives); a write of 8 in 9003 to 9027 us against
+  read of 8 in 9192 to 9214 us against its nine holds (the address's and
+  one before each byte it gives); a write of 8 in 8987 to 9009 us against
   its eight (the address's and seven: the eighth falls after the
   tenure), the write following the read at once and meeting most of one
   hold more - the one the partner spends, as the read's last byte goes
@@ -794,8 +794,8 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
 - **THE HELD WIRE PARKS, AND A PE CYCLE DOES NOT CHANGE THAT** (letter
   `h`, the partner holding SDA low from its GPIO for 60 ms): the tenure
   posted into it parks behind BUSY (27.3.3's START waits for BUSY to
-  fall) and is answered `i2c_timeout` by the arbiter in 19993 to 20011
-  us from its `start()`, 70 passes of 70; the same tenure at 400 kHz after commands
+  fall) and is answered `i2c_timeout` by the arbiter in 19998 to 20023
+  us from its `start()`, 21 passes of 21; the same tenure at 400 kHz after commands
   at 100 kHz, a PE cycle before its START (the three timing registers are
   PE-gated), parks the same way, every run - where the FMPI2C beside it and
   the STM32G0's host forget the held line at a PE cycle and lose

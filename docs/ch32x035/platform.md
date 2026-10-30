@@ -1097,14 +1097,14 @@ calls in each run:
 
 | HCLK cycles | path in SRAM (the default) | in SRAM, without the prologue | path in the flash | in the flash, without the prologue | CH32V203C8T6 (144 MHz) |
 |---|---|---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | 180..196 | 221..233 | 368..392 | 412..432 | 119..121 |
-| road 1 at depth 2, over a preempting dispatch | 167..234 | 207..233 | 340..412 | 380..484 | 107..109 |
-| a quiet post (it asks for no scheduling) | 124 | 114 | 157 | 159..163 | 55 |
-| a road-2 post, the receiver's empty dispatch inside | 473..475 | 477..480 | 941 | 963..975 | 310 |
-| `activate()` over four empty queues, through the by-hand entry and exit | 179 | 181 | 325 | 327 | 90 |
+| road 1: an interrupt's last statement to the preempting dispatch's first | 180..196 | 221..233 | 368..392 | 412..432 | 144..147 |
+| road 1 at depth 2, over a preempting dispatch | 167..234 | 207..233 | 340..412 | 380..484 | 127..129 |
+| a quiet post (it asks for no scheduling) | 124 | 114 | 157 | 159..163 | 57 |
+| a road-2 post, the receiver's empty dispatch inside | 473..475 | 477..480 | 941 | 963..975 | 370 |
+| `activate()` over four empty queues, through the by-hand entry and exit | 179 | 181 | 325 | 327 | 127 |
 | one `arm()`, its masked window inside | 137 | 139 | 145..161 | 147 | 55 |
-| a post under the mask: the section's end to the receiver's first | 191..201 | 196..209 | 397..473 | 413..497 | 132..134 |
-| stack high-water of the suite's deepest chain (bytes) | 1016 | 1016 | 1016 | 1044..1076 | 1000 |
+| a post under the mask: the section's end to the receiver's first | 191..201 | 196..209 | 397..473 | 413..497 | 155..157 |
+| stack high-water of the suite's deepest chain (bytes) | 1016 | 1016 | 1016 | 1044..1076 | 1016 |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending
 software interrupt, that body's thirteen instructions and its MRET, the
@@ -1216,44 +1216,47 @@ per period over the pass, none dropped. The target-free half of the
 suite is the link suites' shared body,
 `avrxt/src/apps/rubato_link.hpp`; the UART key's command channel and
 the HSI's calibration are `x035_link_dut.hpp`, the helpers
-`test_x035_usart` shares. Key `y` (115 verdicts) ran three times on each
-image, every verdict green; key `z` is built and not judged ([spi.md](spi.md),
-"Not covered yet"). What it established:
+`test_x035_usart` shares. Key `y` (115 verdicts) ran three times on the
+SRAM image and nine on the flash image, every verdict green; key `z` is
+built and not judged ([spi.md](spi.md), "Not covered yet"). What it
+established:
 
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the
   ring and lent to the borrower: 200 a leg, none lost, out of order or
-  corrupt, and every port counter zero in 63 readings on each image.
+  corrupt, and every port counter zero in 63 readings on the SRAM image
+  and 189 on the flash image.
   Each line is its own burst on the wire: USART4's vector is entered
   twice a line (401 entries a leg of 201 lines, a burst's first
   frame and its idle line), so the port is told at every line's end and
   the ring's half and full marks never find a stream still arriving -
   the receive engine wrote inside the borrower's dispatch once in each of
-  2 legs of 42 (the flash image's paced legs at 460800) and never in a
+  9 legs of 126 on the flash image (paced legs at 460800, the control's
+  in eight runs of nine), in none of the SRAM image's 42, and never in a
   streamed one. The writer, the pack's lowest object, cannot run ahead of a
   receive side above it that takes most of a line's wire time on this
-  core: in the SRAM image the paced legs ran at 503 to 774 per mille of
-  the wire at 460800 and 358 to 687 at 921600, the least under 97 us x
-  3000; in the flash image 379 to 734 and 222 to 628.
+  core: in the SRAM image the paced legs ran at 496 to 775 per mille of
+  the wire at 460800 and 347 to 686 at 921600, the least under 97 us x
+  3000; in the flash image 327 to 732 and 182 to 622.
 - **The transmit engine under preemption.** 300 lines blasted into the
-  peer's sink, counted and summed exact at both rates in every pass: 999
+  peer's sink, counted and summed exact at both rates in every pass: 998
   to 1001 per mille of the wire in the SRAM image; in the flash image
-  998 to 1001 except at 921600 under 97 us x 3000, 764 to 766, where the
+  998 to 1001 except at 921600 under 97 us x 3000, 596, where the
   writer, below an object that takes its spin and the scheduler's path
   from the flash at every tick, no longer keeps the engine's ring
   filled.
 - **The loan under preemption.** At 921600 with the borrower spinning
   6000 cycles a line and the lines streamed twenty ahead, every line
   exact and lent alone, the two line buffers strictly alternating, the
-  preempting object landing inside the borrower 76 to 669 times a
-  pressure pass in the SRAM image and 97 to 1328 in the flash image, 346
-  to 618 and 218 to 570 per mille of the wire.
+  preempting object landing inside the borrower 65 to 643 times a
+  pressure pass in the SRAM image and 97 to 1385 in the flash image, 336
+  to 617 and 179 to 565 per mille of the wire.
 - **The HSI is the UART letters' premise.** The far echo is a polled loop
   with no FIFO that holds two characters of a writer's lead, and both
   ends divide 48 MHz by one divisor, so the lead is the HSI's error
   against the far crystal: measured before every echo letter by the far
-  chip timing 3999 gapless frames of this end at 1 Mbaud, -3048 to -2507
-  ppm over the six runs - this end slow, the echo never backing up.
+  chip timing 3999 gapless frames of this end at 1 Mbaud, -2958 to -2312
+  ppm over the twelve runs - this end slow, the echo never backing up.
   A lead under 38 ppm is what the letters accept (two characters over a
   leg's 14400, less the HSI's 100 ppm of wander between runs a second
   apart).
@@ -1265,6 +1268,23 @@ image, every verdict green; key `z` is built and not judged ([spi.md](spi.md),
   request enables and every DMA enable of TIM2 clear (TIM2's update
   request is a row of channel 2, the SPI's receive channel, and its
   trigger's of channel 8, the ring's), once on each image.
+- **The polled command channel loses a character under the heaviest
+  pressure from the flash.** Between legs the peer is commanded over
+  USART4 polled at 115200: a character every 4156 cycles of this end's
+  HSI, into a receiver whose data register holds one frame, so a
+  character is lost when two of the helpers' reads of the status
+  register lie farther apart. Pressure's 3000-cycle tick - its vector,
+  road 1, the dispatch and the way back - is the longest such gap, read
+  by an instrumented copy of the helpers that binned every gap (its own
+  turn of the loop, 116 to 132 cycles, inside each): with the scheduler
+  path in SRAM 4122 cycles at most and no character lost in four runs;
+  from the flash up to 4788, 16551 to 22641 gaps a run longer than a
+  character and 20 to 33 characters overrun in eight runs. A
+  character lost from a query's reply is retried at once; one lost from
+  an action's acknowledgement leaves the peer acting while this end
+  retries into it, so the suite waits that action's bound out and
+  commands it again: one such lost acknowledgement in each of 3 of the
+  flash image's nine runs of `y`, every leg then run and judged.
 - **Where the code runs.** The release maps: in the SRAM image
   `activate()` is 3074 bytes in SRAM, with the dispatches of Pressure,
   the borrower, the SPI client, the requester below the arbiter and the
@@ -1275,9 +1295,9 @@ image, every verdict green; key `z` is built and not judged ([spi.md](spi.md),
   placement moves the objects that preempt and borrow, not the polled
   SPI loop.
 
-The images: with the path in SRAM 38696 bytes of text and 4056 of data,
-42752 of the 62 KB (67 %), and 9036 bytes of RAM of 20 KB (44 %); with
-the path in the flash 42516 (67 %) and 5504 (27 %).
+The images: with the path in SRAM 38892 bytes of text and 4056 of data,
+42948 of the 62 KB (67 %), and 9040 bytes of RAM of 20 KB (44 %); with
+the path in the flash 42712 (67 %) and 5508 (27 %).
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_x035_rubato_i2c`, the scheduler path in SRAM, and its twin
@@ -1309,13 +1329,14 @@ under the preemptive kernel"). Two of them are this kernel's:
   run. The suite's letter `u` runs that flood by name for 2000 ticks, the
   pressure's vector stopping the timer itself, with the free stack
   painted again before it: the stack's high-water during the letter read
-  1288 to 1304 bytes in ten runs of each image, against the 2144 bytes
+  1304 bytes in ten runs with the scheduler path in SRAM and 1300 to 1320
+  in ten with it in the flash, against the 2144 bytes
   the kernel's bound derives - at most five runs for the pack's five
   objects, each object's deepest dispatch at most once, one empty run at
   an entry, by the release listing's frames (the letter's arithmetic).
-  Of the 2000 probes 1359 to 1363 were answered and 638 to 642 dropped by
-  the arbiter's full queue with the scheduler path in SRAM, 457 to 465
-  and 1536 to 1543 with it in the flash; after the flood the next tenure
+  Of the 2000 probes 1356 to 1368 were answered and 633 to 645 dropped by
+  the arbiter's full queue with the scheduler path in SRAM, 458 to 466
+  and 1535 to 1544 with it in the flash; after the flood the next tenure
   was `i2c_ok` and the arbiter idle in every run. Under the cooperative
   kernel no dispatch nests over another, so the same load would starve
   the lower objects at the stack's one level (not run: the suite is the
@@ -1324,8 +1345,8 @@ under the preemptive kernel"). Two of them are this kernel's:
   turned since the last), which keeps it under what the core serves and
   its held tenure answered in its place ([i2c.md](i2c.md)).
 
-The images: with the path in SRAM 36700 bytes of the 62 KB (58 %) and
-4604 of RAM (22 %); with the path in the flash 36464 and 2088.
+The images: with the path in SRAM 36740 bytes of the 62 KB (58 %) and
+4600 of RAM (22 %); with the path in the flash 36504 and 2088.
 
 ## A handler in SRAM
 

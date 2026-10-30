@@ -604,7 +604,7 @@ established:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
-  off for its whole length - the slice landed there 65 to 352 times a
+  off for its whole length - the slice landed there 57 to 255 times a
   pass in letter `p`. The FIFOs are the write-ahead on every path (no
   more than 8 frames in flight, `brio/pl022/spi.hpp`), so a held-off loop
   or pump leaves a gap on the bus and never a lost frame: the polled loop
@@ -620,7 +620,7 @@ established:
 - **The matrix and the arbiter.** The four modes in both widths, the
   client MSb and LSb first (the LSb rows an exact two-way reversal
   against this MSb-only host) on the engines at clk_peri / 32, byte-exact
-  in every pass, the data windows at 894 to 1004 per mille of the
+  in every pass, the data windows at 907 to 1006 per mille of the
   control's rate under the slice's pressure; three requesters of three
   priorities on one select window (the Client above the arbiter and the
   preempting object itself on the pump, a requester below it polled)
@@ -635,8 +635,8 @@ established:
   matrix and the echoed lines exact under it.
 - **The XIP cache, and whose code shares its sets.** Letter `o` prints the
   cache's misses over each pass (the counters cleared at its start): the
-  control's 6106 to 6299, the slice's six passes 6778 to 7091, the
-  core-1 pass 7736 to 7796, its windows at 856 to 884 per mille of the
+  control's 3522 to 3576, the slice's six passes 5200 to 5678, the
+  core-1 pass 9440 to 9580, its windows at 745 to 782 per mille of the
   control's rate. The suite's letter `x` (outside `z`, no verdict, three
   runs) separates the parts over the matrix's windows, against the same
   windows with nothing else running: the slice's interrupt and the
@@ -658,7 +658,7 @@ established:
 - **The loan under preemption.** With the borrower holding each line
   sixteen character times (one receive level of the FIFO) and the lines
   streamed five ahead, the slice landed inside the borrower's dispatch
-  743 to 3002 times a pass and the link's vector inside every one of its
+  723 to 3006 times a pass and the link's vector inside every one of its
   200 dispatches a leg; every line arrived exact, each lent alone, the
   two buffers strictly alternating, the leg at 995 to 996 per mille of
   the wire.

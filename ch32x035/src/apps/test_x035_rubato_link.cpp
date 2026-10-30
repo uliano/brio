@@ -102,9 +102,23 @@
 //   activate() is the platform page's ("The drivers under the preemptive
 //   kernel", docs/ch32x035/platform.md).
 //   THE UART KEY'S COMMAND CHANNEL. USART4 polled at 115200 between legs
-//   through x035_link_dut.hpp's reviewed helpers: a character every 87 us
-//   (4167 cycles), against the longest preemption there, a 3000-cycle spin
-//   and the scheduler.
+//   through x035_link_dut.hpp's reviewed helpers: a character every 87 us,
+//   4156 cycles of this end's HSI (some 2600 ppm slow of the far crystal,
+//   the UART key's calibrate leg), into a receiver whose DATAR holds one
+//   frame (ch32x035/usart.hpp), so a reply's character is lost when two
+//   of the helpers' reads of STATR lie farther apart than that. The
+//   longest such gap is a preemption of the Console by Pressure's
+//   3000-cycle tick - its vector, road 1, the dispatch and the way back.
+//   Measured by an instrumented copy of the helpers (every gap between two
+//   reads binned, the instrument's own turn of the loop, 116 to 132
+//   cycles, inside each): with the scheduler path in SRAM at most 4122
+//   cycles, under the character, no character lost; from the flash up to
+//   4788 (one of 9020 in eight runs), 16551 to 22641 gaps a run over the
+//   character and 20 to 33 characters overrun. A character lost from a
+//   query's reply is the helpers' own retry's (the peer answers again);
+//   one lost from an ACTION's ack leaves the peer acting while this end
+//   retries into it, so ul::peer_act() waits that action's bound out
+//   before commanding again (its comment has the arithmetic).
 //   THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 //   that would drive a link pad from a sagging rail registers no letter
 //   and says so.
@@ -426,9 +440,30 @@ bool peer_report(link::Report& r, uint16_t after_ms) { return x035link::peer_rep
 /// Command an action from command mode, whatever the last leg left (a
 /// released port is gated off); peer_act() leaves settle_ms after the
 /// ack, the peer opening its window settle_ms + 2 ms after it.
+///
+/// THE LOST ACK. Under the heaviest pressure from the flash a character
+/// of the peer's ack can be overrun (the file header's command channel):
+/// the peer then took the action, and the helpers' three tries fall into
+/// it. The peer ends an action at most settle_ms + 2 ms plus the action's
+/// bound `a.ms` after its ack and is back in command mode at once
+/// (usart_peer.cpp, usart_link.hpp's recovery guarantee); the first try's
+/// ack lies at least the three tries' 3 x (80 + 70) ms behind this point,
+/// so `a.ms` + settle_ms + 2 ms, a tick of each end's millisecond count
+/// and a tick's margin from here covers it, and the command is made
+/// again, three times in all. The leg then runs whole, judged as any
+/// other; each lost ack is printed.
 bool peer_act(link::Op op, const link::Params& a) {
-    (void)x035link::link_command_mode();
-    return x035link::peer_act(op, a);
+    for (uint8_t k = 0;; ++k) {
+        (void)x035link::link_command_mode();
+        if (x035link::peer_act(op, a)) {
+            return true;
+        }
+        if (k == 2u) {
+            return false;
+        }
+        print(serial, "    the ack lost: the action's bound waited out before the command is made again", crlf);
+        x035link::wait_ms(static_cast<uint32_t>(a.ms) + link::settle_ms + 2u + 3u);
+    }
 }
 
 }  // namespace ul

@@ -1320,8 +1320,8 @@ Driver gaps:
   counts the image's longest handler or masked window, not a dispatch.
   Measured under Rubato against the STM32G0B1RE's `spi_peer` with an
   object preempting every 97 to 389 us (`test_stm32f4_rubato_link`,
-  letter `p`): a preemption of 3000 cycles cuts the /64 to /8 rungs
-  short, one of 300 cycles the /8 rung alone, every time with
+  letter `p`, three runs): a preemption of 3000 cycles cut the /64 and
+  /32 rungs short, one of 300 cycles the /16 and /8 rungs, every time with
   `spi_overrun` detected and never a run handed back with a hole; the
   pump and the engines are exact at every rung. That is the limit
   [design/kernel.md](../design/kernel.md)'s "Rubato" section states for

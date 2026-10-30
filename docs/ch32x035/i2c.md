@@ -517,12 +517,8 @@ Rubato, against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
 pack's highest object every 97, 193 or 389 us and its dispatch spins 300
 or 3000 cycles - at 97 us x 3000, 64 % of the core. Every letter runs once
 with TIM2 silent and six times under it. Key `z` (195 verdicts) ran three
-times on each image, green but for two verdicts in one run of the
-default image - two passes' count of the pressure's dispatches, one short
-and then one over, the shared body's base turn not comparing the count
-of quiet posts after its last scan, so that a tick landing there waits a
-turn (`avrxt/src/apps/rubato_passes.hpp`, Not covered yet) - and the
-letter `u`, the unpaced flood, by its own name ten times on each. The pack, the
+times on each image, every verdict green, and the letter `u`, the unpaced
+flood, by its own name ten times on each. The pack, the
 command channel through the arbiter and the letters are the I2C suites'
 shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes
 them), this peer's answers to a refusal stated in the suite's
@@ -630,24 +626,25 @@ dispatch, a 97 us period of 4656 cycles has nothing left. The suite's
 letter `u`, run by name, floods so - a probe at every tick, for 2000
 ticks, after which the pressure's vector stops the timer, since the
 Console that would end the flood does not run: the arbiter's queue
-dropped 638 to 642 of the 2000 probes with the scheduler path in SRAM
-and 1536 to 1543 in the flash, the rest answered once (`i2c_rejected`
+dropped 633 to 645 of the 2000 probes with the scheduler path in SRAM
+and 1535 to 1544 in the flash, the rest answered once (`i2c_rejected`
 but for three or four `i2c_ok` after the release), the next tenure
 `i2c_ok` and the arbiter idle once the flood was over, in ten runs of
 each image; the held tenure, whose timeout is a time event the overload
 starves, reached the wire only after the hold and was answered
 `i2c_nack_addr` (printed, not judged). The preemptive kernel's stack
 stayed within its bound through it: the free stack painted again before
-the letter, its high-water read 1288 to 1304 bytes, against the 2144
+the letter, its high-water read 1304 bytes with the scheduler path in
+SRAM and 1300 to 1320 with it in the flash, against the 2144
 the letter derives from the kernel's count of runs - at most five for
 the pack's five objects - and the release listing's frames
 ([platform.md](platform.md)). The shared letter `h` therefore posts a
 probe at a tick only when the Console - the pack's lowest object,
 which runs only when every object above it is idle - has turned since
 the last (the first probe of a hold excepted): at 97 us x 3000 that is
-287 or 288 probes in the pass's 1199 or 1200 ticks with the scheduler
-path in SRAM and 129 to 132 in 1223 to 1233 with it in the flash (the
-lighter passes keep a probe at most ticks, up to 687 at 97 us x 300),
+280 to 283 probes in the pass's 1199 to 1202 ticks with the scheduler
+path in SRAM and 135 in 1221 to 1232 with it in the flash (the lighter
+passes keep a probe at most ticks, up to 695 at 97 us x 300),
 the arbiter's queue never overflows, the held tenure is answered in its
 place, and the stack ledger's untouched stack stays 14188 bytes or more
 of the 20 KB in every pass of every letter (three runs of `z` on each
@@ -710,14 +707,6 @@ Driver gaps, each with its reason:
   no util service serves a target that way (`I2cClient` is served from
   its vectors). The desk peer, the CH32V006's `twi_peer`, can read this
   board's target (`host_read`). Born with the first util target object.
-- **The suites' shared base turn and the count of quiet posts**
-  (`avrxt/src/apps/rubato_passes.hpp`, `base_turn()`): it runs the
-  scheduler by hand and does not compare the count after its last scan,
-  as the platform's exit does, so a pressure tick landing there is served
-  a turn late and the pass's count of dispatches reads one short, the
-  next pass's one over - two verdicts in one run of six of `z`. The body
-  is every family's link and I2C suites' at once, and is changed for all
-  of them together.
 
 Implemented but not bench-verified, each with what would measure it:
 

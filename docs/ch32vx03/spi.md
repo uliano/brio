@@ -1288,9 +1288,9 @@ Driver gaps:
   not a dispatch. Measured under Rubato on both parts against the other's
   `spi_peer`, with an object preempting every 97 to 389 us
   (`test_vx03_rubato_link`, letter `p`, [platform.md](platform.md)): a
-  preemption of 3000 cycles cuts short the rungs whose frame is 2048
-  cycles or shorter, one of 300 cycles those of 256 and 512, every time
-  with `spi_overrun` and never a run handed back with a hole; the pump
+  preemption of 3000 cycles cuts short rungs whose frame is 2048
+  cycles or shorter, one of 300 cycles none in eighteen passes, every
+  time with `spi_overrun` and never a run handed back with a hole; the pump
   and the engines are exact at every rung. That is the limit
   [../design/kernel.md](../design/kernel.md)'s "Rubato" section states
   for every polled service under the preemptive kernel; a hold-off

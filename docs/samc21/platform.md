@@ -633,8 +633,7 @@ lengthened:
 **The drivers under the preemptive kernel** - the suite is
 `test_samc_rubato_link`, two keys against the AVR64EA48's unchanged
 `spi_peer` (`z`, 119 verdicts) and `usart_peer` (`y`, 125 verdicts), every
-verdict green but the pressure's, which about a third of the runs of `z`
-fail for a reason of the suite's own (the last item below). It runs the
+verdict green in every run (three of each key). It runs the
 real SPI and UART stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
 arbiter over `SpiHost<1>` ([spi.md](spi.md); the polled loop and the RXC
 pump, no DMA data phase), `util/line_reader.hpp`'s `LineReader` over
@@ -699,7 +698,7 @@ character its polled loop has not fetched yet. What it established:
   (`avrxt/src/apps/usart_peer.cpp`) - and a line written back to back
   overruns it (the suite's letter `q`, two runs: ovf 255, 41 per cent of
   the bytes lost at 460800 and 52 at 921600), so the writer paces its
-  characters 32 bit times apart: 97 to 207 per mille of the wire at
+  characters 32 bit times apart: 96 to 204 per mille of the wire at
   460800 and 47 to 135 at 921600, the writer's and the reader's
   per-character dispatches, not the wire, setting the pace. The two
   rates of the wire: this end on OSC48M runs 0.4 % slower than the
@@ -707,32 +706,18 @@ character its polled loop has not fetched yet. What it established:
 - **The UART transmit side, both transmitters.** 300 lines blasted into
   the peer's sink through the interrupt transmitter and then through
   the DMA transmit engine (channel 0, the stratum's one DMA user),
-  counted and summed exact, no block abandoned; 997 to 999 per mille of
+  counted and summed exact, no block abandoned; 996 to 999 per mille of
   the wire with the pressure light. At 97 us x 3000 the writer, the
   lowest object, cannot refill the ring as fast as the wire drains it:
-  920 and 373 to 374 per mille at 460800 and 921600 on the interrupt
-  transmitter, 996 and 494 on the engine, which takes the per-byte
+  828 and 354 per mille at 460800 and 921600 on the interrupt
+  transmitter, 996 and 468 on the engine, which takes the per-byte
   interrupt off the core the writer shares.
 - **The loan under preemption.** At 921600 with the borrower spinning
   6000 cycles a line, the lines streamed twenty ahead and the characters
   two at a time across the lines' ends, TC4 landed inside the borrower's
-  dispatch 158 to 1972 times a pass; every line arrived exact, each lent
+  dispatch 151 to 1991 times a pass; every line arrived exact, each lent
   alone, the two buffers strictly alternating, and the receive stream
   moved inside the borrower's dispatch 0 to 16 times a leg.
-- **The wait turn written out leaves the exit's count unread.** Each turn
-  of a letter's wait is the kernel loop's base turn written in the
-  Console's dispatch (`avrxt/src/apps/rubato_passes.hpp`): the time
-  events walked with the ceiling at 0, `activate()` at the Console's
-  index, the index put back - without the comparison of the count of
-  quiet posts the platform's exit makes
-  ([design/kernel.md](../design/kernel.md), "Rubato"). A tick whose post
-  lands in the turn's last choice, the ceiling at 0, is counted quiet and
-  served only at the next turn; at a pass's end that turn is the next
-  pass's, so the pressure's verdict reads one dispatch short in the pass
-  and one over in the next: in 8 of 23 runs of `z`, two or four verdicts
-  each, while 3 runs of `y` were green. With the turn putting the index back and comparing the count
-  under one mask, turning again when it moved (a diagnostic build of the
-  shared body, not kept), 20 runs of `z` in 20 were green.
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_samc_rubato_i2c`, one key against the AVR64EA48's unchanged
@@ -756,15 +741,15 @@ preemptive kernel). What it established about this platform:
   `activate()`'s 88-byte frame, and 180 for the deepest dispatch, the
   arbiter's state machine down to the SERCOM's synchronization wait), and
   one interrupt over the topmost, 96. The suite paints the free RAM
-  before each pass and reads the high-water after it: 1052 to 1556 bytes
-  over every letter, the held wire's included (1116 to 1348), whose flood
+  before each pass and reads the high-water after it: 1060 to 1564 bytes
+  over every letter, the held wire's included (1164 to 1292), whose flood
   the lowest object's turns pace (a probe posted at a tick only when the
   Console has run since the last, [i2c.md](i2c.md)). Its letter `u`,
   outside `z`, holds the same wire at 97 us x 3000 with the flood
   unpaced, a probe at every one of 1000 ticks: the objects above the
   Console never empty, the Console does not turn for 98 ms, and the
   arbiter's full queue drops some 450 of the 1001 probes posted, each
-  counted, every other one answered once. The high-water is 1284 bytes in
+  counted, every other one answered once. The high-water is 1292 bytes in
   ten runs of ten, the deepest stack pointer a tick found 1000 bytes below
   the top of RAM: under an overload this kernel stalls the lowest object
   and keeps its stack, and what a program sizes is its pack's chain, read

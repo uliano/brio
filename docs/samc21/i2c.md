@@ -576,14 +576,14 @@ write-then-reads of 1+1, 1+2 and 2+8, writes of 1, 2, 3, 8 and 32 -
 every one `i2c_ok`, every read byte-exact, the peer's count, sum and
 address matches exact. A shape's post-to-reply under pressure is the
 control's plus at most a dispatch and the path behind it: the 32-byte
-write 1005 to 1018 us silent and at most 1172 pressed, the probe 75 to
-80 and at most 372. Letter `p`: a read of 16, a 1+4 and a write of 16
-byte-exact at 100 kHz, 400 kHz and 1 MHz (the read of 16 in 1595 to
-1754, 523 to 686 and 309 to 400 us against the wire's 1530, 382 and 153
+write 1005 to 1018 us silent and at most 1174 pressed, the probe 78 to
+82 and at most 372. Letter `p`: a read of 16, a 1+4 and a write of 16
+byte-exact at 100 kHz, 400 kHz and 1 MHz (the read of 16 in 1598 to
+1760, 527 to 689 and 309 to 400 us against the wire's 1530, 382 and 153
 - the polled peer's turnaround, not the host, sets the faster rungs),
 and the peer's
 commanded stretch of 1000 us a byte priced from below by its eight
-holds: a read of 8 in 8902 to 8983 us, a write of 8 in 9699 to 9959 -
+holds: a read of 8 in 8908 to 9029 us, a write of 8 in 9614 to 9944 -
 the read's ninth hold, at its closing NACK, falls after the read's STOP
 and stretches the address of the write that follows it at once.
 
@@ -598,32 +598,32 @@ Letter `w`: the Client above the arbiter (20 write-then-reads of 1+6,
 two outstanding), a requester below it (10 writes of two) and, in a
 pressure pass, the preempting object itself (8 probes from its tick):
 every reply `i2c_ok`, to its requester, in its order, nothing rejected,
-no timeout, the peer's tallies exact, in 7.4 to 13.7 ms a pass.
+no timeout, the peer's tallies exact, in 7.5 to 15.1 ms a pass.
 
 **THE HELD WIRE HAS THREE SIGNATURES HERE.** Letter `h` has the peer
 hold SDA low for 60 ms. A tenure posted at the speed in force parks
 behind the BUSY its monitor saw ("A tenure into a busy bus parks in
 hardware" above) and is answered `i2c_timeout` by the arbiter at 20 ms
 (19955 to 20129 us from its `start()`; 123 of 140 passes with a probe
-posted at every tick, 59 of 70 with the flood paced as below); in the
-others a probe the preempting object posted first parked instead and
-timed out, the arbiter's `recover()` forced the bus state to IDLE, and
-the held tenure's START went out into the held line and lost its
-address: `i2c_arb_lost`, 112 to 196 us from its `start()` and 20.7 ms
-at most from its post. The same tenure posted at 400 kHz
+posted at every tick, 18 of 21 in three runs with the flood paced as
+below); in the others a probe the preempting object posted first parked
+instead and timed out, the arbiter's `recover()` forced the bus state to
+IDLE, and the held tenure's START went out into the held line and lost
+its address: `i2c_arb_lost`, 192 to 278 us from its `start()` and
+20.75 ms at most from its post. The same tenure posted at 400 kHz
 after commands at 100 kHz costs `apply()` an enable that re-boots the
 state machine and a forced IDLE, and is answered `i2c_arb_lost` in 46 to
 61 us, every run. The third is `i2c_bus_error`: ARBLOST with BUSERR
 beside it, which the engine reports as the bus error it also is (the
 suite's `I2cTraits::held_bus_error`) - met once a pass in 35 of 120
-passes flooded at every tick and 18 of 60 flooded paced, always on a
+passes flooded at every tick and 5 of 18 flooded paced, always on a
 probe that completed after the release, in the moment the peer's TWI is
 put back to its command address. Under the flood every request was
 answered exactly once: while held `i2c_rejected` (the FIFO full),
 `i2c_timeout` or `i2c_arb_lost`, after the release `i2c_ok`,
 `i2c_nack_addr` or that bus error; a request arrived in the arbiter's
 draining window, between a timeout's `recover()` and the marker after
-it, in 26 of 140 passes flooded at every tick and 44 of 60 paced. After
+it, in 26 of 140 passes flooded at every tick and 11 of 18 paced. After
 the release the next tenure was `i2c_ok` and the arbiter voted idle with
 nothing waiting, every pass.
 
@@ -637,16 +637,16 @@ objects above the Console never empty, the Console - the one object
 that stops the flood - does not run while the flood lasts, and the pack
 is overloaded for good: its queues drop what they cannot hold, while the
 stack stays within the pack's five runs of the scheduler (the suite's
-letter `u`, outside `z`, floods so for 1000 ticks: 1284 bytes of
+letter `u`, outside `z`, floods so for 1000 ticks: 1292 bytes of
 high-water, [platform.md](platform.md) has the bound and the
 measurement). The shared letter therefore posts a probe at a
 tick only when the Console has turned since the last: a turn of the
 lowest object says the pack above it was idle, so the flood takes only
 the time the core has left (the first probe of a hold excepted, which
-needs no turn). At 97 us x 3000 that is 169 to 171 probes in the pass's
-some 970 ticks (the lighter passes keep a probe at more ticks: 504 to
-532 at 97 us x 300); the suite paints and reads the stack around every
-pass: 1052 to 1556 bytes over every letter, `h` included (1116 to 1348
+needs no turn). At 97 us x 3000 that is 182 to 184 probes in the hold's
+60 ms, some 620 ticks (the lighter passes keep a probe at more ticks:
+522 to 549 at 97 us x 300); the suite paints and reads the stack around every
+pass: 1060 to 1564 bytes over every letter, `h` included (1164 to 1292
 there).
 
 **Dark** (letter `i`): every object idle, the arbiter's vote for the

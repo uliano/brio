@@ -794,10 +794,10 @@ probe, reads of 1 (the pump, the byte taken at STOPF) and of 2, 3, 8 and
 transmit engine) - every one `i2c_ok`, every read byte-exact, the
 peer's count, sum and address matches exact (a write-then-read is two).
 A shape's post-to-reply under pressure is the control's plus at most one
-dispatch and the path behind it: the 32-byte write 825 us silent and at
-most 885 pressed, the probe 56 and at most 167, over thirty runs. Letter `p`: a read of 16,
+dispatch and the path behind it: the 32-byte write 827 us silent and at
+most 883 pressed, the probe 58 and at most 114, over three runs. Letter `p`: a read of 16,
 a 1+4 and a write of 16 byte-exact at 100 and 400 kHz (the write of 16
-in 1599 and 440 us against the wire's 1530 and 382), and the peer's
+in 1601 and 442 us against the wire's 1530 and 382), and the peer's
 commanded stretch of 1000 us a byte priced from below - a read of 8 in
 9868 to 9975 us against its nine holds, a write of 8 in 8243 to 8357 us
 against its eight (the address's and one before every byte the peer
@@ -832,13 +832,13 @@ the peer's tallies exact, in 6.1 to 7.9 ms a pass.
 **THE TWO SIGNATURES OF THE HELD WIRE ARE ONE MECHANISM: THE PE CYCLE.**
 Letter `h` has the peer hold SDA low for 60 ms. A tenure posted at the
 speed in force parks behind the BUSY its own monitor saw and is answered
-`i2c_timeout` by the arbiter at 20 ms (19933 to 20081 us from its
-`start()`, 63 of 70 passes). In the other 7 a probe the preempting object
+`i2c_timeout` by the arbiter at 20 ms (19938 to 20139 us from its
+`start()`, 20 of 21 passes). In the other one a probe the preempting object
 had posted first parked instead and timed out; the arbiter's
 `recover()` - 32.4.6's PE cycle - then started the held tenure, and PE =
 0 clears BUSY (32.9.7), so its START went out at once into the held line
-and lost its address's first one bit: `i2c_arb_lost`, 58 to 77 us from
-its `start()` and 20.2 ms at most from its post. The same tenure posted
+and lost its address's first one bit: `i2c_arb_lost`, 59 us from
+its `start()` and 20023 us from its post. The same tenure posted
 at 400 kHz after the commands at 100 kHz costs `apply()` a PE cycle for
 TIMINGR before the START, and is answered `i2c_arb_lost` in 36 to 43 us,
 every run. The peer-bus letter `r` above meets its hold
@@ -846,13 +846,13 @@ the second way (its request at 400 kHz after commands at 100): that is
 the second signature, and the self-link's park the first. Under the
 flood - after its first probe, one at a tick only when the Console has
 turned since the last, which on this core is most ticks: 180 to 722 a
-pass, 634 to 670 of the 972 ticks at 97 us x 3000 - every request was
+pass, 560 to 565 of the 972 ticks at 97 us x 3000 - every request was
 answered exactly once: while held `i2c_rejected` (the FIFO full),
 `i2c_timeout` or `i2c_arb_lost`, after the release `i2c_ok`, or
-`i2c_nack_addr` in the moment the peer's client was not yet back (18 of
-60 pressure passes, one probe each); a request arrived in the arbiter's
+`i2c_nack_addr` in the moment the peer's client was not yet back (6 of
+18 pressure passes, one probe each); a request arrived in the arbiter's
 draining window, between a timeout's `recover()` and the marker after
-it, in 12 of 60 - the interleaving only a requester above the arbiter
+it, in 2 of 18 - the interleaving only a requester above the arbiter
 can make. After the release the next tenure was `i2c_ok` and the arbiter
 voted idle with nothing waiting, every pass.
 
@@ -860,7 +860,7 @@ voted idle with nothing waiting, every pass.
 sleep, no time event armed, TIM14 stopped, the host between tenures with
 ERRIE alone and both DMA request enables clear, the transmit engine
 holding nothing, BUSY clear and PB8 and PB9 reading high on their pads.
-ES0548 2.10.2's spurious BERR counted 0 over the thirty runs.
+ES0548 2.10.2's spurious BERR counted 0 over thirty runs.
 
 ## On the STM32G071RB
 

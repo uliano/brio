@@ -157,9 +157,10 @@
 //
 // A letter's waits are the Console's: each turn of a wait is Rubato's base
 // turn written out (the matured time events posted with the ceiling held at
-// 0, then the scheduler), because the kernel loop is below the Console and
-// does not turn while a letter runs - so the arbiter's per-bus timeout is a
-// live clock here. The objects' tallies are the one memory the Console
+// 0, then the scheduler through the platform's entry and exit,
+// rubato_passes.hpp's base_turn()), because the kernel loop is below the
+// Console and does not turn while a letter runs - so the arbiter's per-bus
+// timeout is a live clock here. The objects' tallies are the one memory the Console
 // reads outside events: each written by one object, read by the Console
 // after the traffic that wrote it has been answered.
 //

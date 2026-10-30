@@ -738,15 +738,15 @@ kernel's.
   crossover - and the probe, the reads, the write-then-reads and the
   writes are every one `i2c_ok`, every read byte-exact, the partner's
   count, sum and address matches exact. The 32-byte write 819 to 821 us
-  silent and at most 838 pressed (the classic block's 761: this block's
-  400 kHz row is a ceiling, its SCL slower, as above), the probe 40 to 41
+  silent and at most 839 pressed (the classic block's 761: this block's
+  400 kHz row is a ceiling, its SCL slower, as above), the probe 41 to 42
   and at most 59.
 - **Three speeds and the commanded stretch** (letter `p`): a read of 16, a
   1+4 and a write of 16 byte-exact at 100, 400 and 1000 kHz, the write of
   16 in 1589 to 1611, 428 to 448 and 192 to 218 us against the wire's
   1530, 382 and 153 - at Fm+ the partner's polled target stretching each
   byte, as above. The partner's stretch of 1000 us a byte at 100 kHz: a
-  read of 8 in 9210 to 9240 us against its nine holds, a write of 8 in
+  read of 8 in 9208 to 9214 us against its nine holds, a write of 8 in
   8990 to 9025 against its eight (the write follows the read at once and
   meets most of one hold more, [i2c.md](i2c.md) has the arithmetic).
 - **THE REFUSED DATA BYTE IS NAMED AS A REFUSED ADDRESS under the
@@ -770,17 +770,17 @@ kernel's.
   PE CYCLE** - the STM32G0's two signatures, this block being its register
   file ([../stm32g0/i2c.md](../stm32g0/i2c.md)). With the partner holding
   SDA low 60 ms, the tenure posted at the speed in force parks behind
-  BUSY and is answered `i2c_timeout` by the arbiter in 19988 to 20033 us
-  (138 passes of 140 with a probe posted at every tick, 66 of 70 with
-  the flood paced by the Console's turns, 19993 to 20032 us from its
-  `start()`); where a probe the preempting object had posted first parked
+  BUSY and is answered `i2c_timeout` by the arbiter (in 19988 to 20033 us,
+  138 passes of 140, with a probe posted at every tick; in 19981 to
+  20026 us from its `start()`, 20 of 21, with the flood paced by the
+  Console's turns); where a probe the preempting object had posted first parked
   and timed out instead, the arbiter's `recover()` - 23.4.6's PE cycle,
   which clears BUSY - then started the held tenure, and its START went out
   into the held line and lost: `i2c_arb_lost` 47 us from its `start()`,
   at 20044 to 20059 us from its post. The same tenure at 400 kHz after
   commands at 100 kHz pays `apply()`'s PE cycle before its START and is
   answered `i2c_arb_lost` in 26 to 29 us, every run. Under the flood (180
-  to 722 probes a pass, 721 or 722 of some 925 ticks at 97 us x 3000) every
+  to 722 probes a pass, 721 or 722 of 931 to 941 ticks at 97 us x 3000) every
   request was answered exactly once - while held `i2c_rejected`, and
   `i2c_arb_lost` for nearly every probe that reached the wire after a
   `recover()`, after the release `i2c_ok` or `i2c_nack_addr` - and a
