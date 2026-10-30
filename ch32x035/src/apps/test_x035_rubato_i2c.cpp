@@ -1,0 +1,708 @@
+// test_x035_rubato_i2c - the bench suite of the CH32X035's I2C stack under
+// Rubato, the preemptive kernel (kernel/rubato.hpp): util/i2c_bus.hpp's
+// arbiter over ch32x035/i2c.hpp's I2cHost and its DMA engines, run against
+// the desk's CH32V006K8U6 and its unchanged instrument
+// (ch32v00x/src/apps/twi_peer.cpp) while an object of the highest priority
+// preempts it at moments the traffic does not choose. Every verdict is the
+// traffic judged byte-exact and every status the one the wire produced, as
+// the Tenuto suite's peer letters (test_x035_i2c) judge them; nothing here
+// changes a driver or a service.
+//
+// A test_<target>_<subject> suite in the bench grammar (util/testbench.hpp)
+// that runs inside the kernel it tests: the program is one Rubato pack of
+// five objects - Pressure, Client, I2cArb, Minor and Console, from the
+// highest priority down - and everything of it that names no register, the
+// pack, the passes, the command channel and the letters, is the I2C suites'
+// shared body (avrxt/src/apps/rubato_i2c.hpp, whose header describes each
+// object, each letter and where preemption can reach a tenure). What is
+// this chip's is here, each choice from the reference manual's chapters
+// (RM 15 the I2C, RM 9 the DMA, RM 12 the timer) and the driver header:
+//
+//   THE BLOCK FIRST. The datasheet withdraws the I2C from some lots (table
+//   2-1's note 3) and no register names a die's lot, so main() asks
+//   I2c<1>::present() before Host::init() - which refuses a block that does
+//   not hold its timing as well - and a die without the block registers no
+//   letter and says so.
+//   THE HOST. I2cHost<1> on its column 010, SCL PC16 and SDA PC17 (the
+//   F8's one column off the debug port), with the DMA engines on the
+//   channels that ARE its requests (figure 9-1: 6 transmits, 7 receives),
+//   both at high, in the default placement (InFlash: the InRam pump is the
+//   Tenuto suite's letter x, not this key's subject). Its engine, from the
+//   chapter (ch32x035/i2c.hpp's class comment, docs/ch32x035/i2c.md): the
+//   STM32F1's event machine on two vectors, no RTR, no byte counter, no
+//   FIFO; the first two bytes of a pumped write loaded in the entry that
+//   clears ADDR; a write's end at BTF; the repeated START of a
+//   write-then-read requested on the last written byte's TxE; a refused
+//   last byte closed by a void write from the repeated START's SB; a plain
+//   write of three bytes or more and a read of two or more on the engines
+//   (the write ending on BTF with the channel's count at zero and no DMA
+//   interrupt, the read on channel 7's completion under LAST), a one-byte
+//   read and the write half of a write-then-read on the pump (EVT6_1 has no
+//   DMA form; the repeated START wants the last byte's TxE). start() waits,
+//   bounded, for the last STOP to leave CTLR1 (stop_drain_us 5 ms) and for
+//   BUSY (bus_free_us 100 us), each a count of delay_us(1) turns, takes
+//   SWRST for a BUSY standing over an idle wire (unwedges()), and stores
+//   START last: nothing is on the wire before that store, so a preemption
+//   inside start() is a later START - a gap between tenures - or a wait it
+//   lands in lasting longer, never shorter; inside a tenure the master
+//   holds SCL at SB, at ADDR until its two reads and at BTF (15.3, 15.6)
+//   while a vector is late.
+//   THE PREDICTION: strict at every speed, path and pass; unwedges() and the
+//   engines' faults printed (counts, not verdicts); letter x's landings
+//   inside start() find MSL clear - the START store is start()'s last
+//   register write, and MSL rises only at SB, some tens of microseconds on.
+//   THE HELD WIRE: a START into an SDA the peer holds, from a block that saw
+//   the line taken, goes out and its address loses at its first one bit -
+//   i2c_arb_lost at once (docs/ch32x035/i2c.md, "A START into a held SDA is
+//   not refused"); from a block brought up over the held line (SWRST:
+//   recover(); a PE cycle) the START stays pending and only the arbiter's
+//   20 ms answers (i2c_timeout). Letter h meets the hold at the speed in
+//   force (the first signature predicted) and once at another, whose
+//   timing write cycles PE before the START (the second predicted); the
+//   requirement judged either way.
+//   THE RELEASE CONTRACT (docs/ch32x035/dma.md, "A released requester"):
+//   channels 6 and 7 are ORs this block shares with USART2 - the console,
+//   engine-free here, its DMA enables off - with TIM1's channel 3 (TIM1
+//   never opened) and with TIM2's channels 2 and 4 (the pressure's timer,
+//   every DMA enable of DMAINTENR clear): letter i reads every one of them
+//   so, and both channels with nothing left to move.
+//   THE PRESSURE. TIM2's update interrupt, 16 bits on HCLK = 48 MHz at
+//   prescaler 0: 97 / 193 / 389 us are 4656 / 9264 / 18672 counts. Its
+//   dispatch, a 3000-cycle spin, road 1 (154 to 160 cycles with the
+//   scheduler in SRAM, 307 to 311 from the flash: docs/ch32x035/platform.md)
+//   and the way back, is shorter than the shortest period's 4656 cycles,
+//   so no tick finds the last one still queued; at 97 us x 3000 it takes
+//   64 % of the core.
+//   THE RULER. The kernel ticker's composed cycles() (the tick count and
+//   the STK counter's position, ch32x035/ticker.hpp), monotone across a
+//   tick; spin() reads the STK counter bare, one load, the restart at the
+//   compare folded in. The pressure's timer and the STK count one clock,
+//   HCLK, so judge_pressure()'s arithmetic is exact.
+//   THE PLACEMENT. This image runs the scheduler path from SRAM, the
+//   project's default (`// build: scheduler` absent):
+//   test_x035_rubato_i2c_flash is the same source with the path in the
+//   flash. What the release map shows the compiler carried into SRAM with
+//   activate() is the platform page's (docs/ch32x035/platform.md).
+//   THE SUPPLY AND THE RAIL at boot: the voltage detector at 3.0 V
+//   (pwr.hpp), then PB3 driven high push-pull - the bus's pull-ups - from
+//   there to the image's end; under 3.0 V PB3 and the bus's pads stay
+//   floating, no letter is registered and the banner says so.
+//
+// THE PEER, unchanged: twi_peer on the CH32V006K8U6 module, kind 0x06, its
+// I2C1 on column 3 (PB5 SCL, PB6 SDA) a POLLED target that stretches one
+// byte late (its header: the next byte enters the shifter while the last
+// still sits in DATAR), its commanded hold spent at the address match and
+// before every byte it takes or gives. It ends a counted serve once the
+// count has moved and the wire has rested forty microseconds, never at the
+// byte that reaches the count; it gives back the byte a closing NACK leaves
+// in its DATAR (the count is the wire's). After a refused byte it keeps its
+// acknowledge down until its action's window closes (the CH32 target's
+// habit, docs/ch32x035/i2c.md): that is why this suite's letter q is its
+// own (below). Speeds: 100 and 400 kHz, the two of RM 15.1.
+//
+// THE WIRES, fixed on the desk (test_x035_i2c's pair, docs/boards/
+// ch32x035-evt-f8u6.md, docs/boards/ch32v006k8.md): this board's PC16
+// (SCL) to the CH32V006's PB5, PC17 (SDA) to its PB6, a 1.5 kOhm resistor
+// from each line to this board's PB3 - NEVER to 3.3 V: PC17 high at
+// power-up enters WCH's loader - and a ground. NOTHING LIT: no letter
+// drives the LED's pad PA0.
+//
+// The letters (z: n o p q w i; h and x outside it), each but i and x run as
+// seven passes (the shared body's control and six pressures):
+//   n  the command channel through the arbiter at 100 kHz: a ping, ident
+//      (the sanity byte and the CH32V006's kind, 0x06), ten pings, every
+//      tenure i2c_ok.
+//   o  the tenure shapes at 400 kHz on both of the host's paths (I2cTraits
+//      below names each shape's), one counted serve a pass: every status
+//      i2c_ok, every read byte-exact, the peer's count, sum and address
+//      matches exact.
+//   p  100 and 400 kHz: a read of 16, a 1+4 and a write of 16 byte-exact,
+//      the wire's time printed; the peer's commanded stretch, 1000 us a
+//      byte at 100 kHz, priced from below by its holds (I2cTraits).
+//   q  THIS SUITE'S OWN, the shared letter's traffic with this peer's
+//      answers and this block's address space: a deaf client's
+//      i2c_nack_addr and the next command's tenures i2c_ok (no probe of
+//      twi_link's deaf_addr, 0x7A, an address of the 10-bit header's form
+//      on this block: below); the third of six refused (i2c_nack_data, the write on the engines);
+//      the last written byte of a 2+4 refused (i2c_nack_data, the
+//      controller let go by its void write, the read half never begun);
+//      after each refusal the next tenure on the same host answered on the
+//      wire - i2c_ok, or i2c_nack_addr from a peer still deaf from its
+//      refusal - and the peer's address count the one that answer implies.
+//   w  three requesters of three priorities at 400 kHz: the Client's
+//      write-then-reads of 1+6 (the read half on the engines), Minor's
+//      writes of two (the pump: under the engine's three), Pressure's
+//      probes: in order, i2c_ok, nothing rejected, no timeout, the peer's
+//      tallies exact.
+//   h  (outside z) the held wire (the peer holds SDA 60 ms) with
+//      Pressure's probes at every tick: answered in its place, every
+//      request once, the next tenure i2c_ok and the arbiter idle; then the
+//      hold met at another speed (above). Its pass at 97 us x 3000 is more
+//      than this core serves - the flood's probes and their rejections on
+//      top of Pressure's 3000 cycles a period - and the preemptive kernel's
+//      stack then grows a level a tick: the stack guard (below) stops the
+//      pressure there and the pass fails by name; the other six are green.
+//   i  dark: every object idle, the arbiter's vote, no time event armed,
+//      TIM2 stopped with its line quiet and its DMA requests off, the host
+//      idle with its enables at rest, its channels with nothing to move and
+//      no request held on their ORs, BUSY and MSL clear, both lines high,
+//      the rail up, the ceiling the Console's.
+//   x  (outside z) 400 writes of 16 silent and 400 under 97 us x 3000:
+//      the landings inside start() counted, and of them those with MSL set.
+//
+// build: boards = x035f8
+// build: monitor_speed = 115200
+
+#include <stdint.h>
+
+#include <iterator>
+#include <variant>
+
+#include "ch32x035/clock.hpp"
+#include "ch32x035/delay.hpp"
+#include "ch32x035/dma.hpp"
+#include "ch32x035/i2c.hpp"
+#include "ch32x035/pfic.hpp"
+#include "ch32x035/pin.hpp"
+#include "ch32x035/platform.hpp"
+#include "ch32x035/pwr.hpp"
+#include "ch32x035/schedule.hpp"
+#include "ch32x035/ticker.hpp"
+#include "ch32x035/tim.hpp"
+#include "ch32x035/usart.hpp"
+#include "kernel/borrowed.hpp"
+#include "kernel/event_queue.hpp"
+#include "kernel/panic.hpp"
+#include "kernel/post.hpp"
+#include "kernel/rubato.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
+#include "util/i2c_bus.hpp"
+#include "util/power.hpp"
+#include "util/print.hpp"
+#include "util/testbench.hpp"
+
+// THE PROTOCOL HEADERS ARE SHARED, NOT COPIED: the far board's instrument
+// compiles twi_link.hpp too, and the controller's end of it is one reviewed
+// file.
+#include "../../../avrxt/src/apps/twi_link_client.hpp"
+
+/// The one clock root, the HSI undivided: HCLK = 48 MHz, every bus's. FREQ
+/// is 48 and CCR exact at both speeds (240 and, at DUTY 2, 40).
+using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
+constexpr SysClock clock;
+
+namespace {
+
+using namespace brio;
+
+using P = Ch32x035RubatoPlatform<>;
+constexpr uint32_t core_hz = SysClock::hz;
+constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
+
+/// The composed cycle count: monotone across the ticker's restart, a
+/// difference exact under 2^32 cycles (89 s at 48 MHz).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+};
+
+/// The STK counter's period: it counts HCLK and restarts at the ticker's
+/// compare every millisecond.
+constexpr uint32_t stk_period = SysClock::hz / Ticker::ticks_per_second;
+
+/// A busy wait of `cycles` HCLK cycles: the STK counter read bare, one
+/// load a turn, the restart folded in, for a span under half a period; the
+/// composed count for a longer one. A preemption longer than a period only
+/// lengthens a bare spin.
+void spin(uint32_t cycles) {
+    if (cycles < stk_period / 2u) {
+        const uint32_t t0 = stk()->CNTL;
+        for (;;) {
+            const uint32_t t = stk()->CNTL;
+            const uint32_t d = t >= t0 ? t - t0 : t + stk_period - t0;
+            if (d >= cycles) {
+                return;
+            }
+        }
+    }
+    const uint32_t t0 = Ticker::cycles();
+    while (Ticker::cycles() - t0 < cycles) {
+    }
+}
+
+// ---- the console -------------------------------------------------------------------
+
+/// USART2 on PA2/PA3, the probe's serial, ENGINE-FREE: its requests are
+/// ORed into channels 6 and 7, the I2C's (figure 9-1).
+using Serial = Uart<2, P, 64, 128>;
+constexpr Serial serial;
+TestBench<Serial> bench;
+using ConsoleUsart = Usart<2>;
+
+// ---- the I2C host --------------------------------------------------------------------
+
+using H = I2c<1>;
+using TxEngine = DmaTxEngine<6>;
+using RxEngine = DmaRxEngine<7>;
+using Host = I2cHost<1, i2c1_default_pins, TxEngine, RxEngine>;
+using TxChannel = DmaChannel<6>;
+using RxChannel = DmaChannel<7>;
+using SclPin = Pin<'C', 16>;
+using SdaPin = Pin<'C', 17>;
+/// The bus's pull-ups hang from this pad (the file header).
+using Rail = Pin<'B', 3>;
+static_assert(i2c1_default_pins.remap == 2u && i2c1_default_pins.scl == SclPin::pad &&
+                  i2c1_default_pins.sda == SdaPin::pad,
+              "the CH32X035F8's one column off the debug port is I2C1_RM 010, PC16/PC17");
+
+constexpr uint8_t peer_kind = twilink::peer_ch32v00x;
+/// RM 15.1's two speeds, what test_x035_i2c judges against this peer.
+constexpr I2cSpeed speeds[] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k};
+constexpr uint32_t speed_hz(I2cSpeed s) { return i2c_speed_hz(s); }
+
+/// The boot's results, printed by the banner and read by bring_up().
+bool clock_ok = false;
+bool tick_ok = false;
+bool supply_ok = false;
+bool present_ok = false;
+bool host_ok = false;
+/// What the last reset left: RCC_RSTSCKR's flags (3.4.8), cleared once
+/// read, and a panic's breadcrumb (kernel/panic.hpp) - none of either
+/// after a jump to the reset vector.
+uint32_t boot_flags = 0;
+std::optional<PanicRecord> boot_panic;
+
+/// A pad's MODE bits (its nibble's low two): 00 is an input.
+template <typename Pad>
+bool pad_is_output() {
+    return (Pad::nibble() & 0x3u) != 0u;
+}
+
+/// What the shared body changes for this host and this peer.
+struct Shape {
+    uint8_t tx_len;
+    uint8_t rx_len;
+    const char* path;
+};
+struct I2cTraits {
+    /// Letter o's table, each shape with the path this host takes: a plain
+    /// write of three bytes or more and a read of two or more on the
+    /// engines (the driver's dma_min_write, 3, private: the entry that
+    /// clears ADDR loads two bytes with no interrupt, where an engine adds
+    /// its block start; dma_serves_rx() from two), a one-byte read and a
+    /// write half before a read on the pump. Ends on a plain write (the
+    /// shared body's counted serve).
+    static constexpr Shape shapes[] = {
+        {0, 0, "the probe: SB, ADDR, the STOP in the ADDR entry"},
+        {0, 1, "pump: EVT6_1, the STOP at ADDR, the byte at RxNE"},
+        {0, 2, "engines: channel 7 under LAST, its completion the end"},
+        {0, 3, "engines"},
+        {0, 8, "engines"},
+        {0, 32, "engines"},
+        {1, 1, "pump both halves: the byte in the ADDR entry, Sr on its TxE, EVT6_1"},
+        {1, 2, "pump write (Sr on the last byte's TxE), engine read"},
+        {2, 8, "pump write, engine read"},
+        {1, 0, "pump: the byte in the ADDR entry, BTF the end"},
+        {2, 0, "pump: both bytes in the ADDR entry, BTF the end"},
+        {3, 0, "engines: channel 6, BTF with its count at zero, no DMA interrupt"},
+        {8, 0, "engines"},
+        {32, 0, "engines"},
+    };
+    static_assert(Host::has_engines, "the table names engine paths");
+    /// The CH32V006 peer's holds inside the stretched tenures (its
+    /// run_serve): one at the address match and one before each byte it
+    /// takes or gives. A read of 8: the address and all eight gives fall
+    /// inside the tenure - the eighth is given at the end of the ninth
+    /// hold and must reach the wire before the controller's NACK - nine
+    /// holds. A write of 8: the peer is one byte late, so the hold before
+    /// the take of byte k overlaps byte k + 1 entering its shifter; the
+    /// tenure ends once byte 8 is acknowledged, which needs DATAR emptied
+    /// of byte 6, the take after the seventh hold: the address and six,
+    /// seven holds (test_x035_i2c's letter e measures seven at 2 ms). The
+    /// wire adds at least the address byte before the first hold, 90 us at
+    /// 100 kHz, more than this end's HSI, some 3000 ppm slow
+    /// (docs/ch32x035/clock.md), takes off seven or nine milliseconds of
+    /// the peer's crystal (27 us at most), so the bound is the holds alone.
+    static constexpr uint8_t stretch_write_holds = 7;
+    static constexpr uint8_t stretch_read_holds = 9;
+    /// The bus's rail and the block, before the first tenure of a letter:
+    /// the supply above 3.0 V at boot, the block present and up, PB3 an
+    /// output reading high.
+    static bool bring_up() { return supply_ok && present_ok && host_ok && pad_is_output<Rail>() && Rail::read(); }
+};
+
+// ---- the pressure's clock ----------------------------------------------------------
+
+using Pulse = Tim<2>;
+static_assert(tim_clock_hz(SysClock{}) == SysClock::hz, "TIM2 counts HCLK at this clock");
+constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
+static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
+constexpr const char* pressure_name = "TIM2";
+constexpr const char* peer_name = "the CH32V006K8U6";
+
+// THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's I2C suite
+// compiles the same body around its own host.
+#include "../../../avrxt/src/apps/rubato_i2c.hpp"
+
+// =============================================================================
+// What the shared body asks of this family
+// =============================================================================
+
+void pressure_arm(uint16_t period_us) {
+    Pulse::enable(false);
+    Pulse::set_count(0);
+    (void)Pulse::set_period(static_cast<uint16_t>(static_cast<uint32_t>(period_us) * pulse_per_us - 1u));
+    Pulse::clear_flags(Pulse::update_flag);
+    Pulse::interrupts(Pulse::update_interrupt, true);
+}
+void pressure_go() { Pulse::enable(true); }
+void pressure_halt() { Pulse::enable(false); }
+void pressure_quiet() {
+    Pulse::interrupts(Pulse::update_interrupt, false);
+    Pulse::clear_flags(Pulse::update_flag);
+    Pfic::clear_pending(Pulse::update_irq());
+    spin(20'000u);   // the last tick's dispatch, if it was still running
+}
+
+/// STAR2.MSL: the block is the bus's master, from SB to the STOP
+/// (15.9.7). A STAR2 read completes ADDR's clearing sequence after a STAR1
+/// read, but this is read only inside start(), where no ADDR can stand:
+/// the last tenure ended and the next one's address is not out yet.
+bool host_on_wire() { return H::host(); }
+
+/// THE STACK GUARD. Under Rubato the pack's stack is as deep as its chain
+/// of preemptions; its deepest over every letter but h's overloaded pass
+/// is some 1.4 KB (the pass print's stack ledger). Letter h's flood at
+/// 97 us x 3000 asks more of this core than it has (the arbiter's backlog
+/// never drains), and every tick that lands between two dispatches of the
+/// scheduler's loop then opens one more level of it, 192 bytes each,
+/// until the stack meets .bss and the image crashes (measured: 26 levels
+/// in a dump, each level's saved mepc inside activate()). The pressure's
+/// vector reads the stack pointer first and, past this many bytes, stops
+/// the timer and counts the trip, so that the pass fails by name - its
+/// ticks short of the period's count - and the board stays up.
+constexpr uint32_t stack_guard_bytes = 4096;
+volatile uint32_t guard_trips = 0;
+volatile uint32_t guard_sp = 0;
+uint32_t stack_top() { return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(__stack_top)); }
+uint32_t guard_floor() { return stack_top() - stack_guard_bytes; }
+
+/// DMAINTENR's DMA request enables, bits 8 to 14: UDE, CC1DE..CC4DE, COMDE,
+/// TDE (12.4.4) - CC2DE and CC4DE are channel 7's (figure 9-1).
+constexpr uint16_t tim_dma_enables = 0x7F00u;
+
+/// A channel with nothing left to move: disabled, or its count at zero
+/// (the engines leave EN standing after a completed block, the next
+/// start() clears it - dma.hpp).
+template <typename Ch>
+bool channel_at_rest() {
+    return !Ch::enabled() || Ch::count() == 0u;
+}
+
+const char* host_dark() {
+    if (Pulse::enabled() || (Pulse::interrupts() & Pulse::update_interrupt) != 0u ||
+        (Pulse::interrupts() & tim_dma_enables) != 0u || Pfic::pending(Pulse::update_irq())) {
+        return "TIM2 running, its update interrupt or a DMA request enabled, or its line pending";
+    }
+    if (Host::busy()) {
+        return "the host's engine is not between tenures";
+    }
+    // finish() puts CTLR2 back to the error vector alone in one store, the
+    // event and buffer vectors and DMAEN and LAST with it (the class
+    // comment).
+    const uint16_t c2 = H::regs().CTLR2;
+    if ((c2 & (i2c_itevten | i2c_itbufen | i2c_dmaen | i2c_last)) != 0u || (c2 & i2c_iterren) == 0u) {
+        return "the host's enables are not at rest (the error vector alone, DMAEN and LAST clear)";
+    }
+    if (TxEngine::busy() || !channel_at_rest<TxChannel>() || !channel_at_rest<RxChannel>()) {
+        return "a DMA channel of the host's still has items to move";
+    }
+    // The release contract: no request held on channels 6 and 7's ORs.
+    if ((ConsoleUsart::regs().CTLR3 & (usart_dmat | usart_dmar)) != 0u) {
+        return "the console's DMA requests are enabled (USART2 shares channels 6 and 7)";
+    }
+    if (Rcc::enabled(Tim<1>::bus, Tim<1>::gate)) {
+        return "TIM1's gate is open (its channel 3 shares channel 6)";
+    }
+    if (H::busy() || H::host()) {
+        return "the bus monitor reads BUSY or MSL";
+    }
+    if (!SclPin::read() || !SdaPin::read()) {
+        return "a line reads low on its pad";
+    }
+    if (!pad_is_output<Rail>() || !Rail::read()) {
+        return "the rail PB3 is not driven high";
+    }
+    return nullptr;
+}
+
+void print_host() {
+    print(serial, "; the arbiter's queue overflows ", I2cArb::queue.overflows());
+    if (guard_trips != 0u) {
+        // The pass's own trip: cleared once printed (the next pass's arm
+        // starts the timer again).
+        print(serial, "; THE STACK GUARD TRIPPED (sp ", hex(guard_sp), ", ", stack_top() - guard_sp,
+              " bytes deep): the pressure's timer stopped");
+        guard_trips = 0;
+    }
+    print(serial, "; unwedges ", Host::unwedges(), ", transmit tails abandoned ", TxEngine::faults(),
+          ", receive faults ", RxEngine::faults(), " (since boot); stack never touched ", stack_untouched(), " B");
+}
+
+void console_banner() {
+    print(serial, crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=", tick_ok ? "STK" : "FAILED",
+          " ruler=STK supply=", supply_ok ? "above 3.0 V" : "LOW", " i2c1=",
+          !supply_ok ? "not tried" : (!present_ok ? "ABSENT (the lot note)" : (host_ok ? "host" : "FAILED")),
+          " rail=", pad_is_output<Rail>() ? "PB3 high" : "floating", " scheduler=", scheduler_in_ram ? "SRAM" : "flash",
+          crlf);
+    print(serial, "reset: RSTSCKR flags ", hex(boot_flags), ", panic record ");
+    if (boot_panic.has_value()) {
+        print(serial, "code ", boot_panic->code, " context ", boot_panic->context, crlf);
+    } else {
+        print(serial, "none", crlf);
+    }
+    if (!supply_ok) {
+        print(serial, "SUPPLY UNDER 3.0 V (the PVD at PLS 10): no letter registered, PB3 and the bus pads left "
+                      "floating",
+              crlf);
+    } else if (!present_ok || !host_ok) {
+        print(serial, "NO I2C BLOCK UP: no letter registered", crlf);
+    }
+    print(serial, "test_x035_rubato_i2c - the I2C stack under Rubato on the ", device::part_name, " against ",
+          peer_name, " (twi_peer)", crlf);
+    bench.menu();
+}
+
+// =============================================================================
+// q - the vocabulary under pressure, with this peer's answers
+// =============================================================================
+
+// THE SHARED LETTER'S TRAFFIC, THIS PEER'S VERDICTS. rubato_i2c.hpp's
+// tq_vocabulary() judges the tenure after each refusal i2c_ok and the
+// refused 2+4 by two address matches; the CH32V006 keeps its acknowledge
+// down after a refused byte (its arm_ack(): ACK goes back up only at a
+// Stop its loop sees, and a refused byte's Stop is not one it sees) until
+// its action's window closes, so that next probe is refused at its address
+// and the void write that closes the 2+4 too - the Tenuto suite's letter r
+// judges the same ("i2c_ok, or the address refused by a peer still deaf
+// from its refusal"). And the shared letter's probe of deaf_addr is left
+// out (the deaf case below says why). The shared header is frozen, so the
+// letter is this suite's, the traffic the shared letter's tenure for
+// tenure but that probe.
+
+void tq_vocabulary_ch32() {
+    for (uint8_t p = 0; p < pass_count; ++p) {
+        const PassSpec& s = passes[p];
+        begin(s);
+        if (!need_peer()) {
+            (void)pass_end(s);
+            return;
+        }
+        constexpr uint16_t deadline = 120;
+        // A deaf client: the probe and a write meet nobody at dut_addr. The
+        // shared letter's next tenure, a probe of deaf_addr where the peer
+        // parks, is NOT made here: 0x7A is an address of the 10-bit form
+        // (its write byte 0xF4 is the header 11110xx0b), which this host's
+        // block sends as a 10-bit header and answers with ADD10 (RM 15.3,
+        // step 4), a flag the engine's 7-bit phases never clear - the event
+        // vector re-entered without end and every thread starved, the
+        // arbiter's timeout with it (measured; docs/ch32x035/i2c.md, "Not
+        // covered yet"). The next tenures after the deaf window are the
+        // next command's, judged below.
+        twilink::Params deaf{};
+        deaf.ms = deadline;
+        deaf.addr = twilink::dut_addr;
+        deaf.flags = twilink::flag_deaf;
+        uint8_t probe = no_reply, wdeaf = no_reply;
+        const bool a1 = serve(deaf);
+        const uint32_t t1 = Ruler::now();
+        if (a1) {
+            const uint8_t w4[4] = {1, 2, 3, 4};
+            probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
+            wait_past(t1, deadline);
+        }
+        // The third byte of six refused (the write on the engines).
+        twilink::Params n3{};
+        n3.ms = deadline;
+        n3.addr = twilink::dut_addr;
+        n3.nack_at = 3;
+        uint8_t nack3 = no_reply, next2 = no_reply;
+        const uint32_t failed1 = cmd_failed;
+        const bool a2 = serve(n3);
+        const bool next1 = a2 && cmd_failed == failed1;
+        const uint32_t t2 = Ruler::now();
+        if (a2) {
+            const uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+            nack3 = arb_tenure(twilink::dut_addr, w6, 6, nullptr, 0, speeds[1]);
+            next2 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            wait_past(t2, deadline);
+        }
+        twilink::Report r2{};
+        const bool rep2 = a2 && report(r2);
+        // The LAST written byte of a 2+4 write-then-read refused: the
+        // controller lets go by a void write from the repeated START's SB,
+        // no read half follows.
+        twilink::Params n2{};
+        n2.ms = deadline;
+        n2.addr = twilink::dut_addr;
+        n2.nack_at = 2;
+        uint8_t nack2 = no_reply, next3 = no_reply;
+        const bool a3 = serve(n2);
+        const uint32_t t3 = Ruler::now();
+        if (a3) {
+            const uint8_t w2[2] = {0x77, 0x88};
+            for (uint8_t k = 0; k < 4u; ++k) {
+                rx_buf[k] = 0xEE;
+            }
+            nack2 = arb_tenure(twilink::dut_addr, w2, 2, rx_buf, 4, speeds[1]);
+            next3 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            wait_past(t3, deadline);
+        }
+        twilink::Report r{};
+        const bool rep = a3 && report(r);
+        const PassStats st = pass_end(s);
+        print_pass(s, st);
+        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then the next command ", next1 ? "acked, every tenure i2c_ok" : "NOT CLEAN",
+              "; the third of six refused: ", nack3, ", then the probe ", next2, " (peer addr_hits ", r2.addr_hits,
+              "); the last of a 2+4's write refused: ", nack2, ", then the probe ", next3, crlf);
+        if (rep) {
+            print_report(r);
+        }
+        // An answer on the wire after a refusal: i2c_ok, or the address
+        // refused by the peer still deaf from it. The peer's address
+        // matches follow: the refused tenure's one, and the probe's only
+        // when it was acknowledged.
+        const auto answered = [](uint8_t st) { return st == i2c_ok || st == i2c_nack_addr; };
+        const uint8_t hits3 = static_cast<uint8_t>(1u + (next2 == i2c_ok ? 1u : 0u));
+        // The 2+4: the refused tenure's first address; the void write's
+        // and the probe's when acknowledged (a peer that took one back up
+        // takes both).
+        const uint8_t hits2 = static_cast<uint8_t>(1u + (next3 == i2c_ok ? 2u : 0u));
+        bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next "
+                                     "command's tenures i2c_ok",
+                      a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1);
+        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the next tenure answered on the "
+                                     "wire (i2c_ok, or i2c_nack_addr from the peer still deaf), the peer's address "
+                                     "count the one it implies",
+                      a2 && nack3 == i2c_nack_data && answered(next2) && rep2 && r2.addr_hits == hits3 &&
+                          (r2.flags & twilink::report_nacked) != 0u);
+        bench.verdict(pass_label(s), "the last written byte of a 2+4 refused: i2c_nack_data, the controller let go "
+                                     "(no read half), the next tenure answered on the wire",
+                      a3 && nack2 == i2c_nack_data && answered(next3) && rep && r.addr_hits == hits2 &&
+                          (r.flags & twilink::report_nacked) != 0u && r.aux1 == 0u);
+        judge_pressure(s, st);
+    }
+}
+
+} // namespace
+
+// ---- target glue ------------------------------------------------------------
+
+BRIO_CH32_VECTOR(usart2_handler) {
+    if (Serial::isr()) {
+        brio::post<Console>(ConsoleEvent{console_rx});
+    }
+}
+
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+
+BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+
+/// The pressure: TIM2's update, where it landed, and the post - behind
+/// the stack guard (stack_guard_bytes, above): a stack pointer that deep
+/// stops the pressure's timer for good instead of letting the next tick
+/// nest once more.
+BRIO_CH32_VECTOR(tim2_up_handler) {
+    uint32_t sp_now;
+    __asm__ volatile("mv %0, sp" : "=r"(sp_now));
+    if (sp_now < guard_floor()) {
+        guard_trips = guard_trips + 1u;
+        guard_sp = sp_now;
+        Pulse::enable(false);
+        Pulse::interrupts(Pulse::update_interrupt, false);
+        Pulse::clear_flags(Pulse::update_flag);
+        return;
+    }
+    Pulse::clear_flags(Pulse::update_flag);
+    pressure_landed();
+}
+
+// The host's two vectors (table 7-1's entries 30 and 31): every event of a
+// tenure on the first, every error on the second, each ending a tenure
+// with its status.
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
+    if (Host::isr()) {
+        done_from_dma = false;
+        brio::post<I2cArb>(brio::TransferDone{Host::status()});
+    }
+}
+BRIO_CH32_VECTOR(i2c1_er_handler) {
+    if (Host::error_isr()) {
+        done_from_dma = false;
+        brio::post<I2cArb>(brio::TransferDone{Host::status()});
+    }
+}
+
+// The engines' two channels: a read block's completion on channel 7 ends
+// its tenure, a transfer error on either ends it i2c_dma_fault; the
+// transmit channel interrupts on an error alone (BTF ends a write).
+[[gnu::always_inline]] inline void host_dma() {
+    if (Host::dma_isr()) {
+        done_from_dma = true;
+        brio::post<I2cArb>(brio::TransferDone{Host::status()});
+    }
+}
+BRIO_CH32_VECTOR(dma1_channel6_handler) { host_dma(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { host_dma(); }
+
+int main() {
+    boot_flags = brio::Rcc::reset_flags();
+    brio::Rcc::clear_reset_flags();
+    boot_panic = brio::take_panic_record<P>();
+    clock_ok = SysClock::init();
+    const bool serial_ok = Serial::init(clock, 115200);
+    tick_ok = brio::Ticker::init(clock);
+
+    // THE SUPPLY before any bus pad is driven (the desk's rule), the rail
+    // only then, and the block asked before it is brought up.
+    brio::Pwr::pvd(brio::PvdLevel::v3_0);
+    (void)brio::delay_us(clock, 200);
+    supply_ok = !brio::Pwr::supply_low();
+    if (supply_ok) {
+        Rail::output(true);
+        present_ok = H::present();
+        host_ok = present_ok && Host::init(clock);
+    }
+    if (host_ok) {
+        Pulse::init();
+        (void)Pulse::configure(brio::TimConfig{.prescaler = 0, .period = 0xFFFFu});
+        brio::Pfic::enable(Pulse::update_irq());
+
+        bench.letter('n', "the command channel through the arbiter", tn_command_channel);
+        bench.letter('o', "the tenure shapes on both of the host's paths", to_shapes);
+        bench.letter('p', "the speeds, and the peer's commanded stretch", tp_speeds);
+        bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte",
+                     tq_vocabulary_ch32);
+        // The shared body's own letter q stays unregistered on this pair
+        // (above tq_vocabulary_ch32()); named once here so that the frozen
+        // header's definition is not an unused function under -Werror.
+        (void)tq_vocabulary;
+        bench.letter('w', "the arbiter with three requesters of three priorities", tw_arbiter);
+        // Letter h by name only, outside z: its flood at 97 us x 3000 is
+        // more than this core serves, and the preemptive kernel's stack
+        // then grows a level a tick (the stack guard above stops it there;
+        // the report's finding). The other six passes are green.
+        bench.letter('h', "the held wire, with requests arriving while it is held (its 97 us x 3000 pass "
+                          "overloads this core: the stack guard trips)",
+                     th_held_wire, false);
+        bench.letter('i', "dark: every object idle, nothing lit", ti_dark);
+        bench.letter('x', "the landings inside start() counted: 400 writes silent and pressed", tx_fill, false);
+    }
+    brio::scheduler_init();
+
+    (void)serial_ok;
+    brio::enable_interrupts();
+    K::run();
+}

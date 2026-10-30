@@ -173,3 +173,10 @@ too before the next capture is trusted.
   nothing about the idle path's power is measurable with the probe
   halted on it; and the debugger's `step` does not take pending
   interrupts.
+- **A hardware breakpoint outlives the session that set it.** One set by
+  an OpenOCD session that was killed (`bp 0x0 2 hw`) stays armed in the
+  QingKe's trigger registers across `brio flash`'s programming and reset,
+  and the core then halts at pc 0 at every boot with the console silent
+  (measured on the CH32X035F8U6: tdata1 0x2010104c, tdata2 0). Cleared
+  over the debug port - tselect 0 and 1, tdata1 0x20000000 - and the
+  image flashed again.

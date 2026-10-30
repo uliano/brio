@@ -135,9 +135,11 @@
  *     lower addresses
  *
  * THE PER-LEVEL SAVE IS THE MAIN STACK, not an array of the kernel's
- * indexed by a depth: each preemption adds one level, as deep as the
- * pack's chain of priorities, and the stack is where the nesting already
- * keeps its order, so no bound is chosen and no index is kept - the same
+ * indexed by a depth: each preemption adds one level - as deep as the
+ * pack's chain of priorities while the pack's load stays under the core,
+ * and deeper under an overload, where a request landing between two
+ * dispatches nests a level at the same ceiling (docs/design/kernel.md,
+ * the stack) - and the stack is where the nesting already keeps its order, so no bound is chosen and no index is kept - the same
  * two words below the frame the Cortex-M realization pushes
  * (cortexm/schedule.hpp). With the hardware prologue (the projects'
  * CH32VX03_HPE and CH32X035_HPE options, the default) the MRET pops the

@@ -1259,6 +1259,46 @@ The images: with the path in SRAM 38500 bytes of text and 3936 of data,
 42436 of the 62 KB (67 %), and 8916 bytes of RAM of 20 KB (44 %); with
 the path in the flash 42196 (66 %) and 5504 (27 %).
 
+**The I2C stack under the preemptive kernel** - the suite is
+`test_x035_rubato_i2c`, the scheduler path in SRAM, and its twin
+`test_x035_rubato_i2c_flash`, against the CH32V006K8U6's unchanged
+`twi_peer`: key `z` (159 verdicts) green on thirty runs of the first and
+twenty of the twin. A Rubato pack of five objects runs `util/i2c_bus.hpp`'s
+arbiter over the engined `I2cHost<1>` ([i2c.md](i2c.md)) with three
+requesters of three priorities, under the same TIM2 pressure and the same
+seven passes as the link suite; the target-free half is the I2C suites'
+shared body, `avrxt/src/apps/rubato_i2c.hpp`, and the waits and passes
+both bodies share are `avrxt/src/apps/rubato_passes.hpp`. Every tenure
+shape on both of the host's paths, both speeds, the vocabulary, the
+commanded stretch and the arbiter's ordering held under every pressure as
+in the control, and a preemption inside the host's `start()` is a later
+START, never a stretch (the findings are [i2c.md](i2c.md)'s, "The stack
+under the preemptive kernel"). Two of them are this kernel's:
+
+- **The tenure cycle locks to the pressure's period, at a phase the
+  placement moves.** Under 97 us x 3000, 400 writes landed TIM2's
+  interrupt inside `start()` 140 to 213 times with the scheduler path in
+  SRAM - five to eight times what independent ticks would give - and never
+  with the path in the flash, `start()` itself in the flash in both images.
+- **Past this core's capacity the stack grows a level a tick.** The
+  held-wire letter's flood at 97 us x 3000 asks more than the 4656 cycles
+  of a period hold (a rejected probe's chain costs some 1600 cycles over
+  Pressure's 3000). The arbiter's backlog never drains, the time events -
+  walked at the base of the pack - are starved, and every tick that lands
+  between two of the scheduler's dispatches, the ceiling back at the
+  level's base, opens a new level that serves the same objects as the one
+  it interrupts and returns only when all their queues are empty: one
+  level of 192 bytes a tick, never unwound, until the stack meets the
+  statics (26 levels read in a dump, each saved return address inside the
+  scheduler's loop). Under the cooperative kernel no dispatch nests
+  over another, so the same load would starve the lower objects at the
+  stack's one level (not run: the suite is the preemptive kernel's). The suite's
+  pressure vector stops TIM2 at a stack 4 KB deep, so the pass fails by
+  name; the letter runs outside `z`.
+
+The images: with the path in SRAM 34204 bytes of the 62 KB (54 %) and
+4336 of RAM (21 %); with the path in the flash 34000 and 2068.
+
 ## A handler in SRAM
 
 **What the silicon does.** At 48 MHz the code flash answers behind two

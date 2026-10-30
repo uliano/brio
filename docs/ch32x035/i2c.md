@@ -8,7 +8,8 @@ covers the one I2C of RM ch. 15, host and client, 7- and 10-bit
 addresses, dual addressing and the general call, two speeds with fast
 mode's two duty shapes, clock stretching, PEC, two DMA requests; and
 the host engine `I2cHost`, which the bus arbiter of util/i2c_bus.hpp
-drives on this silicon as on every other stratum: an active object
+drives on this silicon as on every other stratum, under the
+cooperative kernel and the preemptive one: an active object
 posts a request, the arbiter runs it as one bus tenure (a START, the
 address, the bytes, a STOP) and replies with an event when the wire is
 done ([design/i2c-bus.md](../design/i2c-bus.md)).
@@ -505,6 +506,140 @@ the same vector:
   re-initialised whole - DMA_DeInit and DMA_Init - for every block, where
   the engine stores five words.
 
+### The stack under the preemptive kernel (`test_x035_rubato_i2c`)
+
+Measured by `test_x035_rubato_i2c` and its twin `test_x035_rubato_i2c_flash`
+(the same source with the scheduler path in the flash, where the first
+runs it from SRAM, [platform.md](platform.md), "The scheduler's place"):
+`util/i2c_bus.hpp`'s arbiter (pending depth 4, the per-bus timeout at
+20 ms) over the engined `I2cHost<1>` on PC16/PC17 (channels 6 and 7) inside
+Rubato, against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
+pack's highest object every 97, 193 or 389 us and its dispatch spins 300
+or 3000 cycles - at 97 us x 3000, 64 % of the core. Every letter runs once
+with TIM2 silent and six times under it. Key `z` (159 verdicts) was green
+on thirty runs of the default image and twenty of the twin; the held-wire
+letter `h` runs by name only, outside `z`, for the reason its paragraph
+below gives. The pack, the command channel through the arbiter and the
+letters are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`,
+whose header describes them); letter `q` is the suite's own, for two
+reasons its paragraph gives.
+
+**Where a preemption can reach this host: before the START, or in
+`start()`'s last instructions after it.** `start()` waits for the last
+STOP and for BUSY, then stores START last: a dispatch above the arbiter
+that lands in it delays the START, a gap between tenures, and every byte
+decision after it is the vectors'. Letter `x` counts it on 400 writes of
+16 bytes on the engines: `start()` takes 330 cycles with TIM2 silent (332
+in the twin: it is in the flash in both images). Under 97 us x 3000 the
+interrupt landed inside it 140 to 213 times in three runs of the default
+image - against the 28 that ticks independent of the tenures would give -
+and none at all in three runs of the twin, `start()` there averaging 321
+cycles: the tenure cycle locks to the pressure's period in both images,
+at a phase inside `start()` in one and outside it in the other. MSL was
+never set at such a landing in `x`; in the letters of `z` it was, up to
+seven times a pass in `p`, `q` and `w` - a preemption after the START
+store that outlasted the START's way onto the wire, the tenure then the
+vector's from its first bit.
+
+**Every shape on both paths, under every pressure as in the control.**
+Letter `o`, at 400 kHz against one serve counted to its last byte: the
+probe, reads of 1 (the pump) and of 2, 3, 8 and 32 (channel 7 under
+LAST), write-then-reads of 1+1 (both halves the pump), 1+2 and 2+8 (the
+write half the pump, the read the engine), writes of 1 and 2 (the pump,
+both bytes loaded in the ADDR entry) and of 3, 8 and 32 (channel 6, BTF
+the end) - every one `i2c_ok`, every read byte-exact, the peer's count,
+sum and address matches exact. A shape's post-to-reply under pressure is
+the control's plus at most one dispatch and the path behind it: the
+32-byte write 805 us silent and at most 953 pressed with the scheduler
+path in SRAM, 817 and at most 1060 with it in the flash; the probe 70 and
+at most 274, 82 and at most 382. Letter `p`: a read of 16, a 1+4 and a
+write of 16 byte-exact at 100 and 400 kHz (the write of 16 in 1593 and
+438 us silent against the wire's 1530 and 382), and the peer's commanded
+stretch of 1000 us a byte priced from below - a read of 8 in 9260 to 9504
+us against its nine holds, a write of 8 in 7660 to 8132 us against its
+seven (the peer one byte late: the hold before each byte it takes
+overlaps the next byte's shifting in, and the write's last two fall after
+its tenure), under the 20 ms timeout.
+
+**The vocabulary under pressure, with this peer's answers.** Letter `q`:
+a deaf client answers the probe and a four-byte write `i2c_nack_addr`,
+and the next command's tenures are `i2c_ok`; the third byte of a
+six-byte write on the engines refused answers `i2c_nack_data`; the last
+written byte of a 2+4 refused answers `i2c_nack_data`, the controller let
+go by its void write and no read half begun. After each refusal the
+CH32V006 keeps its acknowledge down until its action's window closes, so
+the probe that follows is answered `i2c_nack_addr` and the peer counts
+one address match for the refused tenure - in every pass of every run,
+where the shared letter's verdicts expect `i2c_ok` and two (the suite's
+own letter judges the wire's answer instead, as `test_x035_i2c`'s letter
+`r` does). The shared letter also probes twi_link's `deaf_addr`, 0x7A,
+which this block cannot address (the driver gap below): the suite's
+letter leaves that probe out.
+
+**The arbiter with three requesters of three priorities.** Letter `w`,
+at 400 kHz: the requester above the arbiter's twenty write-then-reads of
+1+6 (the read half on channel 7), two outstanding; the one below it ten
+writes of two bytes (the pump); Pressure's eight probes in a pressure
+pass - every reply `i2c_ok`, to its own requester, in its order (slot k
+complete and k + 1 untouched at reply k), nothing rejected, the timeout
+never firing, the peer's count, sum and address matches exact; the
+letter in 6.8 to 12.7 ms with the scheduler path in SRAM and 7.2 to 20.8
+with it in the flash.
+
+**The held wire: `i2c_arb_lost` at the speed in force and at another.**
+Letter `h` (the peer holds SDA for 60 ms, the tenure into it, and in a
+pressure pass a probe from Pressure at every tick): at the speed in force
+the held tenure answered `i2c_arb_lost` in 448 to 986 us, its START out
+into the held line and its address's first one bit read back low; where
+a flood probe met the hold first, timed out and was recovered (SWRST, a
+block brought up over the held line, whose START stays pending), the
+held tenure behind it answered `i2c_timeout` at 21 ms. Met at 400 kHz
+after commands at 100 - the timing written again before the START, a PE
+cycle - it is `i2c_arb_lost` too (447 to 529 us): a PE cycle does not
+make this block forget the line it saw taken, where SWRST does. Up to
+three of Pressure's requests a pass arrived in the arbiter's draining
+window (between a timeout's recovery and its BusFlushed marker, an order
+only the preemptive kernel produces), every one answered once.
+
+**AT 97 US X 3000 LETTER `h` IS MORE THAN THIS CORE SERVES.** A probe
+answered `i2c_rejected` by an arbiter holding its four waiting - the
+flood's common case while the line is held - costs 1600 to 1630 cycles
+from its post to the poster's return, the reply's dispatch in Pressure
+included (measured from the console with the line held, the ruler's own
+pair of reads about 120 cycles of it); with Pressure's 3000 cycles, the
+road into it and its tick's own dispatch, a 97 us period of 4656 cycles
+has nothing left. The arbiter was found running at 17935 of 19361 ticks,
+its queue dropped 4495 posts (each a probe never answered), the time
+events - walked by the console's turns, starved - answered the held
+tenure after 64 ms to 2 s instead of 20, and the preemptive kernel's stack
+grew by one level of 192 bytes for each tick that landed between two of
+the scheduler's dispatches (26 levels read in a dump, each level's
+saved return address inside the scheduler's loop), until it met the
+statics and the image crashed. The suite's pressure vector carries a
+stack guard (4 KB under the stack's top) that stops TIM2 there, so the
+pass fails by name; at 193 us x 3000 the same flood is served, the stack
+at its usual depth. The other six passes of `h` are green in every run.
+
+**Dark** (letter `i`): every object idle, the arbiter's vote for the
+sleep, no time event armed, TIM2 stopped with its update interrupt and
+every DMA enable of DMAINTENR clear, the host's phase idle with CTLR2 at
+the error vector alone, channels 6 and 7 with nothing left to move, the
+console's DMA enables clear and TIM1's gate shut (the other requesters
+ORed into channels 6 and 7), BUSY and MSL clear, both lines high, PB3
+driven high. `unwedges()` stayed 0 and the receive engine counted no
+fault in every run. The transmit engine's fault count rises by one at
+every tenure an error ends - a NACK on the address included -, since the
+error path's `put_engines_away()` calls `abandon()` whatever the engine
+held: a count of error-ended tenures, not of transmit tails.
+
+**Where the code runs.** With the scheduler path in SRAM, `activate()` is
+1874 bytes there, with the dispatches of Pressure, the requester below the
+arbiter and the console inlined into it, `.data` 2468 bytes against the
+twin's 420; the arbiter's dispatch is reached through its state machine's
+handler pointer, in the flash in both images, and so is `start()`. The
+images: 34204 bytes of the 62 KB (54 %) and 4336 of RAM in the default,
+34000 and 2068 in the twin.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -523,6 +658,25 @@ Driver gaps, each with its reason:
   has two boards.
 - Fast mode Plus: 15.1 names two speeds and the datasheet gives the I2C
   no timing table; the engine has no third speed.
+- **An address of the 10-bit header's form in a 7-bit Request, 0x78 to
+  0x7B.** Its write byte is 11110xx0b, which the block sends as a 10-bit
+  header and answers with ADD10, waiting for the second address byte
+  (15.3, step 4); the engine's phases wait for ADDR, the event vector
+  re-enters on ADD10 without end, and every thread starves - the
+  arbiter's timeout with it, its time events walked at thread level.
+  Measured: a probe of 0x7A against a peer serving there left STAR1 at
+  0x0008 (ADD10), STAR2 MSL and BUSY, CTLR2 with the event vector on.
+  `start()` does not refuse these addresses (the I2C-bus specification
+  reserves them for 10-bit addressing) and the host has no 10-bit path;
+  which of the two the engine takes is the driver's decision, not yet
+  made.
+- **This chip as the bus's target, served from an active object, under
+  the preemptive kernel.** A target whose bytes come from an object (its
+  vector posting "the host reads" and leaving SCL held, a dispatch giving
+  the byte) is the one place a held-off reader would stretch the clock;
+  no util service serves a target that way (`I2cClient` is served from
+  its vectors). The desk peer, the CH32V006's `twi_peer`, can read this
+  board's target (`host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
 
