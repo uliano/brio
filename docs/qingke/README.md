@@ -146,24 +146,33 @@ the software interrupt's (`software_handler`) and the environment call's
 The two bodies keep the kernel's entry and exit (`kernel/platform.hpp`).
 These cores do not clear MIE when they take an interrupt or an
 exception (the V4 manual 2.2), and the peripheral lines preempt the
-software interrupt's handler, so each body clears MIE as its first
-instruction. The trap's body then reads the kernel's ceiling into a
-byte of the block it leaves on the stack and stores 0 in its place; the
-entry hands that byte, `base`, to `activate(base)` and writes the count
-of quiet posts it returns into the next byte; the environment call's
-body puts `base` back, compares the count and, when it moved, pends the
-software interrupt again, which is taken over the interrupted code once
-its MRET has popped the block. One moment stays open, the trap's first
-instruction, at which a peripheral handler can still preempt it: a
-request made there is taken at the entry, as a run that finds the
-ceiling at 0 and serves nothing (kernel/rubato.hpp, "The stack"). By the
-release listings, with the hardware prologue and the linker's
-relaxation turning each address's `lui` and access into one access
-relative to gp: the trap's body thirteen instructions where it was
-nine, the environment call's twelve on the path that finds the count
-still and sixteen on the path that pends, where it was six, the entry
-forty where it was thirty-eight (ninety-five and ninety-three with the
-V4F's f-registers). The body is a template on the kernel,
+software interrupt's handler, so each body clears MIE itself. The trap's
+body does it with a `csrrci` that also reads the mstatus the trap was
+taken with, the old value read and the bit cleared in one instruction:
+a peripheral line taken right after a mask has retired - the mask's
+shadow - comes back with mstatus.MPIE clear, and a body that read
+mstatus after its mask saved that clear MPIE, so the exit's MRET left
+the interrupted code masked for good (measured on the CH32X035F8U6 and
+the CH32V203C8T6, the ticker stopped and the program hung; the header's
+"THE MASK'S SHADOW IN THE TRAP" has the counts). With the hardware
+prologue the `csrrci` is the body's first instruction; without it, the
+block is made and t0 saved in it first, so that the `csrrci` has a
+register to read into. The trap's body then reads the kernel's ceiling
+into a byte of the block it leaves on the stack and stores 0 in its
+place; the entry hands that byte, `base`, to `activate(base)` and writes
+the count of quiet posts it returns into the next byte; the environment
+call's body puts `base` back, compares the count and, when it moved,
+pends the software interrupt again, which is taken over the interrupted
+code once its MRET has popped the block. One window stays open - until the
+trap's `csrrci` executes, and that instruction's shadow - in which a peripheral handler can still run: a
+request made there is taken at the entry, as a run that finds the ceiling at 0 and serves
+nothing (kernel/rubato.hpp, "The stack"). By the release listings, with
+the hardware prologue and the linker's relaxation turning each
+address's `lui` and access into one access relative to gp: the trap's
+body thirteen instructions, the environment call's twelve on the path
+that finds the count still and sixteen on the path that pends, the
+entry forty (ninety-five with the V4F's f-registers). The body is a
+template on the kernel,
 `scheduler_return<K>()`, because no register can carry the addresses
 into it: the hardware prologue's pop at its MRET gives the interrupted
 code back every register the environment call found.

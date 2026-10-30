@@ -82,8 +82,7 @@ architectures.
   instructions, fourteen on the Cortex-M4; the entry twelve, sixteen
   with the FPU's four, four of them still masked; SVC's eleven on the
   path that finds the count still, twelve on the Cortex-M4, and five
-  more, two of them branches, on the path that pends - where the entry
-  was two instructions (six with the FPU) and the SVC handler three.
+  more, two of them branches, on the path that pends.
   Because the addresses come in SVC's frame, which the core's own entry
   wrote, one SVC body serves every kernel, the two of a pair of cores
   included. The frames, the FPU's lazy context and EXC_RETURN's bits
@@ -98,17 +97,17 @@ architectures.
   [../stm32g0/platform.md](../stm32g0/platform.md)), the SAM C21's
   Cortex-M0+ (`samc21/platform.hpp`'s `SamRubatoPlatform`, measured on
   the SAMC21J18A: road 1 from an interrupt's last statement to the
-  preempting dispatch's first in 232 cycles, the SVC vector bound by
+  preempting dispatch's first in 251 cycles, the SVC vector bound by
   that crt's name `SVCall_Handler`, a PendSV pending at the idle's WFI
   ending it, [../samc21/platform.md](../samc21/platform.md)), the
   RP2040's (`rp2040/platform.hpp`'s `Rp2040RubatoPlatform`, one per
   core, each core pending and taking its own PendSV, the one vector
   table's entry bound to `rp2040/schedule.hpp`'s pair body when both
-  cores run the kernel, measured on the WeAct RP2040: road 1 in 197
+  cores run the kernel, measured on the WeAct RP2040: road 1 in 213
   cycles, a Rubato on each core preempting at once through that entry,
   [../rp2040/platform.md](../rp2040/platform.md)) and the RP2350's
   Cortex-M33 (`rp2350/platform.hpp`'s `Rp2350RubatoPlatform`, measured
-  on the WeAct RP2350B: road 1 in 106 cycles with the pair body bound,
+  on the WeAct RP2350B: road 1 in 122 cycles with the pair body bound,
   a Rubato on each core through the one PendSV entry,
   [../rp2350/platform.md](../rp2350/platform.md)); the M33's cycle
   figures are its own, measured by `test_rp2350_platform`'s letter i

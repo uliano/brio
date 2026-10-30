@@ -618,18 +618,18 @@ benchmark instrument's image, which has no writer, three passes of 16
 
 | | cycles |
 |---|---|
-| the line printed from an object's dispatch, cold (the first after the console drained: its run starts the idle transmitter, and one entry of the transmit handler falls inside) / warm, the line right behind the cold one (the handler's second entry falls inside: the transmitter takes the first byte into its shift register a bit time later) | 1987 to 2099 / 1896 to 2076 |
-| the same, warm, with interrupts masked: the core's own cycles, no handler inside | 1778 to 1906 |
-| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1101 to 1135 / 644 to 773 |
-| `print()` straight into the transport, warm and masked, in the same image | 1426 to 1534 |
+| the line printed from an object's dispatch, cold (the first after the console drained: its run starts the idle transmitter, and one entry of the transmit handler falls inside) / warm, the line right behind the cold one (the handler's second entry falls inside: the transmitter takes the first byte into its shift register a bit time later) | 1995 to 2127 / 1913 to 2037 |
+| the same, warm, with interrupts masked: the core's own cycles, no handler inside | 1770 to 1902 |
+| of a warm one with interrupts enabled: the four texts into the stage / the line's end, its publish | 1101 to 1135 / 648 to 800 |
+| `print()` straight into the transport, warm and masked, in the same image | 1414 to 1530 |
 | `print()` straight into the transport in the image with no writer, cold (two entries of the transmit handler inside, 144 cycles) / warm | 1861 to 1981 / 1536 to 1652 |
-| the transport's run alone, warm and masked: 2 bytes / 60 bytes | 188 to 196 / 325 to 441 |
+| the transport's run alone, warm and masked: 2 bytes / 60 bytes | 187 to 195 / 325 to 437 |
 
 The writer's line is the whole cost: nothing runs after the call. Like
 against like, the writer's masked line against the direct print masked
-in the same image is 1778 to 1906 against 1426 to 1534, some 360 cycles
+in the same image is 1770 to 1902 against 1414 to 1530, some 360 cycles
 more, over a fifth; its warm line against the instrument's warm direct
-print is 1896 to 2076 against 1536 to 1652, some 360 more at the least
+print is 1913 to 2037 against 1536 to 1652, some 380 more at the least
 of each. What
 the writer adds: the stage's resolution at each text (the source, its
 slot), the stage's take and the lock, and a copy of every byte into the
