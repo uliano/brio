@@ -544,8 +544,8 @@ PA22/PA23 at 48 MHz inside Rubato, the preemptive kernel, against the
 same AVR64EA48 `twi_peer`, while TC4 posts to the pack's highest object
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 97 us x 3000, 64 % of the core. Every letter runs once with TC4 silent
-and six times under it; **202 verdicts, green on every run: thirty of
-the letters `n`, `o`, `p`, `w` and `i`, ten of `q` and `h`**. The pack, the command channel through the arbiter and the letters
+and six times under it; **202 verdicts, green in each of three runs of
+`z`**. The pack, the command channel through the arbiter and the letters
 are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
 header describes them), and [platform.md](platform.md) places the suite
 among the preemptive kernel's. Every serve the body commands asks the
@@ -634,18 +634,20 @@ at once after a recovery, the completion's vector and dispatch, the
 reply into the preempting object); with a 3000-cycle spin that is more
 than the 4656 cycles of a 97 us period. Posted at every tick, the
 objects above the Console never empty, the Console - the one object
-that stops the flood - never runs again, the pack is overloaded for
-good, and under Rubato that overload does not stall: it spends the stack
-until it has written over the RAM above `.bss` ([platform.md](platform.md)
-has the measurement). The shared letter therefore posts a probe at a
+that stops the flood - does not run while the flood lasts, and the pack
+is overloaded for good: its queues drop what they cannot hold, while the
+stack stays within the pack's five runs of the scheduler (the suite's
+letter `u`, outside `z`, floods so for 1000 ticks: 1284 bytes of
+high-water, [platform.md](platform.md) has the bound and the
+measurement). The shared letter therefore posts a probe at a
 tick only when the Console has turned since the last: a turn of the
 lowest object says the pack above it was idle, so the flood takes only
 the time the core has left (the first probe of a hold excepted, which
-needs no turn). At 97 us x 3000 that is 204 to 208 probes in the pass's
-973 ticks (the lighter passes keep a probe at most ticks: up to 657 at
-97 us x 300); the suite paints and reads the stack around every pass:
-1064 to 1596 bytes over every letter, `h` included (1156 to 1596 there,
-its heaviest pass among them).
+needs no turn). At 97 us x 3000 that is 169 to 171 probes in the pass's
+some 970 ticks (the lighter passes keep a probe at more ticks: 504 to
+532 at 97 us x 300); the suite paints and reads the stack around every
+pass: 1052 to 1556 bytes over every letter, `h` included (1116 to 1348
+there).
 
 **Dark** (letter `i`): every object idle, the arbiter's vote for the
 sleep, no time event armed, TC4 stopped, the host between tenures with

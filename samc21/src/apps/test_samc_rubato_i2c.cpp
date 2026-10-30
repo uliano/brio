@@ -60,7 +60,7 @@
 //   clock channel from generator 0, prescaler 1: 97 / 193 / 389 us are 4656
 //   / 9264 / 18672 counts, CC0 one less - the link suite's. Free of SERCOM3
 //   (the bus under test), SERCOM5 (the console) and SysTick. Its tick's
-//   dispatch, a 3000-cycle spin, and road 1's 232 (docs/samc21/platform.md)
+//   dispatch, a 3000-cycle spin, and road 1's 251 (docs/samc21/platform.md)
 //   are shorter than the shortest period's 4656 cycles, so no tick finds
 //   the last one still queued; at 97 us x 3000 it takes 64 % of the core.
 //   Letter h's flood adds probes whose whole cost is far more than their
@@ -116,8 +116,8 @@
 //     ack's arrival here (the body's arithmetic), the 0.64 % a few hundred
 //     microseconds of it.
 //
-// The letters (z: n o p q w h i; x outside it), each but i and x run as
-// seven passes (the shared body's control and six pressures):
+// The letters (z: n o p q w h i; x and u outside it), each but i, x and u
+// run as seven passes (the shared body's control and six pressures):
 //   n  the command channel through the arbiter at 100 kHz: a ping, ident
 //      (the sanity byte and the avrxt port's kind, 0x01), ten pings, every
 //      tenure i2c_ok.
@@ -143,13 +143,11 @@
 //      signatures (I2cTraits::held_bus_error).
 //   THE STACK is painted and read around every pass (print_host()), its
 //   high-water printed with the pass: Rubato runs every dispatch on the one
-//   main stack, and a road-1 request landing in activate()'s scan between
-//   two dispatches - the ceiling back at the scan's own - nests a whole
-//   scheduler level at that same ceiling, which unwinds only when every
-//   queue below it has drained; so the depth grows with the load, not with
-//   the pack's length (docs/samc21/platform.md: past the RAM under a flood
-//   at every tick of 97 us x 1000). THE SERVES carry flag_stop_interrupt
-//   (the shared body's serve()): this peer sees a STOP only with it.
+//   main stack, a pack of five holds at most five runs of the scheduler
+//   (kernel/rubato.hpp, "The stack"), and letter u bounds the high-water by
+//   them under the heaviest load this suite makes. THE SERVES carry
+//   flag_stop_interrupt (the shared body's serve()): this peer sees a STOP
+//   only with it.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,
 //      TC4 stopped and its line quiet, the host idle with ERROR alone armed,
 //      no flag standing, its line enabled and not pending, the bus monitor
@@ -157,9 +155,31 @@
 //   x  (outside z) 400 writes of 16 silent and 400 under 97 us x 3000:
 //      the landings inside start() counted, and of them those with the bus
 //      monitor reading OWNER.
+//   u  (outside z) letter h's held wire at 97 us x 3000 with the flood
+//      UNPACED: for 1000 ticks TC4's handler marks the Console's turn
+//      itself, so Pressure posts a probe at every tick. Every probe is at
+//      least a post, the arbiter's dispatch and its reply's road 2 into
+//      Pressure, more than a 97 us period leaves beside the 3000-cycle
+//      tick, so the pack above the Console stays busy for the whole window
+//      and the Console, the flood's pacer, does not turn (98 ms between two
+//      of its turns, measured): the timeout of the first probe, parked on
+//      the held line, is a time event its turns walk, so it does not
+//      mature either, and the probes after it fill the pending FIFO
+//      (i2c_rejected) and then the arbiter's queue, which drops them - the
+//      load under which a scheduler that nested a run at every landing
+//      between two dispatches would grow its stack without bound. The
+//      stack is painted before the hold and read
+//      after it: its high-water within the five runs' arithmetic
+//      (unpaced_stack_bound's comment), the window whole, a guard at 16 KB
+//      that would have ended it unreached. An overload drops what it cannot
+//      queue, so the held wire's requirement is not letter h's: every probe
+//      answered at most once, in the vocabulary, or counted among the posts
+//      the arbiter's full queue dropped; and the overload over, the next
+//      tenure i2c_ok and the arbiter idle.
 //
 // RUNNING IT: `brio flash <the SAM board> test_samc_rubato_i2c`, the peer
-// on twi_peer; then `brio run <board> z`.
+// on twi_peer; then `brio run <board> z`, and x or u by name with
+// `brio run <board> u --expect=" pass, "`.
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -439,6 +459,134 @@ void console_banner() {
     bench.menu();
 }
 
+// =============================================================================
+// u - outside z: the held wire under the flood unpaced, the stack bounded
+// =============================================================================
+
+/// Letter u's window, counted in ticks of TC4 while letter h's flood is
+/// live: at each one TC4's handler marks the Console's turn itself, so
+/// Pressure posts a probe at every tick - the flood the shared body paces,
+/// unpaced. 1000 ticks of 97 us are 97 ms: past the hold's 60 ms and the
+/// Console's 70 ms wait for the release, when the core is overloaded the
+/// Console's own turns cannot come at all.
+constexpr uint16_t unpaced_window = 1000;
+/// The window's guard: a tick that finds the main stack more than 16 KB
+/// below the top of RAM ends the window, so that a kernel whose stack grows
+/// with the load stops the flood with half the RAM still free (.bss ends
+/// below 0x20000900 in this image, the stack starts at 0x20008000).
+constexpr uint32_t unpaced_guard_bytes = 16384;
+volatile uint16_t unpaced_ticks = 0;     ///< the window's ticks still to grant
+volatile uint16_t unpaced_given = 0;     ///< the ticks the window granted
+volatile bool unpaced_guard_hit = false;
+volatile uint32_t unpaced_sp_low = 0xFFFF'FFFFu;   ///< the lowest MSP the window's ticks found
+
+/// TC4's share of the window, from its handler: the stack pointer the tick
+/// interrupted, the guard, and the mark that lets Pressure's dispatch of
+/// this tick post a probe.
+void unpaced_tick() {
+    const uint32_t sp = __get_MSP();
+    if (sp < unpaced_sp_low) {
+        unpaced_sp_low = sp;
+    }
+    if (sp < reinterpret_cast<uintptr_t>(&__stack_top) - unpaced_guard_bytes) {
+        unpaced_guard_hit = true;
+        unpaced_ticks = 0;
+        return;
+    }
+    unpaced_ticks = static_cast<uint16_t>(unpaced_ticks - 1u);
+    unpaced_given = static_cast<uint16_t>(unpaced_given + 1u);
+    h::turned = true;
+}
+
+/// THE STACK'S BOUND under the preemptive kernel, by the release listing
+/// of this image (each function's pushes and `sub sp` summed, the deepest
+/// callee followed, an indirect call charged its deepest candidate). A
+/// pack of five holds at most five runs (kernel/rubato.hpp, "The stack"):
+/// the loop's own, whose dispatch is the Console's, and four nested ones,
+/// each started at a dispatch of an index below the last and serving
+/// above it - Minor's, the arbiter's, the Client's and Pressure's, the
+/// deepest chain there is. From the top of RAM:
+///   - the Console's chain: Reset_Handler 8, main() with the kernel loop
+///     inlined 96, the loop's activate() 88, the letter's call through
+///     TestBench's handle() and run() 56, and this letter with everything
+///     it calls 588 (its deepest chain: held_tenure(), the command
+///     channel's frame receipt, a tenure posted and its buffers cleared):
+///     836;
+///   - each of the four nested runs: what starts it - an exception frame
+///     over the code it preempts (32, and 4 when the core aligns it) and
+///     PendSV's two words (8): 44, or nothing for the Console's base turn,
+///     which calls activate() itself - then activate()'s frame, 88, and the
+///     deepest a dispatch reaches below it, 180 (the arbiter's state
+///     machine down to the SERCOM's synchronization wait; every other
+///     object's dispatch reaches less): 312 a run, 1248 for the four;
+///   - over Pressure's dispatch, whose index 0 no post can preempt, one
+///     interrupt: its frame, 36, and the deepest handler, SERCOM3's 60
+///     (the pump's synchronization wait): 96.
+/// The run at a ceiling of 0 a handler preempting PendSV's first
+/// instruction can leave (cortexm/schedule.hpp) takes the place of the
+/// topmost run: the delayed run's 44, the empty run's 44 and 88 and an
+/// interrupt's 96 are 272, under the topmost full run's 312 + 96. The
+/// fake frame (32) and the exit's SVC frame (32) each stand where an
+/// activate() frame of 88 would. So the high-water is at most
+/// 836 + 1248 + 96 = 2180 bytes.
+constexpr uint32_t unpaced_console = 8u + 96u + 88u + 56u + 588u;
+constexpr uint32_t unpaced_stack_bound = unpaced_console + 4u * (44u + 88u + 180u) + 36u + 60u;
+static_assert(unpaced_stack_bound == 2180u, "the arithmetic beside it");
+
+void tu_unpaced() {
+    const PassSpec s = pass_at(4);   // 97 us x 3000
+    begin(s);
+    if (!need_peer()) {
+        (void)pass_end(s);
+        return;
+    }
+    const uint8_t stale0 = I2cArb::stale_events();
+    const uint16_t dropped0 = I2cArb::queue.overflows();
+    unpaced_given = 0;
+    unpaced_guard_hit = false;
+    unpaced_sp_low = 0xFFFF'FFFFu;
+    paint_stack();
+    unpaced_ticks = unpaced_window;
+    const HeldOutcome o = held_tenure(speeds[0], true);
+    unpaced_ticks = 0;
+    const uint32_t used = stack_used();
+    const uint8_t stale = static_cast<uint8_t>(I2cArb::stale_events() - stale0);
+    const uint16_t dropped = static_cast<uint16_t>(I2cArb::queue.overflows() - dropped0);
+    const PassStats st = pass_end(s);
+    print_pass(s, st);
+    const uint32_t sp_depth =
+        unpaced_sp_low == 0xFFFF'FFFFu ? 0u : reinterpret_cast<uintptr_t>(&__stack_top) - unpaced_sp_low;
+    print(serial, "  the flood unpaced for ", unpaced_given, " of ", unpaced_window, " ticks",
+          unpaced_guard_hit ? " (CUT BY THE STACK GUARD)" : "", "; the hold's stack high-water ", used,
+          " bytes (the bound ", unpaced_stack_bound, "), the deepest stack pointer a tick found ", sp_depth,
+          " bytes below the top", crlf);
+    print(serial, "    the Console's turns ", us_of(o.turn_gap), " us apart at most; Pressure posted ", h::press.posted,
+          ", answered ", h::press.replies, " (ok ", h::press.ok, ", rejected ", h::press.rejected, ", timeout ",
+          h::press.timeouts, ", arb_lost ", h::press.arb_lost, ", nack_addr ", h::press.nack_addr, ", bus_error ",
+          h::press.bus_errors, ", other ", h::press.other, "), the arbiter's queue full for ", dropped,
+          " posts; the Client's tenure into the hold: status ", o.status, status_name(o.status), ", ",
+          us_of(o.cycles), " us from its post, ", us_of(o.from_start), " from its start(); stale ", stale,
+          "; next tenure ", o.next, ", the vote ", o.idle ? "idle" : "NOT IDLE", crlf);
+    bench.verdict(pass_label(s), "the flood ran unpaced, a probe at every tick of the window, the stack guard "
+                                 "never reached",
+                  unpaced_given == unpaced_window && !unpaced_guard_hit && h::press.posted >= unpaced_given);
+    bench.verdict(pass_label(s), "the stack's high-water within the pack's five runs (the arithmetic beside "
+                                 "the bound)",
+                  used <= unpaced_stack_bound);
+    // An overload drops what it cannot queue (kernel/post.hpp: a full
+    // queue drops and counts), so the accounting is the requirement: no
+    // probe answered twice, none answered outside the vocabulary, and every
+    // one answered or counted among the arbiter's dropped posts.
+    bench.verdict(pass_label(s), "every probe answered at most once and in the vocabulary, the rest counted "
+                                 "dropped by the arbiter's full queue",
+                  h::press.replies <= h::press.posted && h::press.other == 0u &&
+                      h::press.ok_early == 0u && h::press.nack_early == 0u &&
+                      static_cast<uint32_t>(h::press.replies) + dropped >= h::press.posted);
+    bench.verdict(pass_label(s), "the overload over, the next tenure i2c_ok and the arbiter idle (its own vote)",
+                  o.next == i2c_ok && o.idle);
+    judge_pressure(s, st);
+}
+
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
@@ -460,6 +608,9 @@ extern "C" [[gnu::naked]] void SVCall_Handler() { brio::scheduler_return(); }
 /// The pressure: TC4's overflow, where it landed, and the post.
 extern "C" void TC4_Handler() {
     Pulse::clear_flags(Pulse::overflow_flag);
+    if (unpaced_ticks != 0u && h::live) {
+        unpaced_tick();   // letter u's window
+    }
     pressure_landed();
 }
 
@@ -493,6 +644,8 @@ int main() {
     bench.letter('h', "the held wire, with requests arriving while it is held", th_held_wire);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);
     bench.letter('x', "the landings inside start() counted: 400 writes silent and pressed", tx_fill, false);
+    bench.letter('u', "the held wire under the flood unpaced at 97 us x 3000, the stack bounded", tu_unpaced,
+                 false);
 
     (void)serial_ok;
     paint_stack();

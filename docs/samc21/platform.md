@@ -551,14 +551,17 @@ are 48 cycles apart, a cost taken off every span below, and across four
 tick reloads it reads 4 x 48000 cycles within 7. CPU cycles, each figure
 within the bound its letter derives from the release listing and the
 Cortex-M0+'s cycle table with every flash line paid at its worst
-alignment, a fifth on top. That count is not an upper bound on this
-flash: road 1, the scheduler's pass and the section's end measure 4 to 5
-cycles over it, while the same instructions at 16 MHz, the flash behind
-no wait state, measured 1 to 4 under their zero-wait count in a
-diagnostic build (not kept) - a literal that misses costs more than the
-two wait states the count charges it, by a mechanism inside the flash
-controller not established - so
-letter c's threshold for a slow event stands on the quiet path measured.
+alignment, a fifth on top. That count is not proven an upper bound on
+this flash. Its zero-wait part is the instructions' own: the suite's
+paths at 16 MHz, the flash behind no wait state, measured 1 to 6 cycles
+under it in a diagnostic build (not kept). Every path measures under the
+whole count, road 1 by 1 to 2 cycles, the scheduler's pass by 4, the
+road-2 post by 26; but where the code sits moves a path's cost by up to
+ten cycles either way - a build with the same instructions four bytes
+lower (not kept) measured road 1 six cycles faster, the pass ten, the
+section's end two slower - by a mechanism inside the flash controller not
+established, so letter c's threshold for a slow event stands on the quiet
+path measured.
 An event a kernel tick landed in is told apart by the tick count read
 around it and reported, and the bound judges the events nothing
 lengthened:
@@ -572,16 +575,24 @@ lengthened:
   running then, nothing posting to Top between letters); Low posting to Mid and Mid to High nests High
   inside Mid inside Low, each inside the post that asked; at depth 2 an
   interrupt over High's handler, started by either road, runs Top before
-  High resumes, Top's first statement 200 to 201 cycles after the
+  High resumes, Top's first statement 234 to 235 cycles after the
   handler's last.
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 231 cycles min and 232
-  median over 100 events in every run, none missed; eight events in the
-  thousand of ten runs took 275 to 294, each one a kernel tick landed in.
+  last statement to High's handler's first, 250 cycles min and 251
+  median over 100 events in every run, none missed; eleven events in the
+  thousand of ten runs took 298 to 321, each one a kernel tick landed in.
+  The path is 112 instructions by the listing: the handler's exit and the
+  tail-chain into PendSV, the entry storing the ceiling 0 while PendSV's
+  mask still holds, and a choice that reads the count of quiet posts,
+  raises the ceiling to High and finds the count unmoved.
 - **The scheduler and the post** (letter d): `activate()` over four
-  empty queues, each queue's two cursors compared in line, 167 cycles; a
-  post that asks for nothing 107; a post that runs High's empty dispatch
-  inside it 654, the scheduling's share 547.
+  empty queues, each queue's two cursors compared in line, entered by
+  hand as the platform's entry enters it, 216 cycles (`activate()` alone
+  50 instructions); a post that asks for nothing 130, the count of quiet
+  posts loaded, incremented and stored among its eighteen instructions; a
+  post that runs High's empty dispatch inside it 715, the scheduling's
+  share 585, the exit through SVC eleven instructions on the path that
+  finds the count unmoved.
 - **Time events under preemption** (letter f): three timers matured in
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
@@ -592,19 +603,19 @@ lengthened:
   PendSV and is served when the section's guard restores the mask,
   before the statement after it, from the Console's dispatch and from
   inside Low's; the section's last statement to the receiver's first
-  257 to 258 cycles.
+  274 to 275 cycles.
 - **The request pending at the idle's WFI** (letter w): with interrupts
   masked as the kernel's idle path masks them, a post to Mid pends
   PendSV and the platform's own `idle()` follows. **A pending PendSV
   ends the WFI, in IDLE0 and in IDLE2**: Mid served at the unmask,
-  before the next tick, in 10 of 10 runs in each mode, 266 to 267 cycles
+  before the next tick, in 10 of 10 runs in each mode, 283 to 284 cycles
   from the stamp before `idle()` to Mid's first statement; the letter
   hands PM.SLEEPCFG back at IDLE0. STANDBY is not walked (the end of
   "Not covered yet").
 - **Dark** (letter i): every object idle, no time event armed, TC4's
   line quiet, PB23 (the LED's pad) not an output, the ceiling the
   Console's, interrupts enabled.
-- **The stack** (letter h): 556 to 580 bytes of high-water for the
+- **The stack** (letter h): 588 bytes of high-water in every run for the
   suite's deepest chain, the deepest sampled stack pointer at 496 bytes
   in a dispatch and 408 in the interrupt.
 - **Where the code sits** (PendSV's body thirteen instructions and 32
@@ -621,9 +632,10 @@ lengthened:
 
 **The drivers under the preemptive kernel** - the suite is
 `test_samc_rubato_link`, two keys against the AVR64EA48's unchanged
-`spi_peer` (`z`, 119 verdicts) and `usart_peer` (`y`, 125 verdicts), three
-runs of each alike, every verdict green. It runs the real SPI and UART
-stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
+`spi_peer` (`z`, 119 verdicts) and `usart_peer` (`y`, 125 verdicts), every
+verdict green but the pressure's, which about a third of the runs of `z`
+fail for a reason of the suite's own (the last item below). It runs the
+real SPI and UART stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
 arbiter over `SpiHost<1>` ([spi.md](spi.md); the polled loop and the RXC
 pump, no DMA data phase), `util/line_reader.hpp`'s `LineReader` over
 `Uart<1>` and its interrupt receiver ([sercom.md](sercom.md)), a
@@ -707,6 +719,20 @@ character its polled loop has not fetched yet. What it established:
   dispatch 158 to 1972 times a pass; every line arrived exact, each lent
   alone, the two buffers strictly alternating, and the receive stream
   moved inside the borrower's dispatch 0 to 16 times a leg.
+- **The wait turn written out leaves the exit's count unread.** Each turn
+  of a letter's wait is the kernel loop's base turn written in the
+  Console's dispatch (`avrxt/src/apps/rubato_passes.hpp`): the time
+  events walked with the ceiling at 0, `activate()` at the Console's
+  index, the index put back - without the comparison of the count of
+  quiet posts the platform's exit makes
+  ([design/kernel.md](../design/kernel.md), "Rubato"). A tick whose post
+  lands in the turn's last choice, the ceiling at 0, is counted quiet and
+  served only at the next turn; at a pass's end that turn is the next
+  pass's, so the pressure's verdict reads one dispatch short in the pass
+  and one over in the next: in 8 of 23 runs of `z`, two or four verdicts
+  each, while 3 runs of `y` were green. With the turn putting the index back and comparing the count
+  under one mask, turning again when it moved (a diagnostic build of the
+  shared body, not kept), 20 runs of `z` in 20 were green.
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_samc_rubato_i2c`, one key against the AVR64EA48's unchanged
@@ -720,32 +746,29 @@ byte-exact under every pressure as in the control, and a held wire was
 answered in its place every time ([i2c.md](i2c.md), the stack under the
 preemptive kernel). What it established about this platform:
 
-- **The stack grows with the load, not with the pack.** A road-1 request
-  - an interrupt's post to an object above the ceiling - that lands while
-  `activate()` is between two dispatches, the ceiling back at the scan's
-  own, nests a whole scheduler level at that same ceiling: the fake
-  frame's return into the thread-mode entry, a new `activate()`, which
-  serves every queue the suspended one would have and returns only when
-  all of them are empty. Under a light load the nested level drains at
-  once and unwinds; under a heavy one the next request lands in the
-  nested level's own scan before it drains, and the levels pile up, 128
-  bytes each on this core (the exception frame, the two words, the
-  scheduler's frame - read off a dump of the RAM, each sampled level's
-  interrupted code in the scan). The suite paints the free RAM before each
-  pass and reads the high-water after it: 1064 to 1596 bytes over every
-  letter, the held wire's included, whose flood the lowest object's turns
-  pace (a probe posted at a tick only when the Console has run since the
-  last, [i2c.md](i2c.md)). With a probe posted at every tick instead, swept
-  across the spin at 97 us (a diagnostic letter, not kept): 2704 bytes
-  at 300 cycles, 3984 at 600, 6012 at 800,
-  19580 at 900 and at 1000 past the RAM - the stack ran down through
-  `.bss` with no fault until the variables it overwrote made the code
-  fault, a HardFault with the stack pointer below `.bss`. At 193 and 389
-  us the same flood stays at 1348 to 1776 bytes up to a 3000-cycle spin.
-  A pack whose objects above the lowest never empty is overloaded under
-  any kernel; under this one the overload is a stack without bound, and
-  the stack a program sizes must be measured at its heaviest load, not
-  read from the pack's length.
+- **The stack stays within the pack's five runs.** A pack of five holds
+  at most five runs of the scheduler whatever the interrupts' timing
+  ([design/kernel.md](../design/kernel.md), "Rubato"), and by this
+  image's listing that bounds the high-water at 2180 bytes: the Console's
+  chain, 836 (the reset handler, `main()` with the kernel loop inlined,
+  the loop's `activate()` and the deepest of the letter's own calls), four
+  nested runs of 312 each (an exception frame and PendSV's two words,
+  `activate()`'s 88-byte frame, and 180 for the deepest dispatch, the
+  arbiter's state machine down to the SERCOM's synchronization wait), and
+  one interrupt over the topmost, 96. The suite paints the free RAM
+  before each pass and reads the high-water after it: 1052 to 1556 bytes
+  over every letter, the held wire's included (1116 to 1348), whose flood
+  the lowest object's turns pace (a probe posted at a tick only when the
+  Console has run since the last, [i2c.md](i2c.md)). Its letter `u`,
+  outside `z`, holds the same wire at 97 us x 3000 with the flood
+  unpaced, a probe at every one of 1000 ticks: the objects above the
+  Console never empty, the Console does not turn for 98 ms, and the
+  arbiter's full queue drops some 450 of the 1001 probes posted, each
+  counted, every other one answered once. The high-water is 1284 bytes in
+  ten runs of ten, the deepest stack pointer a tick found 1000 bytes below
+  the top of RAM: under an overload this kernel stalls the lowest object
+  and keeps its stack, and what a program sizes is its pack's chain, read
+  as above from its own listing.
 
 ## The idle path, measured
 

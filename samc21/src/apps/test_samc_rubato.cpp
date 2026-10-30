@@ -77,17 +77,20 @@
 // best (26 instructions in one run of 52 bytes, 36 cycles at zero wait
 // states and seven lines, 14: 50 - the loop that measures them is longer
 // than the cache, so there every line is paid); the reads measure 48
-// (letter d prints them). THE COUNT IS NOT AN UPPER BOUND on this flash:
-// road 1, the scan and letter g measure 4 to 5 cycles over their counts,
-// while the same instructions at 16 MHz, the flash behind no wait state,
-// measured 1 to 4 under their zero-wait counts in a diagnostic build (not
-// kept) - the shortfall is the fetch's, a literal that misses costing more
-// than the two wait states the count charges it, the mechanism inside the
-// flash controller not established. Every bound adds its fifth on top of the count;
-// letter c's threshold for a slow event, which has no margin of its own,
-// stands on the measured quiet path instead (its comment). The
-// instruction counts are THIS image's listing
-// (build-cmake/samc21j-release/test_samc_rubato.lst).
+// (letter d prints them). THE COUNT IS NOT PROVEN AN UPPER BOUND on this
+// flash. Its zero-wait part is the instructions' own: this image's paths
+// at 16 MHz, the flash behind no wait state, measured 1 to 6 cycles under
+// their zero-wait counts in a diagnostic build (not kept). Its fetch part
+// is not: every path of this image measures under its whole count, road 1
+// by 1 to 2 cycles, the scan by 4, the road-2 post by 26, but where the
+// code sits moves a path's cost by up to ten cycles either way - a build
+// with the same instructions four bytes lower (not kept) measured road 1
+// six cycles faster, the scan ten, and letter g two slower - by a
+// mechanism inside the flash controller not established. Every bound
+// adds its fifth on top of the count; letter c's threshold for a slow
+// event, which has no margin of its own, stands on the measured quiet
+// path instead (its comment). The instruction counts are THIS image's
+// listing (build-cmake/samc21j-release/test_samc_rubato.lst).
 //
 // The letters:
 //   a  THE CEILING, ROAD 1 AT DEPTH 1. Low's handler, started by the
@@ -385,7 +388,12 @@ using K = Rubato<P, Top, High, Mid, Low, Console>;
 /// The scheduler run by hand from the Console's dispatch, as the
 /// platform's entry and exit run it (kernel/platform.hpp): the ceiling
 /// replaced with 0, activate() at the Console's own, the ceiling put
-/// back. Whether it served.
+/// back. Whether it served. The exit's comparison of the count of quiet
+/// posts is left out, and nothing here needs it: the two letters that
+/// call this (d's scan, f's turns) run with TC4 disarmed, and the one
+/// other post an interrupt makes is the UART's to the Console itself,
+/// which is not above the Console and is served by the kernel's own loop
+/// when the letter returns. Letter d times the scheduler's path alone.
 bool activate_here() {
     const uint8_t base = P::ceiling;
     P::ceiling = 0;
@@ -597,30 +605,34 @@ void sort(uint32_t* v, uint32_t n) {
 /// stamp's tail and the handler's exit (25 instructions, a pop of five
 /// into the PC); the tail-chain into PendSV (11) and its vector's read;
 /// PendSV's thirteen instructions (no barrier on this core,
-/// cortexm/schedule.hpp) and the return into thread mode (10);
-/// the entry's cpsie and call; activate() at the Console's ceiling - its
-/// frame and the ceiling's test, Top's visit (the queue's two cursors
-/// loaded and compared in line, no call), High's, the raise of the
-/// ceiling and of the dispatching index, take() on the path whose cursor
-/// wraps (the longer of its two, by a cycle) and its result, to the
-/// stamp's read of VAL. 100 instructions, 183 cycles at zero wait
-/// states and 94 of fetch (ten literals and the vector among them): 277,
-/// less the ruler's 50, 227 (147 at zero wait states) - the path's own
-/// count, which the quiet events measure 231 to 232: SHORT by 4 to 5 (the
-/// file header says why). So the threshold for a slow event is the
-/// fastest quiet event measured, 231, plus two cycles for each of the
-/// path's nine taken transfers (the most a branch target's line can move
-/// with where the code lands): 249. On top of the slowest quiet event
-/// measured, 232, at most one SysTick landing in the path: its entry (15)
-/// and its vector, its handler on the longer branch, a second's boundary,
-/// and its return (19 instructions, 57 cycles, 26 of fetch: 83), and
-/// either the stamp's retry when it lands between the five reads (13
-/// instructions, 30) or an exception return abandoned and begun again
-/// (12): 113. The bound is the two, 345, and a fifth of the quiet path
-/// (47): 392. The letter reads the kernel tick around each event, and
-/// every event over 249 must have had a tick in it.
-constexpr uint32_t latency_quiet = 249u;
-constexpr uint32_t latency_bound = 392u;
+/// cortexm/schedule.hpp) and the return into thread mode (10); the
+/// entry's seven - the ceiling read and 0 stored under PendSV's mask, the
+/// unmask, `base` into the filler word and the call; activate(4) - its
+/// frame, `base` and the served flag stored, the count of quiet posts
+/// read, the first object's index against `base`, Top's look (the queue's
+/// two cursors loaded and compared in line, no call), High's, the raise of
+/// the ceiling, the count read again and found still, the dispatching
+/// index raised, take() on the path whose cursor wraps (the longer of its
+/// two with the fetch, by a cycle) and its result, to the stamp's read of
+/// VAL. 112 instructions, 200 cycles at zero wait states and 102 of fetch
+/// (eleven literals and the vector among them): 302, less the ruler's 50,
+/// 252 (164 at zero wait states) - the path's own count, which the quiet
+/// events measure 250 to 251, under it (the file header says why that
+/// proves no bound). So the threshold for a slow event stands on the
+/// measured quiet path: the fastest quiet event measured, 250, plus two
+/// cycles for each of the path's nine taken transfers (the most a branch
+/// target's line can move with where the code lands): 268. On top of the
+/// count, 252, the larger of it and the slowest quiet event measured
+/// (251), at most one SysTick landing in the path: its entry (15) and its
+/// vector, its handler on the longer branch, a second's boundary, and its
+/// return (19 instructions, 57 cycles, 26 of fetch: 83), and either the
+/// stamp's retry when it lands between the five reads (13 instructions,
+/// 30) or an exception return abandoned and begun again (12): 113. The
+/// bound is the two, 365, and a fifth of the quiet path (50): 415. The
+/// letter reads the kernel tick around each event, and every event over
+/// 268 must have had a tick in it.
+constexpr uint32_t latency_quiet = 268u;
+constexpr uint32_t latency_bound = 415u;
 
 void tc_latency() {
     reset_scenario();
@@ -772,41 +784,52 @@ void td_scan() {
     // The bounds below are the release listing's count with every line
     // paid at the worst alignment, the ruler's 50 taken off, and a fifth
     // as the margin (the file header says how they are drawn).
-    // The scan: the stamp's tail and the call; activate()'s frame and the
-    // ceiling's test; per empty object the ceiling's compare and the
-    // queue's two cursors loaded and compared in line (no call); the
-    // Console's index ending the pass and the return; the second stamp
-    // to VAL (activate() alone is 46 instructions, 88 cycles at zero wait
-    // states). 78 instructions, 135 cycles and 78 of fetch: 213, less 50,
-    // 163 (99 at zero wait states); 196 with the fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 196 cycles",
-                  scan < 196u);
+    // The scan: the stamp's tail and the call; activate_here()'s frame,
+    // the ceiling read and 0 stored, the call; activate(4)'s frame, `base`
+    // and the served flag stored, the count of quiet posts read, the first
+    // object's index against `base`; per empty object its index against
+    // `base` and the queue's two cursors loaded and compared in line (no
+    // call); the Console's index ending the scan, the test that no object
+    // is held, the result packed and the return; activate_here()'s store
+    // of `base` and its return; the second stamp to VAL (activate() alone
+    // is 50 instructions, 90 cycles at zero wait states). 93 instructions,
+    // 168 cycles and 102 of fetch: 270, less 50, 220 (132 at zero wait
+    // states); 264 with the fifth.
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 264 cycles",
+                  scan < 264u);
     // The quiet post: the stamp's tail, the event's setup and the call;
-    // post<Low>()'s thirteen instructions on the path that asks nothing,
-    // the queue's push() under its guard (twenty-two: mrs, cpsid, the
-    // cursors, the slot, msr); the second stamp to VAL. No queue is asked
-    // whether it is empty on this path. 66 instructions, 108 cycles and
-    // 60 of fetch: 168, less 50, 118 (72 at zero wait states); 142 with
-    // the fifth.
-    bench.verdict("a post that asks nothing costs under 142 cycles (the push and one compare)",
-                  quiet < 142u);
+    // post<Low>()'s eighteen instructions on the path that asks nothing -
+    // the compare with the ceiling, then the count of quiet posts loaded,
+    // incremented and stored with the branch out and back the layout adds
+    // - and the queue's push() under its guard (twenty-two: mrs, cpsid,
+    // the cursors, the slot, msr); the second stamp to VAL. No queue is
+    // asked whether it is empty on this path. 71 instructions, 117 cycles
+    // and 66 of fetch: 183, less 50, 133 (81 at zero wait states); 159
+    // with the fifth.
+    bench.verdict("a post that asks nothing costs under 159 cycles (the push, one compare and "
+                  "the count of quiet posts)",
+                  quiet < 159u);
     // The road-2 post: the quiet one's shape to the compare, then the
     // request's call and body; PendSV's entry from thread mode (15) and
     // its vector's read, its body and the return into thread mode (10);
-    // the entry; activate() at Mid's ceiling - Top's visit and High's,
-    // each queue's cursors compared in line, the raises, take() and the
+    // the entry's seven; activate(2) - the count read, Top's look and
+    // High's, each queue's cursors compared in line, the raise and the
+    // count found still, the dispatching index raised, take() and the
     // release each on the path whose cursor wraps, High's dispatch with
     // nothing to do (its stamp, the stack sample, the trace's and the
-    // action's tests), the two restores, the rescan of Top and High and
-    // Mid's index ending the pass, the return; the SVC's entry (15) and
-    // its vector's read, three instructions and the return into the real
-    // frame (10); the request's and the post's returns; the second stamp
-    // to VAL. 249 instructions, 464 cycles and 260 of fetch (24 literals
-    // and the two vectors among them): 724, less 50, 674 (428 at zero
-    // wait states); 809 with the fifth.
+    // action's tests), the dispatching index put back and the served flag
+    // kept, the ceiling to 0; the second choice - the count read, Top's
+    // look and High's finding them empty, Mid's index ending it - the
+    // result packed and the return; the entry's last four and the svc; the
+    // SVC's entry (15) and its vector's read, the exit's eleven
+    // instructions on the path that finds the count still and the return
+    // into the real frame (10); the request's and the post's returns; the
+    // second stamp to VAL. 277 instructions, 505 cycles and 286 of fetch
+    // (27 literals and the two vectors among them): 791, less 50, 741 (469
+    // at zero wait states); 889 with the fifth.
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    bench.verdict("and under 809 cycles, High's empty dispatch included", road2 < 809u);
+    bench.verdict("and under 889 cycles, High's empty dispatch included", road2 < 889u);
 }
 
 // =============================================================================
@@ -882,10 +905,12 @@ volatile uint32_t arm_cycles = 0;
 volatile uint32_t low_iteration = 0;          ///< Low's loop, counted
 volatile uint32_t high_landed = 0;            ///< the iteration High's dispatch landed in
 
-/// One turn of Rubato::run()'s loop at the Console's level, as run()
-/// writes it: the matured time events posted with the ceiling held at 0,
-/// then the ceiling back (here the Console's own index, at the base 255)
-/// and the scheduler, which serves them in priority order.
+/// One turn of Rubato::run()'s loop at the Console's level: the matured
+/// time events posted with the ceiling held at 0, then the scheduler at
+/// the Console's own index (at the base, 255), which serves them in
+/// priority order. run() keeps the 0 from the walk into the scheduler;
+/// this turn puts the Console's index back between the two, for the few
+/// instructions before activate_here() stores 0 again.
 void base_turn() {
     const uint8_t c = P::ceiling;
     P::ceiling = 0;
@@ -1113,15 +1138,16 @@ void tg_primask() {
     // From the stamp's read to Mid's, by the release listing: the stamp's
     // tail and store, the guard's msr that lifts the mask; PendSV's entry
     // from thread mode (15) and its vector's read, its body and the
-    // return into thread mode (10); the entry; activate() at the
-    // Console's ceiling - Top's visit and High's, each queue's cursors
-    // compared in line, Mid's, the raises, take() on the path whose
-    // cursor wraps and its result, to the stamp's read. 108 instructions,
-    // 197 cycles and 106 of fetch: 303, less 50, 253 (161 at zero wait
-    // states); 304 with the fifth (letter d's comment says how the bounds
+    // return into thread mode (10); the entry's seven; activate(4) - the
+    // count of quiet posts read, Top's look and High's, each queue's
+    // cursors compared in line, Mid's, the raise and the count found
+    // still, the dispatching index raised, take() on the path whose cursor
+    // wraps and its result, to the stamp's read. 119 instructions, 214
+    // cycles and 122 of fetch: 336, less 50, 286 (178 at zero wait
+    // states); 343 with the fifth (letter d's comment says how the bounds
     // are drawn).
-    bench.verdict("the section's end to the receiver's first statement under 304 cycles",
-                  most < 304u);
+    bench.verdict("the section's end to the receiver's first statement under 343 cycles",
+                  most < 343u);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 
@@ -1166,16 +1192,17 @@ uint8_t wfi_leg(SleepMode mode, bool& pending_all, uint32_t& least, uint32_t& mo
 /// stamp's tail; idle()'s call, the SLEEPCFG read and its test, the DSB,
 /// the WFI, the branch to the cpsie; PendSV's entry from thread mode (15)
 /// and its vector's read, its body and the return into thread mode
-/// (10); the entry; activate() at the Console's ceiling - Top's visit
-/// and High's, each queue's cursors compared in line, Mid's, the raises,
+/// (10); the entry's seven; activate(4) - the count of quiet posts read,
+/// Top's look and High's, each queue's cursors compared in line, Mid's,
+/// the raise and the count found still, the dispatching index raised,
 /// take() on the path whose cursor wraps and its result, to the stamp's
-/// read. 106 instructions, 199 cycles and 112 of fetch: 311, less the
-/// ruler's 50, 261 (163 at zero wait states). The count puts idle()'s
+/// read. 117 instructions, 216 cycles and 128 of fetch: 344, less the
+/// ruler's 50, 294 (180 at zero wait states). The count puts idle()'s
 /// own path at 38 cycles, where test_samc_platform measured it at 30 to
 /// 45 with a pending NVIC line (docs/samc21/platform.md, "The idle path,
-/// measured": the SLEEPCFG read crosses a bridge): 7 more, 268; 322 with
+/// measured": the SLEEPCFG read crosses a bridge): 7 more, 301; 361 with
 /// a fifth (letter d's comment says how the bounds are drawn).
-constexpr uint32_t wfi_bound = 322u;
+constexpr uint32_t wfi_bound = 361u;
 
 void tw_wfi() {
     reset_scenario();
@@ -1257,8 +1284,21 @@ void th_stack() {
     // paths) or, the handler gone and its post pending PendSV, PendSV's
     // two words and an activate() frame that finds nothing to serve
     // (8 + 64 = 72; the fake frame's 32 are popped before activate()
-    // pushes). 60 + 36 + 72 = 168: the high-water mark lies within 168
-    // bytes of the deeper of the two samples.
+    // pushes; the SVC's frame of the exit, 32, stands where activate()'s
+    // stood). 60 + 36 + 72 = 168: the high-water mark lies within 168
+    // bytes of the deeper of the two samples. Two shapes reach deeper,
+    // both made by a handler that preempts PendSV before its first
+    // instruction (cortexm/schedule.hpp, RE-ENTRANCY): that handler's
+    // frame and its own below the interrupt's (36 + 56, 188 below the
+    // sample), and the run at a ceiling of 0 its post leaves
+    // (kernel/rubato.hpp, "The stack"): the delayed run's two words, a
+    // frame over its entry and the empty run's two words and activate()
+    // (8 + 36 + 72), 212 below the sample, and an interrupt over that
+    // empty choice (36 + 56), 304. Both stand while PendSV is pending for
+    // a post above the ceiling, so the run that follows serves it, and
+    // that dispatch's sample lies 168 below this one (60 + 36 + 8 + 64):
+    // the two shapes reach at most 136 bytes below a deeper sample, within
+    // the 168 again.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
     bench.verdict("the high-water mark is within 168 bytes of the deepest sample",

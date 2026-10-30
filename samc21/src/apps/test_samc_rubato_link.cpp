@@ -88,7 +88,7 @@
 //   35.6.2.4, and has TC4_GCLK_ID alone, 35.5.3) from generator 0, the
 //   48 MHz the CPU runs on, prescaler 1: 97 / 193 / 389 us are 4656 / 9264
 //   / 18672 counts, CC0 one less. Free of SERCOM1, SERCOM5 (the console),
-//   the DMAC and SysTick. Its dispatch, a 3000-cycle spin and road 1's 232
+//   the DMAC and SysTick. Its dispatch, a 3000-cycle spin and road 1's 251
 //   cycles (docs/samc21/platform.md), is shorter than the shortest period's
 //   4656, so no tick finds the last one still queued; at 97 us x 3000 it
 //   takes 64 % of the core.
