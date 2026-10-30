@@ -54,12 +54,15 @@
 //   Serial, serial, bench    the console's Uart and its TestBench (one set,
 //                            the all-key `z`)
 //   Host                     the family's I2cHost with its engines and its
-//                            pads, initialized by the suite before the
-//                            kernel runs and never again (the arbiter owns
-//                            its vector for the image's life). The body
-//                            writes a Request's addr, tx, tx_len, rx,
-//                            rx_len, reply and speed, and reads
-//                            Host::status() only through the arbiter
+//                            pads, initialized by the suite only between
+//                            tenures with the arbiter idle - before the
+//                            kernel runs, or (a family whose pads wait for
+//                            a partner's rail) in I2cTraits::bring_up()
+//                            before a pass's first tenure; the arbiter owns its
+//                            vector for the image's life. The body writes
+//                            a Request's addr, tx, tx_len, rx, rx_len,
+//                            reply and speed, and reads Host::status()
+//                            only through the arbiter
 //   peer_kind                the far peer's twi_link kind byte (twi_link.hpp,
 //                            Ident::version's high byte), which letter n
 //                            judges
@@ -79,17 +82,42 @@
 //   shapes[]                 letter o's table: an array of a struct of the
 //                            suite's with `tx_len`, `rx_len` (uint8_t) and
 //                            `path` (const char*, the host's path for it:
-//                            the pump or the engines, and why); the last
-//                            entry a plain write (the counted serve ends on
-//                            its last byte, below). Default: the probe,
-//                            reads of 1 2 3 8 32, write-then-reads 1+1 1+2
-//                            2+8, writes of 1 2 3 8 32, the path unnamed
+//                            the pump or the engines, and why); a {0, 0}
+//                            entry is the probe, counted as `probe_bytes`
+//                            bytes served; the last entry a plain write
+//                            (the counted serve ends on its last byte,
+//                            below). Default: the probe, reads of 1 2 3 8
+//                            32, write-then-reads 1+1 1+2 2+8, writes of 1
+//                            2 3 8 32, the path unnamed
 //   w_client_len             (uint8_t; 6) the read half of letter w's
 //                            Client's 1+n write-then-reads, at most 8
 //   w_minor_len              (uint8_t; 2) letter w's Minor's writes, at most 8
+//   closing_len              (uint8_t; 1) letter w's closing write, the
+//                            bytes after its last read (the counted serve,
+//                            below), at most 64
 //   probe_bytes              (uint8_t; 0) the bytes the host's probe moves:
 //                            0 for an address-only probe, 1 for a host whose
-//                            probe is a one-byte read (the peer counts it)
+//                            probe is a one-byte read (the peer serves and
+//                            counts it)
+//   refused_close_hits       (uint8_t; 0) the address matches a host adds
+//                            when the LAST written byte of a write-then-read
+//                            is refused: 1 on a host that closes it by a
+//                            void write from the repeated START already
+//                            requested (the F1 lineage's event machine),
+//                            0 on one that lets go with a STOP
+//   refusal_holds_address    (bool; false) the PEER refuses its own address
+//                            from a refused data byte to its action's
+//                            deadline (a target whose one ACK bit answers
+//                            the data and the address alike, and whose
+//                            Stop after a refused byte puts nothing back):
+//                            letter q then judges the tenures inside that
+//                            window refused at the address and the next
+//                            tenure i2c_ok after the deadline
+//   held_bus_error           (bool; false) the host answers a START lost
+//                            into a held line with BUSERR beside the loss
+//                            as i2c_bus_error (the SAM C21's settle()):
+//                            letter h then counts it among the held wire's
+//                            signatures
 //   stretch_us               (uint16_t; 1000) letter p's commanded hold
 //   stretch_write_holds, stretch_read_holds   (uint8_t; 7 and 8) how many
 //                            holds the peer's chapter puts inside an 8-byte
@@ -101,29 +129,44 @@
 //   fill_tx                  (uint8_t; 16) letter x's write: the host's
 //                            longest single-fill shape
 //   bring_up()               (static bool; none) called at the opening of
-//                            every letter that drives the wire, before the
-//                            first tenure: a family whose wire needs a check
+//                            every pass that drives the wire (need_peer()),
+//                            before its first tenure: a family whose wire needs a check
 //                            or a rail first (a partner's power read on the
 //                            lines, a pull-up rail); false fails the letter
 //                            by name
+//   tick_spin_begin(), tick_spin_end()   (static void; none) an instrument's
+//                            two hooks, called by Pressure's Tick dispatch
+//                            just before and just after its spin, in
+//                            Pressure's own context: what the preempted
+//                            state was when the pressure came (a road
+//                            measured to the spin, a stretch found at its
+//                            end). A hook reads, it never posts
 //
 // 3. AFTER THE INCLUDE, the functions declared below under "What the
 // including suite defines": the pressure's timer, host_on_wire(),
 // host_dark(), print_host() and console_banner().
 //
 // The vectors stay the suite's: its pressure vector clears its flag and
-// calls pressure_landed(); its I2C vector posts the arbiter's TransferDone
-// (`done_from_dma = false` first), and a DMA vector whose engine ends a
-// tenure posts it with `done_from_dma = true`.
+// calls pressure_landed() - or, where another hand posts the Tick (a
+// doorbell from the second core, whose inbox drain makes the post),
+// note_landing() alone, the same record without the post; its I2C vector
+// posts the arbiter's TransferDone (`done_from_dma = false` first), and a
+// DMA vector whose engine ends a tenure posts it with `done_from_dma =
+// true`.
+//
+// A suite that runs one of the letters below with another pressure source
+// sets `pass_source` to its name around the call: every pass of the letter
+// is then labelled with it (rubato_passes.hpp's PassSpec::source).
 //
 // THE PACK, from the highest priority down:
 //
 //   Pressure  the preempting object: the family's timer posts to it every
 //             97, 193 or 389 us and its dispatch spins 300 or 3000 cycles
 //             (rubato_passes.hpp). In letter w it is also a requester (one
-//             probe outstanding, posted from its tick); in letter h it posts
-//             a probe at every tick, as many outstanding as the arbiter
-//             takes.
+//             probe outstanding, posted from its tick); in letter h it
+//             floods, a probe at every tick the Console has turned since its
+//             last (letter h below says why the Console paces it), as many
+//             outstanding as the arbiter takes.
 //   Client    the I2C requester above the arbiter: it takes one Tenure from
 //             the Console (the buffers lent until Client::done moves), posts
 //             the host's Request with its reply to itself, and at the reply
@@ -162,8 +205,21 @@
 // a READ'S last byte is still on the wire at that moment while a write's
 // was acknowledged before the peer saw it: so every counted serve here
 // ends on a plain write - letter o's table's last entry, letter p's write
-// after its read, letter w's closing write after its traffic. Letter q's
-// serves and letter h's hold end on their deadlines.
+// after its read, letter w's closing write after its traffic. A peer that
+// gives a read FIFO-ahead (the RP pair's: up to sixteen bytes at each read
+// request, the untaken ones given back at the closing NACK) stands its
+// tally above the wire's while a read runs, so the writes after the last
+// read must outnumber that FIFO: letter w's close is `closing_len` long,
+// and a table's plain writes after its last read are the suite's to size.
+// A peer that sees a STOP only with its stop interrupt on (the AVR's TWI,
+// PIEN) ends a counted serve only when the action asks for it, so every
+// serve here carries twilink::flag_stop_interrupt (every other peer maps
+// it to nothing). A peer returns to its command address only after the
+// serve has ended, so the report that follows a counted serve waits
+// twi_link's arm_ms first - the margin that protocol names over the
+// peer's re-init - instead of meeting the peer still at dut_addr and
+// costing twi_link_client.hpp's 400 ms retry. Letter q's serves and
+// letter h's hold end on their deadlines.
 //
 // THE LETTERS (z: n o p q w h i; x outside it). Each of n o p q w h runs
 // its traffic as the seven passes and judges each on its own, the pressure
@@ -184,29 +240,56 @@
 //      at speeds[0], each tenure at least the peer's holds long
 //      (stretch_read_holds, stretch_write_holds) and under the per-bus
 //      timeout.
-//   q  a deaf client (the probe and a write i2c_nack_addr, the next tenure -
-//      a probe of deaf_addr, where the peer parks - i2c_ok), the third byte
-//      of six refused (i2c_nack_data, then a probe i2c_ok), the last written
-//      byte of a 2+4 refused (i2c_nack_data, then a probe i2c_ok, and the
-//      peer counting two address matches and no byte served: the read half
-//      never began).
+//   q  a deaf client - the peer's client parked at q_deaf_addr, letter q's
+//      own address (below) - the probe and a write of dut_addr
+//      i2c_nack_addr, the next tenure, a probe of q_deaf_addr, i2c_ok; the
+//      third byte of six refused (i2c_nack_data, then a probe, and the
+//      peer's report: its word that it refused, its address matches); the
+//      last written byte of a 2+4 refused (i2c_nack_data, then a probe, and
+//      the peer's report: no byte served but the probe's, the read half
+//      never began, its address matches). The probe after each refusal is
+//      i2c_ok, or i2c_nack_addr from a peer that refuses its address to the
+//      deadline (refusal_holds_address), which is then followed by a probe
+//      of the command address after the deadline, i2c_ok; the address
+//      matches are the refused tenure's, and the void write's and the
+//      probe's where the peer took them.
 //   w  the Client's 20 write-then-reads of 1+w_client_len (two outstanding),
 //      Minor's 10 writes of w_minor_len and, in a pressure pass, Pressure's
 //      8 probes (one outstanding), all at speeds[1] against a fixed-pattern
 //      serve: every reply i2c_ok, to its requester, in its order, nothing
-//      rejected, no timeout and no stale event, then a closing write; the
-//      peer's count, sum and address matches exact.
+//      rejected, no timeout and no stale event, then a closing write of
+//      closing_len; the peer's count, sum and address matches exact.
 //   h  the peer holds SDA low for 60 ms; the Client's write into it at
 //      speeds[0], the speed in force, and in a pressure pass Pressure's
-//      probe of the command address at every tick until the release: the
-//      held tenure answered in its place by i2c_timeout or i2c_arb_lost at
-//      22 ms or sooner, every probe answered once (i2c_rejected, i2c_timeout
-//      or i2c_arb_lost while held; i2c_ok, or i2c_nack_addr in the moment
-//      the peer's client is not yet back, after the release), the next
-//      tenure i2c_ok and the arbiter's own vote idle. The Requests that
-//      arrived in the draining window are printed. Once after the passes
-//      the hold is met at speeds[1], another speed than the one in force,
-//      the requirement judged the same.
+//      flood of probes of the command address until the release: the held
+//      tenure answered in its place by i2c_timeout or i2c_arb_lost (or
+//      i2c_bus_error, held_bus_error) 22 ms after its start() or sooner -
+//      later by the longest interval between two of the Console's turns,
+//      which walk the time events - every probe answered once (i2c_rejected, i2c_timeout or i2c_arb_lost while held;
+//      i2c_ok, or i2c_nack_addr in the moment the peer's client is not yet
+//      back, after the release; i2c_bus_error either side where the family
+//      has it), the next tenure i2c_ok and the arbiter's own vote idle. The
+//      Requests that arrived in the draining window are printed. Once after
+//      the passes the hold is met at speeds[1], another speed than the one
+//      in force, the requirement judged the same. THE FLOOD IS PACED BY THE
+//      CONSOLE: after its first probe, Pressure posts one at a tick only
+//      when the Console has taken a turn of its wait since its last. The
+//      first needs no turn, so that a tick before the Client's post puts a
+//      probe on the wire ahead of the held tenure (the probe parks or loses
+//      first, and the arbiter's recover() starts the held tenure). The
+//      Console is the pack's lowest object, so a turn of it says every
+//      object above it was idle at that moment: the flood asks only for
+//      time the core has left over, whatever one probe costs on this core
+//      (a probe that loses
+//      its START at once into the held line is a whole cycle of post,
+//      dispatch, start(), completion and reply - more than a 97 us period
+//      leaves beside a 3000-cycle tick on a 48 MHz core). A flood at every
+//      tick regardless overloads such a core for good - the Console, the
+//      one object that ends the flood, never runs again - and under Rubato
+//      the stack then grows by a scheduler level at a time without bound
+//      (a kernel finding: docs/ch32x035/platform.md and
+//      docs/samc21/platform.md); paced, every level a probe's life opens
+//      unwinds when the Console turns.
 //   i  dark: the queues empty, the arbiter's vote for the sleep, no time
 //      event armed, host_dark(), the ceiling the Console's.
 //   x  400 writes of fill_tx with the pressure silent and 400 under 97 us x
@@ -300,11 +383,43 @@ constexpr uint8_t w_minor_len() {
     }
 }
 template <typename T>
+constexpr uint8_t closing_len() {
+    if constexpr (requires { T::closing_len; }) {
+        return T::closing_len;
+    } else {
+        return 1;
+    }
+}
+template <typename T>
 constexpr uint8_t probe_bytes() {
     if constexpr (requires { T::probe_bytes; }) {
         return T::probe_bytes;
     } else {
         return 0;
+    }
+}
+template <typename T>
+constexpr uint8_t refused_close_hits() {
+    if constexpr (requires { T::refused_close_hits; }) {
+        return T::refused_close_hits;
+    } else {
+        return 0;
+    }
+}
+template <typename T>
+constexpr bool refusal_holds_address() {
+    if constexpr (requires { T::refusal_holds_address; }) {
+        return T::refusal_holds_address;
+    } else {
+        return false;
+    }
+}
+template <typename T>
+constexpr bool held_bus_error() {
+    if constexpr (requires { T::held_bus_error; }) {
+        return T::held_bus_error;
+    } else {
+        return false;
     }
 }
 template <typename T>
@@ -348,11 +463,31 @@ bool bring_up() {
         return true;
     }
 }
+/// The instrument's hooks around Pressure's spin, where the family has
+/// them; nothing otherwise.
+template <typename T = I2cTraits>
+[[gnu::always_inline]] inline void tick_spin_begin() {
+    if constexpr (requires { T::tick_spin_begin(); }) {
+        T::tick_spin_begin();
+    }
+}
+template <typename T = I2cTraits>
+[[gnu::always_inline]] inline void tick_spin_end() {
+    if constexpr (requires { T::tick_spin_end(); }) {
+        T::tick_spin_end();
+    }
+}
 
 }  // namespace i2c_traits
 
 constexpr const auto& shapes = i2c_traits::shapes<I2cTraits>();
 constexpr uint8_t shape_count = static_cast<uint8_t>(std::size(shapes));
+constexpr uint8_t probe_bytes = i2c_traits::probe_bytes<I2cTraits>();
+/// The bytes the peer serves for a shape of letter o's table: its read
+/// half, or a probe's `probe_bytes`.
+constexpr uint8_t shape_served(uint8_t tx_len, uint8_t rx_len) {
+    return (tx_len == 0u && rx_len == 0u) ? probe_bytes : rx_len;
+}
 static_assert(shape_count >= 1u && shape_count <= 16u, "letter o's table: 1 to 16 shapes");
 static_assert(shapes[shape_count - 1u].tx_len != 0u && shapes[shape_count - 1u].rx_len == 0u,
               "letter o's table ends on a plain write: the counted serve ends on its last byte");
@@ -396,19 +531,21 @@ volatile uint8_t arb_event = arb_none;
 /// their post.
 volatile bool done_from_dma = false;
 
-/// Inside Host::start() (Marked below), and that start()'s own cycles - the
-/// last one's, preemption inside it included.
+/// Inside Host::start() (Marked below), that start()'s own cycles - the
+/// last one's, preemption inside it included - and the ruler at its entry.
 volatile bool in_start = false;
 volatile uint32_t start_cycles = 0;
+volatile uint32_t start_at = 0;
 
 /// The family's host with start() wrapped by the instrument: `in_start`
-/// set around it, the cycles it took kept - two loads of the ruler and
-/// three stores a tenure, outside the engine. Every other verb is the
-/// host's own.
+/// set around it, the ruler at its entry and the cycles it took kept - two
+/// loads of the ruler and four stores a tenure, outside the engine. Every
+/// other verb is the host's own.
 template <typename H>
 struct Marked : H {
     static bool start(const typename H::Request& r) {
         const uint32_t t0 = Ruler::now();
+        start_at = t0;
         in_start = true;
         const bool sync = H::start(r);
         in_start = false;
@@ -565,15 +702,26 @@ void note(volatile Tally& t, const I2cDone& d, bool in_order) {
 
 namespace h {
 
-/// Letter h's flood: Pressure posts a probe of the command address at
-/// every tick while `live`, and its replies are counted by status, each
-/// with the time it came back. While the peer holds SDA a probe can be
-/// answered i2c_rejected (the pending FIFO full), i2c_timeout (parked past
-/// the arbiter's limit) or i2c_arb_lost (its START out into the held line,
-/// its address's first one bit read back low); after the release i2c_ok,
-/// or i2c_nack_addr in the moment the peer's client is not yet back at the
-/// command address.
+/// Letter h's flood: while `live`, Pressure posts a probe of the command
+/// address at a tick when the Console has turned since its last probe
+/// (`turned`, set at the flood's start and by the Console at every turn of
+/// its waits during the hold, cleared by Pressure at each probe - the file
+/// header's pacing),
+/// and its replies are counted by status, each with the time it came back.
+/// While the peer holds SDA a probe can be answered i2c_rejected (the
+/// pending FIFO full), i2c_timeout (parked past the arbiter's limit) or
+/// i2c_arb_lost (its START out into the held line, its address's first one
+/// bit read back low); after the release i2c_ok, or i2c_nack_addr in the
+/// moment the peer's client is not yet back at the command address; and on
+/// a host with held_bus_error, i2c_bus_error (a loss with BUSERR beside it)
+/// either side, counted by which.
 volatile bool live = false;
+volatile bool turned = false;
+/// The Console's turns during the hold: the ruler at the last one's start,
+/// and the longest interval between two (the time-event walk's latency,
+/// letter h's bound).
+volatile uint32_t last_turn = 0;
+volatile uint32_t turn_gap = 0;
 struct Tally {
     uint16_t posted = 0;
     uint16_t replies = 0;
@@ -584,6 +732,8 @@ struct Tally {
     uint16_t arb_lost = 0;
     uint16_t nack_addr = 0;
     uint16_t nack_early = 0; ///< i2c_nack_addr before `held_until`
+    uint16_t bus_errors = 0;
+    uint16_t bus_errors_early = 0;   ///< i2c_bus_error before `held_until`
     uint16_t other = 0;
     uint8_t other_status = 0;
 };
@@ -603,6 +753,8 @@ void clear() {
     press.arb_lost = 0;
     press.nack_addr = 0;
     press.nack_early = 0;
+    press.bus_errors = 0;
+    press.bus_errors_early = 0;
     press.other = 0;
     press.other_status = 0;
 }
@@ -630,6 +782,11 @@ void note(const I2cDone& d) {
         press.nack_addr = static_cast<uint16_t>(press.nack_addr + 1u);
         if (still_held(Ruler::now())) {
             press.nack_early = static_cast<uint16_t>(press.nack_early + 1u);
+        }
+    } else if (d.status == i2c_bus_error && i2c_traits::held_bus_error<I2cTraits>()) {
+        press.bus_errors = static_cast<uint16_t>(press.bus_errors + 1u);
+        if (still_held(Ruler::now())) {
+            press.bus_errors_early = static_cast<uint16_t>(press.bus_errors_early + 1u);
         }
     } else {
         press.other = static_cast<uint16_t>(press.other + 1u);
@@ -667,12 +824,15 @@ struct Pressure {
                     post<I2cArb>(request(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1],
                                          reply_to<Pressure, I2cDone>()));
                 }
-                if (h::live) {
+                if (h::live && h::turned) {
+                    h::turned = false;
                     h::press.posted = static_cast<uint16_t>(h::press.posted + 1u);
                     post<I2cArb>(request(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[0],
                                          reply_to<Pressure, I2cDone>()));
                 }
+                i2c_traits::tick_spin_begin();
                 spin(pressure_spin);
+                i2c_traits::tick_spin_end();
             },
             [](const I2cDone& d) {
                 if (w::live) {
@@ -685,9 +845,10 @@ struct Pressure {
     }
 };
 
-/// The pressure vector's body after the timer's flag is cleared: where it
-/// landed, and the post. Interrupt context.
-[[gnu::always_inline]] inline void pressure_landed() {
+/// Where the pressure's interrupt landed, recorded without the post: the
+/// vector's body for a source whose Tick another hand posts (the file
+/// header). Interrupt context.
+[[gnu::always_inline]] inline void note_landing() {
     const uint8_t c = P::ceiling;
     const uint8_t slot = c < landing_slots - 1u ? c : static_cast<uint8_t>(landing_slots - 1u);
     landed[slot] = landed[slot] + 1u;
@@ -704,6 +865,12 @@ struct Pressure {
         }
     }
     pressure_irqs = pressure_irqs + 1u;
+}
+
+/// The pressure vector's body after the timer's flag is cleared: where it
+/// landed, and the post. Interrupt context.
+[[gnu::always_inline]] inline void pressure_landed() {
+    note_landing();
     post<Pressure>(Tick{});
 }
 
@@ -729,6 +896,10 @@ struct Client {
     static inline volatile uint32_t done = 0;    ///< tenures answered
     static inline volatile uint8_t status = i2c_ok;
     static inline volatile uint32_t cycles = 0;  ///< the last tenure, post to reply
+    /// The last tenure, from its start() to its reply: under Rubato the
+    /// reply runs inside the arbiter's finish(), before the next waiting
+    /// request starts, so `start_at` is still this tenure's.
+    static inline volatile uint32_t since_start = 0;
     static inline uint32_t t_post = 0;
 
     static void init() {}
@@ -759,7 +930,9 @@ struct Client {
                     post_next_w();
                     return;
                 }
-                cycles = Ruler::now() - t_post;
+                const uint32_t now = Ruler::now();
+                cycles = now - t_post;
+                since_start = now - start_at;
                 status = d.status;
                 done = done + 1u;
             },
@@ -869,8 +1042,27 @@ void print_pass(const PassSpec& s, const PassStats& st) {
               st.dma_completion, "; inside start() with the host on the wire ", st.marked);
     }
     print(serial, "; command tenures ", cmd_tenures, ", not i2c_ok ", cmd_failed);
+    if (cmd_failed != 0u) {
+        // i2c_nack_addr: a peer not yet back at its command address;
+        // anything else a finding.
+        print(serial, " (the last ", cmd_last_bad, ")");
+    }
     print_host();
     print(serial, crlf);
+}
+
+/// The pressure source every pass of a letter is labelled with: null for
+/// the family's own timer, a name while a suite runs a letter fed by
+/// another (the file header).
+const char* pass_source = nullptr;
+
+/// Pass `p` of the seven, carrying `pass_source` when it presses.
+PassSpec pass_at(uint8_t p) {
+    PassSpec s = passes[p];
+    if (s.period_us != 0u && s.source == nullptr) {
+        s.source = pass_source;
+    }
+    return s;
 }
 
 // =============================================================================
@@ -887,7 +1079,9 @@ static_assert(no_reply != i2c_ok && no_reply != i2c_rejected && no_reply != i2c_
 /// 500 ms, an order above the arbiter's own timeout, so a tenure is always
 /// answered by the arbiter first and no_reply means the pack itself
 /// stopped. The buffers are lent for the call.
-uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, Speed speed) {
+/// The tenure's half that posts: the Client's count of answered tenures
+/// before it, which the waiting half compares against.
+uint32_t post_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, Speed speed) {
     const uint32_t before = Client::done;
     Tenure t{};
     t.addr = addr;
@@ -897,6 +1091,11 @@ uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
     t.rx_len = rx_len;
     t.speed = speed;
     post<Client>(t);
+    return before;
+}
+
+uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, Speed speed) {
+    const uint32_t before = post_tenure(addr, tx, tx_len, rx, rx_len, speed);
     if (!wait_until([before] { return Client::done != before; }, 500)) {
         return no_reply;
     }
@@ -948,23 +1147,40 @@ bool need_peer() {
     return false;
 }
 
-/// A serve commanded: the peer a client at `a.addr`, acked and armed.
-bool serve(const twilink::Params& a) { return Link::act(Op::serve, a); }
+/// A serve commanded: the peer a client at `a.addr`, acked and armed - with
+/// its stop interrupt asked for (the file header's counted serve: a peer
+/// that sees a STOP only so ends a counted serve only so; every other peer
+/// maps the flag to nothing).
+bool serve(const twilink::Params& a) {
+    twilink::Params q = a;
+    q.flags = static_cast<uint8_t>(q.flags | twilink::flag_stop_interrupt);
+    return Link::act(Op::serve, q);
+}
 
 /// A wait past a deadline-ended action: `ms` of the action's deadline from
 /// `t0` (the ruler's reading when it was acked), and 10 ms more - the
 /// peer's own clock against this one's (a few hundred ppm at most, under a
-/// millisecond over these deadlines) and its return to command mode.
+/// millisecond over these deadlines) and its return to command mode. Each
+/// turn is `Turn` (the Console's wait turn; letter h's marks the flood's
+/// pacing first).
+template <void (*Turn)() = wait_turn>
 void wait_past(uint32_t t0, uint16_t ms) {
     const uint32_t until = (static_cast<uint32_t>(ms) + 10u) * (core_hz / 1000u);
     while (Ruler::now() - t0 < until) {
-        wait_turn();
+        Turn();
     }
 }
 
 /// The peer's report of its last action. False when four queries could not
 /// fetch it.
 bool report(twilink::Report& r) { return Link::report(r); }
+
+/// The report of a COUNTED serve: twi_link's arm_ms first, the peer's
+/// return to its command address after the serve ended (the file header).
+bool report_served(twilink::Report& r) {
+    wait_ms(twilink::arm_ms);
+    return Link::report(r);
+}
 
 void print_report(const twilink::Report& r) {
     print(serial, "    peer: count ", r.count, " (received ", r.aux0, ", served ", r.aux1, "), sum ", hex(r.sum),
@@ -995,7 +1211,7 @@ uint32_t us_of(uint32_t cycles) { return cycles / cycles_per_us; }
 
 void tn_command_channel() {
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         begin(s);
         const bool there = need_peer();
         twilink::Ident d{};
@@ -1039,10 +1255,10 @@ void to_shapes() {
     uint32_t pass_cyc[shape_count] = {};
     uint16_t total = 0;
     for (const auto& sh : shapes) {
-        total = static_cast<uint16_t>(total + sh.tx_len + sh.rx_len);
+        total = static_cast<uint16_t>(total + sh.tx_len + shape_served(sh.tx_len, sh.rx_len));
     }
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         begin(s);
         if (!need_peer()) {
             (void)pass_end(s);
@@ -1090,11 +1306,11 @@ void to_shapes() {
                     }
                 }
             }
-            served = static_cast<uint16_t>(served + sh.rx_len);
+            served = static_cast<uint16_t>(served + shape_served(sh.tx_len, sh.rx_len));
             hits = static_cast<uint16_t>(hits + ((sh.tx_len != 0u && sh.rx_len != 0u) ? 2u : 1u));
         }
         twilink::Report r{};
-        const bool rep = acted && report(r);
+        const bool rep = acted && report_served(r);
         const PassStats st = pass_end(s);
         print_pass(s, st);
         print(serial, "    post to reply, us:");
@@ -1140,7 +1356,7 @@ static_assert(9u * stretch_us + 1000u < 1000u * arb_timeout_ms,
 void tp_speeds() {
     constexpr uint8_t n_speeds = static_cast<uint8_t>(std::size(speeds));
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         begin(s);
         if (!need_peer()) {
             (void)pass_end(s);
@@ -1185,7 +1401,7 @@ void tp_speeds() {
                 sum = static_cast<uint16_t>(sum + tx_buf[k]);
             }
             twilink::Report r{};
-            const bool rep = report(r);
+            const bool rep = report_served(r);
             rung_ok[j] = rs == i2c_ok && cs == i2c_ok && ws == i2c_ok && mism == 0u && rep && r.count == 37u &&
                          r.sum == sum && ran_to_count(r);
             if (!rung_ok[j]) {
@@ -1276,9 +1492,67 @@ void tp_speeds() {
 // q - the vocabulary under pressure
 // =============================================================================
 
+/// LETTER q'S OWN DEAF ADDRESS: its deaf case parks the peer's client here
+/// (a serve whose `addr` names it), not at twi_link's deaf_addr. That one,
+/// 0x7A, lies in 1111 0XX, the range I2C reserves for the first byte of a
+/// 10-bit address, and the F1 lineage's event machine (the STM32F4's I2C1,
+/// the CH32V203's and CH32V303's, the CH32X035's) sends its write byte 0xF4
+/// as that header, sets ADD10 where a 7-bit address sets ADDR, and the
+/// 7-bit engine waiting for ADDR never ends the tenure (each family's I2C
+/// page, a driver gap). 0x5D is an ordinary 7-bit address (0x08..0x77):
+/// no peer's client takes it in any mode of twi_link (command_addr 0x6B,
+/// dut_addr 0x2C, shared_addr 0x39, low_addr 0x11), the AVR suite's
+/// single-board half never names it (the list beside twi_link.hpp's
+/// command_addr), and no board page lists a device on a desk's I2C pair -
+/// so while the peer sits there the probe of it is the peer's alone, and
+/// the dut_addr it left answers nobody.
+constexpr uint8_t q_deaf_addr = 0x5D;
+static_assert(q_deaf_addr >= 0x08u && q_deaf_addr <= 0x77u, "a 7-bit address outside both reserved ranges");
+static_assert(q_deaf_addr != twilink::command_addr && q_deaf_addr != twilink::dut_addr &&
+                  q_deaf_addr != twilink::shared_addr && q_deaf_addr != twilink::low_addr,
+              "an address no mode of the protocol gives the peer's client");
+
+constexpr bool refusal_holds_address = i2c_traits::refusal_holds_address<I2cTraits>();
+constexpr uint8_t refused_close_hits = i2c_traits::refused_close_hits<I2cTraits>();
+/// What the probe of dut_addr inside a refusing action's window is
+/// answered: the peer's client there again, or (refusal_holds_address)
+/// its address refused with its data.
+constexpr uint8_t inside_refusal = refusal_holds_address ? i2c_nack_addr : i2c_ok;
+
+/// The tenures after a refusal: the probe of dut_addr inside the action's
+/// window, the wait past its deadline, and - where the peer holds its
+/// address refused to that deadline - a probe of the command address, the
+/// peer back in command mode. `next` is the tenure the letter judges
+/// i2c_ok: the probe after the deadline there, the probe inside the window
+/// elsewhere.
+struct AfterRefusal {
+    uint8_t inside = no_reply;
+    uint8_t next = no_reply;
+};
+AfterRefusal after_refusal(uint32_t t0, uint16_t deadline) {
+    AfterRefusal a{};
+    a.inside = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
+    wait_past(t0, deadline);
+    if constexpr (refusal_holds_address) {
+        a.next = arb_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[1]);
+    } else {
+        a.next = a.inside;
+    }
+    return a;
+}
+
 void tq_vocabulary() {
+    // The peer's address matches in each refusing action: the refused
+    // tenure's, and - where the peer took them - the void write's that
+    // closes a refused last byte of a write-then-read and the probe's;
+    // the bytes it served there, the probe's alone (the read half never
+    // began).
+    constexpr uint16_t hits_after_six = static_cast<uint16_t>(1u + (refusal_holds_address ? 0u : 1u));
+    constexpr uint16_t hits_after_two =
+        static_cast<uint16_t>(1u + (refusal_holds_address ? 0u : refused_close_hits + 1u));
+    constexpr uint16_t served_after_two = refusal_holds_address ? 0u : probe_bytes;
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         begin(s);
         if (!need_peer()) {
             (void)pass_end(s);
@@ -1286,19 +1560,18 @@ void tq_vocabulary() {
         }
         constexpr uint16_t deadline = 120;
         // A deaf client: the probe and a write meet nobody at dut_addr; the
-        // peer is parked at deaf_addr, which answers - the next tenure.
+        // peer's client is at q_deaf_addr, which answers - the next tenure.
         twilink::Params deaf{};
         deaf.ms = deadline;
-        deaf.addr = twilink::dut_addr;
-        deaf.flags = twilink::flag_deaf;
+        deaf.addr = q_deaf_addr;
         uint8_t probe = no_reply, wdeaf = no_reply, next1 = no_reply;
-        bool a1 = serve(deaf);
+        const bool a1 = serve(deaf);
         const uint32_t t1 = Ruler::now();
         if (a1) {
             const uint8_t w4[4] = {1, 2, 3, 4};
             probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
             wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
-            next1 = arb_tenure(twilink::deaf_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            next1 = arb_tenure(q_deaf_addr, nullptr, 0, nullptr, 0, speeds[1]);
             wait_past(t1, deadline);
         }
         // The third byte of six refused.
@@ -1306,23 +1579,27 @@ void tq_vocabulary() {
         n3.ms = deadline;
         n3.addr = twilink::dut_addr;
         n3.nack_at = 3;
-        uint8_t nack3 = no_reply, next2 = no_reply;
+        uint8_t nack3 = no_reply;
+        AfterRefusal after2{};
         const bool a2 = serve(n3);
         const uint32_t t2 = Ruler::now();
         if (a2) {
             const uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
             nack3 = arb_tenure(twilink::dut_addr, w6, 6, nullptr, 0, speeds[1]);
-            next2 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t2, deadline);
+            after2 = after_refusal(t2, deadline);
         }
+        twilink::Report r2{};
+        const bool rep2 = a2 && report(r2);
         // The LAST written byte of a 2+4 write-then-read refused: the
-        // controller lets go, no read half follows (the peer counts the
-        // tenure's one address match, and the probe after it).
+        // controller lets go - with a STOP, or with a void write from the
+        // repeated START already requested (refused_close_hits) - and no
+        // read half follows.
         twilink::Params n2{};
         n2.ms = deadline;
         n2.addr = twilink::dut_addr;
         n2.nack_at = 2;
-        uint8_t nack2 = no_reply, next3 = no_reply;
+        uint8_t nack2 = no_reply;
+        AfterRefusal after3{};
         const bool a3 = serve(n2);
         const uint32_t t3 = Ruler::now();
         if (a3) {
@@ -1331,29 +1608,40 @@ void tq_vocabulary() {
                 rx_buf[k] = 0xEE;
             }
             nack2 = arb_tenure(twilink::dut_addr, w2, 2, rx_buf, 4, speeds[1]);
-            next3 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t3, deadline);
+            after3 = after_refusal(t3, deadline);
         }
         twilink::Report r{};
         const bool rep = a3 && report(r);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then deaf_addr's probe ", next1,
-              "; the third of six refused: ", nack3, ", then the probe ", next2, "; the last of a 2+4's write "
-              "refused: ",
-              nack2, ", then the probe ", next3, crlf);
+        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then the probe of ", hex(q_deaf_addr), " ", next1,
+              "; the third of six refused: ", nack3, ", then the probe ", after2.inside);
+        if (refusal_holds_address) {
+            print(serial, " and after the deadline ", after2.next);
+        }
+        print(serial, "; the last of a 2+4's write refused: ", nack2, ", then the probe ", after3.inside);
+        if (refusal_holds_address) {
+            print(serial, " and after the deadline ", after3.next);
+        }
+        print(serial, crlf);
+        if (rep2) {
+            print_report(r2);
+        }
         if (rep) {
             print_report(r);
         }
         bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next tenure "
                                      "i2c_ok",
                       a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1 == i2c_ok);
-        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the next tenure i2c_ok",
-                      a2 && nack3 == i2c_nack_data && next2 == i2c_ok);
+        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the peer's word that it refused "
+                                     "and its address matches, the next tenure i2c_ok",
+                      a2 && nack3 == i2c_nack_data && after2.inside == inside_refusal && after2.next == i2c_ok &&
+                          rep2 && (r2.flags & twilink::report_nacked) != 0u && r2.addr_hits == hits_after_six);
         bench.verdict(pass_label(s), "the last written byte of a 2+4 refused: i2c_nack_data, the controller let go "
-                                     "(no read half), the next tenure i2c_ok",
-                      a3 && nack2 == i2c_nack_data && next3 == i2c_ok && rep && r.addr_hits == 2u &&
-                          (r.flags & twilink::report_nacked) != 0u && r.aux1 == 0u);
+                                     "(no read half), the peer's address matches, the next tenure i2c_ok",
+                      a3 && nack2 == i2c_nack_data && after3.inside == inside_refusal && after3.next == i2c_ok &&
+                          rep && r.addr_hits == hits_after_two && (r.flags & twilink::report_nacked) != 0u &&
+                          r.aux1 == served_after_two);
         judge_pressure(s, st);
     }
 }
@@ -1362,12 +1650,13 @@ void tq_vocabulary() {
 // w - the arbiter with three requesters of three priorities
 // =============================================================================
 
-constexpr uint8_t probe_bytes = i2c_traits::probe_bytes<I2cTraits>();
 constexpr uint8_t closing_byte = 0x6E;
+constexpr uint8_t closing_len = i2c_traits::closing_len<I2cTraits>();
+static_assert(closing_len >= 1u && closing_len <= sizeof tx_buf, "letter w's closing write fits the buffer");
 
 void tw_arbiter() {
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         const bool pressing = s.period_us != 0u;
         begin(s);
         if (!need_peer()) {
@@ -1375,9 +1664,10 @@ void tw_arbiter() {
             return;
         }
         const uint16_t bytes = static_cast<uint16_t>(w::client_n * (1u + w::client_len) + w::minor_n * w::minor_len +
-                                                     (pressing ? w::press_n * probe_bytes : 0u) + 1u);
+                                                     (pressing ? w::press_n * probe_bytes : 0u) + closing_len);
         const uint16_t sum = static_cast<uint16_t>(w::client_n * w::client_byte +
-                                                   w::minor_n * w::minor_len * w::minor_byte + closing_byte);
+                                                   w::minor_n * w::minor_len * w::minor_byte +
+                                                   closing_len * closing_byte);
         const uint16_t hits = static_cast<uint16_t>(2u * w::client_n + w::minor_n + (pressing ? w::press_n : 0u) + 1u);
         twilink::Params a{};
         a.count = bytes;
@@ -1413,11 +1703,14 @@ void tw_arbiter() {
                 2000);
             w::press_live = false;
             w::live = false;
-            closing = arb_tenure(twilink::dut_addr, &closing_byte, 1, nullptr, 0, speeds[1]);
+            for (uint8_t k = 0; k < closing_len; ++k) {
+                tx_buf[k] = closing_byte;
+            }
+            closing = arb_tenure(twilink::dut_addr, tx_buf, closing_len, nullptr, 0, speeds[1]);
         }
         const uint32_t took = Ruler::now() - t0;
         twilink::Report r{};
-        const bool rep = acted && report(r);
+        const bool rep = acted && report_served(r);
         uint16_t host_bad = 0;
         for (const auto& row : w::client_rx) {
             for (const uint8_t b : row) {
@@ -1432,8 +1725,8 @@ void tw_arbiter() {
               w::client.ok, " ok, ", w::client.out_of_order, " out of order), Minor ", w::minor.replies, "/",
               w::minor.posted, " (", w::minor.ok, " ok), Pressure ", w::press.replies, "/", w::press.posted, " (",
               w::press.ok, " ok); timeouts ", w::client.timeouts + w::minor.timeouts + w::press.timeouts,
-              ", rejected ", rejected, ", stale ", stale, "; read bytes wrong ", host_bad, "; the closing write ",
-              closing, crlf);
+              ", rejected ", rejected, ", stale ", stale, "; read bytes wrong ", host_bad, "; the closing write of ",
+              closing_len, " ", closing, crlf);
         if (rep) {
             print_report(r);
         }
@@ -1465,10 +1758,23 @@ void tw_arbiter() {
 /// release (aux8 0: no SCL edge releases it).
 constexpr uint16_t hold_ms = 60;
 
-/// The held tenure's longest answer: the arbiter's 20 ticks, a tick more
-/// for where in a tick the timer was armed, and a millisecond for the walk
-/// of the time events that posts it (the Console's wait turn and one
-/// Pressure dispatch: some 80 us) - 22 ms.
+/// The held tenure's longest answer, counted from its start() - the arbiter
+/// arms its timeout as start() returns (util/bus_master.hpp's begin()):
+/// the arbiter's 20 ticks, a tick more for where in a tick the timer was
+/// armed, a millisecond for start() itself and the timeout's way from its
+/// post to the Client's reply (the arbiter's recover() and finish(), a
+/// Pressure dispatch or two over them) - 22 ms - and the walk's latency:
+/// the matured timeout is posted only by the Console's next wait turn
+/// (rubato_passes.hpp's base turn), so the longest interval between two of
+/// its turns during the wait, measured in the pass (h::turn_gap), is added.
+/// Under the heaviest pressure the paced flood takes what the core has
+/// left, and the Console turns only between probes: that interval is then
+/// several periods. It is not counted from the Client's
+/// post: the flood's first probe may stand in the arbiter's queue ahead
+/// of the held tenure and take its own answer first - a park to its own
+/// timeout, or a loss whose recovery brings the block up over the held
+/// line - so the post-to-reply can exceed the bound by a whole tenure, and
+/// is printed beside it.
 constexpr uint32_t held_answer_ms = arb_timeout_ms + 2u;
 
 /// One held tenure: the hold commanded, the Client's write into it at
@@ -1478,12 +1784,42 @@ constexpr uint32_t held_answer_ms = arb_timeout_ms + 2u;
 struct HeldOutcome {
     bool acted = false;
     uint8_t status = no_reply;
-    uint32_t cycles = 0;
+    uint32_t cycles = 0;        ///< post to reply
+    uint32_t from_start = 0;    ///< its start() to its reply
+    uint32_t turn_gap = 0;      ///< the longest interval between two Console turns meanwhile
     bool drained = false;
     uint8_t next = no_reply;
     bool voted = false;
     bool idle = false;
 };
+
+/// One of the Console's wait turns while the peer holds the wire: the mark
+/// that lets Pressure post its next flood probe (the file header's pacing:
+/// the Console runs only when every object above it is idle), then the
+/// turn.
+void held_turn() {
+    const uint32_t t = Ruler::now();
+    const uint32_t gap = t - h::last_turn;
+    if (gap > h::turn_gap) {
+        h::turn_gap = gap;
+    }
+    h::last_turn = t;
+    h::turned = true;
+    wait_turn();
+}
+
+/// rubato_passes.hpp's wait_until() with letter h's turn.
+template <typename Pred>
+bool held_wait_until(Pred done, uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (!done()) {
+        if (Ticker::millis() - t0 >= ms) {
+            return done();
+        }
+        held_turn();
+    }
+    return true;
+}
 
 HeldOutcome held_tenure(Speed speed, bool flood) {
     HeldOutcome o{};
@@ -1504,13 +1840,26 @@ HeldOutcome held_tenure(Speed speed, bool flood) {
     const uint32_t now = Ruler::now();
     h::held_from = now;
     h::held_until = now + (hold_ms - 5u) * (core_hz / 1000u);
+    // The flood's first probe needs no turn: a tick between here and the
+    // Client's post below puts a probe on the wire before the held tenure,
+    // the probe then parks or loses first and the arbiter's recover() starts
+    // the held tenure - one of the interleavings the letter judges. Every
+    // probe after it waits for a turn of the Console.
+    h::turned = true;
+    h::last_turn = Ruler::now();
+    h::turn_gap = 0;
     h::live = flood;
+    // The Client's write into the hold, waited for - as arb_tenure() does,
+    // at most 500 ms - by the turns that pace the flood.
     const uint8_t w4[4] = {0x31, 0x32, 0x33, 0x34};
-    o.status = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speed);
+    const uint32_t before = post_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speed);
+    o.status = held_wait_until([before] { return Client::done != before; }, 500) ? Client::status : no_reply;
     o.cycles = Client::cycles;
+    o.from_start = Client::since_start;
+    o.turn_gap = h::turn_gap;
     // The release: the hold's 60 ms from its start, the peer's coarse
     // deadline check and its return to command mode - 70 ms from the ack.
-    wait_past(now, hold_ms);
+    wait_past<held_turn>(now, hold_ms);
     h::live = false;
     o.drained = wait_until([] { return h::press.replies >= h::press.posted; }, 500);
     o.next = Link::command(Op::ping) ? i2c_ok : cmd_last_bad;
@@ -1521,11 +1870,26 @@ HeldOutcome held_tenure(Speed speed, bool flood) {
     return o;
 }
 
-bool held_signature(uint8_t st) { return st == i2c_timeout || st == i2c_arb_lost; }
+/// The held wire's signatures: i2c_timeout (the START parked) and
+/// i2c_arb_lost (the START out into the held line), and i2c_bus_error
+/// where the family's host reports a loss with BUSERR beside it so
+/// (held_bus_error).
+constexpr bool held_bus_error = i2c_traits::held_bus_error<I2cTraits>();
+/// The held tenure answered inside its bound (held_answer_ms's arithmetic).
+bool held_in_time(const HeldOutcome& o) {
+    return o.from_start <= held_answer_ms * (core_hz / 1000u) + o.turn_gap;
+}
+bool held_signature(uint8_t st) {
+    return st == i2c_timeout || st == i2c_arb_lost || (held_bus_error && st == i2c_bus_error);
+}
+const char* status_name(uint8_t st) {
+    return st == i2c_timeout ? " (i2c_timeout)"
+                             : (st == i2c_arb_lost ? " (i2c_arb_lost)" : (st == i2c_bus_error ? " (i2c_bus_error)" : ""));
+}
 
 void th_held_wire() {
     for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
+        const PassSpec s = pass_at(p);
         const bool pressing = s.period_us != 0u;
         begin(s);
         if (!need_peer()) {
@@ -1540,20 +1904,27 @@ void th_held_wire() {
         const uint8_t stale = static_cast<uint8_t>(I2cArb::stale_events() - stale0);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    the held tenure: status ", o.status,
-              o.status == i2c_timeout ? " (i2c_timeout)" : (o.status == i2c_arb_lost ? " (i2c_arb_lost)" : ""), " in ",
-              us_of(o.cycles), " us; Pressure posted ", h::press.posted, ", answered ", h::press.replies, " (ok ",
-              h::press.ok, ", of them while held ", h::press.ok_early, "; rejected ", h::press.rejected, ", timeout ",
-              h::press.timeouts, ", arb_lost ", h::press.arb_lost, ", nack_addr ", h::press.nack_addr, " (", h::press.nack_early, " while held), other ", h::press.other, " last ",
-              h::press.other_status, "); Requests in the draining window ", I2cArb::draining_requests, ", stale ",
-              stale, "; next tenure ", o.next, ", the vote ", o.idle ? "idle" : "NOT IDLE", crlf);
+        print(serial, "    the held tenure: status ", o.status, status_name(o.status), " in ", us_of(o.from_start),
+              " us from its start (", us_of(o.cycles), " from its post; the Console's turns ", us_of(o.turn_gap),
+              " us apart at most); Pressure posted ", h::press.posted, ", answered ", h::press.replies, " (ok ", h::press.ok,
+              ", of them while held ", h::press.ok_early, "; rejected ", h::press.rejected, ", timeout ",
+              h::press.timeouts, ", arb_lost ", h::press.arb_lost, ", nack_addr ", h::press.nack_addr, " (",
+              h::press.nack_early, " while held)");
+        if (held_bus_error) {
+            print(serial, ", bus_error ", h::press.bus_errors, " (", h::press.bus_errors_early, " while held)");
+        }
+        print(serial, ", other ", h::press.other, " last ", h::press.other_status,
+              "); Requests in the draining window ", I2cArb::draining_requests, ", stale ", stale, "; next tenure ",
+              o.next, ", the vote ", o.idle ? "idle" : "NOT IDLE", crlf);
         bench.verdict(pass_label(s), "the held tenure answered in its place, never i2c_ok - i2c_timeout or "
-                                     "i2c_arb_lost, the family's two signatures",
+                                     "i2c_arb_lost (or the family's i2c_bus_error), its signatures",
                       o.acted && held_signature(o.status));
-        bench.verdict(pass_label(s), "... at the arbiter's limit or sooner (22 ms, the letter's arithmetic)",
-                      o.acted && o.cycles <= held_answer_ms * (core_hz / 1000u));
+        bench.verdict(pass_label(s), "... at the arbiter's limit or sooner from its start (22 ms and the longest "
+                                     "interval between the Console's turns, the letter's arithmetic)",
+                      o.acted && held_in_time(o));
         bench.verdict(pass_label(s), "every request Pressure posted answered exactly once, i2c_rejected, "
-                                     "i2c_timeout, i2c_arb_lost, or after the release i2c_ok or i2c_nack_addr",
+                                     "i2c_timeout, i2c_arb_lost, or after the release i2c_ok or i2c_nack_addr "
+                                     "(the family's i2c_bus_error either side)",
                       o.drained && h::press.replies == h::press.posted && h::press.other == 0u &&
                           h::press.ok_early == 0u && h::press.nack_early == 0u &&
                           (pressing || h::press.posted == 0u));
@@ -1571,12 +1942,11 @@ void th_held_wire() {
     }
     const HeldOutcome o = held_tenure(speeds[1], false);
     print(serial, "  the hold met at ", speed_hz(speeds[1]) / 1000u, " kHz after commands at ",
-          speed_hz(speeds[0]) / 1000u, ": status ", o.status,
-          o.status == i2c_timeout ? " (i2c_timeout)" : (o.status == i2c_arb_lost ? " (i2c_arb_lost)" : ""), " in ",
-          us_of(o.cycles), " us; next tenure ", o.next, crlf);
+          speed_hz(speeds[0]) / 1000u, ": status ", o.status, status_name(o.status), " in ", us_of(o.from_start),
+          " us from its start (", us_of(o.cycles), " from its post); next tenure ", o.next, crlf);
     bench.verdict("a rate change into the held wire: answered in its place, never i2c_ok, at the limit or sooner, "
                   "the next tenure i2c_ok",
-                  o.acted && held_signature(o.status) && o.cycles <= held_answer_ms * (core_hz / 1000u) &&
+                  o.acted && held_signature(o.status) && held_in_time(o) &&
                       o.next == i2c_ok && o.idle);
 }
 
@@ -1614,7 +1984,7 @@ void tx_fill() {
     constexpr uint16_t tenures = 400;
     uint32_t silent_start = 0;   ///< the control's average start(), in cycles
     for (uint8_t press = 0; press < 2u; ++press) {
-        const PassSpec& s = passes[press == 0u ? 0u : 4u];
+        const PassSpec s = pass_at(press == 0u ? 0u : 4u);
         if (!need_peer()) {
             return;
         }
@@ -1643,7 +2013,7 @@ void tx_fill() {
         const uint32_t in_start_n = landed_in_start;
         const PassStats st = pass_end(s);
         twilink::Report r{};
-        const bool rep = acted && report(r);
+        const bool rep = acted && report_served(r);
         print_pass(s, st);
         if (press == 0u) {
             silent_start = acted ? start_sum / tenures : 0u;

@@ -14,7 +14,7 @@
 // that runs inside the kernel it tests: the program is one Rubato pack of
 // five objects - Pressure, Client, I2cArb, Minor and Console, from the
 // highest priority down - and everything of it that names no register, the
-// pack, the passes, the command channel and the letters but one, is the I2C
+// pack, the passes, the command channel and the letters, is the I2C
 // suites' shared body (avrxt/src/apps/rubato_i2c.hpp, whose header
 // describes each object, each letter and where preemption can reach a
 // tenure). What is this family's is here, each choice from the reference
@@ -71,9 +71,10 @@
 //   37344 counts. Pressure's dispatch, a 3000-cycle spin behind the
 //   platform's road (119 cycles from a handler's last statement at 144 MHz
 //   on the CH32V203C8T6, docs/ch32vx03/platform.md - re-measured here at
-//   this clock: every pass prints the TIM2 count at the spin's entry, the
-//   cycles from the update event through the vector and the road to the
-//   dispatch's spin, 180 to 238 cycles at its least), is shorter than the
+//   this clock: every pass prints the TIM2 count where the spin begins
+//   (I2cTraits::tick_spin_begin()), the cycles from the update event
+//   through the vector and the road to the dispatch's spin, 180 to 238
+//   cycles at its least), is shorter than the
 //   shortest period's 9312 cycles, so a tick finds the last one done; at
 //   97 us x 3000 it takes 32 % of the core. The exception is measured, not
 //   placed: in letter h's 97 us passes, at the far end's release of the
@@ -101,8 +102,7 @@
 // acknowledges the target's own address, so from the refused byte to the
 // action's deadline the peer refuses its address too (its header: STOPF
 // does not rise for a Stop after a refused byte, so the deadline's re-init
-// is what puts ACK back) - which is why this suite's letter q is its own
-// (below).
+// is what puts ACK back) - I2cTraits::refusal_holds_address below.
 //
 // THE WIRES, fixed on the desk (docs/boards/weact-ch32v203c8.md,
 // docs/boards/ch32v303-evt.md; test_vx03_i2c's pair): V203 PB6 to V303 PB6
@@ -126,19 +126,19 @@
 //   p  100 and 400 kHz: a read of 16, a 1+4 and a write of 16 byte-exact,
 //      the wire's time printed; the peer's commanded stretch, 1000 us a
 //      byte at 100 kHz, priced from below by its holds (I2cTraits).
-//   q  this suite's own (above the letter, why): a deaf client's
-//      i2c_nack_addr, the third of six refused (i2c_nack_data, the write on
-//      the transmit engine), the last written byte of a 2+4 refused
-//      (i2c_nack_data, the controller let go through the void write), the
-//      peer's own word that it refused, and after each action's deadline
-//      the next tenure i2c_ok.
+//   q  the vocabulary: a deaf client's i2c_nack_addr, the third of six
+//      refused (i2c_nack_data, the write on the transmit engine), the last
+//      written byte of a 2+4 refused (i2c_nack_data, the controller let go
+//      through the void write), the peer's own word that it refused; inside
+//      each refusing window the probe refused at the address (this peer),
+//      and after the deadline the next tenure i2c_ok.
 //   w  three requesters of three priorities at 400 kHz: the Client's
 //      write-then-reads of 1+6 (the read half on the receive engine),
 //      Minor's writes of two (the pump: both bytes in the ADDR entry),
 //      Pressure's probes: in order, i2c_ok, nothing rejected, no timeout,
 //      the peer's tallies exact.
-//   h  the held wire (the peer holds SDA 60 ms) with Pressure's probes at
-//      every tick: answered in its place, every request once, the next
+//   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
+//      probes, paced by the Console's turns: answered in its place, every request once, the next
 //      tenure i2c_ok and the arbiter idle; then the hold met at another
 //      speed.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,
@@ -217,17 +217,11 @@ static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2
 constexpr const char* pressure_name = "TIM2";
 constexpr const char* peer_name = v303 ? "the CH32V203C8T6" : "the CH32V303VCT6";
 
-/// Every spin's entry, the TIM2 count beside it (defined after the shared
-/// body, which declares what it compares against): the road instrument.
-void note_spin(uint32_t cycles, uint32_t count);
-
 /// A busy wait of `cycles` HCLK cycles: the STK counter read bare, one
 /// load a turn, the restart folded in, for a span under half a period; the
 /// composed count for a longer one. A preemption longer than a period only
-/// lengthens a bare spin. Its first act reads TIM2's count, which
-/// note_spin() keeps when the spin is Pressure's.
+/// lengthens a bare spin.
 inline void spin(uint32_t cycles) {
-    note_spin(cycles, Pulse::count());
     if (cycles < stk_period / 2u) {
         const uint32_t t0 = stk()->CNTL;
         for (;;) {
@@ -324,6 +318,18 @@ struct I2cTraits {
     /// the bound is the holds alone.
     static constexpr uint8_t stretch_write_holds = 7;
     static constexpr uint8_t stretch_read_holds = 9;
+    /// A refused LAST written byte of a write-then-read is closed by a void
+    /// write from the repeated START already requested (the driver's
+    /// close_refused()): one address more, which this peer, refusing its
+    /// address after a refused byte, does not take.
+    static constexpr uint8_t refused_close_hits = 1;
+    /// From a refused data byte to the action's deadline this peer's ACK is
+    /// down, and that bit acknowledges its own address too (the file
+    /// header): the probe inside the window is refused at the address.
+    static constexpr bool refusal_holds_address = true;
+    /// The road instrument (below): TIM2's count where Pressure's spin
+    /// begins.
+    static void tick_spin_begin();
     /// Both lines high on their pads before the letter's first tenure: the
     /// pull-ups are the CH32V203C8T6 board's, so on the CH32V303VCT6 a line
     /// low at rest is that board unpowered (or a line held).
@@ -355,14 +361,12 @@ void pressure_quiet() {
 }
 
 /// The road instrument: TIM2 counts HCLK from zero at its update event, so
-/// its count at the entry of Pressure's spin is the cycles from the event
+/// its count where Pressure's spin begins is the cycles from the event
 /// through the interrupt's entry, the vector (its flag, the landing trace,
 /// the post), the scheduler's road and the dispatch's head (a request
 /// posted in letters w and h included) - the least of a pass that road
 /// with nothing in its way, the most what the no-dropped-tick bound
-/// spends. Pressure's spin is the one whose length is pressure_spin with
-/// Pressure's index as the ceiling (a wait turn spins 500 to 1523 cycles,
-/// a pass's spin 300 or 3000).
+/// spends.
 volatile uint32_t road_least = 0xFFFF'FFFFu;
 volatile uint32_t road_most = 0;
 volatile uint32_t road_n = 0;
@@ -377,17 +381,19 @@ volatile uint8_t most_ceiling = 0;
 volatile uint8_t most_arb = 0;
 volatile uint32_t tick_entry = 0;
 volatile uint32_t most_entry = 0;
-void note_spin(uint32_t cycles, uint32_t count) {
-    if (cycles != 0u && cycles == pressure_spin && P::ceiling == pressure_index) {
-        road_least = count < road_least ? count : road_least;
-        if (count > road_most) {
-            road_most = count;
-            most_ceiling = tick_ceiling;
-            most_arb = tick_arb;
-            most_entry = tick_entry;
-        }
-        road_n = road_n + 1u;
+void I2cTraits::tick_spin_begin() {
+    const uint32_t count = Pulse::count();
+    if (pressure_spin == 0u) {
+        return;   // a tick outside a pressure pass (pass_end() clears the spin): no road kept
     }
+    road_least = count < road_least ? count : road_least;
+    if (count > road_most) {
+        road_most = count;
+        most_ceiling = tick_ceiling;
+        most_arb = tick_arb;
+        most_entry = tick_entry;
+    }
+    road_n = road_n + 1u;
 }
 
 /// STAR2.MSL: the controller is the bus's master, set when its START is on
@@ -474,136 +480,6 @@ void console_banner() {
     bench.menu();
 }
 
-// =============================================================================
-// q - the vocabulary under pressure, against this peer
-// =============================================================================
-//
-// The shared body's letter q cannot run on this pair, for two reasons, and
-// this letter is that one with both answered:
-//
-//  - ITS DEAF CLIENT'S NEXT TENURE IS A PROBE OF deaf_addr, 0x7A, and on this
-//    host that tenure never ends. 0x78..0x7B are the I2C bus's 10-bit
-//    header codes (1111 0xx), and the F1 event machine recognises the
-//    header by its value: the address byte 0xF4 written after SB raises
-//    ADD10 (19.12.6), not ADDR, and waits for the second address byte. The
-//    driver's 7-bit engine has no ADD10 step, so its event vector, waiting
-//    for ADDR, re-enters for ever on the standing flag and the thread -
-//    the arbiter's timeout with it - never runs again (measured on the
-//    CH32V203C8T6, the core halted in the event handler: mcause the I2C1
-//    event line, STAR1 0x0008 ADD10 alone, STAR2 MSL and BUSY, DATAR 0xF4,
-//    CTLR2 the error and event vectors). A driver finding, reported; here
-//    the deaf serve's next tenure is a probe of the command address after
-//    the serve's deadline instead.
-//  - ITS OTHER NEXT TENURES ARE INSIDE THE REFUSING ACTION'S WINDOW, which a
-//    peer that re-arms its acknowledge at the Stop answers. This peer
-//    cannot (the file header): from the refused byte to the action's
-//    deadline its ACK is down, and that bit acknowledges its own address
-//    too - so a probe of dut_addr there meets a refusal of the address,
-//    and the void write that closes a refused last byte meets one as well.
-//    The two refusals' next tenures move past the deadline, as
-//    test_vx03_i2c's letter o takes them (a probe of the command address,
-//    which the peer answers again once its deadline has put it back), the
-//    probe inside the window is printed, and the 2+4's address count is
-//    the peer's: the write's one match, the void write's address refused,
-//    no read half begun (no byte given).
-
-/// The shared letter stays compiled (an unnamed namespace's function no
-/// letter names would be an unused-function error) and is never registered.
-[[maybe_unused]] void (*const shared_q)() = tq_vocabulary;
-
-void tq_vocabulary_vx03() {
-    for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
-        begin(s);
-        if (!need_peer()) {
-            (void)pass_end(s);
-            return;
-        }
-        constexpr uint16_t deadline = 120;
-        // A deaf client: the probe and a write meet nobody at dut_addr (the
-        // peer is parked at deaf_addr); after the deadline the command
-        // address answers again.
-        twilink::Params deaf{};
-        deaf.ms = deadline;
-        deaf.addr = twilink::dut_addr;
-        deaf.flags = twilink::flag_deaf;
-        uint8_t probe = no_reply, wdeaf = no_reply, next1 = no_reply;
-        const bool a1 = serve(deaf);
-        const uint32_t t1 = Ruler::now();
-        if (a1) {
-            const uint8_t w4[4] = {1, 2, 3, 4};
-            probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
-            wait_past(t1, deadline);
-            next1 = arb_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[1]);
-        }
-        // The third byte of six refused, on the transmit engine.
-        twilink::Params n3{};
-        n3.ms = deadline;
-        n3.addr = twilink::dut_addr;
-        n3.nack_at = 3;
-        uint8_t nack3 = no_reply, inside2 = no_reply, next2 = no_reply;
-        const bool a2 = serve(n3);
-        const uint32_t t2 = Ruler::now();
-        if (a2) {
-            const uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
-            nack3 = arb_tenure(twilink::dut_addr, w6, 6, nullptr, 0, speeds[1]);
-            inside2 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t2, deadline);
-            next2 = arb_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[1]);
-        }
-        twilink::Report r2{};
-        const bool rep2 = a2 && report(r2);
-        // The LAST written byte of a 2+4 write-then-read refused: the NACK
-        // arrives with the repeated START already requested, and the
-        // controller closes the tenure with a void write (the driver's
-        // close_refused()).
-        twilink::Params n2{};
-        n2.ms = deadline;
-        n2.addr = twilink::dut_addr;
-        n2.nack_at = 2;
-        uint8_t nack2 = no_reply, inside3 = no_reply, next3 = no_reply;
-        const bool a3 = serve(n2);
-        const uint32_t t3 = Ruler::now();
-        if (a3) {
-            const uint8_t w2[2] = {0x77, 0x88};
-            for (uint8_t k = 0; k < 4u; ++k) {
-                rx_buf[k] = 0xEE;
-            }
-            nack2 = arb_tenure(twilink::dut_addr, w2, 2, rx_buf, 4, speeds[1]);
-            inside3 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t3, deadline);
-            next3 = arb_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[1]);
-        }
-        twilink::Report r{};
-        const bool rep = a3 && report(r);
-        const PassStats st = pass_end(s);
-        print_pass(s, st);
-        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", the probe after its deadline ", next1,
-              "; the third of six refused: ", nack3, ", a probe inside its window ", inside2,
-              ", the probe after its deadline ", next2, "; the last of a 2+4's write refused: ", nack2,
-              ", inside ", inside3, ", after ", next3, crlf);
-        if (rep2) {
-            print_report(r2);
-        }
-        if (rep) {
-            print_report(r);
-        }
-        bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next tenure "
-                                     "i2c_ok",
-                      a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1 == i2c_ok);
-        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the peer's word that it refused, "
-                                     "the next tenure i2c_ok",
-                      a2 && nack3 == i2c_nack_data && next2 == i2c_ok && rep2 &&
-                          (r2.flags & twilink::report_nacked) != 0u);
-        bench.verdict(pass_label(s), "the last written byte of a 2+4 refused: i2c_nack_data, the controller let go "
-                                     "(no read half), the next tenure i2c_ok",
-                      a3 && nack2 == i2c_nack_data && next3 == i2c_ok && rep && r.addr_hits == 1u &&
-                          (r.flags & twilink::report_nacked) != 0u && r.aux1 == 0u);
-        judge_pressure(s, st);
-    }
-}
-
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
@@ -679,8 +555,7 @@ int main() {
     bench.letter('n', "the command channel through the arbiter", tn_command_channel);
     bench.letter('o', "the tenure shapes on both of the host's paths", to_shapes);
     bench.letter('p', "the speeds, and the peer's commanded stretch", tp_speeds);
-    bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte",
-                 tq_vocabulary_vx03);
+    bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary);
     bench.letter('w', "the arbiter with three requesters of three priorities", tw_arbiter);
     bench.letter('h', "the held wire, with requests arriving while it is held", th_held_wire);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);

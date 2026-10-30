@@ -389,8 +389,8 @@ Nucleo-G0B1RE's unchanged `twi_peer` over the desk's I2C node: the I2C
 stack - `util/i2c_bus.hpp`'s arbiter over `I2cHost<1>` on I2C1 and, in
 the twin, over `FmpI2cHost<1>`, each with its DMA engines - under Rubato
 with the same pressure on TIM2, every letter run first without it as
-its control; every verdict green on every run (thirty of the first,
-twenty of the twin). The command channel through the arbiter, the
+its control; every verdict green on every run ([i2c.md](i2c.md) and
+[fmpi2c.md](fmpi2c.md) say how many of each letter). The command channel through the arbiter, the
 tenure shapes on every path of each host, the speeds (100 and 400 kHz,
 and 1 MHz on the FMPI2C1) and the partner's commanded stretch, three
 requesters of three priorities, and a held wire with requests arriving

@@ -544,13 +544,14 @@ PA22/PA23 at 48 MHz inside Rubato, the preemptive kernel, against the
 same AVR64EA48 `twi_peer`, while TC4 posts to the pack's highest object
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 97 us x 3000, 64 % of the core. Every letter runs once with TC4 silent
-and six times under it; **202 verdicts, green on twenty runs of
-twenty**. The pack, the command channel through the arbiter and the
-letters are the I2C suites' shared body
-(`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them); the
-held-wire letter is the suite's own, for the reason below, and
-[platform.md](platform.md) places the suite among the preemptive
-kernel's.
+and six times under it; **202 verdicts, green on every run: thirty of
+the letters `n`, `o`, `p`, `w` and `i`, ten of `q` and `h`**. The pack, the command channel through the arbiter and the letters
+are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
+header describes them), and [platform.md](platform.md) places the suite
+among the preemptive kernel's. Every serve the body commands asks the
+AVR peer for its stop interrupt (`twi_link.hpp`'s `flag_stop_interrupt`):
+that peer sees a STOP, and so ends a counted serve on its count, only
+with it.
 
 **Where a preemption can reach this host: before the START, never inside
 a tenure.** `start()` copies the request's fields, applies the speed and
@@ -586,10 +587,12 @@ holds: a read of 8 in 8902 to 8983 us, a write of 8 in 9699 to 9959 -
 the read's ninth hold, at its closing NACK, falls after the read's STOP
 and stretches the address of the write that follows it at once.
 
-**The vocabulary and the arbiter.** Letter `q`: a deaf client answers
-the probe and a four-byte write `i2c_nack_addr`, the third byte of six
-refused answers `i2c_nack_data`, the last written byte of a 2+4 refused
-answers `i2c_nack_data` with no read half (the peer counting two address
+**The vocabulary and the arbiter.** Letter `q`: a deaf client - the
+peer's client parked at 0x5D - answers the probe and a four-byte write
+`i2c_nack_addr` and the probe of 0x5D `i2c_ok`, the third byte of six
+refused answers `i2c_nack_data` (the peer reporting the refusal and two
+address matches), the last written byte of a 2+4 refused answers
+`i2c_nack_data` with no read half (the peer counting two address
 matches and no byte served), the next tenure `i2c_ok` after each.
 Letter `w`: the Client above the arbiter (20 write-then-reads of 1+6,
 two outstanding), a requester below it (10 writes of two) and, in a
@@ -601,41 +604,48 @@ no timeout, the peer's tallies exact, in 7.4 to 13.7 ms a pass.
 hold SDA low for 60 ms. A tenure posted at the speed in force parks
 behind the BUSY its monitor saw ("A tenure into a busy bus parks in
 hardware" above) and is answered `i2c_timeout` by the arbiter at 20 ms
-(19930 to 20185 us, 123 of 140 passes); in the other 17 a probe the
-preempting object posted first parked instead and timed out, the
-arbiter's `recover()` forced the bus state to IDLE, and the held
-tenure's START went out into the held line and lost its address:
-`i2c_arb_lost`, still inside 20.2 ms. The same tenure posted at 400 kHz
+(19955 to 20129 us from its `start()`; 123 of 140 passes with a probe
+posted at every tick, 59 of 70 with the flood paced as below); in the
+others a probe the preempting object posted first parked instead and
+timed out, the arbiter's `recover()` forced the bus state to IDLE, and
+the held tenure's START went out into the held line and lost its
+address: `i2c_arb_lost`, 112 to 196 us from its `start()` and 20.7 ms
+at most from its post. The same tenure posted at 400 kHz
 after commands at 100 kHz costs `apply()` an enable that re-boots the
-state machine and a forced IDLE, and is answered `i2c_arb_lost` in 58 to
-61 us, twenty runs of twenty. The third is `i2c_bus_error`: ARBLOST with
-BUSERR beside it, which the engine reports as the bus error it also is -
-met once a pass in 35 of the 120 flooded passes, always on a probe that
-completed after the release, in the moment the peer's TWI is put back to
-its command address. Under the flood - a probe at every tick, 180 to 723
-a pass - every request was answered exactly once: while held
-`i2c_rejected` (the FIFO full), `i2c_timeout` or `i2c_arb_lost`, after
-the release `i2c_ok`, `i2c_nack_addr` (55 passes) or that bus error; a
-request arrived in the arbiter's draining window, between a timeout's
-`recover()` and the marker after it, in 26 of 140 passes. After the
-release the next tenure was `i2c_ok` and the arbiter voted idle with
+state machine and a forced IDLE, and is answered `i2c_arb_lost` in 46 to
+61 us, every run. The third is `i2c_bus_error`: ARBLOST with BUSERR
+beside it, which the engine reports as the bus error it also is (the
+suite's `I2cTraits::held_bus_error`) - met once a pass in 35 of 120
+passes flooded at every tick and 18 of 60 flooded paced, always on a
+probe that completed after the release, in the moment the peer's TWI is
+put back to its command address. Under the flood every request was
+answered exactly once: while held `i2c_rejected` (the FIFO full),
+`i2c_timeout` or `i2c_arb_lost`, after the release `i2c_ok`,
+`i2c_nack_addr` or that bus error; a request arrived in the arbiter's
+draining window, between a timeout's `recover()` and the marker after
+it, in 26 of 140 passes flooded at every tick and 44 of 60 paced. After
+the release the next tenure was `i2c_ok` and the arbiter voted idle with
 nothing waiting, every pass.
 
-**THE FLOOD IS NOT RUN AT 97 us x 3000 ON THIS CORE.** A flooding probe
-costs this core some 3500 cycles end to end (its post, the arbiter's
-dispatch of it, a START that loses at once after a recovery, the
-completion's vector and dispatch, the reply into the preempting object);
-with a 3000-cycle spin that is more than the 4656 cycles of a 97 us
-period, so the objects above the Console never empty, the Console - the
-one object that stops the flood - never runs again, and the pack is
-overloaded for good. Under Rubato that overload does not stall: it
-spends the stack until it has written over the RAM above `.bss`
-([platform.md](platform.md) has the measurement). The suite's letter
-therefore floods only where the tick, its spin and the flood's bill fit
-the period - every pressure pass but 97 us x 3000, which meets the held
-wire without the flood - and paints and reads the stack around every
-pass: 1068 to 1648 bytes in every letter but `h`, 2632 at most under the
-flood at 97 us x 300.
+**THE FLOOD IS PACED, BECAUSE AT 97 us x 3000 A PROBE A TICK IS MORE THAN
+THIS CORE SERVES.** A flooding probe costs this core some 3500 cycles
+end to end (its post, the arbiter's dispatch of it, a START that loses
+at once after a recovery, the completion's vector and dispatch, the
+reply into the preempting object); with a 3000-cycle spin that is more
+than the 4656 cycles of a 97 us period. Posted at every tick, the
+objects above the Console never empty, the Console - the one object
+that stops the flood - never runs again, the pack is overloaded for
+good, and under Rubato that overload does not stall: it spends the stack
+until it has written over the RAM above `.bss` ([platform.md](platform.md)
+has the measurement). The shared letter therefore posts a probe at a
+tick only when the Console has turned since the last: a turn of the
+lowest object says the pack above it was idle, so the flood takes only
+the time the core has left (the first probe of a hold excepted, which
+needs no turn). At 97 us x 3000 that is 204 to 208 probes in the pass's
+973 ticks (the lighter passes keep a probe at most ticks: up to 657 at
+97 us x 300); the suite paints and reads the stack around every pass:
+1064 to 1596 bytes over every letter, `h` included (1156 to 1596 there,
+its heaviest pass among them).
 
 **Dark** (letter `i`): every object idle, the arbiter's vote for the
 sleep, no time event armed, TC4 stopped, the host between tenures with

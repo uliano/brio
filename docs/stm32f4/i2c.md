@@ -726,7 +726,8 @@ ms) over the engined `I2cHost<1>` on PB8/PB9 (DMA1 streams 6 and 0 on
 channel 1) inside Rubato, while TIM2 posts to the pack's highest object
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97
 us x 3000, 17 % of the core. Every letter runs once with TIM2 silent and
-six times under it; **195 verdicts, green on thirty runs of thirty**.
+six times under it; **195 verdicts, green on every run: forty of the
+letters `n`, `o`, `p`, `w` and `i`, ten of `q` and `h`**.
 The pack, the command channel through the arbiter and the letters are
 the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
 header describes them), and [platform.md](platform.md) places the suite
@@ -770,11 +771,14 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
   hold more - the one the partner spends, as the read's last byte goes
   out, before the byte it is asked for beyond it (a write of 8 alone took
   8195 us, measured on the side); under the 20 ms timeout.
-- **The vocabulary** (letter `q`): a deaf client answers the probe and a
-  four-byte write `i2c_nack_addr`; the third byte of six refused answers
+- **The vocabulary** (letter `q`): a deaf client - the partner's client
+  parked at 0x5D, the letter's own address (the reserved one below) -
+  answers the probe and a four-byte write `i2c_nack_addr`, and the probe
+  of 0x5D `i2c_ok`; the third byte of six refused answers
   `i2c_nack_data`, the write on the transmit engine, its untransmitted
-  tail abandoned and counted (one a pass); the last written byte of a
-  2+4 refused answers `i2c_nack_data` and no read half follows, the
+  tail abandoned and counted (one a pass), the partner reporting the
+  refusal and two address matches; the last written byte of a 2+4
+  refused answers `i2c_nack_data` and no read half follows, the
   controller closing the tenure with the void write from the repeated
   START it had requested - so the partner counts three address matches
   where a host that lets go with a STOP makes two. The next tenure is
@@ -790,33 +794,37 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
 - **THE HELD WIRE PARKS, AND A PE CYCLE DOES NOT CHANGE THAT** (letter
   `h`, the partner holding SDA low from its GPIO for 60 ms): the tenure
   posted into it parks behind BUSY (27.3.3's START waits for BUSY to
-  fall) and is answered `i2c_timeout` by the arbiter in 19994 to 20019
-  us, 210 passes of 210; the same tenure at 400 kHz after commands at 100
-  kHz, a PE cycle before its START (the three timing registers are
-  PE-gated), parks the same way, 30 of 30 - where the FMPI2C beside it and
+  fall) and is answered `i2c_timeout` by the arbiter in 19993 to 20011
+  us from its `start()`, 70 passes of 70; the same tenure at 400 kHz after commands
+  at 100 kHz, a PE cycle before its START (the three timing registers are
+  PE-gated), parks the same way, every run - where the FMPI2C beside it and
   the STM32G0's host forget the held line at a PE cycle and lose
   arbitration at once ([fmpi2c.md](fmpi2c.md)). `recover()`'s SWRST leaves
   the next START parking too while the line is held. Under the flood - a
-  probe at every tick, 179 to 722 a pass - every request was answered
-  exactly once: while held `i2c_rejected` (the four-deep queue full) or
-  `i2c_timeout` (one a pass: the probe started after the held tenure's
-  timeout, parked in its turn), after the release `i2c_ok`, or
-  `i2c_nack_addr` in the moment the partner's client was not yet back
-  (about two a pass); a request arrived in the arbiter's draining window
-  - between a timeout's `recover()` and the marker after it, which only a
-  requester above the arbiter can reach - in 5 of 180 pressure passes.
+  probe at a tick whenever the Console has turned since the last, which
+  on this core is most ticks: 180 to 721 a pass, 718 or 719 of the 920
+  to 932 ticks at 97 us x 3000 - every request was answered exactly once: while
+  held `i2c_rejected` (the four-deep queue full) or `i2c_timeout` (one a
+  pass: the probe started after the held tenure's timeout, parked in its
+  turn), after the release `i2c_ok`, or `i2c_nack_addr` in the moment the
+  partner's client was not yet back (in every pressure pass); a request
+  arrived in the arbiter's draining window - between a timeout's
+  `recover()` and the marker after it, which only a requester above the
+  arbiter can reach - in 5 of 180 pressure passes with a probe posted at
+  every tick, 12 of 60 with the flood paced.
   After the release the next tenure was `i2c_ok` and the arbiter voted
   idle with nothing waiting, every pass.
-- **THE RESERVED ADDRESS WEDGES THIS HOST.** The shared letter `q` probes
-  the partner parked at 0x7A, `twi_link.hpp`'s `deaf_addr`; on this block
-  the program stopped there for good: the core halted inside the event
+- **THE RESERVED ADDRESS WEDGES THIS HOST.** A probe of the partner
+  parked at 0x7A, `twi_link.hpp`'s `deaf_addr`, stopped the program there
+  for good: the core halted inside the event
   vector (IRQ 31 active), SR1 ADD10, SR2 MSL and BUSY, DR 0xF4, CR2
   with the event vector on, SCL held low by this side. 0xF4 is 0x7A
   shifted, 1111 0100, the first byte of a 10-bit address; this block in
   controller mode sends it as that header and sets ADD10 where a 7-bit
   address sets ADDR (27.3.3, 27.6.6), and the engine's address phase
-  waits for ADDR alone. The suite probes the command address there
-  instead; the refusal is a driver gap below.
+  waits for ADDR alone. The shared letter `q` therefore parks its deaf
+  client at an address of its own, 0x5D; the refusal is a driver gap
+  below.
 - **A BUS ERROR COUNTED, and a real one.** `spurious_bus_errors()` rose by
   one in each pass of letter `p` and nowhere else - seven a run, 210 in
   thirty runs; a probe letter (not kept) placed every one at the 100 kHz

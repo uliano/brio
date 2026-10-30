@@ -9,13 +9,13 @@
 //
 // TWO SHARED BODIES, ONE ABOVE THE OTHER. What names no register - the pack
 // of five objects, the command channel through the arbiter, the passes,
-// the letters n o p h i x - is every family's (avrxt/src/apps/rubato_i2c.hpp,
-// whose header describes each object and each letter). What the two chips
-// share because they carry the same IP block and the same peer - the host's
-// paths and the shapes, this peer's arithmetic, the in-tenure stretch and
-// its instrument, the RP versions of letters q and w, letter s - is this
-// file's, as rp_i2c_pair.hpp is for the Tenuto suites: one register
-// description, so one body, not a copy.
+// the letters n o p q w h i x - is every family's
+// (avrxt/src/apps/rubato_i2c.hpp, whose header describes each object and
+// each letter). What the two chips share because they carry the same IP
+// block and the same peer - the host's paths and the shapes, this peer's
+// arithmetic (the I2cTraits below), the in-tenure stretch and its
+// instrument, letter s - is this file's, as rp_i2c_pair.hpp is for the
+// Tenuto suites: one register description, so one body, not a copy.
 //
 // What the binding states before it includes this file, inside its own
 // anonymous namespace with `using namespace brio` in force, having included
@@ -43,7 +43,8 @@
 //
 // and defines after it the pressure verbs, console_banner() and
 // binding_dark() (declared below). Its glue calls rp_landing_stamp() before
-// the shared body's pressure_landed() in the pressure's vector, binds the
+// the shared body's pressure_landed() in the pressure's vector (and
+// i2c_note_landing() below where the doorbell's drain posts), binds the
 // I2C vector (Host::isr(), a TransferDone to the arbiter on true,
 // done_from_dma false) and isr_dma_0 (Host::dma_isr(), the same, done_from_dma
 // true), and registers every letter through rp_letter<>.
@@ -77,17 +78,16 @@
 // landing stretches - and of 18 us at 1 MHz, where a landing after the
 // first push, or the second on the RP2040, does. Letter s measures
 // start()'s fill, states the landings expected and judges the 400 kHz case;
-// the stretch instrument (stretch_check(), at the end of every spin) counts
-// the stretches wherever they happen, and every pass prints them.
+// the stretch instrument (stretch_check(), at the end of Pressure's spin:
+// I2cTraits::tick_spin_end()) counts the stretches wherever they happen,
+// and every pass prints them.
 //
 // THE PEER (rp_twi_peer.hpp), and what it changes in three letters:
 //
-//  - THE PROBE COUNTS: it is a one-byte read, so `probe_bytes` is 1 (letter
-//    w's tallies), letter o's table leaves it out (the shared table's
-//    index arithmetic counts read bytes alone: a probe there would shift
-//    every read after it by one pattern index and the serve's count by
-//    one), and letter q's last case finds the probe after the refused
-//    write served one byte, not none - the RP version of q below.
+//  - THE PROBE COUNTS: it is a one-byte read, so `probe_bytes` is 1 - letter
+//    o's tallies and its pattern index count the probe's byte, letter w's
+//    tallies count Pressure's eight, and letter q's last case finds the
+//    probe after the refused write served one byte, not none.
 //  - A READ IS SERVED A FIFO AHEAD: up to sixteen bytes given at each read
 //    request, those the host does not take flushed at its closing NACK and
 //    given back to the tally. The counted serve ends when the bytes RECEIVED
@@ -97,7 +97,7 @@
 //    ends the serve in the middle of that read. Every counted serve here
 //    therefore ends on a write of sixteen bytes or more after its last read
 //    - letter o's table does (46 bytes of writes after the last read), and
-//    letter w's closing write is sixteen bytes in the RP version below.
+//    letter w's closing write is sixteen bytes (`closing_len`).
 //  - THE STRETCH IS A READ'S: `hold_us` holds before every byte the client
 //    GIVES (its read request holds SCL) and never on a write (a byte written
 //    lands in the sixteen-deep receive FIFO), so letter p's stretched read
@@ -109,18 +109,15 @@
 // The names the shared body asks, the two chips alike
 // =============================================================================
 
-/// The stretch instrument, defined below: called at the end of every spin.
+/// The stretch instrument, defined below: called at the end of Pressure's
+/// spin (I2cTraits::tick_spin_end()).
 void stretch_check();
 
-/// A busy wait of at least `cycles`, then the stretch instrument: the one
-/// spin above the arbiter is Pressure's (the shared body's), so a spin that
-/// ends with start() still in progress is Pressure's dispatch having
-/// preempted it.
+/// A busy wait of at least `cycles`.
 [[gnu::always_inline]] inline void spin(uint32_t cycles) {
     const uint32_t t0 = Ruler::now();
     while (Ruler::now() - t0 < cycles) {
     }
-    stretch_check();
 }
 
 /// The three speeds both chips' DW block solves at its clk_sys, which the
@@ -138,11 +135,12 @@ struct Shape {
 struct I2cTraits {
     /// Letter o's table, each shape with the path this host takes: a read
     /// phase of three or more rides the engines, a shorter one and every
-    /// write phase the pump. No probe (the file header: the shared table
-    /// counts read bytes alone); the plain writes last, 46 bytes after the
-    /// last read, more than the peer's FIFO-ahead can stand its tally above
-    /// the wire's.
+    /// write phase the pump; the probe a one-byte read the peer serves
+    /// (probe_bytes). The plain writes last, 46 bytes after the last read,
+    /// more than the peer's FIFO-ahead can stand its tally above the
+    /// wire's.
     static constexpr Shape shapes[] = {
+        {0, 0, "pump: the probe, one read entry carrying STOP, its byte served and dropped"},
         {0, 1, "pump: one read entry carrying STOP, the byte taken at STOP_DET"},
         {0, 2, "pump: two read entries, the bytes at STOP_DET"},
         {0, 3, "engines: the pump's first and last entries, the middle one poured, every byte collected"},
@@ -170,20 +168,20 @@ struct I2cTraits {
     /// Letter x's write: sixteen entries, one fill of the command FIFO.
     static constexpr uint8_t fill_tx = 16;
     static_assert(fill_tx == Host::Resource::fifo_depth, "letter x's write is exactly one fill");
+    /// Letter w's closing write: sixteen bytes. During the last read before
+    /// the close the peer's tally stands up to fifteen bytes above the
+    /// wire's (the file header), and a closing write of one would let that
+    /// tally reach the count with the read still running.
+    static constexpr uint8_t closing_len = 16;
+    static_assert(closing_len >= Host::Resource::fifo_depth, "the close outlasts the peer's FIFO-ahead");
     static bool bring_up() { return rp_bring_up(); }
+    /// The stretch instrument at the end of Pressure's spin.
+    static void tick_spin_end() { stretch_check(); }
 };
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's I2C suite
-// compiles the same body around its own host. Its letters q and w are
-// replaced by the RP versions below (the file header), so the shared two
-// stay uncalled, and -Wunused-function -Werror would refuse a function of
-// an unnamed namespace left uncalled: the warning is silenced over the
-// include alone (a [[maybe_unused]] on the shared letters is proposed in
-// the lane's report).
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
+// compiles the same body around its own host.
 #include "../../../avrxt/src/apps/rubato_i2c.hpp"
-#pragma GCC diagnostic pop
 
 // =============================================================================
 // The stretch instrument and the landing stamp
@@ -193,8 +191,8 @@ struct I2cTraits {
 /// is given back between letters its pads and its lines): null when dark.
 const char* binding_dark();
 
-/// Stretches found since the last pass's print: a spin that ended inside
-/// start(), before its mask store (IC_INTR_MASK is zero from the last
+/// Stretches found since the last pass's print: a Pressure spin that ended
+/// inside start(), before its mask store (IC_INTR_MASK is zero from the last
 /// tenure's finish() to start()'s last store), with the master active and
 /// its command FIFO empty - the block holding SCL with no STOP pushed. A
 /// one-entry tenure preempted between its only push and the mask store
@@ -226,28 +224,11 @@ void stretch_check() {
 [[gnu::always_inline]] inline void rp_landing_stamp() { t_land = Ruler::now(); }
 
 /// The landing record without its post, for a pressure whose post another
-/// hand made (the RP2040's doorbell, whose inbox drain posts the Tick):
-/// pressure_landed()'s record, the one place the two are apart - the shared
-/// body keeps them in one function (a split is proposed in the lane's
-/// report).
+/// hand made (the RP2040's doorbell, whose inbox drain posts the Tick): the
+/// stamp and the shared body's note_landing().
 [[gnu::always_inline]] inline void i2c_note_landing() {
     rp_landing_stamp();
-    const uint8_t c = P::ceiling;
-    const uint8_t slot = c < landing_slots - 1u ? c : static_cast<uint8_t>(landing_slots - 1u);
-    landed[slot] = landed[slot] + 1u;
-    if (arb_event == arb_done) {
-        landed_completion = landed_completion + 1u;
-        if (done_from_dma) {
-            landed_dma_completion = landed_dma_completion + 1u;
-        }
-    }
-    if (in_start) {
-        landed_in_start = landed_in_start + 1u;
-        if (host_on_wire()) {
-            landed_marked = landed_marked + 1u;
-        }
-    }
-    pressure_irqs = pressure_irqs + 1u;
+    note_landing();
 }
 
 // =============================================================================
@@ -310,211 +291,6 @@ void rp_letter() {
     Xip::reset_counters();
     letter();
     rp_letter_end();
-}
-
-// =============================================================================
-// q - the vocabulary under pressure, the RP version
-// =============================================================================
-
-/// The shared body's tq_vocabulary() with ONE expectation changed: the
-/// probe after the refused 2+4 is a one-byte read here, which the peer
-/// serves, so its report counts `probe_bytes` bytes given where the shared
-/// letter counts none (the read half of the refused tenure still never
-/// began: the address matches are the tenure's and the probe's, two). The
-/// shared letter's verdict is `r.aux1 == 0`; a parameter for it is proposed
-/// in the lane's report.
-void tq_vocabulary_rp() {
-    for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
-        begin(s);
-        if (!need_peer()) {
-            (void)pass_end(s);
-            return;
-        }
-        constexpr uint16_t deadline = 120;
-        // A deaf client: the probe and a write meet nobody at dut_addr; the
-        // peer is parked at deaf_addr, which answers - the next tenure.
-        twilink::Params deaf{};
-        deaf.ms = deadline;
-        deaf.addr = twilink::dut_addr;
-        deaf.flags = twilink::flag_deaf;
-        uint8_t probe = no_reply, wdeaf = no_reply, next1 = no_reply;
-        bool a1 = serve(deaf);
-        const uint32_t t1 = Ruler::now();
-        if (a1) {
-            const uint8_t w4[4] = {1, 2, 3, 4};
-            probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
-            next1 = arb_tenure(twilink::deaf_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t1, deadline);
-        }
-        // The third byte of six refused.
-        twilink::Params n3{};
-        n3.ms = deadline;
-        n3.addr = twilink::dut_addr;
-        n3.nack_at = 3;
-        uint8_t nack3 = no_reply, next2 = no_reply;
-        const bool a2 = serve(n3);
-        const uint32_t t2 = Ruler::now();
-        if (a2) {
-            const uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
-            nack3 = arb_tenure(twilink::dut_addr, w6, 6, nullptr, 0, speeds[1]);
-            next2 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t2, deadline);
-        }
-        // The LAST written byte of a 2+4 write-then-read refused: the
-        // controller lets go, no read half follows (the peer counts the
-        // tenure's one address match, and the probe after it - which on
-        // this block is a one-byte read, served).
-        twilink::Params n2{};
-        n2.ms = deadline;
-        n2.addr = twilink::dut_addr;
-        n2.nack_at = 2;
-        uint8_t nack2 = no_reply, next3 = no_reply;
-        const bool a3 = serve(n2);
-        const uint32_t t3 = Ruler::now();
-        if (a3) {
-            const uint8_t w2[2] = {0x77, 0x88};
-            for (uint8_t k = 0; k < 4u; ++k) {
-                rx_buf[k] = 0xEE;
-            }
-            nack2 = arb_tenure(twilink::dut_addr, w2, 2, rx_buf, 4, speeds[1]);
-            next3 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t3, deadline);
-        }
-        twilink::Report r{};
-        const bool rep = a3 && report(r);
-        const PassStats st = pass_end(s);
-        print_pass(s, st);
-        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then deaf_addr's probe ", next1,
-              "; the third of six refused: ", nack3, ", then the probe ", next2, "; the last of a 2+4's write "
-              "refused: ",
-              nack2, ", then the probe ", next3, crlf);
-        if (rep) {
-            print_report(r);
-        }
-        bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next tenure "
-                                     "i2c_ok",
-                      a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1 == i2c_ok);
-        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the next tenure i2c_ok",
-                      a2 && nack3 == i2c_nack_data && next2 == i2c_ok);
-        bench.verdict(pass_label(s), "the last written byte of a 2+4 refused: i2c_nack_data, the controller let go "
-                                     "(no read half: the one byte served is the probe's), the next tenure i2c_ok",
-                      a3 && nack2 == i2c_nack_data && next3 == i2c_ok && rep && r.addr_hits == 2u &&
-                          (r.flags & twilink::report_nacked) != 0u && r.aux1 == probe_bytes);
-        judge_pressure(s, st);
-    }
-}
-
-// =============================================================================
-// w - the arbiter with three requesters of three priorities, the RP version
-// =============================================================================
-
-/// The shared body's tw_arbiter() with ONE change: the closing write is
-/// sixteen bytes, not one. The counted serve must end on writes the peer's
-/// FIFO-ahead cannot overtake (the file header): during the last read
-/// before the close the peer's tally stands up to fifteen bytes above the
-/// wire's, and a closing write of one byte would let that tally reach the
-/// count with the read still running. A closing length is proposed as a
-/// trait in the lane's report.
-constexpr uint8_t closing_len = 16;
-static_assert(closing_len >= Host::Resource::fifo_depth, "the close outlasts the peer's FIFO-ahead");
-uint8_t closing_buf[closing_len];
-
-void tw_arbiter_rp() {
-    for (uint8_t& b : closing_buf) {
-        b = closing_byte;
-    }
-    for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
-        const bool pressing = s.period_us != 0u;
-        begin(s);
-        if (!need_peer()) {
-            (void)pass_end(s);
-            return;
-        }
-        const uint16_t bytes = static_cast<uint16_t>(w::client_n * (1u + w::client_len) + w::minor_n * w::minor_len +
-                                                     (pressing ? w::press_n * probe_bytes : 0u) + closing_len);
-        const uint16_t sum = static_cast<uint16_t>(w::client_n * w::client_byte +
-                                                   w::minor_n * w::minor_len * w::minor_byte +
-                                                   closing_len * closing_byte);
-        const uint16_t hits = static_cast<uint16_t>(2u * w::client_n + w::minor_n + (pressing ? w::press_n : 0u) + 1u);
-        twilink::Params a{};
-        a.count = bytes;
-        a.ms = 3000;
-        a.addr = twilink::dut_addr;
-        a.seed = w::seed;
-        a.pattern = twilink::pattern_fixed;
-        const bool acted = serve(a);
-        for (auto& row : w::client_rx) {
-            for (uint8_t& b : row) {
-                b = w::untouched;
-            }
-        }
-        w::clear(w::client);
-        w::clear(w::minor);
-        w::clear(w::press);
-        Pressure::outstanding = false;
-        const uint8_t rejected0 = I2cArb::rejected_count();
-        const uint8_t stale0 = I2cArb::stale_events();
-        const uint32_t t0 = Ruler::now();
-        bool done = false;
-        uint8_t closing = no_reply;
-        if (acted) {
-            w::live = true;
-            w::press_live = pressing;
-            post<Client>(Kick{});
-            post<Minor>(Kick{});
-            done = wait_until(
-                [pressing] {
-                    return w::client.replies >= w::client_n && w::minor.replies >= w::minor_n &&
-                           (!pressing || w::press.replies >= w::press_n);
-                },
-                2000);
-            w::press_live = false;
-            w::live = false;
-            closing = arb_tenure(twilink::dut_addr, closing_buf, closing_len, nullptr, 0, speeds[1]);
-        }
-        const uint32_t took = Ruler::now() - t0;
-        twilink::Report r{};
-        const bool rep = acted && report(r);
-        uint16_t host_bad = 0;
-        for (const auto& row : w::client_rx) {
-            for (const uint8_t b : row) {
-                host_bad = static_cast<uint16_t>(host_bad + (b != w::seed));
-            }
-        }
-        const uint8_t rejected = static_cast<uint8_t>(I2cArb::rejected_count() - rejected0);
-        const uint8_t stale = static_cast<uint8_t>(I2cArb::stale_events() - stale0);
-        const PassStats st = pass_end(s);
-        print_pass(s, st);
-        print(serial, "    ", us_of(took), " us; Client ", w::client.replies, "/", w::client.posted, " replies (",
-              w::client.ok, " ok, ", w::client.out_of_order, " out of order), Minor ", w::minor.replies, "/",
-              w::minor.posted, " (", w::minor.ok, " ok), Pressure ", w::press.replies, "/", w::press.posted, " (",
-              w::press.ok, " ok); timeouts ", w::client.timeouts + w::minor.timeouts + w::press.timeouts,
-              ", rejected ", rejected, ", stale ", stale, "; read bytes wrong ", host_bad, "; the closing write of ",
-              closing_len, " ", closing, crlf);
-        if (rep) {
-            print_report(r);
-        }
-        bench.verdict(pass_label(s), "every request answered i2c_ok, to its own requester, once",
-                      done && w::client.ok == w::client_n && w::minor.ok == w::minor_n &&
-                          w::client.replies == w::client_n && w::minor.replies == w::minor_n &&
-                          w::press.replies == (pressing ? w::press_n : 0u) &&
-                          w::press.ok == (pressing ? w::press_n : 0u) && closing == i2c_ok);
-        bench.verdict(pass_label(s), "every reply in its requester's order (the Client's slot k complete and k + 1 "
-                                     "untouched at reply k)",
-                      w::client.out_of_order == 0u && w::minor.out_of_order == 0u && w::press.out_of_order == 0u);
-        bench.verdict(pass_label(s), "nothing rejected, the per-bus timeout never fired (no i2c_timeout, no stale "
-                                     "event)",
-                      rejected == 0u && stale == 0u && w::client.timeouts == 0u && w::minor.timeouts == 0u &&
-                          w::press.timeouts == 0u && w::client.rejected == 0u && w::minor.rejected == 0u &&
-                          w::press.rejected == 0u);
-        bench.verdict(pass_label(s), "the peer's count, sum and address matches exact, every read byte the peer's",
-                      rep && r.count == bytes && r.sum == sum && r.addr_hits == hits && ran_to_count(r) &&
-                          host_bad == 0u);
-        judge_pressure(s, st);
-    }
 }
 
 // =============================================================================
@@ -695,22 +471,27 @@ void ts_fill() {
 // c, e - (the RP2040's) letters o and x with every pressure pass fed by core 1
 // =============================================================================
 
+/// The source the two letters' passes are labelled with.
+constexpr const char* core1_source = "core 1's doorbell";
+
 /// The shared letter o with Pressure fed through core 1's doorbell in every
 /// pressure pass (the binding's pressure verbs read the flag): core 1
 /// fetching its program from the flash shares the XIP cache start() runs
-/// from. The passes' labels name their period and spin; the source is this
-/// letter's. Uncalled where the binding has no core-1 pass.
+/// from. Every pressure pass's label names the source. Uncalled where the
+/// binding has no core-1 pass.
 [[maybe_unused]] void tc_core1_shapes() {
-    print(serial, "  every pressure pass below is fed by core 1's doorbell, not by ", pressure_name, crlf);
     pressure_core1 = true;
+    pass_source = core1_source;
     to_shapes();
+    pass_source = nullptr;
     pressure_core1 = false;
 }
 
 /// The shared letter x the same way.
 [[maybe_unused]] void te_core1_fill() {
-    print(serial, "  the pressure pass below is fed by core 1's doorbell, not by ", pressure_name, crlf);
     pressure_core1 = true;
+    pass_source = core1_source;
     tx_fill();
+    pass_source = nullptr;
     pressure_core1 = false;
 }

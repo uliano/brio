@@ -516,13 +516,14 @@ runs it from SRAM, [platform.md](platform.md), "The scheduler's place"):
 Rubato, against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
 pack's highest object every 97, 193 or 389 us and its dispatch spins 300
 or 3000 cycles - at 97 us x 3000, 64 % of the core. Every letter runs once
-with TIM2 silent and six times under it. Key `z` (159 verdicts) was green
-on thirty runs of the default image and twenty of the twin; the held-wire
-letter `h` runs by name only, outside `z`, for the reason its paragraph
-below gives. The pack, the command channel through the arbiter and the
-letters are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`,
-whose header describes them); letter `q` is the suite's own, for two
-reasons its paragraph gives.
+with TIM2 silent and six times under it. Key `z` (195 verdicts) is green
+on every run: the letters `n`, `o`, `p`, `w` and `i` on forty runs of the
+default image and thirty of the twin, `q` and `h` on ten of each, and `h`
+by its own name on three more of each. The pack, the
+command channel through the arbiter and the letters are the I2C suites'
+shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes
+them), this peer's answers to a refusal stated in the suite's
+`I2cTraits`.
 
 **Where a preemption can reach this host: before the START, or in
 `start()`'s last instructions after it.** `start()` waits for the last
@@ -562,19 +563,21 @@ overlaps the next byte's shifting in, and the write's last two fall after
 its tenure), under the 20 ms timeout.
 
 **The vocabulary under pressure, with this peer's answers.** Letter `q`:
-a deaf client answers the probe and a four-byte write `i2c_nack_addr`,
-and the next command's tenures are `i2c_ok`; the third byte of a
+a deaf client - the peer's client parked at 0x5D, the letter's own
+address, since twi_link's `deaf_addr`, 0x7A, is one this block cannot
+address (the driver gap below) - answers the probe and a four-byte write
+`i2c_nack_addr`, and the probe of 0x5D `i2c_ok`; the third byte of a
 six-byte write on the engines refused answers `i2c_nack_data`; the last
 written byte of a 2+4 refused answers `i2c_nack_data`, the controller let
 go by its void write and no read half begun. After each refusal the
 CH32V006 keeps its acknowledge down until its action's window closes, so
-the probe that follows is answered `i2c_nack_addr` and the peer counts
-one address match for the refused tenure - in every pass of every run,
-where the shared letter's verdicts expect `i2c_ok` and two (the suite's
-own letter judges the wire's answer instead, as `test_x035_i2c`'s letter
-`r` does). The shared letter also probes twi_link's `deaf_addr`, 0x7A,
-which this block cannot address (the driver gap below): the suite's
-letter leaves that probe out.
+the probe that follows inside the window is answered `i2c_nack_addr` and
+the peer counts one address match for each refused tenure, the void
+write's address refused too - in every pass of every run, as
+`test_x035_i2c`'s letter `r` finds it - and after the deadline a probe of
+the command address is `i2c_ok` (the suite's
+`I2cTraits::refusal_holds_address`, which the shared letter's verdicts
+follow).
 
 **The arbiter with three requesters of three priorities.** Letter `w`,
 at 400 kHz: the requester above the arbiter's twenty write-then-reads of
@@ -588,37 +591,56 @@ with it in the flash.
 
 **The held wire: `i2c_arb_lost` at the speed in force and at another.**
 Letter `h` (the peer holds SDA for 60 ms, the tenure into it, and in a
-pressure pass a probe from Pressure at every tick): at the speed in force
-the held tenure answered `i2c_arb_lost` in 448 to 986 us, its START out
-into the held line and its address's first one bit read back low; where
-a flood probe met the hold first, timed out and was recovered (SWRST, a
-block brought up over the held line, whose START stays pending), the
-held tenure behind it answered `i2c_timeout` at 21 ms. Met at 400 kHz
-after commands at 100 - the timing written again before the START, a PE
-cycle - it is `i2c_arb_lost` too (447 to 529 us): a PE cycle does not
-make this block forget the line it saw taken, where SWRST does. Up to
-three of Pressure's requests a pass arrived in the arbiter's draining
-window (between a timeout's recovery and its BusFlushed marker, an order
-only the preemptive kernel produces), every one answered once.
+pressure pass Pressure's flood of probes, paced as below): at the speed
+in force the held tenure answered `i2c_arb_lost` in 427 to 1833 us from
+its `start()` (453 to 933 with the scheduler path in the flash), its
+START out into the held line and its address's first one bit read back
+low - 70 passes of 91 on each image; where a flood probe met the hold
+first and its recovery (SWRST, a block brought up over the held line,
+whose START stays pending) came before the held tenure's START, the
+held tenure answered `i2c_timeout`, 20107 to 22404 us from its `start()`
+and up to 25.3 ms from its post (21 of 91). Met at 400 kHz after
+commands at 100 - the timing written again before the START, a PE cycle
+- it is `i2c_arb_lost` too (420 to 532 us): a PE cycle does not make this
+block forget the line it saw taken, where SWRST does. The bound on the
+held tenure is the arbiter's 20 ms counted from its `start()`, a tick, a
+millisecond for the way to the reply, and the longest interval between
+two of the Console's turns in the pass - the timeout's event is posted
+only by the Console's wait turn, and at 97 us x 3000 the paced flood
+leaves the Console a turn only between probes: up to 3.7 ms apart with
+the scheduler path in SRAM, 5.8 ms in the flash. Up to three of
+Pressure's requests a pass arrived in the arbiter's draining window
+(between a timeout's recovery and its BusFlushed marker, an order only
+the preemptive kernel produces), every one answered once. In the control
+pass, where no flood probe takes the parked START, the first command
+after the release is answered `i2c_timeout` and retried 400 ms later,
+once a run (printed, no verdict).
 
-**AT 97 US X 3000 LETTER `h` IS MORE THAN THIS CORE SERVES.** A probe
-answered `i2c_rejected` by an arbiter holding its four waiting - the
-flood's common case while the line is held - costs 1600 to 1630 cycles
-from its post to the poster's return, the reply's dispatch in Pressure
-included (measured from the console with the line held, the ruler's own
-pair of reads about 120 cycles of it); with Pressure's 3000 cycles, the
-road into it and its tick's own dispatch, a 97 us period of 4656 cycles
-has nothing left. The arbiter was found running at 17935 of 19361 ticks,
-its queue dropped 4495 posts (each a probe never answered), the time
-events - walked by the console's turns, starved - answered the held
-tenure after 64 ms to 2 s instead of 20, and the preemptive kernel's stack
-grew by one level of 192 bytes for each tick that landed between two of
-the scheduler's dispatches (26 levels read in a dump, each level's
-saved return address inside the scheduler's loop), until it met the
-statics and the image crashed. The suite's pressure vector carries a
-stack guard (4 KB under the stack's top) that stops TIM2 there, so the
-pass fails by name; at 193 us x 3000 the same flood is served, the stack
-at its usual depth. The other six passes of `h` are green in every run.
+**AT 97 US X 3000 A PROBE AT EVERY TICK IS MORE THAN THIS CORE SERVES,
+SO THE FLOOD IS PACED.** A probe answered `i2c_rejected` by an arbiter
+holding its four waiting - the flood's common case while the line is
+held - costs 1600 to 1630 cycles from its post to the poster's return,
+the reply's dispatch in Pressure included (measured from the console
+with the line held, the ruler's own pair of reads about 120 cycles of
+it); with Pressure's 3000 cycles, the road into it and its tick's own
+dispatch, a 97 us period of 4656 cycles has nothing left. With a probe
+posted at every tick the arbiter was found running at 17935 of 19361
+ticks, its queue dropped 4495 posts (each a probe never answered), the
+time events - walked by the console's turns, starved - answered the
+held tenure after 64 ms to 2 s instead of 20, and the preemptive
+kernel's stack grew by one level of 192 bytes for each tick that landed
+between two of the scheduler's dispatches (26 levels read in a dump,
+each level's saved return address inside the scheduler's loop), until
+it met the statics and the image crashed. The shared letter therefore
+posts a probe at a tick only when the Console - the pack's lowest
+object, which runs only when every object above it is idle - has turned
+since the last (the first probe of a hold excepted): at 97 us x 3000
+that is 313 or 314 probes in the pass's 1199 ticks with the scheduler
+path in SRAM and 163 to 167 in 1200 with it in the flash (the lighter
+passes keep a probe at most ticks, up to 697 at 97 us x 300), the
+arbiter's queue never overflows, the held tenure is answered in its
+place, and the stack ledger's untouched stack stays 13884 bytes or more
+of the 20 KB in every pass of every letter.
 
 **Dark** (letter `i`): every object idle, the arbiter's vote for the
 sleep, no time event armed, TIM2 stopped with its update interrupt and

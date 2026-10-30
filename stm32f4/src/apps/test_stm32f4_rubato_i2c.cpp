@@ -126,19 +126,18 @@
 //   q  the vocabulary: a deaf client's i2c_nack_addr, the third of six
 //      refused (i2c_nack_data, the write on the engines), the last written
 //      byte of a 2+4 refused (i2c_nack_data, the read half never begun),
-//      the next tenure i2c_ok after each. On I2C1 the letter is this
-//      suite's own (tq_f1 below), for two reasons it states: the shared
-//      one's address-match count does not know the F1 lineage's void write,
-//      and its probe of deaf_addr (0x7A) is a 10-bit header to this block.
-//      On FMPI2C1 it is the shared letter, OUTSIDE z (the defect above).
+//      the next tenure i2c_ok after each. On I2C1 the refused last byte is
+//      closed by the F1 lineage's void write, which the peer acknowledges
+//      (refused_close_hits below). On FMPI2C1 the letter stands OUTSIDE z
+//      (the defect above).
 //   w  three requesters of three priorities at 400 kHz: the Client's
 //      write-then-reads of 1+6 (the read half on the engines), Minor's
 //      writes of two, Pressure's probes: in order, i2c_ok, nothing
 //      rejected, no timeout, the peer's tallies exact.
-//   h  the held wire (the peer holds SDA 60 ms) with Pressure's probes at
-//      every tick: answered in its place, every request once, the next
-//      tenure i2c_ok and the arbiter idle; then the hold met at 400 kHz,
-//      another speed than the one in force.
+//   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
+//      probes, paced by the Console's turns: answered in its place, every
+//      request once, the next tenure i2c_ok and the arbiter idle; then the
+//      hold met at 400 kHz, another speed than the one in force.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,
 //      TIM2 stopped with its DMA requests off, the host between tenures
 //      with its enables at rest and its two streams idle, BUSY clear and
@@ -329,6 +328,12 @@ struct OnI2c1 {
             {32, 0, "engines"},
         };
         static_assert(Host::has_engines, "the table names engine paths");
+        /// A refused LAST written byte of a write-then-read is closed by a
+        /// VOID WRITE from the repeated START already requested (RM0390
+        /// 24.6.1 forbids any CR1 access while START stands: close_refused(),
+        /// the address with the write bit and a STOP behind it), and the
+        /// peer acknowledges that address - one address match more.
+        static constexpr uint8_t refused_close_hits = 1;
     };
 
     static bool init() { return Host::init(clock); }
@@ -514,16 +519,7 @@ const char* host_dark() {
     return why != nullptr ? why : On::dark();
 }
 
-/// The host's counters, and what the last refused command tenure was
-/// answered (the shared body counts the refusals and keeps the status):
-/// i2c_nack_addr a peer not yet back at its command address, anything
-/// else a finding.
-void print_host() {
-    if (cmd_failed != 0u) {
-        print(serial, " (the last ", cmd_last_bad, ")");
-    }
-    On::print_counters();
-}
+void print_host() { On::print_counters(); }
 
 bool clock_ok = false;
 bool tick_ok = false;
@@ -536,113 +532,6 @@ void console_banner() {
     print(serial, On::image, " - the I2C stack under Rubato on ", On::name,
           " against the STM32G0B1RE (twi_peer)", crlf);
     bench.menu();
-}
-
-// =============================================================================
-// q on I2C1 - the vocabulary, the F1 lineage's close counted
-// =============================================================================
-
-/// The shared letter q with two differences of its own. ONE: on the F1
-/// lineage a refused LAST written byte of a write-then-read is closed by a
-/// VOID WRITE from the repeated START that was already requested (RM0390 24.6.1:
-/// close_refused(), the address with the write bit and a STOP behind it),
-/// and the peer acknowledges that address - so it counts three address
-/// matches (the refused tenure's, the void write's, the probe's) where the
-/// shared letter, written against a host that lets go with a STOP, demands
-/// two. TWO: the deaf client's next tenure is the command address's probe
-/// after the serve's deadline, not deaf_addr's during it (the comment at
-/// the call says why). Every other verdict is the shared letter's word for
-/// word. THE SHARED HEADERS ARE FROZEN for the wave; the I2cTraits member
-/// that would say the first (the extra address match of a refused close)
-/// is proposed in the lane's report, and the second is a driver defect.
-constexpr uint8_t refused_close_hits = suite_on_fmpi2c ? 0u : 1u;
-
-void tq_f1() {
-    for (uint8_t p = 0; p < pass_count; ++p) {
-        const PassSpec& s = passes[p];
-        begin(s);
-        if (!need_peer()) {
-            (void)pass_end(s);
-            return;
-        }
-        constexpr uint16_t deadline = 120;
-        twilink::Params deaf{};
-        deaf.ms = deadline;
-        deaf.addr = twilink::dut_addr;
-        deaf.flags = twilink::flag_deaf;
-        uint8_t probe = no_reply, wdeaf = no_reply, next1 = no_reply;
-        const bool a1 = serve(deaf);
-        const uint32_t t1 = Ruler::now();
-        if (a1) {
-            const uint8_t w4[4] = {1, 2, 3, 4};
-            probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
-            wait_past(t1, deadline);
-            // The next tenure is a probe of the COMMAND address, the peer
-            // back in command mode - not the shared letter's probe of
-            // deaf_addr, where the peer parks during the serve: deaf_addr
-            // is 0x7A, inside the 1111 0XX prefix I2C reserves for a 10-bit
-            // address's header, and this block takes the byte 0xF4 as that
-            // header (RM0390 24.3.3, 24.6.6 ADD10), so its address phase
-            // ends on ADD10 and not ADDR, and the host's event vector, which
-            // waits for ADDR, re-enters without end - measured: IRQ 31
-            // active, SR1 ADD10, SR2 MSL and BUSY, DR 0xF4, SCL held low.
-            // A driver defect, reported by this lane; no letter here names
-            // an address of 0x78..0x7B on this host.
-            next1 = arb_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speeds[1]);
-        }
-        twilink::Params n3{};
-        n3.ms = deadline;
-        n3.addr = twilink::dut_addr;
-        n3.nack_at = 3;
-        uint8_t nack3 = no_reply, next2 = no_reply;
-        const bool a2 = serve(n3);
-        const uint32_t t2 = Ruler::now();
-        if (a2) {
-            const uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
-            nack3 = arb_tenure(twilink::dut_addr, w6, 6, nullptr, 0, speeds[1]);
-            next2 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t2, deadline);
-        }
-        twilink::Params n2{};
-        n2.ms = deadline;
-        n2.addr = twilink::dut_addr;
-        n2.nack_at = 2;
-        uint8_t nack2 = no_reply, next3 = no_reply;
-        const bool a3 = serve(n2);
-        const uint32_t t3 = Ruler::now();
-        if (a3) {
-            const uint8_t w2[2] = {0x77, 0x88};
-            for (uint8_t k = 0; k < 4u; ++k) {
-                rx_buf[k] = 0xEE;
-            }
-            nack2 = arb_tenure(twilink::dut_addr, w2, 2, rx_buf, 4, speeds[1]);
-            next3 = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
-            wait_past(t3, deadline);
-        }
-        twilink::Report r{};
-        const bool rep = a3 && report(r);
-        const PassStats st = pass_end(s);
-        print_pass(s, st);
-        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then, the deadline past, the command address's probe ", next1,
-              "; the third of six refused: ", nack3, ", then the probe ", next2, "; the last of a 2+4's write "
-              "refused: ",
-              nack2, ", then the probe ", next3, crlf);
-        if (rep) {
-            print_report(r);
-        }
-        bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next tenure "
-                                     "(the command address's) i2c_ok",
-                      a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1 == i2c_ok);
-        bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the next tenure i2c_ok",
-                      a2 && nack3 == i2c_nack_data && next2 == i2c_ok);
-        bench.verdict(pass_label(s), "the last written byte of a 2+4 refused: i2c_nack_data, closed by the void "
-                                     "write (no read half), the next tenure i2c_ok",
-                      a3 && nack2 == i2c_nack_data && next3 == i2c_ok && rep &&
-                          r.addr_hits == 2u + refused_close_hits && (r.flags & twilink::report_nacked) != 0u &&
-                          r.aux1 == 0u);
-        judge_pressure(s, st);
-    }
 }
 
 } // namespace
@@ -721,7 +610,7 @@ int main() {
         bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary,
                      false);
     } else {
-        bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_f1);
+        bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary);
     }
     bench.letter('w', "the arbiter with three requesters of three priorities", tw_arbiter);
     bench.letter('h', "the held wire, with requests arriving while it is held", th_held_wire);

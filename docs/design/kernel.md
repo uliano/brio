@@ -1209,14 +1209,16 @@ BUSY in the dispatch, a preemption lands in those waits or before the
 START store and lengthens the gap; on the FMPI2C1, as on the STM32G0,
 before its one START store. The CH32X035's ran the same way against
 the CH32V006's `twi_peer`, in both placements of the scheduler path
-(`test_x035_rubato_i2c`, 159 verdicts, [the CH32X035 I2C
-page](../ch32x035/i2c.md)), its held-wire letter outside the all-key
-for the same overload as the SAM C21's. The SAM C21's ran the same way against the
+(`test_x035_rubato_i2c`, 195 verdicts, [the CH32X035 I2C
+page](../ch32x035/i2c.md)). The SAM C21's ran the same way against the
 AVR64EA48's unchanged `twi_peer` (`test_samc_rubato_i2c`, 202 verdicts,
 [the SAM C21 I2C page](../samc21/i2c.md)), every tenure on its byte
-pump, a preemption inside `start()` a later START; its held-wire letter
-cannot flood at the heaviest pressure, which overloads that core and,
-under Rubato, overflows the stack (the paragraph on the stack above).
+pump, a preemption inside `start()` a later START. On those two cores
+a held-wire flood with a probe at every tick of the heaviest pressure
+overloads the pack and, under Rubato, overflows the stack (the paragraph
+on the stack above), so the suites' flood posts a probe only when the
+pack's lowest object has run since the last: the load it asks is then
+what the core has left.
 
 Not Rubato: a blocking kernel (a handler that waits is a different
 kernel's, reserved under the name `Fermata` and not built), a

@@ -683,8 +683,8 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_stm32_rubato_i2c`, one key (`z`, 195 verdicts) against the
-Nucleo-F446RE's unchanged `twi_peer`, thirty runs alike, every verdict
-green. A Rubato pack of five objects runs `util/i2c_bus.hpp`'s arbiter
+Nucleo-F446RE's unchanged `twi_peer`, every verdict green on every run
+([i2c.md](i2c.md) says how many of each letter). A Rubato pack of five objects runs `util/i2c_bus.hpp`'s arbiter
 over the engined `I2cHost<1>` ([i2c.md](i2c.md)) with three requesters
 of three priorities, under the same TIM14 pressure and the same seven
 passes as the link suite; the target-free half (the pack, the command

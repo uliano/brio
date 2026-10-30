@@ -57,10 +57,12 @@
 //   o  the tenure shapes at 400 kHz on both of the host's paths.
 //   p  100 kHz, 400 kHz and 1 MHz; the peer's commanded stretch on a read
 //      of 8 at 100 kHz (eight holds).
-//   q  the vocabulary (rp_rubato_i2c.hpp's version).
+//   q  the vocabulary (the probe after a refused 2+4 a byte served:
+//      probe_bytes).
 //   w  three requesters of three priorities, the close sixteen bytes long
-//      (rp_rubato_i2c.hpp's version).
-//   h  the held wire, with Pressure's probes at every tick.
+//      (closing_len).
+//   h  the held wire, with Pressure's flood of probes, paced by the
+//      Console's turns.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,
 //      TIMER1's alarm 0 disarmed, the host given back (the block in reset,
 //      both pads at no function), both lines high through the partner's
@@ -327,8 +329,8 @@ int main() {
     bench.letter('o', "the tenure shapes on both of the host's paths", rp_letter<to_shapes>);
     bench.letter('p', "the speeds, and the peer's commanded stretch", rp_letter<tp_speeds>);
     bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte",
-                 rp_letter<tq_vocabulary_rp>);
-    bench.letter('w', "the arbiter with three requesters of three priorities", rp_letter<tw_arbiter_rp>);
+                 rp_letter<tq_vocabulary>);
+    bench.letter('w', "the arbiter with three requesters of three priorities", rp_letter<tw_arbiter>);
     bench.letter('h', "the held wire, with requests arriving while it is held", rp_letter<th_held_wire>);
     bench.letter('i', "dark: every object idle, the host given back, nothing lit", rp_letter<ti_dark>);
     bench.letter('x', "the landings inside start() counted: 400 writes silent and pressed", rp_letter<tx_fill>,

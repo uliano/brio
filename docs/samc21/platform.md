@@ -710,7 +710,8 @@ character its polled loop has not fetched yet. What it established:
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_samc_rubato_i2c`, one key against the AVR64EA48's unchanged
-`twi_peer` (`z`, 202 verdicts), twenty runs alike, every verdict green:
+`twi_peer` (`z`, 202 verdicts), every verdict green on every run
+([i2c.md](i2c.md) says how many of each letter):
 `util/i2c_bus.hpp`'s arbiter over `I2cHost<3>` and its byte pump inside
 a Rubato pack of five objects, the same TC4 pressure and the same seven
 passes. Every tenure shape, the three speeds, the status vocabulary, the
@@ -731,10 +732,12 @@ preemptive kernel). What it established about this platform:
   bytes each on this core (the exception frame, the two words, the
   scheduler's frame - read off a dump of the RAM, each sampled level's
   interrupted code in the scan). The suite paints the free RAM before each
-  pass and reads the high-water after it: 1068 to 1648 bytes in every
-  letter but the held wire's, 2632 at most under its flood at 97 us x
-  300. With the flood swept across the spin at 97 us (a diagnostic
-  letter, not kept): 2704 bytes at 300 cycles, 3984 at 600, 6012 at 800,
+  pass and reads the high-water after it: 1064 to 1596 bytes over every
+  letter, the held wire's included, whose flood the lowest object's turns
+  pace (a probe posted at a tick only when the Console has run since the
+  last, [i2c.md](i2c.md)). With a probe posted at every tick instead, swept
+  across the spin at 97 us (a diagnostic letter, not kept): 2704 bytes
+  at 300 cycles, 3984 at 600, 6012 at 800,
   19580 at 900 and at 1000 past the RAM - the stack ran down through
   `.bss` with no fault until the variables it overwrote made the code
   fault, a HardFault with the stack pointer below `.bss`. At 193 and 389

@@ -1070,8 +1070,8 @@ of RAM of 20 KB (27 %); on the CH32V303VC 44720 of 252 KB (17 %) and
 
 **The I2C stack under the preemptive kernel** - `test_vx03_rubato_i2c`,
 one source and two images, each board the other's peer with its
-unchanged `twi_peer` (`z`, 195 verdicts on each), twenty runs on each
-image, every verdict green: `util/i2c_bus.hpp`'s arbiter over the
+unchanged `twi_peer` (`z`, 195 verdicts on each), every verdict green on
+every run of each image ([i2c.md](i2c.md) says how many of each letter): `util/i2c_bus.hpp`'s arbiter over the
 engined `I2cHost<1>` (DMA1's channels 6 and 7) inside a Rubato pack of
 five objects - the preempting object on top, a requester above the
 arbiter and one below it, the console's object at the bottom - with

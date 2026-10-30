@@ -99,8 +99,8 @@
 //      write-then-reads of 1+6 (the read half on the engines), Minor's
 //      writes of one (the pump's preload), Pressure's probes: in order,
 //      i2c_ok, nothing rejected, no timeout, the peer's tallies exact.
-//   h  the held wire (the peer holds SDA 60 ms) with Pressure's probes at
-//      every tick: answered in its place, every request once, the next
+//   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
+//      probes, paced by the Console's turns: answered in its place, every request once, the next
 //      tenure i2c_ok and the arbiter idle; then the hold met at another
 //      speed (above).
 //   i  dark: every object idle, the arbiter's vote, no time event armed,

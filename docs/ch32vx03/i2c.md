@@ -889,9 +889,10 @@ at 20 ms) over the engined `I2cHost<1>` on PB6/PB7 (DMA1 channels 6 and
 FREQ window), while TIM2 posts to the pack's highest object every 97,
 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97 us x
 3000, 32 % of the core. Every letter runs once with TIM2 silent and six
-times under it; **195 verdicts on each image, green on twenty runs of
-twenty on each**. The pack, the command channel through the arbiter and
-all the letters but one are the I2C suites' shared body
+times under it; **195 verdicts on each image, green on every run:
+thirty on each image of the letters `n`, `o`, `p`, `w` and `i`, ten of
+`q` and `h`**. The pack, the command channel through the arbiter
+and the letters are the I2C suites' shared body
 (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them), and
 [platform.md](platform.md) places the suite among the preemptive
 kernel's.
@@ -936,18 +937,23 @@ write's address waits for it, which is where the most of a hold the
 write measures beyond its seven comes from (the peer's loop read, not
 measured apart).
 
-**The vocabulary, and the two answers of this peer.** Letter `q` is the
-suite's own, for two reasons its header gives. A deaf client answers the
-probe and a four-byte write `i2c_nack_addr`; the third byte of six
+**The vocabulary, and the two answers of this peer.** Letter `q`: a
+deaf client - the peer's client parked at 0x5D, the letter's own
+address, since twi_link's `deaf_addr`, 0x7A, is a 10-bit header to this
+host (the gap below) - answers the probe and a four-byte write
+`i2c_nack_addr` and the probe of 0x5D `i2c_ok`; the third byte of six
 refused (the write on the transmit engine) answers `i2c_nack_data`; the
 last written byte of a 2+4 refused answers `i2c_nack_data` with the
 controller let go through its void write; the peer reports each refusal
-as its own, and after each action's deadline the next tenure is `i2c_ok`.
-Inside a refusing action's window a probe of the peer is refused at the
-address, every pass: `twi_peer` refuses a data byte with CTLR1.ACK set
-down in advance, the same bit acknowledges its own address, and nothing
-puts it back before the deadline - so the 2+4's void write meets a
-refused address too, and the peer counts that tenure's one address match.
+as its own, and after each action's deadline the next tenure, a probe
+of the command address, is `i2c_ok`. Inside a refusing action's window a
+probe of the peer is refused at the address, every pass: `twi_peer`
+refuses a data byte with CTLR1.ACK set down in advance, the same bit
+acknowledges its own address, and nothing puts it back before the
+deadline - so the 2+4's void write meets a refused address too, and the
+peer counts each refusing tenure's one address match (the suite's
+`I2cTraits::refusal_holds_address`, which the shared letter's verdicts
+follow).
 
 **The arbiter with three requesters of three priorities.** Letter `w`:
 the Client above the arbiter (20 write-then-reads of 1+6, the read half
@@ -964,20 +970,24 @@ out at the controller's tick (the section above) and loses its first one
 bit: the held tenure is answered `i2c_arb_lost` in 176 to 373 us when it
 is the first. A START set after one has lost inside the same hold does
 not go out - it parks, and the arbiter's 20 ms answers it `i2c_timeout`:
-under the flood (a probe at every tick, 179 to 722 a pass) the first
-START to meet the hold lost - the held tenure's, or a probe's - and two
-or three probes after it timed out, one after another, until the
-release; where a probe had met the hold before the Client's tenure (7 of
-280 passes, that probe answered `i2c_arb_lost` each time) the held
-tenure itself was answered `i2c_timeout`, in 19833 to 20005 us. Met at 400 kHz after the commands at 100 (a PE cycle
-for the timing first) it is `i2c_arb_lost` in 167 to 268 us, forty runs
-of forty. Every request was answered exactly
-once - while held `i2c_rejected` (the pending FIFO full), `i2c_arb_lost`
-or `i2c_timeout`, after the release `i2c_ok` or, in the moment the
-peer's client is not yet back, `i2c_nack_addr` (one probe in each of 12
-of 280 passes) - a request arrived in the arbiter's draining window,
-between a timeout's `recover()` and the marker after it, in 16 passes,
-the interleaving only a requester above the arbiter can make; after the release
+under the flood (a probe at a tick whenever the Console has turned since
+the last, which at 96 MHz is most ticks: 180 to 719 a pass, 712 to 716
+of some 930 ticks at 97 us x 3000) the first START to meet the hold lost
+- the held tenure's, or a probe's - and two or three probes after it
+timed out, one after another, until the release; where a probe had met
+the hold before the Client's tenure (7 of 280 passes with a probe posted
+at every tick, 5 of 140 with the flood paced) the held tenure itself
+was answered `i2c_timeout`, in 19833 to 20005 us from its post (19697
+to 19750 from its `start()`). Met at 400 kHz after the commands at 100
+(a PE cycle for the timing first) it is `i2c_arb_lost` in 167 to 268 us,
+every run. Every request was answered exactly once - while held
+`i2c_rejected` (the pending FIFO full), `i2c_arb_lost` or `i2c_timeout`,
+after the release `i2c_ok` or, in the moment the peer's client is not
+yet back, `i2c_nack_addr` (one probe in each of 12 of 280 passes, 6 of
+120 paced) - a request arrived in the arbiter's draining window, between
+a timeout's `recover()` and the marker after it, in 16 passes of 280 and
+11 of 120 paced, the
+interleaving only a requester above the arbiter can make; after the release
 the next tenure was `i2c_ok` and the arbiter voted idle with nothing
 waiting, every pass. `unwedges()` stayed at zero in every run.
 

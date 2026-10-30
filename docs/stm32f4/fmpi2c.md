@@ -713,8 +713,9 @@ arbiter (pending depth 4, the per-bus timeout at 20 ms) over the engined
 kernel clock, the Fm+ pad drive on) inside Rubato, while TIM2 posts to
 the pack's highest object every 97, 193 or 389 us and its dispatch spins
 300 or 3000 cycles. Every letter runs once with TIM2 silent and six
-times under it; **174 verdicts, green on twenty runs of twenty**, the
-vocabulary letter `q` kept out of them (below). The pack and the letters
+times under it; **174 verdicts, green on every run: thirty of the
+letters `n`, `o`, `p`, `w` and `i`, ten of `h`**, the vocabulary letter
+`q` kept out of them (below). The pack and the letters
 are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`), and
 [platform.md](platform.md) places the suite among the preemptive
 kernel's.
@@ -750,12 +751,13 @@ kernel's.
   meets most of one hold more, [i2c.md](i2c.md) has the arithmetic).
 - **THE REFUSED DATA BYTE IS NAMED AS A REFUSED ADDRESS under the
   engines** (letter `q`, run by its name): the deaf client's probe and
-  write answer `i2c_nack_addr` and its next tenure - a probe of 0x7A,
-  where the partner parks, a 7-bit address to this block - `i2c_ok`; but
-  the third byte of a six-byte write refused answers `i2c_nack_addr` too,
-  and so does the last written byte of a 2+4 refused, whose two written
-  bytes the partner reports received - 14 verdicts of 28 failing, every
-  pass of every run. The event vector names a NACK by the byte pump's position
+  write answer `i2c_nack_addr` and its next tenure - a probe of 0x5D,
+  where the partner parks - `i2c_ok`; but the third byte of a six-byte
+  write refused answers `i2c_nack_addr` too, and so does the last written
+  byte of a 2+4 refused, whose two written bytes the partner reports
+  received, its address matches the two a host that lets go with a STOP
+  makes - 14 verdicts of 28 failing, every pass of every run, the
+  status alone. The event vector names a NACK by the byte pump's position
   in the half (`pos_ == 0`: the address), and with the engines carrying
   the bytes the pump's position never moves. The engineless host tells
   the two apart (letter `m` above); the twin keeps the letter out of its
@@ -769,18 +771,22 @@ kernel's.
   file ([../stm32g0/i2c.md](../stm32g0/i2c.md)). With the partner holding
   SDA low 60 ms, the tenure posted at the speed in force parks behind
   BUSY and is answered `i2c_timeout` by the arbiter in 19988 to 20033 us
-  (138 passes of 140); in the other 2 a probe the
-  preempting object had posted first parked and timed out instead, the
-  arbiter's `recover()` - 23.4.6's PE cycle, which clears BUSY - then
-  started the held tenure, and its START went out into the held line and
-  lost: `i2c_arb_lost` at 20046 to 20052 us. The same tenure at 400 kHz
-  after commands at 100 kHz pays `apply()`'s PE cycle before its START
-  and is answered `i2c_arb_lost` in 28 us, 20 of 20. Under the flood
-  every request was answered exactly once - while held `i2c_rejected`,
-  and `i2c_arb_lost` for nearly every probe that reached the wire after a
+  (138 passes of 140 with a probe posted at every tick, 66 of 70 with
+  the flood paced by the Console's turns, 19993 to 20032 us from its
+  `start()`); where a probe the preempting object had posted first parked
+  and timed out instead, the arbiter's `recover()` - 23.4.6's PE cycle,
+  which clears BUSY - then started the held tenure, and its START went out
+  into the held line and lost: `i2c_arb_lost` 47 us from its `start()`,
+  at 20044 to 20059 us from its post. The same tenure at 400 kHz after
+  commands at 100 kHz pays `apply()`'s PE cycle before its START and is
+  answered `i2c_arb_lost` in 26 to 29 us, every run. Under the flood (180
+  to 722 probes a pass, 721 or 722 of some 925 ticks at 97 us x 3000) every
+  request was answered exactly once - while held `i2c_rejected`, and
+  `i2c_arb_lost` for nearly every probe that reached the wire after a
   `recover()`, after the release `i2c_ok` or `i2c_nack_addr` - and a
   request arrived in the arbiter's draining window in 2 of 120 pressure
-  passes; after the release the next tenure was
+  passes with a probe at every tick, 1 of 60 with the flood paced; after
+  the release the next tenure was
   `i2c_ok` and the arbiter voted idle, every pass.
 - **The bus error count** rose by one in each pass of letter `p` and
   nowhere else, seven a run, as on the classic block beside it
