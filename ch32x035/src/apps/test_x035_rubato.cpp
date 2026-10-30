@@ -346,7 +346,14 @@ using K = Rubato<P, Top, High, Mid, Low, Console>;
 /// The scheduler run by hand from the Console's dispatch, as the
 /// platform's entry and exit run it (kernel/platform.hpp): the ceiling
 /// replaced with 0, activate() at the Console's own, the ceiling put
-/// back. Whether it served.
+/// back. Whether it served. Unlike the platform's exit it does not
+/// compare the count of quiet posts after the last scan: no letter lets a
+/// post to an object above the Console land in that window (letter d's
+/// scan and letter f's turns arm no edge, letter f's part 2 consumes its
+/// one edge inside Low's loop before its turns, and the UART's post is
+/// to the Console itself, which waits for its own dispatch's end either
+/// way), so a missed post cannot occur and the check would only lengthen
+/// letter d's measured scan.
 bool activate_here() {
     const uint8_t base = P::ceiling;
     P::ceiling = 0;
@@ -597,41 +604,42 @@ constexpr uint32_t latency_events = 100;
 /// the path's own sites can share an entry and be wrong in every run.
 ///
 /// The road-1 path from the interrupt handler's last statement to High's
-/// first, by the listing:
+/// first, by the listing of the flash image:
 ///   TIM2's handler after the stamp's load: a load, a store, the stack's
 ///   release, its MRET (4 instructions)                               12
-///   the tail into the software interrupt, its body to its MRET: the
-///   block, mepc and mstatus read and stored, the entry's address into
-///   mepc (9)                                                    24 + 28
-///   its MRET into the entry; the entry's sixteen stores, csrsi, the call
-///   (19)                                                              48
-///   activate(): its frame and thirteen stores, the queues' addresses,
-///   the ceiling's load (20)                                            56
-///   Top's visit: its queue's two index bytes loaded and compared in
-///   line (EventQueue::empty() is forced inline), the index compare, the
-///   taken branch to High's visit (7)                                   24
-///   High's visit: its two bytes compared, the taken branch to its take
-///   (5)                                                                28
-///   the ceiling's store, the dispatching flag, the call to take(),
-///   take() to its return, the stamp's load (25)                       88
+///   the tail into the software interrupt (24), its body to its MRET:
+///   the trap's mstatus read as MIE is cleared, the block, mstatus and
+///   mepc stored, the ceiling read into the block and 0 stored in its
+///   place, the entry's address into mepc (13)                    24 + 44
+///   its MRET into the entry (8); the entry's frame, sixteen stores, the
+///   base's load from the block, csrsi, the call (20)             8 + 44
+///   the call into activate() (8), its frame - thirteen stores and four
+///   ALU instructions (18)                                         8 + 44
+///   the choice's start: the count of quiet posts read, the base tested,
+///   the hold, the limit and the queues' addresses set (12)            36
+///   Top's look - its queue's two index bytes loaded and compared in
+///   line, the taken branch to High's - High's look, found, the ceiling
+///   raised to it, the count read again and found still, the
+///   dispatching flag, the call to take() (20)                         88
+///   take() to its return, the stamp's load (20)                       56
 ///                                                                    ---
-///                                                                    308
-/// (89 instructions, 6 taken transfers; the queue's ring wrapping in
+///                                                                    364
+/// (107 instructions, 7 taken transfers; the queue's ring wrapping in
 /// take() changes the instructions and not the cycles. The fetch is
 /// counted a word at a time, so a figure moves with the code's place in
-/// the words.) On top of it: the predictor's spread at the path's 10
-/// predicted sites (7 conditional branches, 2 calls, 1 return), 40; and
+/// the words.) On top of it: the predictor's spread at the path's 12
+/// predicted sites (9 conditional branches, 2 calls, 1 return), 48; and
 /// at most one tick landing in the
 /// path - the ticker's line is at the peripheral level, so it preempts
-/// the software interrupt's handler, the entry and activate(), never
-/// TIM2's handler - its entry (20), its thirteen instructions to its MRET
-/// (40), its MRET into a 32-bit instruction across two words (12) and its
-/// own branch's spread (4), 76. The bound is the three, 424, and a fifth
-/// of the path's count, 61: 485. An event more than the spread, 40, over
-/// the fastest is one a tick landed in (a tick costs at least 64: its
-/// entry, its body and an MRET, less the fetch the interrupted instruction
-/// had anyway), and the letter reads the kernel tick around each event to
-/// say so.
+/// the software interrupt's handler after its first instruction's mask,
+/// the entry and activate(), never TIM2's handler - its entry (20), its
+/// thirteen instructions to its MRET (40), its MRET into a 32-bit
+/// instruction across two words (12) and its own branch's spread (4), 76.
+/// The bound is the three, 488, and a fifth of the path's count, 72: 560.
+/// An event more than the spread, 48, over the fastest is one a tick
+/// landed in (a tick costs at least 64: its entry, its body and an MRET,
+/// less the fetch the interrupted instruction had anyway), and the letter
+/// reads the kernel tick around each event to say so.
 ///
 /// AN IMAGE BUILT WITHOUT THE HARDWARE PROLOGUE (CH32X035_HPE=OFF) pays
 /// on every path through a handler that saves in software, not in the
@@ -639,12 +647,13 @@ constexpr uint32_t latency_events = 100;
 /// are drawn the same way over that image's listing: TIM2's handler,
 /// attributed and saving in software, reloads after the stamp its sixteen
 /// integer registers (44 cycles where 12 were); the software interrupt's
-/// body saves and reloads its scratch register (two instructions, 56
-/// where 52 were); the rest, the same instructions at other addresses,
-/// costs 236 there (244 in this image, the words falling otherwise). Road
-/// 1 then counts 336 (107 instructions), its spread the same 40, and a
-/// tick landing in it 92 (its frame of sixteen saves: 56 cycles of body
-/// where 40 were): 468, and 535 with a fifth of the count.
+/// body saves and restores its two scratch registers (four instructions,
+/// 64 to the entry's first where 52 were); the rest, the same
+/// instructions at other addresses, costs 280 there (276 in this image,
+/// the words falling otherwise). Road 1 then counts 412 (127
+/// instructions), its spread the same 48, and a tick landing in it 92 (its
+/// frame of sixteen saves: 56 cycles of body where 40 were): 552, and 634
+/// with a fifth of the count.
 ///
 /// THE SRAM COST MODEL, for the image that runs the scheduler path from
 /// SRAM (`ram_build`, the project's default). Code in SRAM issues one
@@ -684,35 +693,36 @@ constexpr uint32_t latency_events = 100;
 /// The road-1 path in the SRAM image, by its listing:
 ///   TIM2's handler after the stamp's load, in the flash (4)              12
 ///   its MRET into the pending software interrupt, the table in SRAM      12
-///   the software interrupt's body: six ALU and CSR instructions, two
-///   stores, the MRET into the entry (9)                                  15
-///   the entry's frame, sixteen compressed stores, csrsi, the call (19)   31
-///   activate()'s frame: thirteen stores, four ALU, the ceiling's load,
-///   a branch not taken (20)                                              29
-///   Top's visit: its queue's two index bytes loaded and compared in
-///   line, the index compare, the taken branch to High's visit, a 32-bit
-///   target across two words (7)                                          11
-///   High's visit: the two bytes compared, the taken branch to its take
-///   (5)                                                                   8
-///   High's take: the ceiling's and the dispatching flag's stores, a
-///   load, the call, take() - fourteen and its return - and the stamp's
-///   load (25)                                                            36
+///   the software interrupt's body: seven ALU and CSR instructions, a
+///   load and four stores, the MRET into the entry (13)                   22
+///   the entry's frame, sixteen compressed stores, the base's load,
+///   csrsi, the call (20)                                                 33
+///   activate()'s frame: thirteen stores, four ALU (18)                   26
+///   the choice's start: the count read, the base tested, the hold, the
+///   limit and the queues' addresses set (12)                             13
+///   Top's look: its queue's two index bytes loaded and compared in
+///   line, the taken branch to High's look (5)                             8
+///   High's look: the limit compared, its two bytes compared, found (6)    8
+///   the ceiling raised to High, the hold tested, the count read again
+///   and found still (4)                                                   6
+///   High's take: the dispatching flag's load and store, the call,
+///   take() - fifteen and its return - and the stamp's load (25)          35
 ///                                                                       ---
-///                                                                       154
-/// (89 instructions, letter c's flash path with the code after TIM2's
-/// MRET in SRAM.) On top of it: the predictor's spread at the 10 sites,
-/// all in SRAM, 30; and at most one tick landing in the path - its entry
+///                                                                       175
+/// (107 instructions, letter c's flash path with the code after TIM2's
+/// MRET in SRAM.) On top of it: the predictor's spread at the 12 sites,
+/// all in SRAM, 36; and at most one tick landing in the path - its entry
 /// from SRAM code into its handler in the flash (14), its thirteen
 /// instructions to the MRET (40), the MRET into SRAM code (8, the flash's
 /// MRET into code, an upper figure where the target is not fetched from
 /// the flash) and its own branch's spread (4), 66. The bound is the three,
-/// 250, and a fifth of the count, 30: 280. An event more than the spread,
-/// 30, over the fastest is one a tick landed in (a tick costs at least
+/// 277, and a fifth of the count, 35: 312. An event more than the spread,
+/// 36, over the fastest is one a tick landed in (a tick costs at least
 /// 54: its entry and its body). Without the hardware prologue: TIM2's
 /// sixteen reloads (44 cycles where 12 were) and the software interrupt's
-/// scratch save and reload (a store and a load, 4 more), 190; a tick its
-/// software frame (56 of body where 40 were), 82: 302, and 340 with a
-/// fifth of the count.
+/// two scratch registers saved and restored (four instructions, 30 where
+/// 22 were), 215; a tick its software frame (56 of body where 40 were),
+/// 82: 333, and 376 with a fifth of the count.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
 constexpr bool hpe_build = true;
 #else
@@ -722,9 +732,9 @@ constexpr bool hpe_build = false;
 /// the flash (test_x035_rubato_flash), as ch32x035/schedule.hpp reads it
 /// from the build's `// build: scheduler` line.
 constexpr bool ram_build = scheduler_in_ram;
-constexpr uint32_t latency_count = ram_build ? (hpe_build ? 154u : 190u) : (hpe_build ? 308u : 336u);
-constexpr uint32_t latency_bound = ram_build ? (hpe_build ? 280u : 340u) : (hpe_build ? 485u : 535u);
-constexpr uint32_t latency_spread = ram_build ? 30u : 40u;
+constexpr uint32_t latency_count = ram_build ? (hpe_build ? 175u : 215u) : (hpe_build ? 364u : 412u);
+constexpr uint32_t latency_bound = ram_build ? (hpe_build ? 312u : 376u) : (hpe_build ? 560u : 634u);
+constexpr uint32_t latency_spread = ram_build ? 36u : 48u;
 
 void tc_latency() {
     reset_scenario();
@@ -927,90 +937,101 @@ void td_scan() {
     // model's word is one cycle coarse inside a word), the predictor's
     // spread at the path's predicted sites (letter c), and a fifth of the
     // count as the margin; each is a least of 16, so no tick enters it.
-    // The scan: the read and the call (4); activate()'s frame, thirteen
-    // stores, the queues' addresses and the ceiling's load (56); Top's
-    // visit - its queue's two index bytes loaded and compared in line -
-    // the index compare and the taken branch to High's (24); High's and
-    // Mid's visits (32 each); Low's, whose index compare ends the pass
-    // (28); the thirteen loads and the return of the epilogue (40); the
-    // second read, a 32-bit load across two words (12): 228 (68
-    // instructions), 224 without the ruler; the spread at its 11 sites
-    // (44) and the fifth (44): 312. Without the hardware prologue the same
-    // instructions at other addresses: 216, the ruler 0, and 303.
-    // In the SRAM image, by the SRAM model (letter c): the read, the
-    // auipc and the jalr's words in the flash (8) and the transfer into
-    // SRAM (3); activate()'s frame (29), Top's visit (11), High's (9) and
-    // Mid's (10), Low's, whose index compare ends the pass (11), the
-    // thirteen loads of the epilogue (28), the return into the second
-    // read, a 32-bit load across two words of the flash (13): 122 (69
-    // instructions), 118 without the ruler; the spread at its 10 sites in
-    // SRAM (30) and its one in the flash (4), and the fifth (23): 175.
-    // Without the hardware prologue the flash's words fall the same: 122,
-    // the ruler 0, and 180.
-    constexpr uint32_t scan_bound = ram_build ? (hpe_build ? 175u : 180u) : (hpe_build ? 312u : 303u);
+    // The scan, through activate_here(), the by-hand entry and exit: the
+    // read and the call (8); activate_here()'s frame, the ceiling read and
+    // 0 stored in its place, the call (8 instructions, 28); activate()'s
+    // frame, thirteen stores and four ALU instructions (44); the choice's
+    // start - the count of quiet posts read, the base tested, the hold,
+    // the limit and the queues' addresses set (36); the looks - Top's,
+    // High's, Mid's and Low's, each its queue's two index bytes loaded and
+    // compared in line, and the limit at the Console ending the scan (26
+    // instructions, 132); the hold tested, the result's packing, the
+    // thirteen loads of the epilogue and the return (52); activate_here()'s
+    // tail - the ceiling put back, the result's byte, its frame, the
+    // return - into the second read (28): 328 (93 instructions), 324
+    // without the ruler; the spread at its 14 sites (56) and the fifth
+    // (64): 444. Without the hardware prologue the same instructions at
+    // other addresses: 328, the ruler 0, and 449.
+    // In the SRAM image, by the SRAM model (letter c): the read and the
+    // call in the flash (12); activate_here()'s frame to its jalr in the
+    // flash, 9 instructions, and the transfer into SRAM (27); activate()'s
+    // frame (26) and the choice's start (13); the looks (41); the hold
+    // tested, the packing, the epilogue and the return into the flash, a
+    // 32-bit load across two words (41); activate_here()'s tail into the
+    // second read (28): 188 (94 instructions), 184 without the ruler; the
+    // spread at its 11 sites in SRAM (33) and its 3 in the flash (12), and
+    // the fifth (36): 265. Without the hardware prologue the flash's words
+    // fall the same: 188, the ruler 0, and 270.
+    constexpr uint32_t scan_bound = ram_build ? (hpe_build ? 265u : 270u) : (hpe_build ? 444u : 449u);
     bench.verdict("the scan of four empty queues, the least of 16, under its bound (the "
                   "arithmetic beside it)",
                   scan < scan_bound);
-    // The quiet post: the read, the event's store and the call (4);
-    // post<Low>()'s frame and the call to the queue's push() (20); push()
-    // under its guard to the unmask and its return (76); the ceiling's
-    // compare taken, the epilogue and the return (32); the instruction
-    // before the second read (12): 144 (41 instructions; the queue's ring
-    // wrapping changes the instructions and not the cycles), 140 without
-    // the ruler; the spread at its 9 sites (36) and the fifth (28): 204.
-    // Without the hardware prologue 156, and 223.
-    // In the SRAM image: the read, the event's store and the call (12),
-    // post<Low>()'s frame to its jalr, five words of the flash (20), the
-    // transfer into SRAM (3), push() under its guard to the unmask and its
-    // return (29), the return into the flash, a 32-bit load across two
-    // words (12), the ceiling's compare taken and the epilogue (24), the
-    // return (8), the second read's word (4): 112 (41 instructions), 108 without
-    // the ruler; the spread at its 4 sites in the flash (16) and 4 in SRAM
-    // (12), and the fifth (21): 157. Without the hardware prologue the
-    // flash's words at other addresses come to the same 112, the ruler 0,
-    // and 162. No queue is asked on this path (post<Low>, push() and the
-    // ceiling's compare), so EventQueue::empty() does not enter it.
-    constexpr uint32_t quiet_bound = ram_build ? (hpe_build ? 157u : 162u) : (hpe_build ? 204u : 223u);
+    // The quiet post: the read, the event's store and the call (16);
+    // post<Low>()'s frame and the call to the queue's push() (24); push()
+    // under its guard to the unmask and its return (22 instructions, 72);
+    // the ceiling's compare taken, the count of quiet posts loaded,
+    // incremented and stored (kernel/post.hpp), the epilogue and the
+    // return (44); the instruction before the second read (4): 160 (43
+    // instructions; the queue's ring wrapping changes the instructions and
+    // not the cycles), 156 without the ruler; the spread at its 9 sites
+    // (36) and the fifth (31): 223. Without the hardware prologue the same
+    // instructions at other addresses: 160, the ruler 0, and 228.
+    // In the SRAM image: the read, the event's store and the call (16),
+    // post<Low>()'s frame to its jalr, seven instructions of the flash
+    // (20), the transfer into SRAM (3), push() under its guard to the
+    // unmask and its return (29), the return into the flash, a 32-bit load
+    // across two words (12), the ceiling's compare taken, the count's
+    // increment and the epilogue (36), the return (8), the second read's
+    // word (4): 128 (44 instructions), 124 without the ruler; the spread
+    // at its 4 sites in the flash (16) and 5 in SRAM (15), and the fifth
+    // (24): 179. Without the hardware prologue the flash's words at other
+    // addresses come to 116, the ruler 0, and 170. No queue is asked on
+    // this path (post<Low>, push() and the ceiling's compare), so
+    // EventQueue::empty() does not enter it.
+    constexpr uint32_t quiet_bound = ram_build ? (hpe_build ? 179u : 170u) : (hpe_build ? 223u : 228u);
     bench.verdict("a post that asks nothing, under its bound (the push and one compare)",
                   quiet < quiet_bound);
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
     // The road-2 post: the read, post<High>()'s frame and push() as the
-    // quiet post's (100); the compare not taken, the tail jump to the
-    // request and its four instructions to the store that pends the
-    // software interrupt (44); the trap's entry (20) and the software
-    // interrupt's body to its MRET (28); the thread entry's stores and
-    // call (48); activate() at Mid's ceiling to High's take(), the
-    // queues' index bytes compared in line (176); High's dispatch with
-    // nothing to do, the release, the pass served (160); the rescan of
-    // Top and High and Mid's index ending it (76); the epilogue (40); the
-    // entry's reloads and its ecall (44); the ecall's entry (20) and the
-    // exit's body to its MRET (16); the MRET into the request's return,
-    // the return and the second read (16): 788 (219 instructions), 792
-    // where the rings wrap (214), 788 the costlier without the ruler; the
-    // spread at its 33 sites (132) and the fifth (157): 1077. Without the
-    // hardware prologue (letter c) the two bodies' scratch saves and the
-    // same instructions at other addresses: 796 either way, the ruler 0,
-    // and 1087.
+    // quiet post's (112); the compare not taken, the epilogue, the tail
+    // jump to the request and its three instructions to the store that
+    // pends the software interrupt (36); the trap's entry (20) and the
+    // software interrupt's body to its MRET (44); the MRET into the entry
+    // and the entry to its call (52); activate() at Mid's ceiling to
+    // High's take() returned: the call, the frame, the choice's start,
+    // Top's look and High's, the raise and the count found still, take()
+    // (220); High's dispatch with nothing to do, the release, the pass
+    // served (184); the second choice - the count read again, Top's and
+    // High's queues empty, Mid's index ending the scan, the hold tested
+    // (108); the result's packing, the epilogue and its return (44); the
+    // entry's count store, its reloads and its ecall (40); the ecall's
+    // entry (20) and the exit's body to its MRET, the count compared and
+    // found still (40); the MRET into the request's return, the return and
+    // the second read (20): 940 (258 instructions), 944 where the rings
+    // wrap (253), 940 the costlier without the ruler; the spread at its 41
+    // sites (164) and the fifth (188): 1292. Without the hardware prologue
+    // (letter c) the two bodies' scratch saves and the same instructions
+    // at other addresses: 964 either way, the ruler 0, and 1320.
     // In the SRAM image (letter c's SRAM model): the read, post<High>()'s
-    // frame and the call to push() in the flash (32), the transfer into
-    // SRAM and push() (31), the return into the flash and the ceiling's
-    // compare not taken (25), the epilogue and the tail jump to the
-    // request (12) and the transfer into SRAM (3); the request's two
-    // instructions (2), its store, the fence.i and the trap's entry (12);
-    // the software interrupt's body (15); the thread entry (31);
-    // activate() at Mid's ceiling to High's take(): the frame, Top's
-    // visit and High's (48), High's take and dispatch with nothing to do
-    // (69), the release (14), the pass served (10); the rescan of Top and
-    // High and Mid's index ending it (24), the epilogue and its return
-    // (31); the entry's reloads and its ecall's entry (42); the exit's
-    // body and its MRET (12); the request's return into the second read,
-    // on a word of the flash (9): 422 (220 instructions, the fence.i
-    // among them), 418 without the ruler; the spread at its 30 sites in
-    // SRAM (90) and 4 in the flash (16), and the fifth (83): 607. Without
-    // the hardware prologue the two bodies' scratch saves (8) and the
-    // flash's words at other addresses: 434, the ruler 0, and 626.
-    constexpr uint32_t road2_bound = ram_build ? (hpe_build ? 607u : 626u) : (hpe_build ? 1077u : 1087u);
+    // frame and the call to push() in the flash, the transfer into SRAM,
+    // push() and the return into the flash (80); the compare not taken,
+    // the epilogue, the tail jump and the transfer into SRAM, the
+    // request's two instructions and its store (29); the store, the
+    // fence.i and the trap's entry (12) and the software interrupt's body
+    // (17); its MRET into the entry and the thread entry (38); activate()
+    // at Mid's ceiling to High's take() returned (90); High's dispatch with
+    // nothing to do, the release, the pass served (68); the second choice
+    // to the hold tested (36); the packing, the epilogue and its return
+    // (33); the entry's count store, its reloads and its ecall (35); the
+    // ecall's entry (9) and the exit's body to its MRET (17); the MRET into
+    // the request's return and the return into the second read, a 32-bit
+    // load across two words of the flash (17): 481 (260 instructions, the
+    // fence.i among them), 477 without the ruler; the spread at its 37
+    // sites in SRAM (111) and 4 in the flash (16), and the fifth (95): 699.
+    // Without the hardware prologue the two bodies' scratch saves and the
+    // flash's words at other addresses: 485, the ruler 0, and 709.
+    constexpr uint32_t road2_bound = ram_build ? (hpe_build ? 699u : 709u) : (hpe_build ? 1292u : 1320u);
     print(serial, "  bounds: the scan ", scan_bound, ", a quiet post ", quiet_bound,
           ", a road-2 post ", road2_bound, crlf);
     bench.verdict("and under its bound (the arithmetic beside it), High's empty dispatch included",
@@ -1070,25 +1091,25 @@ void te_depth2() {
                                       "resumes (10 runs)",
                           alike == 10u);
             // Letter c's path with activate() at High's ceiling, where
-            // Top's visit is the take: TIM2's tail (12), the software
-            // interrupt's (52), the thread entry (48), activate()'s frame
-            // (56) and Top's two index bytes compared in line, not equal,
-            // with the taken branch (16), the call to take(), take() and
-            // the stamp (84) - 268 under letter c's model, 82
-            // instructions - and the predictor's spread at its 8
-            // predicted sites (32), a tick landing in it (76, letter c),
-            // a fifth of the count (53): 429. Without the hardware
-            // prologue letter c's additions and the words at other
-            // addresses make it 312, a tick 92, and 498.
+            // Top's look finds the event: TIM2's tail (12), the software
+            // interrupt's (68), the thread entry (52), the call and
+            // activate()'s frame (52), the choice's start (36), Top's two
+            // index bytes compared in line, not equal, the raise and the
+            // count found still (40), the call to take(), take() and the
+            // stamp (72) - 332 under letter c's model, 101 instructions -
+            // and the predictor's spread at its 10 predicted sites (40), a
+            // tick landing in it (76, letter c), a fifth of the count (66):
+            // 514. Without the hardware prologue letter c's additions and
+            // the words at other addresses make it 380, a tick 92, and 588.
             // In the SRAM image (letter c's SRAM model): TIM2's tail (12),
-            // its MRET into the software interrupt (12), that body (15),
-            // the thread entry (31), activate()'s frame (29) and Top's two
-            // bytes compared, not equal, with the taken branch (9), Top's
-            // take and the stamp (36) - 144, 82 instructions - the spread
-            // at its 8 sites in SRAM (24), a tick (66, letter c), a fifth
-            // (28): 262. Without the hardware prologue letter c's additions
-            // make it 180, a tick 82, and 322.
-            constexpr uint32_t depth2_bound = ram_build ? (hpe_build ? 262u : 322u) : (hpe_build ? 429u : 498u);
+            // its MRET into the software interrupt (12), that body (22),
+            // the thread entry (33), activate()'s frame (26) and the
+            // choice's start (13), Top's look, found, the raise and the
+            // count found still (15), Top's take and the stamp (33) - 166,
+            // 101 instructions - the spread at its 10 sites in SRAM (30), a
+            // tick (66, letter c), a fifth (33): 295. Without the hardware
+            // prologue letter c's additions make it 206, a tick 82, and 359.
+            constexpr uint32_t depth2_bound = ram_build ? (hpe_build ? 295u : 359u) : (hpe_build ? 514u : 588u);
             bench.verdict("and Top's first statement within its bound of the interrupt's last "
                           "(the arithmetic beside it)",
                           most <= depth2_bound);
@@ -1384,30 +1405,31 @@ void tg_mask() {
         // From the stamp's load to Mid's, by the release listing: the
         // stamp's store, the guard's test and its csrsi that lifts the
         // mask (12); the trap's entry taken at the unmask (20) and the
-        // software interrupt's body (28); the thread entry (48);
-        // activate() at the Console's ceiling - the frame (56), Top's
-        // visit (24), High's (32), Mid's two index bytes compared in line,
-        // not equal, and the taken branch (24), the ceiling's store, the
-        // call to take(), take() and the stamp (88): 332 under letter c's
-        // model, 98 instructions. The most of ten runs carries the
-        // predictor's spread at the path's 13 predicted sites (52) and,
-        // the path being some 7 us of the ticker's 1 ms period, a tick
-        // landing in one of the ten runs about one time in fourteen: its
-        // 76 (letter c); a fifth of the count (66): 526. Without the
-        // hardware prologue letter c's additions and the words at other
-        // addresses make it 340, a tick 92, and 552.
+        // software interrupt's body (44); the thread entry (52); the call
+        // and activate()'s frame (52); the choice's start at the Console's
+        // ceiling (36); Top's look, High's and Mid's, each its queue's two
+        // index bytes compared in line, Mid's not equal (76); the raise
+        // and the count found still (16); Mid's take - the dispatching
+        // flag, the call to take(), take() - and the stamp (84): 392 under
+        // letter c's model, 114 instructions. The most of ten runs carries
+        // the predictor's spread at the path's 15 predicted sites (60) and,
+        // the path being some 8 us of the ticker's 1 ms period, a tick
+        // landing in one of the ten runs about one time in twelve: its 76
+        // (letter c); a fifth of the count (78): 606. Without the hardware
+        // prologue letter c's additions and the words at other addresses
+        // make it 408, a tick 92, and 641.
         // In the SRAM image (letter c's SRAM model): the stamp's store,
         // the guard's test and its csrsi, in the flash (12); the trap's
         // entry from that unmask to the handler in SRAM (12) and the
-        // software interrupt's body (15); the thread entry (31);
-        // activate() at the Console's ceiling - the frame (29), Top's
-        // visit (11), High's (9), Mid's two bytes compared and the taken
-        // branch (10), the ceiling's store, the call to take(), take() and
-        // the stamp (37): 166, 98 instructions; the spread at its 12 sites
-        // in SRAM (36) and its one in the flash (4), a tick in one of the
-        // ten runs (66), a fifth (33): 305. Without the hardware prologue
-        // letter c's additions make it 170, a tick 82, and 326.
-        constexpr uint32_t section_bound = ram_build ? (hpe_build ? 305u : 326u) : (hpe_build ? 526u : 552u);
+        // software interrupt's body (22); the thread entry (33);
+        // activate()'s frame (26) and the choice's start (13); Top's look,
+        // High's and Mid's, found (26); the raise and the count found
+        // still (6); Mid's take, take() and the stamp (36): 186, 114
+        // instructions; the spread at its 14 sites in SRAM (42) and its one
+        // in the flash (4), a tick in one of the ten runs (66), a fifth
+        // (37): 335. Without the hardware prologue letter c's additions
+        // make it 194, a tick 82, and 360.
+        constexpr uint32_t section_bound = ram_build ? (hpe_build ? 335u : 360u) : (hpe_build ? 606u : 641u);
         bench.verdict("the section's end to the receiver's first statement under its bound "
                       "(the arithmetic beside it)",
                       most < section_bound);

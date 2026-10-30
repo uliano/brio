@@ -68,8 +68,8 @@
 //   so, and both channels with nothing left to move.
 //   THE PRESSURE. TIM2's update interrupt, 16 bits on HCLK = 48 MHz at
 //   prescaler 0: 97 / 193 / 389 us are 4656 / 9264 / 18672 counts. Its
-//   dispatch, a 3000-cycle spin, road 1 (154 to 160 cycles with the
-//   scheduler in SRAM, 307 to 311 from the flash: docs/ch32x035/platform.md)
+//   dispatch, a 3000-cycle spin, road 1 (180 to 182 cycles with the
+//   scheduler in SRAM, 372 from the flash: docs/ch32x035/platform.md)
 //   and the way back, is shorter than the shortest period's 4656 cycles,
 //   so no tick finds the last one still queued; at 97 us x 3000 it takes
 //   64 % of the core.
@@ -107,8 +107,8 @@
 // power-up enters WCH's loader - and a ground. NOTHING LIT: no letter
 // drives the LED's pad PA0.
 //
-// The letters (z: n o p q w h i; x outside it), each but i and x run as
-// seven passes (the shared body's control and six pressures):
+// The letters (z: n o p q w h i; x and u outside it), each but i, x and u
+// run as seven passes (the shared body's control and six pressures):
 //   n  the command channel through the arbiter at 100 kHz: a ping, ident
 //      (the sanity byte and the CH32V006's kind, 0x06), ten pings, every
 //      tenure i2c_ok.
@@ -137,9 +137,8 @@
 //      hold met at another speed (above). A flood at every tick regardless
 //      asks more of this core at 97 us x 3000 than it serves - a rejected
 //      probe costs some 1600 cycles beside Pressure's 3000 a period - and
-//      the preemptive kernel's stack then grows a level a tick
-//      (docs/ch32x035/platform.md); paced, the stack ledger the pass prints
-//      stays at its usual depth.
+//      starves the Console, which ends the flood and walks the time events:
+//      letter u runs it so, by name.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,
 //      TIM2 stopped with its line quiet and its DMA requests off, the host
 //      idle with its enables at rest, its channels with nothing to move and
@@ -147,6 +146,18 @@
 //      the rail up, the ceiling the Console's.
 //   x  (outside z) 400 writes of 16 silent and 400 under 97 us x 3000:
 //      the landings inside start() counted, and of them those with MSL set.
+//   u  (outside z) letter h's held wire at 97 us x 3000 with the flood
+//      unpaced - a probe at every tick, the pressure's vector marking the
+//      turn letter h waits for - for 2000 ticks, after which the vector
+//      stops the timer itself, since the Console the overload starves would
+//      otherwise never end it: the free stack painted again first and read
+//      after, its high-water against the preemptive kernel's bound of n runs
+//      for a pack of n (the arithmetic beside the letter); every probe
+//      answered at most once and the unanswered ones within what the
+//      arbiter's full queue dropped; the next tenure i2c_ok and the arbiter
+//      idle once the flood is over. The held tenure's own answer is printed
+//      and not judged: the overload starves the time events its bound
+//      rests on.
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -458,6 +469,110 @@ void console_banner() {
     bench.menu();
 }
 
+// =============================================================================
+// u - the held wire under an unpaced flood (by name, outside z)
+// =============================================================================
+
+/// Letter u's flood: while set, the pressure vector marks a turn before
+/// every Tick it posts, so Pressure probes at every tick (the pacing of
+/// letter h undone), and after `flood_n` ticks the vector stops the timer
+/// itself - the overload starves the Console, which would end the flood
+/// otherwise. Written by the letter, read and cleared by the vector.
+volatile bool unpaced = false;
+volatile uint32_t flood_ticks = 0;
+/// 2000 ticks of 97 us, 194 ms: the hold's 60 ms three times over.
+constexpr uint32_t flood_n = 2000;
+
+/// The free stack below the caller's frame painted again with the crt's
+/// pattern, from the floor to 64 bytes under the stack pointer (a handler
+/// landing during the paint pushes nothing deeper than that; one that did
+/// would count as used, the safe side). Main context.
+void repaint_stack() {
+    uint32_t sp;
+    __asm__ volatile("mv %0, sp" : "=r"(sp));
+    for (volatile uint32_t* p = __stack_floor; reinterpret_cast<uint32_t>(p) + 64u < sp; ++p) {
+        *p = 0xA5A5A5A5UL;
+    }
+}
+
+/// THE BOUND on the stack this letter may reach, by the release listing's
+/// frames (-fstack-usage, the same in both placements) and the preemptive
+/// kernel's count of runs (kernel/rubato.hpp, "The stack": a pack of n holds
+/// at most n runs, each but the topmost suspended in a dispatch of a
+/// strictly lower index, plus one empty run at an entry on this core):
+///   main(), with run() in it                                          64
+///   the base run's activate()                                        112
+///   the Console's dispatch to this letter (TestBench::handle 48, run 16)
+///   and the letter's deepest chain - its own frame 192, held_tenure() 80,
+///   TwiLinkClient::command() 96, recv_frame() 80, arb_tenure() 64 and
+///   the post to the Client 32 that asks for a run                    608
+///   four more runs, each the software interrupt's block (16), the
+///   entry's sixteen registers (64) and activate()'s frame (112) -
+///   the Console's by-hand base turn (wait_turn() 16 and activate() 112)
+///   is the smaller way to start one                                  768
+///   the four dispatches above the Console in progress, at most one of
+///   each object: Minor's 80 (its post_next() 48 and the post 32), the
+///   arbiter's 176 (Fsm::dispatch() 16, follow() 32, a state handler
+///   128 - busy() 32, begin_waiting() 48, Marked::start() 16,
+///   I2cHost::start() 32 - its replies' thunks and posts 0), the
+///   Client's 80 (post_next_w() 48 and the post 32), Pressure's 32 (its
+///   post 32, or its spin 16)                                         368
+///   one empty run at an entry: a block, an entry and an activate()
+///   frame, counted over everything above                             192
+///   an interrupt handler's own frame, the deepest i2c1_er's (the
+///   hardware prologue pushes to the core's own stack)                  32
+///                                                                     ----
+///                                                                     2144
+/// The old kernel opened a level of 192 bytes a tick under this flood
+/// (26 levels, past 5 KB, before it crashed: docs/ch32x035/platform.md).
+constexpr uint32_t unpaced_stack_bound = 2144;
+
+void tu_unpaced_flood() {
+    constexpr PassSpec s{97, 3000};
+    begin(s);
+    if (!need_peer()) {
+        (void)pass_end(s);
+        return;
+    }
+    repaint_stack();
+    const uint16_t arb_drops0 = I2cArb::queue.overflows();
+    const uint16_t press_drops0 = Pressure::queue.overflows();
+    flood_ticks = 0;
+    unpaced = true;
+    const HeldOutcome o = held_tenure(speeds[0], true);
+    unpaced = false;
+    const PassStats st = pass_end(s);
+    const uint32_t top = reinterpret_cast<uint32_t>(__stack_top);
+    const uint32_t used = top - reinterpret_cast<uint32_t>(__stack_floor) - stack_untouched();
+    const uint16_t arb_drops = static_cast<uint16_t>(I2cArb::queue.overflows() - arb_drops0);
+    const uint16_t press_drops = static_cast<uint16_t>(Pressure::queue.overflows() - press_drops0);
+    print_pass(s, st);
+    print(serial, "    the unpaced flood: ", flood_ticks, " ticks, Pressure posted ", h::press.posted, ", answered ",
+          h::press.replies, " (ok ", h::press.ok, ", rejected ", h::press.rejected, ", timeout ", h::press.timeouts,
+          ", arb_lost ", h::press.arb_lost, ", nack_addr ", h::press.nack_addr, ", other ", h::press.other,
+          "), dropped by the arbiter's full queue ", arb_drops, ", Pressure's queue dropped ", press_drops, crlf);
+    print(serial, "    the held tenure: status ", o.status, status_name(o.status), " in ", us_of(o.from_start),
+          " us from its start (not judged: an overload by design, no response time promised); next tenure ",
+          o.next, ", the vote ", o.idle ? "idle" : "NOT IDLE", crlf);
+    print(serial, "    the stack's high-water during the letter ", used, " bytes of ", top - reinterpret_cast<uint32_t>(__stack_floor),
+          ", the bound ", unpaced_stack_bound, crlf);
+    bench.verdict("the flood ran its ticks unpaced, a probe posted at each", flood_ticks == flood_n &&
+                                                                                 h::press.posted > flood_n / 2u);
+    // The arbiter answers every Request it takes (i2c_rejected when its
+    // pending FIFO is full), so a probe goes unanswered only when its post
+    // found the arbiter's queue full; that queue's count also takes the
+    // other events dropped there (a TransferDone, a timeout's fire), so it
+    // bounds the unanswered probes from above.
+    bench.verdict("every probe answered at most once, and the unanswered ones within what the arbiter's full "
+                  "queue dropped",
+                  h::press.replies <= h::press.posted && h::press.posted - h::press.replies <= arb_drops &&
+                      press_drops == 0u && h::press.other == 0u);
+    bench.verdict("after the flood the next tenure i2c_ok, the arbiter idle with nothing pending (its own vote)",
+                  o.next == i2c_ok && o.idle);
+    bench.verdict("the stack's high-water within the bound of n runs (the arithmetic beside it)",
+                  used <= unpaced_stack_bound);
+}
+
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
@@ -476,6 +591,14 @@ BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 /// The pressure: TIM2's update, where it landed, and the post.
 BRIO_CH32_VECTOR(tim2_up_handler) {
     Pulse::clear_flags(Pulse::update_flag);
+    if (unpaced && h::live) {
+        h::turned = true;   // letter u: a probe at every tick
+        flood_ticks = flood_ticks + 1u;
+        if (flood_ticks >= flood_n) {
+            Pulse::enable(false);
+            unpaced = false;
+        }
+    }
     pressure_landed();
 }
 
@@ -539,6 +662,8 @@ int main() {
         bench.letter('h', "the held wire, with requests arriving while it is held", th_held_wire);
         bench.letter('i', "dark: every object idle, nothing lit", ti_dark);
         bench.letter('x', "the landings inside start() counted: 400 writes silent and pressed", tx_fill, false);
+        bench.letter('u', "the held wire under an unpaced flood at 97 us x 3000, the stack's bound", tu_unpaced_flood,
+                     false);
     }
     brio::scheduler_init();
 
