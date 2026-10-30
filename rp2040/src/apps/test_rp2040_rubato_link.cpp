@@ -209,90 +209,15 @@ static_assert(389u * press_per_us <= 0x10000u, "the longest period fits the slic
 
 // ---- core 1: a Tenuto program of one object ------------------------------------------
 
-using P1T = Rp2040Platform<1>;
-
-struct Fire {};
-
-/// Core 1's one object: every Fire, posted by alarm 1's handler, answered
-/// with a Tick sent to Pressure on core 0.
-struct Bell {
-    using Event = Fire;
-    static inline EventQueue<Event, 4, P1T> queue;
-    static inline volatile uint32_t runs = 0;
-    static void init() {}
-    static void dispatch(const Event&) {
-        runs = runs + 1u;
-        send<Pressure>(Tick{});
-    }
-};
-using K1T = Tenuto<P1T, Bell>;
-
-/// The system timer's alarm core 1 ticks on, in its NVIC alone.
-constexpr uint8_t bell_alarm = 1;
-volatile bool bell_running = false;
-volatile uint32_t bell_next = 0;
-volatile uint32_t bell_period_us = 97;
-/// Which program core 1 runs: 0 none (the bootrom), 1 the Bell.
-volatile uint32_t core1_stage = 0;
-
-[[noreturn]] void core1_entry() {
-    CoreTicker<1>::init(clock);   // core 1's own SysTick, Tenuto's timebase there
-    Timer::clear(bell_alarm);
-    Timer::interrupt(bell_alarm, true);
-    Nvic::clear_pending(Timer::irq(bell_alarm));
-    Nvic::enable(Timer::irq(bell_alarm));   // core 1's NVIC
-    core1_stage = 1;
-    enable_interrupts();
-    K1T::run();
-}
-
-/// What core 0's doorbell handler drains: Pressure alone receives across.
-using Drain0 = Inboxes<Pressure>;
-
-/// Core 1 out of its program and into the bootrom, with core 0's doorbell
-/// off around it (the reset's words come through the FIFO), the inbox
-/// emptied while nobody sends (test_rp2040_rubato's core1_park()).
-bool core1_park() {
-    SioDoorbell<0>::disable();
-    const bool ok = Core1::reset();
-    core1_stage = 0;
-    Inbox<Pressure>::clear();
-    SioDoorbell<0>::pop_all();
-    Nvic::clear_pending(SioDoorbell<0>::irq());
-    SioDoorbell<0>::enable();
-    return ok;
-}
-
-/// Core 1 reset, the inbox emptied, then launched; true when its entry
-/// reported within 10 ms.
-bool core1_launch() {
-    SioDoorbell<0>::disable();
-    bool ok = Core1::reset();
-    core1_stage = 0;
-    Inbox<Pressure>::clear();
-    ok = ok && Core1::protocol(&core1_entry);
-    SioDoorbell<0>::pop_all();
-    Nvic::clear_pending(SioDoorbell<0>::irq());
-    SioDoorbell<0>::enable();
-    const uint32_t t0 = Ruler::now();
-    while (ok && core1_stage != 1u) {
-        if (Ruler::now() - t0 >= 10u * (core_hz / 1000u)) {
-            return false;
-        }
-    }
-    return ok;
-}
-
-bool core1_up = false;
+// THE SECOND CORE AS A PRESSURE SOURCE IS SHARED, NOT COPIED: the RP2040's
+// I2C suite under Rubato runs the same pass.
+#include "core1_bell.hpp"
 
 // ---- the shared body's four verbs -----------------------------------------------------
 
 void pressure_arm(uint16_t period_us) {
     if (pressure_core1) {
-        bell_running = false;
-        Timer::disarm(bell_alarm);
-        bell_period_us = period_us;
-        core1_up = core1_launch();
+        bell_arm(period_us);
         return;
     }
     PressSlice::enable(false);
@@ -307,11 +232,7 @@ void pressure_arm(uint16_t period_us) {
 
 void pressure_go() {
     if (pressure_core1) {
-        if (core1_up) {
-            bell_next = Timer::now_low() + bell_period_us;
-            bell_running = true;
-            Timer::alarm(bell_alarm, bell_next);
-        }
+        bell_go();
         return;
     }
     PressSlice::enable(true);
@@ -319,8 +240,7 @@ void pressure_go() {
 
 void pressure_halt() {
     if (pressure_core1) {
-        bell_running = false;
-        Timer::disarm(bell_alarm);
+        bell_halt();
         return;
     }
     PressSlice::enable(false);
@@ -328,12 +248,7 @@ void pressure_halt() {
 
 void pressure_quiet() {
     if (pressure_core1) {
-        spin(20'000u);   // a send already made, drained and dispatched
-        (void)core1_park();
-        Timer::disarm(bell_alarm);
-        Timer::interrupt(bell_alarm, false);
-        Timer::clear(bell_alarm);
-        core1_up = false;
+        bell_quiet();
         return;
     }
     PressSlice::interrupt(false);
@@ -344,7 +259,7 @@ void pressure_quiet() {
 
 bool pressure_silent() {
     return !PressSlice::enabled() && (Pwm::interrupts() & PressSlice::bit) == 0u && !Nvic::pending(Pwm::irq()) &&
-           core1_stage == 0u && !Timer::armed(bell_alarm) && Drain0::idle();
+           bell_silent();
 }
 const char* pressure_silent_text() {
     return "PWM slice 7 stopped, its interrupt off and its line quiet; core 1 parked, alarm 1 disarmed, the inbox "
@@ -512,26 +427,12 @@ extern "C" void isr_pwm_wrap() {
 
 /// Core 1's alarm: re-armed at absolute counts while the pass runs, the
 /// post to its Bell.
-extern "C" void isr_timer_1() {
-    brio::Timer::clear(bell_alarm);
-    if (bell_running) {
-        bell_next = bell_next + bell_period_us;
-        brio::Timer::alarm(bell_alarm, bell_next);
-    }
-    brio::post<Bell>(Fire{});
-}
+extern "C" void isr_timer_1() { bell_alarm_isr(); }
 
 /// Core 0's doorbell: Inboxes<Pressure>::isr() written out - the bells
 /// popped, then the inbox drained into local posts - with each event that
 /// crossed recorded where it landed.
-extern "C" void isr_sio_proc0() {
-    Drain0::Bell::pop_all();
-    std::atomic_thread_fence(std::memory_order_acquire);
-    const uint8_t n = brio::Inbox<Pressure>::drain();
-    for (uint8_t k = 0; k < n; ++k) {
-        note_landing();   // the drain made the post
-    }
-}
+extern "C" void isr_sio_proc0() { bell_doorbell_isr<note_landing>(); }
 
 extern "C" void isr_spi1() {
     if (Host::isr()) {

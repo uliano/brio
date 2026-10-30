@@ -483,8 +483,26 @@ Driver gaps, each with its reason:
 - Two clients on one address with a third party reading (twi_link's
   `coll`): this desk has no third node on the wire, and a DW block is a
   host or a client, never both.
+- This chip as the bus's target, served from an active object, under
+  the preemptive kernel: a target whose bytes come from an object (its
+  vector posting "the host reads" and leaving SCL held, a dispatch giving
+  the byte) is the one place a held-off reader would stretch the clock,
+  and no util service serves a target that way (`I2cClient` is served
+  from its vector). The partner's `twi_peer` could read it (its
+  `host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
+- The stack under the preemptive kernel, `test_rp2040_rubato_i2c`:
+  util/i2c_bus.hpp's arbiter over this host and its engines inside Rubato,
+  an object of the highest priority preempting it at prime periods, built
+  for the WeAct RP2040 and not run against the partner: the pair's SCL
+  wire (GP3 to the RP2350B's GP37) does not reach its node, so the
+  Tenuto suite's two-board key fails the same way. What measures
+  it: its key `z` ten to twenty times against the RP2350B's `twi_peer`,
+  then letters `x`, `e` and `s`, which count the landings inside
+  `start()` and the clock stretches a preemption there produces once the
+  block has run out of entries (the arithmetic in
+  `rp2040/src/apps/rp_rubato_i2c.hpp`'s header).

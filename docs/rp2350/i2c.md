@@ -479,6 +479,13 @@ here.
 - Two clients on one address with a third party reading (twi_link's
   `coll`): this desk has no third node on the wire, and a DW block is a
   host or a client, never both.
+- This chip as the bus's target, served from an active object, under
+  the preemptive kernel: a target whose bytes come from an object (its
+  vector posting "the host reads" and leaving SCL held, a dispatch giving
+  the byte) is the one place a held-off reader would stretch the clock,
+  and no util service serves a target that way (`I2cClient` is served
+  from its vector). The partner's `twi_peer` could read it (its
+  `host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -486,3 +493,14 @@ Implemented but not bench-verified, each with what would measure it:
   clock chapter grows one, a tenure exact after a switch.
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.
+- The stack under the preemptive kernel, `test_rp2350_rubato_i2c` on
+  both halves: util/i2c_bus.hpp's arbiter over this host and its engines
+  inside Rubato, an object of the highest priority preempting it at prime
+  periods, the host brought up behind the partner's rail at every pass
+  and given back at every letter's end; built for the WeAct RP2350B and
+  not run against the partner: the pair's SCL wire (the RP2040's GP3 to
+  this board's GP37) does not reach its node, so the Tenuto suite's
+  two-board key fails the same way. What measures it: its key `z` ten to
+  twenty times on each half against the RP2040's `twi_peer`, then
+  letters `x` and `s` (the arithmetic in
+  `rp2040/src/apps/rp_rubato_i2c.hpp`'s header).
