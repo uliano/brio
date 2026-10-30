@@ -61,7 +61,8 @@
 //      the ceiling at its own object's index; the Console reads its own,
 //      4, after the chain, and the UART's receive interrupt read the
 //      loop's ceiling when the letter's key arrived - 255 at the base, or
-//      0 while the base turn walks the time events. Ten runs, all alike.
+//      0 through the base turn (its walk of the time events and its
+//      choice). Ten runs, all alike.
 //   b  ROAD 2: Low posts to Mid, Mid to High, inside the handlers; High
 //      posts to Low. The trace nests High inside Mid inside Low, and
 //      Low's second event is served after its first dispatch ends, never
@@ -364,7 +365,15 @@ using K = Rubato<P, Top, High, Mid, Low, Console>;
 /// The scheduler run by hand from the Console's dispatch, as the
 /// platform's entry and exit run it (kernel/platform.hpp): the ceiling
 /// replaced with 0, activate() at the Console's own, the ceiling put
-/// back. Whether it served.
+/// back. Whether it served. One step of the platform's exit is left out:
+/// the compare of the quiet-post count that activate() returns, which
+/// starts the scheduler again when a post landed after its last scan.
+/// No post can land there in this suite: the kernel tick posts nothing
+/// (the time events are walked in the base turn, base_turn() here),
+/// alarm 0 is armed only by a letter that waits for its post before
+/// going on, the Console's own received byte is a post at the base's ceiling
+/// that activate() would not serve anyway, and core 1's doorbell is
+/// enabled in letters j and k alone, where core 0 calls this nowhere.
 bool activate_here() {
     const uint8_t base = P::ceiling;
     P::ceiling = 0;
@@ -620,10 +629,11 @@ bool core1_launch(void (*entry)(), uint32_t stage) {
 // =============================================================================
 void ta_ceiling() {
     // The key arrives while the kernel's loop runs below every object, and
-    // the loop holds one of two ceilings there: 255, its base, or 0 while
-    // its base turn walks the matured time events (kernel/rubato.hpp,
-    // run(): a fire then only queues; init_all() holds 0 the same way
-    // around the inits). 0 is also Top's index, so a 0 would be Top's
+    // the loop holds one of two ceilings there: 255, its base, or 0 through
+    // its base turn (kernel/rubato.hpp, run(): 0 from the walk of the
+    // matured time events, where a fire only queues, through activate()'s
+    // choice, until idle_if_empty() puts 255 back; init_all() holds 0 the
+    // same way around the inits). 0 is also Top's index, so a 0 would be Top's
     // dispatch as well - but nothing can dispatch Top when this key
     // arrives: the suite arms no time event on Top (its timers are High's,
     // Mid's and Low's), and Top has two senders. One is alarm 0's
@@ -636,17 +646,17 @@ void ta_ceiling() {
     // sender across, core 1 (core 0's doorbell drains High alone), is
     // parked in the bootrom with the inboxes cleared before letters j and
     // k end. Letter i checks both, no alarm armed and core 1 parked,
-    // before the prompt. So a 0 here is the walk, never a dispatch.
+    // before the prompt. So a 0 here is the base turn, never a dispatch.
     const bool at_base = rx_ceiling == 255u;
     const bool in_walk = rx_ceiling == 0u;
     print(serial, "  the UART's receive interrupt read the ceiling ", rx_ceiling,
           at_base   ? " (the loop's base)"
-          : in_walk ? " (the base turn's walk of the time events, held at 0)"
-                    : " (neither the base nor the walk)",
+          : in_walk ? " (the base turn, held at 0 through its walk of the time events and its choice)"
+                    : " (neither the base nor the base turn)",
           " when this letter's key arrived", crlf);
     bench.verdict("the ceiling the receive interrupt read as the key arrived is the loop's: 255 "
-                  "at its base or 0 during its walk of the time events (no dispatch of Top can "
-                  "be running then)",
+                  "at its base or 0 during its turn, the walk of the time events and the choice "
+                  "(no dispatch of Top can be running then)",
                   at_base || in_walk);
     bench.verdict("the Console's dispatch reads its own index, 4", P::ceiling == console_index);
 
@@ -765,22 +775,27 @@ void sort(uint32_t* v, uint32_t n) {
 ///   the tail-chain into PendSV                                      11
 ///   the pair body to its BX (22), the BX and the return into thread
 ///   mode (12)                                                       34
-///   the entry: cpsie, the call                                       4
-///   activate() to High's dispatch: five registers saved, the frame,
-///   the ceiling's address and value kept on the stack and the
-///   ceiling's test (20); Top's visit - the queue's two cursors loaded
-///   and compared in line (empty() is forced inline), the compare with
-///   the ceiling (13); High's cursors compared (9)                   42
-///   High's dispatch to its first stamp's sample: the ceiling's raise,
-///   the dispatching index's raise and the call of take() (16), take()
-///   on its longer path, the cursor not wrapping (22); the slot kept
-///   and the call of cycles() (8); cycles() to its sample - its frame,
-///   three literals, LOAD, the tick count, the first ICSR read and VAL
-///   (22)                                                            68
+///   the entry, under PendSV's PRIMASK until its cpsie: the ceiling's
+///   literal, its load and the store of 0 (7), cpsie (1), `base` into
+///   the stacked filler (2), the call (3)                            13
+///   activate() to High's look: five registers saved, the frame, `base`
+///   and the served flag on the stack, the count's literal and load,
+///   `base` reloaded and its test, the no-hold value and two queue
+///   addresses (26); Top's visit - the queue's two cursors loaded and
+///   compared in line (empty() is forced inline), the branch taken - and
+///   the compare with `above` (10); High's cursors compared, the branch
+///   not taken (6)                                                   42
+///   High's dispatch to its first stamp's sample: the ceiling's raise to
+///   High's index (5), the count read again and compared, both branches
+///   not taken (6), the dispatching index saved and raised and the call
+///   of take() (13), take() on its longer path, the cursor not wrapping
+///   (22); the slot kept and the call of cycles() (7); cycles() to its
+///   sample - its frame, three literals, LOAD, the tick count, the
+///   first ICSR read and VAL (22)                                    75
 ///                                                                  ---
-///                                                                  199
+///                                                                  215
 /// with every fetch a hit of the XIP cache, which answers in one cycle
-/// (2.6.3.1) - zero wait states, so 199 is the warm count. A line the
+/// (2.6.3.1) - zero wait states, so 215 is the warm count. A line the
 /// cache misses costs its fetch over the QSPI bus, 50 to 80 cycles at
 /// 125 MHz (docs/rp2040/platform.md, "A handler in SRAM"); the letter
 /// reads the cache's miss counter around each event, as it reads the
@@ -789,9 +804,9 @@ void sort(uint32_t* v, uint32_t n) {
 /// one SysTick handler landing in the path - its entry (15), its body on
 /// core 0 (27 by the listing), its return (10) and, landing on an
 /// exception return, that return begun again (12): 64; one line missed
-/// (80); and a fifth of the warm count (40): 383.
-constexpr uint32_t latency_count = 199u;
-constexpr uint32_t latency_bound = 383u;
+/// (80); and a fifth of the warm count (43): 402.
+constexpr uint32_t latency_count = 215u;
+constexpr uint32_t latency_bound = 402u;
 
 /// One latency run: `events` edges from `edge`, each followed by a wait
 /// for High's first statement; returns the misses, fills `latency[]`,
@@ -1011,43 +1026,57 @@ void td_scan() {
     // so the cache is warm, and a fifth of the whole as the margin; the
     // ruler's two-read cost taken off holds one move the measured span
     // does not, so each count below is the span's less one.
-    // The scan: activate()'s frame and the ceiling's test (20); Top's
-    // visit, the queue's two cursors loaded and compared in line (8),
-    // and the compare with the ceiling (5); High's (8 and 4), Mid's (9
-    // and 4) and Low's (9, then the last compare with the ceiling and
-    // the branch out, 6); the frame's release and the return (11): 84;
-    // the call and the result kept (4): 88; 106 with the fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 106 cycles",
-                  scan < 106u);
+    // The scan, through activate_here(), the platform's entry and exit
+    // written by hand: its prologue, the ceiling's literal and load, the
+    // store of 0 and the call of activate(4) (18); activate()'s prologue
+    // to Top's look (26, letter c's); Top's visit, the queue's two cursors
+    // loaded and compared in line with the branch taken, and the compare
+    // with `above` (10); High's (10); Mid's and Low's, each with its
+    // queue's literal (13 and 14, Low's compare finding `above` at the
+    // Console's index); the no-hold test, the result packed, the frame's
+    // release and the return (17): 90 in activate(); the result's unpack,
+    // the ceiling put back and the return (13): 121; the call and the
+    // result kept (4): 125; 150 with the fifth.
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 150 cycles",
+                  scan < 150u);
     // The quiet post: the event's setup and the call between the two
     // reads (8), post<Low>()'s prefix (a push, a literal, two moves, the
     // call: 10), the queue's push() - the core check, an IOPORT load of
     // CPUID, then the copy under the guard's mrs, cpsid and msr (48) -
-    // the ceiling's compare and the return (16): 82, less one: 81; 98
-    // with the fifth. Its path asks no queue whether it is empty.
-    bench.verdict("a post that asks nothing costs under 98 cycles (the push and one compare)",
-                  quiet < 98u);
+    // the ceiling's compare, its branch taken (11), the count of quiet
+    // posts raised out of line - the call, the literal, the load, the
+    // add, the store and the return (12) - and the branch back and the
+    // pop of the PC (7): 96, less one: 95; 114 with the fifth. Its path
+    // asks no queue whether it is empty.
+    bench.verdict("a post that asks nothing costs under 114 cycles (the push, one compare and the "
+                  "count)",
+                  quiet < 114u);
     // The road-2 post: the setup and the call (9); post<High>()'s prefix
     // (10) and push() (48); the ceiling's compare and the call of the
     // request (13); the request - the core's test, the store, the DSB
     // and the ISB (17, Rp2040RubatoPlatform::pend_schedule()); PendSV's
     // entry from thread mode (15); the pair body and the return into
-    // thread mode (34); the entry (4); activate() at Mid's ceiling to
-    // High's dispatch (42, letter c's); High's dispatch with nothing to
-    // do (191: the two raises and take(), 38, as in letter c; the slot
-    // kept and the ruler's whole call, 8 and 51; the stamp's store, the
-    // timer's low word over the APB bridge, whose read adds two cycles
-    // to the core's load (2.1.3), its store, the count and the stack
-    // sample, 32; the tests, 19; the call of release() and release(),
-    // 23; the ceiling and the index restored and the branch to the
-    // second pass, 20); the second pass, which compares Top's and High's
-    // cursors in line and finds both empty, and the return (49); the
-    // SVC's entry, its three instructions and its return (31); the
-    // request's and the post's returns (7): 470, less one: 469; 563 with
-    // the fifth.
+    // thread mode (34); the entry (13, letter c's); activate() at Mid's
+    // ceiling to High's dispatch (42, letter c's); High's dispatch with
+    // nothing to do (199: the raise, the count compared, the dispatching
+    // index and take(), 46, as in letter c; the slot kept and the ruler's
+    // whole call, 7 and 51; the stamp's store, the timer's low word over
+    // the APB bridge, whose read adds two cycles to the core's load
+    // (2.1.3), its store, the count and the stack sample, 31; the tests,
+    // 17; the drop flag's test and the call of release(), 11, and
+    // release(), 14; the served flag, the dispatching index put back, the
+    // ceiling's store of 0 and the branch to the next choice, 22); the
+    // next choice - the count read, Top's cursors and High's compared in
+    // line, both empty, `above` found at Mid's index, the result packed
+    // and the return (52); the entry's exit - the count kept, the two
+    // literals and the SVC (6) -, the SVC's entry (15), its handler - the
+    // frame's three words and the filler loaded, the ceiling put back,
+    // the count compared, the branch not taken, the frame's release and
+    // the BX (20) - and its return (10); the request's and the post's
+    // returns (7): 510, less one: 509; 611 with the fifth.
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
-    bench.verdict("and under 563 cycles, High's empty dispatch included", road2 < 563u);
+    bench.verdict("and under 611 cycles, High's empty dispatch included", road2 < 611u);
 }
 
 // =============================================================================
@@ -1333,7 +1362,7 @@ void tg_primask() {
             if (!lengthened) {
                 most_clean = d > most_clean ? d : most_clean;
             }
-            if (d > 214u) {
+            if (d > 231u) {
                 ++slow;
                 if (lengthened) {
                     ++explained;
@@ -1360,7 +1389,7 @@ void tg_primask() {
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles; runs over 214: ", slow, ", a kernel tick or an XIP refill inside ",
+          " cycles; runs over 231: ", slow, ", a kernel tick or an XIP refill inside ",
           explained, crlf);
     bench.verdict("PendSV stood pending inside every section, and no receiver ran inside one",
                   pend_inside && !ran_inside);
@@ -1373,17 +1402,21 @@ void tg_primask() {
     // the rest of the ruler's call (29), the stamp's store with its
     // literal and the saved mask's load (6) and the guard's msr that
     // lifts it (3); PendSV's entry from thread mode (15), the pair body
-    // and its return into thread mode (34); the entry (4); activate() at
-    // the Console's ceiling - its frame and test (20), Top's visit (13),
-    // High's (12), Mid's to its dispatch (10), each queue's cursors
-    // compared in line; Mid's dispatch to its stamp's sample (68, High's
-    // in letter c): 214 warm; 257 with a fifth. A run a tick's handler or a refill lengthened is explained
-    // by the counters read around it (measured: one run of ten at 604
-    // cycles, a tick inside), so the bound judges the runs nothing
-    // lengthened, and every lengthened one must be explained.
-    bench.verdict("the section's end to the receiver's first statement under 257 cycles "
+    // and its return into thread mode (34); the entry (13, letter c's);
+    // activate() at the Console's ceiling - its prologue to Top's look
+    // (26), Top's visit (10), High's (10), Mid's look with its queue's
+    // literal (9), each queue's cursors compared in line; Mid's dispatch
+    // to its stamp's sample - the raise (5), the count compared (6), the
+    // dispatching index and the call of take() (13), take() (22), the
+    // slot kept, its test's branch taken and the call of cycles() (8),
+    // cycles() to its sample (22): 76: 231 warm; 278 with a fifth. A run
+    // a tick's handler or a refill lengthened is explained by the
+    // counters read around it (measured: one run of ten at 604 cycles, a
+    // tick inside), so the bound judges the runs nothing lengthened, and
+    // every lengthened one must be explained.
+    bench.verdict("the section's end to the receiver's first statement under 278 cycles "
                   "in every run nothing lengthened",
-                  most_clean < 257u);
+                  most_clean < 278u);
     bench.verdict("every run over the path's warm count had a tick or a cache refill in it",
                   slow == explained);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
@@ -1468,16 +1501,16 @@ void tj_across() {
     // handler's tail in place of the alarm's, and the tails are the same
     // by the listing - the rest of cycles() (29), the stamp's store with
     // its literal (4), a pop of four into the PC (7) - so the warm count
-    // is letter c's 199. One thing more runs beside it: core 1, which
+    // is letter c's 215. One thing more runs beside it: core 1, which
     // after its ring returns from its send and its dispatch and turns its
     // loop to the WFI, fetching from the same XIP cache, whose port
     // serves one master a cycle; so each of the path's fetches from the
-    // cache - by the listing 58 words of instructions, 8 literals, the
+    // cache - by the listing 63 words of instructions, 10 literals, the
     // pair body's table entry and PendSV's vector - may wait one cycle
-    // behind core 1's: 68 more. An event is slow over 267, and the bound
-    // is letter c's with those 68: 451.
-    constexpr uint32_t bell_count = latency_count + 68u;
-    constexpr uint32_t bell_bound = latency_bound + 68u;
+    // behind core 1's: 75 more. An event is slow over 290, and the bound
+    // is letter c's with those 75: 477.
+    constexpr uint32_t bell_count = latency_count + 75u;
+    constexpr uint32_t bell_bound = latency_bound + 75u;
     tracing = false;
     console_drain();
     const Slow s = latency_run([] { send<Relay>(Fire{0, false}); }, [] { return bell_last; },
@@ -1571,14 +1604,20 @@ void tk_both_cores() {
         const uint32_t d0 = k1_done;
         post<Low>(Hit{1});
         // Both settle: core 1's Low1 ended its action (within 2 ms of the
-        // post's return, its spin being 500 us), then its dispatch -
-        // the trace's last entry written before the ceiling is restored
-        // to 255, its base (kernel/rubato.hpp's visit()), within 1 ms.
+        // post's return, its spin being 500 us), then its dispatch - the
+        // trace's last entry written, then the scheduler's exit putting
+        // back 255, the ceiling of core 1's base (kernel/platform.hpp, the
+        // entry and the exit) - within 1 ms. Seen once is settled, and the
+        // read is not taken again: core 1's loop then turns once more with
+        // the ceiling at 0 (its base turn, kernel/rubato.hpp's run()) before
+        // its idle puts 255 back, and a second read can land in that turn.
         const bool done = wait_runs(k1_done, d0, 2u * one_ms);
         const uint32_t t0 = Ruler::now();
-        while (core1_ceiling() != 255u && Ruler::now() - t0 < one_ms) {
+        bool back1 = core1_ceiling() == 255u;
+        while (!back1 && Ruler::now() - t0 < one_ms) {
+            back1 = core1_ceiling() == 255u;
         }
-        settled = settled && done && core1_ceiling() == 255u && P::ceiling == console_index;
+        settled = settled && done && back1 && P::ceiling == console_index;
         if (run == 0) {
             continue;
         }
@@ -1647,14 +1686,24 @@ void tk_both_cores() {
     // and below that either the deepest handler's own frames (the
     // doorbell's 40 with a push, 8: 48; the alarm's 16 with a push: 24)
     // or, the handler gone and its post pending PendSV, PendSV's two
-    // words and an activate() frame that finds nothing (8 + 40 = 48; the
+    // words and an activate() frame not yet dispatching (8 + 40 = 48; the
     // fake frame's 32 below the two words are popped before activate()
-    // pushes, 48 too). 36 + 36 + 48 = 120: core 1's high-water mark lies
-    // within 120 bytes of the deeper of its two samples.
+    // pushes, 48 too): 36 + 36 + 48 = 120. One run lies deeper than the
+    // dispatch it precedes: an interrupt taken at PendSV's first
+    // instruction, before its cpsid, posts with the old ceiling and asks
+    // again, and the request is taken at the entry's cpsie, after its
+    // store of 0, as a run at ceiling 0 that serves nothing
+    // (kernel/rubato.hpp, "The stack") - a basic frame, PendSV's two
+    // words and an activate() frame below the delayed run's entry, whose
+    // own dispatch is then sampled one activate() frame below it: 44
+    // bytes under that sample, and an interrupt over the empty run, a
+    // basic frame and the doorbell's 48: 44 + 36 + 48 = 128. So core 1's
+    // high-water mark lies within 128 bytes of the deeper of its two
+    // samples.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("core 1's paint reached its deepest sampled stack pointer", used >= deepest);
-    bench.verdict("core 1's high-water mark is within 120 bytes of its deepest sample",
-                  used <= deepest + 120u);
+    bench.verdict("core 1's high-water mark is within 128 bytes of its deepest sample",
+                  used <= deepest + 128u);
     Timer::interrupt(edge_alarm1, false);
     Timer::disarm(edge_alarm1);
     Timer::clear(edge_alarm1);
@@ -1712,10 +1761,14 @@ void th_stack() {
     // handler's own frames (the alarm's 16 and the doorbell's 16, each
     // calling cycles(), 20, or the trace's note(), 20: 36; the UART's 32,
     // its post inline) or, the handler gone and its post pending PendSV,
-    // PendSV's two words and an activate() frame that finds nothing to
-    // serve (8 + 56 = 64; the fake frame's 32 are popped before
-    // activate() pushes). 68 + 36 + 64 = 168: the high-water mark lies
-    // within 168 bytes of the deeper of the two samples.
+    // PendSV's two words and an activate() frame not yet dispatching
+    // (8 + 56 = 64; the fake frame's 32 are popped before activate()
+    // pushes). 68 + 36 + 64 = 168. The run at ceiling 0 that an interrupt
+    // taken before PendSV's cpsid can leave at the entry (core 1's letter
+    // k says how) lies 44 bytes under the dispatch sample of the run it
+    // delays, an interrupt over it a basic frame and a handler's 36 more:
+    // 116, inside 168. So the high-water mark lies within 168 bytes of the
+    // deeper of the two samples.
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
     bench.verdict("the high-water mark is within 168 bytes of the deepest sample",

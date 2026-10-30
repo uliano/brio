@@ -876,10 +876,11 @@ moving and a refill goes unseen.
 On both halves road 1 preempts at any depth: an interrupt's post to
 High inside Low's dispatch runs High to its end before Low resumes,
 every object reading its own index as the ceiling and the UART's
-interrupt the loop's - 255 at its base, or 0 while the base turn walks
-the time events (kernel/rubato.hpp holds it there so that a timer's
-fire only queues; no dispatch of Top, whose index is also 0, can be
-open then, nothing posting to Top between letters); road 2 nests High inside Mid inside Low, each
+interrupt the loop's - 255 at its base, or 0 through the base turn
+(kernel/rubato.hpp holds it there from the walk of the time events,
+where a timer's fire only queues, through the choice that follows; no
+dispatch of Top, whose index is also 0, can be open then, nothing
+posting to Top between letters); road 2 nests High inside Mid inside Low, each
 inside the post that asked; at depth 2 an interrupt over High's
 dispatch, started by either road, runs Top before High resumes; three
 timers matured in one turn are posted with the ceiling at 0 and served
@@ -892,71 +893,68 @@ cost taken off:
 
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 106 / 106 / 135 | 179 / 179 / 407 |
-| road 1: the path's count by the release listing, and the bound | 102, 177 | 175, 284 |
-| road 1 at depth 2, over a preempting dispatch | 96 | 170 |
-| `activate()` over four empty queues | 65 | 68 |
-| a post that asks nothing | 60 | 53 |
-| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 303 (243) | 323 (270) |
-| one `arm()`, its masked window inside | 61 | 45 to 51 |
-| a post under the mask: the section's end to the receiver's first | 117 | 160 |
-| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 652 (632 / 488) | 904 to 992 (928 / 736) |
-| core 1, road 1 from its doorbell's handler at its base, a send from core 0 | 110 | 185 |
-| core 1, road 1 from its alarm over a dispatch | 102 | 175 |
-| core 1's paths' counts, and the bounds | 107 and 100; 129 and 120 | 181 and 171; 218 and 206 |
-| core 1's stack high-water (bytes), the deepest sample in a dispatch / in an interrupt | 236 (216 / 88) | 348 (352 / 192) |
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 122 / 122 / 231 | 192 / 192 / 471 |
+| road 1: the path's count by the release listing, and the bound | 117, 195 | 188, 300 |
+| road 1 at depth 2, over a preempting dispatch | 117 | 184 |
+| `activate()` over four empty queues, the entry and exit written out around it | 107 | 98 |
+| a post that asks nothing | 66 | 60 |
+| a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 347 (281) | 359 (299) |
+| one `arm()`, its masked window inside | 61 (52 in one run of ten) | 45 to 51 |
+| a post under the mask: the section's end to the receiver's first | 136 | 174 |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 664 (632 / 488) | 904 (928 / 736) |
+| core 1, road 1 from its doorbell's handler at its base, a send from core 0 | 131 | 202 |
+| core 1, road 1 from its alarm over a dispatch | 119 | 190 |
+| core 1's paths' counts, and the bounds | 127 and 116; 153 and 140 | 198 and 186; 238 and 224 |
+| core 1's stack high-water (bytes), the deepest sample in a dispatch / in an interrupt | 260 (240 / 96) | 420 (448 / 224) |
 
 The pair body costs core 0 three cycles a scheduler entry on the
-Cortex-M33 by the model and three measured (road 1, depth 2 and the
-post under the mask each three longer than in an image with the single
-body bound: 103, 93 and 114 there), two on Hazard3 by the model and two
-to four measured, where the paths' other one-cycle differences are
-branches that land on a 32-bit instruction off its 4-byte alignment in
-one image and not in the other. A road-2 post pays the request's core
-check too: four cycles on the Cortex-M33 (the SIO's address, CPUID, the
-branch), seven in all with the body, measured eight longer (295 with the
-single body); one on Hazard3, whose request reads the hart id anyway,
-three in all with the body, measured four longer (319 with the single
-body). The quiet post, the scan and `arm()` ask nothing of the body and
-differ by a cycle at most between the two images, by layout. Road 1's
-events over the fastest are the ones a tick, a refill or the console
-line landed in, and the bound judges the others: on Hazard3 one or two
-of the hundred events of a run were lengthened so in six runs of ten
-(246 to 407 cycles), none in the four others. Every count is drawn with
-the figures `test_rp2350_platform`'s letter `i` measures ("The cost
-models", above). Against the measurement the counts lie within a cycle
-on the paths that start and end in thread mode - the scan, the quiet
-post, the road-2 post and `arm()` - but for Hazard3's road-2 post,
-counted 325 and measured 323, and 2 to 4 cycles under it on those that start in an interrupt
-handler or under the mask and end at a dispatch's first statement: road
-1, depth 2, the post under the mask and core 1's two paths, on both
-halves. That residue is not placed: every primitive those paths add over
-the others - the tail-chain from a handler's POP of the PC, PendSV taken
-at the MSR, the software interrupt behind an `mret` and behind a
-`csrsi` - measures at its model in `test_rp2350_platform`'s letter `i`.
-Counted with the
-Cortex-M4's table instead, the Cortex-M33's paths come out 24 cycles
-over the measurement on road 1 and 15 to 79 over on the others; with the
-core's dual issue turned off (ACTLR.DISFOLD set in a build of this suite
-kept off the tree) road 1 measured 111, the scan 69, the quiet post 62,
-the road-2 post 317, depth 2 100 and the post under the mask 124, where
-the measured model without the fold counts 105, 68, 60, 313, 95 and 119:
-the fold is 2 to 14 cycles of each path, and the Cortex-M4's counts
-(130, 80, 80, 382, 118, 144) are not reached with it off either. On
-Hazard3 the measured model is 3.8.7 with `mret` at 3 and the interrupt's
-entries measured, and its counts lie within a cycle or two of 3.8.7's.
-Each queue's emptiness is its two cursors compared in line, no call. A
-post under the mask
-lengthened by a kernel tick or an XIP refill reached 278 cycles on the
-Cortex-M33 and 394 on Hazard3, and is reported, not judged. Core 0's
-high-water marks are those of core 1's letter, whose Low, High and
-Top nest three deep over the Console; on Hazard3 the paint's edge
-stands 24 bytes above the deepest sample in seven runs of ten (904
-against 928), the lowest words of that `activate()`'s frame being ones
-no path below it writes, and the letter allows that frame's 44 such
-bytes; in one run it stood at the sample and in two 64 bytes below it
-(992). All are inside the bound below the deepest sample, 312 and 400
-bytes. The two halves' rows part
+Cortex-M33 by the model and three measured (road 1, depth 2, the post
+under the mask and the road-2 post each three longer than in a build of
+the suite with the single body bound, kept off the tree: 119, 114, 133
+and 344 there), two on Hazard3 by the model and three to five measured
+(188, 181, 169 and 354 with the single body), where the paths' other
+one-cycle differences are branches that land on a 32-bit instruction off
+its 4-byte alignment in one image and not in the other - Hazard3's scan,
+which passes no body, measured 95 in that build against 98. The quiet post,
+the scan and `arm()` ask nothing of the body. Road 1's events over the
+fastest are the ones a tick, a refill or the console line landed in, and
+the bound judges the others: on Hazard3 one to three of the hundred
+events of a run were lengthened so in eight runs of ten (260 to 471
+cycles), none in the two others. Every count is drawn with the figures
+`test_rp2350_platform`'s letter `i` measures ("The cost models",
+above). Against the measurement the counts lie within two cycles on the
+paths that start and end in thread mode - exactly on Hazard3, and on the
+Cortex-M33 the scan counted 105 and measured 107, the quiet post counted
+68 and measured 66, the road-2 post counted 349 and measured 347 - and
+3 to 5 cycles under it on those that start in an interrupt handler or
+under the mask and end at a dispatch's first statement: road 1, depth
+2, the post under the mask and core 1's two paths, on both halves. That
+residue is not placed: every primitive those paths add over the others -
+the tail-chain from a handler's POP of the PC, PendSV taken at the MSR,
+the software interrupt behind an `mret` and behind a `csrsi` - measures
+at its model in `test_rp2350_platform`'s letter `i`. With the
+Cortex-M33's dual issue turned off (ACTLR.DISFOLD set in a build of
+this suite kept off the tree) road 1 measured 128, the scan 107, the
+quiet post 69, the road-2 post 365, depth 2 122 and the post under the
+mask 142, where the measured model without the fold counts 122, 105,
+69, 361, 116 and 137: the fold is 0 to 18 cycles of each path, and the
+quiet post's two cycles over its count are a fold the model does not
+know of. On Hazard3 the measured model is 3.8.7 with `mret` at 3 and the
+interrupt's entries measured, and its counts lie within a cycle or two
+of 3.8.7's. Each queue's emptiness is its two cursors compared in line,
+no call. A post under the mask lengthened by a kernel tick or an XIP
+refill reached 522 cycles on the Cortex-M33 and 520 on Hazard3, and is
+reported, not judged. Core 0's high-water marks are those of core 1's
+letter, whose Low, High and Top nest three deep over the Console; on
+Hazard3 the paint's edge stands 24 bytes above the deepest sample in
+ten runs of ten (904 against 928), the lowest words of that
+`activate()`'s frame being ones no path below it writes, and the letter
+allows that frame's 44 such bytes; on the Cortex-M33 it stands 32 bytes
+below it. All are inside the bound below the deepest sample that each
+letter derives from the listing - 312 and 400 bytes on core 0, 136 and
+192 on core 1 - and the kernel holds at most one run of the scheduler
+per object of a pack, whatever the interrupts' timing
+(kernel/rubato.hpp, "The stack"). The two halves' rows part
 where their mechanisms do: on the Cortex-M33 the hardware stacks the
 interrupted code's registers, on Hazard3 the crt's trampoline and the
 scheduler's entry each save sixteen in software ("What the silicon
@@ -1002,20 +1000,24 @@ nineteen instructions in the listing, the single body's seventeen.
   - in every run. Core 1's two road-1 latencies, the table's rows, are
   read with core 0 asleep. In a diagnostic build of the letter (not
   kept) with core 0 spinning on the ruler and on the flash meanwhile,
-  they read 113 to 117 and 110 cycles against that build's 111 and 105
-  with core 0 asleep on the Cortex-M33, and 196 and 189 against 185 and
-  175 on Hazard3 - the two cores' fetches and bus accesses meet, by 2 to
-  6 cycles on one half and 11 to 14 on the other; which port they meet
+  they read 135 and 125 cycles against 131 and 119 with core 0 asleep
+  on the Cortex-M33, and 223 to 228 and 205 to 210 against 202 and 190
+  on Hazard3 - the two cores' fetches and bus accesses meet, by 4 to 6
+  cycles on one half and 15 to 26 on the other; which port they meet
   at is not separated. Core 1's FPCCR reads 0xC0000004,
   ASPEN 1 and LSPEN 1, as core 0's does in its first run after a flash.
-  Sent before core 1 has left the scheduler entry of the previous
-  crossing, a doorbell lands in that entry's exit and nests a new entry
-  over it, as the Hazard3 file's re-entrancy section allows: back to
-  back, the crossings took core 1's stack 80 bytes deeper at every one
-  that landed so (1516 bytes of high-water in one run against 348
-  settled), each level unwinding when the one above it ended - the
-  letter waits 20 us after each crossing's end, many times the rest of
-  core 1's way back to its base.
+  Sent before core 1 has left the scheduler of the previous crossing, a
+  doorbell's post to Low1 asks for nothing: the run on its way out
+  serves it, or the scheduler's exit, finding the count of quiet posts
+  moved, starts the scheduler again in place, never one level deeper
+  (kernel/platform.hpp, the entry and the exit). In a build of the
+  letter that sends each crossing as soon as Low1's action has ended
+  (not kept), ten runs on each half, core 1's high-water mark and its
+  deepest dispatch sample were the settled letter's in every run - 260
+  and 240 bytes on the Cortex-M33, 420 and 448 on Hazard3. The letter
+  itself waits 20 us after each crossing's end, many times the rest of
+  core 1's way back to its base, so that each latency it times is one
+  crossing's alone.
 
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2350_rubato_link`, one source and two images, two keys against

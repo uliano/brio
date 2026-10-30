@@ -497,52 +497,61 @@ unseen. clk_sys cycles:
 - **The ceiling, both roads** (letters a, b, e): an alarm's post to High
   inside Low's handler runs High to its end before Low resumes, every
   handler reading its own index as the ceiling and the UART's interrupt
-  the loop's: 255 at its base, or 0 while the base turn walks the time
-  events (kernel/rubato.hpp holds it there so that a timer's fire only
-  queues; no handler of Top, whose index is also 0, can be running then,
-  nothing posting to Top between letters); Low posting to Mid and Mid to High nests High inside
-  Mid inside Low, each inside the post that asked; at depth 2 an
-  interrupt over High's handler, started by either road, runs Top before
-  High resumes, Top's first statement 182 to 183 cycles after the
-  handler's last, but for one event of a set at 834 (by road 2) in two
-  runs of ten and one at 234 (by road 1) in a third (the letter reads no
-  tick and no miss counter around its events, so those are
-  unattributed).
+  the loop's: 255 at its base, or 0 through the base turn
+  (kernel/rubato.hpp holds it there from the walk of the time events,
+  where a timer's fire only queues, through the choice that follows; no
+  handler of Top, whose index is also 0, can be running then, nothing
+  posting to Top between letters); Low posting to Mid and Mid to High
+  nests High inside Mid inside Low, each inside the post that asked; at
+  depth 2 an interrupt over High's handler, started by either road, runs
+  Top before High resumes, Top's first statement 204 to 205 cycles after
+  the handler's last, but for one event of a set at 241 or 1232 (by road
+  2) in two runs of ten and at 255 or 391 (by road 1) in two others (the
+  letter reads no tick and no miss counter around its events, so those
+  are unattributed).
 - **The latency of road 1** (letter c): from the alarm handler's last
-  statement to High's handler's first, 196 cycles min and 197 median
+  statement to High's handler's first, 212 cycles min and 213 median
   over 100 events, none missed, two to three cycles under the listing's
-  count of the path with every fetch a cache hit (199); in the runs
-  where a kernel tick or a cache refill landed in one event, that event
-  233 to 247 cycles, told apart by the counters read around it.
+  count of the path with every fetch a cache hit (215); in the two runs
+  of ten where a kernel tick or a cache refill landed in one event, that
+  event 249 cycles, told apart by the counters read around it. The
+  scheduler's entry is thirteen of those cycles: the ceiling read and
+  replaced with 0 under PendSV's mask, `base` stored for the exit, the
+  call.
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 88 cycles, each queue's two cursors compared
-  in line (`empty()` is forced inline); a post that asks for nothing 80;
-  a post that runs High's empty dispatch inside it 465, the scheduling's
-  share 385.
+  queues below the ceiling 125 cycles, the listing's count, through the
+  platform's entry and exit written out by hand around it (the ceiling
+  read and replaced with 0, put back after), each queue's two cursors
+  compared in line (`empty()` is forced inline); a post that asks for
+  nothing 94, the count of quiet posts raised out of line in it; a post
+  that runs High's empty dispatch inside it 505, the scheduling's share
+  411, its exit through SVC comparing the count.
 - **Time events under preemption** (letter f): three timers matured in
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
   leaves the list whole, every timer due fired once, the disarmed one
-  never; one `arm()` 73 cycles in six runs of ten and 85 in four, the
-  least of sixteen each, with its masked window inside (the difference
-  is not explained).
+  never; one `arm()` 85 cycles in ten runs of ten, the least of sixteen
+  each, with its masked window inside (73 in one run of three of a
+  build that differs only in the scheduler, which `arm()` does not
+  call: the difference is not explained).
 - **The request under PRIMASK** (letter g): a post to a higher object
   inside a critical section pends PendSV and is served when the
   section's guard restores the mask, before the statement after it,
   from the Console's dispatch and from inside Low's; the section's last
-  statement to the receiver's first 211 cycles in every run (in nine
-  runs of ten a kernel tick or an XIP refill lengthened one event of
-  the run, told apart by the counters).
+  statement to the receiver's first 228 cycles in every run, three
+  under the listing's count (231) (in every run of ten a kernel tick or
+  an XIP refill lengthened one event of the run, two in one, told apart
+  by the counters).
 - **Road 1 across the cores** (letter j, core 1 under Tenuto running one
   object, Relay, that answers core 0's send with a send to High): a post
   from core 1 to core 0's object is refused and counted as a mispost and
   pends no PendSV on core 1; Low's send crosses to core 1 and Relay's
   answer crosses back, core 0's doorbell handler posts to High, and
   High's dispatch starts after that handler's last statement and before
-  Low resumes, 7 to 11 us from Low's send to High's first statement. From
-  the doorbell handler's last statement to High's first, 196 cycles
-  min and 197 median over 100 crossings, the slowest of a run 197 to
-  248, none over 267: the road 1 of letter c, a doorbell's handler in
+  Low resumes, 7 to 13 us from Low's send to High's first statement. From
+  the doorbell handler's last statement to High's first, 212 cycles
+  min and 213 median over 100 crossings, the slowest of a run 213 to
+  249, none over 290: the road 1 of letter c, a doorbell's handler in
   place of an alarm's.
 - **A Rubato on each core** (letter k, core 1's pack of three on
   `Rp2040RubatoPlatform<1>`, both cores through the one pair body):
@@ -553,14 +562,22 @@ unseen. clk_sys cycles:
   the two cores preempt at once, each preemption landing inside the
   other core's preempted dispatch on the system timer, in 10 of 10;
   core 1's ceiling reads 255 at its base after; core 1's stack
-  high-water mark 260 bytes (272 in one run of ten), its deepest sampled
+  high-water mark 260 bytes in ten runs of ten, its deepest sampled
   stack pointer 240 in a dispatch and 112 in its interrupt.
 - **Dark** (letter i): every object of core 0 idle, core 1 parked in the
   bootrom, no time event and no alarm armed, GP25 not an output, the
   ceiling the Console's, interrupts enabled.
-- **The stack** (letter h): core 0's high-water mark 532 bytes
-  for the suite's deepest chain, its deepest sampled stack pointer 512
-  in a dispatch and 344 to 368 in an interrupt.
+- **The stack** (letter h): core 0's high-water mark 532 bytes for
+  the suite's deepest chain in three runs of ten and 544 in seven, its
+  deepest sampled stack pointer 512 in a dispatch and 368 in an
+  interrupt - inside the 168 bytes below the deepest sample that the
+  letter derives from the listing, the kernel holding at most one run
+  of the scheduler per object of the pack (kernel/rubato.hpp, "The
+  stack"). Where the interrupts land moves the mark: a build of the
+  letter that printed the words at the paint's edge (not kept) read 532
+  in four runs and 568 in a fifth, there an exception frame whose
+  return address lies in the ruler's call that a dispatch makes,
+  20 bytes and that frame's 36 below the deepest sample.
 
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2040_rubato_link`, two keys against the WeAct RP2350B's
