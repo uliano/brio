@@ -64,9 +64,10 @@
 //      inside it. Ten runs, all alike.
 //   c  THE LATENCY OF ROAD 1, the Console's wait loop interrupted: the
 //      ruler at the interrupt handler's last statement and at High's
-//      handler's first, min, median and max over 100 events after one
-//      warm-up, the console drained first; the bound beside it. Where road
-//      1 is not kept, the letter measures and judges the deferral instead.
+//      handler's first, min, median and max over 100 events after twelve
+//      of warm-up, the console drained first; the bound beside it. Where
+//      road 1 is not kept, the letter measures and judges the deferral
+//      instead.
 //   d  THE RULERS, THE SCAN AND THE POST: the two rulers' two-read costs
 //      and their agreement over a span; activate() with nothing ready
 //      below the Console's ceiling (four empty queues, the fifth object at
@@ -345,7 +346,14 @@ using K = Rubato<P, Top, High, Mid, Low, Console>;
 /// The scheduler run by hand from the Console's dispatch, as the
 /// platform's entry and exit run it (kernel/platform.hpp): the ceiling
 /// replaced with 0, activate() at the Console's own, the ceiling put
-/// back. Whether it served.
+/// back. Whether it served. Unlike the platform's exit it does not compare
+/// the count of quiet posts after the run, and here it need not: a post
+/// that lands in the run's last choice, with the ceiling at 0, is counted
+/// quiet and waits, and the only handler that posts while the letters
+/// call this - letters d and f - is the UART's receive edge, to the
+/// Console, whose index is the base itself and which no run started here
+/// may serve; TIM2's and TIM3's edges are armed only inside a dispatch and
+/// disarm themselves there, and the tick posts nothing.
 bool activate_here() {
     const uint8_t base = P::ceiling;
     P::ceiling = 0;
@@ -575,78 +583,97 @@ constexpr uint32_t latency_events = 100;
 ///   release (3 instructions)                                        4
 ///   its MRET into the software interrupt, pending: an MRET and an
 ///   entry                                                        25 + 16
-///   the software interrupt's body: the block, mepc and mstatus read and
-///   stored, the entry's address into mepc (8 instructions)         8
+///   the software interrupt's body: the trap's mstatus read and MIE
+///   cleared in one instruction, the block, that mstatus with MIE clear
+///   and mepc stored, the ceiling loaded into the block and 0 stored in
+///   its place, the entry's address into mepc (12 instructions, one
+///   load)                                                          13
 ///   its MRET into the entry                                        25
-///   the entry: the frame, sixteen stores, csrsi, the call (19)     21
-///   activate(): its frame and thirteen stores, the queues'
-///   addresses, the ceiling's load and test (20 instructions)       21
-///   Top's visit, its two cursors loaded and compared in line (5)   7
-///   the ceiling's compare for High, taken (2)                      3
-///   High's visit, in line, its branch taken (5)                    8
-///   the raise: the ceiling's store, the queue's address, the
-///   dispatching index's load and store, the call to take() (5)     8
+///   the entry: the frame, sixteen stores, `base` loaded from the
+///   block, csrsi, the call (20)                                    23
+///   activate(): its frame and thirteen stores, `base` kept, the
+///   queues' addresses (18 instructions)                            18
+///   the choice's head: the count of quiet posts loaded, `base`
+///   tested against 0 (3)                                            4
+///   the scan's registers: the limit, the hold, the indices (9)      9
+///   Top's visit, its two cursors loaded and compared in line, its
+///   branch taken (5)                                                8
+///   the limit's compare for High, not taken (1)                     1
+///   High's visit, in line, its branch not taken (5)                 7
+///   the raise: the ceiling's store, the hold's test, the count
+///   loaded again and compared, the queue's address, the
+///   dispatching index's load and store, the call to take() (9)    13
 ///   take(), fifteen with its return                               20
 ///   its result tested, the stamp's address and load (5)            6
 ///                                                                 ---
-///                                                                 172
-/// (87 instructions outside the traps, 57 of them in activate().) That is
-/// the CH32V203's listing; the CH32V303's, built with F, runs the same
+///                                                                 192
+/// (105 instructions outside the traps, 70 of them in activate().) That
+/// is the CH32V203's listing; the CH32V303's, built with F, runs the same
 /// functions instruction for instruction and adds two things to every
 /// path through the entry: a vector that calls out is a trampoline there
 /// (pfic.hpp), TIM2's body reloading its return address and returning to
 /// the MRET (a load and a return, 5), and the entry tests mstatus.FS
 /// before the call (four instructions, the branch taken where there is
-/// nothing to save, 5): 182. On top of it, at most one tick landing in the
+/// nothing to save, 5): 202. On top of it, at most one tick landing in the
 /// path - the ticker's line is at the peripheral level, so it preempts the
-/// software interrupt's handler, the entry and activate(), never TIM2's
-/// handler: its entry (16), its twelve instructions (14) and its MRET
-/// (25), 55. The bound is the two, 227 (237), and a fifth of the path's
-/// count, 34 (36): 261 (273). And the spread: two events no other
-/// interrupt touches run the same instructions, and differ by the
-/// predictor's state at the path's taken transfers, two cycles each at
-/// most - five on the CH32V203 (the call to activate(), the call to
-/// take() and its return, High's two branches), seven on the CH32V303
-/// (the body's return and the FS test's branch besides): an event more
-/// than 10 (14) cycles over the fastest is one a tick landed in, and the
-/// letter reads the kernel tick around each event to say so.
+/// software interrupt's handler at its first instruction, the entry and
+/// activate(), never TIM2's handler: its entry (16), its twelve
+/// instructions (14) and its MRET (25), 55. The bound is the two, 247
+/// (257), and a fifth of the path's count, 38 (40): 285 (297). And the
+/// spread: two events no other interrupt touches run the same
+/// instructions, and differ by the predictor's state at the path's taken
+/// transfers, two cycles each at most - four on the CH32V203 (the call to
+/// activate(), Top's branch, the call to take() and its return), six on
+/// the CH32V303 (the body's return and the FS test's branch besides): an
+/// event more than 8 (12) cycles over the fastest is one a tick landed
+/// in, and the letter reads the kernel tick around each event to say so.
 ///
 /// AN IMAGE BUILT WITHOUT THE HARDWARE PROLOGUE (CH32VX03_HPE=OFF) pays
 /// more on every path through a trap, and its bounds are drawn the same
 /// way: letter e's figures for that build, an entry 19 and an MRET 32
-/// (three and seven more, 17 over the path's three transitions); the two
-/// scheduler bodies' save of their scratch register (two instructions
-/// each, 3 cycles); and TIM2's handler, attributed and saving in
+/// (three and seven more, 17 over the path's three transitions); each
+/// scheduler body's save of its two scratch registers (two stores and two
+/// loads, 6 cycles a body); and TIM2's handler, attributed and saving in
 /// software, reloading after the stamp its sixteen integer registers on
 /// the CH32V203 (36 cycles where 4 were, 32 more) and its twenty
 /// f-registers too on the CH32V303 (79 where the trampoline's tail took
-/// 9, 70 more). Road 1 then counts 224 (272), and a tick landing in it
-/// costs 76 (its entry 19, its twenty instructions 25, its MRET 32): 345
-/// (402) with a fifth of the count. That handler is no trampoline, so the
-/// body's return leaves the CH32V303's path: six taken transfers, a
-/// spread of 12.
+/// 9, 70 more). Road 1 then counts 247 (295), and a tick landing in it
+/// costs 76 (its entry 19, its twenty instructions 25, its MRET 32): 372
+/// (430) with a fifth of the count. That handler is no trampoline, so the
+/// body's return leaves the CH32V303's path: five taken transfers, a
+/// spread of 10.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
 constexpr bool hpe_build = true;
 #else
 constexpr bool hpe_build = false;
 #endif
 constexpr bool fpu_part = device::has_fpu;
-constexpr uint32_t latency_count = hpe_build ? (fpu_part ? 182u : 172u) : (fpu_part ? 272u : 224u);
-constexpr uint32_t latency_bound = hpe_build ? (fpu_part ? 273u : 261u) : (fpu_part ? 402u : 345u);
-constexpr uint32_t latency_spread = fpu_part ? (hpe_build ? 14u : 12u) : 10u;
+constexpr uint32_t latency_count = hpe_build ? (fpu_part ? 202u : 192u) : (fpu_part ? 295u : 247u);
+constexpr uint32_t latency_bound = hpe_build ? (fpu_part ? 297u : 285u) : (fpu_part ? 430u : 372u);
+constexpr uint32_t latency_spread = fpu_part ? (hpe_build ? 12u : 10u) : 8u;
+/// The events letter c runs before it counts (the comment in tc_latency()).
+constexpr uint32_t latency_warmup = 12;
 
 void tc_latency() {
     reset_scenario();
     tracing = false;
     if constexpr (scheduler_in_thread_mode) {
-        // One warm-up event not counted, then 100; each waits at most 1 ms
-        // for High's first statement.
+        // Twelve warm-up events not counted, then 100; each waits at most
+        // 1 ms for High's first statement. The warm-up takes High's queue
+        // cursor twice round its six positions: on the CH32V303VCT6 the
+        // first two events whose take() wraps the cursor ran 13 to 14
+        // cycles over the fastest, every run alike, and the later wraps 1
+        // or 2 (read over the debug port, in an image that differed from
+        // this one by its sort skipped) - the wrap path cold in the core's
+        // predictor after the letters before, a cost of the first passes
+        // that the model's two cycles a taken transfer does not describe
+        // and that the letter's figure is not about.
         console_drain();
         uint32_t missed = 0;
         // An event slower than the fastest by more than the spread is one
         // a tick landed in: the kernel tick read around each says so.
         bool ticked_at[latency_events];
-        for (uint32_t i = 0; i <= latency_events; ++i) {
+        for (uint32_t i = 0; i < latency_warmup + latency_events; ++i) {
             const uint32_t r = High::runs;
             const uint32_t t0 = Ticker::ticks();
             edge_to = 1;
@@ -656,9 +683,9 @@ void tc_latency() {
                 flush();
             }
             const bool ticked = Ticker::ticks() != t0;
-            if (i > 0u) {
-                latency[i - 1u] = between(edge_last, High::entered);
-                ticked_at[i - 1u] = ticked;
+            if (i >= latency_warmup) {
+                latency[i - latency_warmup] = between(edge_last, High::entered);
+                ticked_at[i - latency_warmup] = ticked;
             }
         }
         uint32_t fastest = 0xFFFF'FFFFu;
@@ -823,48 +850,66 @@ void td_scan() {
                   agree_hi <= 2u * ticker_ruler);
     // The bounds below are the release listing's count under letter c's
     // cost model, and a fifth of it as the margin.
-    // The scan: the call (3); activate()'s frame and thirteen stores, the
-    // queues' addresses, the ceiling's load and test (21); per empty
-    // object its two cursors loaded and compared in line, no call (Top's
-    // and High's 7, Mid's and Low's 8 with their queue's address) and the
-    // ceiling's compare (3 taken after Top, 2 after High and Mid, 3 where
-    // the Console's index ends the pass); the thirteen loads and the
-    // return of the epilogue (31): 67 instructions, 95 cycles; 114 with
-    // the fifth.
-    bench.verdict("the scan of four empty queues, the least of 16, costs under 114 cycles",
-                  scan < 114u);
-    // The quiet post: the event's store and the call (2), post<Low>()'s
-    // frame and the call to the queue's push() (6), push() under its guard
-    // to the unmask and the return (22), the ceiling's compare, its taken
-    // branch and the epilogue (8), and the instruction before the second
-    // read: 39 instructions, 58 cycles; 70 with the fifth. Its path asks no
-    // queue whether it is empty: the same instructions with empty() in
-    // line or out of it.
-    bench.verdict("a post that asks nothing costs under 70 cycles (the push and one compare)",
-                  quiet < 70u);
+    // The scan, through activate_here() - the platform's entry and exit
+    // written out, so its few instructions are the scan's here: the call
+    // (3); activate_here()'s frame, the ceiling loaded and 0 stored,
+    // `base` moved, the call to activate() (8 instructions, 11 cycles);
+    // activate()'s frame and thirteen stores, `base` kept, the queues'
+    // addresses (18, 18); the choice's head, the count loaded and `base`
+    // tested (3, 4); the scan's registers (9, 9); per empty object its two
+    // cursors loaded and compared in line, no call, its branch taken
+    // (Top's, High's and Mid's 8, Low's 9 with its queue's address), and
+    // the limit's compare after each (1 not taken after Top, High and
+    // Mid; after Low the Console's index ends the scan, its constant and
+    // the taken branch, 3); no hold, so the choice ends (a taken branch,
+    // 2); the epilogue - the result packed, thirteen loads and the return
+    // (18, 33); activate_here()'s three loads, the ceiling put back, the
+    // result's byte and the return (8, 13): 92 instructions, 132 cycles;
+    // 158 with the fifth.
+    constexpr uint32_t scan_bound = 158u;
+    bench.verdict("the scan of four empty queues, the least of 16, costs under 158 cycles",
+                  scan < scan_bound);
+    // The quiet post: the event's store and the call (2 instructions, 4
+    // cycles), post<Low>()'s frame and the call to the queue's push() (6,
+    // 8), push() under its guard to the unmask and the return (22, 30),
+    // the ceiling's compare and its taken branch (4, 7), the count of quiet
+    // posts loaded, incremented and stored inside the epilogue (7, 12),
+    // and the instruction before the second read (1): 42 instructions, 62
+    // cycles; 74 with the fifth. Its path asks no queue whether it is
+    // empty: the same instructions with empty() in line or out of it.
+    constexpr uint32_t quiet_bound = 74u;
+    bench.verdict("a post that asks nothing costs under 74 cycles (the push, one compare and "
+                  "the count)",
+                  quiet < quiet_bound);
     bench.verdict("a road-2 post costs more than a quiet one (the receiver ran inside it)",
                   road2 > quiet);
     // The road-2 post: the event's store and the call, post<High>()'s
     // frame and the call to push() (8 instructions, 12 cycles), push() as
     // in the quiet post (22, 30), the compare not taken and the tail jump
     // to the request (8, 13), the request's four instructions to its
-    // fence.i (4), the trap's entry (16), the software interrupt's eight
-    // (8), its MRET (25), the entry's nineteen (21); activate() at Mid's
-    // ceiling, 124 instructions and 178 cycles - the frame, Top's and
-    // High's visits in line and the raise to the call to take() (37, 47),
-    // take() (15, 20), High's dispatch with nothing to do and the call to
-    // release() with its body (34, 49), the two restores and the jump back
-    // (6, 8), the rescan of Top and High in line and Mid's index ending
-    // the pass (16, 23), the epilogue (16, 31); the entry's seventeen after
-    // the call (33), the ecall's entry (16), the exit's five (7), its MRET
-    // (25), the request's return (3): 216 instructions, 309 cycles, and
-    // the four transitions 82: 391, and with the entry's FS test where
-    // there is F (letter c) 396; 469 (475) with the fifth. Without the
-    // hardware prologue (letter c) the two bodies' scratch saves (6) and
-    // the four transitions' 20 more: 417 (422), 500 (506).
+    // fence.i (4), the trap's entry (16), the software interrupt's twelve
+    // (13), its MRET (25), the entry's twenty (23); activate() at Mid's
+    // ceiling, 151 instructions and 208 cycles - the frame, the choice's
+    // head, the scan's registers, Top's and High's visits in line and the
+    // raise with the count compared to the call to take() (50, 60), take()
+    // (15, 20), High's dispatch with nothing to do and the call to
+    // release() with its body (35, 51), the dispatching index restored,
+    // the served flag, the ceiling 0 and the jump back (8, 10), the second
+    // choice - its head, its registers, Top and High empty in line, Mid's
+    // index ending the scan, no hold (25, 34), the epilogue (18, 33); the
+    // entry's eighteen after the call, the count stored in the block
+    // (34), the ecall's entry (16), the exit's eleven to its MRET - MIE
+    // cleared, the ceiling back, the count compared and found still,
+    // mepc and mstatus back, the block popped (16), its MRET (25), the
+    // request's return (3): 255 instructions, 356 cycles, and the four
+    // transitions 82: 438, and with the entry's FS test where there is F
+    // (letter c) 443; 526 (532) with the fifth. Without the hardware
+    // prologue (letter c) the two bodies' scratch saves (12) and the four
+    // transitions' 20 more: 470 (475), 564 (570).
     constexpr uint32_t road2_bound =
-        hpe_build ? (fpu_part ? 475u : 469u) : (fpu_part ? 506u : 500u);
-    print(serial, "  bounds: the scan 114, a quiet post 70, a road-2 post ", road2_bound, crlf);
+        hpe_build ? (fpu_part ? 532u : 526u) : (fpu_part ? 570u : 564u);
+    print(serial, "  bounds: the scan ", scan_bound, ", a quiet post ", quiet_bound,
+          ", a road-2 post ", road2_bound, crlf);
     bench.verdict("and under its bound (the arithmetic beside it), High's empty dispatch included",
                   road2 < road2_bound);
 }
@@ -923,17 +968,21 @@ void te_depth2() {
                           alike == 10u);
             // Letter c's path with activate() at High's ceiling, where
             // Top's visit is the take: TIM2's tail (4), the software
-            // interrupt's eight (8), the entry's nineteen (21), activate()'s
-            // frame to the ceiling's test (21), Top's visit in line, its
-            // branch taken (8), the raise and the call to take() (8),
-            // take() (20), its result and the stamp (6) - 80 instructions,
-            // 96 cycles under letter c's model - and the three transitions
-            // (66): 162, 172 with letter c's two additions where there is F.
-            // With a tick landing in it (55) and a fifth (32, 34): 249
-            // (261). Without the hardware prologue letter c's additions make
-            // it 214 (262), and with a tick (76) and a fifth 333 (390).
+            // interrupt's twelve (13), the entry's twenty (23), activate()'s
+            // frame, the choice's head and the scan's registers (30
+            // instructions, 31 cycles), Top's visit in line, its branch not
+            // taken (5, 7), the raise to 0 with the hold's test and the count
+            // compared, the queue's address, the dispatching index's load
+            // and store and the call to take() (10, 14), take() (15, 20),
+            // its result and the stamp, the ruler's address already in a
+            // register (4, 5) - 99 instructions, 117 cycles under letter c's
+            // model - and the three transitions (66): 183, 193 with letter
+            // c's two additions where there is F. With a tick landing in it
+            // (55) and a fifth (37, 39): 275 (287). Without the hardware
+            // prologue letter c's additions make it 238 (286), and with a
+            // tick (76) and a fifth 362 (419).
             constexpr uint32_t depth2_bound =
-                hpe_build ? (fpu_part ? 261u : 249u) : (fpu_part ? 390u : 333u);
+                hpe_build ? (fpu_part ? 287u : 275u) : (fpu_part ? 419u : 362u);
             bench.verdict("and Top's first statement within its bound of the interrupt's last "
                           "(the arithmetic beside it)",
                           most <= depth2_bound);
@@ -1216,16 +1265,20 @@ void tg_mask() {
         // mask, the two instructions after it the V4B runs before the
         // trap (6, this core's shadow behind the unmask, ch32vx03/
         // schedule.hpp); the trap's entry (16), the software interrupt's
-        // eight and its MRET (25); the entry's nineteen; activate() at the
-        // Console's ceiling - its frame to the ceiling's test, Top's,
-        // High's and Mid's visits in line, the raise, take() and the stamp
-        // (66 instructions, 84 cycles): 99 instructions, 119 cycles under
-        // letter c's model, and the two transitions 41: 160, 165 with the
-        // entry's FS test where there is F; 192 (198) with a fifth.
-        // Without the hardware prologue the software interrupt's scratch
-        // save (3) and the two transitions' 10 more: 173 (178), 208 (214).
+        // twelve (13) and its MRET (25); the entry's twenty (23);
+        // activate() at the Console's ceiling - its frame, the choice's
+        // head and the scan's registers (30 instructions, 31 cycles),
+        // Top's and High's visits in line, empty, each with the limit's
+        // compare after it (12, 18), Mid's visit (5, 7), the raise with the
+        // hold's test and the count compared, to the call to take() (10,
+        // 14), take() (15, 20) and the stamp (5, 6) - 77 instructions, 96
+        // cycles: 115 instructions, 138 cycles under letter c's model, and
+        // the two transitions 41: 179, 184 with the entry's FS test where
+        // there is F; 215 (221) with a fifth. Without the hardware prologue
+        // the software interrupt's scratch saves (6) and the two
+        // transitions' 10 more: 195 (200), 234 (240).
         constexpr uint32_t section_bound =
-            hpe_build ? (fpu_part ? 198u : 192u) : (fpu_part ? 214u : 208u);
+            hpe_build ? (fpu_part ? 221u : 215u) : (fpu_part ? 240u : 234u);
         bench.verdict("the section's end to the receiver's first statement under its bound "
                       "(the arithmetic beside it)",
                       most < section_bound);
@@ -1468,12 +1521,12 @@ void tj_fpu() {
         // its jump where the Clean one falls through, and its branch falls
         // through where the Clean one's is taken, so each least carries
         // its own transfers' alignment and predictor state - the spread
-        // letter c derives for a path on this core, latency_spread (14 on
-        // this part), which the difference inherits. Measured, the restore read 20 to
-        // 35 and the save 25 to 33 across three images of this suite that
-        // differ in their layout alone, the model inside both ranges. So:
-        // the model and that spread, 49 and 42.
-        bench.verdict("the save within 49 cycles and the restore within 42 (the model and the "
+        // letter c derives for a path on this core, latency_spread (12 on
+        // this part), which the difference inherits. Measured, the restore
+        // read 20 to 35 and the save 25 to 33 across three images of this
+        // suite that differ in their layout alone, the model inside both
+        // ranges. So: the model and that spread, 47 and 40.
+        bench.verdict("the save within 47 cycles and the restore within 40 (the model and the "
                       "layout spread)",
                       in_dirty - in_clean <= 35u + latency_spread &&
                           out_dirty - out_clean <= 28u + latency_spread);
@@ -1483,11 +1536,11 @@ void tj_fpu() {
         // software around its call and reloads them: the reload leaves FS
         // Dirty, so the entry finds it Dirty on both paths and saves on
         // both. The two paths then run the same instructions and differ by
-        // letter c's spread at most (12 in this build).
+        // letter c's spread at most (10 in this build).
         const uint32_t d_in = in_dirty > in_clean ? in_dirty - in_clean : in_clean - in_dirty;
         const uint32_t d_out = out_dirty > out_clean ? out_dirty - out_clean : out_clean - out_dirty;
         bench.verdict("without the hardware prologue the edge's handler leaves FS Dirty and the "
-                      "entry saves on both paths: the two within 12 cycles",
+                      "entry saves on both paths: the two within 10 cycles",
                       d_in <= latency_spread && d_out <= latency_spread);
 #endif
     }
@@ -1552,18 +1605,23 @@ void th_stack() {
     // push and the request, none: 64); and below that either an
     // interrupt handler's own frames - the hardware prologue pushes to its
     // internal stack, not to this one: TIM2's 32 with a post's 16, 48 - or,
-    // the handler gone and its request pending, the software interrupt's
-    // block (16), the entry's sixteen registers (64) and an activate()
-    // frame that finds nothing to serve (96), with a handler over that
-    // (48): 224. 64 + 224 = 288: the high-water mark lies within 288 bytes
-    // of the deeper of the two samples. Where there is F, the entry's
+    // the handler gone and its request pending, a scheduler run that
+    // serves nothing (one that serves would sample deeper): at most two
+    // software interrupt blocks (16 each) - the second where a handler
+    // landing on the trap's first instruction, before its csrci, pended
+    // the request again, taken at the entry's first instruction as a run
+    // at a ceiling of 0 (qingke/schedule.hpp, RE-ENTRANCY; kernel/
+    // rubato.hpp, "The stack") - then that run's entry's sixteen registers
+    // (64) and its activate() frame (96), with a handler over that (48):
+    // 240. 64 + 240 = 304: the high-water mark lies within 304 bytes of
+    // the deeper of the two samples. Where there is F, the entry's
     // f-register save adds its 96 bytes to the second branch, and letter
     // j's float handler is the deepest handler - the float trampoline's 96
-    // bytes, its body's 32 and a post's 16, 144: 64 + 16 + 64 + 96 + 96 +
-    // 144 = 480. Without the hardware prologue the handlers' frames carry
+    // bytes, its body's 32 and a post's 16, 144: 64 + 32 + 64 + 96 + 96 +
+    // 144 = 496. Without the hardware prologue the handlers' frames carry
     // their saves: TIM2's 96 (192 with the f-registers) and a post's 16,
-    // so 352 (544).
-    constexpr uint32_t below = hpe_build ? (fpu_part ? 480u : 288u) : (fpu_part ? 544u : 352u);
+    // so 368 (560).
+    constexpr uint32_t below = hpe_build ? (fpu_part ? 496u : 304u) : (fpu_part ? 560u : 368u);
     const uint32_t deepest = deepest_dispatch > deepest_isr ? deepest_dispatch : deepest_isr;
     bench.verdict("the paint reached the deepest sampled stack pointer", used >= deepest);
     print(serial, "  the bound below the deepest sample ", below, " bytes", crlf);

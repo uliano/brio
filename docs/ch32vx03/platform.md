@@ -492,8 +492,12 @@ with one preemption bit, so every peripheral line, at the reset
 priority 0, sits at one level above it: the peripheral handlers still
 never nest among themselves, and every one of them interrupts the
 software interrupt's. The scheduler runs in THREAD MODE: the software
-interrupt's body, `scheduler_trap<K>()`, clears MIE, pushes a 16-byte
-block with the trap's mepc and mstatus, reads the kernel's ceiling into
+interrupt's body, `scheduler_trap<K>()`, reads the mstatus the trap was
+taken with and clears MIE in one `csrrci` (a line taken in that
+instruction's shadow would otherwise leave MPIE clear for the exit to
+restore: [qingke/schedule.hpp](../../brio/qingke/schedule.hpp), "THE
+MASK'S SHADOW IN THE TRAP"), pushes a 16-byte
+block with the trap's mepc and that mstatus, reads the kernel's ceiling into
 the block and stores 0 in its place, writes the entry's address into
 mepc and returns (thirteen instructions in the release listing); the
 entry, `scheduler_thread<K>()`, stores the sixteen caller-saved integer
@@ -867,7 +871,7 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
 
 **The preemptive kernel** - `test_vx03_rubato`, 40 verdicts in `z` on the
 CH32V203C8T6 and 46 on the CH32V303VCT6, at 144 MHz, ten runs of `z`
-alike (twenty on the CH32V303VCT6): a Rubato pack of five objects, the
+alike on each: a Rubato pack of five objects, the
 Console the lowest and the letters' runner, TIM2's compare the
 interrupt the road-1 letters land, the STK's CNTL read bare the ruler
 (two reads one cycle apart, against 35 or 36 cycles for the ticker's
@@ -898,43 +902,63 @@ beside the Cortex-M realizations':
 
 | HCLK cycles | CH32V203C8T6 | CH32V303VCT6 | STM32F446RE | STM32G0B1RE |
 |---|---|---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first | **119**..121 | **126**..137 | 143..148 | 180..181 |
-| road 1 at depth 2, over a preempting dispatch | 107..109 | 115..125 | 134..138 | 155..156 |
-| a post that asks nothing | **55** | 55 | 78 | 95 |
-| a road-2 post, the receiver's empty dispatch inside | **310** | 311..313 | 398 | 517 |
-| `activate()` over four empty queues | 90 | 81 | 80 | 111 |
-| one `arm()`, its masked window inside | 55 | 59 | 79 | 93 |
-| a post under the mask: the section's end to the receiver's first | 132..134 | 136..156 | - | 192..193 |
-| stack high-water of the suite's deepest chain (bytes) | 1000 | 1156 | 712 | 500 |
-| the entry's f-register save, FS Dirty, in / out | - | 27..30 / 29 | (lazy, in the frame) | - |
+| road 1: an interrupt's last statement to the preempting dispatch's first | **144**..147 | **149**..157 | 173..186 | 204..205 |
+| road 1 at depth 2, over a preempting dispatch | 127..129 | 138..160 | 163..168 | 188..189 |
+| a post that asks nothing | **57** | 58..59 | 95 | 108 |
+| a road-2 post, the receiver's empty dispatch inside | **370** | 372 | 472 | 575 |
+| `activate()` over four empty queues, through the suite's entry and exit written out | 127 | 115 | 124 | 170 |
+| one `arm()`, its masked window inside | 55 | 59..61 | 79 | 93 |
+| a post under the mask: the section's end to the receiver's first | 155..182 | 156..171 | - | 224..225 |
+| stack high-water of the suite's deepest chain (bytes) | 1016 | 1172 | 712 | 500..520 |
+| the entry's f-register save, FS Dirty, in / out | - | 27..35 / 25..29 | (lazy, in the frame) | - |
 
 Road 1 is the TIM2 handler's tail, its MRET straight into the pending
-software interrupt, that body's nine instructions and its MRET, the
-entry's nineteen and `activate()`'s visits to Top and High, each
-queue's two cursors loaded and compared in line (the queue's header
-forces `empty()` inline, so a visit makes no call): 87
-instructions outside the traps, 172 cycles by the letters' model with
-letter `e`'s two returns and one entry (66), against 119 measured: the
-model, its trap figures above all (each carries a few instructions of
-the raiser's own), is an upper estimate, and the bound (261, 273 on the
-V4F) is loose by that much. Two events no tick touches differ by the
-predictor's state at the path's taken transfers, five on the V4B and
-seven on the V4F, two cycles each at most: the quiet events spread over
-2 cycles on the CH32V203C8T6 and up to 11 on the CH32V303VCT6, against
-10 and 14. A tick landed in one event of 1000 on the CH32V203C8T6 (145
-cycles) and in six of 2000 on the CH32V303VCT6 (152 to 172), read
-inside each. The CH32V303VCT6's seven cycles more are the vector's
-trampoline (pfic.hpp: its body's return before the MRET), the entry's
-test of mstatus.FS, and where the path's branch targets fall in their
-words, which costs the two cores differently (above). The road-2
-post's scheduling share, 255 cycles, is two traps from thread mode - the pend and the `ecall` - and
-their two returns around the entry's 37 instructions and the rescan;
-the stack's 1000 bytes (1156) are the deepest chain's frames plus the
-block and the entry's 64 bytes at each level of preemption (on the V4F
-the f-registers' 96 too, where the entry saves them), where a Cortex-M
-level costs its exception frame.
+software interrupt, that body's thirteen instructions - the trap's
+mstatus read and MIE cleared in one, the block, the ceiling read into it
+and 0 stored in its place -
+and its MRET, the entry's twenty and `activate()`'s choice: the count
+of quiet posts read, the visits to Top and High, each queue's two
+cursors loaded and compared in line (the queue's header forces
+`empty()` inline, so a visit makes no call), the raise to High's index
+and the count read again and found still: 105 instructions outside the
+traps, 192 cycles by the letters' model with letter `e`'s two returns
+and one entry (66), against 144 measured: the model, its trap figures
+above all (each carries a few instructions of the raiser's own), is an
+upper estimate, and the bound (285, 297 on the V4F) is loose by that
+much. Two events no tick touches differ by the predictor's state at the
+path's taken transfers, four on the V4B and six on the V4F, two cycles
+each at most: the quiet events spread over 3 cycles on the CH32V203C8T6
+and up to 8 on the CH32V303VCT6, against 8 and 12, once the letter's
+twelve warm-up events have taken High's queue cursor twice round its
+six positions. Without that warm-up, on the CH32V303VCT6 the first two
+events whose `take()` wraps the cursor ran 13 to 14 cycles over the
+fastest in every run and the later wraps 1 or 2 (read over the debug
+port, in an image whose only difference was the letter's sort skipped):
+the wrap path cold in the V4F's predictor after the letters before it,
+a cost the two cycles a transfer do not describe. A tick landed in two
+events of 1000 on the CH32V203C8T6 (171 cycles) and in four of 1000 on
+the CH32V303VCT6 (179 to 189), read inside each; letter `g` reads no
+tick, and its two slowest events on the CH32V203C8T6, 181 and 182 in two
+runs of ten against 157 in the other eight, are a tick's length over the
+rest. The CH32V303VCT6's five
+or six cycles more are the vector's trampoline (pfic.hpp: its body's return
+before the MRET), the entry's test of mstatus.FS, and where the path's
+branch targets fall in their words, which costs the two cores
+differently (above). The road-2 post's scheduling share, 313 cycles, is
+two traps from thread mode - the pend and the `ecall` - and their two
+returns around the entry's 38 instructions, the exit's compare of the
+count and the second choice that finds nothing above Mid; the stack's
+1016 bytes (1172) are the deepest chain's frames plus the block and the
+entry's 64 bytes at each level of preemption (on the V4F the
+f-registers' 96 too, where the entry saves them), where a Cortex-M level
+costs its exception frame. A pack of n objects holds at most n levels
+([kernel/rubato.hpp](../../brio/kernel/rubato.hpp), "The stack"), and
+letter `h`'s bound counts the one block more and the empty run that a
+handler landing on the trap's first instruction, before its `csrci`,
+can stand at an entry (304 bytes below the deepest sample on the
+CH32V203C8T6, 496 on the CH32V303VCT6, against 40 and 20 measured).
 
-On the CH32V303VCT6 (`z`, 46 verdicts, twenty runs alike) the same letters
+On the CH32V303VCT6 (`z`, 46 verdicts, ten runs alike) the same letters
 and the floating-point letter `j`: Low's float series under
 round-toward-zero, preempted at a mark inside its loop by High's own
 series, and in ten of twenty runs by a float handler too, bound by the
@@ -943,26 +967,18 @@ preemption, Low's fflags cleared before the preemption still clear
 after it though High's series raised NX in its own (0x01), Low's fcsr at
 the end as without the preemption (0x21), High finding FS Clean. The
 entry's save, timed by road 1 over Low, the least of sixteen each:
-from the edge to High's first statement 156 to 158 cycles with Low's
-unit Dirty against 128 to 130 with it Clean, from High's last statement
-to Low's first 158 against 129 - the twenty stores and
-fcsr 27 to 30 cycles on the way in, the twenty loads and fcsr 29 on the
-way out, as the letter prints them, beside the
+from the edge to High's first statement 180 to 184 cycles with Low's
+unit Dirty against 149 to 153 with it Clean, from High's last statement
+to Low's first 191 to 193 against 162 to 166 - the twenty stores and
+fcsr 27 to 35 cycles on the way in, the twenty loads and fcsr 25 to 29
+on the way out, as the letter prints them, beside the
 float trampoline's own 33 and 26 (letter `l` above).
-
-The scheduler's frame measured alone, with an image built for it
-alone whose scheduler stand-in clobbers every caller-saved register:
-sixteen patterns set before the request, all sixteen back after the
-return and the stack pointer where it was, sixteen trips alike, in an
-image built with the hardware prologue and in one built without it
-(where the two bodies save their scratch register themselves) on the
-CH32V203C8T6.
 
 The suite in images built without the hardware prologue
 (CH32VX03_HPE=OFF), its bounds drawn for that build (letter c), ten runs
 of `z` alike on each part: 40 verdicts on the CH32V203C8T6 and 45 on the
-CH32V303VCT6. Road 1 there takes 140 cycles on the CH32V203C8T6 and 198
-on the CH32V303VCT6, a road-2 post 317 and 312; the CH32V303VCT6's
+CH32V303VCT6. Road 1 there takes 167 cycles on the CH32V203C8T6 and 222
+on the CH32V303VCT6, a road-2 post 381 and 376 to 378; the CH32V303VCT6's
 handler that calls out saves and reloads the twenty f-registers in
 software around its body, and that reload leaves FS Dirty, so there the
 entry saves on both of letter `j`'s paths and the two cost the same.
@@ -1071,9 +1087,9 @@ established:
   the scheduler's entry saved the crt's Dirty unit once, and nothing of
   the pack wrote a float after.
 
-The images: on the CH32V203C8 40952 bytes of text and 724 of data,
-41676 of the 60 KB the linker script gives it (67 %), and 5436 bytes
-of RAM of 20 KB (27 %); on the CH32V303VC 44720 of 252 KB (17 %) and
+The images: on the CH32V203C8 41280 bytes of text and 724 of data,
+42004 of the 60 KB the linker script gives it (68 %), and 5436 bytes
+of RAM of 20 KB (27 %); on the CH32V303VC 45044 of 252 KB (17 %) and
 5440 of 64 KB.
 
 **The I2C stack under the preemptive kernel** - `test_vx03_rubato_i2c`,
@@ -1089,18 +1105,26 @@ FREQ window asks for ([i2c.md](i2c.md)); at that clock 97, 193 and
 the core. The road at that clock, read in every pressure pass as TIM2's
 count at the entry of the preempting object's spin (from the update
 event through the vector, its post, the scheduler and the dispatch's
-first lines): 180 to 238 cycles at the least of a pass, against the 119
-of road 1 alone at 144 MHz above; at the most 248 to 7798, every one above 1000 in
-the held-wire letter's passes (a diagnostic build, not kept, placed them
-at the moment the far end lets the line go), with TIM2's vector entered
-within 218 counts of the event - the time is spent after the vector and
-before the dispatch, where the suite's instruments do not place it. No tick was dropped in any pass. The findings
+first lines): 176 to 262 cycles at the least of a pass, against the 144
+of road 1 alone at 144 MHz above; at the most 1170 to 7786, above 1000
+in every pass, with TIM2's vector entered within 62 counts of the event.
+The thousand cycles every pass shows are the suites' written-out base
+turn's (`base_turn()` in the shared body, `avrxt/src/apps/rubato_passes.hpp`):
+it runs `activate()` and puts the ceiling back without comparing the
+count of quiet posts, as the platform's exit does, so a tick whose post
+lands in its last choice, the ceiling at 0, waits for the Console's next
+turn - an image whose one difference was that compare added read 296 to
+3718 at the most, above 1000 in 1 to 3 passes of 36. Those, the
+held-wire letter's (a diagnostic build, not kept, placed them at the
+moment the far end lets the line go), spend their time after the vector
+and before the dispatch, where the suite's instruments do not place it.
+No tick was dropped in any pass. The findings
 are the I2C page's: a preemption reaches the host only before its
 START, every tenure shape exact on both paths under every pressure, and
 on a held line the first START loses and the next ones park. The
-images: on the CH32V203C8 33492 bytes of text and 428 of data, 33920
-of the 60 KB the linker script gives it (55 %), and 2088 bytes of RAM of
-20 KB (10 %); on the CH32V303VC 34292 of 252 KB (13 %) and 2088 of
+images: on the CH32V203C8 34720 bytes of text and 428 of data, 35148
+of the 60 KB the linker script gives it (57 %), and 2108 bytes of RAM of
+20 KB (10 %); on the CH32V303VC 35524 of 252 KB (14 %) and 2108 of
 64 KB.
 
 ## Not covered yet
@@ -1135,6 +1159,15 @@ Implemented but not bench-verified, each with what would measure it:
   STM32F4's serial suite does
   ([../stm32f4/usart.md](../stm32f4/usart.md), letter h), would
   measure it.
+- **The scheduler's frame, register by register, over these bodies**:
+  the suite's letters run the entry and the exit with every trace, sum
+  and flag exact, which shows no register the dispatches and the
+  interrupted code use lost, not all sixteen the entry stores; an image
+  built for that alone - a stand-in scheduler clobbering every
+  caller-saved register, sixteen patterns set before the request and
+  compared after the return, the stack pointer checked, with and
+  without the hardware prologue - rebuilt over the bodies that carry the
+  ceiling and the count would measure it.
 - **Rubato on the other parts**: the platform, its request and the two
   vector bodies compile for all thirteen, with and without the hardware
   prologue (the family fixture), and the suite is built and run for

@@ -69,16 +69,16 @@
 //   THE PRESSURE. TIM2's update interrupt, 16 bits on TIMCLK = 2 x PB1 =
 //   HCLK = 96 MHz at prescaler 0: 97 / 193 / 389 us are 9312 / 18528 /
 //   37344 counts. Pressure's dispatch, a 3000-cycle spin behind the
-//   platform's road (119 cycles from a handler's last statement at 144 MHz
+//   platform's road (144 cycles from a handler's last statement at 144 MHz
 //   on the CH32V203C8T6, docs/ch32vx03/platform.md - re-measured here at
 //   this clock: every pass prints the TIM2 count where the spin begins
 //   (I2cTraits::tick_spin_begin()), the cycles from the update event
-//   through the vector and the road to the dispatch's spin, 180 to 238
+//   through the vector and the road to the dispatch's spin, 176 to 262
 //   cycles at its least), is shorter than the
 //   shortest period's 9312 cycles, so a tick finds the last one done; at
 //   97 us x 3000 it takes 32 % of the core. The exception is measured, not
 //   placed: in letter h's 97 us passes, at the far end's release of the
-//   line, that road has taken up to 7798 cycles, and 3000 more run past
+//   line, that road has taken up to 7786 cycles, and 3000 more run past
 //   the next update - that tick waits in Pressure's queue (eight deep)
 //   behind the dispatch, none is dropped, and judge_pressure() judges
 //   exactly that (one dispatch a tick, no overflow).

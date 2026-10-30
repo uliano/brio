@@ -71,7 +71,7 @@
 //   every channel the image uses disabled and every request enable clear.
 //   THE PRESSURE. TIM2's update interrupt, 16 bits on TIMCLK = HCLK = 144
 //   MHz at prescaler 0: 97 / 193 / 389 us are 13968 / 27792 / 56016 counts.
-//   Its dispatch, a 3000-cycle spin, road 1 (119 cycles, docs/ch32vx03/
+//   Its dispatch, a 3000-cycle spin, road 1 (144 cycles, docs/ch32vx03/
 //   platform.md) and the way back, is shorter than the shortest period's
 //   13968 cycles, so no tick finds the last one still queued; at 97 us x
 //   3000 it takes 21 % of the core. TIM2's update request is a DMA1
@@ -140,7 +140,7 @@
 //      frames (the shared body's LinkTraits): the three paths the design
 //      gives the three requesters. Minor's two frames are both in flight
 //      at /256, each 4096 cycles, longer than Pressure's longest hold of
-//      the polled loop (3000 cycles, road 1's 119 and the way back): a
+//      the polled loop (3000 cycles, road 1's 144 and the way back): a
 //      preemption there is a gap on the bus (letter p never cut a
 //      4096-cycle frame). Every reply to its requester in its order, every
 //      one spi_ok, nothing rejected, the per-bus timeout never firing, the
