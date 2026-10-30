@@ -79,9 +79,15 @@ tenure stops the program. The buffers: `index` and `id` are lent from
 `start()` to the completion, untouched and in scope until then, which
 the `Borrowed` type records and nothing checks. One tenure at a time:
 `start()` does not look at whether the previous tenure has completed -
-`I2cBus` is what serializes. And `start()`'s answer: false means the
-tenure is on the wire and a handler will complete it; true means it was
-refused before a byte moved (a speed the clock cannot produce), with
+`I2cBus` is what serializes. The address: `addr` is a 7-bit address of
+0x08 to 0x77, and nothing refuses one above it. The four after 0x77,
+0x78 to 0x7B, are the prefix I2C reserves for the first byte of a 10-bit
+address, and this block takes such a byte as that header: the address
+phase ends on ADD10 instead of ADDR (27.3.3), which the host's event
+vector does not serve, so the vector re-enters without end, the program
+stops and SCL stays low (measured at 0x7A, "Bench findings"). And
+`start()`'s answer: false means the tenure is on the wire and a
+handler will complete it; true means it was refused before a byte moved (a speed the clock cannot produce), with
 `status()` already `i2c_rejected` and no interrupt to follow, so a loop
 that waits for `done` after a true waits for ever. `start()` itself
 waits in its caller, bounded: about 5 ms for the previous tenure's STOP
@@ -713,6 +719,119 @@ ten cycles a byte the rows moved by between the two builds moved the
 FMPI2C1 host's rows too, whose code did not change - the image's layout
 under the flash accelerator, not the engine.
 
+**Under the preemptive kernel: `test_stm32f4_rubato_i2c`** on the
+Nucleo-F446RE, against the same partner's `twi_peer` on the same node:
+`util/i2c_bus.hpp`'s arbiter (pending depth 4, the per-bus timeout at 20
+ms) over the engined `I2cHost<1>` on PB8/PB9 (DMA1 streams 6 and 0 on
+channel 1) inside Rubato, while TIM2 posts to the pack's highest object
+every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97
+us x 3000, 17 % of the core. Every letter runs once with TIM2 silent and
+six times under it; **195 verdicts, green on thirty runs of thirty**.
+The pack, the command channel through the arbiter and the letters are
+the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
+header describes them), and [platform.md](platform.md) places the suite
+among the preemptive kernel's; its twin over the FMPI2C1 is
+[fmpi2c.md](fmpi2c.md)'s.
+
+- **Where a preemption reaches this host: `start()`'s two waits and its
+  register writes, all before the START.** `start()` waits for the last
+  tenure's STOP to leave the wire and for BUSY, then raises the event
+  vector and sets START last, so a dispatch above the arbiter landing in
+  it lengthens the gap between tenures and moves nothing on the wire.
+  Letter `x`, 400 writes of 16 bytes on the transmit engine: `start()`
+  takes 189 cycles with TIM2 silent (the longest 307); under 97 us x 3000
+  the interrupt landed inside it 1 to 8 times in seven runs, against the
+  4.3 that independent ticks would give (400 x 189 / 17460) - no phase
+  lock, unlike the STM32G0's host ([../stm32g0/i2c.md](../stm32g0/i2c.md))
+  - and never with MSL set. In letter `h`, where the preempting object's
+  probes follow one another back to back, the interrupt found MSL set
+  inside `start()` 142 times in 180 pressure passes: `start()` entered
+  while the last probe's STOP was still on its way out, MSL standing
+  until it is - the drain this block cannot queue a START behind.
+- **Every shape on every path, under every pressure as in the control**
+  (letter `o`, at 400 kHz against one serve counted to its last byte):
+  the probe; reads of 1 (the pump) and of 2, 3, 8 and 32 (the receive
+  engine under LAST); write-then-reads of 1+1 (the pump both halves), 1+2
+  and 2+8 (the write in ADDR's entry, the read on the engine); writes of
+  1 and 2 (EV8_1, no interrupt for either byte) and of 3, 8 and 32 (the
+  transmit engine) - every one `i2c_ok`, every read byte-exact, the
+  partner's count, sum and address matches exact. A shape's
+  post-to-reply under pressure is the control's plus at most one
+  dispatch and its road: the 32-byte write 761 to 762 us silent and at
+  most 766 pressed, the probe 33 to 35 and at most 52, over thirty runs.
+- **The speeds and the commanded stretch** (letter `p`): a read of 16, a
+  1+4 and a write of 16 byte-exact at 100 and 400 kHz (the write of 16 in
+  1542 to 1565 us and 396 to 416 against the wire's 1530 and 382). The
+  partner's stretch of 1000 us a byte at 100 kHz, priced from below: a
+  read of 8 in 9194 to 9237 us against its nine holds (the address's and
+  one before each byte it gives); a write of 8 in 9003 to 9027 us against
+  its eight (the address's and seven: the eighth falls after the
+  tenure), the write following the read at once and meeting most of one
+  hold more - the one the partner spends, as the read's last byte goes
+  out, before the byte it is asked for beyond it (a write of 8 alone took
+  8195 us, measured on the side); under the 20 ms timeout.
+- **The vocabulary** (letter `q`): a deaf client answers the probe and a
+  four-byte write `i2c_nack_addr`; the third byte of six refused answers
+  `i2c_nack_data`, the write on the transmit engine, its untransmitted
+  tail abandoned and counted (one a pass); the last written byte of a
+  2+4 refused answers `i2c_nack_data` and no read half follows, the
+  controller closing the tenure with the void write from the repeated
+  START it had requested - so the partner counts three address matches
+  where a host that lets go with a STOP makes two. The next tenure is
+  `i2c_ok` after each.
+- **The arbiter with three requesters of three priorities** (letter
+  `w`): the Client above the arbiter (20 write-then-reads of 1+6, the read
+  half on the receive engine, two outstanding), a requester below it (10
+  writes of two bytes, EV8_1's), and in a pressure pass the preempting
+  object itself (8 probes posted from its tick): every reply `i2c_ok`, to
+  its requester, in its order - the Client's slot k complete and slot k+1
+  untouched at reply k - nothing rejected, no timeout, the partner's
+  tallies exact, in 5.2 to 5.8 ms a pass.
+- **THE HELD WIRE PARKS, AND A PE CYCLE DOES NOT CHANGE THAT** (letter
+  `h`, the partner holding SDA low from its GPIO for 60 ms): the tenure
+  posted into it parks behind BUSY (27.3.3's START waits for BUSY to
+  fall) and is answered `i2c_timeout` by the arbiter in 19994 to 20019
+  us, 210 passes of 210; the same tenure at 400 kHz after commands at 100
+  kHz, a PE cycle before its START (the three timing registers are
+  PE-gated), parks the same way, 30 of 30 - where the FMPI2C beside it and
+  the STM32G0's host forget the held line at a PE cycle and lose
+  arbitration at once ([fmpi2c.md](fmpi2c.md)). `recover()`'s SWRST leaves
+  the next START parking too while the line is held. Under the flood - a
+  probe at every tick, 179 to 722 a pass - every request was answered
+  exactly once: while held `i2c_rejected` (the four-deep queue full) or
+  `i2c_timeout` (one a pass: the probe started after the held tenure's
+  timeout, parked in its turn), after the release `i2c_ok`, or
+  `i2c_nack_addr` in the moment the partner's client was not yet back
+  (about two a pass); a request arrived in the arbiter's draining window
+  - between a timeout's `recover()` and the marker after it, which only a
+  requester above the arbiter can reach - in 5 of 180 pressure passes.
+  After the release the next tenure was `i2c_ok` and the arbiter voted
+  idle with nothing waiting, every pass.
+- **THE RESERVED ADDRESS WEDGES THIS HOST.** The shared letter `q` probes
+  the partner parked at 0x7A, `twi_link.hpp`'s `deaf_addr`; on this block
+  the program stopped there for good: the core halted inside the event
+  vector (IRQ 31 active), SR1 ADD10, SR2 MSL and BUSY, DR 0xF4, CR2
+  with the event vector on, SCL held low by this side. 0xF4 is 0x7A
+  shifted, 1111 0100, the first byte of a 10-bit address; this block in
+  controller mode sends it as that header and sets ADD10 where a 7-bit
+  address sets ADDR (27.3.3, 27.6.6), and the engine's address phase
+  waits for ADDR alone. The suite probes the command address there
+  instead; the refusal is a driver gap below.
+- **A BUS ERROR COUNTED, and a real one.** `spurious_bus_errors()` rose by
+  one in each pass of letter `p` and nowhere else - seven a run, 210 in
+  thirty runs; a probe letter (not kept) placed every one at the 100 kHz
+  write of 16 that ends the partner's counted serve, never at the same
+  write at 400 kHz nor at the stretched one. That write's last byte is
+  where the partner ends its serve and re-inits its block, inside the
+  byte's acknowledge at 100 kHz - a STOP where none belongs, which is what
+  BERR flags - attributed, not seen on a scope. The tenure ran on to
+  `i2c_ok` with the byte counted at the partner, as 27.3.4 and the
+  driver's counting intend.
+- **Dark** (letter `i`): every object idle, the arbiter's vote for the
+  sleep, no time event armed, TIM2 stopped with its DMA requests off, CR2
+  at ITERREN alone, no START or STOP standing, both streams idle, BUSY and
+  MSL clear, PB8 and PB9 reading high on their pads.
+
 `test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
 reset through the panel's shared line PH7. `z` is 63 verdicts, and one
@@ -762,6 +881,21 @@ Driver gaps, each with its reason:
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's,
   as on every other stratum.
+- An address of 0x78 to 0x7B in a `Request`: this block takes the byte
+  as a 10-bit address's header and ends the address phase on ADD10
+  (27.3.3), which the host's event vector does not serve, so the program
+  wedges in the vector (measured at 0x7A, Bench findings). The refusal -
+  `i2c_rejected` from `start()` for an address of 0x78 and above, the
+  10-bit prefix and the four addresses I2C reserves after it - is owed
+  to the driver.
+- This chip as the bus's target, served from an active object, under the
+  preemptive kernel. A target whose bytes come from an object (its vector
+  posting "the host reads" and leaving SCL held, a dispatch giving the
+  byte) is the one place a held-off reader would stretch the clock; no
+  util service serves a target that way (`I2cClient` is served from its
+  vector), and the desk partner, the STM32G0B1RE's `twi_peer`, has no
+  `host_read` to read this board's target. Born with the first util
+  target object.
 
 Implemented, not bench-verified (each with what would measure it):
 - The client's SECOND own address (ENDUAL) and its 10-bit matching: the
@@ -792,10 +926,17 @@ Implemented, not bench-verified (each with what would measure it):
   ([../stm32g0/i2c.md](../stm32g0/i2c.md), "TWO HELD STARTS"). What
   would measure it is a peer releasing its START by software at a delay
   swept across this one's.
-- A bus error (`i2c_bus_error`) and the spurious-BERR count: the
-  chapter raises it on a misplaced START or STOP, which wants another
-  controller misbehaving, and the errata's own spurious one did not
-  appear in this suite.
+- A bus error status (`i2c_bus_error`): the engine answers it for an
+  overrun, a PEC error or an SMBus time-out or alert inside a controller
+  tenure, none of which a plain controller tenure raises, and no
+  instrument here makes one.
+- ES0298 2.11.1's spurious BERR told apart from a real one: the count
+  moved under the preemptive kernel's suite, once a pass at a write that
+  ends the partner's counted serve at 100 kHz, the tenure running on to
+  `i2c_ok` (Bench findings), which the partner's re-init inside that
+  byte's acknowledge would explain as a misplaced STOP - a real one,
+  counted the same. A scope on the two lines at that write would
+  separate them.
 - The noise filters ON THE WIRE: the register is written and read back
   and the ceiling arithmetic is checked, but what a 4-period digital
   filter does to a glitch wants a glitch generator.

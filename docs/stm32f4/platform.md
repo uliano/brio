@@ -382,6 +382,27 @@ answer window is not heard until the peer is back in command mode
 (the suite waits between windows); the receive engine tells the port
 of a stream only at an idle line or a half lap, up to 1024 characters.
 
+`test_stm32f4_rubato_i2c`, 195 verdicts on the Nucleo-F446RE, and its
+twin `test_stm32f4_rubato_fmpi2c`, 174 (their target-free half the I2C
+suites' shared body, `avrxt/src/apps/rubato_i2c.hpp`), against the
+Nucleo-G0B1RE's unchanged `twi_peer` over the desk's I2C node: the I2C
+stack - `util/i2c_bus.hpp`'s arbiter over `I2cHost<1>` on I2C1 and, in
+the twin, over `FmpI2cHost<1>`, each with its DMA engines - under Rubato
+with the same pressure on TIM2, every letter run first without it as
+its control; every verdict green on every run (thirty of the first,
+twenty of the twin). The command channel through the arbiter, the
+tenure shapes on every path of each host, the speeds (100 and 400 kHz,
+and 1 MHz on the FMPI2C1) and the partner's commanded stretch, three
+requesters of three priorities, and a held wire with requests arriving
+in the arbiter's draining window from above it: every request answered
+once, every byte exact - and the status vocabulary on the classic
+block. A preemption inside a host's `start()` delays the START and
+never stretches a tenure. The suites found two driver defects: an
+address the classic block takes as a 10-bit header
+([i2c.md](i2c.md)), and a refused data byte under the FMPI2C1's engines
+answered as a refused address ([fmpi2c.md](fmpi2c.md)), for which the
+twin keeps its vocabulary letter out of its all-key.
+
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
 four boards, and letters `w`, `k` and `t` beside them in `z` (49
 verdicts on the Nucleo-F446RE):
