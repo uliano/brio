@@ -309,24 +309,37 @@ letters land, nothing wired and nothing lit:
   after High returns and after Low's own dispatch ends; and at depth 2,
   an interrupt over High's
   handler (started by either road) runs Top before High resumes, Top's
-  first statement 134 to 138 cycles after the handler's last in every
+  first statement 163 to 168 cycles after the handler's last in every
   set of ten events, twenty sets over ten runs of the suite, one by each
   road; the letter does not read the kernel tick around its events, so
   an event a tick lengthened would go unattributed.
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 143 cycles on all but one
-  event of a hundred in each of ten runs, which takes 148; 188 when a
-  kernel tick lands in the path (one event in two of the ten runs). The sum of the path's own counts in the
-  listing (the handler's exit, PendSV's entry by tail-chaining, the
-  fake frame's return, the entry, `activate()`'s scan and the
-  dispatch's call, every refill at its most) is 135, short of the
-  measurement, so the bound, 218, is the quiet path's slowest event
-  (148) plus one tick (58) and the flash accelerator's misses (12).
+  last statement to High's handler's first, 173 to 186 cycles on every
+  event no kernel tick lands in, a hundred events in each of ten runs
+  (173 the least, 186 the median and the most); 231 and 248 when a tick
+  lands in the path (one event in three of the ten runs). The sum of the path's own counts in
+  the listing (the handler's exit, PendSV's entry by tail-chaining, the
+  fake frame's return, the entry with its masked store of the ceiling,
+  `activate()`'s read of the count of quiet posts, its looks and the
+  dispatch's call, every refill at its most) is 165 cycles, 81
+  instructions, short of the measurement. A diagnostic build whose one
+  difference is a print in this letter's own code - every function on
+  the path at the same address, instruction for instruction - measures
+  162 on nearly every event: the up to 21 cycles the suite's image adds
+  are the flash accelerator's line refills, decided by the code around
+  the path - the finding the STM32G0's page makes of its own flash
+  ([../stm32g0/platform.md](../stm32g0/platform.md), "Code in SRAM"): a
+  path's cost from flash moves with where the code sits. So the bound,
+  256, is the quiet path's slowest event (186) plus one tick (58) and
+  the flash accelerator's misses (12).
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 80 cycles (123 at worst), each queue's two
-  cursors loaded and compared in line, since the queue's header forces
-  `empty()` inline; a post that asks for nothing 78; a post that runs
-  High's empty dispatch inside it 398, the scheduling's share 320.
+  queues below the ceiling, entered and left by hand as the platform's
+  entry and exit do, 124 cycles (213 at worst; the listing's count 140),
+  each queue's two cursors loaded and compared in line, since the
+  queue's header forces `empty()` inline; a post that asks for nothing
+  95 (the count 85, eleven of it the count of quiet posts moved); a post
+  that runs High's empty dispatch inside it 472 (the count 475), the
+  scheduling's share 377.
 - **Time events under preemption** (letter f): three timers matured in
   one turn, the lowest object's armed last, are posted with the ceiling
   held at 0 and served High, Mid, Low; High preempting Low's loop of
@@ -341,7 +354,11 @@ letters land, nothing wired and nothing lit:
   deepest chain, the deepest sampled stack pointer at 568 bytes in a
   dispatch and 512 in the interrupt, the mark within the 350 bytes the
   deepest action's calls (a line through the writer), an exception frame
-  with the FPU's words and the handler's frames add.
+  with the FPU's words and the handler's frames add. The SVC frame of
+  the exit is basic and stands where a returned `activate()`'s frame
+  stood, and the one run a request made in PendSV's first instruction
+  can start at an entry (kernel/rubato.hpp, "The stack") reaches 44
+  bytes below the dispatch of the run it delays, inside the same 350.
 - **Dark** (letter i): every object idle, no timer armed, TIM9 quiet,
   PA5 not an output, the ceiling the Console's, interrupts enabled.
 - **A compiler hazard on road 2, found and closed**: GCC 16 at `-Os`
@@ -572,4 +589,10 @@ timer on the crystal or the RTC is the ruler the M0+ suites use, and
 the timer chapter brings it); a scheduling request made with PRIMASK
 set, served when the mask lifts, which this
 family's suite does not exercise (the STM32G0's letter g does, on the
-same core stratum's code).
+same core stratum's code); the preemptive kernel's stack bound under a
+load that never lets the pack drain - at most one run per object, and
+the one empty run a request made in PendSV's first instruction can
+start at an entry (kernel/rubato.hpp, "The stack") - which no letter of
+this family drives: letter h measures the chain the suite builds, and
+the I2C suites' flood is paced; their letter h run unpaced, with the
+stack painted and read, is what would measure it.

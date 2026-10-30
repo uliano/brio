@@ -503,9 +503,9 @@ of five objects on `Stm32g0RubatoPlatform` on the Nucleo-G0B1RE at
 64 MHz, the Console the lowest and the letters' runner, TIM14's compare
 the interrupt the road-1 letters land, nothing wired and nothing lit.
 The ruler is TIM2 free-running at HCLK: two back-to-back reads of its
-CNT are 4 cycles apart, against 68 for the kernel ticker's composed
+CNT are 4 cycles apart, against 65 for the kernel ticker's composed
 `cycles()` (SysTick's position and the tick count, five reads and a
-consistency check), and the two agree within 3 cycles over a millisecond
+consistency check), and the two agree within a cycle over a millisecond
 and a reload. HCLK cycles, each figure beside the bound its letter
 derives from the core's own counts over the release listing:
 
@@ -523,28 +523,36 @@ derives from the core's own counts over the release listing:
   Low, each inside the post that asked, High's post to Low served
   after Low's own dispatch ends; and at depth 2 an
   interrupt over High's handler, started by either road, runs Top
-  before High resumes, Top's first statement 155 to 156 cycles after
-  the handler's last (a few events of the two hundred in ten runs at 201
-  to 219, by either road, unattributed: the letter reads no tick around
-  them).
+  before High resumes, Top's first statement 188 to 189 cycles after
+  the handler's last (one set of ten events in five of the twenty sets
+  of ten runs reaching 234 to 252, by either road, unattributed: the
+  letter reads no tick around them).
 - **The latency of road 1** (letter c): from the interrupt handler's
-  last statement to High's handler's first, 180 cycles min, 181 median
-  and max over 100 events, every run; 226 to 250 for the one event in
-  about two hundred a kernel tick lands in (five or six of the thousand
-  events of ten runs, a tick inside each). The path counts 144 cycles at zero
-  wait states - the handler's exit, the tail-chain into PendSV, its
-  thirteen instructions and the return through the fake frame, the
-  entry, `activate()`'s visits to Top and High with each queue's two
-  cursors compared in line, the raise of the ceiling, `take()` - and
-  183 with every flash refill paid; the bound, 290, adds one tick (70)
-  and a fifth.
+  last statement to High's handler's first, 204 cycles min, 205 median
+  and max over 100 events, every run; 251 to 267 for the one event in
+  about a hundred and fifty a kernel tick lands in (seven of the
+  thousand events of ten runs, a tick inside each). The path counts 161
+  cycles at zero wait states, 83 instructions - the handler's exit, the
+  tail-chain into PendSV, its thirteen instructions and the return
+  through the fake frame, the entry (the ceiling read and 0 stored while
+  PendSV's mask still holds, the unmask, base kept in the filler word),
+  `activate()`'s read of the count of quiet posts, its looks at Top and
+  High with each queue's two cursors compared in line, the raise of the
+  ceiling and the count read again, `take()` - and 207 with every flash
+  refill paid; the bound, 319, adds one tick (70) and a fifth.
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 111 cycles in every run (bound 138); a post
-  that asks for nothing 95 (bound 127); a post that runs High's empty
-  dispatch inside it 517 (bound 645), the scheduling's share 422 - two
-  exception entries from thread mode (PendSV's and the SVC's, DDI
-  0484C's 15 cycles each) and two returns, and a line of a flash at two
-  wait states refilled at every call and taken branch on the way.
+  queues below the ceiling, entered and left by hand as the platform's
+  entry and exit do, 170 cycles in every run (bound 213: 123 at zero
+  wait states, 177 with every refill); a post that asks for nothing 108
+  (bound 140), the count of quiet posts moved on that path (a literal,
+  a load, the add, a store, a branch back: nine cycles at zero wait
+  states); a post that runs High's empty dispatch inside it 575 (bound
+  692: 433 at zero wait states, 576 with every refill), the
+  scheduling's share 467 - two exception entries from thread mode
+  (PendSV's and the SVC's, DDI 0484C's 15 cycles each) and two returns,
+  the entry's masked store and the exit's count compared in the SVC's
+  eleven instructions, and a line of a flash at two wait states
+  refilled at every call and taken branch on the way.
 - **Time events under preemption** (letter f): three timers matured in
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
@@ -557,15 +565,14 @@ derives from the core's own counts over the release listing:
   run - and the receiver runs when the section's guard restores the
   mask, before the statement after it, from the Console's dispatch and
   from inside Low's, ten runs each; the section's last statement to the
-  receiver's first 192 to 193 cycles on every event no kernel tick
-  landed in (bound 234: the path counts 157 cycles at zero wait states
-  and 195 with every flash refill paid). The letter reads the tick
+  receiver's first 224 to 225 cycles on every event no kernel tick
+  landed in (bound 273: the path counts 175 cycles at zero wait states
+  and 227 with every flash refill paid). The letter reads the tick
   around each event, as letter c does: an event a tick lands in is
-  reported and judged against 304, the bound with one tick's 70 on it,
-  and every event over 195 must have had a tick in it. In twenty runs
-  of letter `g` alone and ten of `z`, three hundred events, a tick
-  fell inside the reads around three and lengthened none (192 and 193
-  cycles), every verdict green. The nested guard of the trace's own
+  reported and judged against 343, the bound with one tick's 70 on it,
+  and every event over 227 must have had a tick in it. In ten runs of
+  `z`, a hundred events, a tick fell inside one, which took 288 cycles,
+  every verdict green. The nested guard of the trace's own
   `note()` inside the section restores PRIMASK set and takes nothing.
 - **The stack** (letter h): painted from main's frame down to the end of
   `.bss` and `.noinit` (0x20000730..0x20023F80), 500 to 520 bytes of
@@ -574,20 +581,30 @@ derives from the core's own counts over the release listing:
   stack pointer at 464 bytes in a dispatch and 336 to 344 in the
   interrupt, the mark
   within the 156 bytes an action's frames, a basic exception frame and
-  a handler's or a PendSV level's frames add.
+  a handler's or a PendSV level's frames add. The SVC frame of the exit
+  stands where a returned `activate()`'s frame stood, and the one run a
+  request made in PendSV's first instruction can start at an entry
+  (kernel/rubato.hpp, "The stack") reaches 44 bytes below the dispatch
+  of the run it delays, inside the same 156.
 - **Dark** (letter i): every object idle, no timer armed, TIM14 quiet,
   PA5 not an output, the ceiling the Console's, interrupts enabled.
 - **The hot path in the release listing**: PendSV's body is thirteen
   instructions, every one a 16-bit form, 32 bytes with its literal, and
   no barrier (the DSB is the Cortex-M4's alone, for its erratum,
-  [../cortexm/README.md](../cortexm/README.md)); the SVC's three; the
-  request seven (the mask and the address, the store to ICSR, DSB, ISB,
-  the return), a call the compiler cannot see into; `post<Low>()`
-  thirteen on the path that asks nothing and one call more on the path
-  that asks; `activate()` reads each queue's two cursors and compares
-  them in line, no call per queue (`EventQueue::empty()` is forced
-  inline), and `idle_if_empty()`'s masked window, from the `cpsid` to
-  the WFI, is 27 instructions and no call. The rest of this paragraph
+  [../cortexm/README.md](../cortexm/README.md)); the thread-mode entry
+  twelve, the first four under PendSV's mask (the ceiling's literal,
+  its load, the 0 and its store); the SVC's eleven on the path that
+  finds the count of quiet posts still, five more on the path that
+  pends PendSV again; the request seven (the mask and the address, the
+  store to ICSR, DSB, ISB, the return), a call the compiler cannot see
+  into; `post<Low>()` eighteen on the path that asks nothing, five of
+  them the count's, and thirteen and one call on the path that asks;
+  `activate()` reads each queue's two cursors and compares them in
+  line, no call per queue (`EventQueue::empty()` is forced inline), the
+  chosen index, the scan's limit and the count in registers, and
+  `idle_if_empty()`'s masked window, from the `cpsid` to the WFI, is 28
+  instructions and no call, the store of the base's ceiling, 255, among
+  them. The rest of this paragraph
   was measured in diagnostic builds of the suite (not kept) whose
   `activate()` calls the queue's `empty()` out of line. Two that differ
   only in comments and
@@ -936,7 +953,13 @@ the same pack on the LPTIM's platform with its vector bound is what
 would measure it); `test_stm32_rubato` on the STM32G071RB and the
 STM32G031K8 (built for the G0B1RE alone; TIM2, TIM14 and every verb it
 uses exist on both, so its boards line and a run there are the
-measurement); `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
+measurement); the preemptive kernel's stack bound under a load that
+never lets the pack drain - at most one run per object, and the one
+empty run a request made in PendSV's first instruction can start at an
+entry (kernel/rubato.hpp, "The stack") - which no letter of this
+family drives: letter h measures the chain the suite builds, and the
+I2C suite's flood is paced; its letter h run unpaced, with the stack
+painted and read, is what would measure it; `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
 exercised, by `hard_fault_reset` - [reset.md](reset.md); the spins are
 what runs when no body is bound, and every suite binds one). The
 cortex-debug launch entry ([README.md](README.md)) has not been driven
