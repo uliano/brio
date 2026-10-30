@@ -140,13 +140,20 @@
  * THE ENTRY AND THE EXIT (kernel/platform.hpp states what they owe the
  * kernel). These cores do not clear MIE when they take an interrupt (the
  * V4 manual 2.2, the note to mstatus), and the peripheral lines preempt
- * the software interrupt's handler (NESTING, above), so the trap's first
- * instruction clears MIE itself: from there to its MRET no handler runs,
- * and the store of 0 into the ceiling is made before any handler can run
- * after the request was taken - but for the trap's first instruction, the
- * one moment a peripheral handler can still preempt it (RE-ENTRANCY,
- * below). The MRET takes MIE from MPIE, as before, so the entry runs as
- * the interrupted code did. The entry hands the block's `base` to
+ * the software interrupt's handler (NESTING, above), so the trap clears
+ * MIE itself, with the `csrrci` that also reads the mstatus the trap was
+ * taken with - one instruction, the CSR's old value read and the bit
+ * cleared atomically (Zicsr), THE MASK'S SHADOW below saying why that
+ * matters: from there to its MRET no handler runs, and the store of 0
+ * into the ceiling is made before any handler can run after the request
+ * was taken - but until that `csrrci` executes, the one moment a
+ * peripheral handler can still preempt it (RE-ENTRANCY, below): at the
+ * body's first instruction with the hardware prologue, where the
+ * `csrrci` is that instruction, and over two more without it, where the
+ * block is made and t0 saved in it first, so that the `csrrci` has a
+ * register to read into. The block's mstatus word is that read with MIE
+ * cleared; the exit's MRET takes MIE from its MPIE, so the interrupted
+ * code resumes as it ran. The entry hands the block's `base` to
  * K::activate(base), and puts the low byte of what it returns - the count
  * of quiet posts its last choice read - in the block's byte 13 before the
  * `ecall`. scheduler_return<K>(), the machine-mode environment call's
@@ -200,6 +207,24 @@
  * The scheduler is then the work the request asked for before the section
  * began.
  *
+ * THE MASK'S SHADOW IN THE TRAP. The same race reaches the trap's own
+ * mask: a peripheral line taken right after the trap's `csrrci` - the
+ * instruction retired, MIE already clear - comes back into the trap with
+ * mstatus.MPIE clear, while mepc reads back what the trap was taken with.
+ * Measured on the CH32X035F8U6 under the I2C suite's heaviest pressure,
+ * with counters placed in the trap in scratch images: 4 such landings in
+ * some 60 000 traps in each of the two builds, the live MPIE after the
+ * mask unlike the one read by the mask itself and mepc the same before
+ * and after it every time; a trap body that read mstatus after its mask
+ * saved MPIE clear once in some 28 000 traps, and the exit's MRET then
+ * left the interrupted code masked for good - the ticker stopped, the
+ * program hung. So the trap reads mstatus in the instruction that masks,
+ * and mepc after it; the trap's own MRET may then enter the entry with
+ * MIE clear, which the entry's unmask (above) sets again. The exit has the
+ * same shadow after its own `csrci`
+ * and nothing to lose there: it writes mepc and mstatus from the block
+ * before its MRET.
+ *
  * THE FLOATING-POINT UNIT (an image built with F, the CH32V303's: the
  * compiler's __riscv_flen; the V4B and the V4C have none, RV32IMAC, and
  * there the entry has no f-registers to save and the file no second
@@ -222,8 +247,8 @@
  * flags again. Measured on the CH32V303VCT6 (test_vx03_rubato's letter
  * j): sums held in f-registers bit-exact across preemptions, a float
  * handler's among them, flags raised by the preempting dispatch not seen
- * by the preempted one, and the save's price 27 to 30 cycles on the way
- * in and 29 on the way out. The save lives here, in thread mode,
+ * by the preempted one, and the save's price 27 to 31 cycles on the way
+ * in and 25 to 29 on the way out. The save lives here, in thread mode,
  * and never in a vector's body: the vector guard (cli/vector_guard.py)
  * holds every vector of an F image to touching no f-register, and the
  * scheduler's two vectors touch none.
@@ -245,9 +270,10 @@
  * dispatch's index, and a post that finds 0 asks for nothing. Pended by
  * the exit itself, it is taken over the interrupted code, the block
  * already popped. And pended by a peripheral handler that preempts the
- * software interrupt's handler at its first instruction, before the MIE
- * it clears - the one moment between the request being taken and the
- * store of 0 at which a handler can run - it is taken at the instruction
+ * software interrupt's handler before its `csrrci` - the one moment
+ * between the request being taken and the store of 0 at which a handler
+ * can run (THE ENTRY AND THE EXIT, above) - or lands in that `csrrci`'s
+ * shadow, it is taken at the instruction
  * after the trap's MRET, the entry's first, and builds its block below
  * the first: that run finds the ceiling at 0, serves nothing and returns,
  * and the run it delayed serves the post (kernel/rubato.hpp, "The stack",
@@ -425,21 +451,24 @@ template <class Kernel>
         ::"i"(&Kernel::activate));
 }
 
-/// The body the program binds to software_handler: MIE cleared first, the
-/// block with the trap's mepc and mstatus, the ceiling read into the
+/// The body the program binds to software_handler: the trap's mstatus read
+/// and MIE cleared in one `csrrci` (the file header, the mask's shadow),
+/// the block with the trap's mepc and mstatus, the ceiling read into the
 /// block's byte 12 and 0 stored in its place, then the return into
-/// scheduler_thread<K>(). Thirteen instructions with the hardware prologue
-/// (`la` is two), sixteen without, all of them after the mask.
+/// scheduler_thread<K>(). Thirteen instructions in the release image with
+/// the hardware prologue (`la` is two, the ceiling's `lui` relaxed away),
+/// all of them from the mask on; seventeen without, the block and t0's
+/// save before the mask.
 template <class Kernel>
 [[gnu::always_inline]] inline void scheduler_trap() {
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
     __asm__ volatile(
-        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
+        "csrrci t0, mstatus, 8\n\t"  // the trap's mstatus read, and MIE cleared, in one instruction
         "addi sp, sp, -16\n\t"
+        "andi t0, t0, -9\n\t"        // MIE clear in the word: the exit's MRET takes MIE from MPIE
+        "sw t0, 4(sp)\n\t"
         "csrr t0, mepc\n\t"
         "sw t0, 0(sp)\n\t"
-        "csrr t0, mstatus\n\t"       // MIE clear in the word: the exit's MRET takes MIE from MPIE
-        "sw t0, 4(sp)\n\t"
         "lui t1, %%hi(%1)\n\t"
         "lbu t0, %%lo(%1)(t1)\n\t"   // base
         "sb zero, %%lo(%1)(t1)\n\t"  // the ceiling 0, before any handler can run
@@ -450,14 +479,14 @@ template <class Kernel>
         ::"i"(&scheduler_thread<Kernel>), "i"(&Kernel::Platform::ceiling));
 #else
     __asm__ volatile(
-        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
-        "addi sp, sp, -16\n\t"
+        "addi sp, sp, -16\n\t"       // the block first, its word 8 the place t0 is saved in
         "sw t0, 8(sp)\n\t"
+        "csrrci t0, mstatus, 8\n\t"  // the trap's mstatus read, and MIE cleared, in one instruction
         "sw t1, -4(sp)\n\t"          // below the block: free stack, and nothing runs here
+        "andi t0, t0, -9\n\t"        // MIE clear in the word: the exit's MRET takes MIE from MPIE
+        "sw t0, 4(sp)\n\t"
         "csrr t0, mepc\n\t"
         "sw t0, 0(sp)\n\t"
-        "csrr t0, mstatus\n\t"       // MIE clear in the word: the exit's MRET takes MIE from MPIE
-        "sw t0, 4(sp)\n\t"
         "lui t1, %%hi(%1)\n\t"
         "lbu t0, %%lo(%1)(t1)\n\t"   // base
         "sb zero, %%lo(%1)(t1)\n\t"  // the ceiling 0, before any handler can run
