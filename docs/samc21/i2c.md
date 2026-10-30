@@ -103,7 +103,9 @@ bench suite `test_samc_i2c`, bench letter `bench_samc` i
 (15 letters - a letter is one command key of a suite's console and the
 group of verdicts it runs - two-board: the peer board runs `twi_peer` on an AVR64EA48,
 an AVR DA/DB or a second SAM C21, one `twi_link.hpp` wire format between them -
-commanded in band over the bus under test).
+commanded in band over the bus under test), and `test_samc_rubato_i2c`
+for the stack under the preemptive kernel (the last of the bench
+findings).
 
 ## The headline: this peripheral has no input filter, and the wire decides everything
 
@@ -534,6 +536,113 @@ What the rows say:
   letter finds by itself: 17 to 19 collisions of 81 attempts each way,
   in every one of fifteen runs, none wedged.
 
+### The stack under the preemptive kernel (`test_samc_rubato_i2c`)
+
+Measured by `test_samc_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
+(pending depth 4, the per-bus timeout at 20 ms) over `I2cHost<3>` on
+PA22/PA23 at 48 MHz inside Rubato, the preemptive kernel, against the
+same AVR64EA48 `twi_peer`, while TC4 posts to the pack's highest object
+every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
+97 us x 3000, 64 % of the core. Every letter runs once with TC4 silent
+and six times under it; **202 verdicts, green on twenty runs of
+twenty**. The pack, the command channel through the arbiter and the
+letters are the I2C suites' shared body
+(`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them); the
+held-wire letter is the suite's own, for the reason below, and
+[platform.md](platform.md) places the suite among the preemptive
+kernel's.
+
+**Where a preemption can reach this host: before the START, never inside
+a tenure.** `start()` copies the request's fields, applies the speed and
+ends on the ADDR store, so a dispatch above the arbiter that lands in it
+delays the START: a gap between tenures. Inside a tenure every byte is
+the pump's, and a late vector is a held SCL (MB and SB, 33.10.6). Letter
+`x` counts it on 400 writes of 16 bytes: `start()` takes 293 cycles with
+TC4 silent; under 97 us x 3000 the interrupt landed inside it 215 to 222
+times in three runs, against the 25 that ticks independent of the
+tenures would give - the tenure cycle locks to the pressure's period,
+exactly one tick landing inside each tenure's completion dispatch (400
+of the pass's 3768), which step of the cycle sets the phase not
+established - and of those 48 to 54 with the bus monitor already
+reading OWNER. BUSSTATE
+was never OWNER at `start()`'s entry (a diagnostic build, not kept: 0 of
+407 entries), so those landings fell after the ADDR store, in the
+instructions that return from `start()`.
+
+**Every shape on the pump, under every pressure as in the control.**
+Letter `o`, at 400 kHz: the probe, reads of 1, 2, 3, 8 and 32,
+write-then-reads of 1+1, 1+2 and 2+8, writes of 1, 2, 3, 8 and 32 -
+every one `i2c_ok`, every read byte-exact, the peer's count, sum and
+address matches exact. A shape's post-to-reply under pressure is the
+control's plus at most a dispatch and the path behind it: the 32-byte
+write 1005 to 1018 us silent and at most 1172 pressed, the probe 75 to
+80 and at most 372. Letter `p`: a read of 16, a 1+4 and a write of 16
+byte-exact at 100 kHz, 400 kHz and 1 MHz (the read of 16 in 1595 to
+1754, 523 to 686 and 309 to 400 us against the wire's 1530, 382 and 153
+- the polled peer's turnaround, not the host, sets the faster rungs),
+and the peer's
+commanded stretch of 1000 us a byte priced from below by its eight
+holds: a read of 8 in 8902 to 8983 us, a write of 8 in 9699 to 9959 -
+the read's ninth hold, at its closing NACK, falls after the read's STOP
+and stretches the address of the write that follows it at once.
+
+**The vocabulary and the arbiter.** Letter `q`: a deaf client answers
+the probe and a four-byte write `i2c_nack_addr`, the third byte of six
+refused answers `i2c_nack_data`, the last written byte of a 2+4 refused
+answers `i2c_nack_data` with no read half (the peer counting two address
+matches and no byte served), the next tenure `i2c_ok` after each.
+Letter `w`: the Client above the arbiter (20 write-then-reads of 1+6,
+two outstanding), a requester below it (10 writes of two) and, in a
+pressure pass, the preempting object itself (8 probes from its tick):
+every reply `i2c_ok`, to its requester, in its order, nothing rejected,
+no timeout, the peer's tallies exact, in 7.4 to 13.7 ms a pass.
+
+**THE HELD WIRE HAS THREE SIGNATURES HERE.** Letter `h` has the peer
+hold SDA low for 60 ms. A tenure posted at the speed in force parks
+behind the BUSY its monitor saw ("A tenure into a busy bus parks in
+hardware" above) and is answered `i2c_timeout` by the arbiter at 20 ms
+(19930 to 20185 us, 123 of 140 passes); in the other 17 a probe the
+preempting object posted first parked instead and timed out, the
+arbiter's `recover()` forced the bus state to IDLE, and the held
+tenure's START went out into the held line and lost its address:
+`i2c_arb_lost`, still inside 20.2 ms. The same tenure posted at 400 kHz
+after commands at 100 kHz costs `apply()` an enable that re-boots the
+state machine and a forced IDLE, and is answered `i2c_arb_lost` in 58 to
+61 us, twenty runs of twenty. The third is `i2c_bus_error`: ARBLOST with
+BUSERR beside it, which the engine reports as the bus error it also is -
+met once a pass in 35 of the 120 flooded passes, always on a probe that
+completed after the release, in the moment the peer's TWI is put back to
+its command address. Under the flood - a probe at every tick, 180 to 723
+a pass - every request was answered exactly once: while held
+`i2c_rejected` (the FIFO full), `i2c_timeout` or `i2c_arb_lost`, after
+the release `i2c_ok`, `i2c_nack_addr` (55 passes) or that bus error; a
+request arrived in the arbiter's draining window, between a timeout's
+`recover()` and the marker after it, in 26 of 140 passes. After the
+release the next tenure was `i2c_ok` and the arbiter voted idle with
+nothing waiting, every pass.
+
+**THE FLOOD IS NOT RUN AT 97 us x 3000 ON THIS CORE.** A flooding probe
+costs this core some 3500 cycles end to end (its post, the arbiter's
+dispatch of it, a START that loses at once after a recovery, the
+completion's vector and dispatch, the reply into the preempting object);
+with a 3000-cycle spin that is more than the 4656 cycles of a 97 us
+period, so the objects above the Console never empty, the Console - the
+one object that stops the flood - never runs again, and the pack is
+overloaded for good. Under Rubato that overload does not stall: it
+spends the stack until it has written over the RAM above `.bss`
+([platform.md](platform.md) has the measurement). The suite's letter
+therefore floods only where the tick, its spin and the flood's bill fit
+the period - every pressure pass but 97 us x 3000, which meets the held
+wire without the flood - and paints and reads the stack around every
+pass: 1068 to 1648 bytes in every letter but `h`, 2632 at most under the
+flood at 97 us x 300.
+
+**Dark** (letter `i`): every object idle, the arbiter's vote for the
+sleep, no time event armed, TC4 stopped, the host between tenures with
+ERROR alone armed and no flag standing, its line enabled and not
+pending, the bus monitor IDLE and PA22 and PA23 reading high on their
+pads.
+
 ## Not covered yet
 
 Driver gaps (not built), each with its reason:
@@ -543,6 +652,14 @@ Driver gaps (not built), each with its reason:
   closes a read by smart mode.
 - **The 4-wire PINOUT** (CTRLA.PINOUT, an external transceiver's
   shape): no user and no transceiver on the bench.
+- **This chip as the bus's target, served from an active object, under
+  the preemptive kernel.** A target whose bytes come from an object (its
+  vector posting "the host reads" and leaving SCL held, a dispatch giving
+  the byte) is the one place a held-off reader would stretch the clock;
+  no util service serves a target that way (`I2cClient` is served from
+  its vector), and the desk peer, the AVR64EA48's `twi_peer`, has no
+  `host_read` to read from this board's target. Born with the first util
+  target object.
 - **High-speed mode**: REFUSED, because errata 1.17.7 and 1.17.9 break
   its repeated starts with no workaround.
 - **10-bit HOST addressing**: the register surface only - the Request

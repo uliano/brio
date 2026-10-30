@@ -708,6 +708,42 @@ character its polled loop has not fetched yet. What it established:
   alone, the two buffers strictly alternating, and the receive stream
   moved inside the borrower's dispatch 0 to 16 times a leg.
 
+**The I2C stack under the preemptive kernel** - the suite is
+`test_samc_rubato_i2c`, one key against the AVR64EA48's unchanged
+`twi_peer` (`z`, 202 verdicts), twenty runs alike, every verdict green:
+`util/i2c_bus.hpp`'s arbiter over `I2cHost<3>` and its byte pump inside
+a Rubato pack of five objects, the same TC4 pressure and the same seven
+passes. Every tenure shape, the three speeds, the status vocabulary, the
+commanded stretch and three requesters of three priorities came back
+byte-exact under every pressure as in the control, and a held wire was
+answered in its place every time ([i2c.md](i2c.md), the stack under the
+preemptive kernel). What it established about this platform:
+
+- **The stack grows with the load, not with the pack.** A road-1 request
+  - an interrupt's post to an object above the ceiling - that lands while
+  `activate()` is between two dispatches, the ceiling back at the scan's
+  own, nests a whole scheduler level at that same ceiling: the fake
+  frame's return into the thread-mode entry, a new `activate()`, which
+  serves every queue the suspended one would have and returns only when
+  all of them are empty. Under a light load the nested level drains at
+  once and unwinds; under a heavy one the next request lands in the
+  nested level's own scan before it drains, and the levels pile up, 128
+  bytes each on this core (the exception frame, the two words, the
+  scheduler's frame - read off a dump of the RAM, each sampled level's
+  interrupted code in the scan). The suite paints the free RAM before each
+  pass and reads the high-water after it: 1068 to 1648 bytes in every
+  letter but the held wire's, 2632 at most under its flood at 97 us x
+  300. With the flood swept across the spin at 97 us (a diagnostic
+  letter, not kept): 2704 bytes at 300 cycles, 3984 at 600, 6012 at 800,
+  19580 at 900 and at 1000 past the RAM - the stack ran down through
+  `.bss` with no fault until the variables it overwrote made the code
+  fault, a HardFault with the stack pointer below `.bss`. At 193 and 389
+  us the same flood stays at 1348 to 1776 bytes up to a 3000-cycle spin.
+  A pack whose objects above the lowest never empty is overloaded under
+  any kernel; under this one the overload is a stack without bound, and
+  the stack a program sizes must be measured at its heaviest load, not
+  read from the pack's length.
+
 ## The idle path, measured
 
 The kernel calls `idle()` masked when every queue is empty, and asks

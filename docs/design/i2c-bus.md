@@ -231,7 +231,11 @@ STM32F4's FMPI2C1, the same register file, does the same; its classic
 I2C does not forget the held line at a PE cycle: its START parks at the
 speed in force and after a speed change alike, and the arbiter's 20 ms
 answers both (measured under the preemptive kernel, [the STM32F4 I2C
-page](../stm32f4/i2c.md)).
+page](../stm32f4/i2c.md)). On the SAM C21 a forced IDLE does the same - the
+arbiter's `recover()`, or the enable a speed change costs - and the
+START into the held line loses its address, `i2c_arb_lost`, or
+`i2c_bus_error` where BUSERR stands beside the loss (measured under the
+preemptive kernel, [the SAM C21 I2C page](../samc21/i2c.md)).
 The CH32V00x's F1-lineage I2C has no clock-low timeout either (a client
 holding SCL for 45 ms stands until the arbiter answers at its 20), and
 it is the one that answers a wedged SDA by itself: its START into a
