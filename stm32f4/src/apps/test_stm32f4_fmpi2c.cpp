@@ -90,7 +90,7 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "twi_link_client.hpp"
+#include "../../../avrxt/src/apps/twi_link_client.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000,
                              brio::HseMode::bypass>;

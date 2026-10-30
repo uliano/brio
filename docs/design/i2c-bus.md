@@ -214,7 +214,11 @@ same way: the host's own unserved hold trips TIMEOUTA, a peer's 6 ms
 hold trips neither TIMEOUTA nor TIMEOUTB
 ([the STM32G0 I2C page](../stm32g0/i2c.md)). On that part a wedged SDA
 does not even raise an error: the START simply parks with BUSY
-standing, which is the AVR's and the SAM's behaviour met a third time.
+standing, which is the AVR's and the SAM's behaviour met a third time -
+unless a PE cycle came first (a speed change, or the arbiter's own
+`recover()`), which clears BUSY, and then the START goes out into the
+held line and loses its address: `i2c_arb_lost` at once (measured under
+the preemptive kernel, [the STM32G0 I2C page](../stm32g0/i2c.md)).
 The CH32V00x's F1-lineage I2C has no clock-low timeout either (a client
 holding SCL for 45 ms stands until the arbiter answers at its 20), and
 it is the one that answers a wedged SDA by itself: its START into a

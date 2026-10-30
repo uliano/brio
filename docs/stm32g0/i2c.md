@@ -42,9 +42,9 @@ loans), and the per-bus timeout given to the arbiter is what ends a
 tenure a wedged device holds, because on this silicon a held data line
 is a wait and not an error. The chapter is built whole and measured on
 the Nucleo's own self-link and, on the same bus, against the desk
-partner, an STM32F446RE, and on the two smaller parts against a second
-STM32G0; what is not covered is listed at the end, with the reason in
-each case.
+partner, an STM32F446RE - the host under the preemptive kernel too -
+and on the two smaller parts against a second STM32G0; what is not
+covered is listed at the end, with the reason in each case.
 
 ## Documents of record
 
@@ -658,17 +658,19 @@ and a busy one against it - `util/i2c_bus.hpp` and `util/bus_master.hpp`
 exactly as they are written.
 
 **AND THE WEDGE HAS A SECOND SIGNATURE WHEN A FOREIGN CHIP HOLDS THE
-WIRE - RECORDED, NOT RECONCILED.** The self-link's letters `c` and `l`
+WIRE.** The self-link's letters `c` and `l`
 measure a client of this same die holding SDA down: the silicon sees a
 PARK and raises nothing (BUSY alone, no ARLO, no BERR), and the
 arbiter's `i2c_timeout` at 20 ms is the whole answer. With the peer told
 to hold SDA from its own GPIO for 300 ms, the same tenure comes back
 **`i2c_arb_lost` in 0 ms, with SDA still low at the reply** - the ENGINE
 reporting a wire code of its own where the other arrangement reported
-nothing at all. The two differ in who holds the line and in how the
-hold's start lines up with the controller's own START, and this bench
-does not separate those; what it does establish is that the REQUIREMENT
-is met either way - the requester is answered IN ITS PLACE, never with
+nothing at all. What separates the two is a PE cycle before the START:
+this letter's request runs at 400 kHz after commands at 100 kHz, and
+the speed change cycles PE, which clears BUSY - measured under the
+preemptive kernel below, where the same hold met at the speed in force
+parks and times out and met after a speed change or a `recover()` loses
+its address at once. The REQUIREMENT is met either way - the requester is answered IN ITS PLACE, never with
 silence and never with `i2c_ok`, at the arbiter's limit or sooner, and
 the same bus AO carries the next tenure to `i2c_ok` once the line comes
 back.
@@ -742,6 +744,117 @@ re-state its claim afterwards or every later completion is consumed by
 the wrong branch and answered `i2c_timeout` on a tenure that ran
 perfectly.
 
+### The stack under the preemptive kernel (`test_stm32_rubato_i2c`)
+
+Measured by `test_stm32_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
+(pending depth 4, the per-bus timeout at 20 ms) over the engined
+`I2cHost<1>` on PB8/PB9 (DMA1 channels 1 and 2, PCLK under the static
+PLL at 64 MHz) inside Rubato, against the same STM32F446RE `twi_peer`,
+while TIM14 posts to the pack's highest object every 97, 193 or 389 us
+and its dispatch spins 300 or 3000 cycles - at 97 us x 3000, 48 % of
+the core. Every letter runs once with TIM14 silent and six times under
+it; **195 verdicts, green on thirty runs of thirty**. The pack, the
+command channel through the arbiter and the letters are the I2C suites'
+shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes
+them), and [platform.md](platform.md) places the suite among the
+preemptive kernel's.
+
+**Where a preemption can reach this host: before the START, never inside
+a tenure.** `start()` writes the tenure's enables and then the one CR2
+store that carries START, so a dispatch above the arbiter that lands in
+it delays the START: a gap between tenures. Inside a tenure every byte
+decision is the vector's, and a late vector is a held SCL (32.4.8,
+32.4.9). Letter `x` counts it on 400 writes of 16 bytes on the engines:
+`start()` takes 400 cycles with TIM14 silent; under 97 us x 3000 the
+interrupt landed inside it 166 to 181 times in eight runs, and of those 3
+to 7 with ISR.BUSY already set - which can only be after the START
+store, `start()`'s last register write, with the engines armed before
+it, so the tenure on the wire was the vector's from its first bit:
+nothing the thread does after the START store reaches the wire.
+
+**THE TENURE CYCLE LOCKS TO THE PRESSURE'S PERIOD.** Were the ticks
+independent of the tenures, a 400-cycle `start()` would hold one in
+400 / 6208 of the cases - about 25 of 400. It holds one in 42 to 45 %: a
+histogram of TIM14's count at `start()`'s entry (an instrument added for
+the measurement, not kept in the suite) put 290 and 294 of 400 entries,
+in two runs, in the last eighth of the period, just before a tick. The
+tenure cycle - the write, its STOPF, the reply up the pack and the next
+request down - settles at a phase of the pressure's period instead of
+drifting across it; which step of that path does the locking is not
+established. A program's own periodic interrupt and its bus traffic can
+phase-lock the same way; what it costs here is one dispatch's length on
+nearly every other tenure, and nothing on the wire.
+
+**Every shape on both paths, under every pressure as in the control.**
+Letter `o`, at 400 kHz against one serve counted to its last byte: the
+probe, reads of 1 (the pump, the byte taken at STOPF) and of 2, 3, 8 and
+32 (the receive engine), write-then-reads of 1+1 (both halves the pump),
+1+2 and 2+8, writes of 1 (the preload alone) and of 2, 3, 8 and 32 (the
+transmit engine) - every one `i2c_ok`, every read byte-exact, the
+peer's count, sum and address matches exact (a write-then-read is two).
+A shape's post-to-reply under pressure is the control's plus at most one
+dispatch and the path behind it: the 32-byte write 825 us silent and at
+most 885 pressed, the probe 56 and at most 167, over thirty runs. Letter `p`: a read of 16,
+a 1+4 and a write of 16 byte-exact at 100 and 400 kHz (the write of 16
+in 1599 and 440 us against the wire's 1530 and 382), and the peer's
+commanded stretch of 1000 us a byte priced from below - a read of 8 in
+9868 to 9975 us against its nine holds, a write of 8 in 8243 to 8357 us
+against its eight (the address's and one before every byte the peer
+takes or gives, the write's last falling after its tenure), under the
+20 ms timeout.
+
+**The vocabulary under pressure, and a refused byte ON THE ENGINE.**
+Letter `q`: a deaf client answers the probe and a four-byte write
+`i2c_nack_addr` (the transmit channel's count never moved); the third
+byte of six refused answers `i2c_nack_data` - a write of six rides the
+transmit engine, so this is the NACK named mid-block from the channel's
+count, its untransmitted tail abandoned and counted; the last written
+byte of a 2+4 refused answers `i2c_nack_data` with the controller let
+go, the peer counting one address match for that tenure and no byte
+served - no repeated START followed. The next tenure is `i2c_ok` after
+each.
+
+**The arbiter with three requesters of three priorities.** Letter `w`:
+the Client above the arbiter (20 write-then-reads of 1+6, the read half
+on the receive engine, two outstanding), a requester below it (10 writes
+of one byte, the preload), and in a pressure pass the preempting object
+itself (8 probes posted from its tick): every reply `i2c_ok`, to its
+requester, in its order - the Client's slot k complete and slot k+1
+untouched at reply k, which Rubato makes exact because the requester
+above the arbiter runs its reply inside the arbiter's own dispatch,
+before the next waiting request starts - nothing rejected, no timeout,
+the peer's tallies exact, in 6.1 to 7.9 ms a pass.
+
+**THE TWO SIGNATURES OF THE HELD WIRE ARE ONE MECHANISM: THE PE CYCLE.**
+Letter `h` has the peer hold SDA low for 60 ms. A tenure posted at the
+speed in force parks behind the BUSY its own monitor saw and is answered
+`i2c_timeout` by the arbiter at 20 ms (19962 to 20104 us, 201 of 210
+passes). In the other 9, a probe the preempting object had posted first
+parked instead and timed out; the arbiter's `recover()` - 32.4.6's PE
+cycle - then started the held tenure, and PE = 0 clears BUSY (32.9.7),
+so its START went out at once into the held line and lost its address's
+first one bit: `i2c_arb_lost`, still inside 20.1 ms. The same tenure
+posted at 400 kHz after the commands at 100 kHz costs `apply()` a PE
+cycle for TIMINGR before the START, and is answered `i2c_arb_lost` in 43
+us - thirty runs of thirty. The peer-bus letter `r` above meets its hold
+the second way (its request at 400 kHz after commands at 100): that is
+the second signature, and the self-link's park the first. Under the
+flood - a probe at every tick, 180 to 723 a pass - every request was
+answered exactly once: while held `i2c_rejected` (the FIFO full),
+`i2c_timeout` or `i2c_arb_lost`, after the release `i2c_ok`, or
+`i2c_nack_addr` in the moment the peer's client was not yet back (25 of
+210 passes, one probe each); a request arrived in the arbiter's draining
+window, between a timeout's `recover()` and the marker after it, in 32
+of 210 passes - the interleaving only a requester above the arbiter can
+make. After the release the next tenure was `i2c_ok` and the arbiter
+voted idle with nothing waiting, every pass.
+
+**Dark** (letter `i`): every object idle, the arbiter's vote for the
+sleep, no time event armed, TIM14 stopped, the host between tenures with
+ERRIE alone and both DMA request enables clear, the transmit engine
+holding nothing, BUSY clear and PB8 and PB9 reading high on their pads.
+ES0548 2.10.2's spurious BERR counted 0 over the thirty runs.
+
 ## On the STM32G071RB
 
 `test_stm32_i2c` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
@@ -814,6 +927,15 @@ reason.
 
 Driver gaps:
 
+- **This chip as the bus's target, served from an active object, under
+  the preemptive kernel.** A target whose bytes come from an object (its
+  vector posting "the host reads" and leaving SCL held, a dispatch giving
+  the byte) is the one place a held-off reader would stretch the clock;
+  no util service serves a target that way (`I2cClient` is served from
+  its vector), and the desk peer, the STM32F446RE's `twi_peer`, has no
+  `host_read` to read from this board's target. Born with the first util
+  target object.
+
 - **No client DMA slots.** `I2cClient` has none, as `SpiClient` has
   none, and a slot waits for a device-shaped user. The TARGET
   side of a DMA tenure is therefore not measured at all: letter `h`
@@ -847,13 +969,6 @@ Implemented but not bench-verified:
   reset by reading - the self-link's engined letters pass with it, and a
   tenure abandoned mid-block, then released, then followed by the next
   owner of its request line, would measure it.
-- **A data byte refused under an engine.** The NACK's name under an
-  engine is the transmit channel's count (the address's when it never
-  moved, measured by letter `i`'s write to the address nobody answers);
-  a byte refused mid-block is the other branch, and the self-link's
-  client refuses bytes only under byte control, which letter `c` stages
-  on the pump. Letter `c`'s refusal through the engined host would
-  measure it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of

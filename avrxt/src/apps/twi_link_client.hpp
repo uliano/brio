@@ -1,25 +1,36 @@
-// twi_link_client.hpp - the CONTROLLER's end of twi_link.hpp for this
-// stratum's I2C suites: the command channel to a `twi_peer` on the bus
-// under test, over whichever host engine the suite is measuring.
+// twi_link_client.hpp - the CONTROLLER's end of twi_link.hpp: the command
+// channel to a `twi_peer` on the bus under test, for any suite whose board
+// is the bus controller, over whichever path to the wire the suite is
+// measuring - a host engine driven directly, or a bus arbiter (util/
+// i2c_bus.hpp) the tenures are posted to.
 //
-// APP-LEVEL BENCH TOOLING, not framework, kept beside the two suites that
-// share it (test_stm32f4_i2c over I2C1, test_stm32f4_fmpi2c over FMPI2C1)
-// so that one reviewed copy of the request/response choreography serves
-// both. The wire format is avrxt/src/apps/twi_link.hpp, included by
-// relative path and not copied.
+// APP-LEVEL BENCH TOOLING, not framework, kept beside the protocol header it
+// speaks so that one reviewed copy of the request/response choreography
+// serves every suite that drives a peer this way; nothing in brio knows it
+// exists, and nothing here names a register. The wire format is
+// twi_link.hpp beside it, included by relative path and not copied. A suite
+// includes this file at file scope, before its own anonymous namespace.
 //
-// ONE COMMAND IS TWO TENURES of the engine under test - a write carrying
-// the frame, then a read of `response_bytes` collecting the answer - so the
-// command channel is itself a measurement of that engine. The peer acts
-// only after the ack read completes (ack before act), and every action it
-// runs ends at its own deadline, so a command that fails costs a deadline
-// and never a power cycle.
+// ONE COMMAND IS TWO TENURES of the path under test - a write carrying the
+// frame, then a read of `response_bytes` collecting the answer - so the
+// command channel is itself a measurement of that path. The peer acts only
+// after the ack read completes (ack before act), and every action it runs
+// ends at its own deadline, so a command that fails costs a deadline and
+// never a power cycle. A failed attempt is followed by Port::ready() and
+// 400 ms (the peer's own recovery bound) before the next; three attempts
+// are made, and a command that succeeds is followed by twi_link.hpp's
+// arm_ms before the caller's first measured edge.
 //
-// `Port` supplies the engine:
-//   static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len,
-//                         uint8_t* rx, uint8_t rx_len);   // a brio status
-//   static void ready();             // the host back where start() is legal
-//   static void wait_ms(uint32_t);   // a bounded wait on the tick
+// `Port` supplies the path, every function static:
+//   uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len,
+//                  uint8_t* rx, uint8_t rx_len);   // one tenure, waited for: a brio status
+//   void ready();             // the path back where a tenure is legal (a
+//                             // host re-inited; nothing, where an arbiter's
+//                             // timeout and recover() own that)
+//   void wait_ms(uint32_t);   // a bounded wait, in the suite's own sense
+//                             // of waiting (a spin, or a kernel's turns)
+// The buffers passed to tenure() are this file's own locals, valid for the
+// call; tenure() returns only when the tenure is over.
 
 #pragma once
 

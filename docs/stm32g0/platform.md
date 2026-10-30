@@ -681,6 +681,23 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   with its count at zero), USART1 given back, PA5 not an output, the
   ceiling the Console's.
 
+**The I2C stack under the preemptive kernel** - the suite is
+`test_stm32_rubato_i2c`, one key (`z`, 195 verdicts) against the
+Nucleo-F446RE's unchanged `twi_peer`, thirty runs alike, every verdict
+green. A Rubato pack of five objects runs `util/i2c_bus.hpp`'s arbiter
+over the engined `I2cHost<1>` ([i2c.md](i2c.md)) with three requesters
+of three priorities, under the same TIM14 pressure and the same seven
+passes as the link suite; the target-free half (the pack, the command
+channel through the arbiter, the letters) is the I2C suites' shared body,
+`avrxt/src/apps/rubato_i2c.hpp`, and the waits and passes both bodies
+share are `avrxt/src/apps/rubato_passes.hpp`. Every tenure shape on both
+of the host's paths, both speeds, the vocabulary, the commanded stretch
+and the arbiter's ordering held under every pressure as in the control;
+a preemption inside the host's `start()` is a later START and never a
+stretch, and the tenure cycle locks to the pressure's period (the
+findings are [i2c.md](i2c.md)'s, "The stack under the preemptive
+kernel").
+
 Two kernel programs on the Nucleo-G0B1RE: two AOs under time events at
 500/250/100 ms (PA5 sampled over SWD every 100 ms shows the 500 ms cadence
 and the switch to 250 ms after three seconds), and three AOs over USART2

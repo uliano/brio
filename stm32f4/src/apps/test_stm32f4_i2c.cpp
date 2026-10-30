@@ -126,7 +126,7 @@
 #include "util/testbench.hpp"
 
 #if defined(STM32F446xx)
-#include "twi_link_client.hpp"
+#include "../../../avrxt/src/apps/twi_link_client.hpp"
 #endif
 
 #if defined(STM32F446xx)

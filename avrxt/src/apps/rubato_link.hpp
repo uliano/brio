@@ -1,9 +1,11 @@
 // rubato_link.hpp - THE TARGET-FREE HALF OF THE LINK SUITES UNDER RUBATO:
 // what every family's test_<target>_rubato_link compiles unchanged around
-// its own engines - the pack of seven objects, the passes and the
-// pressure's verdict, the numbered lines and their borrower, the
-// spi_link.hpp window client with its command, query and report helpers,
-// letter w's bookkeeping, the base and wait turns, and the UART legs. A
+// its own engines - the pack of seven objects, the numbered lines and
+// their borrower, the spi_link.hpp window client with its command, query
+// and report helpers, letter w's bookkeeping and the UART legs; and,
+// through rubato_passes.hpp beside it (the waits and the passes every
+// suite under Rubato shares), the base and wait turns, the passes and the
+// pressure's verdict. A
 // link suite runs a family's real SPI and UART stacks (util/spi_bus.hpp's
 // arbiter over the family's SpiHost, util/line_reader.hpp's LineReader
 // over its Uart) inside Rubato, the preemptive kernel, against a desk
@@ -161,21 +163,12 @@
 // reads outside events: each written by one object, read by the Console
 // after the traffic that wrote it has been answered.
 //
-// THE PASSES. Every letter runs its traffic seven times: a CONTROL with the
-// pressure's timer silent, then under pressure at 97, 193 and 389 us with a
-// 300-cycle spin, and again with a 3000-cycle spin. Every pass is judged on
-// its own; a pass under pressure that fails where its control passes is a
-// finding about the service, printed with its counters. A pressure pass
-// also judges the pressure itself (judge_pressure()): the family's timer
-// counts from the clock its core runs on, so over a pass of T core cycles
-// it interrupts floor(T / (core MHz x period_us)) times, plus or minus one
-// for the two ends of the window, and each interrupt is one dispatch, none
-// dropped by Pressure's queue - which the family keeps true by keeping
-// Pressure's dispatch, a spin of at most 3000 cycles and the scheduler's
-// few hundred, shorter than its shortest period. A suite may add a pass fed
-// by another source (a PassSpec naming its `source`, which every label of
-// the pass carries), judged by the same arithmetic when that source counts
-// from the same crystal.
+// THE PASSES. Every letter runs its traffic seven times - a control with
+// the pressure's timer silent, then six pressures - and every pressure
+// pass judges the pressure itself; the passes, their arithmetic and the
+// waits are rubato_passes.hpp's, whose header states them. This pack's
+// marked state, the landing trace's `landed_marked`, is LineSink's
+// dispatch on the stack.
 
 #pragma once
 
@@ -327,10 +320,11 @@ constexpr uint8_t landing_slots = 8;   ///< the seven indices, and the loop's ba
 /// by slot.
 volatile uint32_t landed[landing_slots];
 /// ... with the arbiter dispatching a TransferDone at any depth, and of those
-/// one a DMA completion posted; and with LineSink's dispatch on the stack.
+/// one a DMA completion posted; and with LineSink's dispatch on the stack
+/// (`landed_marked`: this pack's marked state, rubato_passes.hpp's name).
 volatile uint32_t landed_completion = 0;
 volatile uint32_t landed_dma_completion = 0;
-volatile uint32_t landed_sink_any = 0;
+volatile uint32_t landed_marked = 0;
 volatile uint32_t pressure_irqs = 0;
 
 /// The arbiter's event kind while its dispatch runs (SpiArb below).
@@ -524,7 +518,7 @@ struct Pressure {
         }
     }
     if (sink_depth != 0u) {
-        landed_sink_any = landed_sink_any + 1u;
+        landed_marked = landed_marked + 1u;
     }
     pressure_irqs = pressure_irqs + 1u;
 }
@@ -914,181 +908,7 @@ struct Console {
 using K = Rubato<P, Pressure, LineSink, Client, SpiArb, Minor, LinePort, Console>;
 using TE = TimeEvents<P>;
 
-/// The console's received characters, each a letter or '?' (the console's
-/// vector posts console_rx when a byte arrived).
-void console_turn() {
-    uint8_t c = 0;
-    while (Serial::read_byte(c)) {
-        if (c == '\r' || c == '\n') {
-            continue;
-        }
-        print(serial, static_cast<char>(c), crlf);
-        if (c == '?') {
-            console_banner();
-        } else if (!bench.handle(static_cast<char>(c))) {
-            print(serial, "unknown letter (? for the menu)", crlf);
-        }
-        bench.prompt();
-    }
-}
-
-/// One turn of Rubato::run()'s loop, written out in the Console's dispatch:
-/// the matured time events posted with the ceiling held at 0, then the
-/// scheduler at the Console's ceiling.
-void base_turn() {
-    const uint8_t c = P::ceiling;
-    P::ceiling = 0;
-    TE::process();
-    P::ceiling = c;
-    (void)K::activate();
-}
-
-/// A wait's turn: the base turn, then 500 to 1523 cycles of the Console's
-/// own, the length from an 8-bit LFSR - so that the walk with the ceiling at
-/// 0 is a few per cent of a wait and not most of it (a tick landing in the
-/// walk waits for its end), and so that the wait's own period never locks
-/// to the pressure's and steers where it lands.
-uint8_t wait_lfsr = 0xA5;
-void wait_turn() {
-    base_turn();
-    const uint8_t v = wait_lfsr;
-    wait_lfsr = static_cast<uint8_t>((v << 1) | (((v >> 7) ^ (v >> 5) ^ (v >> 4) ^ (v >> 3)) & 1u));
-    spin(500u + 4u * static_cast<uint32_t>(v));
-}
-
-template <typename Pred>
-bool wait_until(Pred done, uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (!done()) {
-        if (Ticker::millis() - t0 >= ms) {
-            return done();
-        }
-        wait_turn();
-    }
-    return true;
-}
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-        wait_turn();
-    }
-}
-
-void wait_us(uint32_t us) { spin(us * cycles_per_us); }
-
-// =============================================================================
-// The passes and the pressure
-// =============================================================================
-
-struct PassSpec {
-    uint16_t period_us;   ///< 0: the control, the pressure's timer silent
-    uint16_t spin;        ///< Pressure's dispatch, in core cycles
-    /// The pressure's source, named in the pass's label: null for the
-    /// family's own timer (pressure_name), a text for a pass a suite adds
-    /// with another source ("core 1's doorbell").
-    const char* source = nullptr;
-};
-constexpr PassSpec passes[] = {{0, 0},      {97, 300},   {193, 300}, {389, 300},
-                               {97, 3000}, {193, 3000}, {389, 3000}};
-constexpr uint8_t pass_count = sizeof passes / sizeof passes[0];
-
-struct PassStats {
-    uint32_t wall = 0;        ///< core cycles, the timer on to off (the control: the pass)
-    uint32_t irqs = 0;
-    uint32_t runs = 0;
-    uint16_t overflows = 0;
-    uint32_t land[landing_slots] = {};
-    uint32_t completion = 0;
-    uint32_t dma_completion = 0;
-    uint32_t sink_any = 0;
-};
-
-uint32_t pass_t0 = 0;
-uint32_t pass_runs0 = 0;
-uint16_t pass_overflows0 = 0;
-
-char label_buf[48];
-
-/// "control: ", "97 us x 300: " or, for a pass with a source of its own,
-/// "core 1's doorbell, 97 us x 3000: ", the prefix of a pass's verdicts.
-const char* pass_label(const PassSpec& s) {
-    uint8_t n = 0;
-    auto put = [&n](char c) {
-        if (n + 1u < sizeof label_buf) {
-            label_buf[n++] = c;
-        }
-    };
-    auto put_num = [&put](uint32_t v) {
-        char d[6];
-        uint8_t k = 0;
-        do {
-            d[k++] = static_cast<char>('0' + v % 10u);
-            v /= 10u;
-        } while (v != 0u && k < sizeof d);
-        while (k != 0u) {
-            put(d[--k]);
-        }
-    };
-    if (s.period_us == 0u) {
-        for (const char* p = "control: "; *p != '\0'; ++p) put(*p);
-    } else {
-        if (s.source != nullptr) {
-            for (const char* p = s.source; *p != '\0'; ++p) put(*p);
-            put(',');
-            put(' ');
-        }
-        put_num(s.period_us);
-        for (const char* p = " us x "; *p != '\0'; ++p) put(*p);
-        put_num(s.spin);
-        put(':');
-        put(' ');
-    }
-    label_buf[n] = '\0';
-    return label_buf;
-}
-
-void pass_begin(const PassSpec& s) {
-    for (uint8_t i = 0; i < landing_slots; ++i) {
-        landed[i] = 0;
-    }
-    landed_completion = 0;
-    landed_dma_completion = 0;
-    landed_sink_any = 0;
-    pressure_irqs = 0;
-    pass_runs0 = Pressure::runs;
-    pass_overflows0 = Pressure::queue.overflows();
-    pressure_spin = s.spin;
-    if (s.period_us != 0u) {
-        pressure_arm(s.period_us);
-        pass_t0 = Ruler::now();
-        pressure_go();
-    } else {
-        pass_t0 = Ruler::now();
-    }
-}
-
-PassStats pass_end(const PassSpec& s) {
-    PassStats st{};
-    if (s.period_us != 0u) {
-        pressure_halt();
-        st.wall = Ruler::now() - pass_t0;
-        pressure_quiet();
-    } else {
-        st.wall = Ruler::now() - pass_t0;
-    }
-    st.irqs = pressure_irqs;
-    st.runs = Pressure::runs - pass_runs0;
-    st.overflows = static_cast<uint16_t>(Pressure::queue.overflows() - pass_overflows0);
-    for (uint8_t i = 0; i < landing_slots; ++i) {
-        st.land[i] = landed[i];
-    }
-    st.completion = landed_completion;
-    st.dma_completion = landed_dma_completion;
-    st.sink_any = landed_sink_any;
-    pressure_spin = 0;
-    return st;
-}
+#include "rubato_passes.hpp"
 
 /// The pass's pressure, printed with where it landed.
 void print_pass(const PassSpec& s, const PassStats& st) {
@@ -1103,22 +923,7 @@ void print_pass(const PassSpec& s, const PassStats& st) {
           ", Minor ", st.land[minor_index], ", Port ", st.land[port_index], ", Console ",
           st.land[console_index], ", base ", st.land[landing_slots - 1u], crlf);
     print(serial, "    inside a completion's dispatch (any depth) ", st.completion, ", of a DMA "
-          "completion ", st.dma_completion, "; LineSink on the stack ", st.sink_any, crlf);
-}
-
-/// The pressure was real: one interrupt a period over the pass, plus or
-/// minus one for the window's ends (the file header's arithmetic), every
-/// one dispatched, none dropped.
-void judge_pressure(const PassSpec& s, const PassStats& st) {
-    if (s.period_us == 0u) {
-        bench.verdict(pass_label(s), "the pressure's timer stayed silent", st.irqs == 0u);
-        return;
-    }
-    const uint32_t period = static_cast<uint32_t>(s.period_us) * cycles_per_us;
-    const uint32_t expect = st.wall / period;
-    const bool count_ok = st.irqs + 1u >= expect && st.irqs <= expect + 1u;
-    bench.verdict(pass_label(s), "Pressure ticked once a period, each tick one dispatch, none dropped",
-                  count_ok && st.runs == st.irqs && st.overflows == 0u);
+          "completion ", st.dma_completion, "; LineSink on the stack ", st.marked, crlf);
 }
 
 // =============================================================================
