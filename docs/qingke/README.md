@@ -281,13 +281,16 @@ of its platform suite that differ in the alignment alone, ten runs each:
 the software interrupt's round trip read 78 cycles aligned against 81
 unaligned on the CH32V006K8U6, 52 against 56 on the CH32V203C8T6, and 52
 to 62 against 53 to 63 on the CH32V303VCT6. There the preemptive
-kernel's suite, built the same two ways while its scan still called
-each queue's `empty()` out of line, moved the other way: road 1 (an
-interrupt handler's post preempting the running object) read 144 cycles
-aligned against 140 to 141, and a road-2 post (one object's post to a
-higher-priority object, which runs inside it) 344 to 347 against 338 to 342.
-Those figures are measured and not explained beyond the bodies behind
-the vectors, whose branch targets moved with them (`qingke/pfic.hpp`).
+kernel's suite moved the other way, in two diagnostic builds (not kept)
+that differ in the alignment alone and whose scheduler calls each
+queue's `empty()` out of line where the tree's forces it inline: road 1
+(an interrupt handler's post preempting the running object) read 144
+cycles aligned against 140 to 141, and a road-2 post (one object's post
+to a higher-priority object, which runs inside it) 344 to 347 against
+338 to 342. Those figures are measured and not explained beyond the
+bodies behind the vectors, whose branch targets moved with them
+(`qingke/pfic.hpp`); the pair is not measured on the scheduler the tree
+builds.
 
 ## What lives here, and what does not
 

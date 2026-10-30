@@ -202,19 +202,22 @@ PinSpeed miso_speed = PinSpeed::low;
 /// from GPIO for the whole burst, and on these wires the edges beside it
 /// couple into it: with SpiHost's default very-high on MOSI the far
 /// STM32G0B1RE's select pad sees 4 to 19 edges a burst where 2 are sent,
-/// whatever SCK's class from medium up (an EXTI line counting both edges
-/// on the pad, ten bursts of each client shape; its pull-up changes
-/// nothing, so the line is driven, not floating). A client that takes NSS
+/// whatever SCK's class from medium up (counted in a diagnostic build of
+/// the G0's suite, not kept: an EXTI line counting both edges on the pad,
+/// ten bursts of each client shape; its pull-up changes nothing, so the
+/// line is driven, not floating). A client that takes NSS
 /// from that pad is deselected mid-frame and its bit count starts again:
 /// 65 to 79 bursts of 100 lose a frame or slip, both ends wrong from one
 /// frame on, in every direction (letter r's exchange, letter y's single
 /// line out and its receive-only run). A client under SSM, which reads
 /// the pad once to see the select fall and then ignores it, is exact in
 /// every burst that carries the same glitches - the select alone is hit.
-/// With MOSI at MEDIUM the pad sees exactly 2 edges in every burst and
-/// every shape is exact, SCK at medium, high or very-high alike (360
-/// bursts of 360; test_stm32_spi letters r and y). SCK at low cures it
-/// too, but outside ES0298 2.14.5's table 5 for this APB1 (25 MHz of APB
+/// With MOSI at MEDIUM the same diagnostic counts exactly 2 edges in 360
+/// bursts of 360 and every shape is exact, SCK at medium, high or
+/// very-high alike (and test_stm32_spi's letters r and y, which count no
+/// edges, exact in twenty runs each). SCK at low with MOSI at very-high
+/// cures it too, so which edge couples into PB12 is not isolated; but
+/// SCK at low is outside ES0298 2.14.5's table 5 for this APB1 (25 MHz of APB
 /// at low against 45): medium on both pads keeps the erratum's ceiling
 /// (75 MHz), and DS10693 table 58's reach for medium (25 MHz at 50 pF)
 /// is above the fastest burst this instance can clock (PCLK1/2 = 22.5

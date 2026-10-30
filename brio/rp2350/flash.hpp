@@ -794,8 +794,10 @@ struct Xip {
     /// saturate at all ones and are cleared by a write of any value.
     /// They are 32 bits wide (4.4.5, tables 452 and 453), so a reader
     /// that subtracts them - a count of misses - clears them first with
-    /// reset_counters(): 2^32 accesses on both stand at all ones, the
-    /// difference stops moving and every miss after goes unseen.
+    /// reset_counters(): once the access counter stands at all ones a miss
+    /// leaves the difference where it is and a hit lowers it, so every
+    /// miss after goes unseen, and once the hit counter stands there too
+    /// the difference stops moving.
     static uint32_t accesses() { return XIP_CTRL->CTR_ACC; }
     static uint32_t hits() { return XIP_CTRL->CTR_HIT; }
     static void reset_counters() {

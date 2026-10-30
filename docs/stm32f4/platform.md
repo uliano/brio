@@ -303,28 +303,27 @@ letters land, nothing wired and nothing lit:
   events (kernel/rubato.hpp holds it there so that a timer's fire only
   queues; no dispatch of Top, whose index is also 0, can be open then,
   nothing in the suite being able to post to Top when a key arrives) -
-  and read 255 in every run, twenty of letter `a` alone and three of
+  and read 255 in every run, twenty of letter `a` alone and ten of
   `z`; Low posting to Mid and Mid to High nests High inside Mid inside
   Low, each inside the post that asked; High's post to Low is served
   after High returns and after Low's own dispatch ends; and at depth 2,
   an interrupt over High's
   handler (started by either road) runs Top before High resumes, Top's
-  first statement 134 to 138 cycles after the handler's last. Ten runs
-  of the suite time ten events by each road, twenty sets in all; in one
-  set the slowest event took 192 cycles, and since this letter does not
-  read the kernel tick around its events, a tick landing in the path is
-  not ruled out.
+  first statement 134 to 138 cycles after the handler's last in every
+  set of ten events, twenty sets over ten runs of the suite, one by each
+  road; the letter does not read the kernel tick around its events, so
+  an event a tick lengthened would go unattributed.
 - **The latency of road 1** (letter c): from the interrupt handler's
   last statement to High's handler's first, 143 cycles on all but one
-  or two events of a hundred, which take 148; 188 to 203 when a kernel
-  tick lands in the path. The sum of the path's own counts in the
+  event of a hundred in each of ten runs, which takes 148; 188 when a
+  kernel tick lands in the path (one event in two of the ten runs). The sum of the path's own counts in the
   listing (the handler's exit, PendSV's entry by tail-chaining, the
   fake frame's return, the entry, `activate()`'s scan and the
   dispatch's call, every refill at its most) is 135, short of the
   measurement, so the bound, 218, is the quiet path's slowest event
   (148) plus one tick (58) and the flash accelerator's misses (12).
 - **The scan and the post** (letter d): `activate()` with four empty
-  queues below the ceiling 80 cycles (121 at worst), each queue's two
+  queues below the ceiling 80 cycles (123 at worst), each queue's two
   cursors loaded and compared in line, since the queue's header forces
   `empty()` inline; a post that asks for nothing 78; a post that runs
   High's empty dispatch inside it 398, the scheduling's share 320.
@@ -348,7 +347,7 @@ letters land, nothing wired and nothing lit:
 - **A compiler hazard on road 2, found and closed**: GCC 16 at `-Os`
   deleted as dead a store the receiving dispatch inside `post()` read,
   the dispatch being reached through an exception the compiler cannot
-  see and the DSB's memory clobber not stopping it; the request is now
+  see and the DSB's memory clobber not stopping it; the request is
   a call the compiler cannot see into (`noinline`, `noipa`), one call
   and return on the asking path only.
 - **A second compiler hazard, in the kernel, found by the link suite
@@ -357,8 +356,8 @@ letters land, nothing wired and nothing lit:
   landing in that gap served the event in a nested scheduler and the
   outer pass took it again and released the slot twice, wedging the
   queue after half a second to nine seconds of pressure. The raise and
-  the restore are compiler barriers now (`kernel/rubato.hpp`), and the
-  suite below ran clean after it.
+  the restore are compiler barriers (`kernel/rubato.hpp`), and the
+  suite below runs clean over them.
 
 `test_stm32f4_rubato_link`, 230 verdicts on the Nucleo-F446RE (its
 target-free half the link suites' shared body,
@@ -367,15 +366,16 @@ the Nucleo-G0B1RE's unchanged `spi_peer` and `usart_peer` over the desk's
 SPI2 and USART1 wires: the real SPI and UART stacks under Rubato with
 an object above them preempting on TIM2 at 97, 193 and 389 us, its
 dispatch 300 then 3000 cycles, every letter run first without pressure
-as its control. The peer's command channel through the arbiter, the
-matrix on the DMA engines (152 kB/s, 977 to 1000 per mille of the
+as its control; three runs of each key, every verdict green. The peer's
+command channel through the arbiter, the
+matrix on the DMA engines (152 kB/s, 963 to 1000 per mille of the
 control under pressure), the arbiter with three requesters of three
 priorities (every reply to its requester in order, no timeout), the
 UART's numbered lines echoed at 460800 and 921600 through `LineReader`
 into a borrower above it (no line lost, out of order or corrupt, every
-port counter zero, 876 to 924 per mille of the wire), the one-writer
+port counter zero, 876 to 926 per mille of the wire), the one-writer
 blast judged by the peer, the loan with a slow borrower preempted
-inside its dispatch 21 to 106 times a pass: all byte-exact. The one
+inside its dispatch 19 to 114 times a pass: all byte-exact. The one
 limit found is the polled loop's, [spi.md](spi.md)'s "Not covered
 yet". Also observed: the peer's command window sent right after an
 answer window is not heard until the peer is back in command mode
@@ -551,6 +551,4 @@ timer on the crystal or the RTC is the ruler the M0+ suites use, and
 the timer chapter brings it); a scheduling request made with PRIMASK
 set, served when the mask lifts, which this
 family's suite does not exercise (the STM32G0's letter g does, on the
-same core stratum's code). The FPU is no longer a gap: `test_stm32f4_rubato`'s
-letter g computes float sums across a preemption and judges them
-bit-exact.
+same core stratum's code).

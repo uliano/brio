@@ -558,8 +558,8 @@ constexpr uint32_t latency_events = 100;
 /// at zero wait states, the code warm in the ART's cache after the
 /// uncounted first event, every refill taken at its most, every load at
 /// two cycles. The count is short of the path: measured, 143 on every
-/// event of a run no other interrupt touches but one or two in a hundred
-/// at 148, 8 and 13 cycles over the count. So the quiet path is the
+/// event of a run no other interrupt touches but one in a hundred at
+/// 148, 8 and 13 cycles over the count. So the quiet path is the
 /// measured 143 to 148, not the count; an event over latency_quiet below
 /// is one an interrupt landed in. On top of it, at most one SysTick
 /// handler landing in the path - its entry (12), its fifteen

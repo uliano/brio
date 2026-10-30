@@ -1291,10 +1291,13 @@ Driver gaps:
   preemption of 3000 cycles cuts short the rungs whose frame is 2048
   cycles or shorter, one of 300 cycles those of 256 and 512, every time
   with `spi_overrun` and never a run handed back with a hole; the pump
-  and the engines are exact at every rung. A hold-off that counts the
-  longest dispatch above the arbiter, or a polled path refused under a
-  preemptive platform, is the preemptive kernel's open question
-  ([../design/kernel.md](../design/kernel.md), "Rubato").
+  and the engines are exact at every rung. That is the limit
+  [../design/kernel.md](../design/kernel.md)'s "Rubato" section states
+  for every polled service under the preemptive kernel; a hold-off
+  figure that counts the longest dispatch above the arbiter, or a
+  polled path refused under a preemptive platform, is a decision not
+  taken, born with the first preemptive program that sizes its rate by
+  the hold-off.
 - **The BR ladder under HSRXEN on the CH32V30x_D8 lots that have it**
   (FPCLK/3, /5 ... /9): declined, because a program cannot read its lot
   and /2, the one code both ladders share, is what the driver offers.
@@ -1316,7 +1319,7 @@ Implemented but not bench-verified, each with what would measure it:
   `bench_vx03`'s letter e measures; SPI3's pads on the CH32V303VCT6's
   board are the evaluation board's jumpers and the pair's link, and the
   oracle run on SPI3 would close it by name. The preemptive link suite
-  measures the safe side on SPI3 already: two frames in flight from
+  measures the safe side on SPI3: two frames in flight from
   256-cycle frames (8-bit at /16, 16-bit at /8) through the pump and the
   polled loop, no overrun in its control passes and the pump exact under
   pressure ([platform.md](platform.md)); the loss on the other side of

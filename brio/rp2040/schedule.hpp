@@ -49,7 +49,8 @@
  * r0p1, and the stores it would order are the core's own, unstacked by
  * the same core.
  * Eighteen instructions to the single body's thirteen, 44 bytes with the
- * table; two cycles more on each core.
+ * table; five cycles more on each core, by that count (the single body's
+ * own path is timed by no suite).
  *
  * Each core keeps everything else as cortexm/schedule.hpp says: PendSV at
  * the lowest level in its own SHPR3 (so scheduler_init() runs on each core),
@@ -70,8 +71,8 @@
  * (rp2040/src/glue/startup_rp2040.cpp holds the one table today) and the
  * launch to take it (Core1::launch passes this core's SCB->VTOR); and a
  * second spelling of PendSV's binding that a program must keep apart
- * from the first. What it saves: the two cycles above, and the question
- * asked at every request. Two cycles a request do not pay for a second
+ * from the first. What it saves: the five cycles above, and the question
+ * asked at every request. Five cycles a request do not pay for a second
  * table every bound vector must be kept in step with, so the pair body is
  * the road a two-kernel program takes.
  *

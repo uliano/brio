@@ -872,7 +872,8 @@ as the ceiling and the UART's interrupt the loop's - 255 at its base,
 or 0 while the base turn walks the time events (kernel/rubato.hpp holds
 it there so that a timer's fire only queues; no dispatch of Top, whose
 index is also 0, can be open then, nothing posting to Top between
-letters); road 2 nests
+letters; every key of these runs arrived at the base, so the 0 rests
+on the code); road 2 nests
 High inside Mid inside Low, each inside the post that asked; at depth 2
 an interrupt over High's dispatch, started by either road, runs Top
 before High resumes; three timers matured in one turn are posted with
@@ -1037,14 +1038,15 @@ established:
   a leg and the preempting object landing inside the borrower 25 to 121
   times a pressure pass, 873 to 894 per mille of the wire.
 - **The crystal is that letter's premise.** The far echo is a polled
-  loop with no FIFO that holds two characters of a writer's lead. On a
-  first build whose clock was the HSI's PLL (the clock type without the
-  crystal's rate), half a per cent fast of the far crystal, the paced
-  and the blasted legs passed and the streamed one failed in every
-  pass, the control included: the far receiver counted 10 to 15 framing
-  errors a leg and 25 to 27 lines a leg came back corrupt. On the
+  loop with no FIFO that holds two characters of a writer's lead. On the
   crystals the two ends divide one PCLK1 by one divisor and agree within
-  nine ppm ([usart.md](usart.md)), 0.13 of a character over the leg.
+  nine ppm ([usart.md](usart.md)), 0.13 of a character over the leg; a
+  clock half a per cent fast of the far crystal would lead it by some 70
+  characters over the same leg. In a diagnostic build (not kept) clocked
+  so - the HSI's PLL, the clock type without the crystal's rate - the
+  paced and the blasted legs passed and the streamed one failed in every
+  pass, the control included: the far receiver counted 10 to 15 framing
+  errors a leg and 25 to 27 lines a leg came back corrupt.
 - **The DMA release contract holds at every hand-over.** Each leg moves
   the link port from the polled command channel to the Uart task and
   back through the block's reset line ([dma.md](dma.md), "A released
@@ -1061,10 +1063,10 @@ established:
   the scheduler's entry saved the crt's Dirty unit once, and nothing of
   the pack wrote a float after.
 
-The images: on the CH32V203C8 40684 bytes of text and 724 of data,
-41408 of the 60 KB the linker script gives it (67 %), and 5484 bytes
-of RAM of 20 KB (27 %); on the CH32V303VC 44432 of 252 KB (17 %) and
-5488 of 64 KB.
+The images: on the CH32V203C8 40952 bytes of text and 724 of data,
+41676 of the 60 KB the linker script gives it (67 %), and 5436 bytes
+of RAM of 20 KB (27 %); on the CH32V303VC 44720 of 252 KB (17 %) and
+5440 of 64 KB.
 
 ## Not covered yet
 

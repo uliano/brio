@@ -974,10 +974,10 @@ fails on both serves: the DMA serve hears all eight characters exact
 and this end reads all eight wrong, in twelve runs of twelve; the run
 loses one. It is a figure, not a fault to fix. Longer windows find
 PCLK/4 itself marginal on this fitting: thirty-two frames on the
-engines, or sixteen 16-bit frames on any path, slip between one window
-in twenty and one in a hundred and sixty, as often with nothing else
-running as under a preempting kernel ([platform.md](platform.md), "The
-drivers under the preemptive kernel"); no shape slipped at PCLK/8.
+engines, or sixteen 16-bit frames on any path, slip in up to one window
+in ten of a run, with nothing else running as well as under a
+preempting kernel ([platform.md](platform.md), "The drivers under the
+preemptive kernel"); no shape slipped at PCLK/8.
 
 **The arbiter over a SECOND CHIP.** Letter `q` runs `SpiBus`
 (= `BusMaster`) over `SpiHost` with the F446 answering: four
@@ -1009,20 +1009,23 @@ instrument's own: the command carries a DIVISION of the peer's clock, so
 the same 32 is 750 kHz from an AVR, 1.5 MHz from a SAM, 2 MHz from a G0
 and **1.406 MHz from the F446** (its PCLK1 of 45 MHz). Exact both ways,
 in 20 runs of 20 alone and in every run of `z` - WITH THE FAR HOST'S
-DATA PAD AT MEDIUM, because on these wires its edge reaches the select.
-The F446 holds the select low from GPIO for the whole burst; with its
-MOSI at `SpiHost`'s default very-high, PA15 counts 4 to 19 edges a burst
-where 2 are sent (an EXTI line on the pad in its alternate function,
-both edges; the pad's pull-up changes nothing, so the line is driven
-and coupled, not floating). A client that takes NSS from the pad is
+SCK AND MOSI AT MEDIUM, because on these wires the burst's fast edges
+reach the select. The F446 holds the select low from GPIO for the whole
+burst; with its MOSI at `SpiHost`'s default very-high and its SCK at
+medium or above, PA15 sees 4 to 19 edges a burst where 2 are sent
+(counted in a diagnostic build, not kept: an EXTI line on the pad in its
+alternate function, both edges; the pad's pull-up changes nothing, so
+the line is driven and coupled, not floating). A client that takes NSS from the pad is
 DESELECTED MID-FRAME and its bit count starts again at the next edge: it
 loses a frame or slips a bit, both ends wrong from one frame on - this
 exchange, letter `y`'s single line out and its receive-only run alike,
 65 to 79 bursts of 100 - while the client under SSM (letter `y`, below),
 which reads the pad only to see the select fall, is exact through the
-same glitches. With the F446's MOSI at medium the pad counts exactly 2
-edges in 360 bursts of 360, its SCK at medium, high or very-high alike;
-its SCK at low cures it as well, outside the F446's own erratum table
+same glitches. Either of the far host's pads cures it: with the F446's
+MOSI at medium the same diagnostic counts exactly 2 edges in 360 bursts
+of 360, its SCK at medium, high or very-high alike, and its SCK at low
+cures it with MOSI left at very-high (which edge couples into the select
+is not isolated), SCK at low being outside the F446's own erratum table
 ([the STM32F4's SPI page](../stm32f4/spi.md), "`SpiClient` against the
 STM32G0B1RE host"). The rate is not the remedy: a larger division
 keeps the same edges.
@@ -1030,9 +1033,12 @@ keeps the same edges.
 **16-BIT FRAMES ON ALL THREE OF THIS HOST'S ENGINES, AT THE WIRE'S TIME**
 (letter `u`, spi_link's `spare_wide`): thirty-two 16-bit frames a window,
 the F446 serving them in half-word beats, byte-exact both ways at every
-judged code to 16 MHz from the polled loop, the RXNE pump and the
+judged code to 8 MHz from the polled loop, the RXNE pump and the
 half-word engines - a frame on the engines a half-word beat, the beat
-the frame. Timed from two windows of 16 and 48 frames at the same rung
+the frame - and at 16 MHz in seven runs of `z` of ten: in the other
+three one of the letter's PCLK/4 verdicts failed (the engines' wire
+time, the F446's 16-bit client run, the polled loop's half-words), a
+frame lost or slipped there, the fitting's PCLK/4 margin above. Timed from two windows of 16 and 48 frames at the same rung
 (the transaction's fixed cost cancels), a frame inside the window takes
 998..1000 permille of its sixteen SCK periods on the polled loop and
 996..999 on the engines, at PCLK/16 and at PCLK/4; the pump's takes
@@ -1049,12 +1055,12 @@ the F446 listening with its answer line dark (its receive DMA, then its
 MHz too, printed: a client that only listens holds above the ceiling
 its answers break at. Odd counts both ways, 7 and 33 byte frames, exact
 against both of the peer's serves.
-ON THE DESK AS IT STANDS the PCLK/4 rung of these windows does not hold:
-six runs of the letter (two of them the suite's image before letter `y`
-was added) each failed three or four of its verdicts, the F446 reading
-the 16 MHz transmit-only windows wrong from a frame part-way through -
-the polled loop in both widths in most runs, the pump and the engines in
-some - every slower code exact; the open finding below.
+ON THE DESK AS IT STANDS the PCLK/4 rung of these windows does not hold
+in every run: in ten runs of `z` the letter failed one of its verdicts
+in four, the F446 reading the 16 MHz transmit-only windows wrong from a
+frame part-way through - the polled loop in two, the pump's write shape
+and the F446's `receive()` run once each - every slower code exact; the
+open finding below.
 
 **THE CRC AGAINST A FOREIGN UNIT** (letter `w`, `spare_crc`), this end's
 unit driven by hand on the resource (`SpiHost`'s Request has no CRC
@@ -1360,12 +1366,13 @@ on every header of the pack, but no silicon has run it:
 
 **Findings left open, with what would settle them:**
 
-- **letter `v`'s PCLK/4 rung on the desk as it stands** (above): the
-  same windows were exact at every judged code when the letter was
-  written, and the suite's image without letter `y` fails the same way
-  today, so what moved is most likely the wire and not the code. Letter `x`'s walk of the MOSI
-  pad's class against the F446's listening client at 16 MHz, and a look
-  at the four wires, would say whether it is the data edge again.
+- **letters `u`'s and `v`'s PCLK/4 rung on the desk as it stands**
+  (above): a frame lost or slipped at 16 MHz with this end hosting, in
+  four runs of `z` of ten. Letter `x`'s walk of the
+  MOSI pad's class against the F446's listening client at 16 MHz, an
+  edge count on the F446's select pad as the one above, and a look at
+  the four wires would say whether this end's edges reach the far
+  select as the far host's reach this one's.
 
 - **the CRCNEXT window's cause** (letter `t`): a store 16 to 26 core
   cycles before the last data frame's RXNE corrupts both calculators,

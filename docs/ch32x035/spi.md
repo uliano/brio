@@ -567,9 +567,10 @@ Driver gaps, each with its reason:
   loop runs inside the arbiter's dispatch, which a dispatch above it
   holds off for its whole length. An OVR test in the loop is a load and a
   branch a frame on a loop that runs at the wire; a decision for the
-  user, inside the preemptive kernel's open question on a polled path
-  under preemption ([../design/kernel.md](../design/kernel.md),
-  "Rubato").
+  user, the limit itself being the one
+  [../design/kernel.md](../design/kernel.md)'s "Rubato" section states
+  for every polled service under the preemptive kernel, this loop's
+  status `spi_stalled` where the others' is `spi_overrun`.
 
 Implemented but not bench-verified, each with what would measure it:
 

@@ -135,14 +135,16 @@ that asks which processor is in the socket, and its two halves),
 request, the core stratum's on one half and this stratum's on the
 other), `ticker.hpp` (the kernel timebase, one per core), `mtime.hpp`
 (the microsecond ruler), `resets.hpp`, `sysinfo.hpp` and `device.hpp`;
-4.4.1 (the XIP cache) and `brio/util/placement.hpp` for the placement.
+4.4.1 (the XIP cache), 4.4.5 (its registers, the two counters in
+tables 452 and 453) and `brio/util/placement.hpp` for the placement.
 The reference suites: `test_rp2350_platform`, which runs on both
 architectures from one source and is judged the same way on each (a
 letter is one command key of the suite's console and the group of
 verdicts it runs; `z` is the key that runs every letter but two, which
 run by name: `r`, the breadcrumb across a processor reset, and `x`,
-`break_here()`, which stops the console), and `test_rp2350_rubato` for
-the preemptive kernel, the same on both ("Bench findings").
+`break_here()`, which stops the console), `test_rp2350_rubato` for
+the preemptive kernel, and `test_rp2350_rubato_link` for the drivers
+under it, the same on both ("Bench findings").
 
 ## What the silicon does
 
@@ -338,7 +340,8 @@ bootrom hands over:
   and LSPEN. ARM's architecture resets both to 1, while this chip's
   FPCCR table gives both a reset value of 0, and so does the SVD it is
   generated from. **Measured, the register table is contradicted:**
-  FPCCR reads 0xC000001C after the bootrom, ASPEN 1 and LSPEN 1, so
+  FPCCR reads 0xC000001C after the bootrom (0xC0000004 in the first run
+  after a flash), ASPEN 1 and LSPEN 1 either way, so
   every exception taken over FP code stacks the FP context lazily, under
   Tenuto as under Rubato, and the FP registers come back bit-exact
   across a preemption, a float-computing handler's included
@@ -529,6 +532,13 @@ BRIO_RP2350_SCHEDULER_VECTORS_PAIR(K0, K1)
 }
 ```
 
+The excerpt discards two answers: `CoreTicker<1>::init()` is false when
+the ticker cannot be set (the SysTick reload not fitting on one half,
+the reference clock not a whole number of megahertz on the other, as
+the single-core example says), and `Inboxes<Motor>::enable()` is false on any core but Motor's,
+which `core1_main()` runs on by construction; a program that cannot
+rule the first out checks it before the unmask.
+
 Core 0's `main()` calls `brio::scheduler_init()` before its own unmask
 and `brio::Core1::launch(&core1_main)`, whose answer says whether core 1
 came up ([multicore.md](multicore.md) has the launch and the doorbell's
@@ -553,7 +563,7 @@ architectures from one source. Where the halves differ, both numbers:
 | the suite | 75 pass, 0 fail | 71 pass, 0 fail |
 | 200 kernel ticks on the ruler | 200000 us, 0 ppm | 199999 to 200000 us, 0 to 5 ppm |
 | `idle()` calls covering 200 ticks | 200 | 200 |
-| awake in that span (about 199.1 to 200.0 ms) | 1 to 3 us | 1 to 3 us |
+| awake in that span (about 199.0 to 200.0 ms) | 1 to 3 us | 1 to 3 us |
 | a wakeup raised INSIDE the mask | back in 0 to 4 us | back in 3 to 4 us |
 | a 5 ms masked window's ticks | 1 | 5 |
 | `Resets::release()` to RESET_DONE | 0 to 1 us | 0 to 1 us |
@@ -759,15 +769,16 @@ What the rows say of the Cortex-M33:
   else in the table moves. A queue visit as the kernel compiles it in
   line pays its cmp and bne one cycle together.
 - THE QUEUE VISIT IN LINE SAVES 6.5 CYCLES A VISIT, read directly: 12.5
-  through a call to `empty()` (alternating 12 and 13 with the units'
-  alignment) against 6 for the 32-bit in-line visit `activate()` makes.
+  through a call to `empty()` against 6 for the 32-bit in-line visit
+  `activate()` makes.
   The measured model counts 13 against 6, 7; the Cortex-M4's table 18
   against 8, 10. Built with the visit out of line and in line, the
   preemptive suite's road 1, scan, post under the mask, road-2 post and
   depth 2 differ by 13 cycles over two visits, 29 over four, 22 over
-  three, 31 over four and 5 over one: 5 to 7.75 a visit, which the
-  measured model predicts and the Cortex-M4's table overstates by about
-  a third.
+  three, 31 over four and 5 over one: 5 to 7.75 a visit, where the
+  measured model counts 17, 33, 25, 35 and 7, two to four cycles over on
+  each path, and the Cortex-M4's table 22, 46, 34, 44 and 8, half again
+  the measurement.
 - THE EXCEPTIONS: an SVC reaches its handler's first instruction in 13
   cycles, its own and the entry's 12, the Cortex-M4's figure. The return
   is faster: 10 from the BX LR that loads EXC_RETURN to the thread's next
@@ -863,47 +874,49 @@ cost taken off:
 
 | clk_sys cycles | Cortex-M33 | Hazard3 |
 |---|---|---|
-| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 106 / 106 / 135 | 179 / 179 / 551 |
+| road 1: an interrupt's last statement to the preempting dispatch's first, min / median / max over 100 events | 106 / 106 / 135 | 179 / 179 / 407 |
 | road 1: the path's count by the release listing, and the bound | 102, 177 | 175, 284 |
 | road 1 at depth 2, over a preempting dispatch | 96 | 170 |
-| `activate()` over four empty queues | 65 | 67 |
+| `activate()` over four empty queues | 65 | 68 |
 | a post that asks nothing | 60 | 53 |
 | a road-2 post, the receiver's empty dispatch inside (the scheduling's share) | 303 (243) | 323 (270) |
 | one `arm()`, its masked window inside | 61 | 45 to 51 |
 | a post under the mask: the section's end to the receiver's first | 117 | 160 |
-| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 652 to 688 (632 / 488) | 904 (928 / 736) |
+| stack high-water of the suite's deepest chain (bytes), the deepest sample in a dispatch / in the interrupt | 652 (632 / 488) | 904 to 992 (928 / 736) |
 | core 1, road 1 from its doorbell's handler at its base, a send from core 0 | 110 | 185 |
 | core 1, road 1 from its alarm over a dispatch | 102 | 175 |
 | core 1's paths' counts, and the bounds | 107 and 100; 129 and 120 | 181 and 171; 218 and 206 |
 | core 1's stack high-water (bytes), the deepest sample in a dispatch / in an interrupt | 236 (216 / 88) | 348 (352 / 192) |
 
-The pair body costs core 0 four cycles a scheduler entry on the
+The pair body costs core 0 three cycles a scheduler entry on the
 Cortex-M33 by the model and three measured (road 1, depth 2 and the
-post under the mask each three longer than with the single body: 103,
-93 and 114 before), two on Hazard3 by the model and two to four
-measured, where the paths' other one-cycle differences are branches
-that land on a 32-bit instruction off its 4-byte alignment in one image
-and not in the other. A road-2 post pays the request's core check too:
-four cycles on the Cortex-M33 (the SIO's address, CPUID, the branch),
-eight in all with the body, measured eight longer (295 before); one on
-Hazard3, whose request reads the hart id anyway, four in all, measured
-four longer (319 before). The quiet post, the scan and `arm()` ask
-nothing of the body and moved by a cycle at most, by layout. Road 1's
+post under the mask each three longer than in an image with the single
+body bound: 103, 93 and 114 there), two on Hazard3 by the model and two
+to four measured, where the paths' other one-cycle differences are
+branches that land on a 32-bit instruction off its 4-byte alignment in
+one image and not in the other. A road-2 post pays the request's core
+check too: four cycles on the Cortex-M33 (the SIO's address, CPUID, the
+branch), seven in all with the body, measured eight longer (295 with the
+single body); one on Hazard3, whose request reads the hart id anyway,
+three in all with the body, measured four longer (319 with the single
+body). The quiet post, the scan and `arm()` ask nothing of the body and
+differ by a cycle at most between the two images, by layout. Road 1's
 events over the fastest are the ones a tick, a refill or the console
-line landed in, and the bound judges the others: on Hazard3 this image,
-larger by core 1's letter, takes an XIP refill in one to three of the
-hundred events of every run (286 to 551 cycles), where the image with
-the single body took none. Every count is drawn with the figures this
-suite's letter `i` measures ("The cost models", above). Against the
-measurement the counts lie within a cycle on the paths that start and
-end in thread mode - the scan, the quiet post, the road-2 post and
-`arm()` - and 2 to 4 cycles under it on those that start in an interrupt
+line landed in, and the bound judges the others: on Hazard3 one or two
+of the hundred events of a run were lengthened so in six runs of ten
+(246 to 407 cycles), none in the four others. Every count is drawn with
+the figures `test_rp2350_platform`'s letter `i` measures ("The cost
+models", above). Against the measurement the counts lie within a cycle
+on the paths that start and end in thread mode - the scan, the quiet
+post, the road-2 post and `arm()` - but for Hazard3's road-2 post,
+counted 325 and measured 323, and 2 to 4 cycles under it on those that start in an interrupt
 handler or under the mask and end at a dispatch's first statement: road
 1, depth 2, the post under the mask and core 1's two paths, on both
 halves. That residue is not placed: every primitive those paths add over
 the others - the tail-chain from a handler's POP of the PC, PendSV taken
 at the MSR, the software interrupt behind an `mret` and behind a
-`csrsi` - measures at its model in letter `i`. Counted with the
+`csrsi` - measures at its model in `test_rp2350_platform`'s letter `i`.
+Counted with the
 Cortex-M4's table instead, the Cortex-M33's paths come out 24 cycles
 over the measurement on road 1 and 15 to 79 over on the others; with the
 core's dual issue turned off (ACTLR.DISFOLD set in a build of this suite
@@ -916,14 +929,16 @@ Hazard3 the measured model is 3.8.7 with `mret` at 3 and the interrupt's
 entries measured, and its counts lie within a cycle or two of 3.8.7's.
 Each queue's emptiness is its two cursors compared in line, no call. A
 post under the mask
-lengthened by a kernel tick or an XIP refill reached 395 cycles on the
-Cortex-M33 and 257 on Hazard3, and is reported, not judged. Core 0's
-high-water marks are now those of core 1's letter, whose Low, High and
+lengthened by a kernel tick or an XIP refill reached 278 cycles on the
+Cortex-M33 and 394 on Hazard3, and is reported, not judged. Core 0's
+high-water marks are those of core 1's letter, whose Low, High and
 Top nest three deep over the Console; on Hazard3 the paint's edge
-stands 24 bytes above the deepest sample, the lowest words of that
-`activate()`'s frame being ones no path below it writes, and the
-letter allows that frame's 44 such bytes. Both are inside the bound
-below the deepest sample, 312 and 400 bytes. The two halves' rows part
+stands 24 bytes above the deepest sample in seven runs of ten (904
+against 928), the lowest words of that `activate()`'s frame being ones
+no path below it writes, and the letter allows that frame's 44 such
+bytes; in one run it stood at the sample and in two 64 bytes below it
+(992). All are inside the bound below the deepest sample, 312 and 400
+bytes. The two halves' rows part
 where their mechanisms do: on the Cortex-M33 the hardware stacks the
 interrupted code's registers, on Hazard3 the crt's trampoline and the
 scheduler's entry each save sixteen in software ("What the silicon
@@ -936,14 +951,15 @@ longer, the barrier's cost on this core. Hazard3's pair body is
 nineteen instructions in the listing, the single body's seventeen.
 
 - **The FPU across a preemption** (letter j, the Cortex-M33 alone):
-  FPCCR reads 0xC000001C, ASPEN 1 and LSPEN 1, where the datasheet's
+  FPCCR reads 0xC000001C (0xC0000004 in the first run after a flash),
+  ASPEN 1 and LSPEN 1 either way, where the datasheet's
   register table and the SVD give both a reset value of 0; Low's float
   series, preempted at a mark inside its loop by High's own series, and
   in a second run by an interrupt handler that computes a float too,
   ends with every value bit-exact against the same functions run without
   preemption.
 - **The software interrupt's own facts** (letter k, Hazard3 alone):
-  after the raw store that raises the hart's flag, 1 to 2 of the eight
+  after the raw store that raises the hart's flag, two of the eight
   stores behind it retire before the trap - the latency the request
   waits out - and behind the platform's request none; each raise serves
   Top exactly once (20 raises); the caller-saved registers, loaded with
@@ -966,12 +982,13 @@ nineteen instructions in the listing, the single body's seventeen.
   0's High is refused and counted by High's queue, runs nothing, and
   leaves core 1's request down - PendSV not pending, the hart's flag low
   - in every run. Core 1's two road-1 latencies, the table's rows, are
-  read with core 0 asleep: the same letter with core 0 spinning on the
-  ruler and on the flash meanwhile read 113 to 117 and 110 cycles
-  against 111 and 105 asleep on the Cortex-M33, and 196 and 189 against
-  185 and 175 on Hazard3 - the two cores' fetches and bus accesses
-  meet, by 2 to 6 cycles on one half and 11 to 14 on the other; which
-  port they meet at is not separated. Core 1's FPCCR reads 0xC0000004,
+  read with core 0 asleep. In a diagnostic build of the letter (not
+  kept) with core 0 spinning on the ruler and on the flash meanwhile,
+  they read 113 to 117 and 110 cycles against that build's 111 and 105
+  with core 0 asleep on the Cortex-M33, and 196 and 189 against 185 and
+  175 on Hazard3 - the two cores' fetches and bus accesses meet, by 2 to
+  6 cycles on one half and 11 to 14 on the other; which port they meet
+  at is not separated. Core 1's FPCCR reads 0xC0000004,
   ASPEN 1 and LSPEN 1, as core 0's does in its first run after a flash.
   Sent before core 1 has left the scheduler entry of the previous
   crossing, a doorbell lands in that entry's exit and nests a new entry
@@ -985,7 +1002,7 @@ nineteen instructions in the listing, the single body's seventeen.
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2350_rubato_link`, one source and two images, two keys against
 the WeAct RP2040's unchanged `spi_peer` (`z`, 147 verdicts) and
-`uart_peer` (`y`, 55 verdicts), ten runs of each key on each half alike,
+`uart_peer` (`y`, 55 verdicts), three runs of each key on each half alike,
 every verdict green. It runs the real SPI and UART stacks inside a Rubato
 pack of seven objects on core 0: `util/spi_bus.hpp`'s arbiter over the
 engined `SpiHost<1>` ([spi.md](spi.md); half-word engines on DMA channels
@@ -1007,8 +1024,8 @@ established, on both halves:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
-  off for its whole length - the alarm landed there 36 to 188 times a
-  pass in letter `p` on the Cortex-M33 and 42 to 212 on Hazard3. The
+  off for its whole length - the alarm landed there 39 to 192 times a
+  pass in letter `p` on the Cortex-M33 and 40 to 190 on Hazard3. The
   FIFOs are the write-ahead on every path (no more than 8 frames in
   flight, `brio/pl022/spi.hpp`), so a held-off loop or pump leaves a gap
   on the bus and never a lost frame: the polled loop in 8-bit frames (9)
@@ -1019,15 +1036,15 @@ established, on both halves:
   [spi.md](spi.md) derives it against the RP2040's 125 MHz), under every
   pressure as in the control, the block's overrun flag clear at every
   reply. Past that ceiling, /14 is exact on all six paths in every pass
-  of both halves and /12 on a varying few, the control's as the
+  of both halves and /12 on none to three, varying, the control's as the
   pressures'.
 - **The matrix and the arbiter.** The four modes in both widths, the
   client MSb and LSb first (the LSb rows an exact two-way reversal
   against this MSb-only host) on the engines at clk_peri / 32, byte-exact
-  in every pass, the data windows at 944 to 1007 per mille of the
-  control's rate under pressure on the Cortex-M33 and 926 to 1003 on
-  Hazard3, the cache's misses over a pass as the control's (611 to 887 on
-  the Cortex-M33, 4934 to 5274 on Hazard3, the counters cleared at each
+  in every pass, the data windows at 939 to 1003 per mille of the
+  control's rate under pressure on the Cortex-M33 and 925 to 1005 on
+  Hazard3, the cache's misses over a pass as the control's (1750 to 1970 on
+  the Cortex-M33, 2152 to 2415 on Hazard3, the counters cleared at each
   pass's start); three requesters of three priorities on one select
   window answered every one `spi_ok`, to its requester, in its order,
   with no timeout, no rejection and the peer counting every frame exact.
@@ -1035,14 +1052,14 @@ established, on both halves:
   echoed by the RP2040's `uart_peer`, assembled by `LineReader` from the
   interrupt receiver's ring and lent to the borrower: 200 a leg, none
   lost, out of order or corrupt, every port counter zero (ring overruns,
-  OE, FE, PE, BE, the ring's skips), 950 to 953 per mille of the wire (the writer
+  OE, FE, PE, BE, the ring's skips), 949 to 953 per mille of the wire (the writer
   paces each line to its own last stop bit). The peer has one rate and no
   report, so the key is reduced to this rate and to what this end judges
   (Not covered yet).
 - **The loan under preemption.** With the borrower holding each line
   sixteen character times (one receive level of the FIFO) and the lines
   streamed five ahead, the alarm landed inside the borrower's dispatch
-  706 to 2937 times a pass and the link's vector inside every one of its 200
+  709 to 2934 times a pass and the link's vector inside every one of its 200
   dispatches a leg; every line arrived exact, each lent alone, the two
   buffers strictly alternating, the leg at 995 to 996 per mille of the wire.
 - **Dark** (letter `i`): every object idle, TIMER1's alarm 0 disarmed with

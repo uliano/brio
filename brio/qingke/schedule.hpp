@@ -193,7 +193,7 @@
  * flags again. Measured on the CH32V303VCT6 (test_vx03_rubato's letter
  * j): sums held in f-registers bit-exact across preemptions, a float
  * handler's among them, flags raised by the preempting dispatch not seen
- * by the preempted one, and the save's price 25 to 27 cycles on the way
+ * by the preempted one, and the save's price 27 to 30 cycles on the way
  * in and 29 on the way out. The save lives here, in thread mode,
  * and never in a vector's body: the vector guard (cli/vector_guard.py)
  * holds every vector of an F image to touching no f-register, and the

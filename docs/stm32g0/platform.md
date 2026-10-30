@@ -497,7 +497,8 @@ listing) - ST's
   drain first.
 
 **The preemptive kernel** - the reference suite is `test_stm32_rubato`
-(nine letters in `z`, 37 verdicts, ten runs of `z` alike): a Rubato pack
+(nine letters in `z`, 37 verdicts; ten runs of `z`, every verdict green
+in nine and letter `g`'s bound missed once in the tenth, below): a Rubato pack
 of five objects on `Stm32g0RubatoPlatform` on the Nucleo-G0B1RE at
 64 MHz, the Console the lowest and the letters' runner, TIM14's compare
 the interrupt the road-1 letters land, nothing wired and nothing lit.
@@ -517,19 +518,20 @@ derives from the core's own counts over the release listing:
   (kernel/rubato.hpp holds it there so that a timer's fire only
   queues; no dispatch of Top, whose index is also 0, can be open then,
   nothing in the suite being able to post to Top when a key arrives) -
-  and read 255 in every run, twenty of letter `a` alone and three of
+  and read 255 in every run, twenty of letter `a` alone and ten of
   `z`; Low posting to Mid and Mid to High nests High inside Mid inside
   Low, each inside the post that asked, High's post to Low served
   after Low's own dispatch ends; and at depth 2 an
   interrupt over High's handler, started by either road, runs Top
   before High resumes, Top's first statement 155 to 156 cycles after
-  the handler's last (one event of the two hundred in ten runs at 218,
-  unattributed: the letter reads no tick around it).
+  the handler's last (three events of the two hundred in ten runs at 201
+  to 219, each by road 1, unattributed: the letter reads no tick around
+  them).
 - **The latency of road 1** (letter c): from the interrupt handler's
   last statement to High's handler's first, 180 cycles min, 181 median
-  and max over 100 events, every run; 227 and 246 for the one event in
-  about five hundred a kernel tick lands in (two of the thousand events
-  of ten runs, a tick inside each). The path counts 144 cycles at zero
+  and max over 100 events, every run; 227 to 250 for the one event in
+  about a hundred and seventy a kernel tick lands in (six of the
+  thousand events of ten runs, a tick inside each). The path counts 144 cycles at zero
   wait states - the handler's exit, the tail-chain into PendSV, its
   thirteen instructions and the return through the fake frame, the
   entry, `activate()`'s visits to Top and High with each queue's two
@@ -555,13 +557,16 @@ derives from the core's own counts over the release listing:
   run - and the receiver runs when the section's guard restores the
   mask, before the statement after it, from the Console's dispatch and
   from inside Low's, ten runs each; the section's last statement to the
-  receiver's first 192 to 193 cycles (bound 234). The nested guard of
+  receiver's first 192 to 193 cycles (bound 234) in nine runs of ten,
+  and in the tenth one event of ten at 239, over the bound, failing the
+  letter: an event lengthened by something the letter does not read
+  (it reads no tick around its events). The nested guard of
   the trace's own `note()` inside the section restores PRIMASK set and
   takes nothing.
 - **The stack** (letter h): painted from main's frame down to the end of
   `.bss` and `.noinit` (0x20000730..0x20023F80), 500 bytes of
   high-water for the suite's deepest chain, the deepest sampled stack
-  pointer at 464 bytes in a dispatch and 344 in the interrupt, the mark
+  pointer at 464 bytes in a dispatch and 336 in the interrupt, the mark
   within the 156 bytes an action's frames, a basic exception frame and
   a handler's or a PendSV level's frames add.
 - **Dark** (letter i): every object idle, no timer armed, TIM14 quiet,
@@ -576,9 +581,10 @@ derives from the core's own counts over the release listing:
   that asks; `activate()` reads each queue's two cursors and compares
   them in line, no call per queue (`EventQueue::empty()` is forced
   inline), and `idle_if_empty()`'s masked window, from the `cpsid` to
-  the WFI, is 27 instructions and no call. Builds of the suite in which
-  `activate()` called the queue's `empty()` out of line measured the
-  rest of this paragraph. Two that differed only in comments and
+  the WFI, is 27 instructions and no call. The rest of this paragraph
+  was measured in diagnostic builds of the suite (not kept) whose
+  `activate()` calls the queue's `empty()` out of line. Two that differ
+  only in comments and
   constants put the road-1 path at 197..198 and 193..194 cycles, the
   scan at 184 and 165, the road-2 post at 546 and 531: a path's cost
   from this flash moves with where it sits, as "Code in SRAM" below
@@ -596,7 +602,7 @@ derives from the core's own counts over the release listing:
 
 **The drivers under the preemptive kernel** - the suite is
 `test_stm32_rubato_link`, two keys against the Nucleo-F446RE's unchanged
-`spi_peer` (`z`, 140 verdicts) and `usart_peer` (`y`, 111 verdicts), ten
+`spi_peer` (`z`, 140 verdicts) and `usart_peer` (`y`, 111 verdicts), three
 runs of each alike, every verdict green. It runs the real SPI and UART
 stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
 arbiter over the engined `SpiHost<1>` ([spi.md](spi.md); half-word
@@ -614,7 +620,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds
-  it off for its whole length - TIM14 landed there up to 360 times a
+  it off for its whole length - TIM14 landed there up to 353 times a
   pass. With the RXFIFO as the write-ahead (no more frames in flight
   than it holds, [spi.md](spi.md)), a held-off loop leaves a gap on the
   bus and never a lost frame: the polled loop packed (8 frames) and
@@ -625,20 +631,20 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   at every one of the replies (the receive shapes never let it rise).
   This host has no `spi_overrun` and needs none.
 - **PCLK/4 = 16 MHz is this fitting's, not the service's.** The same
-  rungs at PCLK/4 slip between one window in twenty and one in a hundred
-  and sixty, with TIM14 silent as often as under it and on the DMA
-  engines too, which no preemption reaches
+  rungs at PCLK/4 slip in up to one window in ten of a run, with TIM14
+  silent as well as under it and on the DMA engines too, which no
+  preemption reaches
   (the suite's letter `x`, forty windows a shape and a pressure, four
-  runs: 16-bit frames on the engines 8 of 160 windows silent and 4 of
-  160 pressed, on the pump 2 and 2, on the polled loop 1 and 1; byte
+  runs: 16-bit frames on the engines 2 of 160 windows silent and 4 of
+  160 pressed, on the pump 2 and 4, on the polled loop 1 and 0; byte
   frames on the pump 0 and 0; 16-bit frames at PCLK/8 0 and 0). Letter
-  `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 349 of 350
-  path rungs over ten runs) and PCLK/2 (above the F446 client's
+  `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 103 of 105
+  path rungs over three runs) and PCLK/2 (above the F446 client's
   22.5 MHz, wrong on every path, as [spi.md](spi.md)'s peer ladder
   finds).
 - **The matrix and the arbiter.** The four modes in both widths, LSb
   first and a DORD mismatch on the engines at PCLK/32, byte-exact in
-  every pass, the data windows at 719 to 999 per mille of the control's
+  every pass, the data windows at 725 to 1000 per mille of the control's
   rate under pressure; three requesters of three priorities on one
   select window (the Client above the arbiter on the engines, a
   requester below it polled, the preempting object itself on the pump)
@@ -656,7 +662,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   the USART counting one HSI16.
 - **The loan under preemption.** At 460800 with the borrower spinning
   6000 cycles a line and the lines streamed five ahead, TIM14 landed
-  inside the borrower's dispatch 95 to 604 times a pass; every line
+  inside the borrower's dispatch 93 to 601 times a pass; every line
   arrived exact, each lent alone, the two buffers strictly alternating,
   and the receive stream moved inside the borrower's dispatch 21 to 32
   times a leg. The rate is the echo's: the F446's echo has no FIFO and

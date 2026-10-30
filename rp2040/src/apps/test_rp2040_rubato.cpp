@@ -886,8 +886,8 @@ void td_scan() {
     // (the first span is always flagged, its second pair's code cold; of
     // the three after it 12 in 60 were flagged, the differences of the
     // flagged spans of that run 34 to 69 cycles), and that run had no
-    // span left to judge. The lengths step through 1, 1.001, 1.002 and
-    // 1.003 ms as before.
+    // span left to judge. The lengths step by 1000 cycles, 8 us: 1, 1.008,
+    // 1.016 and 1.024 ms.
     constexpr uint8_t spans_wanted = 4;
     constexpr uint8_t spans_most = 16;
     uint32_t agree_hi = 0;        ///< the worst span whose pairs missed no line

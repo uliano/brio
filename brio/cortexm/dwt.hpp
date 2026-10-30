@@ -29,9 +29,7 @@
  *
  * THE COST OF A READ: one LDR from 0xE0001004 on the private peripheral
  * bus, two cycles on the Cortex-M4 when it does not pipeline with a
- * neighbouring load (DDI 0439B table 3-1, 3.3.2) - on the RP2350's M33
- * one, two when the next instruction reads it (measured, rp2350/src/apps/
- * test_rp2350_platform.cpp's letter i) -, plus the address it
+ * neighbouring load (DDI 0439B table 3-1, 3.3.2), plus the address it
  * needs in a register. now() is forced inline so that a stamp in a
  * handler is that load and nothing more.
  *

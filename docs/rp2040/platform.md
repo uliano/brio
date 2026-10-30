@@ -216,7 +216,10 @@ nothing short of the DORMANT state stops.
   barrier is the Cortex-M4's alone, for its erratum 838869,
   [the core stratum's page](../cortexm/README.md)). By the release
   listing eighteen instructions and 44 bytes with the table, against the
-  single body's thirteen and 32: two cycles more at zero wait states.
+  single body's thirteen and 32: five cycles more at zero wait states
+  (the selection's six instructions, seven cycles, in place of the
+  literal load's two), counted and not measured, the single body's own
+  path being timed by no suite.
   `K0` must be a Rubato on `Rp2040RubatoPlatform<0>` and `K1` one on
   `Rp2040RubatoPlatform<1>`, refused at compile time otherwise.
 - `Ticker` = `CoreTicker<0>`, the core stratum's `BasicTicker<1000>`
@@ -326,8 +329,8 @@ words, 192 bytes in the flash or a copy in SRAM aligned as VTOR
 requires, every vector a program binds present in both; a crt that
 defines it and a launch that takes it (today the crt holds one table and
 `Core1::launch` passes core 0's VTOR); a second binding of PendSV a
-program must keep apart from the first. What it saves: the pair's two
-cycles and its question at every request. Two cycles a request do not
+program must keep apart from the first. What it saves: the pair's five
+cycles and its question at every request. Five cycles a request do not
 pay for a second table that every bound vector must be kept in step
 with, so a two-kernel program takes the pair body, built and measured
 ("Bench findings"), and the table per core is declined.
@@ -465,12 +468,12 @@ to the pair body for every letter (letter k runs a Rubato on each core),
 nothing wired and nothing lit. The ruler is core 0's composed `cycles()`
 (SysTick's position and the tick count): two back-to-back reads are 55
 cycles apart, a cost taken off every span below. Against the system
-timer over spans of 1 to 1.003 ms, taken until four are clean or
+timer over spans of 1 to 1.024 ms, taken until four are clean or
 sixteen have been taken (five to seven were taken), a span whose pairs
-of reads missed no XIP line agrees within 27 to 98 cycles - the
+of reads missed no XIP line agrees within 26 to 98 cycles - the
 microsecond's two floors, 125 cycles, and the skew between the pairs -
 while a span with a cache refill flagged inside a pair of reads is off
-by up to 223 and is reported, not judged; with four spans alone, every
+by up to 145 and is reported, not judged; with four spans alone, every
 one was flagged in one run of twenty, and that run had none to judge. That is the suite's method throughout: an event, a run or a
 span that a kernel tick, an XIP refill or the console line's handler
 lengthened is told apart by counters read around it (the tick count,
@@ -492,13 +495,16 @@ unseen. clk_sys cycles:
   Mid inside Low, each inside the post that asked; at depth 2 an
   interrupt over High's handler, started by either road, runs Top before
   High resumes, Top's first statement 182 to 183 cycles after the
-  handler's last.
+  handler's last, but for one event of a set at 834 (by road 2) in two
+  runs of ten and one at 234 (by road 1) in a third (the letter reads no
+  tick and no miss counter around its events, so those are
+  unattributed).
 - **The latency of road 1** (letter c): from the alarm handler's last
   statement to High's handler's first, 196 cycles min and 197 median
   over 100 events, none missed, two to three cycles under the listing's
   count of the path with every fetch a cache hit (199); in the runs
   where a kernel tick or a cache refill landed in one event, that event
-  232 to 247 cycles, told apart by the counters read around it.
+  233 to 247 cycles, told apart by the counters read around it.
 - **The scan and the post** (letter d): `activate()` with four empty
   queues below the ceiling 88 cycles, each queue's two cursors compared
   in line (`empty()` is forced inline); a post that asks for nothing 80;
@@ -508,21 +514,23 @@ unseen. clk_sys cycles:
   one turn are posted with the ceiling held at 0 and served High, Mid,
   Low; High preempting Low's loop of `arm()` and `disarm()` by road 1
   leaves the list whole, every timer due fired once, the disarmed one
-  never; one `arm()` 85 cycles with its masked window inside.
+  never; one `arm()` 73 cycles in six runs of ten and 85 in four, the
+  least of sixteen each, with its masked window inside (the difference
+  is not explained).
 - **The request under PRIMASK** (letter g): a post to a higher object
   inside a critical section pends PendSV and is served when the
   section's guard restores the mask, before the statement after it,
   from the Console's dispatch and from inside Low's; the section's last
-  statement to the receiver's first 211 cycles in every run nothing
-  lengthened (in one run of ten a kernel tick or an XIP refill
-  lengthened one, told apart by the counters).
+  statement to the receiver's first 211 cycles in every run (in nine
+  runs of ten a kernel tick or an XIP refill lengthened one event of
+  the run, told apart by the counters).
 - **Road 1 across the cores** (letter j, core 1 under Tenuto running one
   object, Relay, that answers core 0's send with a send to High): a post
   from core 1 to core 0's object is refused and counted as a mispost and
   pends no PendSV on core 1; Low's send crosses to core 1 and Relay's
   answer crosses back, core 0's doorbell handler posts to High, and
   High's dispatch starts after that handler's last statement and before
-  Low resumes, 7 to 14 us from Low's send to High's first statement. From
+  Low resumes, 7 to 11 us from Low's send to High's first statement. From
   the doorbell handler's last statement to High's first, 196 cycles
   min and 197 median over 100 crossings, the slowest of a run 197 to
   248, none over 267: the road 1 of letter c, a doorbell's handler in
@@ -536,19 +544,19 @@ unseen. clk_sys cycles:
   the two cores preempt at once, each preemption landing inside the
   other core's preempted dispatch on the system timer, in 10 of 10;
   core 1's ceiling reads 255 at its base after; core 1's stack
-  high-water mark 260 bytes, its deepest sampled stack pointer 240 in a
-  dispatch and 112 in its interrupt.
+  high-water mark 260 bytes (272 in one run of ten), its deepest sampled
+  stack pointer 240 in a dispatch and 112 in its interrupt.
 - **Dark** (letter i): every object of core 0 idle, core 1 parked in the
   bootrom, no time event and no alarm armed, GP25 not an output, the
   ceiling the Console's, interrupts enabled.
-- **The stack** (letter h): core 0's high-water mark 532 to 576 bytes
+- **The stack** (letter h): core 0's high-water mark 532 bytes
   for the suite's deepest chain, its deepest sampled stack pointer 512
   in a dispatch and 344 to 368 in an interrupt.
 
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2040_rubato_link`, two keys against the WeAct RP2350B's
 unchanged `spi_peer` (`z`, 150 verdicts) and `uart_peer` (`y`, 58
-verdicts), ten runs of each alike, every verdict green. It runs the real
+verdicts), three runs of each alike, every verdict green. It runs the real
 SPI and UART stacks inside a Rubato pack of seven objects on core 0:
 `util/spi_bus.hpp`'s arbiter over the engined `SpiHost<1>`
 ([spi.md](spi.md); half-word engines on DMA channels 6 and 7, line 1),
@@ -556,8 +564,8 @@ SPI and UART stacks inside a Rubato pack of seven objects on core 0:
 receiver ([uart.md](uart.md)), a borrower of the reader's lines above it,
 and on top an object that PWM slice 7's wrap interrupt posts to every 97,
 193 or 389 us, whose dispatch spins 300 or 3000 cycles - at 97 us x 3000,
-25 % of the core. Every letter runs once with the slice silent as its
-control and six times under that pressure, and letters `o` and `t` an
+25 % of the core. Every letter but the dark one runs once with the slice
+silent as its control and six times under that pressure, and letters `o` and `t` an
 eighth time with the pressure fed by core 1 (below); every pass judges the
 pressure itself, one dispatch per period over the pass, none dropped. The
 target-free half of the suite is the link suites' shared body
@@ -570,7 +578,7 @@ established:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
-  off for its whole length - the slice landed there 63 to 379 times a
+  off for its whole length - the slice landed there 65 to 352 times a
   pass in letter `p`. The FIFOs are the write-ahead on every path (no
   more than 8 frames in flight, `brio/pl022/spi.hpp`), so a held-off loop
   or pump leaves a gap on the bus and never a lost frame: the polled loop
@@ -581,12 +589,12 @@ established:
   client's ceiling as [spi.md](spi.md) derives it), under every pressure
   as in the control, the block's overrun flag clear at every reply. The
   first rung past that ceiling, /10 (a half period of 40 ns where the
-  client needs 41.7), is exact on a different subset of the six paths in
-  each pass, the control's as the pressures'; /8 on none.
+  client needs 41.7), is exact on a subset of the six paths that varies
+  from pass to pass, the control's as the pressures'; /8 on none.
 - **The matrix and the arbiter.** The four modes in both widths, the
   client MSb and LSb first (the LSb rows an exact two-way reversal
   against this MSb-only host) on the engines at clk_peri / 32, byte-exact
-  in every pass, the data windows at 834 to 1002 per mille of the
+  in every pass, the data windows at 894 to 1004 per mille of the
   control's rate under the slice's pressure; three requesters of three
   priorities on one select window (the Client above the arbiter and the
   preempting object itself on the pump, a requester below it polled)
@@ -600,31 +608,31 @@ established:
   (the system timer's microsecond and clk_sys share the crystal), the
   matrix and the echoed lines exact under it.
 - **The XIP cache, and whose code shares its sets.** Letter `o` prints the
-  cache's misses over each pass (the counters cleared at its start). On
-  the final image the slice's passes read 5908 to 6196, as the control's
-  6107 to 6252, and the core-1 pass 13733 to 13994, its windows at 684 to
-  766 per mille of the control's rate; the suite's letter `x` (outside
-  `z`, no verdict, three runs) separates the parts: core 1 idle in its
-  Tenuto loop adds 2000 to 2500 misses to the matrix's windows, core 1
-  ticking its object every 97 us 6800 to 7400, the slice's interrupt and
-  the preempting dispatch none. An earlier build of the same suite read the other way
-  round - the slice's passes some 4300 misses over the control's, the
-  core-1 pass none - which is what a two-way cache does when a path's
-  lines happen to share sets with the traffic's in one layout and not in
-  another; the layouts' sets were not compared. No verdict moves with
-  it: a refill lengthens a window and loses nothing.
+  cache's misses over each pass (the counters cleared at its start): the
+  control's 6106 to 6299, the slice's six passes 6778 to 7091, the
+  core-1 pass 7736 to 7796, its windows at 856 to 884 per mille of the
+  control's rate. The suite's letter `x` (outside `z`, no verdict, three
+  runs) separates the parts over the matrix's windows, against the same
+  windows with nothing else running: the slice's interrupt and the
+  preempting dispatch's path add 600 to 1020 misses, as many when the
+  dispatch spins no cycle as when it spins 3000, and the slice counting
+  with its interrupt off none; core 1 idle in its Tenuto loop adds 280
+  to 440, core 1 ticking its object every 97 us 1370 to 1550. Which
+  lines meet in the two-way cache's sets is a fact of the image's
+  layout, and the sets were not compared. No verdict moves with it: a
+  refill lengthens a window and loses nothing.
 - **The UART receive side under preemption, at 115200.** Numbered lines
   echoed by the RP2350B's `uart_peer`, assembled by `LineReader` from
   the interrupt receiver's ring and lent to the borrower: 200 a leg, none
   lost, out of order or corrupt, every port counter zero (ring overruns,
-  OE, FE, PE, BE, the ring's skips), 942 to 948 per mille of the wire
+  OE, FE, PE, BE, the ring's skips), 943 to 948 per mille of the wire
   (the writer paces each line to its own last stop bit). The peer has
   one rate and no report, so the key is reduced to this rate and to what
   this end judges (Not covered yet).
 - **The loan under preemption.** With the borrower holding each line
   sixteen character times (one receive level of the FIFO) and the lines
   streamed five ahead, the slice landed inside the borrower's dispatch
-  742 to 3026 times a pass and the link's vector inside every one of its
+  743 to 3002 times a pass and the link's vector inside every one of its
   200 dispatches a leg; every line arrived exact, each lent alone, the
   two buffers strictly alternating, the leg at 995 to 996 per mille of
   the wire.
@@ -746,7 +754,7 @@ Driver gaps, each with its reason:
 - The bus fabric's priorities and performance counters (BUSCTRL): a
   measurement tool, born with the two-core contention question.
 - A vector table per core, the other way two Rubato kernels could share
-  PendSV: declined, two cycles a request against a second table ("How to
+  PendSV: declined, five cycles a request against a second table ("How to
   use it").
 
 Implemented but not bench-verified, each with what would measure it:

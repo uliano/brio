@@ -392,8 +392,10 @@ public:
     }
 
     /// No event waits (the outstanding ones are not waiting). Forced
-    /// inline: both kernels ask it of every queue on every pass, and at
-    /// -Os GCC keeps it out of line, the call costing more than its two
+    /// inline: the preemptive kernel's scan asks it of every queue on
+    /// every pass, the cooperative one of every queue on a pass that
+    /// served nothing, and at -Os GCC may keep it out of line where it
+    /// is called from many sites, the call costing more than its two
     /// loads and a compare.
     [[gnu::always_inline]] bool empty() const {
         return load_shared(take_) == load_shared(alloc_);

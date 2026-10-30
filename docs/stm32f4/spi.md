@@ -1267,17 +1267,20 @@ slip statistics: 12 of 40 slip at `very_high`, 7 at `high` and 12 at
 and the ladder is exact to 16 MHz at low ("The client run"). AS THE BUS
 HOST (`host_burst`, twelve frames at PCLK1/32 = 1.406 MHz to the G0's
 client) the peer drives SCK and MOSI at MEDIUM, because on these wires
-the data edge reaches the SELECT: the peer holds PB12 low from GPIO for
-the whole burst, and with MOSI at `SpiHost`'s default very-high the G0's
-select pad counts 4 to 19 edges a burst where 2 are sent (an EXTI line on
-the pad, both edges; its pull-up changes nothing - the line is driven,
-and coupled). A client that takes NSS from the pad is deselected
-mid-frame and its bit count starts again - a frame lost or a bit
-slipped, both ends wrong from one frame on, in 65 to 79 bursts of 100,
-whatever its direction - while a client under SSM, which reads the pad
-only to see the select fall, is exact through the same glitches. With
-MOSI at medium the pad counts exactly 2 edges in 360 bursts of 360, SCK
-at medium, high or very-high alike. SCK at low cures it too, but it is
+the burst's fast edges reach the SELECT: the peer holds PB12 low from
+GPIO for the whole burst, and with MOSI at `SpiHost`'s default very-high
+and SCK at medium or above, the G0's select pad sees 4 to 19 edges a
+burst where 2 are sent (counted in a diagnostic build, not kept: an
+EXTI line on the pad, both edges; its pull-up changes nothing - the
+line is driven, and coupled). A client that takes NSS from the pad is
+deselected mid-frame and its bit count starts again - a frame lost or a
+bit slipped, both ends wrong from one frame on, in 65 to 79 bursts of
+100, whatever its direction - while a client under SSM, which reads the
+pad only to see the select fall, is exact through the same glitches.
+Either pad's class cures it: with MOSI at medium the same diagnostic
+counts exactly 2 edges in 360 bursts of 360, SCK at medium, high or
+very-high alike, and SCK at low cures it with MOSI left at very-high;
+which of the two edges couples into PB12 is not isolated. SCK at low is
 outside ES0298 2.14.5's table 5 for APB1's 45 MHz (25 MHz of APB at
 low); medium on both pads stays inside it (75 MHz), and DS10693 table
 58's 25 MHz at 50 pF for medium is above the fastest burst this instance
@@ -1320,10 +1323,13 @@ Driver gaps:
   letter `p`): a preemption of 3000 cycles cuts the /64 to /8 rungs
   short, one of 300 cycles the /8 rung alone, every time with
   `spi_overrun` detected and never a run handed back with a hole; the
-  pump and the engines are exact at every rung. A hold-off that counts
-  the longest dispatch above the arbiter, or a polled path refused
-  under a preemptive platform, is the preemptive kernel's open question
-  ([design/kernel.md](../design/kernel.md), "Rubato").
+  pump and the engines are exact at every rung. That is the limit
+  [design/kernel.md](../design/kernel.md)'s "Rubato" section states for
+  every polled service under the preemptive kernel; a hold-off figure
+  that counts the longest dispatch above the arbiter, or a polled path
+  refused under a preemptive platform, is a decision not taken, born
+  with the first preemptive program that sizes its rate by the
+  hold-off.
 - No DMA engine slots on `SpiClient`: a program that wants its client
   on the streams binds them raw (the stm32f4 `spi_peer` does, "The
   client run"); a slot pair is born with a device-shaped client.

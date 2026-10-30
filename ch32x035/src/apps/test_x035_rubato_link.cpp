@@ -81,8 +81,9 @@
 //   clear.
 //   THE PRESSURE. TIM2's update interrupt, 16 bits on HCLK = 48 MHz at
 //   prescaler 0: 97 / 193 / 389 us are 4656 / 9264 / 18672 counts. Its
-//   dispatch, a 3000-cycle spin, road 1 (168 cycles with the scheduler in
-//   SRAM, 356 from the flash: docs/ch32x035/platform.md) and the way back,
+//   dispatch, a 3000-cycle spin, road 1 (154 to 160 cycles with the
+//   scheduler in SRAM, 307 to 311 from the flash: docs/ch32x035/platform.md)
+//   and the way back,
 //   is shorter than the shortest period's 4656 cycles, so no tick finds the
 //   last one still queued; at 97 us x 3000 it takes 64 % of the core.
 //   TIM2's update request is DMA channel 2's row (dma_engine.hpp), the SPI's

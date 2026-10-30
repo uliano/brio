@@ -603,8 +603,10 @@ the two spans:
   12 MHz: start() got the core back when it was over), and so is every
   interrupt of the pump's priority with a higher exception number - a
   periodic one loses ticks: under the preemptive kernel a 32-frame
-  window at 3 or 4 MHz held TC4's 97 us overflow off some 10400 cycles,
-  one tick merged into the next a window, against 5310 at 2 MHz, where
+  window at 3 or 4 MHz held TC4's 97 us overflow off 10068 to 10485
+  cycles, more than two of its periods, one tick merged into the next a
+  window when the preempting dispatch spins 3000 cycles and 2 to 16 in
+  40 windows when it spins 300, against 5338 to 5341 at 2 MHz, where
   the handler is shorter than the character
   ([platform.md](platform.md), "The drivers under the preemptive
   kernel"). The pump is for rates where a character outlasts the

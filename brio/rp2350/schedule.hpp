@@ -91,7 +91,7 @@
  * the unchecked request would merely run the posting core's own
  * scheduler once for nothing; the check is the same in both programs.
  * request_scheduler() itself is the unchecked request of the calling
- * core, what a bench letter that times the bare request calls.
+ * core.
  *
  * A PREPROCESSOR QUESTION ABOVE core.hpp IS ALWAYS ABOUT
  * BRIO_RP2350_CORE_M33, the macro core.hpp defines, and never about the
@@ -176,10 +176,11 @@ template <uint8_t core>
 /// ADR and the entry one LDR with the index scaled in the instruction.
 /// Four instructions where the single body has the entry's literal load:
 /// sixteen instructions to its thirteen, 44 bytes with the table to its
-/// 32 with the literal; by the Cortex-M4's table the suite counts with
-/// (test_rp2350_rubato's header: a load 2, an ALU instruction 1) six
-/// cycles where the literal took two, four more on each core, the same
-/// path on both. The rest is the single body's instructions one for one,
+/// 32 with the literal; by the measured model the suite counts with
+/// (test_rp2350_platform's letter i: an instruction 1, a load 1 and 2
+/// when the next instruction reads it) five cycles where the literal
+/// took two, three more on each core, as measured, the same path on
+/// both. The rest is the single body's instructions one for one,
 /// the three that build EXC_RETURN included, and the body carries no DSB:
 /// the barrier is the Cortex-M4's alone (that file's header).
 ///

@@ -106,7 +106,8 @@
 // A bound is the path's count under its model, plus what may land in it
 // (a kernel tick), plus a fifth of the count, rounded up, as the margin.
 // Against the measurement the counts sit within a cycle on the paths that
-// start and end in thread mode (the scan, the two posts, `arm()`) and 2 to
+// start and end in thread mode (the scan, the two posts, `arm()`) - but
+// for Hazard3's road-2 post, counted 325 and measured 323 - and 2 to
 // 4 cycles under it on those that start in an interrupt handler or under
 // the mask and end at a dispatch's first statement (letters c, e, g and
 // l): a residue the letter's rows, each matching its model, do not place.

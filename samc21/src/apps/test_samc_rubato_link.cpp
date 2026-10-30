@@ -839,9 +839,9 @@ constexpr SpiClock rungs[] = {119, 47, 23, 11, 7, 5};
 /// 3 MHz, 96 at 4) is shorter than the pump's handler, which re-enters at
 /// its own exit for the whole window, a polled loop at the interrupt level
 /// (docs/samc21/spi.md), and TC4 - the same priority, a higher exception
-/// number - waits the window out: letter x measured 10300 cycles between
-/// two of its entries there, a tick of the 4656-cycle period merged into
-/// the next one's flag, against 5348 at 2 MHz.
+/// number - waits the window out: letter x measured 10068 to 10485 cycles
+/// between two of its entries there, more than two of the 4656-cycle
+/// periods, against 5338 to 5341 at 2 MHz.
 constexpr SpiClock judged_top = 11;
 
 /// A frame's core cycles at BAUD `c`: 8 bits x 2 (c + 1).
@@ -934,8 +934,8 @@ void tp_ladders() {
 // =============================================================================
 
 /// TC4's entries stamped while letter x runs: the longest span between two
-/// in a row, and how many spans passed one and a half periods (a tick
-/// merged into the next one's flag).
+/// in a row, and how many spans passed one and a half periods (where a
+/// tick can merge into the next one's flag).
 volatile bool x_live = false;
 volatile uint32_t x_last = 0;
 volatile uint32_t x_most = 0;

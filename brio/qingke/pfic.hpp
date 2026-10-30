@@ -208,11 +208,13 @@
  * CH32V203's and 60 across the CH32V303's, whose trampolines are aligned
  * too - and what the alignment does not fix: where a function's own
  * branch targets fall in their words, which the V4B and the V4F price by
- * a cycle or two a taken branch (docs/ch32vx03/platform.md). In the
- * same two images, built while its scan still called each queue's
- * empty() out of line, the preemptive kernel's suite on the CH32V303VCT6 read
- * road 1 at 144 cycles against 140 to 141 and a road-2 post at 344 to 347
- * against 338 to 342 - measured, and explained no further than this:
+ * a cycle or two a taken branch (docs/ch32vx03/platform.md). The
+ * preemptive kernel's suite on the CH32V303VCT6, in two diagnostic builds
+ * (not kept) that differ in the alignment alone and whose scheduler calls
+ * each queue's empty() out of line, read road 1 at 144 cycles against
+ * 140 to 141 and a road-2 post at 344 to 347 against 338 to 342 (the
+ * pair is not measured on the scheduler the tree builds) - measured, and
+ * explained no further than this:
  * the trampoline bodies behind the vectors moved with them (the timer's
  * from two modulo four to zero), and their branch targets with them.
  *

@@ -93,9 +93,10 @@ architectures.
   on the WeAct RP2350B: road 1 in 106 cycles with the pair body bound,
   a Rubato on each core through the one PendSV entry,
   [../rp2350/platform.md](../rp2350/platform.md)); the M33's cycle
-  figures are its own, measured by that suite's platform letter i, the
-  Cortex-M4's table being no model for it (a load 1 cycle, BL and BX 2
-  each, PUSH and POP 1 + N, a not-taken branch folded after a 16-bit
+  figures are its own, measured by `test_rp2350_platform`'s letter i
+  ("The cost models" on that page), the Cortex-M4's table being no model
+  for it (a load 1 cycle, BL and BX 2 each, PUSH and POP of N registers
+  N and a POP into the PC N + 3, a not-taken branch folded after a 16-bit
   instruction). The ARMv8-M facts the
   M33 rests on are checked against the documents there: EXC_RETURN's
   security bits (ES, DCRS and S, all 1 in the Secure state the image

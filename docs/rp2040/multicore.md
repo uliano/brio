@@ -227,10 +227,11 @@ the one PendSV entry of the shared vector table takes
 `rp2040/schedule.hpp`'s `scheduler_exception_pair<K0, K1>()`, which
 reads SIO's CPUID and returns into the scheduler of the core that took
 it; a vector table per core, the other way, is declined
-([platform.md](platform.md), "How to use it"). Both are measured by
-`test_rp2040_rubato` on the WeAct RP2040 at 125 MHz ("Bench findings"
-below, and [platform.md](platform.md)'s "Bench findings" for the rest of
-the suite).
+([platform.md](platform.md), "How to use it"). The doorbell's road 1
+and the pair body are measured by `test_rp2040_rubato` on the WeAct
+RP2040 at 125 MHz ("Bench findings" below, and
+[platform.md](platform.md)'s "Bench findings" for the rest of the
+suite).
 
 ## Bench findings
 
@@ -309,7 +310,7 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   counted as a mispost and pends no PendSV on core 1. Low's send crosses
   to core 1 and the answer crosses back; core 0's doorbell handler posts
   to High, and High's dispatch starts after that handler's last
-  statement and before Low resumes, 7 to 14 us from Low's send to High's
+  statement and before Low resumes, 7 to 11 us from Low's send to High's
   first statement across core 1 and back. From the doorbell handler's
   last statement to High's first, 196 cycles min and 197 median over
   100 crossings, none over 267 - the figure of road 1 from an alarm's
@@ -324,7 +325,7 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   cores preempt at the same time, each preemption landing inside the
   other core's preempted dispatch on the system timer, in 10 of 10; core
   1's ceiling is 255 at its base after; its stack's high-water mark is
-  260 bytes, the deepest sampled stack pointer 240 in a dispatch and 112
+  260 bytes (272 in one run of ten), the deepest sampled stack pointer 240 in a dispatch and 112
   in its interrupt.
 - THE CROSSING UNDER DRIVER TRAFFIC (`test_rp2040_rubato_link`, its
   eighth pass of letters o and t, [platform.md](platform.md) "Bench
@@ -333,10 +334,10 @@ ten runs of its `z` alike, clk_sys cycles on core 0's composed
   inbox, so each preemption of core 0's SPI and UART stacks is road 1
   from the doorbell's handler - every send one dispatch, none dropped,
   every window and every line exact. Core 1's program shares the XIP
-  cache with core 0's: on that image its idle loop adds 2000 to 2500
-  misses to the sixteen SPI exchanges of core 0's matrix and its
-  ticking 6800 to 7400 (the cache's counters, the bus fabric's not
-  read).
+  cache with core 0's: its idle loop adds 280 to 440 misses to the
+  sixteen SPI exchanges of core 0's matrix and its ticking 1370 to 1550
+  (that suite's letter `x`, three runs; the cache's counters, the bus
+  fabric's not read).
 
 ## Not covered yet
 
