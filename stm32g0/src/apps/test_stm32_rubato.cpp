@@ -89,7 +89,10 @@
 //      ends, before the statement after it; from the Console (to Mid) and
 //      from Low's dispatch (to High), ten runs each, with PENDSVSET read
 //      inside the section and the cycles from the section's last
-//      statement to the receiver's first.
+//      statement to the receiver's first, the kernel tick read around
+//      each event as in letter c: the events no tick landed in judged
+//      against the path's bound, those a tick did reported and judged
+//      against the bound with one tick's cost on it.
 //   i  DARK: every object but the Console idle, no time event armed,
 //      TIM14's line quiet, the LED's pad not an output, the ceiling the
 //      Console's own, interrupts enabled.
@@ -973,6 +976,35 @@ template <class Receiver>
     note(who, 'a');
 }
 
+/// From the stamp's load to Mid's, by the release listing: the stamp's
+/// store with its literal (4) and the guard's msr (3) that lifts the
+/// mask; PendSV's entry from thread mode (15), its body and its return
+/// into thread mode (32); the entry (4); activate() at the Console's
+/// ceiling - its frame and test (20), Top's visit (8), High's (13),
+/// Mid's to the stamp (the visit 14, the raises 13, take() 25, its result
+/// and the stamp's address 6: 58): 157 at zero wait states. Its 8
+/// discontinuities - PendSV's vector and its return into thread mode,
+/// the call to activate(), High's and Mid's taken branches, take()'s
+/// call, its branch on a wrapped cursor and its return - (24) and 7
+/// literals (the stamp's, PendSV's, the ceiling's address, three queues,
+/// the dispatching index's: 14): 195, the path's own count with every
+/// refill paid; 234 with a fifth (letter d's comment says how the bounds
+/// are drawn). A kernel tick (1 ms, 64000 cycles, so at most one in a
+/// path of two hundred) lengthens an event in one of two ways. Matured
+/// inside the section, SysTick (priority 0, above PendSV) is taken at the
+/// msr before PendSV, which then tail-chains in (11) instead of entering
+/// from thread mode (15): the handler's entry (15), its body (27) and
+/// its first line refilled (6) less the 4 saved, 44. Landing in the path
+/// after the msr, it costs letter c's 70 (its entry, body, return,
+/// refills and an exception return begun again). The worse, 70, on the
+/// bound: 304. The letter reads the kernel tick around each event:
+/// the events nothing lengthened are judged against 234, every event
+/// over 195 must have had a tick in it, and a ticked event is judged
+/// against 304.
+constexpr uint32_t primask_count = 195u;
+constexpr uint32_t primask_bound = 234u;
+constexpr uint32_t primask_tick_bound = 304u;
+
 void tg_primask() {
     console_drain();
     pend_inside = true;
@@ -984,16 +1016,41 @@ void tg_primask() {
     const char* const want_low = "Ls3 Lm3 Lp3 Hs1 He1 La3 Le3";
     uint8_t alike_console = 0;
     uint8_t alike_low = 0;
+    // The events no tick landed in, and those one did.
+    uint32_t clean = 0;
     uint32_t least = 0xFFFF'FFFFu;
     uint32_t most = 0;
+    // Printed after the loop: a print inside it would put the UART's
+    // interrupt in the next events.
+    uint32_t ticked_cycles[10];
+    uint32_t ticked = 0;
+    uint32_t ticked_most = 0;
+    // An event slower than the path's own count is one a tick landed in.
+    uint32_t slow = 0;
+    uint32_t slow_ticked = 0;
     bool back = true;
     for (int run = 0; run < 10; ++run) {
         reset_scenario();
+        const uint32_t t0 = Ticker::ticks();
         post_in_section<Mid>('C');
         {
+            const bool tick_in = Ticker::ticks() != t0;
             const uint32_t d = Mid::entered - section_last;
-            least = d < least ? d : least;
-            most = d > most ? d : most;
+            if (tick_in) {
+                ticked_cycles[ticked] = d;
+                ++ticked;
+                ticked_most = d > ticked_most ? d : ticked_most;
+            } else {
+                ++clean;
+                least = d < least ? d : least;
+                most = d > most ? d : most;
+            }
+            if (d > primask_count) {
+                ++slow;
+                if (tick_in) {
+                    ++slow_ticked;
+                }
+            }
         }
         if (trace_is(want_console)) {
             ++alike_console;
@@ -1014,8 +1071,15 @@ void tg_primask() {
     print(serial, "  from the Console to Mid: ", alike_console, " of 10 runs traced ",
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
-    print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles", crlf);
+    if (clean > 0u) {
+        print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
+              " cycles over the ", clean, " events no tick landed in", crlf);
+    }
+    print(serial, "  events over ", primask_count, " cycles: ", slow, ", a kernel tick inside ",
+          slow_ticked, " of them; ", ticked, " of 10 events with a tick inside", crlf);
+    for (uint32_t k = 0; k < ticked; ++k) {
+        print(serial, "  an event a kernel tick landed in: ", ticked_cycles[k], " cycles", crlf);
+    }
     bench.verdict("PendSV stood pending inside every section, and no receiver ran inside one",
                   pend_inside && !ran_inside);
     bench.verdict("the Console's post to Mid under PRIMASK is served when the section ends, "
@@ -1023,21 +1087,14 @@ void tg_primask() {
                   alike_console == 10u);
     bench.verdict("Low's post to High under PRIMASK likewise, inside Low's dispatch (10 runs)",
                   alike_low == 10u);
-    // From the stamp's load to Mid's, by the release listing: the
-    // stamp's store with its literal (4) and the guard's msr (3) that
-    // lifts the mask; PendSV's entry from thread mode (15), its body and
-    // its return into thread mode (32); the entry (4); activate() at the
-    // Console's ceiling - its frame and test (20), Top's visit (8),
-    // High's (13), Mid's to the stamp (the visit 14, the raises 13,
-    // take() 25, its result and the stamp's address 6: 58): 157 at zero
-    // wait states. Its 8 discontinuities - PendSV's vector and its return
-    // into thread mode, the call to activate(), High's and Mid's taken
-    // branches, take()'s call, its branch on a wrapped cursor and its
-    // return - (24) and 7 literals (the stamp's, PendSV's, the ceiling's
-    // address, three queues, the dispatching index's: 14): 195; 234 with
-    // a fifth (letter d's comment says how the bounds are drawn).
-    bench.verdict("the section's end to the receiver's first statement under 234 cycles",
-                  most < 234u);
+    // The bounds' arithmetic is beside primask_count above.
+    bench.verdict("the section's end to the receiver's first statement under 234 cycles, "
+                  "in every event no tick landed in",
+                  most < primask_bound);
+    bench.verdict("every event over the path's own count (195) had a tick land in it",
+                  slow == slow_ticked);
+    bench.verdict("an event a tick landed in under 304 cycles (the bound and one tick)",
+                  ticked_most < primask_tick_bound);
     bench.verdict("the ceiling is the Console's again, interrupts enabled", back);
 }
 

@@ -497,8 +497,8 @@ listing) - ST's
   drain first.
 
 **The preemptive kernel** - the reference suite is `test_stm32_rubato`
-(nine letters in `z`, 37 verdicts; ten runs of `z`, every verdict green
-in nine and letter `g`'s bound missed once in the tenth, below): a Rubato pack
+(nine letters in `z`, 39 verdicts, every one green in ten runs of
+`z`): a Rubato pack
 of five objects on `Stm32g0RubatoPlatform` on the Nucleo-G0B1RE at
 64 MHz, the Console the lowest and the letters' runner, TIM14's compare
 the interrupt the road-1 letters land, nothing wired and nothing lit.
@@ -524,14 +524,14 @@ derives from the core's own counts over the release listing:
   after Low's own dispatch ends; and at depth 2 an
   interrupt over High's handler, started by either road, runs Top
   before High resumes, Top's first statement 155 to 156 cycles after
-  the handler's last (three events of the two hundred in ten runs at 201
-  to 219, each by road 1, unattributed: the letter reads no tick around
+  the handler's last (a few events of the two hundred in ten runs at 201
+  to 219, by either road, unattributed: the letter reads no tick around
   them).
 - **The latency of road 1** (letter c): from the interrupt handler's
   last statement to High's handler's first, 180 cycles min, 181 median
-  and max over 100 events, every run; 227 to 250 for the one event in
-  about a hundred and seventy a kernel tick lands in (six of the
-  thousand events of ten runs, a tick inside each). The path counts 144 cycles at zero
+  and max over 100 events, every run; 226 to 250 for the one event in
+  about two hundred a kernel tick lands in (five or six of the thousand
+  events of ten runs, a tick inside each). The path counts 144 cycles at zero
   wait states - the handler's exit, the tail-chain into PendSV, its
   thirteen instructions and the return through the fake frame, the
   entry, `activate()`'s visits to Top and High with each queue's two
@@ -557,16 +557,22 @@ derives from the core's own counts over the release listing:
   run - and the receiver runs when the section's guard restores the
   mask, before the statement after it, from the Console's dispatch and
   from inside Low's, ten runs each; the section's last statement to the
-  receiver's first 192 to 193 cycles (bound 234) in nine runs of ten,
-  and in the tenth one event of ten at 239, over the bound, failing the
-  letter: an event lengthened by something the letter does not read
-  (it reads no tick around its events). The nested guard of
-  the trace's own `note()` inside the section restores PRIMASK set and
-  takes nothing.
+  receiver's first 192 to 193 cycles on every event no kernel tick
+  landed in (bound 234: the path counts 157 cycles at zero wait states
+  and 195 with every flash refill paid). The letter reads the tick
+  around each event, as letter c does: an event a tick lands in is
+  reported and judged against 304, the bound with one tick's 70 on it,
+  and every event over 195 must have had a tick in it. In twenty runs
+  of letter `g` alone and ten of `z`, three hundred events, a tick
+  fell inside the reads around three and lengthened none (192 and 193
+  cycles), every verdict green. The nested guard of the trace's own
+  `note()` inside the section restores PRIMASK set and takes nothing.
 - **The stack** (letter h): painted from main's frame down to the end of
-  `.bss` and `.noinit` (0x20000730..0x20023F80), 500 bytes of
-  high-water for the suite's deepest chain, the deepest sampled stack
-  pointer at 464 bytes in a dispatch and 336 in the interrupt, the mark
+  `.bss` and `.noinit` (0x20000730..0x20023F80), 500 to 520 bytes of
+  high-water for the suite's deepest chain (the paint is laid once at
+  boot, so the mark is the deepest since the flash), the deepest sampled
+  stack pointer at 464 bytes in a dispatch and 336 to 344 in the
+  interrupt, the mark
   within the 156 bytes an action's frames, a basic exception frame and
   a handler's or a PendSV level's frames add.
 - **Dark** (letter i): every object idle, no timer armed, TIM14 quiet,

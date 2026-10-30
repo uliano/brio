@@ -967,7 +967,7 @@ void td_scan() {
     }
     reset_scenario();
     print(serial, "  the ruler's two reads (core 0's composed cycles()) ", ruler, " cycles", crlf);
-    print(serial, "  over 1..1.003 ms the ruler and the system timer differ by at most ", agree_hi,
+    print(serial, "  over 1..1.024 ms the ruler and the system timer differ by at most ", agree_hi,
           " cycles on the clean spans", crlf);
     print(serial, "  activate() with nothing ready below the Console: ", scan, "..", scan_hi,
           " cycles (four empty queues, the fifth at the ceiling)", crlf);
