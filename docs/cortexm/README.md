@@ -68,8 +68,26 @@ architectures.
   depth; `scheduler_return()`, the body bound to `SVC_Handler`
   (`SVCall_Handler` on the SAM C21, whose crt names the core exceptions
   as its device header does), steps over the SVC's frame and returns
-  into the real one. The frames, the
-  FPU's lazy context and EXC_RETURN's bits are the header's account.
+  into the real one. The two keep the kernel's entry and exit
+  (`kernel/platform.hpp`): the thread-mode entry, still under PendSV's
+  PRIMASK, reads the kernel's ceiling into the filler word PendSV
+  pushed and stores 0 in its place, then unmasks and calls
+  `activate(base)`, and passes the count of quiet posts it returns and
+  the addresses of the ceiling and of the count to SVC in r0 to r2;
+  SVC's handler, at priority 0 beside every peripheral line so that no
+  handler enters it, puts `base` back, compares the count and, when it
+  moved, pends PendSV again with a DSB behind the write, so that the
+  return tail-chains into PendSV over the interrupted frame instead of
+  nesting. By the release listings: PendSV's body thirteen
+  instructions, fourteen on the Cortex-M4; the entry twelve, sixteen
+  with the FPU's four, four of them still masked; SVC's eleven on the
+  path that finds the count still, twelve on the Cortex-M4, and five
+  more, two of them branches, on the path that pends - where the entry
+  was two instructions (six with the FPU) and the SVC handler three.
+  Because the addresses come in SVC's frame, which the core's own entry
+  wrote, one SVC body serves every kernel, the two of a pair of cores
+  included. The frames, the FPU's lazy context and EXC_RETURN's bits
+  are the header's account.
   The assembly is the ARMv6-M subset, so one source serves the M0+, the
   M4 and the M33, and five platforms have run it: the STM32F4's
   Cortex-M4 (`stm32f4/platform.hpp`'s `Stm32f4RubatoPlatform`, measured
@@ -107,11 +125,14 @@ architectures.
   the RP2350's own register table gives both a reset value of 0, and the
   register read after the bootrom is 0xC000001C, both bits 1, the FP
   registers bit-exact across a preemption there - the measurement
-  contradicts the table. One barrier in the PendSV body is the
-  Cortex-M4's alone: erratum 838869 (the STM32F4's r0p1) wants a DSB
-  before the exception return, and the body carries it on that core and
-  on no other (the device header's `__CORTEX_M`), the rule being no
-  barrier where no erratum asks for one.
+  contradicts the table. One barrier in the PendSV and SVC bodies is
+  the Cortex-M4's alone: erratum 838869 (the STM32F4's r0p1) wants a DSB
+  before an exception return that follows a store, and both bodies
+  carry it on that core and on no other (the device header's
+  `__CORTEX_M`), the rule being no barrier where no erratum asks for
+  one; the DSB behind the exit's PENDSVSET is the architecture's (an SCS
+  write takes effect when it completes), on every core, on that path
+  alone.
 
 ## Why the stratum exists
 

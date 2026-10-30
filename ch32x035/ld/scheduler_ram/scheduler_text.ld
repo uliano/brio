@@ -32,5 +32,5 @@
 *(.text.brio_scheduler_vector.*)
 *(.text._ZN4brio16scheduler_thread*)
 *(.text._ZN4brio17request_schedulerEv)
-*(.text._ZN4brio6RubatoINS_22Ch32x035RubatoPlatform*8activateEv)
+*(.text._ZN4brio6RubatoINS_22Ch32x035RubatoPlatform*8activateEh)
 *(.text._ZN*4brio10EventQueueI*22Ch32x035RubatoPlatform*)

@@ -20,7 +20,7 @@
  *     using P = brio::Ch32vx03RubatoPlatform<>;   // or Ch32x035RubatoPlatform<>
  *     using K = brio::Rubato<P, Sensor, Logger>;
  *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
- *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
  *     ...
  *     brio::scheduler_init();        // in main(), before interrupts are enabled
  *     K::run();
@@ -123,24 +123,52 @@
  *
  * WHERE THE SCHEDULER RUNS: IN THREAD MODE. The software interrupt does
  * not run the scheduler; it makes the core return from the trap INTO it.
- * scheduler_trap<K>() moves the stack pointer down sixteen bytes, stores
- * there the interrupted code's mepc and mstatus, writes the entry's
- * address into mepc and executes MRET:
+ * scheduler_trap<K>() clears MIE, moves the stack pointer down sixteen
+ * bytes, stores there the interrupted code's mepc and mstatus, reads the
+ * kernel's ceiling into the block's byte 12 and stores 0 in its place,
+ * writes the entry's address into mepc and executes MRET:
  *
  *     higher addresses
  *       the interrupted code's stack
- *       (two words unused)           the 16-byte block keeps the ABI's
- *       mstatus of the trap          alignment of the stack pointer
+ *       byte 13: the count           the 16-byte block keeps the ABI's
+ *       byte 12: base                alignment of the stack pointer; word
+ *       (a word unused)              8 is the bodies' scratch without the
+ *       mstatus of the trap          hardware prologue
  *       mepc of the trap        <- sp at the entry
  *     lower addresses
  *
+ * THE ENTRY AND THE EXIT (kernel/platform.hpp states what they owe the
+ * kernel). These cores do not clear MIE when they take an interrupt (the
+ * V4 manual 2.2, the note to mstatus), and the peripheral lines preempt
+ * the software interrupt's handler (NESTING, above), so the trap's first
+ * instruction clears MIE itself: from there to its MRET no handler runs,
+ * and the store of 0 into the ceiling is made before any handler can run
+ * after the request was taken - but for the trap's first instruction, the
+ * one moment a peripheral handler can still preempt it (RE-ENTRANCY,
+ * below). The MRET takes MIE from MPIE, as before, so the entry runs as
+ * the interrupted code did. The entry hands the block's `base` to
+ * K::activate(base), and puts the low byte of what it returns - the count
+ * of quiet posts its last choice read - in the block's byte 13 before the
+ * `ecall`. scheduler_return<K>(), the machine-mode environment call's
+ * vector (line 5 of the table), is the exit: it clears MIE first too - the
+ * V4 manual's rule holds for an exception as for an interrupt, and the
+ * measured fact that no line preempts the environment call's handler
+ * (NESTING) is not one this file leans on - stores `base` back into the
+ * ceiling, compares the count with the kernel's, and when it moved pends
+ * the software interrupt again (a store into PFIC_IPSR0, six instructions
+ * ahead of the MRET, which covers the three a posted store takes to
+ * arrive on the V4B); then it loads mepc and mstatus from the block -
+ * whose MIE is the trap's cleared one, so the handler stays masked to its
+ * MRET, which takes MIE from MPIE - moves the stack pointer back up over
+ * the block and executes MRET. A request pended there is taken at the
+ * interrupted code's first instruction, over it, in place of the run that
+ * ended.
+ *
  * THE PER-LEVEL SAVE IS THE MAIN STACK, not an array of the kernel's
- * indexed by a depth: each preemption adds one level - as deep as the
- * pack's chain of priorities while the pack's load stays under the core,
- * and deeper under an overload, where a request landing between two
- * dispatches nests a level at the same ceiling (docs/design/kernel.md,
- * the stack) - and the stack is where the nesting already keeps its order, so no bound is chosen and no index is kept - the same
- * two words below the frame the Cortex-M realization pushes
+ * indexed by a depth: each preemption adds one level, at most one per
+ * object of the pack (kernel/rubato.hpp, "The stack"), and the stack is
+ * where the nesting already keeps its order, so no index is kept - the
+ * same two words below the frame the Cortex-M realization pushes
  * (cortexm/schedule.hpp). With the hardware prologue (the projects'
  * CH32VX03_HPE and CH32X035_HPE options, the default) the MRET pops the
  * sixteen caller-saved integer registers the hardware pushed at the
@@ -151,17 +179,16 @@
  * at the entry, all sixteen found again after the return). The entry
  * stores those sixteen on the stack - x1, x5..x7, x10..x17, x28..x31, the
  * set the hardware saves - sets MIE, calls K::activate(), loads them back
- * and executes `ecall`. scheduler_return(), the machine-mode environment
- * call's vector (line 5 of the table), loads mepc and mstatus from the
- * two words, moves the stack pointer back up over the block and executes
- * MRET: the hardware's push at the ecall and its pop at this MRET pair up
- * around the exit, and the interrupted code resumes with its registers,
- * its mstatus and its stack pointer as they were. Without the hardware
- * prologue (the option OFF) the same shape holds with the two bodies' one
- * scratch register, t0, saved and restored in the block's third word by
- * the bodies themselves: nothing else has been pushed, so the MRET has
- * nothing else to pop. s0..s11 and sp never leave the register file:
- * everything between the two traps is code that keeps them.
+ * and executes `ecall`; the hardware's push at the ecall and its pop at
+ * the exit's MRET pair up around the exit, and the interrupted code
+ * resumes with its registers, its mstatus and its stack pointer as they
+ * were. Without the hardware prologue (the option OFF) the same shape
+ * holds with the bodies' two scratch registers, t0 saved in the block's
+ * word 8 and t1 in the word below the block - free stack, written with
+ * MIE clear - and restored by the bodies themselves: nothing else has
+ * been pushed, so the MRET has nothing else to pop. s0..s11 and sp never
+ * leave the register file: everything between the two traps is code that
+ * keeps them.
  *
  * THE UNMASK IN THE ENTRY is not decoration. Entry does not clear MIE on
  * these cores (the V4 manual 2.2), so the trap normally returns into the
@@ -211,15 +238,20 @@
  * the V4F alone) and the scheduler's own frames.
  *
  * RE-ENTRANCY. The software interrupt can be pended at any moment and the
- * shapes all close: pended while a dispatch runs, it nests one level
- * more; pended while the entry stores its registers or between
- * activate()'s return and the `ecall`, it nests over the entry itself,
- * whose `ecall` then runs after the nested level has unwound; pended by a
- * peripheral handler nested over the software interrupt's own handler, it
- * is taken at the instruction after that handler's MRET - the entry's
- * first - and builds its block below the first. The block is written
- * after the stack pointer has moved, so a handler nested over the surgery
- * puts its frame below it.
+ * shapes all close. Pended while a dispatch runs, it nests one level
+ * more, at that dispatch's index. Pended while the entry stores its
+ * registers, runs the scheduler between dispatches or loads them back
+ * before the `ecall`, it cannot be: the ceiling is 0 there, or a
+ * dispatch's index, and a post that finds 0 asks for nothing. Pended by
+ * the exit itself, it is taken over the interrupted code, the block
+ * already popped. And pended by a peripheral handler that preempts the
+ * software interrupt's handler at its first instruction, before the MIE
+ * it clears - the one moment between the request being taken and the
+ * store of 0 at which a handler can run - it is taken at the instruction
+ * after the trap's MRET, the entry's first, and builds its block below
+ * the first: that run finds the ceiling at 0, serves nothing and returns,
+ * and the run it delayed serves the post (kernel/rubato.hpp, "The stack",
+ * counts it).
  *
  * WHAT THIS FILE ASSUMES. Every line but the software interrupt stays at
  * priority 0 (no driver of the three strata writes PFIC_IPRIOR); nothing
@@ -247,10 +279,12 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <type_traits>
 
+#include "kernel/platform.hpp"
 #include "qingke/pfic.hpp"
 
 static_assert(std::is_same_v<decltype(brio::scheduling_request_posted), const bool>,
@@ -317,10 +351,18 @@ inline void scheduler_init() {
     Pfic::enable(Irq::software);
 }
 
+/// The first pending-set register, PFIC_IPSR0 (the QingKe V4 manual 3.1,
+/// table 3-2: 0xE000E200), by address: the exit pends the software
+/// interrupt from assembly, where pfic() is not a constant.
+inline constexpr uint32_t pfic_ipsr0_address = 0xE000E200UL;
+static_assert(offsetof(PficRegs, IPSR) == pfic_ipsr0_address - 0xE000E000UL,
+              "qingke/schedule.hpp: the family's PficRegs puts IPSR at 0x200 (table 3-2)");
+
 /// The thread-mode entry the trap returns into (the file header): the
 /// sixteen caller-saved integer registers stored (and in an image with F
-/// the twenty caller-saved f-registers and fcsr, when FS is Dirty), MIE
-/// set, the scheduler, the registers loaded back, and the way out through
+/// the twenty caller-saved f-registers and fcsr, when FS is Dirty), `base`
+/// taken from the block, MIE set, the scheduler, the count it hands back
+/// put in the block, the registers loaded back, and the way out through
 /// `ecall`. Naked: it owns no frame but the one it builds, so the stack
 /// pointer at its `ecall` is the one it started with, and it touches no
 /// register the interrupted code keeps.
@@ -332,6 +374,7 @@ template <class Kernel>
         "sw a0, 16(sp)\n\t"  "sw a1, 20(sp)\n\t"  "sw a2, 24(sp)\n\t"  "sw a3, 28(sp)\n\t"
         "sw a4, 32(sp)\n\t"  "sw a5, 36(sp)\n\t"  "sw a6, 40(sp)\n\t"  "sw a7, 44(sp)\n\t"
         "sw t3, 48(sp)\n\t"  "sw t4, 52(sp)\n\t"  "sw t5, 56(sp)\n\t"  "sw t6, 60(sp)\n\t"
+        "lbu a0, 76(sp)\n\t" // base: the block's byte 12, the trap's
 #if defined(__riscv_flen)
         // The interrupted code's floating-point state, when it has one:
         // FS Dirty (both bits of mstatus 14:13) - the twenty caller-saved
@@ -371,6 +414,7 @@ template <class Kernel>
         "csrsi mstatus, 8\n\t"
         "call %0\n\t"
 #endif
+        "sb a0, 77(sp)\n\t"  // the count, the result's low byte: the block's byte 13
         "lw ra, 0(sp)\n\t"   "lw t0, 4(sp)\n\t"   "lw t1, 8(sp)\n\t"   "lw t2, 12(sp)\n\t"
         "lw a0, 16(sp)\n\t"  "lw a1, 20(sp)\n\t"  "lw a2, 24(sp)\n\t"  "lw a3, 28(sp)\n\t"
         "lw a4, 32(sp)\n\t"  "lw a5, 36(sp)\n\t"  "lw a6, 40(sp)\n\t"  "lw a7, 44(sp)\n\t"
@@ -381,61 +425,113 @@ template <class Kernel>
         ::"i"(&Kernel::activate));
 }
 
-/// The body the program binds to software_handler: the block with the
-/// trap's mepc and mstatus, then the return into scheduler_thread<K>().
-/// Nine instructions with the hardware prologue (the address two), eleven
-/// without.
+/// The body the program binds to software_handler: MIE cleared first, the
+/// block with the trap's mepc and mstatus, the ceiling read into the
+/// block's byte 12 and 0 stored in its place, then the return into
+/// scheduler_thread<K>(). Thirteen instructions with the hardware prologue
+/// (`la` is two), sixteen without, all of them after the mask.
 template <class Kernel>
 [[gnu::always_inline]] inline void scheduler_trap() {
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
     __asm__ volatile(
+        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
         "addi sp, sp, -16\n\t"
         "csrr t0, mepc\n\t"
         "sw t0, 0(sp)\n\t"
-        "csrr t0, mstatus\n\t"
+        "csrr t0, mstatus\n\t"       // MIE clear in the word: the exit's MRET takes MIE from MPIE
         "sw t0, 4(sp)\n\t"
+        "lui t1, %%hi(%1)\n\t"
+        "lbu t0, %%lo(%1)(t1)\n\t"   // base
+        "sb zero, %%lo(%1)(t1)\n\t"  // the ceiling 0, before any handler can run
+        "sb t0, 12(sp)\n\t"
         "la t0, %0\n\t"
         "csrw mepc, t0\n\t"
         "mret\n\t"
-        ::"i"(&scheduler_thread<Kernel>));
+        ::"i"(&scheduler_thread<Kernel>), "i"(&Kernel::Platform::ceiling));
 #else
     __asm__ volatile(
+        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
         "addi sp, sp, -16\n\t"
         "sw t0, 8(sp)\n\t"
+        "sw t1, -4(sp)\n\t"          // below the block: free stack, and nothing runs here
         "csrr t0, mepc\n\t"
         "sw t0, 0(sp)\n\t"
-        "csrr t0, mstatus\n\t"
+        "csrr t0, mstatus\n\t"       // MIE clear in the word: the exit's MRET takes MIE from MPIE
         "sw t0, 4(sp)\n\t"
+        "lui t1, %%hi(%1)\n\t"
+        "lbu t0, %%lo(%1)(t1)\n\t"   // base
+        "sb zero, %%lo(%1)(t1)\n\t"  // the ceiling 0, before any handler can run
+        "sb t0, 12(sp)\n\t"
         "la t0, %0\n\t"
         "csrw mepc, t0\n\t"
+        "lw t1, -4(sp)\n\t"
         "lw t0, 8(sp)\n\t"
         "mret\n\t"
-        ::"i"(&scheduler_thread<Kernel>));
+        ::"i"(&scheduler_thread<Kernel>), "i"(&Kernel::Platform::ceiling));
 #endif
 }
 
-/// The body the program binds to ecall_m_handler: mepc and mstatus from
-/// the block, the block popped, the return into the interrupted code.
-/// Six instructions with the hardware prologue, eight without.
+/// The body the program binds to ecall_m_handler: the exit (the file
+/// header). MIE cleared first; the ceiling put back from the block's byte
+/// 12; the count from its byte 13 compared with the kernel's, and the
+/// software interrupt pended again when it moved; then mepc and mstatus
+/// from the block, the block popped, the return into the interrupted code.
+/// Fourteen instructions on the path that finds the count still with the
+/// hardware prologue, eighteen without; four more on the path that pends.
+template <class Kernel>
 [[gnu::always_inline]] inline void scheduler_return() {
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
     __asm__ volatile(
+        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
+        "lbu t0, 12(sp)\n\t"         // base
+        "lui t1, %%hi(%0)\n\t"
+        "sb t0, %%lo(%0)(t1)\n\t"    // the ceiling back
+        "lbu t0, 13(sp)\n\t"         // the count the scheduler read
+        "lui t1, %%hi(%1)\n\t"
+        "lbu t1, %%lo(%1)(t1)\n\t"
+        "bne t0, t1, 2f\n"
+        "1:\n\t"
         "lw t0, 0(sp)\n\t"
         "csrw mepc, t0\n\t"
         "lw t0, 4(sp)\n\t"
         "csrw mstatus, t0\n\t"
         "addi sp, sp, 16\n\t"
-        "mret\n\t");
+        "mret\n"
+        "2:\n\t"
+        "li t0, %3\n\t"              // a quiet post landed behind the last scan:
+        "lui t1, %%hi(%2)\n\t"
+        "sw t0, %%lo(%2)(t1)\n\t"    // the software interrupt pended, taken over the interrupted code
+        "j 1b\n\t"
+        ::"i"(&Kernel::Platform::ceiling), "i"(&quiet_posts<typename Kernel::Platform>),
+          "i"(pfic_ipsr0_address), "i"(1UL << static_cast<uint8_t>(Irq::software)));
 #else
     __asm__ volatile(
+        "csrci mstatus, 8\n\t"       // no handler from here to the MRET
         "sw t0, 8(sp)\n\t"
+        "sw t1, -4(sp)\n\t"          // below the block: free stack, and nothing runs here
+        "lbu t0, 12(sp)\n\t"         // base
+        "lui t1, %%hi(%0)\n\t"
+        "sb t0, %%lo(%0)(t1)\n\t"    // the ceiling back
+        "lbu t0, 13(sp)\n\t"         // the count the scheduler read
+        "lui t1, %%hi(%1)\n\t"
+        "lbu t1, %%lo(%1)(t1)\n\t"
+        "bne t0, t1, 2f\n"
+        "1:\n\t"
         "lw t0, 0(sp)\n\t"
         "csrw mepc, t0\n\t"
         "lw t0, 4(sp)\n\t"
         "csrw mstatus, t0\n\t"
+        "lw t1, -4(sp)\n\t"
         "lw t0, 8(sp)\n\t"
         "addi sp, sp, 16\n\t"
-        "mret\n\t");
+        "mret\n"
+        "2:\n\t"
+        "li t0, %3\n\t"              // a quiet post landed behind the last scan:
+        "lui t1, %%hi(%2)\n\t"
+        "sw t0, %%lo(%2)(t1)\n\t"    // the software interrupt pended, taken over the interrupted code
+        "j 1b\n\t"
+        ::"i"(&Kernel::Platform::ceiling), "i"(&quiet_posts<typename Kernel::Platform>),
+          "i"(pfic_ipsr0_address), "i"(1UL << static_cast<uint8_t>(Irq::software)));
 #endif
 }
 

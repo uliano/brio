@@ -471,7 +471,7 @@ BRIO_CH32_VECTOR(usart2_handler) {
 BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 
 /// The pressure: TIM2's update, where it landed, and the post.
 BRIO_CH32_VECTOR(tim2_up_handler) {

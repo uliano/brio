@@ -233,8 +233,11 @@ stratum's PendSV and SVC, the same code the STM32F4 and the STM32G0 run
 ([../cortexm/README.md](../cortexm/README.md)): PendSV at the lowest of
 the core's sixteen levels (3.7.2: four priority bits) returns into the
 scheduler in thread mode through a second exception frame, and the
-scheduler leaves through SVC. On Hazard3 it is a realization of this
-stratum's own, written from 3.8.4:
+scheduler leaves through SVC, whose handler is the kernel's exit (by
+the release listing sixteen instructions for the entry with the FPU's
+four, eleven for SVC on the path that finds the count still, five more
+on the path that pends PendSV again). On Hazard3 it is a realization of
+this stratum's own, written from 3.8.4:
 
 - The request is the machine software interrupt. mip.MSIP is wired to
   the SIO's RISCV_SOFTIRQ register, one flag per hart, raised by a
@@ -269,6 +272,21 @@ stratum's own, written from 3.8.4:
   state, so there is nothing to pair it with: no exit vector, no
   `ecall`, where the QingKe V4 of the CH32V203 needs one for its
   hardware prologue's pop.
+- The entry and the exit the kernel asks for (`kernel/platform.hpp`)
+  are the entry's own. Before it sets MIE - nothing has run on the hart
+  since the trap cleared it - the entry reads the kernel's ceiling into
+  its frame's first byte and stores 0 in its place, and hands that
+  value to `activate(base)`; after the call, its write of mstatus clears
+  MIE again, and in that one step it stores the value back, compares
+  the count of quiet posts the scheduler returned with the kernel's, and
+  raises the hart's flag again when it moved, which is taken over the
+  interrupted code after the `mret`. With the trap masking in hardware,
+  no request can be made between the trap and the store of 0, so no run
+  of the scheduler ever starts at a ceiling of 0 on this half. By the
+  release listing the entry is 49 instructions on the path that finds
+  the count still, four more on the path that raises the flag, where it
+  was 41; three of the new ones run before MIE is set and five more
+  between the mask and the `mret`.
 - Hazard3 here has no floating-point unit (3.8.8), so the entry saves no
   f-register.
 

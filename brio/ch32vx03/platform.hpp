@@ -96,12 +96,13 @@ static_assert(Platform<Ch32vx03Platform<>> && HandlerAware<Ch32vx03Platform<>>);
  *     using P = brio::Ch32vx03RubatoPlatform<>;
  *     using K = brio::Rubato<P, Sensor, Logger>;
  *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
- *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
  *     int main() { ...; brio::scheduler_init(); brio::enable_interrupts(); K::run(); }
  *
  *  - `preemptive`, true;
  *  - `ceiling`, the byte the kernel keeps: the pack index of the object
- *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    being dispatched or just served, 0 while the scheduler chooses, 255
+ *    at the loop's base (kernel/platform.hpp). A static of the platform,
  *    so of the program: one kernel per platform type, which on this
  *    single-core family is one kernel;
  *  - `pend_schedule()`, the request for the scheduler: qingke/
@@ -125,7 +126,8 @@ template <class TB = Ticker>
 struct Ch32vx03RubatoPlatform : Ch32vx03Platform<TB> {
     static constexpr bool preemptive = true;
 
-    /// The index of the object being dispatched; 255 at the loop's base.
+    /// The index of the object being dispatched or just served, 0 while
+    /// the scheduler chooses; 255 at the loop's base.
     static inline uint8_t ceiling = 255;
 
     /// The request for the scheduler (qingke/schedule.hpp).

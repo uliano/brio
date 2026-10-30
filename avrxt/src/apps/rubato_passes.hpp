@@ -90,13 +90,15 @@ void console_turn() {
 
 /// One turn of Rubato::run()'s loop, written out in the Console's dispatch:
 /// the matured time events posted with the ceiling held at 0, then the
-/// scheduler at the Console's ceiling.
+/// scheduler entered with it still there at the Console's own ceiling, as
+/// the platform's entry hands it over (kernel/platform.hpp), and the
+/// ceiling put back.
 void base_turn() {
     const uint8_t c = P::ceiling;
     P::ceiling = 0;
     TE::process();
+    (void)K::activate(c);
     P::ceiling = c;
-    (void)K::activate();
 }
 
 /// A wait's turn: the base turn, then 500 to 1523 cycles of the Console's

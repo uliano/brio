@@ -4,7 +4,7 @@
  * The scheduling request of the preemptive kernel on the CH32V203's
  * QingKe V4B and the CH32V303's V4F, and the thread-mode scheduler it
  * starts: `request_scheduler()`, `scheduler_init()`, the two vector
- * bodies `scheduler_trap<K>()` and `scheduler_return()` and their
+ * bodies `scheduler_trap<K>()` and `scheduler_return<K>()` and their
  * binding BRIO_CH32_SCHEDULER_VECTOR are the QingKe core stratum's
  * (qingke/schedule.hpp, whose account they are: the software interrupt
  * one preemption level below every peripheral line, the return into the
@@ -13,7 +13,7 @@
  * shows (ch32vx03/platform.hpp):
  *
  *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
- *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
  *
  * This family's fact, the one the core file asks: on these two cores the
  * request's store into the PFIC is posted - measured on the CH32V203C8T6

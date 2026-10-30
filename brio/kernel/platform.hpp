@@ -109,12 +109,40 @@
  * kernel/time_event.hpp, util/ring.hpp) compiles for it exactly what it
  * compiles without the question:
  *  - preemptive: a static constexpr bool, true;
- *  - ceiling: a static uint8_t, the pack index of the active object
- *    being dispatched, 255 at the loop's base. A post to an object whose
- *    index is below it asks for the scheduler;
+ *  - ceiling: a static uint8_t, 255 at the loop's base, which the kernel
+ *    keeps: the pack index of the active object being dispatched or just
+ *    served, and 0 while it chooses the next one. A post to an object
+ *    whose index is below it asks for the scheduler; every other post on
+ *    the platform adds one to the kernel's count of quiet posts,
+ *    quiet_posts<P> below;
  *  - pend_schedule(): that request. The scheduler (Rubato's activate())
  *    runs when no interrupt handler is running: at once from a
  *    dispatch, at the handler's exit from an interrupt handler.
+ *
+ * The half of the preemptive contract no member states is how the
+ * platform runs the scheduler once the request is taken - its ENTRY and
+ * its EXIT - and it is the half that bounds the stack:
+ *  - the entry reads the ceiling and stores 0 in its place before any
+ *    interrupt handler can run after the request was taken, and calls
+ *    activate(base) with the value it read. A handler that runs after
+ *    that store finds the ceiling at 0: its post asks for nothing, moves
+ *    the count, and the choice under way sees it;
+ *  - activate(base) returns with the ceiling still at 0, handing back the
+ *    count its last choice read (Activation below);
+ *  - the exit stores `base` back in the ceiling and compares the count
+ *    with quiet_posts<P> in one step no interrupt handler can enter, and
+ *    when the count moved it makes the request again before it returns,
+ *    so that the scheduler starts again over the code the request
+ *    interrupted, in place of the run that just ended, instead of
+ *    nesting over it.
+ * Kept, every run of the scheduler that starts over a dispatch starts at
+ * that dispatch's index, below the ceiling of the run it interrupts, so a
+ * pack of n objects holds at most n runs (kernel/rubato.hpp, "The
+ * stack"). How each core keeps the two steps whole is its scheduler
+ * file's (cortexm/schedule.hpp, qingke/schedule.hpp,
+ * rp2350/schedule_hazard3.hpp), with the one request a core may still find
+ * pending at its entry; the host's simulation is RubatoHostPlatform's
+ * (host/platform.hpp).
  *
  * Optional members of a HOST platform only, detected the same way:
  *  - interleave_point(): called by EventQueue's take() and release() at
@@ -125,11 +153,17 @@
  *  - preempt_point(): called by TimeEvents::process() after each fire
  *    on a preemptive platform, the place a host suite lands a simulated
  *    interrupt inside the walk (test/test_rubato); a test object's
- *    handler may call it too. No target platform has it.
+ *    handler may call it too. No target platform has it;
+ *  - scan_point(SchedulerPoint where, uint8_t index): called by Rubato's
+ *    activate() at each place of its choice and of its gap between two
+ *    dispatches where an interrupt could land (SchedulerPoint below), so
+ *    a host suite can land one there (test/test_rubato). No target
+ *    platform has it, and no code is compiled for it there.
  */
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <concepts>
 #include <type_traits>
@@ -180,6 +214,55 @@ concept Preemptive = requires {
     requires P::preemptive;
     { P::ceiling } -> std::same_as<uint8_t&>;
     { P::pend_schedule() } -> std::same_as<void>;
+};
+
+/// The count of quiet posts on preemptive platform P: one added by every
+/// post() that asked for no scheduler (kernel/post.hpp), modulo 256.
+/// Rubato's choice reads it before its first scan and again once the
+/// ceiling is raised to the object chosen, and the platform's exit
+/// compares it with the value activate() hands back
+/// (the entry and the exit above): a post that landed behind a look is
+/// seen by the count having moved. A count is all it is - which object,
+/// and how many, the next choice finds - so a lost update between an
+/// interrupt handler and a dispatch, which still moves it, is harmless.
+/// Two misses it cannot see, both stated here and not guarded: 256 quiet
+/// posts inside one choice, and on a chip with two cores a post from the
+/// other core (a mispost the queue refuses) whose read and write of the
+/// byte straddle this core's own increment. A Tenuto platform never
+/// instantiates it.
+template <typename P>
+inline uint8_t quiet_posts = 0;
+
+/// What Rubato's activate() hands back to the platform's entry that
+/// called it: `count`, quiet_posts<P> as the last choice read it, which
+/// the exit compares; and `served`, whether this run dispatched anything,
+/// which the kernel's own loop asks. The scheduler bodies written in
+/// assembly read `count` as the low byte of the register the result
+/// comes back in (r0 under the AAPCS, a0 under the RISC-V calling
+/// convention: a structure no wider than a register returns in it, laid
+/// out as in memory, and both targets are little-endian), which the
+/// layout asserted below makes true.
+struct Activation {
+    uint8_t count;
+    bool served;
+};
+
+static_assert(sizeof(Activation) == 2 && offsetof(Activation, count) == 0,
+              "the scheduler bodies read Activation::count as the result's low byte");
+
+/// The places of Rubato's activate() a host platform's scan_point() is
+/// called at (the optional member above): the ceiling is 0 at `look`,
+/// `empty` and `found` in a choice's first scan (the held object's index
+/// in the scans after it), at `raised` the chosen object's index, in the
+/// `gap` after a dispatch the index of the object just served, and at
+/// `exit` 0 again, the run's last choice having found nothing.
+enum class SchedulerPoint : uint8_t {
+    look,     ///< before one queue's look
+    empty,    ///< after a look that found the queue empty
+    found,    ///< after the look that chose an object, before the raise
+    raised,   ///< after the raise, before the count is read again
+    gap,      ///< after a dispatch, before the next choice
+    exit,     ///< after the last choice, before activate() returns
 };
 
 } // namespace brio

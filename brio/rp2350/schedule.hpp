@@ -69,8 +69,10 @@
  * mscratch and the software interrupt flag are each hart's own, each
  * core's scheduler runs on its own stack (core 0's in scratch_y, core
  * 1's in scratch_x, rp2350/ld/), and each kernel's ceiling is a static of
- * its own platform type. The SVC body asks nothing: it steps over the
- * frame on the stack it finds, which is the core's own. A vector table
+ * its own platform type, as is its count of quiet posts. The SVC body
+ * asks nothing: the addresses of the ceiling and the count it puts back
+ * and compares come in the frame on the stack it finds, which the core's
+ * own entry wrote; on Hazard3 the exit is each kernel's entry itself. A vector table
  * per core - core 1 launched with a copy whose scheduler entries name K1
  * - would spare the question at every request for a second table that
  * every bound vector must be kept in step with; it is declined.

@@ -40,16 +40,14 @@ struct Note { uint8_t n; };   // the published notification
 
 // The harness: a simulated interrupt handler. It runs `f` (which posts)
 // with in_isr raised, lowers it, and when a post asked for the scheduler
-// runs it at the exit: road 1.
+// takes the request at the exit, through the platform's entry and exit:
+// road 1.
 template <typename F>
 void isr(F f) {
     RP::in_isr = true;
     f();
     RP::in_isr = false;
-    if (RP::pending && RP::scheduler != nullptr) {
-        RP::pending = false;
-        (void)RP::scheduler();
-    }
+    RP::interrupt_exit();
 }
 
 // Three objects of one shape, over either platform, so the same scenario
@@ -125,9 +123,9 @@ using K = brio::Rubato<RP, High, Mid, Low>;
 
 // The scheduler the platform calls, counted.
 uint32_t activations = 0;
-bool counted_activate() {
+brio::Activation counted_activate(uint8_t base) {
     ++activations;
-    return K::activate();
+    return K::activate(base);
 }
 
 void reset() {
@@ -625,12 +623,13 @@ TEST_CASE("a periodic timer far behind posts once per process(), its deadlines k
 namespace {
 
 /// One turn of run()'s loop, as run() does it: the matured time events
-/// posted with the ceiling held at 0, then the scheduler, then sleep.
+/// posted with the ceiling held at 0, then the scheduler entered with it
+/// still there, then - when the run served nothing - the base's exit and
+/// sleep. A turn that served leaves the ceiling at 0, as run() turns again.
 void turn() {
     RP::ceiling = 0;
     brio::TimeEvents<RP>::process();
-    RP::ceiling = 255;
-    if (!K::activate()) {
+    if (!K::activate(255).served) {
         K::idle_if_empty();
     }
 }
@@ -653,7 +652,9 @@ TEST_CASE("timers matured in one turn are served in priority order, none inside 
     CHECK(trace[0] == "hi10:c0");
     CHECK(trace[2] == "mid30:c1");
     CHECK(trace[4] == "lo20:c2");
-    CHECK(RP::ceiling == 255);
+    CHECK(RP::ceiling == 0);                   // the turn served: the loop turns again from 0
+    turn();
+    CHECK(RP::ceiling == 255);                 // the next found nothing: the base's exit
     periodic_low.disarm();
 }
 
@@ -817,10 +818,14 @@ struct UnderRubato {
         RP::scheduler = &K::activate;
         RP::pending = false;
     }
-    static void crank() { (void)K::activate(); }
+    static void crank() {
+        RP::pending = true;   // the request the feed recorded, taken now
+        RP::take_request();
+    }
     static void crank_keeper() {
         RP::scheduler = &KH::activate;
-        (void)KH::activate();
+        RP::pending = true;
+        RP::take_request();
     }
 };
 
@@ -954,4 +959,488 @@ TEST_CASE("dispatching<P> is the inner object's index inside the preemption and 
     isr([] { brio::post<Low>(Hit{1}); });
     CHECK(seen == std::vector<uint8_t>{2, 0, 2});
     CHECK(brio::dispatching<RP> == brio::no_dispatch);
+}
+
+// ---------------------------------------------------------------------------
+// l. The stack's bound: interrupts inside the scheduler itself
+// ---------------------------------------------------------------------------
+//
+// A pack of four, each object's queue four deep, and interrupts landing
+// at the scheduler's own places (kernel/platform.hpp's SchedulerPoint,
+// through RubatoHostPlatform's scan_hook), in the platform's entry window
+// (entry_hook) and inside the dispatches (preempt_hook). The scheduler
+// the platform calls is counted: `depth` is the number of runs of
+// activate() in progress.
+//
+// The bound, derived. A run that starts at base b serves only indices
+// below b, and a run that starts over one of its dispatches of index c
+// starts at base c < b, because the entry stores 0 before any handler
+// can run after the request is taken, and the exit puts b back and
+// compares the count with no handler between: no run starts at the base
+// of the run it interrupts. Every run in progress but the topmost is
+// suspended in a dispatch, and from the loop's base those dispatches
+// have strictly decreasing indices 255 > c1 > c2 > ... >= 0, at most four
+// of them for four objects - and when there are four, the fourth is
+// index 0's, at the ceiling 0 where no post asks, and nothing stands
+// above it. So four objects hold at most four runs. The one exception
+// to "a run starts over a dispatch" is a request made in the entry
+// window, which the core takes right after the entry's store: a run at
+// base 0, serving nothing, standing over the entry of the run it delays,
+// which has not begun choosing - so it takes that run's place in the
+// count, and the count stays within four. `serving` counts the runs at a
+// base above 0 apart.
+
+namespace {
+
+using brio::SchedulerPoint;
+
+constexpr uint8_t pack = 4;
+std::vector<std::string> order;
+uint32_t inversions = 0;    // a dispatch started, or resumed, while a higher queue waited
+uint32_t self_nested = 0;   // an object dispatched inside its own dispatch
+uint32_t dispatches = 0;
+
+bool higher_waiting(uint8_t id);
+
+template <int id>
+struct Quad : brio::Fsm<Quad<id>, Hit> {
+    using Base = brio::Fsm<Quad<id>, Hit>;
+    using Event = typename Base::Event;
+    using Status = typename Base::Status;
+    static inline brio::EventQueue<Event, 4, RP> queue;
+    static inline uint8_t active = 0;
+    static inline void (*action)(uint8_t) = nullptr;
+    static void init() { Base::start(&only); }
+    static void dispatch(const Event& e) { Base::dispatch(e); }
+    static void clear() {
+        while (queue.pop().has_value()) {}
+        active = 0;
+        action = nullptr;
+    }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return Base::handled(); },
+            [](Hit h) {
+                if (active != 0) {
+                    ++self_nested;
+                }
+                ++active;
+                ++dispatches;
+                if (higher_waiting(id)) {
+                    ++inversions;
+                }
+                order.push_back("n" + std::to_string(id) + "." + std::to_string(h.n));
+                if (action != nullptr) {
+                    action(h.n);
+                }
+                // Back from whatever landed inside: nothing above may wait.
+                if (higher_waiting(id)) {
+                    ++inversions;
+                }
+                --active;
+                return Base::handled();
+            },
+            [](auto) { return Base::unhandled(); });
+    }
+};
+
+using Q0 = Quad<0>;
+using Q1 = Quad<1>;
+using Q2 = Quad<2>;
+using Q3 = Quad<3>;
+using K4 = brio::Rubato<RP, Q0, Q1, Q2, Q3>;
+
+bool higher_waiting(uint8_t id) {
+    return (id > 0 && !Q0::queue.empty()) || (id > 1 && !Q1::queue.empty()) ||
+           (id > 2 && !Q2::queue.empty());
+}
+
+uint32_t depth = 0;          // runs in progress
+uint32_t serving = 0;        // runs in progress at a base above 0
+uint32_t max_depth = 0;
+uint32_t max_serving = 0;
+uint32_t empty_runs = 0;     // runs started at base 0
+uint32_t empty_runs_served = 0;
+
+brio::Activation counted4(uint8_t base) {
+    ++depth;
+    max_depth = depth > max_depth ? depth : max_depth;
+    if (base != 0) {
+        ++serving;
+        max_serving = serving > max_serving ? serving : max_serving;
+    } else {
+        ++empty_runs;
+    }
+    const brio::Activation a = K4::activate(base);
+    if (base != 0) {
+        --serving;
+    } else if (a.served) {
+        ++empty_runs_served;
+    }
+    --depth;
+    return a;
+}
+
+void post_to(uint8_t target, uint8_t n) {
+    switch (target) {
+    case 0: brio::post<Q0>(Hit{n}); break;
+    case 1: brio::post<Q1>(Hit{n}); break;
+    case 2: brio::post<Q2>(Hit{n}); break;
+    default: brio::post<Q3>(Hit{n}); break;
+    }
+}
+
+void reset4() {
+    order.clear();
+    RP::reset();
+    Q0::clear();
+    Q1::clear();
+    Q2::clear();
+    Q3::clear();
+    inversions = 0;
+    self_nested = 0;
+    dispatches = 0;
+    depth = 0;
+    serving = 0;
+    max_depth = 0;
+    max_serving = 0;
+    empty_runs = 0;
+    empty_runs_served = 0;
+    K4::init_all();
+    RP::scheduler = &counted4;
+}
+
+// The load: `budget` interrupts, each landing at a place whose class is
+// in `mask` (a bit per SchedulerPoint, bit 6 the entry window), posting
+// one event to the target `pick` names.
+constexpr uint32_t at_entry = 1u << 6;
+uint32_t budget = 0;
+uint32_t landed = 0;
+uint32_t landing = 0;
+uint8_t (*pick)(uint32_t) = nullptr;
+
+constexpr uint32_t bit(SchedulerPoint w) { return 1u << static_cast<uint8_t>(w); }
+
+void land_one() {
+    const uint32_t n = landed++;
+    isr([n] { post_to(pick(n), static_cast<uint8_t>(n)); });
+}
+
+void scan_landing(SchedulerPoint where, uint8_t) {
+    if (!RP::in_isr && landed < budget && (landing & bit(where)) != 0u) {
+        land_one();
+    }
+}
+
+void entry_landing() {
+    if (!RP::in_isr && landed < budget && (landing & at_entry) != 0u) {
+        land_one();
+    }
+}
+
+uint8_t pick_lowest(uint32_t) { return 3; }
+uint8_t pick_one(uint32_t) { return 1; }
+uint8_t pick_highest(uint32_t) { return 0; }
+uint8_t pick_rotate(uint32_t n) { return static_cast<uint8_t>(n % pack); }
+uint8_t pick_hashed(uint32_t n) {
+    uint32_t x = n * 2654435761u + 12345u;   // a fixed hash: the same sequence every run
+    x ^= x >> 13;
+    x *= 0x5bd1e995u;
+    x ^= x >> 15;
+    return static_cast<uint8_t>(x % pack);
+}
+
+struct Load {
+    const char* name;
+    uint8_t (*pick)(uint32_t);
+};
+const Load loads[] = {
+    {"lowest", pick_lowest}, {"one", pick_one}, {"highest", pick_highest},
+    {"rotate", pick_rotate}, {"hashed", pick_hashed},
+};
+
+/// One run of a load: the first event to the lowest object from an
+/// interrupt, then up to `n` interrupts at the places `mask` names, then
+/// what is left served from the loop's base, as a turn of run() would.
+void loaded(uint32_t mask, uint8_t (*p)(uint32_t), uint32_t n) {
+    reset4();
+    budget = n;
+    landed = 0;
+    landing = mask;
+    pick = p;
+    RP::scan_hook = &scan_landing;
+    RP::entry_hook = &entry_landing;
+    isr([] { brio::post<Q3>(Hit{200}); });
+    RP::scan_hook = nullptr;
+    RP::entry_hook = nullptr;
+    RP::pending = true;
+    RP::take_request();
+}
+
+uint32_t pending_events() {
+    return uint32_t{Q0::queue.size()} + Q1::queue.size() + Q2::queue.size() + Q3::queue.size();
+}
+
+} // namespace
+
+TEST_CASE("an interrupt in every gap between two dispatches, the pack never empty: at most four runs") {
+    // Each interrupt posts one event, so the pack never empties while the
+    // budget lasts: the shape that nested one run per interrupt before the
+    // ceiling stayed at the object served (N + 1 runs for N interrupts).
+    for (const Load& l : loads) {
+        for (const uint32_t n : {10u, 100u, 1000u}) {
+            loaded(bit(SchedulerPoint::gap), l.pick, n);
+            INFO(std::string(l.name) << " N=" << n << " depth " << max_depth);
+            CHECK(landed == n);
+            CHECK(max_depth <= pack);
+            CHECK(empty_runs == 0);
+            CHECK(self_nested == 0);
+            CHECK(inversions == 0);
+            CHECK(pending_events() == 0);
+        }
+    }
+}
+
+TEST_CASE("an interrupt at every exit, in every entry window, at every look: at most four runs") {
+    // The adversarial schedules: every landing in one class of place, four
+    // hundred interrupts each, every load. The exit's landings ask the
+    // platform to take the request again, in place of the run that ended;
+    // the entry window's start runs at base 0, which serve nothing.
+    struct Where {
+        const char* name;
+        uint32_t mask;
+        bool window;   // lands in the entry window: a base-0 run may follow
+    };
+    const Where wheres[] = {
+        {"exit", bit(SchedulerPoint::exit), false},
+        {"entry window", at_entry, true},
+        {"look", bit(SchedulerPoint::look), false},
+        {"empty", bit(SchedulerPoint::empty), false},
+        {"found", bit(SchedulerPoint::found), false},
+        {"raised", bit(SchedulerPoint::raised), false},
+        {"every place", 0x7Fu, true},
+    };
+    for (const Where& w : wheres) {
+        for (const Load& l : loads) {
+            loaded(w.mask, l.pick, 400);
+            INFO(std::string(w.name) << " " << l.name << " depth " << max_depth << " serving "
+                                     << max_serving << " empty runs " << empty_runs << " retakes "
+                                     << RP::retakes);
+            if (w.mask != at_entry) {
+                CHECK(landed == 400u);
+            } else {
+                // The window alone runs dry: its landing's request starts a
+                // run at base 0, whose own window finds the ceiling at 0 and
+                // asks for nothing, so no further entry follows.
+                CHECK(landed == 2u);
+            }
+            CHECK(max_depth <= pack);
+            CHECK(empty_runs_served == 0);
+            if (!w.window) {
+                CHECK(empty_runs == 0);
+            }
+            CHECK(self_nested == 0);
+            CHECK(inversions == 0);
+            CHECK(pending_events() == 0);
+        }
+    }
+    // The exit's landings are taken again, not nested over the exit: one
+    // interrupt at each of a pass's four exits from the base.
+    loaded(bit(SchedulerPoint::exit), pick_lowest, 4);
+    CHECK(RP::retakes == 4);
+    CHECK(max_depth == 1);
+    // The entry window is real on the host as on a Cortex-M: a request
+    // made there is taken at the entry's unmask, as a run at base 0.
+    loaded(at_entry, pick_highest, 1);
+    CHECK(empty_runs == 1);
+    CHECK(empty_runs_served == 0);
+}
+
+TEST_CASE("a post landing behind the scan, N1 just served and N3 waiting: N2 before N3") {
+    // The choice after N1's dispatch looks at N0, N1 and N2, all empty; an
+    // interrupt then posts to N2, quiet at the ceiling 0, and the scan goes
+    // on to N3. The count moved, so the choice looks again above N3 with
+    // the ceiling held at 3, and finds N2.
+    reset4();
+    RP::scheduler = nullptr;   // fed without serving
+    brio::post<Q1>(Hit{1});
+    brio::post<Q3>(Hit{3});
+    RP::scheduler = &counted4;
+    static bool armed = false;
+    static bool done = false;
+    armed = false;
+    done = false;
+    Q1::action = [](uint8_t) { armed = true; };
+    RP::scan_hook = [](SchedulerPoint where, uint8_t index) {
+        if (armed && !done && where == SchedulerPoint::empty && index == 2) {
+            done = true;
+            isr([] { brio::post<Q2>(Hit{2}); });
+        }
+    };
+    RP::pending = true;
+    RP::take_request();
+    RP::scan_hook = nullptr;
+    CHECK(done);
+    CHECK(order == std::vector<std::string>{"n1.1", "n2.2", "n3.3"});
+    CHECK(inversions == 0);
+}
+
+TEST_CASE("a post landing behind a nested run's last scan: N2 before the suspended N3 resumes") {
+    // N3 is dispatching; an interrupt inside it posts to N1, and the run
+    // nested at base 3 serves N1. Its last choice finds N2 empty, and an
+    // interrupt then posts to N2: quiet at the ceiling 0, so the run ends
+    // without it - and the platform's exit, finding the count moved,
+    // takes the request again at base 3, which serves N2 before N3
+    // resumes.
+    reset4();
+    static bool armed = false;
+    static bool done = false;
+    armed = false;
+    done = false;
+    Q3::action = [](uint8_t) {
+        RP::preempt_hook = [] { isr([] { brio::post<Q1>(Hit{1}); }); };
+        RP::preempt_point();
+        RP::preempt_hook = nullptr;
+        order.push_back("n3.resumed");
+    };
+    Q1::action = [](uint8_t) { armed = true; };
+    RP::scan_hook = [](SchedulerPoint where, uint8_t index) {
+        if (armed && !done && where == SchedulerPoint::empty && index == 2) {
+            done = true;
+            isr([] { brio::post<Q2>(Hit{2}); });
+        }
+    };
+    isr([] { brio::post<Q3>(Hit{3}); });
+    RP::scan_hook = nullptr;
+    CHECK(done);
+    CHECK(order == std::vector<std::string>{"n3.3", "n1.1", "n2.2", "n3.resumed"});
+    CHECK(RP::retakes == 1);
+    CHECK(max_depth == 2);
+    CHECK(inversions == 0);
+}
+
+TEST_CASE("the run at base 0 in the deepest entry: four runs, the fourth serving nothing") {
+    // Q3's dispatch preempted by Q2's, Q2's by Q1's - three runs that
+    // serve - and Q1's interrupt posting to Q0; in the entry window of the
+    // run that will serve Q0 an interrupt posts to Q0 once more, at the
+    // ceiling 1 the entry has not yet replaced. Its request is taken right
+    // after the entry's store, as a run at base 0 over that entry: the
+    // fourth run, serving nothing. Then the delayed run serves both events.
+    reset4();
+    static uint32_t depth_in_window = 0;
+    depth_in_window = 0;
+    Q3::action = [](uint8_t) {
+        RP::preempt_hook = [] { isr([] { brio::post<Q2>(Hit{2}); }); };
+        RP::preempt_point();
+    };
+    Q2::action = [](uint8_t) {
+        RP::preempt_hook = [] { isr([] { brio::post<Q1>(Hit{1}); }); };
+        RP::preempt_point();
+    };
+    Q1::action = [](uint8_t) {
+        RP::preempt_hook = nullptr;
+        RP::entry_hook = [] {
+            if (RP::ceiling == 1) {
+                RP::entry_hook = nullptr;
+                depth_in_window = depth;
+                isr([] { brio::post<Q0>(Hit{9}); });
+            }
+        };
+        isr([] { brio::post<Q0>(Hit{0}); });
+    };
+    isr([] { brio::post<Q3>(Hit{3}); });
+    CHECK(depth_in_window == 3);
+    CHECK(max_depth == pack);
+    CHECK(max_serving == pack);   // the delayed run, once it serves Q0
+    CHECK(empty_runs == 1);
+    CHECK(empty_runs_served == 0);
+    CHECK(order == std::vector<std::string>{"n3.3", "n2.2", "n1.1", "n0.0", "n0.9"});
+    CHECK(inversions == 0);
+}
+
+namespace {
+
+// The random interrupts: at every place, with a probability, posting
+// one or two events to random objects; and the dispatches posting too,
+// to random objects (road 2 when the receiver is above, quiet when not).
+uint32_t rng = 1;
+uint32_t next_rng() {
+    rng = rng * 1664525u + 1013904223u;
+    return rng >> 8;
+}
+uint32_t odds = 0;            // a landing in `odds` out of 64
+uint32_t campaign_budget = 0;
+
+void campaign_post() {
+    const uint32_t r = next_rng();
+    post_to(static_cast<uint8_t>(r % pack), static_cast<uint8_t>(r));
+    if ((r & 0x100u) != 0u) {
+        post_to(static_cast<uint8_t>((r >> 4) % pack), static_cast<uint8_t>(r >> 8));
+    }
+}
+
+void maybe_land() {
+    if (RP::in_isr || campaign_budget == 0 || (next_rng() & 63u) >= odds) {
+        return;
+    }
+    --campaign_budget;
+    isr([] { campaign_post(); });
+}
+
+void campaign_action(uint8_t) {
+    maybe_land();
+    if (campaign_budget != 0 && (next_rng() & 7u) == 0u) {
+        --campaign_budget;
+        campaign_post();
+    }
+    maybe_land();
+}
+
+} // namespace
+
+TEST_CASE("the depth bound under random interrupts everywhere: at most four runs, none inverted") {
+    // 400 seeds x 4 rates, 3000 interrupts or dispatch posts each: every
+    // place the host can land one - each scheduler place, the entry
+    // window, twice inside every dispatch.
+    uint32_t worst_serving = 0;
+    uint32_t worst_depth = 0;
+    uint64_t total_dispatches = 0;
+    uint32_t total_empty_runs = 0;
+    for (const uint32_t rate : {4u, 16u, 32u, 64u}) {
+        for (uint32_t seed = 1; seed <= 400; ++seed) {
+            reset4();
+            rng = seed * 7919u;
+            odds = rate;
+            campaign_budget = 3000;
+            Q0::action = &campaign_action;
+            Q1::action = &campaign_action;
+            Q2::action = &campaign_action;
+            Q3::action = &campaign_action;
+            RP::scan_hook = [](SchedulerPoint, uint8_t) { maybe_land(); };
+            RP::entry_hook = [] { maybe_land(); };
+            while (campaign_budget != 0) {
+                const uint32_t before = campaign_budget;
+                isr([] { campaign_post(); });
+                if (campaign_budget == before) {
+                    --campaign_budget;   // the base's own interrupt counts too
+                }
+            }
+            RP::scan_hook = nullptr;
+            RP::entry_hook = nullptr;
+            RP::pending = true;
+            RP::take_request();
+            worst_serving = max_serving > worst_serving ? max_serving : worst_serving;
+            worst_depth = max_depth > worst_depth ? max_depth : worst_depth;
+            total_dispatches += dispatches;
+            total_empty_runs += empty_runs;
+            REQUIRE(max_depth <= pack);
+            REQUIRE(empty_runs_served == 0);
+            REQUIRE(self_nested == 0);
+            REQUIRE(inversions == 0);
+            REQUIRE(pending_events() == 0);
+        }
+    }
+    MESSAGE("worst runs that serve " << worst_serving << ", worst runs " << worst_depth
+            << ", dispatches " << total_dispatches << ", runs at base 0 " << total_empty_runs);
+    CHECK(worst_depth == pack);     // the bound is reached, not only respected
 }

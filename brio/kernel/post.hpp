@@ -18,13 +18,18 @@
  *
  * Under Rubato, on a preemptive platform (kernel/platform.hpp), post()
  * does one thing more after the copy: when the receiver's priority is
- * above the platform's ceiling (the object being dispatched, or none at
- * the loop's base) it asks for the scheduler, P::pend_schedule(). Called
+ * above the platform's ceiling (the object being dispatched or just
+ * served, none at the loop's base) it asks for the scheduler, P::pend_schedule(). Called
  * from a dispatch, the receiver's dispatch then runs inside post(), which
  * returns after it; called from an interrupt handler, it runs at the
  * handler's exit (kernel/rubato.hpp). A post to an object at or below the
- * ceiling, the poster itself included, waits as under Tenuto. On every
- * other platform the question is not compiled at all.
+ * ceiling, the poster itself included, waits as under Tenuto, and adds one
+ * to the platform's count of quiet posts (quiet_posts<P>,
+ * kernel/platform.hpp): the ceiling is 0 while the scheduler chooses, so a
+ * post that lands during a choice asks for nothing, and the count moving
+ * is how the choice learns it was posted behind its looks - a byte
+ * loaded, incremented and stored, four or five instructions. On every
+ * other platform neither the question nor the count is compiled.
  *
  * The compiler checks that the receiver accepts the event: an event type
  * that is not among the receiver's alternatives is an error at the call.
@@ -55,7 +60,8 @@ namespace brio {
 
 /// Copy one event (any alternative of Ao::Event) into Ao's queue. Any
 /// context; never waits; a full queue drops and counts. On a preemptive
-/// platform, then ask for the scheduler when Ao is above the ceiling.
+/// platform, then ask for the scheduler when Ao is above the ceiling, and
+/// count the post as quiet (quiet_posts, kernel/platform.hpp) when not.
 template <typename Ao, typename Ev>
     requires std::constructible_from<typename Ao::Event, Ev>
 void post(const Ev& e) {
@@ -68,6 +74,8 @@ void post(const Ev& e) {
         using Plat = typename Q::Platform;
         if (Ao::queue.priority() < Plat::ceiling) {
             Plat::pend_schedule();
+        } else {
+            ++quiet_posts<Plat>;   // what Rubato's choice and the platform's exit compare
         }
     }
 }

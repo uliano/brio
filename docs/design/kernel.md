@@ -939,32 +939,52 @@ same stack, and the suspended one resumes when the higher one
 returns.** Nothing is ever suspended in the other direction: an object
 of equal or lower priority than the one running waits, as under Tenuto.
 
-The ceiling. The platform keeps one byte, `P::ceiling`: the list index
-of the object being dispatched, 255 at the loop's base, and 0 while
-nothing may be dispatched at all (during `init_all()`'s inits and while
-the loop posts the matured time events). "Above the ceiling" in what
-follows means a smaller index, that is a higher priority. Only an
-object whose index is below the ceiling may start a dispatch. Every
-`post()` compares the receiver's index with the ceiling after the copy
-and, when it is below, asks the platform for the scheduler
-(`P::pend_schedule()`); the compare reads the ceiling once, and a
-request that finds its queue already served by a scheduler that ran in
-between serves nothing and costs one pass of the scan. The raise of
-the ceiling before a dispatch and its restore after are compiler
-barriers in the kernel (`std::atomic_signal_fence`, no instruction on
-one core): without them the compiler may move the queue's reads ahead
-of the raise, and a request landing in that gap serves the event in a
-nested scheduler while the outer pass takes it again from a stale
-cursor and releases the slot twice, which wedges the queue (seen on
-the STM32F446RE under GCC 16 at `-Os`, in the bench suite below).
-The scheduler is `activate()`: it serves the highest non-empty queue
-below the ceiling, one event, with the ceiling raised to that object's
-index for the length of the dispatch and restored after it, and repeats
-from the top of the list until no queue below the ceiling holds
-anything. Each queue knows its index because `init_all()` writes it
-(the pack index, kept in the queue on a preemptive platform only),
-and `init_all()` holds the ceiling at 0 while the inits run, so nothing
-is dispatched before the last `init()` has returned.
+The ceiling. The platform keeps one byte, `P::ceiling`, 255 at the
+loop's base; the kernel keeps in it the list index of the object being
+dispatched or just served, and 0 while nothing may be dispatched: while
+the scheduler chooses, during `init_all()`'s inits and while the loop
+posts the matured time events. "Above the ceiling" in what follows
+means a smaller index, that is a higher priority. Only an object whose
+index is below the ceiling may start a dispatch. Every `post()`
+compares the receiver's index with the ceiling after the copy and, when
+it is below, asks the platform for the scheduler (`P::pend_schedule()`);
+every other post adds one to a byte the kernel keeps per platform, the
+count of quiet posts (`quiet_posts<P>`, `kernel/platform.hpp`), four or
+five instructions on the path that asks nothing. Each queue knows its
+index because `init_all()` writes it (the pack index, kept in the queue
+on a preemptive platform only), and `init_all()` holds the ceiling at 0
+while the inits run, so nothing is dispatched before the last `init()`
+has returned.
+
+The scheduler is `activate(base)`, a run of it called by the platform
+with the ceiling it found when it took the request, `base`, already
+replaced by 0. A run CHOOSES and serves, one event at a time: a scan
+from the top of the list for the first non-empty queue below `base`,
+with the ceiling at 0, so that a post landing during the scan asks for
+nothing and only moves the count; then the ceiling raised to the chosen
+object's index and, when the count has not moved since the scan began,
+one event of that object dispatched; between two dispatches the ceiling
+stays at the index just served, and the next choice stores 0 again. A
+choice during which the count moved looks once more, above the chosen
+object with the ceiling already held at it: a post the scan had passed
+is served first, a post landing after the raise asks for a run of its
+own when it is above the chosen object and cannot beat it otherwise, so
+the second look needs no count. When a choice finds nothing, the run
+returns with the ceiling still at 0 and the count it read, and the
+platform's exit puts `base` back and compares the count in one step no
+interrupt handler can enter: when it moved, a quiet post landed behind
+the last scan, and the exit makes the request again, so that the
+scheduler starts over the code the request interrupted in place of the
+run that ended. The raise of the ceiling and the restore of a cursor are
+ordered by compiler barriers in the kernel (`std::atomic_signal_fence`,
+no instruction on one core): without them the compiler may move the
+queue's reads ahead of the raise, and a request landing in that gap
+serves the event in a nested run while the outer one takes it again
+from a stale cursor and releases the slot twice, which wedges the queue
+(seen on the STM32F446RE under GCC 16 at `-Os`, in the bench suite
+below). At the loop's base the run is called the same way - the ceiling
+is already 0 from the walk of the time events - and the base's exit is
+the masked re-check before sleep, which puts 255 back.
 
 Two roads lead to a dispatch that preempts another:
 
@@ -1064,30 +1084,56 @@ The accepted limits are Tenuto's with preemption in place of "the
 running dispatch finishes first": the kernel promises that an object of
 higher priority is served before a lower one resumes, and nothing more;
 no response time, no fairness, no ageing. A long dispatch delays every
-object of its own and lower priority by its length. The stack is one.
-Each interrupt whose post lands while `activate()` is between two
-dispatches nests a whole scheduler level at the ceiling that scan
-restored, and that level returns only when every queue below the
-ceiling has drained, so the depth is not bounded by the pack's length:
-it grows with the load, a level at a time while the pack stays busy,
-and without bound when the objects above the lowest never empty
-(measured on the SAMC21J18A, 128 bytes a level: 1.3 KB at light load,
-6 KB near saturation, past the RAM under an overloaded pack, [the SAM
-C21 platform page](../samc21/platform.md); on the CH32X035F8U6 192
-bytes a level, 26 levels read in a dump before the crash, [the
-CH32X035 platform page](../ch32x035/platform.md)). It is to be measured on
-each realization at its heaviest load, not computed (712 bytes of high-water on the STM32F446RE for the bench
-suite's deepest chain, [the STM32F4 platform page](../stm32f4/platform.md);
-500 to 520 on the STM32G0B1RE, whose frames carry no FPU words,
-[the STM32G0 platform page](../stm32g0/platform.md); 580 on the
-SAMC21J18A, [the SAM C21 platform page](../samc21/platform.md); 532
-on the RP2040's core 0 and 260 to 272 on its core 1 for a pack of three, [the
-RP2040 platform page](../rp2040/platform.md); 652 on the RP2350's
-Cortex-M33 and 904 to 992 on its Hazard3 (236 and 348 on core 1 for a pack of its own), [the RP2350 platform
-page](../rp2350/platform.md); 1000 on the CH32V203C8T6 and 1156 on the
-CH32V303VCT6, whose levels carry the entry's registers on the stack
-where a Cortex-M's carry an exception frame, as the RP2350's Hazard3's
-do, [the CH32V203/CH32V303 platform page](../ch32vx03/platform.md)).
+object of its own and lower priority by its length.
+
+The stack is one, and its depth is bounded by the pack. A run of the
+scheduler that preempts a dispatch starts at that dispatch's index,
+strictly below the ceiling of the run it preempts: during a choice the
+ceiling is 0 and no post asks, between two dispatches it is the index
+just served, and the platform's entry and exit leave no instant at
+which a handler finds the ceiling of the run being entered or left
+(`kernel/platform.hpp`). So every run in progress but the topmost is
+suspended in a dispatch, those dispatches have strictly decreasing
+indices, and a pack of n objects holds at most n runs, whatever the
+interrupts' timing. One run starts otherwise, on the cores where an
+interrupt handler can still run between the request being taken and the
+entry's store of 0 - the Cortex-M, at PendSV's first instruction, and
+the QingKe V4, at the software interrupt's: the request that handler
+made is taken right after the store, as a run at a ceiling of 0 that
+serves nothing and returns. It stands over the entry of the run it
+delays, which has not begun choosing, so the count stays within n; what
+it adds to the stack is one entry's frame and an empty choice in place
+of the delayed run's dispatch. On the RP2350's Hazard3, whose trap masks
+in hardware, no such run exists. The host suite derives the bound and
+checks it under interrupts landing at every place of the scheduler,
+in the entry's window and inside the dispatches, from adversarial
+schedules to random ones over four objects - at most four runs, the
+bound reached, no dispatch ever started or resumed while a higher queue
+waited - and a timed model of the SAM C21's order of costs, with random
+arrivals from light load past saturation and a strictly periodic source
+swept over the scheduler's own windows, never exceeds it either.
+
+What a program sizes is then the pack's chain: for each level, the
+platform's entry frame (an exception frame and two words on a Cortex-M,
+the block and the entry's registers on a QingKe V4 or on Hazard3), the
+run's own frame, and the frames of the deepest dispatch at that index,
+summed over the pack's objects from the lowest to the highest. The
+bench measures the chain each realization's suite drives, its deepest
+(712 bytes of high-water on the STM32F446RE, [the STM32F4 platform
+page](../stm32f4/platform.md); 500 to 520 on the STM32G0B1RE, whose
+frames carry no FPU words, [the STM32G0 platform
+page](../stm32g0/platform.md); 580 on the SAMC21J18A, [the SAM C21
+platform page](../samc21/platform.md); 532 on the RP2040's core 0 and
+260 to 272 on its core 1 for a pack of three, [the RP2040 platform
+page](../rp2040/platform.md); 652 on the RP2350's Cortex-M33 and 904 to
+992 on its Hazard3 (236 and 348 on core 1 for a pack of its own), [the
+RP2350 platform page](../rp2350/platform.md); 1000 on the CH32V203C8T6
+and 1156 on the CH32V303VCT6, whose levels carry the entry's registers on
+the stack where a Cortex-M's carry an exception frame, as the RP2350's
+Hazard3's do, [the CH32V203/CH32V303 platform
+page](../ch32vx03/platform.md)), and what it must still measure is the
+bound under an overload: the high-water of a pack whose objects above
+the lowest never empty, which the design holds to the chain.
 
 What the platform provides is the three members above
 ([the platform](#11-platform-what-the-machine-provides-kernelplatformhpp)).
@@ -1098,18 +1144,24 @@ exception priority, below every peripheral line, which does not run
 the scheduler itself but returns into it in thread mode through a
 second exception frame, so that PendSV is not active while the
 dispatches run and an interrupt's post preempts a dispatch at any
-depth; the scheduler leaves through SVC (`cortexm/schedule.hpp`, the
-frames and the FPU's part in its header). The kernel never names the
-vectors; the application binds the two as it binds every other.
-On a QingKe V4 it is the software interrupt, alone one preemption level
-below every peripheral line with the nesting the platform turns on at
-run time, which does not run the scheduler either but returns into it
-in thread mode with the trap's mepc and mstatus in a block on the
-stack, the scheduler leaving through the machine-mode environment call
-(`qingke/schedule.hpp`, the frame and the f-registers' save in its
-header, the same request and bodies on the V4B, the V4F and the V4C,
-which has no f-registers, the request ending with a `fence.i` where the
-core posts its store). Eight realizations exist, and all eight have run: the host's
+depth; the thread-mode entry, still masked, replaces the ceiling with 0
+and keeps `base` in the stacked filler word, and the scheduler leaves
+through SVC, whose handler runs at priority 0 beside every peripheral
+line and is the exit: `base` back, the count compared, PendSV pended
+again when it moved, which then tail-chains over the interrupted frame
+(`cortexm/schedule.hpp`, the frames and the FPU's part in its header).
+The kernel never names the vectors; the application binds the two as
+it binds every other. On a QingKe V4 it is the software interrupt,
+alone one preemption level below every peripheral line with the
+nesting the platform turns on at run time, which does not run the
+scheduler either but returns into it in thread mode with the trap's
+mepc and mstatus and `base` in a block on the stack, its handler
+clearing MIE first, since these cores do not; the scheduler leaves
+through the machine-mode environment call, whose handler, masked the
+same way, is the exit (`qingke/schedule.hpp`, the frame and the
+f-registers' save in its header, the same request and bodies on the
+V4B, the V4F and the V4C, which has no f-registers, the request ending
+with a `fence.i` where the core posts its store). Eight realizations exist, and all eight have run: the host's
 (`RubatoHostPlatform`, `host/platform.hpp`), and seven on the bench,
 each with three figures in core cycles - an interrupt's post to the
 first instruction of the preempting dispatch (road 1), a post that asks
@@ -1134,7 +1186,8 @@ the WeAct RP2350B: 106, 60 and 303, the FP context stacked lazily
 0); and on its Hazard3 the machine software interrupt reached through
 the startup code's own register-saving trampoline, whose body points
 the trampoline's `mret` at the scheduler's entry, the entry leaving by
-an `mret` of its own with no exit vector: 179, 53 and 323; a Rubato on
+an `mret` of its own with no exit vector, the entry's tail with MIE
+cleared being the exit: 179, 53 and 323; a Rubato on
 each core of either half through the one scheduler entry, core 1's road
 1 from its doorbell's handler 110 and 185 cycles ([the RP2350 platform
 page](../rp2350/platform.md)); and the CH32V203's and
@@ -1163,8 +1216,13 @@ both roads, an object never nested in itself, the chain of three, the
 loans and the lender's trap, a hold under preemption, timers armed and
 disarmed inside a walk of the list and the matured ones served in
 priority order, idle at the base only, overflow unchanged, the ring's
-guard counted, and Tenuto's scenarios giving Tenuto's traces when no
-interrupt ever fires. `Lease::reply` under preemption is reasoned, not
+guard counted, Tenuto's scenarios giving Tenuto's traces when no
+interrupt ever fires, and the stack's bound above: an interrupt in
+every gap between two dispatches with the pack never empty, at every
+exit, in every entry window and at every look, the two posts behind a
+scan that a choice must still serve first, and the deepest entry
+window's run at a ceiling of 0, through the host platform's own entry
+and exit (`RubatoHostPlatform`). `Lease::reply` under preemption is reasoned, not
 yet in the host suite; on the bench it is exercised: the STM32F4's SPI
 and UART stacks ran under Rubato against the STM32G0B1RE's unchanged
 peers, the STM32G0's against the STM32F446RE's, the CH32V203's and
@@ -1214,11 +1272,10 @@ page](../ch32x035/i2c.md)). The SAM C21's ran the same way against the
 AVR64EA48's unchanged `twi_peer` (`test_samc_rubato_i2c`, 202 verdicts,
 [the SAM C21 I2C page](../samc21/i2c.md)), every tenure on its byte
 pump, a preemption inside `start()` a later START. On those two cores
-a held-wire flood with a probe at every tick of the heaviest pressure
-overloads the pack and, under Rubato, overflows the stack (the paragraph
-on the stack above), so the suites' flood posts a probe only when the
-pack's lowest object has run since the last: the load it asks is then
-what the core has left.
+the suites' held-wire flood posts a probe only when the pack's lowest
+object has run since the last, so the load it asks is what the core has
+left; a probe at every tick of the heaviest pressure is the overload
+the paragraph on the stack above leaves to the bench.
 
 Not Rubato: a blocking kernel (a handler that waits is a different
 kernel's, reserved under the name `Fermata` and not built), a
@@ -1466,9 +1523,14 @@ time event. The members:
 - Optional, as a set, the three members of a preemptive platform, the
   one Rubato runs on, detected by the `Preemptive` concept:
   `preemptive` (true), `ceiling` (a byte, the list index of the object
-  being dispatched, 255 at the loop's base) and `pend_schedule()`, the
-  scheduling request ("Rubato" in
-  [the scheduler](#8-scheduler-kerneltenutohpp)). A platform that
+  being dispatched or just served, 0 while the scheduler chooses, 255 at
+  the loop's base) and `pend_schedule()`, the scheduling request
+  ("Rubato" in [the scheduler](#8-scheduler-kerneltenutohpp)), with the
+  half of the contract no member states: the scheduler's entry replaces
+  the ceiling with 0 before any handler can run and hands the old value
+  to `activate()`, and its exit puts it back and compares the kernel's
+  count of quiet posts in one step no handler can enter, asking again
+  when the count moved (`kernel/platform.hpp`). A platform that
   declares `preemptive` without the other two is not preemptive:
   Rubato refuses it, and the other headers treat it as Tenuto's. A
   platform with none of them is Tenuto's, and every header that asks
@@ -1686,13 +1748,13 @@ balancing. The host proves the protocol deterministically
 | Entity | Header | Role |
 |--------|--------|------|
 | `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>`, `serve_one<Ao, P>(index)`, `dispatching<P>`, `no_dispatch` | `active_object.hpp` | what Tenuto requires of an active object; whether an object's queue is P's (its core); one event served in its slot, released unless held; the kernels' step, which keeps the index of the object being dispatched |
-| `Platform`, `Preemptive` (concepts), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `in_handler`, `on_own_core`, `Doorbell`, the host's `interleave_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`) |
+| `Platform`, `Preemptive` (concepts), `PanicRecord`, `quiet_posts`, `Activation`, `SchedulerPoint` | `platform.hpp` | what the kernel requires of the machine (plus the optional `idle_until`, `in_handler`, `on_own_core`, `Doorbell`, the host's `interleave_point`, `preempt_point` and `scan_point`, and the three members of a preemptive platform: `preemptive`, `ceiling`, `pend_schedule`, with the entry and the exit its scheduler keeps) |
 | `EventQueue<E, depth, P>`, `CoreAware`, `QueuePriority` | `event_queue.hpp` | the per-object queue (many producers, one consumer): the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; the overflow counter, the mispost check of a core-aware platform, the owner's list index on a preemptive one |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, the state machine base, `Event`, `Status` |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is `util/inbox.hpp`'s, [two cores](#12-two-cores-two-kernels-and-a-bridge-utilinboxhpp)) |
 | `Borrowed<T, Lease>`, `Lease`, `lend`, `Held<E>` | `borrowed.hpp` | pointer payloads with their lease in the type; a held queue slot's number with `Lease::hold` in its type |
 | `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | list ordering questions (`index`, `lends_ok`); the cooperative loop: `init_all`/`step`/`idle_if_empty`/`run` |
-| `Rubato<P, Aos...>` | `rubato.hpp` | the preemptive kernel over the same list: `init_all` (the queues' indices, the ceiling held at 0), `activate` (the scheduler, re-entrant), `idle_if_empty`, `run` |
+| `Rubato<P, Aos...>` | `rubato.hpp` | the preemptive kernel over the same list: `init_all` (the queues' indices, the ceiling held at 0), `activate(base)` (the scheduler, re-entrant, entered and left by the platform), `idle_if_empty` (the base's exit), `run` |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | the armed list and the owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | `constexpr` tick conversions |
 | `PanicCode`, `panic_magic`, `HaltReporter`, `panic`, `take_panic_record` | `panic.hpp` | unrecoverable failures |

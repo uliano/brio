@@ -104,20 +104,32 @@
  * back at I and MIE clear. It moves sp down 80 bytes - so the frame's
  * words 8 and 12 ARE the body's two stores, and nothing has to be copied
  * - stores the sixteen caller-saved registers in words 16 to 76 (the
- * set the trampoline saved, x1, x5..x7, x10..x17, x28..x31), sets MIE
- * and calls K::activate(). After it, it loads fifteen of them back with
- * MIE still set, then writes mstatus from word 12 - MIE clear, MPIE set,
- * MPP machine, so from that instruction on nothing can enter - then mepc
- * from word 8, loads the sixteenth, moves sp back up and executes `mret`:
- * the interrupted code resumes at its own pc, with its registers, its
- * stack pointer and its interrupt enable as they were. 80 and not 72
- * because the ABI keeps sp 16-byte aligned, and the entry calls.
- * s0..s11 and sp never leave the register file: everything between the
- * trap and the `mret` is code that keeps them. Hazard3 on this chip has
- * no floating-point unit, so
- * there is no f-register and no fcsr to save, and the entry saves none
- * (3.8.8's configuration enables no F extension, and the project's
- * `-march` names none).
+ * set the trampoline saved, x1, x5..x7, x10..x17, x28..x31), and, still
+ * with MIE clear, reads the kernel's ceiling into the frame's byte 0 and
+ * stores 0 in its place: the entry's step of kernel/platform.hpp's
+ * contract, made before any handler can run since the request was taken,
+ * because nothing has run on this hart since the trap cleared MIE. It
+ * then sets MIE and calls K::activate(base), which returns the count of
+ * quiet posts its last choice read in a0's low byte. The exit follows: it
+ * loads thirteen registers back with MIE still set, then writes mstatus
+ * from word 12 - MIE clear, MPIE set, MPP machine, so from that
+ * instruction on nothing can enter - stores `base` back into the ceiling,
+ * compares the count with the kernel's and, when it moved, raises the
+ * hart's flag again (CORE<n>_SET, the request's own store); then it
+ * writes mepc from word 8, loads the last three registers, moves sp back
+ * up and executes `mret`: the interrupted code resumes at its own pc,
+ * with its registers, its stack pointer and its interrupt enable as they
+ * were - and with the flag raised, the software interrupt is taken over
+ * it as soon as the flag reaches mip, in place of the run that ended.
+ * How many of its instructions run first is the bus's fact the request's
+ * paragraph above declines to count on; none of them nests over the exit,
+ * whose frame is given back. 80 and not 72 because the ABI keeps sp
+ * 16-byte aligned, and the entry calls. s0..s11 and sp never leave the
+ * register file: everything between the trap and the `mret` is code that
+ * keeps them. Hazard3 on this chip has no floating-point unit, so there
+ * is no f-register and no fcsr to save, and the entry saves none (3.8.8's
+ * configuration enables no F extension, and the project's `-march` names
+ * none).
  *
  * WHY THE ENTRY'S OWN `mret` AND NO EXIT VECTOR. `mret` is an ordinary
  * machine-mode instruction that "can be executed without any prior trap"
@@ -127,9 +139,10 @@
  * hardware frame to pop and no level to retire. A QingKe V4 needs an
  * `ecall` to leave its scheduler (ch32vx03/schedule.hpp), because its
  * hardware prologue's push must be paired with a pop inside a trap; here
- * the entry writes mepc and mstatus itself, and the exit is one
- * instruction. The exception vector (`isr_riscv_exception`) is not
- * touched, and the program keeps the `ecall` it never executes.
+ * the entry writes mepc and mstatus itself, and the exit is the entry's
+ * own tail, its one step made whole by the MIE its write of mstatus
+ * clears. The exception vector (`isr_riscv_exception`) is not touched,
+ * and the program keeps the `ecall` it never executes.
  *
  * WHAT THIS BUYS. While the dispatches run, no trap is in progress: a
  * peripheral handler's post raises the flag again, and the software
@@ -138,7 +151,8 @@
  * object above it raises the flag with MIE set, and the request waits for
  * the scheduler it starts - road 2. Each level of nesting costs, on the
  * stack, the entry's 80 bytes and the scheduler's own frames; the
- * trampoline's 64 are given back before the entry builds its frame.
+ * trampoline's 64 are given back before the entry builds its frame. The
+ * levels are the kernel's runs, at most one per object of the pack.
  *
  * TWO KERNELS: THE PAIR BODY. Core 1 is launched with core 0's mtvec
  * (rp2350/multicore.hpp), so both harts enter the one table and the one
@@ -158,20 +172,21 @@
  * mscratch, the flag, the stack.
  *
  * RE-ENTRANCY. The flag can be raised at any moment and the shapes all
- * close. Raised while a dispatch runs, it nests one level more: a new
- * trap, a trampoline frame and the body's two words below the current
- * sp, a new entry below them. Raised between activate()'s return and the
- * entry's write of mstatus, it nests over the entry's own exit, whose
- * frame is still allocated, and returns into it. A line that became
- * pending while the body or the entry's first instructions ran (MIE
- * clear, so nothing on this core can raise the flag there) is taken at
- * the entry's `csrsi`, before the call; a post it makes raises the flag,
- * taken at its `mret`, and nests over the entry. Raised after the entry
- * has written mstatus, it
- * waits for the `mret` and is taken at the interrupted code's next
- * instruction, a level the outer one has already left. Every block is
- * written below a stack pointer that has already moved, or with MIE
- * clear, so no frame lands on another.
+ * close. Raised while a dispatch runs, it nests one level more, at that
+ * dispatch's index: a new trap, a trampoline frame and the body's two
+ * words below the current sp, a new entry below them. Raised between the
+ * entry's store of 0 and its write of mstatus, it cannot be: the ceiling
+ * is 0 there, or a dispatch's index, and a post that finds 0 asks for
+ * nothing. A line that became pending while the body or the entry's first
+ * instructions ran (MIE clear, so nothing on this core can raise the flag
+ * there) is taken at the entry's `csrsi`, after the store, and its post
+ * asks for nothing. Raised by the exit itself, or after the entry has
+ * written mstatus, it waits for the `mret` and is taken at the
+ * interrupted code's next instruction, a level the outer one has already
+ * left. So on this core no run starts at a ceiling of 0: from the request
+ * being taken to the entry's store nothing runs (kernel/rubato.hpp, "The
+ * stack"). Every block is written below a stack pointer that has already
+ * moved, or with MIE clear, so no frame lands on another.
  *
  * WHAT THIS FILE ASSUMES. The crt's trampoline for the software interrupt
  * is the 64-byte frame and the `call` described above (the two words'
@@ -190,6 +205,8 @@
 #include "rp2350/device.hpp"
 
 #include "rp2350/core.hpp"
+
+#include "kernel/platform.hpp"
 
 namespace brio {
 
@@ -248,11 +265,14 @@ inline void scheduler_init() {
 
 /// The thread-mode entry the trampoline's `mret` lands in (the file
 /// header): the frame whose words 8 and 12 the body has already written,
-/// the sixteen caller-saved registers stored, MIE set, the scheduler,
-/// fifteen registers loaded back unmasked, mstatus (the mask back on) and
-/// mepc written, the last register, the frame given back, `mret`. Naked:
-/// it owns no frame but the one it builds, and it touches no register the
-/// interrupted code keeps.
+/// the sixteen caller-saved registers stored, the ceiling read into the
+/// frame's byte 0 and 0 stored in its place with MIE still clear, MIE
+/// set, the scheduler, thirteen registers loaded back unmasked; then the
+/// exit with MIE clear again - mstatus written from word 12, the ceiling
+/// put back, the count compared and the hart's flag raised again when it
+/// moved - mepc written, the last three registers, the frame given back,
+/// `mret`. Naked: it owns no frame but the one it builds, and it touches
+/// no register the interrupted code keeps.
 template <class Kernel>
 [[gnu::naked, gnu::noinline]] void scheduler_thread() {
     __asm__ volatile(
@@ -261,20 +281,41 @@ template <class Kernel>
         "sw a0, 32(sp)\n\t"  "sw a1, 36(sp)\n\t"  "sw a2, 40(sp)\n\t"  "sw a3, 44(sp)\n\t"
         "sw a4, 48(sp)\n\t"  "sw a5, 52(sp)\n\t"  "sw a6, 56(sp)\n\t"  "sw a7, 60(sp)\n\t"
         "sw t3, 64(sp)\n\t"  "sw t4, 68(sp)\n\t"  "sw t5, 72(sp)\n\t"  "sw t6, 76(sp)\n\t"
+        "lui t0, %%hi(%1)\n\t"
+        "lbu a0, %%lo(%1)(t0)\n\t"   // base: the ceiling the request was taken at
+        "sb zero, %%lo(%1)(t0)\n\t"  // the ceiling 0, MIE clear since the trap
+        "sb a0, 0(sp)\n\t"           // base, for the exit
         "csrsi mstatus, 8\n\t"
-        "call %0\n\t"
-        "lw ra, 16(sp)\n\t"                       "lw t1, 24(sp)\n\t"  "lw t2, 28(sp)\n\t"
-        "lw a0, 32(sp)\n\t"  "lw a1, 36(sp)\n\t"  "lw a2, 40(sp)\n\t"  "lw a3, 44(sp)\n\t"
+        "call %0\n\t"                // activate(base): the count in a0's low byte
+        "lw ra, 16(sp)\n\t"                                            "lw t2, 28(sp)\n\t"
+                             "lw a1, 36(sp)\n\t"  "lw a2, 40(sp)\n\t"  "lw a3, 44(sp)\n\t"
         "lw a4, 48(sp)\n\t"  "lw a5, 52(sp)\n\t"  "lw a6, 56(sp)\n\t"  "lw a7, 60(sp)\n\t"
         "lw t3, 64(sp)\n\t"  "lw t4, 68(sp)\n\t"  "lw t5, 72(sp)\n\t"  "lw t6, 76(sp)\n\t"
+        "lbu t1, 0(sp)\n\t"          // base
+        "andi a0, a0, 255\n\t"       // the count
         "lw t0, 12(sp)\n\t"
-        "csrw mstatus, t0\n\t"   // MIE clear from here: the exit cannot be entered
+        "csrw mstatus, t0\n\t"       // MIE clear from here: the exit is one step
+        "lui t0, %%hi(%1)\n\t"
+        "sb t1, %%lo(%1)(t0)\n\t"    // the ceiling back
+        "lui t0, %%hi(%2)\n\t"
+        "lbu t0, %%lo(%2)(t0)\n\t"
+        "bne a0, t0, 2f\n"
+        "1:\n\t"
         "lw t0, 8(sp)\n\t"
         "csrw mepc, t0\n\t"
+        "lw a0, 32(sp)\n\t"
+        "lw t1, 24(sp)\n\t"
         "lw t0, 20(sp)\n\t"
         "addi sp, sp, 80\n\t"
-        "mret\n\t"
-        ::"i"(&Kernel::activate));
+        "mret\n"
+        "2:\n\t"
+        "li t0, %3\n\t"              // a quiet post landed behind the last scan:
+        "lui t1, %%hi(%4)\n\t"
+        "sw t0, %%lo(%4)(t1)\n\t"    // the hart's flag raised, taken over the interrupted code
+        "j 1b\n\t"
+        ::"i"(&Kernel::activate), "i"(&Kernel::Platform::ceiling),
+          "i"(&quiet_posts<typename Kernel::Platform>), "i"(1UL << Kernel::Platform::core),
+          "i"(riscv_softirq_address));
 }
 
 /// The body the program binds to isr_riscv_softirq (through

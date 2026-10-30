@@ -44,7 +44,7 @@ void rubato_verbs() {
     scheduler_init();
     K::init_all();
     post<Lo>(Lo::Event{1});
-    (void)K::activate();
+    (void)K::activate(255);
     K::idle_if_empty();
     Lo::alarm.arm(10);
     TimeEvents<P>::process();

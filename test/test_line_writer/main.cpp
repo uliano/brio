@@ -180,10 +180,7 @@ void rubato_isr(void (*f)()) {
     RP::in_isr = true;
     f();
     RP::in_isr = false;
-    if (RP::pending && RP::scheduler != nullptr) {
-        RP::pending = false;
-        (void)RP::scheduler();
-    }
+    RP::interrupt_exit();
 }
 
 // ---- a Rubato pack: four objects whose dispatch runs what the case sets ----

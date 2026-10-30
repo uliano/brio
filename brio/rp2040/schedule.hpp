@@ -57,8 +57,11 @@
  * the scheduler on its own stack (core 0's in the bank at 0x2004_1000, core
  * 1's in the bank at 0x2004_0000, rp2040/ld/), its own ceiling
  * (Rp2040RubatoPlatform<core>::ceiling, a static of the core's own
- * platform type). scheduler_return() needs no question: it steps over the
- * SVC frame on the stack it finds, which is the core's own.
+ * platform type), and its own count of quiet posts (kernel/platform.hpp).
+ * scheduler_return() needs no question: the addresses of the ceiling and
+ * of the count it puts back and compares come in the SVC frame on the
+ * stack it finds, which the core's own entry, scheduler_thread<K0>() or
+ * scheduler_thread<K1>(), wrote.
  *
  * THE OTHER ROAD, DECLINED: a vector table per core. Core 1 launched
  * with a table of its own (the launch protocol's VTOR word is the table

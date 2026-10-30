@@ -28,12 +28,12 @@ struct Worker {
 using K = brio::Rubato<P, Worker>;
 
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 
 int main() {
     brio::scheduler_init();
     brio::post<Worker>(Worker::Event{2});
-    (void)K::activate();
+    (void)K::activate(255);
     for (;;) {
     }
 }

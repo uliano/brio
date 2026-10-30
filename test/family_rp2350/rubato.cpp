@@ -48,7 +48,7 @@ void kernel_paths() {
     K::init_all();
     High::alarm.arm(10);
     post<Low>(Low::Event{1});
-    (void)K::activate();
+    (void)K::activate(255);
     K::idle_if_empty();
     TimeEvents<P>::process();
     High::alarm.disarm();

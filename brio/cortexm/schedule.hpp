@@ -59,7 +59,8 @@
  *                                FPSCR, a reserved word), maybe an
  *                                alignment word above
  *       EXC_RETURN of R          pushed by PendSV (with a filler below
- *       filler                   it, so the stack stays 8-aligned)
+ *       filler                   it, so the stack stays 8-aligned; the
+ *                                entry writes `base` there, below)
  *       xPSR = 0x01000000        the fake frame F, 8 words: the Thumb
  *       PC   = the entry         bit alone in xPSR (IPSR 0, no alignment
  *       LR, R12, R3..R0          word), the entry's address as the return
@@ -74,14 +75,42 @@
  * returned), so the return to thread mode passes the architecture's
  * check (B1.5.8). The core pops F and lands at scheduler_thread<K>() in
  * thread mode, SP just below the two pushed words, PRIMASK still set, and
- * PendSV no longer active. The entry unmasks, calls K::activate(), and
- * when it returns executes `svc #0`. scheduler_return(), the SVC handler,
- * steps over the SVC's own frame (8 words: see the FPU below), pops the
- * filler and R's EXC_RETURN and returns with it: the core unstacks R,
- * FPU words included, and the interrupted code resumes with its
- * registers as the core saved them. R4-R11 and S16-S31 are never in a
- * frame: they pass through untouched, because everything between the two
- * exceptions is AAPCS code that preserves them.
+ * PendSV no longer active.
+ *
+ * THE ENTRY AND THE EXIT (kernel/platform.hpp states what they owe the
+ * kernel). Still masked, the entry reads the kernel's ceiling and stores
+ * 0 in its place: from the request being taken to that store no handler
+ * has run since PendSV's `cpsid`, so a handler that runs after it finds
+ * the ceiling at 0, and its post asks for nothing and moves the count of
+ * quiet posts. The entry then unmasks, writes the value it read - `base`
+ * - into the filler word, and calls K::activate(base). activate() returns
+ * with the ceiling still at 0 and the count its last choice read in its
+ * result's low byte; the entry puts the count in r0 and the addresses of
+ * the ceiling and of the count in r1 and r2, and executes `svc #0`.
+ * scheduler_return(), the SVC handler, reads the three from the SVC's
+ * frame - the stacked R0 to R2, which a handler that tail-chained ahead
+ * of SVC cannot have changed, where the registers themselves it could -
+ * and `base` from the filler under the frame, stores `base` back into the
+ * ceiling and compares the count with the kernel's. When it moved, a
+ * quiet post landed behind the last scan, and the handler pends PendSV
+ * again: PENDSVSET, then a DSB, so that the write is complete when the
+ * exception return looks for a pending exception (A3.7.3: an SCS write
+ * takes effect when it completes, which a DSB guarantees). Either way the
+ * handler then steps over the SVC's own frame (8 words: see the FPU
+ * below), pops the filler and R's EXC_RETURN and returns with it. With
+ * PendSV pending the return tail-chains into PendSV over R (the
+ * RE-ENTRANCY paragraph), so the scheduler starts again in place of the
+ * run that ended instead of over it; without, the core unstacks R, FPU
+ * words included, and the interrupted code resumes with its registers as
+ * the core saved them. R4-R11 and S16-S31 are never in a frame: they pass
+ * through untouched, because everything between the two exceptions is
+ * AAPCS code that preserves them.
+ *
+ * THE EXIT IS ONE STEP because SVCall runs at priority 0, the priority of
+ * every peripheral line (cortexm/nvic.hpp): no peripheral handler
+ * preempts it, PendSV is below it, and nothing runs between its store of
+ * the ceiling and its exception return. A peripheral line pending at that
+ * return is taken before PendSV, over R, at the ceiling just put back.
  *
  * WHAT THIS BUYS. While the dispatches run, PendSV is NOT active: an
  * interrupt handler's post pends it again, and it is taken at that
@@ -89,18 +118,27 @@
  * kernel's road 1. A dispatch's post to an object above it pends PendSV
  * from thread mode, taken at once, inside post() - road 2. Each level of
  * nesting costs, on the main stack, R's frame (32 or 104 bytes, 4 more
- * for alignment), the two pushed words and the scheduler's own frames.
+ * for alignment), the two pushed words and the scheduler's own frames;
+ * the levels are the kernel's runs, at most one per object of the pack
+ * (kernel/rubato.hpp, "The stack").
  *
  * RE-ENTRANCY. PendSV can be pended at any moment and the shapes all
- * close: pended while a dispatch runs, it nests one level more; pended
- * between activate()'s return and the `svc`, it nests over the entry
- * itself, whose `svc` then runs after the nested level has unwound; pended
- * while SVC_Handler runs (SVC sits at priority 0, above PendSV), it is
- * taken when SVC_Handler returns, by tail-chaining - the core then enters
- * PendSV with R still on the stack and R's EXC_RETURN in LR (B1.5.12's
- * TailChain), exactly as if PendSV had interrupted R directly, and builds
- * its frame over R. The two words and the fake frame are written with
- * PRIMASK set, and no peripheral handler touches them.
+ * close. Pended while a dispatch runs, it nests one level more, at that
+ * dispatch's index. Pended between the entry's store and the `svc`, it
+ * cannot be: the ceiling is 0 there, or a dispatch's index, and a post
+ * that finds 0 asks for nothing. Pended while SVC_Handler runs - by
+ * SVC_Handler itself, the exit's request - it is taken when SVC_Handler
+ * returns, by tail-chaining: the core enters PendSV with R still on the
+ * stack and R's EXC_RETURN in LR (B1.5.12's TailChain), exactly as if
+ * PendSV had interrupted R directly, and builds its frame over R. And
+ * pended by a peripheral handler that preempts PendSV before its first
+ * instruction has run - the one moment between the request being taken
+ * and the entry's store at which a handler can run - it is taken at the
+ * entry's `cpsie`, after the store: that run finds the ceiling at 0,
+ * serves nothing and returns, and the run it delayed serves the post
+ * (kernel/rubato.hpp, "The stack", counts it). The two words and the fake
+ * frame are written with PRIMASK set, and no peripheral handler touches
+ * them.
  *
  * THE FPU (`#if __FPU_USED`, the M4F and the M33 with their FPU). The
  * lazy context save stays on (FPCCR.ASPEN and LSPEN at their reset value,
@@ -118,21 +156,24 @@
  * none of this, and its frames are always basic.
  *
  * THE RULE IS NO BARRIER IN THE BODY, AND THE CORTEX-M4 IS THE EXCEPTION.
- * The exception return itself orders the body's stores on every core of
+ * The exception return itself orders the bodies' stores on every core of
  * the architecture; only the Cortex-M4 r0p1 (the STM32F4's) has erratum
  * 838869, a store just before an exception return letting the core
  * vector to the wrong interrupt, and ARM's workaround is a DSB after the
- * last store. So PendSV's body carries that DSB on a Cortex-M4 alone
- * (the device header's __CORTEX_M), three cycles the Cortex-M0+ and the
- * Cortex-M33 do not pay for an erratum they have not got; the SVC
- * handler stores nothing on any core.
+ * last store. So PendSV's body and SVC's carry that DSB on a Cortex-M4
+ * alone (the device header's __CORTEX_M), three cycles the Cortex-M0+ and
+ * the Cortex-M33 do not pay for an erratum they have not got. The DSB
+ * after the exit's PENDSVSET is another matter, the architecture's rule
+ * for an SCS write whose effect must be in place before what follows, and
+ * every core pays it, on that path alone.
  *
  * WHAT THIS FILE ASSUMES. Thread mode runs on the main stack
  * (CONTROL.SPSEL 0, the reset value, which no brio crt changes); every
  * peripheral line stays at priority 0, as cortexm/nvic.hpp says, so that
- * PendSV is below them all; nothing but this file writes PendSV's
- * priority or pends it; and the program executes no `svc` of its own -
- * SVC_Handler is this file's.
+ * PendSV is below them all, and so does SVCall (SHPR2's reset value, which
+ * nothing in brio writes), so that no peripheral handler runs inside the
+ * exit; nothing but this file writes PendSV's priority or pends it; and
+ * the program executes no `svc` of its own - SVC_Handler is this file's.
  *
  * WHICH CORES. ARMv6-M (the M0+ of the SAM C21, the STM32G0, the RP2040),
  * ARMv7-M (the M4 of the STM32F4) and ARMv8-M main (the M33 half of the
@@ -162,7 +203,10 @@
 #error "cortexm/schedule.hpp: include the family's device header first (stm32f4/platform.hpp does) - the CMSIS core header it brings is what this file is written against"
 #endif
 
+#include <stddef.h>
+
 #include "cortexm/nvic.hpp"
+#include "kernel/platform.hpp"
 
 namespace brio {
 
@@ -194,33 +238,47 @@ inline void scheduler_init() {
 }
 
 /// The thread-mode entry the fake frame returns into (the file header):
-/// unmask, run the scheduler, clear the FP context (where there is an
-/// FPU), and leave through SVC. Naked: it owns no frame, so the SP at its
+/// still masked, the ceiling read and 0 stored in its place; then the
+/// unmask, the value read put in the filler word, the scheduler called
+/// with it, the FP context cleared (where there is an FPU), and the way
+/// out through SVC with the count of quiet posts and the two addresses
+/// the exit needs in r0 to r2. Naked: it owns no frame, so the SP at its
 /// `svc` is the SP it started with, and it touches no register the
-/// interrupted code keeps outside the frame.
+/// interrupted code keeps outside the frame. Twelve instructions, sixteen
+/// with the FPU's four, four of them masked.
 template <class Kernel>
 [[gnu::naked, gnu::noinline]] void scheduler_thread() {
     asm volatile(
         ".syntax unified\n\t"
+        "ldr r1, =%c1\n\t"            // the kernel's ceiling
+        "ldrb r0, [r1]\n\t"           // base: the ceiling the request was taken at
+        "movs r2, #0\n\t"
+        "strb r2, [r1]\n\t"           // the ceiling 0, before any handler can run
         "cpsie i\n\t"
-        "bl %c0\n\t"
+        "str r0, [sp]\n\t"            // the filler: base, for the exit
+        "bl %c0\n\t"                  // activate(base): the count in r0's low byte
+        "uxtb r0, r0\n\t"
 #if defined(__FPU_USED) && (__FPU_USED == 1U)
-        "mrs r0, control\n\t"
-        "bic r0, r0, #4\n\t"        // CONTROL.FPCA: the SVC frame is basic
-        "msr control, r0\n\t"
+        "mrs r3, control\n\t"
+        "bic r3, r3, #4\n\t"          // CONTROL.FPCA: the SVC frame is basic
+        "msr control, r3\n\t"
         "isb\n\t"
 #endif
+        "ldr r1, =%c1\n\t"            // the SVC frame's R1: the ceiling
+        "ldr r2, =%c2\n\t"            // its R2: the count of quiet posts
         "svc #0\n\t"
-        "b .\n\t"                   // never reached: SVC returns into the real frame
-        :: "i"(&Kernel::activate));
+        "b .\n\t"                     // never reached: SVC returns into the real frame
+        ".ltorg\n\t"
+        :: "i"(&Kernel::activate), "i"(&Kernel::Platform::ceiling),
+           "i"(&quiet_posts<typename Kernel::Platform>));
 }
 
 #if (__CORTEX_M == 4U)
-/// The DSB erratum 838869 wants before the exception return: the
-/// Cortex-M4's alone (the file header).
-#define BRIO_CORTEXM_PENDSV_DSB "dsb\n\t"
+/// The DSB erratum 838869 wants before an exception return that follows
+/// a store: the Cortex-M4's alone (the file header).
+#define BRIO_CORTEXM_EXCEPTION_RETURN_DSB "dsb\n\t"
 #else
-#define BRIO_CORTEXM_PENDSV_DSB
+#define BRIO_CORTEXM_EXCEPTION_RETURN_DSB
 #endif
 
 /// The body the program binds to PendSV_Handler, a naked handler: the two
@@ -243,21 +301,47 @@ template <class Kernel>
         "mov r0, lr\n\t"
         "movs r1, #16\n\t"
         "orrs r0, r0, r1\n\t"       // R's EXC_RETURN, a basic frame
-        BRIO_CORTEXM_PENDSV_DSB      // the Cortex-M4 alone: erratum 838869
+        BRIO_CORTEXM_EXCEPTION_RETURN_DSB   // the Cortex-M4 alone: erratum 838869
         "bx r0\n\t"
         ".ltorg\n\t"
         :: "i"(&scheduler_thread<Kernel>));
 }
 
-/// The body the program binds to SVC_Handler, a naked handler: step over
-/// the SVC's basic frame, take R's EXC_RETURN from under it, return into
-/// R. Three instructions.
+/// The body the program binds to SVC_Handler, a naked handler: the exit
+/// (the file header). From the SVC's frame the count of quiet posts the
+/// scheduler read and the addresses of the ceiling and of the count, from
+/// the filler under it the ceiling to put back; the ceiling stored, the
+/// count compared, PendSV pended again when it moved; then the SVC's frame
+/// stepped over and the return into R with R's EXC_RETURN. Eleven
+/// instructions on the path that finds the count still, twelve on the
+/// Cortex-M4 (its erratum's DSB); five more, a branch out and back
+/// included, on the path that pends. Not a template: the addresses come
+/// with the frame, so one body serves every kernel, the two of a pair of
+/// cores included.
 [[gnu::always_inline]] inline void scheduler_return() {
     asm volatile(
         ".syntax unified\n\t"
-        "add sp, sp, #32\n\t"       // the SVC's own frame: 8 words, never padded
-        "pop {r0, r1}\n\t"          // the filler, R's EXC_RETURN
-        "bx r1\n\t");
+        "ldr r0, [sp, #0]\n\t"        // the SVC frame's R0: the count the scheduler read
+        "ldr r1, [sp, #4]\n\t"        // R1: the ceiling
+        "ldr r2, [sp, #8]\n\t"        // R2: the count of quiet posts
+        "ldr r3, [sp, #32]\n\t"       // the filler: base
+        "strb r3, [r1]\n\t"           // the ceiling back
+        "ldrb r2, [r2]\n\t"
+        "cmp r0, r2\n\t"
+        "bne 2f\n"
+        "1:\n\t"
+        "add sp, sp, #32\n\t"         // the SVC's own frame: 8 words, never padded
+        "pop {r0, r1}\n\t"            // the filler, R's EXC_RETURN
+        BRIO_CORTEXM_EXCEPTION_RETURN_DSB   // the Cortex-M4 alone: erratum 838869
+        "bx r1\n"
+        "2:\n\t"
+        "ldr r0, =%c0\n\t"            // a quiet post landed behind the last scan:
+        "ldr r1, =%c1\n\t"
+        "str r1, [r0]\n\t"            // PendSV pended again, taken by tail-chaining
+        "dsb\n\t"                     // the write complete before the return (A3.7.3)
+        "b 1b\n\t"
+        ".ltorg\n\t"
+        :: "i"(SCB_BASE + offsetof(SCB_Type, ICSR)), "i"(SCB_ICSR_PENDSVSET_Msk));
 }
 
 } // namespace brio

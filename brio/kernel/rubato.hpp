@@ -20,15 +20,44 @@
  * a Lease::dispatch borrower that follows its lender and an object whose
  * queue lives on another platform.
  *
- * The ceiling. The platform keeps one byte, P::ceiling: the list index
- * of the object being dispatched, 255 at the loop's base. Only an
- * object whose index is below the ceiling may start a dispatch; every
- * post() compares the receiver's index with it after the copy and, when
- * it is below, asks for the scheduler (P::pend_schedule()). The
- * scheduler is activate(): it serves the highest non-empty queue below
- * the ceiling, raising the ceiling to that object's index for the length
- * of the dispatch and restoring it after, and repeats from the top of
- * the list until no queue below the ceiling holds anything.
+ * The ceiling. The platform keeps one byte, P::ceiling, 255 at the
+ * loop's base. Only an object whose index is below the ceiling may start
+ * a dispatch; every post() compares the receiver's index with it after
+ * the copy and, when it is below, asks for the scheduler
+ * (P::pend_schedule()), and every other post adds one to the platform's
+ * count of quiet posts (quiet_posts<P>, kernel/platform.hpp). The
+ * scheduler is activate(base), `base` being the ceiling the platform
+ * found when it took the request and replaced with 0. It CHOOSES - a
+ * scan from the top of the list for the first non-empty queue below
+ * `base`, with the ceiling at 0, so that a post landing during the scan
+ * asks for nothing and only moves the count - then raises the ceiling to
+ * the chosen object's index, serves one event of it, and chooses again;
+ * between two dispatches the ceiling stays at the index just served. A
+ * choice during which the count moved looks once more, above the chosen
+ * object and with the ceiling already raised to it: a post the scan had
+ * passed is served first, and a post landing after the raise asks for
+ * the scheduler when it is above the chosen object and cannot beat it
+ * otherwise. When a choice finds nothing, activate() returns with the
+ * ceiling still at 0 and the count it read, and the platform puts `base`
+ * back and compares the count in one step no interrupt handler can
+ * enter, starting the scheduler again when a quiet post landed behind the
+ * last scan (kernel/platform.hpp, the entry and the exit).
+ *
+ * The stack. A run of the scheduler that preempts a dispatch starts at
+ * that dispatch's index, strictly below the ceiling of the run it
+ * preempts: every run in progress but the topmost is suspended in a
+ * dispatch, those dispatches have strictly decreasing indices, and when
+ * one of them is index 0's nothing can stand above it, since no post
+ * asks at a ceiling of 0. So a pack of n objects holds at most n runs,
+ * whatever the interrupts' timing (test/test_rubato derives and checks
+ * it). One run starts otherwise, on a core where an interrupt handler can
+ * run between the request being taken and the entry's store of 0 (the
+ * Cortex-M and the QingKe V4: cortexm/schedule.hpp, qingke/schedule.hpp):
+ * a request that handler made is taken right after the store, as a run
+ * at a ceiling of 0 that serves nothing and returns. It stands over the
+ * entry of the run it delays, which has not begun choosing, so the count
+ * of runs stays within n; what it adds to the stack is one entry's frame
+ * and an empty choice, in place of the delayed run's dispatch.
  *
  * Two roads lead to a dispatch that preempts another:
  *  1. an interrupt handler posts to an object above the ceiling: the
@@ -84,12 +113,14 @@
  *
  * What the platform provides, beyond the Platform concept: `preemptive`
  * (true), `ceiling` (a uint8_t at 255) and `pend_schedule()`, which runs
- * activate() when no interrupt handler is running - at once when called
- * from a dispatch, at the handler's exit when called from one. The
- * kernel never names the vector a target uses for it.
+ * the scheduler when no interrupt handler is running - at once when
+ * called from a dispatch, at the handler's exit when called from one -
+ * through an entry and an exit that keep kernel/platform.hpp's two
+ * steps. The kernel never names the vector a target uses for it.
  *
- * Host tests drive init_all() and activate() directly, since run() never
- * returns (test/test_rubato, over host/platform.hpp's RubatoHostPlatform).
+ * Host tests drive init_all() and the host platform's entry directly,
+ * since run() never returns (test/test_rubato, over host/platform.hpp's
+ * RubatoHostPlatform).
  */
 
 #pragma once
@@ -123,6 +154,11 @@ class Rubato {
 public:
     Rubato() = delete;
 
+    /// The platform the kernel runs on: what a platform's scheduler body,
+    /// written against the kernel type it serves, reads the ceiling of
+    /// (kernel/platform.hpp, the entry and the exit).
+    using Platform = P;
+
     /// Give every queue its object's list index, then call every active
     /// object's init(), in list order, with the ceiling held at 0 so that
     /// nothing is dispatched before the last init() has run. run() does
@@ -131,32 +167,76 @@ public:
         (Aos::queue.set_priority(index_of<Aos>()), ...);
         const uint8_t ceiling = P::ceiling;
         P::ceiling = 0;
-        std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the inits (visit() says why)
+        std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the inits (look() says why)
         (Aos::init(), ...);
         std::atomic_signal_fence(std::memory_order_seq_cst);
         P::ceiling = ceiling;
     }
 
-    /// The scheduler: serve the highest non-empty queue whose index is
-    /// below the ceiling, one event, with the ceiling raised to that index
-    /// for the dispatch and restored after it, and repeat from the top of
-    /// the list until every queue below the ceiling is empty. Re-entrant:
-    /// a call from a post() inside a dispatch, or from an interrupt's exit,
-    /// sees the raised ceiling and serves only objects above it. Returns
-    /// whether anything was served.
-    static bool activate() {
+    /// The scheduler, called by the platform's entry (kernel/platform.hpp)
+    /// with the ceiling at 0, `base` being the ceiling the entry replaced:
+    /// choose the highest non-empty queue whose index is below `base`,
+    /// raise the ceiling to it, serve one event, and choose again, until a
+    /// choice finds nothing (the file header). Returns with the ceiling at
+    /// 0, handing back the quiet-post count its last choice read and
+    /// whether it served; the caller puts `base` back and compares the
+    /// count. Re-entrant: a run started from a post() inside a dispatch, or
+    /// at an interrupt's exit, starts at that dispatch's index and serves
+    /// only objects above it. Masks nothing and never waits.
+    static Activation activate(uint8_t base) {
         bool served = false;
-        while (serve_highest()) {
-            served = true;
+        for (;;) {
+            // The ceiling is 0 here - the entry's store, or the store that
+            // ends the loop below. The count is read after that store and
+            // before the first look, and the fences keep both orders: a
+            // post the scan could miss lands after the read, and moves it.
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            const uint8_t count = load_count();
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            // One choice: a first scan at the ceiling 0, which serves the
+            // object it finds unless the count moved by the time the
+            // ceiling is raised to it; then a second scan above that object,
+            // the ceiling held there, which serves what it finds; and when
+            // the second finds nothing, a third that walks down to the held
+            // object itself and serves it.
+            uint8_t above = base;
+            uint8_t held = no_hold;
+            for (;;) {
+                Found found = Found::nothing;
+                (void)(look<Aos>(above, held, count, found) || ...);
+                if (found == Found::moved) {
+                    held = above;          // the second scan: above the held object
+                    continue;
+                }
+                if (found != Found::nothing) {
+                    served = served || found == Found::served;
+                    break;                 // a dispatch ran (or its queue was found emptied)
+                }
+                if (held == no_hold) {
+                    point(SchedulerPoint::exit, base);
+                    return Activation{count, served};
+                }
+                if (above > held) {
+                    break;                 // the third scan found nothing: choose again
+                }
+                above = static_cast<uint8_t>(held + 1u);   // the third scan
+            }
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            point(SchedulerPoint::gap, P::ceiling);
+            P::ceiling = 0;
         }
-        return served;
     }
 
-    /// Sleep if, re-checked with interrupts masked, nothing is pending:
-    /// Tenuto's idle_if_empty(). Called at the loop's base only, where the
-    /// ceiling is 255 and nothing is suspended.
+    /// Put the base's ceiling, 255, back and sleep if, re-checked with
+    /// interrupts masked, nothing is pending: Tenuto's idle_if_empty() with
+    /// the base's exit in it. Called at the loop's base only, nothing
+    /// suspended, after a run that served nothing: the ceiling is then 0,
+    /// and the store of 255 and the check share the mask, so a post that
+    /// landed after the run's last scan is found in its queue and the loop
+    /// turns again instead of sleeping.
     static void idle_if_empty() {
         typename P::CriticalSection cs;
+        P::ceiling = 255;
         if ((Aos::queue.empty() && ...)) {
             if constexpr (requires {
                               { P::idle_until(std::optional<uint32_t>{}) } -> std::same_as<void>;
@@ -171,23 +251,25 @@ public:
     /// Initialize every active object, then loop forever: time events,
     /// the scheduler, sleep when idle. Call once, with interrupts enabled
     /// and the clock, the timebase and the platform's scheduling request
-    /// set up. The time events are posted with the ceiling held at 0,
-    /// as init_all() holds it: a fire is a post, and a post that could
+    /// set up. The time events are posted with the ceiling held at 0, as
+    /// init_all() holds it: a fire is a post, and a post that could
     /// activate would serve the matured timers in the armed list's order
     /// instead of the list's; with the ceiling at 0 every fire only
-    /// queues, nothing is dispatched during the walk (a request an
-    /// interrupt handler makes meanwhile waits for the walk's few
-    /// cycles), and activate() then serves in priority order - the base
-    /// turn is Tenuto's.
+    /// queues, nothing is dispatched during the walk (a post an interrupt
+    /// handler makes meanwhile asks for nothing either, and waits for the
+    /// walk's few cycles), and activate() then serves in priority order -
+    /// the base turn is Tenuto's. The ceiling stays at 0 from the walk into the run, which
+    /// is the entry activate() asks for, and a run that served turns the
+    /// loop again with it still there; one that served nothing ends in
+    /// idle_if_empty(), the base's exit.
     [[noreturn]] static void run() {
         init_all();
         for (;;) {
             P::ceiling = 0;
-            std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the walk (visit() says why)
+            std::atomic_signal_fence(std::memory_order_seq_cst);   // the hold before the walk (look() says why)
             TimeEvents<P>::process();
             std::atomic_signal_fence(std::memory_order_seq_cst);
-            P::ceiling = 255;
-            if (!activate()) {
+            if (!activate(255).served) {
                 idle_if_empty();
             }
         }
@@ -199,46 +281,83 @@ private:
         return static_cast<uint8_t>(Pack<Aos...>::template index<Ao>());
     }
 
-    /// One pass over the list from the top: the first object at or below
-    /// the ceiling ends it, as does the first one served. True when one
-    /// event was served.
-    static bool serve_highest() {
-        const uint8_t ceiling = P::ceiling;
-        bool served = false;
-        (void)(visit<Aos>(ceiling, served) || ...);
-        return served;
+    /// The count of quiet posts, read fresh: an interrupt handler moves it.
+    [[gnu::always_inline]] static uint8_t load_count() {
+        return *const_cast<const volatile uint8_t*>(&quiet_posts<P>);
     }
 
-    /// One object of the pass: true ends the pass (the object is at or
-    /// below the ceiling, so is every one after it; or it was served).
+    /// The host's landing places (kernel/platform.hpp's scan_point());
+    /// nothing on a target.
+    [[gnu::always_inline]] static void point([[maybe_unused]] SchedulerPoint where,
+                                             [[maybe_unused]] uint8_t index) {
+        if constexpr (requires { P::scan_point(where, index); }) {
+            P::scan_point(where, index);
+        }
+    }
+
+    /// What a scan of one choice found (activate()).
+    enum class Found : uint8_t {
+        nothing,   ///< no object above the scan's limit holds an event
+        moved,     ///< the first scan's object, raised to, with the count moved: scan again above it
+        served,    ///< an event served
+        emptied,   ///< the object raised to had been served to empty first (the second scan's case)
+    };
+
+    /// `held` when the ceiling is 0 and the count still to be checked.
+    static constexpr uint8_t no_hold = 255;
+
+    /// One object of a scan: true ends the scan - the object is at or
+    /// below `above`, and so is every one after it; or its queue holds an
+    /// event. Then the ceiling is raised to it, and in a first scan (`held`
+    /// is no_hold) the count read again: when it moved, a post may have
+    /// landed above this object after its look, and the scan ends with
+    /// `above` lowered to this object for a second scan. Otherwise its
+    /// event is served here, inside the look, so the scan, the raise and
+    /// the dispatch are one path with no choice by index between them.
+    /// Forced inline: the choice holds its indices in registers.
     template <typename Ao>
-    static bool visit(uint8_t ceiling, bool& served) {
+    [[gnu::always_inline]] static bool look(uint8_t& above, uint8_t held, uint8_t count,
+                                            Found& found) {
         constexpr uint8_t index = index_of<Ao>();
-        if (index >= ceiling) {
+        if (index >= above) {
             return true;
         }
+        point(SchedulerPoint::look, index);
         if (Ao::queue.empty()) {
+            point(SchedulerPoint::empty, index);
             return false;
         }
+        point(SchedulerPoint::found, index);
         P::ceiling = index;
-        // The raise must reach memory before the queue's cursors are read,
-        // and the restore must follow the slot's release: nothing in the
-        // language orders a plain store against those loads and stores,
-        // and GCC 16 at -Os moved take()'s two loads ahead of the raise
-        // (measured on the STM32F446RE: an interrupt's request landing in
-        // that gap served the event in a nested activate(), the outer pass
-        // took it again from its stale cursor and released the slot twice,
-        // which wedges the queue for good). The fences are compiler
-        // barriers alone - one core sees its own stores in order - and
-        // cost no instruction.
+        // The raise must reach memory before the count is read again and
+        // the queue's cursors are read, and the next store of the ceiling
+        // must follow the slot's release: nothing in the language orders a
+        // plain store against those loads and stores, and GCC 16 at -Os
+        // moved take()'s two loads ahead of the raise (measured on the
+        // STM32F446RE: an interrupt's request landing in that gap served
+        // the event in a nested run, the outer one took it again from its
+        // stale cursor and released the slot twice, which wedges the queue
+        // for good). The fences are compiler barriers alone - one core
+        // sees its own stores in order - and cost no instruction.
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        // False only when an interrupt's exit, between the look above and
-        // the raise of the ceiling, served this queue to empty: the pass
-        // goes on.
-        served = serve_one<Ao, P>(index);   // dispatching<P> is the index for the dispatch
-        std::atomic_signal_fence(std::memory_order_seq_cst);
-        P::ceiling = ceiling;
-        return served;
+        point(SchedulerPoint::raised, index);
+        if (held == no_hold && load_count() != count) {
+            // A post landed during the scan, maybe above this object after
+            // its look. Look again above it with the ceiling held here: a
+            // post to an object above it now asks for a run of its own,
+            // which starts below this one, and a post to one at or below it
+            // cannot beat this choice - so the second scan needs no count.
+            above = index;
+            found = Found::moved;
+            return true;
+        }
+        // False only in a second or third scan: a run an interrupt's
+        // request started between this look and the raise served the queue
+        // to empty. A first scan's object is served by nobody else first -
+        // the ceiling is 0 until its raise, and its own index after - so it
+        // always holds the event the look saw.
+        found = serve_one<Ao, P>(index) ? Found::served : Found::emptied;
+        return true;
     }
 };
 

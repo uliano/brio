@@ -226,7 +226,8 @@ static_assert(Platform<Rp2040Platform<1>>);
  *
  *  - `preemptive`, true;
  *  - `ceiling`, the byte the kernel keeps: the pack index of the object
- *    being dispatched, 255 at the loop's base. A static of the platform
+ *    being dispatched or just served, 0 while the scheduler chooses, 255
+ *    at the loop's base (kernel/platform.hpp). A static of the platform
  *    type, and the type is the core, so each core has its own ceiling
  *    and the two never meet;
  *  - `pend_schedule()`, the request for the scheduler, which is the core's
@@ -277,8 +278,8 @@ template <uint8_t core_index = 0, class TB = CoreTicker<core_index>>
 struct Rp2040RubatoPlatform : Rp2040Platform<core_index, TB> {
     static constexpr bool preemptive = true;
 
-    /// The index of the object being dispatched on this core; 255 at the
-    /// loop's base.
+    /// The index of the object being dispatched on this core or just
+    /// served, 0 while the scheduler chooses; 255 at the loop's base.
     static inline uint8_t ceiling = 255;
 
     /// The request for the scheduler, made only when the calling core is

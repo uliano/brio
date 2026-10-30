@@ -16,4 +16,4 @@ struct Ao {
     static void dispatch(const Event&) {}
 };
 
-bool f() { return brio::Rubato<P, Ao>::activate(); }
+bool f() { return brio::Rubato<P, Ao>::activate(255).served; }

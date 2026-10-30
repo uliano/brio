@@ -10,7 +10,10 @@
 namespace {
 
 struct Kernel {
-    static bool activate() { return false; }
+    struct Platform {
+        static inline uint8_t ceiling = 255;
+    };
+    static brio::Activation activate(uint8_t) { return {}; }
 };
 
 } // namespace

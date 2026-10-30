@@ -206,7 +206,16 @@ nothing short of the DORMANT state stops.
   PRIMASK, per core, and a post made inside one serves its receiver when
   the section ends; a send from the other core lands through the
   doorbell's handler as a local post, road 1 on the receiving core
-  ([multicore.md](multicore.md)).
+  ([multicore.md](multicore.md)). The scheduler's entry and exit are the
+  core stratum's (the kernel's two steps, `kernel/platform.hpp`): each
+  kernel's entry, `scheduler_thread<K0>` or `scheduler_thread<K1>`,
+  replaces its own core's ceiling with 0 while PendSV's mask still
+  holds, and hands SVC the addresses of that ceiling and of that core's
+  count of quiet posts in the frame SVC stacks, so the one SVC body
+  serves both cores asking nothing; by the release listing twelve
+  instructions for each entry and eleven for SVC on the path that finds
+  the count still, five more on the path that pends PendSV again
+  ([the core stratum's page](../cortexm/README.md)).
 - `scheduler_exception_pair<K0, K1>()` (`rp2040/schedule.hpp`) - the
   body `isr_pendsv` takes when each core runs a Rubato: the core stratum's
   body with the core's identity read first (SIO's CPUID, one cycle on the

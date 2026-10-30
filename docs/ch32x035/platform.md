@@ -438,16 +438,24 @@ depth.
 The scheduler runs in thread mode - machine mode outside any trap, the
 interrupted code's registers saved on the stack. The software
 interrupt's body, `scheduler_trap<K>()` (K the program's kernel type),
-pushes a 16-byte block with the trap's mepc and mstatus, writes the
-entry's address into mepc and returns (nine instructions). The entry,
-`scheduler_thread<K>()`, finds in the register file the interrupted
-code's sixteen caller-saved registers, which the hardware prologue
-restored at that MRET; it stores them, sets MIE, calls `K::activate()`,
-loads them back and executes `ecall`. The machine-mode environment
-call's body, `scheduler_return()`, puts mepc and mstatus back from the
-block, pops it and returns into the interrupted code (six instructions).
-Without the hardware prologue the two bodies save their one scratch
-register in the block themselves. This core has no FPU, so the entry has
+clears MIE, pushes a 16-byte block with the trap's mepc and mstatus,
+reads the kernel's ceiling into the block and stores 0 in its place,
+writes the entry's address into mepc and returns (thirteen instructions
+in the release listing). The entry, `scheduler_thread<K>()`, finds in
+the register file the interrupted code's sixteen caller-saved
+registers, which the hardware prologue restored at that MRET; it stores
+them, sets MIE, calls `K::activate(base)` with the ceiling the block
+holds, puts the count of quiet posts it returns into the block, loads
+the registers back and executes `ecall`. The machine-mode environment
+call's body, `scheduler_return<K>()`, clears MIE, puts the ceiling
+back, compares the count and pends the software interrupt again when it
+moved, puts mepc and mstatus back from the block, pops it and returns
+into the interrupted code (twelve instructions on the path that finds
+the count still, sixteen on the one that pends). Those are the kernel's
+entry and exit ([../qingke/README.md](../qingke/README.md),
+`kernel/platform.hpp`). Without the hardware prologue the two bodies
+save their two scratch registers themselves, in the block and in the
+word below it. This core has no FPU, so the entry has
 nothing else to save; the request and the two bodies are the code the
 CH32V203 and the CH32V303 run, the f-register save compiling to nothing
 here.
@@ -462,7 +470,7 @@ bodies are leaves under the hardware prologue - no call, nothing saved
 in software - and save their scratch register without it. **A program
 executes no `ecall` of its own**: the environment call's vector is the
 scheduler's way back, and an `ecall` from anywhere else would run
-`scheduler_return()` over a stack that holds no block and return to
+`scheduler_return<K>()` over a stack that holds no block and return to
 whatever two words lie there. **A program calls `scheduler_init()`
 before it enables interrupts.** Nothing checks either rule.
 
@@ -628,7 +636,7 @@ using K = brio::Rubato<P, Uptime>;   // the active objects, highest priority fir
 
 BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 
 int main() {
     (void)brio::take_panic_record<P>();   // as in the opening

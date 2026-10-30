@@ -68,7 +68,7 @@ void rubato_verbs_core0() {
     scheduler_init();
     K0::init_all();
     post<Lo0>(Lo0::Event{1});
-    (void)K0::activate();
+    (void)K0::activate(255);
     K0::idle_if_empty();
     Lo0::alarm.arm(10);
     TimeEvents<P0>::process();
@@ -81,7 +81,7 @@ void rubato_verbs_core1() {
     scheduler_init();
     K1::init_all();
     post<Lo1>(Lo1::Event{1});
-    (void)K1::activate();
+    (void)K1::activate(255);
     K1::idle_if_empty();
     Lo1::alarm.arm(10);
     TimeEvents<P1>::process();

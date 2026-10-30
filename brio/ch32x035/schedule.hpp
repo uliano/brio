@@ -4,7 +4,7 @@
  * The scheduling request of the preemptive kernel on the QingKe V4C of
  * the CH32X035, and the thread-mode scheduler it starts:
  * `request_scheduler()`, `scheduler_init()`, the two vector bodies
- * `scheduler_trap<K>()` and `scheduler_return()` and their binding
+ * `scheduler_trap<K>()` and `scheduler_return<K>()` and their binding
  * BRIO_CH32_SCHEDULER_VECTOR are the QingKe core stratum's
  * (qingke/schedule.hpp, whose account they are: the software interrupt
  * one preemption level below every peripheral line, the return into the
@@ -13,7 +13,7 @@
  * Ch32x035RubatoPlatform's comment shows (ch32x035/platform.hpp):
  *
  *     BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
- *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+ *     BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
  *
  * WHERE THE PATH RUNS is the program's choice, one line of its header,
  * `// build: scheduler = ram` (the default, the line absent) or

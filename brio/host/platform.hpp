@@ -28,7 +28,8 @@
  * plumbing; call reset() at the start of each test case. HostCore<n>
  * below is the two-core host of the inbox's suite (test_inbox), and
  * HostDoorbell<core> its counting doorbell; RubatoHostPlatform is the
- * same platform made preemptive, for the Rubato kernel's tests.
+ * same platform made preemptive, with the scheduler's entry and exit a
+ * target core keeps, for the Rubato kernel's tests.
  */
 
 #pragma once
@@ -102,37 +103,91 @@ struct HostPlatform {
 static_assert(Platform<HostPlatform>);
 
 /// The host platform of a Rubato kernel (kernel/rubato.hpp): HostPlatform
-/// with the three members of a preemptive platform (kernel/platform.hpp)
-/// and what a test needs to simulate an interrupt over a dispatch.
+/// with the three members of a preemptive platform (kernel/platform.hpp),
+/// the entry and the exit that contract asks of the platform's scheduler,
+/// and what a test needs to simulate an interrupt over a dispatch or
+/// inside the scheduler itself.
 ///  - pend_schedule() records the request in `pending` and, unless the
-///    test has raised the base's `in_isr`, runs the scheduler at once and
-///    clears it:
-///    the host's image of a scheduling interrupt taken at once. Inside a
-///    simulated interrupt the request waits, and the test's harness runs
-///    the scheduler at the interrupt's exit when `pending` is set.
-///  - `scheduler` is that scheduler, the one indirect call the host pays:
-///    the test sets it to its kernel's activate(). Null, a request is
-///    recorded and nothing runs (a scheduling interrupt not yet enabled).
+///    test has raised the base's `in_isr`, takes it at once: the host's
+///    image of a scheduling interrupt taken at once. Inside a simulated
+///    interrupt the request waits, and the test's harness calls
+///    interrupt_exit() at the interrupt's exit, which takes it.
+///  - take_request() is the scheduling interrupt itself, with the target
+///    cores' entry and exit: while a request is pending it lowers it,
+///    runs `entry_hook` (an interrupt landing after the request was taken
+///    and before the entry's store, the window a Cortex-M or a QingKe V4
+///    has and Hazard3 has not; a request it makes is taken right after
+///    the store, as a run over the entry), reads the ceiling and stores 0
+///    in its place, calls `scheduler` with what it read, then puts that
+///    back and compares the count of quiet posts with the one the
+///    scheduler handed back - with no landing place inside either step,
+///    as a core makes each whole - raising the request again when the
+///    count moved, which the same loop then takes in place of the run
+///    that just ended. `requests` counts the posts that asked, `retakes` the exits
+///    that asked again.
+///  - `scheduler` is the kernel's activate(), the one indirect call the
+///    host pays: the test sets it. Null, a request is recorded and nothing
+///    runs (a scheduling interrupt not yet enabled).
 ///  - preempt_point() is where a test object's handler, or the time-event
 ///    walk (kernel/time_event.hpp), lets a simulated interrupt land: it
-///    runs the test's `preempt_hook`, if any.
+///    runs the test's `preempt_hook`, if any. scan_point() is the same
+///    inside the scheduler (kernel/platform.hpp's SchedulerPoint): it runs
+///    `scan_hook`, if any.
 /// The counters, the clock and the critical section are the base's: one
 /// set, shared. reset() clears all of it.
 struct RubatoHostPlatform : HostPlatform {
     static constexpr bool preemptive = true;
-    static inline uint8_t ceiling = 255;     ///< the index being dispatched; 255 at the base
+    static inline uint8_t ceiling = 255;     ///< the index dispatched or just served; 0 choosing; 255 at the base
 
-    static inline bool pending = false;      ///< a request not yet served
+    static inline bool pending = false;      ///< a request not yet taken
     static inline uint32_t requests = 0;     ///< how many times pend_schedule() ran
-    static inline bool (*scheduler)() = nullptr;
+    static inline uint32_t retakes = 0;      ///< how many exits found the count moved
+    static inline Activation (*scheduler)(uint8_t) = nullptr;
     static inline void (*preempt_hook)() = nullptr;
+    static inline void (*entry_hook)() = nullptr;
+    static inline void (*scan_hook)(SchedulerPoint, uint8_t) = nullptr;
+    static inline bool in_entry = false;     ///< `entry_hook` running
 
     static void pend_schedule() {
         ++requests;
         pending = true;
-        if (!in_isr && scheduler != nullptr) {
+        if (!in_isr) {
+            take_request();
+        }
+    }
+
+    static void take_request() {
+        while (pending && scheduler != nullptr) {
             pending = false;
-            (void)scheduler();
+            if (entry_hook != nullptr) {
+                in_entry = true;
+                entry_hook();
+                in_entry = false;
+            }
+            const uint8_t base = ceiling;      // the entry: read, 0 stored
+            ceiling = 0;
+            if (pending) {
+                // A request made in the entry's window, which the core
+                // takes at the entry's unmask: a run over this one's entry,
+                // at the ceiling 0 just stored.
+                take_request();
+            }
+            const Activation a = scheduler(base);
+            ceiling = base;                    // the exit: base back, the count compared
+            if (quiet_posts<RubatoHostPlatform> != a.count) {
+                ++retakes;
+                pending = true;
+            }
+        }
+    }
+
+    /// What a simulated interrupt's exit does with a request its posts
+    /// made: takes it - unless that interrupt landed in the entry's window
+    /// (`entry_hook`), where the scheduling interrupt is already in
+    /// progress and the core takes the request after the entry's store.
+    static void interrupt_exit() {
+        if (!in_entry) {
+            take_request();
         }
     }
 
@@ -142,13 +197,24 @@ struct RubatoHostPlatform : HostPlatform {
         }
     }
 
+    static void scan_point(SchedulerPoint where, uint8_t index) {
+        if (scan_hook != nullptr) {
+            scan_hook(where, index);
+        }
+    }
+
     static void reset() {
         HostPlatform::reset();
         ceiling = 255;
         pending = false;
         requests = 0;
+        retakes = 0;
         scheduler = nullptr;
         preempt_hook = nullptr;
+        entry_hook = nullptr;
+        scan_hook = nullptr;
+        in_entry = false;
+        quiet_posts<RubatoHostPlatform> = 0;
     }
 };
 

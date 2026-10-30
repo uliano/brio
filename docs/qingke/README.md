@@ -128,7 +128,7 @@ rate it reads its factor from a per-rate table built at compile time.
 ### `qingke/schedule.hpp`: the preemptive kernel's request
 
 The preemptive kernel, Rubato ([design/kernel.md](../design/kernel.md),
-"Rubato"), runs on the two V4 families. To run a higher-priority object,
+"Rubato"), runs on the three V4 families. To run a higher-priority object,
 it pends the scheduling request, the software interrupt, which
 `scheduler_init()` puts one preemption level below every peripheral
 line, turning the cores' interrupt nesting on for that purpose alone.
@@ -137,11 +137,36 @@ type), does not run the scheduler: it makes the trap return into
 `scheduler_thread<K>()`, which runs in thread mode - machine mode
 outside any trap, the interrupted code's registers saved on the stack -
 and leaves through `ecall`, the machine-mode environment call, whose
-body `scheduler_return()` resumes the interrupted code. On the V4F the
+body `scheduler_return<K>()` resumes the interrupted code. On the V4F the
 entry also saves the twenty caller-saved f-registers and fcsr when
 mstatus.FS says the interrupted code has written one. The two vectors,
 the software interrupt's (`software_handler`) and the environment call's
 (`ecall_m_handler`), are bound with `BRIO_CH32_SCHEDULER_VECTOR`.
+
+The two bodies keep the kernel's entry and exit (`kernel/platform.hpp`).
+These cores do not clear MIE when they take an interrupt or an
+exception (the V4 manual 2.2), and the peripheral lines preempt the
+software interrupt's handler, so each body clears MIE as its first
+instruction. The trap's body then reads the kernel's ceiling into a
+byte of the block it leaves on the stack and stores 0 in its place; the
+entry hands that byte, `base`, to `activate(base)` and writes the count
+of quiet posts it returns into the next byte; the environment call's
+body puts `base` back, compares the count and, when it moved, pends the
+software interrupt again, which is taken over the interrupted code once
+its MRET has popped the block. One moment stays open, the trap's first
+instruction, at which a peripheral handler can still preempt it: a
+request made there is taken at the entry, as a run that finds the
+ceiling at 0 and serves nothing (kernel/rubato.hpp, "The stack"). By the
+release listings, with the hardware prologue and the linker's
+relaxation turning each address's `lui` and access into one access
+relative to gp: the trap's body thirteen instructions where it was
+nine, the environment call's twelve on the path that finds the count
+still and sixteen on the path that pends, where it was six, the entry
+forty where it was thirty-eight (ninety-five and ninety-three with the
+V4F's f-registers). The body is a template on the kernel,
+`scheduler_return<K>()`, because no register can carry the addresses
+into it: the hardware prologue's pop at its MRET gives the interrupted
+code back every register the environment call found.
 
 Rubato is not available on the CH32V00x, which does not include this
 file. Its V2 core's hardware prologue pushes the interrupted code's

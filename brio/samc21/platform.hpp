@@ -189,7 +189,8 @@ static_assert(Platform<SamPlatform>);
  *
  *  - `preemptive`, true;
  *  - `ceiling`, the byte the kernel keeps: the pack index of the object
- *    being dispatched, 255 at the loop's base. A static of the platform,
+ *    being dispatched or just served, 0 while the scheduler chooses, 255
+ *    at the loop's base (kernel/platform.hpp). A static of the platform,
  *    so of the program: one kernel per platform type, which on this
  *    single-core family is one kernel;
  *  - `pend_schedule()`, the request for the scheduler, which is the core's
@@ -232,7 +233,8 @@ static_assert(Platform<SamPlatform>);
 struct SamRubatoPlatform : SamPlatform {
     static constexpr bool preemptive = true;
 
-    /// The index of the object being dispatched; 255 at the loop's base.
+    /// The index of the object being dispatched or just served, 0 while
+    /// the scheduler chooses; 255 at the loop's base.
     static inline uint8_t ceiling = 255;
 
     /// The request for the scheduler (cortexm/schedule.hpp).

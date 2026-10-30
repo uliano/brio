@@ -342,6 +342,18 @@ struct Console {
 };
 
 using K = Rubato<P, Top, High, Mid, Low, Console>;
+
+/// The scheduler run by hand from the Console's dispatch, as the
+/// platform's entry and exit run it (kernel/platform.hpp): the ceiling
+/// replaced with 0, activate() at the Console's own, the ceiling put
+/// back. Whether it served.
+bool activate_here() {
+    const uint8_t base = P::ceiling;
+    P::ceiling = 0;
+    const bool served = K::activate(base).served;
+    P::ceiling = base;
+    return served;
+}
 constexpr uint8_t console_index = 4;
 
 /// The ceiling the UART's receive interrupt read when a byte arrived.
@@ -858,7 +870,7 @@ void td_scan() {
     uint32_t scan_hi = 0;
     for (int i = 0; i < 16; ++i) {
         const uint32_t t0 = Ruler::now();
-        const bool served = K::activate();
+        const bool served = activate_here();
         const uint32_t t1 = Ruler::now();
         const uint32_t c = between(t0, t1) - ruler;
         if (!served && c < scan) {
@@ -1118,7 +1130,7 @@ void base_turn() {
     P::ceiling = 0;
     TE::process();
     P::ceiling = c;
-    (void)K::activate();
+    (void)activate_here();
 }
 
 /// Wait until the kernel tick has moved `ticks` on.
@@ -1152,7 +1164,7 @@ void tf_timers() {
     }
     const bool walk_quiet = trace_len == 0u && !High::queue.empty() && !Mid::queue.empty() &&
                             !Low::queue.empty();
-    (void)K::activate();
+    (void)activate_here();
     const bool in_order = trace_is("Hs1 He1 Ms2 Me2 Ls3 Le3");
     if (!in_order) {
         print_trace();
@@ -1530,7 +1542,7 @@ BRIO_CH32_VECTOR(usart2_handler) {
 BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 
 /// TIM2's capture-compare line: the edge disarmed, the post, and the
 /// ruler as the last statement - letter c's near end.

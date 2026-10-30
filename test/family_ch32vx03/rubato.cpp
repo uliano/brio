@@ -43,7 +43,7 @@ void kernel_paths() {
     K::init_all();
     High::alarm.arm(10);
     post<Low>(Low::Event{1});
-    (void)K::activate();
+    (void)K::activate(255);
     K::idle_if_empty();
     P::pend_schedule();
     scheduler_init();
@@ -54,4 +54,4 @@ void kernel_paths() {
 // The scheduler's two vectors, one spelling whichever way the image is
 // built.
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }

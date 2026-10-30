@@ -492,16 +492,24 @@ with one preemption bit, so every peripheral line, at the reset
 priority 0, sits at one level above it: the peripheral handlers still
 never nest among themselves, and every one of them interrupts the
 software interrupt's. The scheduler runs in THREAD MODE: the software
-interrupt's body, `scheduler_trap<K>()`, pushes a 16-byte block with the
-trap's mepc and mstatus, writes the entry's address into mepc and
-returns (nine instructions); the entry, `scheduler_thread<K>()`, stores
-the sixteen caller-saved integer registers the hardware prologue just
-popped back into the register file - the interrupted code's -, sets MIE,
-calls `K::activate()`, loads them back and executes `ecall`; and the
-machine-mode environment call's body, `scheduler_return()`, puts mepc
-and mstatus back from the block, pops it and returns into the
-interrupted code (six instructions). Without the hardware prologue the
-two bodies save their one scratch register in the block themselves.
+interrupt's body, `scheduler_trap<K>()`, clears MIE, pushes a 16-byte
+block with the trap's mepc and mstatus, reads the kernel's ceiling into
+the block and stores 0 in its place, writes the entry's address into
+mepc and returns (thirteen instructions in the release listing); the
+entry, `scheduler_thread<K>()`, stores the sixteen caller-saved integer
+registers the hardware prologue just popped back into the register file
+- the interrupted code's -, sets MIE, calls `K::activate(base)` with the
+ceiling the block holds, puts the count of quiet posts it returns into
+the block, loads the registers back and executes `ecall`; and the
+machine-mode environment call's body, `scheduler_return<K>()`, clears
+MIE, puts the ceiling back, compares the count and pends the software
+interrupt again when it moved, puts mepc and mstatus back from the
+block, pops it and returns into the interrupted code (twelve
+instructions on the path that finds the count still, sixteen on the one
+that pends). Those are the kernel's entry and exit
+([../qingke/README.md](../qingke/README.md), `kernel/platform.hpp`).
+Without the hardware prologue the two bodies save their two scratch
+registers themselves, in the block and in the word below it.
 In an image built with F the entry also saves, when mstatus.FS is
 Dirty, the twenty caller-saved f-registers and fcsr (96 bytes) and
 writes FS = Clean, so a nested entry over a dispatch that has done no
@@ -579,7 +587,7 @@ using K = brio::Rubato<P, Sensor, Logger>;   // Sensor preempts Logger
 
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_SCHEDULER_VECTOR(software_handler) { brio::scheduler_trap<K>(); }
-BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return(); }
+BRIO_CH32_SCHEDULER_VECTOR(ecall_m_handler) { brio::scheduler_return<K>(); }
 
 int main() {
     SysClock::init();
