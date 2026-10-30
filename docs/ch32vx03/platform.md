@@ -1068,6 +1068,33 @@ The images: on the CH32V203C8 40952 bytes of text and 724 of data,
 of RAM of 20 KB (27 %); on the CH32V303VC 44720 of 252 KB (17 %) and
 5440 of 64 KB.
 
+**The I2C stack under the preemptive kernel** - `test_vx03_rubato_i2c`,
+one source and two images, each board the other's peer with its
+unchanged `twi_peer` (`z`, 195 verdicts on each), twenty runs on each
+image, every verdict green: `util/i2c_bus.hpp`'s arbiter over the
+engined `I2cHost<1>` (DMA1's channels 6 and 7) inside a Rubato pack of
+five objects - the preempting object on top, a requester above the
+arbiter and one below it, the console's object at the bottom - with
+TIM2 as above, the core at 96 MHz from the crystal, which the I2C's
+FREQ window asks for ([i2c.md](i2c.md)); at that clock 97, 193 and
+389 us are 9312, 18528 and 37344 counts, and 97 us x 3000 takes 32 % of
+the core. The road at that clock, read in every pressure pass as TIM2's
+count at the entry of the preempting object's spin (from the update
+event through the vector, its post, the scheduler and the dispatch's
+first lines): 180 to 238 cycles at the least of a pass, against the 119
+of road 1 alone at 144 MHz above; at the most 248 to 7798, every one above 1000 in
+the held-wire letter's passes (a diagnostic build, not kept, placed them
+at the moment the far end lets the line go), with TIM2's vector entered
+within 218 counts of the event - the time is spent after the vector and
+before the dispatch, where the suite's instruments do not place it. No tick was dropped in any pass. The findings
+are the I2C page's: a preemption reaches the host only before its
+START, every tenure shape exact on both paths under every pressure, and
+on a held line the first START loses and the next ones park. The
+images: on the CH32V203C8 33492 bytes of text and 428 of data, 33920
+of the 60 KB the linker script gives it (55 %), and 2088 bytes of RAM of
+20 KB (10 %); on the CH32V303VC 34292 of 252 KB (13 %) and 2088 of
+64 KB.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
