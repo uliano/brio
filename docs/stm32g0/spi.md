@@ -1008,27 +1008,24 @@ the peer becomes the bus host for twelve frames. The burst's rate is the
 instrument's own: the command carries a DIVISION of the peer's clock, so
 the same 32 is 750 kHz from an AVR, 1.5 MHz from a SAM, 2 MHz from a G0
 and **1.406 MHz from the F446** (its PCLK1 of 45 MHz). Exact both ways,
-in 20 runs of 20 alone and in every run of `z` - WITH THE FAR HOST'S
-SCK AND MOSI AT MEDIUM, because on these wires the burst's fast edges
-reach the select. The F446 holds the select low from GPIO for the whole
-burst; with its MOSI at `SpiHost`'s default very-high and its SCK at
-medium or above, PA15 sees 4 to 19 edges a burst where 2 are sent
-(counted in a diagnostic build, not kept: an EXTI line on the pad in its
-alternate function, both edges; the pad's pull-up changes nothing, so
-the line is driven and coupled, not floating). A client that takes NSS from the pad is
+in 10 runs of 10 alone and in every run of `z` - with the far host's MOSI
+at `SpiHost`'s default very-high and its SCK at MEDIUM: at very-high
+this client sees an SCK edge twice and slips a bit, both ends wrong from
+that frame on (5 runs of 5), at high in 1 run of 3 ([the STM32F4's SPI
+page](../stm32f4/spi.md), "`SpiClient` against the STM32G0B1RE host").
+THE SELECT WIRE RUNS APART FROM SCK AND MOSI. The F446 holds the select
+low from GPIO for the whole burst, and a select run in the bundle beside
+the burst's lines picks up their edges: PA15 sees 4 to 19 edges a burst
+where 2 are sent (an EXTI line on the pad in its alternate function,
+both edges; the pad's pull-up changes nothing, so the line is driven and
+coupled, not floating), and a client that takes NSS from the pad is
 DESELECTED MID-FRAME and its bit count starts again at the next edge: it
 loses a frame or slips a bit, both ends wrong from one frame on - this
 exchange, letter `y`'s single line out and its receive-only run alike,
 65 to 79 bursts of 100 - while the client under SSM (letter `y`, below),
 which reads the pad only to see the select fall, is exact through the
-same glitches. Either of the far host's pads cures it: with the F446's
-MOSI at medium the same diagnostic counts exactly 2 edges in 360 bursts
-of 360, its SCK at medium, high or very-high alike, and its SCK at low
-cures it with MOSI left at very-high (which edge couples into the select
-is not isolated), SCK at low being outside the F446's own erratum table
-([the STM32F4's SPI page](../stm32f4/spi.md), "`SpiClient` against the
-STM32G0B1RE host"). The rate is not the remedy: a larger division
-keeps the same edges.
+same glitches. Routed apart, the select counts exactly 2 edges a burst.
+The rate is not the remedy: a larger division keeps the same edges.
 
 **16-BIT FRAMES ON ALL THREE OF THIS HOST'S ENGINES, AT THE WIRE'S TIME**
 (letter `u`, spi_link's `spare_wide`): thirty-two 16-bit frames a window,

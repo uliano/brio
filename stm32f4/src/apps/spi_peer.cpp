@@ -105,8 +105,8 @@
 // Console: USART2 PA2/PA3 at 115200 on the ST-LINK's virtual COM port,
 // observability only.
 //   ? help | i status and counters | 0 back to the dark client |
-//   3 trace | s cycle the MISO pad speed | k cycle the SCK pad speed
-//   the burst's host runs at
+//   3 trace | s cycle the MISO pad speed | k and m cycle the SCK and the
+//   MOSI pad speeds the burst's host runs at
 //
 // The ident label is the 96-bit unique device ID's first word in hex
 // (through brio::DeviceUid); ident.xtal is ALWAYS 0, because this board
@@ -198,35 +198,22 @@ constexpr uint16_t firmware_version = 0x0402;   ///< see spi_link.hpp's Ident
 PinSpeed miso_speed = PinSpeed::low;
 
 /// THE TWO DRIVEN PADS' SLEW CLASSES WHEN THIS END HOSTS (Op::host_burst),
-/// AND THEY ARE MEASUREMENTS TOO. This end holds the select (PB12) low
-/// from GPIO for the whole burst, and on these wires the edges beside it
-/// couple into it: with SpiHost's default very-high on MOSI the far
-/// STM32G0B1RE's select pad sees 4 to 19 edges a burst where 2 are sent,
-/// whatever SCK's class from medium up (counted in a diagnostic build of
-/// the G0's suite, not kept: an EXTI line counting both edges on the pad,
-/// ten bursts of each client shape; its pull-up changes nothing, so the
-/// line is driven, not floating). A client that takes NSS
-/// from that pad is deselected mid-frame and its bit count starts again:
-/// 65 to 79 bursts of 100 lose a frame or slip, both ends wrong from one
-/// frame on, in every direction (letter r's exchange, letter y's single
-/// line out and its receive-only run). A client under SSM, which reads
-/// the pad once to see the select fall and then ignores it, is exact in
-/// every burst that carries the same glitches - the select alone is hit.
-/// With MOSI at MEDIUM the same diagnostic counts exactly 2 edges in 360
-/// bursts of 360 and every shape is exact, SCK at medium, high or
-/// very-high alike (and test_stm32_spi's letters r and y, which count no
-/// edges, exact in twenty runs each). SCK at low with MOSI at very-high
-/// cures it too, so which edge couples into PB12 is not isolated; but
-/// SCK at low is outside ES0298 2.14.5's table 5 for this APB1 (25 MHz of APB
-/// at low against 45): medium on both pads keeps the erratum's ceiling
-/// (75 MHz), and DS10693 table 58's reach for medium (25 MHz at 50 pF)
-/// is above the fastest burst this instance can clock (PCLK1/2 = 22.5
-/// MHz; every suite asks for a division of 32 or more). The rate
-/// is not the lever: a larger division keeps the same edges. The
-/// console's 'k' cycles SCK's four classes for the bench; MOSI's has no
-/// key.
+/// AND SCK'S IS A MEASUREMENT. MOSI is at SpiHost's default, very-high.
+/// SCK is at MEDIUM because at very-high the far STM32G0B1RE's client
+/// sees its edge twice on these wires and its stream slips one bit, both
+/// ends wrong from that frame on (test_stm32_spi letter r wrong in 5 runs
+/// of 5, letter y in 3 of 3), at high in 1 run of 3 - and at medium both
+/// letters are exact in 10 runs of 10. Medium stays inside ES0298
+/// 2.14.5's table 5 for this APB1 (75 MHz of APB ceiling against 45), and
+/// DS10693 table 58's reach for medium (25 MHz at 50 pF) is above the
+/// fastest burst this instance can clock (PCLK1/2 = 22.5 MHz; every suite
+/// asks for a division of 32 or more). This end holds the select (PB12)
+/// low from GPIO for the whole burst, so the select wire must run apart
+/// from SCK and MOSI: in the bundle beside them it picks up their edges
+/// and the far client is deselected mid-frame (docs/stm32f4/spi.md). The
+/// console's 'k' and 'm' cycle the two classes for the bench.
 PinSpeed burst_sck_speed = PinSpeed::medium;
-constexpr PinSpeed burst_mosi_speed = PinSpeed::medium;
+PinSpeed burst_mosi_speed = PinSpeed::very_high;
 
 const char* speed_name(PinSpeed s) {
     switch (s) {
@@ -889,7 +876,8 @@ void handle(const spilink::Frame& f) {
 
 void help() {
     print(console, "spi_peer: ? help | i status | 0 back to the dark client | 3 trace | "
-                   "s cycle the MISO pad speed | k cycle the SCK pad speed as host",
+                   "s cycle the MISO pad speed | k cycle the SCK pad speed as host | "
+                   "m cycle the MOSI pad speed as host",
           crlf);
 }
 
@@ -899,7 +887,8 @@ void status() {
     print(console, "  NSS pin reads ", NssPin::read() ? "high" : "LOW",
           ", selected=", Client::selected(), ", MISO driven=", MisoPin::has_function(),
           ", MISO pad speed=", speed_name(miso_speed),
-          ", SCK pad speed as host=", speed_name(burst_sck_speed), crlf);
+          ", SCK pad speed as host=", speed_name(burst_sck_speed),
+          ", MOSI pad speed as host=", speed_name(burst_mosi_speed), crlf);
     print(console, "  commands=", commands, " actions=", actions, " naks=", naks,
           " served=", serves, engaged() ? "  (ENGAGED)" : "  (dark, mute)", crlf);
     print(console, "  last report: op=", hex(last_report.op), " count=", last_report.count,
@@ -992,6 +981,13 @@ int main() {
                                       : burst_sck_speed == PinSpeed::medium  ? PinSpeed::low
                                                                              : PinSpeed::very_high;
                     print(console, "  SCK pad speed as host now ", speed_name(burst_sck_speed),
+                          " (applied at the next host_burst)", crlf);
+                } else if (c == 'm') {
+                    burst_mosi_speed = burst_mosi_speed == PinSpeed::very_high ? PinSpeed::high
+                                       : burst_mosi_speed == PinSpeed::high    ? PinSpeed::medium
+                                       : burst_mosi_speed == PinSpeed::medium  ? PinSpeed::low
+                                                                               : PinSpeed::very_high;
+                    print(console, "  MOSI pad speed as host now ", speed_name(burst_mosi_speed),
                           " (applied at the next host_burst)", crlf);
                 } else {
                     print(console, "? for help", crlf);

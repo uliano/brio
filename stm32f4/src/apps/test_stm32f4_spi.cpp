@@ -267,9 +267,8 @@ BootState boot;
 ///  - SCK: at high letter x slips 15 bursts of 40 in every mode and
 ///    letter p breaks from 351 kHz, the G0B1RE client's stream one bit
 ///    out of place from a random frame; at medium every one of those runs
-///    is exact. (The stm32f4 spi_peer's host_burst drives both pads at
-///    medium too: its own comment says what MOSI's edge does to the
-///    select.) Medium is inside the erratum's table
+///    is exact. (The stm32f4 spi_peer's host_burst drives SCK at medium
+///    too, for the same doubled edge.) Medium is inside the erratum's table
 ///    for this instance (75 MHz of APB ceiling against APB1's 45); letter
 ///    l walks the class against the erratum itself.
 ///  - MOSI: the same slip, from the DATA edge coupled into the clock

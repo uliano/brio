@@ -1074,9 +1074,9 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   letter x (ten bursts a mode at the command rate) and letter p:
   SCK at very-high or high is seen twice at the G0's input - x slips 15
   bursts of 40 in every mode at high and p breaks from 351 kHz - and is
-  exact at medium and at low (the peer's `host_burst` has a reason of its
-  own for medium on both pads, its select: "`SpiClient` against the
-  STM32G0B1RE host" below). MOSI's edge slips the far client where the
+  exact at medium and at low (the peer's `host_burst` hosts at SCK medium
+  for the same doubled edge: "`SpiClient` against the STM32G0B1RE host"
+  below). MOSI's edge slips the far client where the
   frames run back to back: thirty bursts of 32 frames on the DMA host at PCLK1/4 = 11.25
   MHz slip in 6 to 13 of 30 at high and 16 to 23 of 30 at very-high, the
   same signature (both ends wrong from one frame on), and in none of 270
@@ -1266,27 +1266,28 @@ slip statistics: 12 of 40 slip at `very_high`, 7 at `high` and 12 at
 `medium` (the falling-edge modes), 0 at `low`, the class the app keeps -
 and the ladder is exact to 16 MHz at low ("The client run"). AS THE BUS
 HOST (`host_burst`, twelve frames at PCLK1/32 = 1.406 MHz to the G0's
-client) the peer drives SCK and MOSI at MEDIUM, because on these wires
-the burst's fast edges reach the SELECT: the peer holds PB12 low from
-GPIO for the whole burst, and with MOSI at `SpiHost`'s default very-high
-and SCK at medium or above, the G0's select pad sees 4 to 19 edges a
-burst where 2 are sent (counted in a diagnostic build, not kept: an
-EXTI line on the pad, both edges; its pull-up changes nothing - the
-line is driven, and coupled). A client that takes NSS from the pad is
-deselected mid-frame and its bit count starts again - a frame lost or a
-bit slipped, both ends wrong from one frame on, in 65 to 79 bursts of
-100, whatever its direction - while a client under SSM, which reads the
-pad only to see the select fall, is exact through the same glitches.
-Either pad's class cures it: with MOSI at medium the same diagnostic
-counts exactly 2 edges in 360 bursts of 360, SCK at medium, high or
-very-high alike, and SCK at low cures it with MOSI left at very-high;
-which of the two edges couples into PB12 is not isolated. SCK at low is
-outside ES0298 2.14.5's table 5 for APB1's 45 MHz (25 MHz of APB at
-low); medium on both pads stays inside it (75 MHz), and DS10693 table
-58's 25 MHz at 50 pF for medium is above the fastest burst this instance
-can clock (PCLK1/2 = 22.5 MHz; the suites ask for a division of 32 or
-more). A larger division keeps the same edges: the rate is not the
-remedy.
+client) the peer drives MOSI at `SpiHost`'s default very-high and SCK
+at MEDIUM: at very-high the G0's client sees an SCK edge twice and its
+stream slips one bit, both ends wrong from that frame on (letter r wrong
+in 5 runs of 5, letter y in 3 of 3), at high in 1 run of 3, and at
+medium letters r and y are exact in 10 runs of 10 each. Medium stays
+inside ES0298 2.14.5's table 5 for APB1's 45 MHz (75 MHz of APB), and
+DS10693 table 58's 25 MHz at 50 pF for medium is above the fastest
+burst this instance can clock (PCLK1/2 = 22.5 MHz; the suites ask for a
+division of 32 or more). THE SELECT WIRE RUNS APART FROM SCK AND MOSI.
+The peer holds PB12 low from GPIO for the whole burst, and a select run
+in the bundle beside the burst's lines picks up their edges: the G0's
+select pad sees 4 to 19 edges a burst where 2 are sent (an EXTI line on
+the pad, both edges; its pull-up changes nothing - the line is driven,
+and coupled), and a client that takes NSS from the pad is deselected
+mid-frame and its bit count starts again - a frame lost or a bit
+slipped, both ends wrong from one frame on, in 65 to 79 bursts of 100,
+whatever its direction - while a client under SSM, which reads the pad
+only to see the select fall, is exact through the same glitches. With
+the select routed apart, SCK and MOSI moved together through the debug
+port at every class and both select levels raise no edge on the G0's
+pad in 19200 steps, and the bursts above count exactly 2. A larger
+division keeps the same edges: the rate is not the remedy.
 THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`, every
 code to 16 MHz judged, 32 MHz printed): the peer's streams in half-word
 beats and its 16-bit `exchange()` run exact both ways, the answers at 32
