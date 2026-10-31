@@ -1402,7 +1402,8 @@ private:
  *
  * Status codes (util/i2c_bus.hpp): i2c_ok, i2c_nack_addr, i2c_nack_data,
  * i2c_arb_lost, i2c_bus_error, and i2c_rejected for a request whose
- * speed the divider cannot make (start() below). i2c_nack_addr is any
+ * speed the divider cannot make or whose address is outside 0x08..0x77
+ * (start() below). i2c_nack_addr is any
  * address nobody acknowledged - a write's, a read's, the repeated
  * START's - and i2c_nack_data a written byte refused. On any NACK the
  * engine still issues the STOP so the bus is released; on arbitration
@@ -1448,7 +1449,10 @@ public:
     /// whatever init() programmed (start() reprograms MBAUD when it
     /// differs from the speed in force).
     struct Request {
-        uint8_t addr;          ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -1584,8 +1588,9 @@ public:
     /// TransferDone{status()} follows from the ISR glue - even the empty
     /// probe ends on the wire (its address phase IS the transaction).
     /// True only for the one refusal that moves nothing: a speed the
-    /// divider cannot make at the clock in force, answered i2c_rejected
-    /// through status() - the I2cHost contract (docs/design/i2c-bus.md).
+    /// divider cannot make at the clock in force, or an address outside
+    /// 0x08..0x77 (i2c_address_in_range), answered i2c_rejected through
+    /// status() - the I2cHost contract (docs/design/i2c-bus.md).
     ///
     /// The per-byte state is set up here, once: a cursor into the phase's
     /// buffer and the count of bytes left in it, so the handler's byte is
@@ -1600,7 +1605,7 @@ public:
         tx_len_ = r.tx_len;
         rx_ = r.rx.get();
         rx_len_ = r.rx_len;
-        if (!T::speed_ok(r.speed)) {
+        if (!T::speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             status_ = i2c_rejected;   // nothing armed: no ISR will follow
             return true;
         }

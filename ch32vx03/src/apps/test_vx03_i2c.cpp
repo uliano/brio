@@ -79,8 +79,9 @@
 //   c  THE PEER: the twi_link command channel, ident, ten round trips
 //   d  the tenure shapes against the peer, the four receive
 //      procedures, the counted serve ending at the STOP of the read that
-//      moved its count, the general call, the repeated START counted at
-//      the far end
+//      moved its count, 0x7A and the general call refused inside start()
+//      with nothing on the wire, the repeated START counted at the far
+//      end
 //   e  the vocabulary on the wire (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the speeds against a second chip, each timed on the wire and
@@ -95,7 +96,8 @@
 //      cycle that drops an unclocked byte
 //   k  a ten-second stress with the error counters at both ends
 //   l  THIS BOARD'S TARGET under the peer's controller: its second
-//      address and the general call written to, and THE TARGET AS A
+//      address written to, a general call commanded of that controller
+//      refused there, and THE TARGET AS A
 //      TRANSMITTER - the peer's host reading one, two, three, four and
 //      eight bytes, twice each, and every byte the shifter asked for
 //      beyond the closing NACK dropped by flush()
@@ -1136,6 +1138,12 @@ void td_shapes() {
         }
     }
 
+    // The addresses no Request may name (util/i2c_bus.hpp): 0x7A, a 10-bit
+    // prefix this block would send as a header, and the general call,
+    // refused by start() itself - true, i2c_rejected, nothing armed -
+    // against a peer at dut_addr ANSWERING THE GENERAL CALL, so a byte of
+    // either on the wire would be an address match on its count; the
+    // write to dut_addr after them is its one match and its two bytes.
     twilink::Params g{};
     g.count = 64;
     g.ms = 250;
@@ -1143,14 +1151,28 @@ void td_shapes() {
     g.flags = twilink::flag_general_call;
     if (peer_act(Op::serve, g)) {
         uint8_t gw[2] = {0x5A, 0xA5};
-        const uint8_t gs = host_tenure(0x00, gw, 2, nullptr, 0, link_speed);
+        Host::Request bad{};
+        bad.addr = 0x7A;
+        bad.tx = lend<Lease::reply>(static_cast<const uint8_t*>(gw));
+        bad.tx_len = 2;
+        bad.speed = link_speed;
+        const bool sync_prefix = Host::start(bad);
+        const uint8_t st_prefix = Host::status();
+        bad.addr = 0x00;
+        const bool sync_call = Host::start(bad);
+        const uint8_t st_call = Host::status();
+        const uint8_t own = host_tenure(twilink::dut_addr, gw, 2, nullptr, 0, link_speed);
         settle_ms(300);
         twilink::Report gr{};
         const bool grep = peer_report(gr);
-        print(serial, "  general call: status=", gs, " peer last_addr=", hex(gr.last_addr),
-              " count=", gr.count, crlf);
-        bench.verdict("a GENERAL CALL write reaches the peer at address 0x00",
-                      gs == i2c_ok && grep && gr.count == 2u && gr.last_addr == 0x00u);
+        print(serial, "  0x7A: ", sync_prefix ? "refused at start()" : "STARTED", " ", st_prefix, "; 0x00: ",
+              sync_call ? "refused at start()" : "STARTED", " ", st_call, "; then dut_addr ", own,
+              "; peer: addr_hits=", gr.addr_hits, " count=", gr.count, " last_addr=", hex(gr.last_addr), crlf);
+        bench.verdict("0x7A and the general call answered i2c_rejected inside start(), nothing on the wire: "
+                      "the peer, answering the general call, took only the write to its own address",
+                      sync_prefix && st_prefix == i2c_rejected && sync_call && st_call == i2c_rejected &&
+                          own == i2c_ok && grep && gr.addr_hits == 1u && gr.count == 2u &&
+                          gr.last_addr == twilink::dut_addr);
     } else {
         bench.verdict("the peer accepted the general-call serve", false);
     }
@@ -2473,7 +2495,11 @@ void tl_target() {
         return;
     }
 
-    // ---- THE SECOND ADDRESS AND THE GENERAL CALL, written by the peer ----
+    // ---- THE SECOND ADDRESS, written by the peer, and THE GENERAL CALL ----
+    // The peer's host refuses address 0x00 as every host does
+    // (util/i2c_bus.hpp): commanded to write the general call at this
+    // board's target - the general call armed here - it answers
+    // i2c_rejected in its report and nothing reaches this target.
     const uint8_t w_seed = 0x21;
     struct Aim {
         uint8_t target;
@@ -2482,6 +2508,8 @@ void tl_target() {
     const Aim aims[2] = {{dut_second, "the second address"}, {0x00, "the general call"}};
     uint8_t hits[2] = {};
     bool bytes_ok[2] = {};
+    uint8_t matches[2] = {};
+    uint8_t host_st[2] = {0xFF, 0xFF};
     for (uint8_t k = 0; k < 2u; ++k) {
         link_ready();
         twilink::Params a{};
@@ -2497,18 +2525,28 @@ void tl_target() {
         }
         const TargetLog log = serve_peer_host(true, 1, 0, 900);
         hits[k] = k == 0u ? log.second : log.general;
+        matches[k] = log.addressed;
         bytes_ok[k] = log.in_n == 2u && log.in[0] == w_seed &&
                       log.in[1] == static_cast<uint8_t>(w_seed + 1u) && log.addressed == 1u;
         print(serial, "  ", aims[k].name, " (", hex(aims[k].target), "): ", log.addressed,
               " match(es), DUALF ", log.second, ", GENCALL ", log.general, ", ", log.in_n,
               " byte(s) taken, ", log.stops, " STOP(s)", crlf);
         settle_ms(200);
+        host_ready();
+        twilink::Report r{};
+        if (peer_report(r)) {
+            host_st[k] = r.mstatus;
+        }
+        print(serial, "  the peer's host status ", host_st[k], crlf);
     }
     host_ready();
-    bench.verdict("the second address and the general call each open a write tenure on this "
-                  "board's target from ANOTHER CHIP's controller, the bytes taken exact, and the "
-                  "target says which one matched (DUALF, GENCALL)",
-                  hits[0] == 1u && bytes_ok[0] && hits[1] == 1u && bytes_ok[1]);
+    bench.verdict("the second address opens a write tenure on this board's target from ANOTHER "
+                  "CHIP's controller, the bytes taken exact, and the target says it matched "
+                  "(DUALF)",
+                  hits[0] == 1u && bytes_ok[0] && host_st[0] == i2c_ok);
+    bench.verdict("the general call commanded of the peer's host is refused there "
+                  "(i2c_rejected), and this target, the general call armed, matches nothing",
+                  host_st[1] == i2c_rejected && matches[1] == 0u && hits[1] == 0u);
 
     // ---- THE TARGET AS A TRANSMITTER, read by the peer's controller ----
     // The counts the peer's own receive procedure switches on, two reads
@@ -3398,7 +3436,7 @@ int main() {
     bench.letter('c', "THE PEER: the twi_link command channel, ident, ten round trips",
                  tc_peer_link);
     bench.letter('d', "the tenure shapes against the peer, the four receive procedures, the "
-                      "general call",
+                      "reserved addresses refused",
                  td_shapes);
     bench.letter('e', "the vocabulary on the wire, and commanded stretching priced",
                  te_vocabulary);
@@ -3416,8 +3454,8 @@ int main() {
                  tj_flags);
     bench.letter('k', "a ten-second stress at fast mode with the counters at both ends",
                  tk_stress);
-    bench.letter('l', "THIS BOARD'S TARGET under the peer's controller: the second address, the "
-                      "general call, and the target as a TRANSMITTER",
+    bench.letter('l', "THIS BOARD'S TARGET under the peer's controller: the second address, a "
+                      "general call refused at the far host, and the target as a TRANSMITTER",
                  tl_target);
     bench.letter('n', "a far target stuck mid-byte by a host taken off the bus, and unstick()'s "
                       "clocks counted",

@@ -699,7 +699,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   ceiling the Console's.
 
 **The I2C stack under the preemptive kernel** - the suite is
-`test_stm32_rubato_i2c`, one key (`z`, 195 verdicts) against the
+`test_stm32_rubato_i2c`, one key (`z`, 202 verdicts) against the
 Nucleo-F446RE's unchanged `twi_peer`, every verdict green on every run
 ([i2c.md](i2c.md) says how many of each letter). A Rubato pack of five objects runs `util/i2c_bus.hpp`'s arbiter
 over the engined `I2cHost<1>` ([i2c.md](i2c.md)) with three requesters

@@ -68,7 +68,10 @@ task: the bus timing is counted in clk_sys cycles at the rate the clock
 type claims, not read from the hardware. `init()` answers false when not
 even standard mode can be produced (a clock under 2.7 MHz) or the block
 did not come up, and the example discards that answer; a speed the
-clock cannot produce is answered `i2c_rejected` at the request. The
+clock cannot produce is answered `i2c_rejected` at the request, and so
+is an address outside 0x08..0x77 - the general call and the 10-bit
+prefixes among them, which every host refuses
+([../design/i2c-bus.md](../design/i2c-bus.md)). The
 program binds `isr_i2c0` itself; left unbound, the line's first
 interrupt goes into the crt's default spin and the program stops there
 (no timeout can answer from inside a spinning handler). `reg` and `value` must
@@ -322,9 +325,9 @@ pair, from one source, against the WeAct RP2040's peer over the pair's
 I2C wires. Nothing in this chapter reads differently between the halves,
 which is what a block outside the processor should look like. The same
 block as the PEER, the RP2040 the host, is judged by `test_rp2040_i2c`
-(docs/rp2040/i2c.md, whose wire findings - the general call both ways,
-GEN_CALL standing through the acknowledge, a STOP_DET for every STOP, the
-refusal by a disable - this block shares and are not restated here). The
+(docs/rp2040/i2c.md, whose wire findings - the reserved addresses
+refused both ways, a STOP_DET for every STOP, the refusal by a disable -
+this block shares and are not restated here). The
 cost figures are `bench_rp2350` letter i's, against the same peer.
 
 - **THE COUNTS AT THIS clk_sys.** 100 kHz solves to HCNT 585 and LCNT 899,
@@ -363,8 +366,10 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
 
 - **ON THE WIRE, ABOVE GP31.** The scan finds the peer's 0x6B alone,
   nobody home `i2c_nack_addr` in 110 to 111 us at 100 kHz. Every tenure
-  shape, the general call, the vocabulary (deaf, a data NACK at the
-  first and at the third byte), the three speeds byte-exact both ways -
+  shape, the vocabulary (deaf, 0x7A and the general call refused inside
+  `start()` with the peer answering the general call and matching only
+  the write to its own address, a data NACK at the first and at the
+  third byte), the three speeds byte-exact both ways -
   99, 393 to 394 and 965 to 968 kHz measured on the timer for 100, 400
   and 1000 asked -, the engines with eight 255-byte reads at 1 MHz and
   TX_OVER never raised, I2cBus with its timed bus (`i2c_timeout` at the
@@ -476,8 +481,9 @@ highest object every 97, 193 or 389 us and its dispatch spins 300 or
 3000 cycles - at 97 us x 3000, 21 % of the core. The host is brought up
 at every pass's opening, once the RP2040's rail reads up on the two
 pads, and given back at every letter's end. Every letter runs once with
-the alarm silent and six times under it. **202 verdicts in the key `z`,
-green in ten runs on the Cortex-M33 and ten on Hazard3; the letters `x`
+the alarm silent and six times under it. **209 verdicts in the key `z`,
+green in every run on each half - the key three times on the
+Cortex-M33 and on Hazard3, its vocabulary letter `q` ten more on each; the letters `x`
 and `s`, outside it, green in ten runs each on each half.** The pack,
 the command channel through the arbiter and the letters are the I2C
 suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`); what the two
@@ -545,8 +551,11 @@ engines, the client on the engines - are in
 [../dw_apb_i2c/README.md](../dw_apb_i2c/README.md) and are not repeated
 here.
 
-- The START byte as a host verb: `target(addr, general_call)` is in the
-  resource; no tenure shape asks for it.
+- The START byte and the general call as host verbs: `target(addr,
+  general_call)` is in the resource, and `start()` refuses both
+  addresses with every reserved one
+  ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
+  feature of its own, born with its first user.
 - Two clients on one address with a third party reading (twi_link's
   `coll`): this desk has no third node on the wire, and a DW block is a
   host or a client, never both.
@@ -559,6 +568,12 @@ here.
   `host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The client's general call (`ack_general_call`): no brio host sends a
+  general call, the partner's included, so no suite reaches this
+  block's GEN_CALL handling ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)
+  says what the RP2040 showed of it); a controller that sends one would
+  measure it.
 
 - `rebase()`: this stratum has no dynamic clock; measured when the
   clock chapter grows one, a tenure exact after a switch.

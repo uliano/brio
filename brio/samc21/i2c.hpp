@@ -16,7 +16,8 @@
  * then an active object posts a Request ({addr, tx, tx_len, rx, rx_len,
  * reply, speed}, the buffers as lend<Lease::reply>(...)) to I2c and gets
  * an I2cDone back with i2c_ok or the wire's answer (i2c_rejected for a
- * speed the core cannot make, i2c_bus_error, a NACK code).
+ * speed the core cannot make or an address outside 0x08..0x77,
+ * i2c_bus_error, a NACK code).
  *
  * The words. An active object (AO) is a brio component with its own
  * event queue, served one event at a time by the kernel; `P` is the
@@ -52,7 +53,8 @@
  * wire runs on the byte pump (the engine's interrupt-driven byte
  * loop), and start() returns false, meaning "still running, the
  * completion comes on the interrupt"; it returns true - "already over" -
- * only for a speed the core cannot produce (i2c_rejected) or a SYSOP
+ * only for a speed the core cannot produce or an address outside
+ * 0x08..0x77 (i2c_rejected) or a SYSOP
  * that never settled (i2c_bus_error), with nothing moved, and the
  * arbiter then replies with that status. isr() is the interrupt body: the
  * program's handler for the instance's vector calls it and nothing else
@@ -1010,7 +1012,10 @@ public:
     static constexpr I2cPads pin_pads = pads;
     static constexpr uint8_t core_generator = generator;
     struct Request {
-        uint8_t addr;          ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, LENT until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -1145,10 +1150,12 @@ public:
 
     /// Begin one bus tenure (called by I2cBus from main context). Returns
     /// false whenever the wire moves - the tenure runs on the ISR and a
-    /// TransferDone{status()} follows - and true only for the one failure
-    /// that moves nothing, answered i2c_rejected through status(): a
-    /// request whose speed cannot be programmed. That is the I2cHost
-    /// contract (docs/design/i2c-bus.md).
+    /// TransferDone{status()} follows - and true for the failures that
+    /// move nothing: a request whose speed cannot be programmed, or whose
+    /// address is outside 0x08..0x77 (i2c_address_in_range), answered
+    /// i2c_rejected through status(), and a SYSOP that never settled
+    /// (i2c_bus_error, below). That is the I2cHost contract
+    /// (docs/design/i2c-bus.md).
     ///
     /// A tenure against a BUSY bus is the silicon's to hold: writing ADDR
     /// while another host owns the wire parks the START until the bus
@@ -1162,12 +1169,13 @@ public:
         tx_len_ = r.tx_len;
         rx_ = r.rx.get();
         rx_len_ = r.rx_len;
-        if (!speed_ok(r.speed)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             // The core in force cannot produce this speed (a slowed
-            // core drops the fast end of the vocabulary): refuse the
-            // request on the spot rather than run at a rate nobody
-            // asked for. i2c_rejected is the refused-without-moving
-            // word the vocabulary already has.
+            // core drops the fast end of the vocabulary), or the
+            // address is one no Request may name: refuse the request on
+            // the spot rather than run at a rate nobody asked for or
+            // put a reserved address on the wire. i2c_rejected is the
+            // refused-without-moving word the vocabulary already has.
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;

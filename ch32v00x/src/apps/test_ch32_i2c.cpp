@@ -55,7 +55,8 @@
 //      test
 //   d  the tenure shapes against the peer - write, read, write-then-
 //      read with the repeated START counted from the far end, the
-//      counted serve ended once its read is over, the general call
+//      counted serve ended once its read is over, 0x7A and the general
+//      call refused inside start() with nothing on the wire
 //   e  the vocabulary against the peer (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the two speeds against a second chip, byte-exact both ways, each
@@ -857,6 +858,15 @@ void td_shapes() {
         }
     }
 
+    // The addresses no Request may name (util/i2c_bus.hpp): 0x7A, a 10-bit
+    // prefix this block would send as a header, and the general call,
+    // refused by start() itself - i2c_rejected is that refusal's code
+    // alone, a tenure on the wire ending with one of the wire's - against
+    // a peer at dut_addr ANSWERING THE GENERAL CALL, so a byte of either
+    // on the wire would be an address match on its count; the write to
+    // dut_addr after them is its one match and its two bytes. Through
+    // host_tenure(), which a CH32V003 image has room for where two more
+    // inlined start()s it has not.
     twilink::Params g{};
     g.count = 64;
     g.ms = 250;
@@ -864,14 +874,18 @@ void td_shapes() {
     g.flags = twilink::flag_general_call;
     if (peer_act(Op::serve, g)) {
         uint8_t gw[2] = {0x5A, 0xA5};
-        const uint8_t gs = host_tenure(0x00, gw, 2, nullptr, 0, link_speed);
+        const uint8_t st_prefix = host_tenure(0x7A, gw, 2, nullptr, 0, link_speed);
+        const uint8_t st_call = host_tenure(0x00, gw, 2, nullptr, 0, link_speed);
+        const uint8_t own = host_tenure(twilink::dut_addr, gw, 2, nullptr, 0, link_speed);
         settle_ms(300);
         twilink::Report gr{};
         const bool grep = peer_report(gr);
-        print(serial, "  general call: status=", gs, " peer last_addr=", hex(gr.last_addr),
-              " count=", gr.count, crlf);
-        bench.verdict("a GENERAL CALL write reaches the peer at address 0x00",
-                      gs == i2c_ok && grep && gr.count == 2u && gr.last_addr == 0x00u);
+        print(serial, "  0x7A ", st_prefix, ", 0x00 ", st_call, ", then dut_addr ", own, "; peer: addr_hits=",
+              gr.addr_hits, " count=", gr.count, " last_addr=", hex(gr.last_addr), crlf);
+        bench.verdict("0x7A and the general call answered i2c_rejected, nothing on the wire: the peer, "
+                      "answering the general call, took only the write to its own address",
+                      st_prefix == i2c_rejected && st_call == i2c_rejected && own == i2c_ok && grep &&
+                          gr.addr_hits == 1u && gr.count == 2u && gr.last_addr == twilink::dut_addr);
     } else {
         bench.verdict("the peer accepted the general-call serve", false);
     }
@@ -2789,7 +2803,7 @@ int main() {
     bench.letter('c', "THE PEER: the twi_link command channel, ident, ten round trips",
                  tc_peer_link);
     bench.letter('d', "the tenure shapes against the peer, the four receive procedures, "
-                      "the general call", td_shapes);
+                      "the reserved addresses refused", td_shapes);
     bench.letter('e', "the vocabulary on the wire, and commanded stretching priced",
                  te_vocabulary);
     bench.letter('f', "the two speeds against a second chip, timed", tf_speeds);

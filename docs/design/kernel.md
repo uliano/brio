@@ -1272,25 +1272,25 @@ buffer the SAM C21's. The RP pair's UART key
 runs at 115200 alone, its peer a fixed-role echo. The I2C stack ran
 under Rubato the same way, the STM32G0's against the STM32F446RE's
 unchanged `twi_peer` and the CH32V203's and the CH32V303's each against
-the other's (`test_vx03_rubato_i2c`, 195 verdicts on each, [the
+the other's (`test_vx03_rubato_i2c`, 202 verdicts on each, [the
 CH32V203/CH32V303 I2C page](../ch32vx03/i2c.md)), with three requesters of three priorities on the
 arbiter, a held wire and requests posted into the arbiter's draining
 window from above it, all answered once and byte-exact
-(`test_stm32_rubato_i2c`, 195 verdicts, [the STM32G0 I2C
+(`test_stm32_rubato_i2c`, 202 verdicts, [the STM32G0 I2C
 page](../stm32g0/i2c.md)): a preemption inside the host's `start()`
 delays the START and never stretches a tenure on that host. The
 STM32F446RE's two I2C designs ran the same way against the
 STM32G0B1RE's unchanged `twi_peer` (`test_stm32f4_rubato_i2c` and
-`test_stm32f4_rubato_fmpi2c`, 195 and 174 verdicts, [the STM32F4 I2C
+`test_stm32f4_rubato_fmpi2c`, 202 and 209 verdicts, [the STM32F4 I2C
 page](../stm32f4/i2c.md) and [its FMPI2C page](../stm32f4/fmpi2c.md)):
 on the classic block, whose `start()` waits for the last STOP and for
 BUSY in the dispatch, a preemption lands in those waits or before the
 START store and lengthens the gap; on the FMPI2C1, as on the STM32G0,
 before its one START store. The CH32X035's ran the same way against
 the CH32V006's `twi_peer`, in both placements of the scheduler path
-(`test_x035_rubato_i2c`, 195 verdicts, [the CH32X035 I2C
+(`test_x035_rubato_i2c`, 202 verdicts, [the CH32X035 I2C
 page](../ch32x035/i2c.md)). The SAM C21's ran the same way against the
-AVR64EA48's unchanged `twi_peer` (`test_samc_rubato_i2c`, 202 verdicts,
+AVR64EA48's unchanged `twi_peer` (`test_samc_rubato_i2c`, 209 verdicts,
 [the SAM C21 I2C page](../samc21/i2c.md)), every tenure on its byte
 pump, a preemption inside `start()` a later START. On those two cores
 the suites' held-wire flood posts a probe only when the pack's lowest
@@ -1298,8 +1298,8 @@ object has run since the last, so the load it asks is what the core has
 left; a probe at every tick of the heaviest pressure is each suite's
 letter `u`, the overload the paragraph on the stack above measures.
 The RP pair's ran the same way, each chip against the other's
-`twi_peer` (`test_rp2040_rubato_i2c`, 230 verdicts, and
-`test_rp2350_rubato_i2c`, 202 on each half, [the RP2040 I2C
+`twi_peer` (`test_rp2040_rubato_i2c`, 237 verdicts, and
+`test_rp2350_rubato_i2c`, 209 on each half, [the RP2040 I2C
 page](../rp2040/i2c.md) and [the RP2350's](../rp2350/i2c.md)): on the
 DW_apb_i2c, whose `start()` fills a command FIFO the block is already
 clocking, a preemption inside `start()` is a stretch inside the tenure

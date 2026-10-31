@@ -109,11 +109,14 @@ What decides correctness even there:
 - **Pull-ups on the wire.** The pads are open drain under the block and
   this family's pad has no pull in any output mode, so the bus's
   resistors own the idle level (the bench carries 2.2 kOhm, below).
-- **An address of 0x77 or below.** 0x78 to 0x7B are I2C's prefix for a
-  10-bit address, which this event machine recognises by its value: a
-  Request naming one raises ADD10 instead of ADDR and never completes,
-  its event vector re-entering for ever (measured; "Not covered yet").
-  Nothing refuses it, so the programmer keeps the address below 0x78.
+- **An address of 0x08 to 0x77.** `start()` answers any other
+  `i2c_rejected` before the wire - the general call and the 10-bit
+  prefixes 0x78 to 0x7B among them - as every host does
+  ([../design/i2c-bus.md](../design/i2c-bus.md)). On this event machine
+  the refusal is what keeps such an address off the wire: it recognises
+  the prefix by its value, a write's address byte 1111 0xx0 raising ADD10
+  instead of ADDR, and the engine then ends the tenure `i2c_bus_error`
+  rather than spin on it ("Bench findings").
 - **`init()`'s answer read.** False for a PB1 outside the window, for a
   rise time told to `init()` whose TRISE does not fit RTR's six bits, or
   for a column the part's AFIO refuses; the two interrupt lines then
@@ -508,8 +511,8 @@ repeated START, or the empty probe. `init()` solves both speeds for the
 bus clock and claims the pads open-drain; `rebase()` re-solves them
 after a clock change; `speed_ok()`, `timing_of()` and `scl_hz()` report
 what a speed resolved to. `start()` returns true only for the one
-refusal that moves nothing - a speed the clock cannot produce, answered
-`i2c_rejected`. `isr()` and `error_isr()` are the two vectors' bodies
+refusal that moves nothing - a speed the clock cannot produce, or an
+address outside 0x08..0x77, answered `i2c_rejected`. `isr()` and `error_isr()` are the two vectors' bodies
 and `dma_isr()` the channels'; `status()` carries the outcome.
 `unstick()` is the wire's remedy (nine clocks and a STOP by hand,
 counting the pulses a stuck target took to let go), `recover()` the
@@ -595,8 +598,10 @@ peer's PLL on its 8 MHz crystal): I2C1 to I2C1 on PB6/PB7, a 2.2 kOhm
 pull-up on each line to the CH32V203C8T6 board's 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
 letter both ways, ten runs of `z` in each direction with no failure,
-and ten of letter `d` each way since its counted serve (90 verdicts on
-the CH32V303VCT6's one image, 53 and 37 in the CH32V203C8T6's two). TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
+and ten of letter `d` each way since its counted serve (91 verdicts on
+the CH32V303VCT6's one image, 53 and 38 in the CH32V203C8T6's two, and
+ten each way of letters `d` and `l` since the reserved addresses).
+TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad
 that carries it, with no scope and no wire. The figures below are the
 CH32V203C8T6's where one is given, the CH32V303VCT6's beside it where
@@ -676,7 +681,37 @@ they differ.
   each way).
 - **The vocabulary is real statuses across two chips.** A deaf target
   answers `i2c_nack_addr`; a target commanded to refuse the third byte
-  answers `i2c_nack_data`.
+  answers `i2c_nack_data`; a write to 0x7A and one to the general call
+  are answered true and `i2c_rejected` by `start()`, and the peer's
+  client, answering the general call, takes only the write to its own
+  address that follows - one match, two bytes (letter `d`).
+- **AN ADDRESS OF 0x78 TO 0x7B IS A 10-BIT HEADER HERE, AND THE ENGINE
+  ENDS IT.** Measured on the CH32V303VCT6 with `start()`'s refusal
+  compiled out of a scratch image, the CH32V203C8T6's target
+  acknowledging 0x7A, a probe, a write of 4 and a 1+2 at both speeds.
+  Without the address phase's stray branch (the control) each tenure
+  stopped in the event vector - STAR1 ADD10, STAR2 MSL and BUSY, the
+  vector re-entered 200 000 times before the image's guard cut its line
+  - until the per-bus timeout's `recover()`. With the
+  branch each tenure ended `i2c_bus_error` in two entries (SB, then
+  ADD10), both lines high after, the peer taking no byte, and the next
+  tenures sound (a probe of nobody `i2c_nack_addr`, the command address
+  `i2c_ok`). THE STOP ALONE DOES NOT CLEAR ADD10, whatever 19.12.6's
+  table says of a CTLR1 write after a STAR1 read: in a variant without
+  the DATAR store after the STOP the flag stood on and the next tenure's
+  START never came out (STAR2 0), its vector re-entering on ADD10 until
+  the timeout; with the store, STAR1 read 0 after every one. A READ of
+  0x7A is no header: 0xF5 went out as a plain 7-bit read, `i2c_ok`, the
+  peer serving its two bytes - only the write form 1111 0xx0 is one.
+- **The cost of the two guarantees.** The refusal is five instructions
+  in `start()` on the QingKe V4B (the address's byte load, the constant,
+  a subtraction, a zero-extension and a branch). The stray branch adds
+  nothing to a tenure's path in the release listing of
+  `test_vx03_rubato_i2c` for the CH32V203C8T6: every address phase's
+  test of ADDR is the same two instructions (`andi`, `beqz` not taken),
+  and the stray test, the STOP, the DATAR store and `finish()` a
+  17-instruction cold function called only from an address-phase entry
+  that found no ADDR.
 - **A polled CH32 target's stretch lands where its model puts it.** The
   far end spending 2 ms before each answer (its hold, at the address
   match and before each byte it takes, the receiver one byte late): SCL
@@ -730,9 +765,11 @@ they differ.
   and `I2cClient<1>` at its own address, the far controller wrote six
   bytes into it: one address match, six bytes byte-exact, the tenure
   closed on its STOP - and the command channel came back after the role
-  swap. The same target with a second address and the general call armed
-  took the far controller's two-byte write at each, DUALF and GENCALL
-  naming which matched (letter `l`).
+  swap. The same target with a second address armed took the far
+  controller's two-byte write there, DUALF naming the match; a general
+  call commanded of the far controller was refused there (its report
+  `i2c_rejected`) and this target, the general call armed, matched
+  nothing (letter `l`).
 - **THE TARGET AS A TRANSMITTER** (letter `l`): the far controller read
   one, two, three, four and eight bytes out of this board's data
   register, two reads back to back each, byte-exact both ways; in every
@@ -889,9 +926,9 @@ at 20 ms) over the engined `I2cHost<1>` on PB6/PB7 (DMA1 channels 6 and
 FREQ window), while TIM2 posts to the pack's highest object every 97,
 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97 us x
 3000, 32 % of the core. Every letter runs once with TIM2 silent and six
-times under it; **195 verdicts on each image, green on every run:
+times under it; **202 verdicts on each image, green on every run:
 three runs of `z` on each image, every letter (`n`, `o`, `p`, `q`, `w`,
-`h` and `i`) in each**. The pack, the command channel through the arbiter
+`h` and `i`) in each**, and ten more of `q` on each. The pack, the command channel through the arbiter
 and the letters are the I2C suites' shared body
 (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them), and
 [platform.md](platform.md) places the suite among the preemptive
@@ -938,10 +975,11 @@ write measures beyond its seven comes from (the peer's loop read, not
 measured apart).
 
 **The vocabulary, and the two answers of this peer.** Letter `q`: a
-deaf client - the peer's client parked at 0x5D, the letter's own
-address, since twi_link's `deaf_addr`, 0x7A, is a 10-bit header to this
-host (the gap below) - answers the probe and a four-byte write
-`i2c_nack_addr` and the probe of 0x5D `i2c_ok`; the third byte of six
+deaf client - the peer's client parked at twi_link's `deaf_addr`, 0x5D -
+answers the probe and a four-byte write `i2c_nack_addr` and the probe of
+0x5D `i2c_ok`; a write to 0x7A and one to the general call, the peer's
+client answering the general call, are answered `i2c_rejected` and the
+peer counts one address match, the probe that follows; the third byte of six
 refused (the write on the transmit engine) answers `i2c_nack_data`; the
 last written byte of a 2+4 refused answers `i2c_nack_data` with the
 controller let go through its void write; the peer reports each refusal
@@ -1001,18 +1039,6 @@ runs of three.
 
 Driver gaps:
 
-- **A Request to an address of 0x78 to 0x7B never completes.** Those
-  four 7-bit codes are I2C's prefix for a 10-bit address (1111 0xx), and
-  this event machine recognises the prefix by its value: the address byte
-  written after SB raises ADD10 (19.12.6), not ADDR, and the block waits
-  for the second address byte. `start()` does not refuse the range and the
-  engine has no ADD10 step, so the event vector, waiting for ADDR,
-  re-enters for ever on the standing flag, and the program's thread - the
-  arbiter's timeout with it - does not run again (measured on the
-  CH32V203C8T6: the core halted inside the event handler, STAR1 0x0008,
-  ADD10 alone, STAR2 MSL and BUSY, DATAR 0xF4). Until the engine refuses
-  the range or ends the tenure on ADD10, a program names no address
-  above 0x77.
 - **This chip as the bus's target, served from an active object, under
   the preemptive kernel.** A target whose bytes come from an object (its
   vector posting "the host reads" and leaving SCL held, a dispatch giving
@@ -1041,6 +1067,11 @@ Driver gaps:
   ([sleep.md](sleep.md)): no register of this block asks to be one.
 
 Implemented, not bench-verified (each with what would measure it):
+
+- **The target's general call** (ENGC, GENCALL): armed and read back,
+  and taken on the wire no longer - every brio host refuses address
+  0x00, the desk partner's included. A controller that sends a general
+  call would measure it.
 
 - **I2C2 against another chip.** The block is the same design as
   I2C1's (19.12's one register description, table 19-2's second map),

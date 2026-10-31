@@ -382,8 +382,10 @@ with a repeated START, probe); `start()` is asynchronous whenever the
 wire moves and `isr()` is the per-byte pump that reports through
 `status()`. The one synchronous completion is the refusal: a request
 naming a speed the divider cannot make at the clock in force
-(`speed_ok(speed)` is false) is answered `i2c_rejected` inside
-`start()`, no byte moved, and the arbiter delivers that status like any
+(`speed_ok(speed)` is false), or an address outside 0x08..0x77 - the
+general call and the 10-bit prefixes among them, which every host
+refuses ([../design/i2c-bus.md](../design/i2c-bus.md)) - is answered
+`i2c_rejected` inside `start()`, no byte moved, and the arbiter delivers that status like any
 outcome of the wire - the contract every stratum's engine follows. It
 is a `ClockUser`: `rebase` re-derives MBAUD, and when the speed in force
 no longer fits the new clock MBAUD stays as it was and every request at
@@ -691,11 +693,13 @@ probe. The dual case is the proof that DUALCTRL really moves the client
 to the second pair, since only the desk's wire closes that circuit.
 
 **The address-match space behaves exactly as 29.3.2.3.1 describes**,
-proven by who ACKs a probe: the exact address, and 0x00 only once
-SADDR[0] is set; a mask of 0x03 over 0x40 answers 0x40..0x43 and
-refuses 0x44 and 0x3F; ADDREN = 1 turns the same field into a second
-exact address (0x42 and 0x55 ACK, 0x43 and 0x54 do not); PMEN answers
-everything. The address the client was called on is readable from SDATA
+proven by who ACKs a probe: the exact address; a mask of 0x03 over
+0x40 answers 0x40..0x43 and refuses 0x44 and 0x3F; ADDREN = 1 turns the
+same field into a second exact address (0x42 and 0x55 ACK, 0x43 and 0x54
+do not); PMEN answers everything asked of it, 0x08 to 0x77. The general
+call and 0x7A are answered `i2c_rejected` inside `start()` with the
+client armed for the general call seeing no address packet - a request
+cannot reach SADDR[0] from this host. The address the client was called on is readable from SDATA
 - necessary, since with a mask or PMEN the match alone does not say it.
 
 **The chapter's cases, as MSTATUS values.** M1 reads 0x62 (WIF, ACK
@@ -777,9 +781,9 @@ client replied `i2c_ok` with the right bytes in both directions.
 ### With a second chip on the wire
 
 Every figure below is `test_avr_twi y` against the SAM C21's
-`twi_peer`, twelve runs of the same image, 136 verdicts each - and three
-more runs on the AVR128DA48 (rev A7, its external 24 MHz clock, 5 V),
-136 of 136 each, land inside every range it gives (the 1 ms hold's
+`twi_peer`, twelve runs of the same image - and three
+more runs on the AVR128DA48 (rev A7, its external 24 MHz clock, 5 V)
+land inside every range it gives (the 1 ms hold's
 tenure 162100 ticks, the unstretched one 16814).
 
 **Clock stretching is exactly what the client's hold costs.** A foreign
@@ -858,13 +862,13 @@ that bus the same way. `unstick()` then:
 and it leaves both pins inputs with OUT = 0, which is what errata 2.15.1
 wants of the next owner.
 
-**A General Call is answered by every client that enabled it, at the
-same time.** One write to 0x00 reached both chips' clients in the same
-tenure, each reporting the match as address 0x00. With the peer's
-General Call turned off the same call misses it entirely while its
-exact address still answers - proven inside ONE action, so there is no
-doubt the client was alive throughout. And a **Quick Command against a
-real second chip** is the same 10 SCL rising edges as against the
+**The reserved addresses stay off a wire two clients listen on.** With
+this chip's client and the peer's both answering the general call (the
+peer's at the command address too), a write to 0x00 and one to 0x7A
+were each answered `i2c_rejected` inside `start()`, this chip's client
+matched nothing, and the peer counted one address match - the write to
+its exact address that followed, its three bytes. And a **Quick Command
+against a real second chip** is the same 10 SCL rising edges as against the
 instance's own client, with `i2c_ok`; to an address nobody holds it is
 `i2c_nack_addr`.
 
@@ -921,9 +925,10 @@ Rev B1 at 5 V, CLK_PER 20 MHz from the board's quartz, TWI0 on its
 DEFAULT route on the same kind of node - 1.5k pull-ups to +5 V, the dual
 pair PC2/PC3 and the partner SAM C21's PA22/PA23 on it (the board's
 page). `test_avr_twi` builds two images there (the group axis):
-`test_avr_twi-1` (`z`, with the EA's letters u and v) 226 of 226 in ten
-runs of ten, `test_avr_twi-2` (`y`, against the SAM C21's `twi_peer`)
-136 of 136 in ten runs of ten.
+`test_avr_twi-1` (`z`, with the EA's letters u and v) 225 of 225,
+`test_avr_twi-2` (`y`, against the SAM C21's `twi_peer`) 133 of 133,
+each in every run (thirteen of each image), letter `d` and letter `q` ten
+times more each.
 
 **The duty, measured** (letter u: MBAUD swept, the shortest low and high
 pulses and the period on PA3 under NACK traffic, CLK_PER ticks; the bus's
@@ -1066,6 +1071,9 @@ implement):
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
   (29.3.3.6); neither the client task nor the host's `Request` has a
   shape for it.
+- **The general call as a host verb.** `start()` refuses address 0x00
+  with every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 - **Multi-host as a policy.** The engine reports `i2c_arb_lost`, but
   nothing above the engine decides what to do with it: a retry policy, a
   back-off, a bus AO that knows it shares the wire. `i2c_arb_lost`
@@ -1075,6 +1083,16 @@ implement):
   register reads) is not built.
 
 **Implemented but not bench-verified**:
+
+- letters `d` and `q`'s refusal of the reserved addresses on the AVR DA
+  and DB: run on the AVR64EA48 only, the DA and DB boards being off the
+  desk; a run of the two letters on each would close it;
+
+- the client's general call (`general_call`, SADDR[0]): written, and
+  taken on the wire no longer - every brio host refuses address 0x00,
+  this chip's own and the desk partner's; a controller that sends a
+  general call (this suite's injector pins, driven by hand, could) would
+  measure it;
 
 - the engine's `i2c_arb_lost` on a lost arbitration (MSTATUS with
   ARBLOST, the transaction not landing) with this chip as the DUT: the

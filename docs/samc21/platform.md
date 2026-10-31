@@ -721,7 +721,7 @@ character its polled loop has not fetched yet. What it established:
 
 **The I2C stack under the preemptive kernel** - the suite is
 `test_samc_rubato_i2c`, one key against the AVR64EA48's unchanged
-`twi_peer` (`z`, 202 verdicts), every verdict green on every run
+`twi_peer` (`z`, 209 verdicts), every verdict green on every run
 ([i2c.md](i2c.md) says how many of each letter):
 `util/i2c_bus.hpp`'s arbiter over `I2cHost<3>` and its byte pump inside
 a Rubato pack of five objects, the same TC4 pressure and the same seven

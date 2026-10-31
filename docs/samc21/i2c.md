@@ -66,7 +66,9 @@ the standard 100 kHz speed cannot be produced at that core rate, or a
 synchronization of the peripheral, the forcing of the bus state to IDLE
 included, did not complete; a faster speed the core cannot make is not
 an error at init but a request answered `i2c_rejected` without moving a
-byte. The pads are handed to the SERCOM with input enable and no pull,
+byte, and so is a request whose address lies outside 0x08..0x77 - the
+general call and the 10-bit prefixes among them, which every host
+refuses ([../design/i2c-bus.md](../design/i2c-bus.md)). The pads are handed to the SERCOM with input enable and no pull,
 so the bus's pull-up resistors are the board's, and which pins may carry
 I2C at all is the data sheet's per-package table, which no header symbol
 encodes: the code cannot check the pins named. Every tenure that moves
@@ -349,9 +351,9 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   status vocabulary on the wire (nack_addr for any address nobody
   acknowledged, nack_data for a refused written byte, arb_lost,
   bus_error), per-speed register pairs cached with `speed_ok()` and the
-  refused-not-slowed rule (a speed the core cannot make is answered
-  `i2c_rejected` inside `start()`, the one synchronous completion,
-  delivered through the arbiter). Every tenure rides the byte pump, one
+  refused-not-slowed rule (a speed the core cannot make, and an address
+  outside 0x08..0x77, are answered `i2c_rejected` inside `start()`, the
+  synchronous completion, delivered through the arbiter). Every tenure rides the byte pump, one
   interrupt a byte; there is no DMA phase ([dmac.md](dmac.md), erratum
   1.10.4). `configuration(speed)` is the resource
   configuration the engine runs, what a caller that reconfigures the
@@ -439,11 +441,14 @@ What the rows say:
 - The tenure shapes: write, read and write-then-read all i2c_ok; the
   peer saw the combined tenure as TWO address matches on one tenure
   (the repeated start from the client's side) and accounted all 24
-  bytes; a GENERAL CALL write reached the peer at address 0x00.
+  bytes.
 - The vocabulary on the wire: a deaf peer answers the write AND the
   empty probe with i2c_nack_addr; a commanded NACK on the 3rd data
   byte comes back i2c_nack_data with the peer's own report_nacked
-  beside it.
+  beside it; a write to 0x7A and one to the general call are answered
+  true and i2c_rejected by `start()`, and the peer's client, answering
+  the general call, takes only the write to its own address that
+  follows - one match, two bytes.
 - Clock stretching is flow control: a client holding every data byte
   2 ms stretched an 8-byte tenure to exactly 16 ms, data intact,
   i2c_ok.
@@ -530,7 +535,8 @@ What the rows say:
   some 535 core cycles T2 goes first, above some 575 the peer does and
   T2 waits behind its tenure; between them the two STARTs land inside
   each other's detection and the wired AND arbitrates on the address:
-  aiming 0x7A above the peer's 0x11, T2 comes back `i2c_arb_lost` and the
+  aiming twi_link's `deaf_addr` above the peer's 0x11, T2 comes back
+  `i2c_arb_lost` and the
   peer's tenure completes; aiming 0x08 below it, the peer reports ARBLOST
   and T2 completes. Swept every two cycles across the crossover the
   letter finds by itself: 17 to 19 collisions of 81 attempts each way,
@@ -544,8 +550,8 @@ PA22/PA23 at 48 MHz inside Rubato, the preemptive kernel, against the
 same AVR64EA48 `twi_peer`, while TC4 posts to the pack's highest object
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 97 us x 3000, 64 % of the core. Every letter runs once with TC4 silent
-and six times under it; **202 verdicts, green in each of three runs of
-`z`**. The pack, the command channel through the arbiter and the letters
+and six times under it; **209 verdicts, green in each of three runs of
+`z`**, and letter `q` in ten runs of its own. The pack, the command channel through the arbiter and the letters
 are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
 header describes them), and [platform.md](platform.md) places the suite
 among the preemptive kernel's. Every serve the body commands asks the
@@ -593,7 +599,10 @@ peer's client parked at 0x5D - answers the probe and a four-byte write
 refused answers `i2c_nack_data` (the peer reporting the refusal and two
 address matches), the last written byte of a 2+4 refused answers
 `i2c_nack_data` with no read half (the peer counting two address
-matches and no byte served), the next tenure `i2c_ok` after each.
+matches and no byte served), the next tenure `i2c_ok` after each; a
+write to 0x7A and one to the general call answer `i2c_rejected`, the
+peer, answering the general call, matching only the probe that
+follows.
 Letter `w`: the Client above the arbiter (20 write-then-reads of 1+6,
 two outstanding), a requester below it (10 writes of two) and, in a
 pressure pass, the preempting object itself (8 probes from its tick):
@@ -677,8 +686,16 @@ Driver gaps (not built), each with its reason:
 - **10-bit HOST addressing**: the register surface only - the Request
   is 7-bit on every target, and `design/i2c-bus.md` records that the
   arbiter's descriptor has no shape for it.
+- **The general call as a HOST verb**: `start()` refuses address 0x00
+  with every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 
 Implemented but not bench-verified:
+
+- **The client's general call** (`general_call`, ADDR.GENCEN): written and
+  read back, and taken on the wire no longer - every brio host refuses
+  address 0x00, the desk partner's included. A controller that sends a
+  general call would measure it.
 
 - **The engine against the naive shape and the data sheet's own polled
   loop** (33.6.2.4, smart mode off) on this desk: both are scratch

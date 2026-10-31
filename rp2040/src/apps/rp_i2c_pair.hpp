@@ -543,27 +543,6 @@ void td_shapes() {
     // START: write, read, write-then-read (two), probe, four reads, write.
     bench.verdict("... and the tenures: ten, the write-then-read's repeated START counted from the far end",
                   rep && r.addr_hits == 10u && r.stops == 9u);
-
-    // The general call: the host's tenure to address 0x00.
-    twilink::Params g = serve_params(300, 0);
-    g.flags = twilink::flag_general_call;
-    if (peer_act(Op::serve, g)) {
-        const uint32_t g0 = us_now();
-        uint8_t gw[2] = {0x5A, 0xA5};
-        const uint8_t gs = tenure<Host>(0x00, gw, 2, nullptr, 0);
-        outlast(g, g0);
-        twilink::Report gr{};
-        const bool grep = peer_report(gr);
-        print(serial, "  general call: status ", gs, ", the peer's last address ", hex(gr.last_addr), ", received ",
-              gr.aux0, ", tenures ", gr.addr_hits, ", stops ", gr.stops, crlf);
-        bench.verdict("a GENERAL CALL write (the Request's address 0x00, IC_TAR's SPECIAL clear) reaches the "
-                      "peer's client: one tenure at 0x00, its two bytes taken, and no STOP_DET for it (IC_CON's "
-                      "note on STOP_DET_IFADDRESSED)",
-                      gs == i2c_ok && grep && gr.aux0 == 2u && gr.addr_hits == 1u && gr.last_addr == 0x00u &&
-                          gr.stops == 0u);
-    } else {
-        bench.verdict("the peer accepted the general-call serve", false);
-    }
 }
 
 // =============================================================================
@@ -584,10 +563,51 @@ void te_vocabulary() {
         deaf_r = tenure<Host>(twilink::dut_addr, nullptr, 0, rx_buf, 4);
         outlast(d, s0);
     }
-    print(serial, "  the peer deaf at 0x7A: write ", deaf_w, ", probe ", deaf_p, ", read ", deaf_r, crlf);
+    print(serial, "  the peer deaf at ", hex(twilink::deaf_addr), ": write ", deaf_w, ", probe ", deaf_p, ", read ",
+          deaf_r, crlf);
     bench.verdict("an address nobody answers is i2c_nack_addr on a write, the probe and a read - on a board "
                   "that is otherwise alive",
                   deaf_w == i2c_nack_addr && deaf_p == i2c_nack_addr && deaf_r == i2c_nack_addr);
+
+    // THE ADDRESSES NO REQUEST MAY NAME (util/i2c_bus.hpp): 0x7A, a 10-bit
+    // prefix, and 0x00, the general call, each refused by start() itself -
+    // true from start(), i2c_rejected, no entry written. The peer sits at
+    // dut_addr ANSWERING THE GENERAL CALL (counted at its GEN_CALL), so a
+    // byte of either on the wire would be an address match on its count;
+    // the write to dut_addr after them is its one tenure and its two bytes.
+    {
+        twilink::Params g = serve_params(300, 0);
+        g.flags = twilink::flag_general_call;
+        if (!peer_act(Op::serve, g)) {
+            bench.verdict("the peer accepted the general-call serve", false);
+            return;
+        }
+        const uint32_t g0 = us_now();
+        uint8_t gw[2] = {0x5A, 0xA5};
+        Host::Request bad{};
+        bad.addr = 0x7A;
+        bad.tx = lend<Lease::reply>(static_cast<const uint8_t*>(gw));
+        bad.tx_len = 2;
+        bad.speed = link_speed;
+        const bool sync_prefix = Host::start(bad);
+        const uint8_t st_prefix = Host::status();
+        bad.addr = 0x00;
+        const bool sync_call = Host::start(bad);
+        const uint8_t st_call = Host::status();
+        const uint8_t own = tenure<Host>(twilink::dut_addr, gw, 2, nullptr, 0);
+        outlast(g, g0);
+        twilink::Report gr{};
+        const bool grep = peer_report(gr);
+        print(serial, "  0x7A: ", sync_prefix ? "refused at start()" : "STARTED", " ", st_prefix, "; 0x00: ",
+              sync_call ? "refused at start()" : "STARTED", " ", st_call, "; then dut_addr ", own,
+              "; the peer: received ", gr.aux0, ", tenures ", gr.addr_hits, ", last address ", hex(gr.last_addr),
+              crlf);
+        bench.verdict("0x7A and the general call answered i2c_rejected inside start(), nothing on the wire: the "
+                      "peer, answering the general call, took only the write to its own address",
+                      sync_prefix && st_prefix == i2c_rejected && sync_call && st_call == i2c_rejected &&
+                          own == i2c_ok && grep && gr.aux0 == 2u && gr.addr_hits == 1u &&
+                          gr.last_addr == twilink::dut_addr);
+    }
 
     // The refusals: at the first data byte (IC_SLV_DATA_NACK_ONLY set before
     // the action) and at the third (a disable once the second is taken).
@@ -1334,7 +1354,11 @@ void tl_roles() {
                       rr.first == client_answers[0] && rr.aux0 == client_answers[6] && gave == 12u && nacks == 2u &&
                       flushes == 0u);
 
-    // ---- the client's general call ----
+    // ---- the general call, from the far end ----
+    // The peer's host refuses address 0x00 as this board's does
+    // (util/i2c_bus.hpp): commanded to write the general call at this
+    // board's client - its IC_ACK_GENERAL_CALL on - it answers
+    // i2c_rejected and nothing reaches the wire.
     twilink::Params g{};
     g.ms = 800;
     g.target = 0x00;
@@ -1362,12 +1386,11 @@ void tl_roles() {
     outlast(g, s0);
     twilink::Report gr{};
     const bool grep = peer_report(gr);
-    print(serial, "  the GENERAL CALL to this board's client: init ", up3, ", general-call events ", gcalls,
+    print(serial, "  a GENERAL CALL commanded at this board's client: init ", up3, ", general-call events ", gcalls,
           ", bytes ", gheard, " (", gmism, " wrong), stops ", gstops, "; the peer's host status ", gr.mstatus, crlf);
-    bench.verdict("THE CLIENT'S GENERAL CALL - with IC_ACK_GENERAL_CALL on, a real host's write to 0x00 is "
-                  "acknowledged, reported ONCE as general_call (GEN_CALL masked through the address's "
-                  "acknowledge), its three bytes taken, and no stop event (IC_CON's note)",
-                  up3 && gcalls == 1u && gheard == 3u && gmism == 0u && gstops == 0u && grep && gr.mstatus == i2c_ok);
+    bench.verdict("the peer's host refuses the general call too (i2c_rejected), and this board's client, the "
+                  "general call acknowledged, hears nothing",
+                  up3 && gcalls == 0u && gheard == 0u && gstops == 0u && grep && gr.mstatus == i2c_rejected);
     bench.verdict("the command channel is back after the role swaps", command(Op::ping));
 }
 

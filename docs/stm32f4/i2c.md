@@ -80,14 +80,16 @@ tenure stops the program. The buffers: `index` and `id` are lent from
 the `Borrowed` type records and nothing checks. One tenure at a time:
 `start()` does not look at whether the previous tenure has completed -
 `I2cBus` is what serializes. The address: `addr` is a 7-bit address of
-0x08 to 0x77, and nothing refuses one above it. The four after 0x77,
-0x78 to 0x7B, are the prefix I2C reserves for the first byte of a 10-bit
-address, and this block takes such a byte as that header: the address
-phase ends on ADD10 instead of ADDR (27.3.3), which the host's event
-vector does not serve, so the vector re-enters without end, the program
-stops and SCL stays low (measured at 0x7A, "Bench findings"). And
+0x08 to 0x77, and `start()` refuses any other before the wire - the
+general call and the 10-bit prefixes 0x78 to 0x7B among them - as every
+host does ([../design/i2c-bus.md](../design/i2c-bus.md)). On this block
+the refusal matters more than tidiness: a write's address byte of the
+form 1111 0xx0 is sent as a 10-bit header and the address phase ends on
+ADD10 instead of ADDR (27.3.3); the engine ends such a tenure
+`i2c_bus_error` rather than spin on it ("Bench findings"), but only the
+refusal keeps it off the wire. And
 `start()`'s answer: false means the tenure is on the wire and a
-handler will complete it; true means it was refused before a byte moved (a speed the clock cannot produce), with
+handler will complete it; true means it was refused before a byte moved (a speed the clock cannot produce, or an address outside 0x08..0x77), with
 `status()` already `i2c_rejected` and no interrupt to follow, so a loop
 that waits for `done` after a true waits for ever. `start()` itself
 waits in its caller, bounded: about 5 ms for the previous tenure's STOP
@@ -506,7 +508,9 @@ Bus::unstick();      // the WIRE: nine clocks and a STOP by hand;
 ## Bench findings
 
 `test_stm32f4_i2c` on the STM32F429I-DISC1, I2C3 on PA8/PC9 against the
-board's STMPE811 touch controller. `z` is 63 verdicts.
+board's STMPE811 touch controller. `z` is 64 verdicts, the 63 of the
+board's run and letter `c`'s refusal of the reserved addresses, run on
+the Nucleo-F446RE alone ("Not covered yet").
 
 - **The chapter's reset values are exact** - every register zero but
   TRISE, which is 0x0002 - and the peripheral clock is off at reset.
@@ -648,7 +652,7 @@ scratch program with brio's crt, clock and ruler. At 400 kHz:
 chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - SERVED FROM ITS OWN VECTORS as a register file (an identity at
 0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
-first written byte sets), at 0x2C. `z` is 67 verdicts: every letter of
+first written byte sets), at 0x2C. `z` is 68 verdicts: every letter of
 the DISC1's runs against it, and one more - with the desk partner, an
 STM32G0 on the same two nodes, on its dark console, since letter d's
 scan would otherwise meet the partner's command address. A SECOND SET,
@@ -726,7 +730,7 @@ ms) over the engined `I2cHost<1>` on PB8/PB9 (DMA1 streams 6 and 0 on
 channel 1) inside Rubato, while TIM2 posts to the pack's highest object
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97
 us x 3000, 17 % of the core. Every letter runs once with TIM2 silent and
-six times under it; **195 verdicts, green on every run: forty of the
+six times under it; **202 verdicts, green on every run: forty of the
 letters `n`, `o`, `p`, `w` and `i`, ten of `q` and `h`**.
 The pack, the command channel through the arbiter and the letters are
 the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose
@@ -814,17 +818,42 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
   every tick, 12 of 60 with the flood paced.
   After the release the next tenure was `i2c_ok` and the arbiter voted
   idle with nothing waiting, every pass.
-- **THE RESERVED ADDRESS WEDGES THIS HOST.** A probe of the partner
-  parked at 0x7A, `twi_link.hpp`'s `deaf_addr`, stopped the program there
-  for good: the core halted inside the event
-  vector (IRQ 31 active), SR1 ADD10, SR2 MSL and BUSY, DR 0xF4, CR2
-  with the event vector on, SCL held low by this side. 0xF4 is 0x7A
-  shifted, 1111 0100, the first byte of a 10-bit address; this block in
-  controller mode sends it as that header and sets ADD10 where a 7-bit
-  address sets ADDR (27.3.3, 27.6.6), and the engine's address phase
-  waits for ADDR alone. The shared letter `q` therefore parks its deaf
-  client at an address of its own, 0x5D; the refusal is a driver gap
-  below.
+- **AN ADDRESS OF 0x78 TO 0x7B IS A 10-BIT HEADER HERE, AND THE ENGINE
+  ENDS IT.** Measured on I2C1 with `start()`'s refusal compiled out of a
+  scratch image, the STM32G0B1RE's client acknowledging 0x7A, a probe, a
+  write of 4 and a 1+2 at both speeds. Without the address phase's stray
+  branch (the control) each tenure stopped in the event vector - SR1
+  ADD10, SR2 MSL and BUSY, the vector re-entered 200 000 times before
+  the image's guard cut its line, SCL held low until the per-bus
+  timeout's `recover()`. 0xF4 is 0x7A shifted, 1111 0100: this block in
+  controller mode sends it as a 10-bit header and sets ADD10 where a
+  7-bit address sets ADDR (27.3.3, 27.6.6). With the branch, each tenure
+  ended `i2c_bus_error` in two entries of the vector (SB, then ADD10),
+  both lines high after, the peer counting one address match, no byte
+  and one STOP, and the next tenures sound (a probe of nobody
+  `i2c_nack_addr`, then the command address `i2c_ok`). The STOP alone
+  does not clear ADD10: in a variant without the DR store after it the
+  flag stood on, and the next tenure's START never came out (SR2 0)
+  while its vector re-entered on ADD10 until the timeout; with the
+  store, SR1 read 0 after every one. A READ of 0x7A is not a header:
+  0xF5 went out as a plain 7-bit read and the peer served its two bytes,
+  `i2c_ok` - only the write form 1111 0xx0 is one.
+- **THE REFUSAL, judged.** Letter `c`: 0x00, 0x07, 0x78, 0x7A, 0x7B,
+  0x7C and 0x7F each answered true and `i2c_rejected` by `start()`, CR1
+  and CR2 as they were and MSL never set; the arbiter letter's probe of
+  nobody now names 0x5D. The shared letter `q` of the preemptive
+  kernel's suite judges it through the arbiter with the partner
+  answering the general call: `i2c_rejected` for 0x7A and 0x00 and one
+  address match on the partner's count, the probe that follows.
+- **The cost of the two.** The refusal is three instructions in
+  `start()` (a subtraction, a compare and a branch, the address already
+  loaded for the tenure). The stray branch adds nothing to a tenure's
+  path in the release listing of `test_stm32f4_rubato_i2c`: every
+  address phase's test of ADDR is the same two instructions (`lsls`,
+  `bpl` not taken), the switch's jump table one entry longer, and the
+  stray test, the STOP, the DR store and `finish()` an 18-instruction
+  cold function called only from an address-phase entry that found no
+  ADDR.
 - **A BUS ERROR COUNTED, and a real one.** `spurious_bus_errors()` rose by
   one in each pass of letter `p` and nowhere else - seven a run, 210 in
   thirty runs; a probe letter (not kept) placed every one at the 100 kHz
@@ -842,8 +871,10 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
 
 `test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
-reset through the panel's shared line PH7. `z` is 63 verdicts, and one
-letter more, by name only, wants a finger.
+reset through the panel's shared line PH7. `z` is 64 verdicts - the 63
+of the board's run and letter `c`'s refusal of the reserved addresses,
+run on the Nucleo-F446RE alone ("Not covered yet") - and one letter
+more, by name only, wants a finger.
 
 - **The scan finds one address of 112, 0x38**, and the device says
   what it is in its own registers: FOCALTECH_ID (0xA8) reads 0x11 - the
@@ -881,21 +912,16 @@ Driver gaps, each with its reason:
   device is on this desk. The block is not fully SMBus 2.0 compliant
   anyway (ES0206 2.10.2).
 - The general call as a HOST verb (a broadcast write to address 0):
-  the resource enables the target side's recognition, and no portable
-  program needs the other half yet.
+  `start()` refuses address 0x00 with every reserved address
+  ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
+  feature of its own, born with its first user. The resource enables the
+  target side's recognition.
 - A wake from Stop on an address match: no I2C of this family has one -
   neither this block nor the FMPI2C beside it on some parts
   ([fmpi2c.md](fmpi2c.md)) - so there is nothing to build.
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's,
   as on every other stratum.
-- An address of 0x78 to 0x7B in a `Request`: this block takes the byte
-  as a 10-bit address's header and ends the address phase on ADD10
-  (27.3.3), which the host's event vector does not serve, so the program
-  wedges in the vector (measured at 0x7A, Bench findings). The refusal -
-  `i2c_rejected` from `start()` for an address of 0x78 and above, the
-  10-bit prefix and the four addresses I2C reserves after it - is owed
-  to the driver.
 - This chip as the bus's target, served from an active object, under the
   preemptive kernel. A target whose bytes come from an object (its vector
   posting "the host reads" and leaving SCL held, a dispatch giving the
@@ -906,10 +932,18 @@ Driver gaps, each with its reason:
   target object.
 
 Implemented, not bench-verified (each with what would measure it):
+- Letter `c`'s refusal of the reserved addresses on the STM32F429I-DISC1
+  and the 32F469IDISCOVERY: the same verdict on the same engine, run on
+  the Nucleo-F446RE alone, the two boards being off the desk; a run of
+  `c` on each would close it.
 - The client's SECOND own address (ENDUAL) and its 10-bit matching: the
-  instrument above uses one 7-bit address and the general call, so the
-  dual address and ADDMODE are written, read back and never matched on
-  the wire. A controller that addresses both would close it.
+  instrument above uses one 7-bit address, so the dual address and
+  ADDMODE are written, read back and never matched on the wire. A
+  controller that addresses both would close it.
+- The client's general call (ENGC): written and read back, and taken
+  on the wire no longer - every brio host refuses address 0x00, the
+  desk partner's included. A controller that sends a general call would
+  measure it.
 - I2C2 (compiled everywhere and driven nowhere): I2C1 and I2C3 each
   have a board's touch controller; the 32F469IDISCOVERY's CS43L22 audio
   DAC on I2C2 (PH4/PH5, 100 kHz at most, its identity register 01h

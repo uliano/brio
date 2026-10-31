@@ -212,8 +212,13 @@ default, or `InRam`);
   `error_isr()` the error vector's (a NACK is `i2c_nack_addr` or
   `i2c_nack_data` by the phase it landed in, ARLO `i2c_arb_lost`, the
   rest `i2c_bus_error`); `dma_isr()` both channels', INTFR read once. A
-  speed the clock cannot produce is answered `i2c_rejected` inside
-  `start()`. `start()` waits, bounded, for the last tenure's STOP to leave
+  speed the clock cannot produce, and an address outside 0x08..0x77 (the
+  general call and the 10-bit prefixes among them,
+  [../design/i2c-bus.md](../design/i2c-bus.md)), are answered
+  `i2c_rejected` inside `start()`. An address-phase entry of the event
+  vector that finds ADD10, SB or BTF where it waits for ADDR ends the
+  tenure `i2c_bus_error` - the STOP, then a DATAR store that clears ADD10
+  - instead of re-entering for ever. `start()` waits, bounded, for the last tenure's STOP to leave
   CTLR1 (5 ms, a clock held past it parks the tenure for the per-bus
   timeout) and for BUSY (100 us), then - BUSY still up and both lines
   high - takes SWRST and counts it (`unwedges()`). `unstick()` clocks a
@@ -342,6 +347,39 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   of the same address - completed on the wire; it is `i2c_nack_addr`
   because a CH32 target keeps its acknowledge down after a refused byte
   until its window closes (the peer's own header).
+- **The status a polling thread reads is the vectors'.** `status()` is
+  a load of a field the vectors write, and the field is volatile: before
+  it was, a polled caller into which `start()` was inlined read back the
+  i2c_ok `start()` had stored, and letter `r`'s refused last byte on the
+  engines came back `i2c_ok` - every case, both speeds - though the
+  vectors had answered `i2c_nack_data` (traced: the error vector's last
+  entry left status 3). The arbiter is unaffected (its completion
+  carries the status from the vector); a polled program is not.
+- **The reserved addresses refused** (letter `d`): a write to 0x7A and one
+  to the general call answered true and `i2c_rejected` by `start()`, and
+  the CH32V006's client, answering the general call, took only the write
+  to its own address that follows - one match, two bytes (ten runs of
+  the letter).
+- **AN ADDRESS OF 0x78 TO 0x7B IS A 10-BIT HEADER HERE, AND THE ENGINE
+  ENDS IT.** Measured with `start()`'s refusal compiled out of a scratch
+  image of the preemptive kernel's suite, the CH32V006's client
+  acknowledging 0x7A, a probe, a write of 4 and a 1+2 at both speeds.
+  Without the address phase's stray branch (the control) each tenure
+  stopped in the event vector - STAR1 ADD10, STAR2 MSL and BUSY, SCL held
+  low, the vector re-entered 200 000 times before the image's guard cut
+  its line - until the per-bus timeout's `recover()`. With the branch
+  each ended `i2c_bus_error` in two entries (SB, then ADD10), STAR1 0 and
+  both lines high after, the peer taking no byte and seeing one STOP, the
+  next probe of nobody `i2c_nack_addr` and the command address `i2c_ok`.
+  With the STOP alone ADD10 stood on and the next tenure's START never
+  came out (STAR2 0), its vector re-entering until the timeout. A READ of
+  0x7A is no header: 0xF5 went out as a plain 7-bit read, `i2c_ok`.
+- **The cost of the two guarantees.** In the release listing of
+  `test_x035_i2c-1`, `unserved()` is 54 bytes a host instantiation,
+  called only from an address-phase entry that found no ADDR, and each
+  phase's ADDR test is an `andi` and a branch not taken, as at HEAD; the
+  refusal in `start()` is the CH32V203's five instructions, the same
+  source through the same compiler.
 
 - **Fast mode at DUTY 16/9** (letter f): CKCFGR 0xC005 - F/S, DUTY and
   CCR 5, 48 MHz / (25 x 400 kHz) = 4.8 rounded up so the bus never runs
@@ -516,9 +554,10 @@ runs it from SRAM, [platform.md](platform.md), "The scheduler's place"):
 Rubato, against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
 pack's highest object every 97, 193 or 389 us and its dispatch spins 300
 or 3000 cycles - at 97 us x 3000, 64 % of the core. Every letter runs once
-with TIM2 silent and six times under it. Key `z` (195 verdicts) ran three
-times on each image, every verdict green, and the letter `u`, the unpaced
-flood, by its own name ten times on each. The pack, the
+with TIM2 silent and six times under it. Key `z` (202 verdicts) ran three
+times on each image with every verdict green, its vocabulary letter `q`
+ten more on each, and the letter `u`, the unpaced flood, by its own name
+ten times on each. The pack, the
 command channel through the arbiter and the letters are the I2C suites'
 shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes
 them), this peer's answers to a refusal stated in the suite's
@@ -562,11 +601,12 @@ overlaps the next byte's shifting in, and the write's last two fall after
 its tenure), under the 20 ms timeout.
 
 **The vocabulary under pressure, with this peer's answers.** Letter `q`:
-a deaf client - the peer's client parked at 0x5D, the letter's own
-address, since twi_link's `deaf_addr`, 0x7A, is one this block cannot
-address (the driver gap below) - answers the probe and a four-byte write
-`i2c_nack_addr`, and the probe of 0x5D `i2c_ok`; the third byte of a
-six-byte write on the engines refused answers `i2c_nack_data`; the last
+a deaf client - the peer's client parked at twi_link's `deaf_addr`,
+0x5D - answers the probe and a four-byte write `i2c_nack_addr`, and the
+probe of 0x5D `i2c_ok`; a write to 0x7A and one to the general call
+answer `i2c_rejected`, the peer, answering the general call, matching
+only the probe that follows; the third byte of a six-byte write on the
+engines refused answers `i2c_nack_data`; the last
 written byte of a 2+4 refused answers `i2c_nack_data`, the controller let
 go by its void write and no read half begun. After each refusal the
 CH32V006 keeps its acknowledge down until its action's window closes, so
@@ -679,8 +719,9 @@ Driver gaps, each with its reason:
   has no user.
 - PEC as part of a tenure, and ENARP: the resource has the bits, no
   Request shape asks for them.
-- The general call as a host verb: a Request to address 0x00 sends it
-  (the suite does); no separate verb.
+- The general call as a host verb: `start()` refuses address 0x00 with
+  every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 - A wake on an address match: this stratum's power chapter has no sleep
   site.
 - The collision case (twi_link's `coll`, two clients on one address with
@@ -688,18 +729,6 @@ Driver gaps, each with its reason:
   has two boards.
 - Fast mode Plus: 15.1 names two speeds and the datasheet gives the I2C
   no timing table; the engine has no third speed.
-- **An address of the 10-bit header's form in a 7-bit Request, 0x78 to
-  0x7B.** Its write byte is 11110xx0b, which the block sends as a 10-bit
-  header and answers with ADD10, waiting for the second address byte
-  (15.3, step 4); the engine's phases wait for ADDR, the event vector
-  re-enters on ADD10 without end, and every thread starves - the
-  arbiter's timeout with it, its time events walked at thread level.
-  Measured: a probe of 0x7A against a peer serving there left STAR1 at
-  0x0008 (ADD10), STAR2 MSL and BUSY, CTLR2 with the event vector on.
-  `start()` does not refuse these addresses (the I2C-bus specification
-  reserves them for 10-bit addressing) and the host has no 10-bit path;
-  which of the two the engine takes is the driver's decision, not yet
-  made.
 - **This chip as the bus's target, served from an active object, under
   the preemptive kernel.** A target whose bytes come from an object (its
   vector posting "the host reads" and leaving SCL held, a dispatch giving
@@ -709,6 +738,11 @@ Driver gaps, each with its reason:
   board's target (`host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- **The target's general call** (ENGC, GENCALL): armed and read back,
+  and taken on the wire no longer - every brio host refuses address
+  0x00, the desk partner's included. A controller that sends a general
+  call would measure it.
 
 - **The columns other than PC16/PC17**: PA10/PA11, PA13/PA14 and the
   debug port's pair on the other packages compile on every part (`brio

@@ -1306,7 +1306,7 @@ the path in the flash 42712 (67 %) and 5508 (27 %).
 **The I2C stack under the preemptive kernel** - the suite is
 `test_x035_rubato_i2c`, the scheduler path in SRAM, and its twin
 `test_x035_rubato_i2c_flash`, against the CH32V006K8U6's unchanged
-`twi_peer`: key `z` (195 verdicts) green on every run of both
+`twi_peer`: key `z` (202 verdicts) green on every run of both
 ([i2c.md](i2c.md) says how many of each letter). A Rubato pack of five objects runs `util/i2c_bus.hpp`'s
 arbiter over the engined `I2cHost<1>` ([i2c.md](i2c.md)) with three
 requesters of three priorities, under the same TIM2 pressure and the same

@@ -1836,8 +1836,9 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  *   i2c_arb_lost     ARLO - another controller won; the silicon has already
  *                    released the bus and switched to target mode, so no
  *                    STOP is ours to send
- *   i2c_rejected     a speed this kernel clock cannot produce - a
- *                    synchronous answer, no byte moved
+ *   i2c_rejected     a speed this kernel clock cannot produce, or an
+ *                    address outside 0x08..0x77 - a synchronous
+ *                    answer, no byte moved
  *   i2c_bus_error    a START still standing at start(), the other
  *                    synchronous answer (below)
  *   fmpi2c_dma_fault a DMA stream reported an error mid-tenure
@@ -1920,7 +1921,10 @@ public:
     static constexpr bool has_engines = TxEngine::present;
 
     struct Request {
-        uint8_t addr;   ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, LENT until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -2103,15 +2107,17 @@ public:
 
     /// Begin one bus tenure (called by I2cBus from main context). Returns
     /// false whenever the wire moves - the tenure runs on the ISR and a
-    /// TransferDone{status()} follows - and true for the two failures that
+    /// TransferDone{status()} follows - and true for the failures that
     /// move nothing, answered through status(): a speed this kernel clock
-    /// cannot produce (i2c_rejected), and a START still standing from a
-    /// tenure the peripheral never closed (i2c_bus_error). That is the
+    /// cannot produce or an address outside 0x08..0x77
+    /// (i2c_address_in_range), both i2c_rejected, and a START still
+    /// standing from a tenure the peripheral never closed
+    /// (i2c_bus_error). That is the
     /// I2cHost contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
-        if (!speed_ok(r.speed)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;

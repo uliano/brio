@@ -74,7 +74,11 @@ program. The buffers a `Request` names are lent (`brio::lend`) from the
 post to the `I2cDone` the arbiter replies with: untouched and in scope
 until then, which the `Borrowed` type records and nothing checks. A
 speed the kernel clock cannot produce is answered `i2c_rejected` before
-a byte moves (`speed_ok()` says so beforehand); a Fast-mode Plus bus
+a byte moves (`speed_ok()` says so beforehand), and so is an address
+outside 0x08..0x77 - the general call and the 10-bit prefixes among them,
+which this block would send as plain 7-bit addresses where the classic
+I2C beside it sends a header ([../design/i2c-bus.md](../design/i2c-bus.md));
+a Fast-mode Plus bus
 wants the 20 mA pad drive turned on by the program
 (`Bus::fast_plus_drive(true)`), which nothing turns on by itself. A
 refused address and a refused DATA byte are told apart on both paths:
@@ -450,7 +454,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - and letter m makes
-I2C1 the target. `test_stm32f4_fmpi2c` is 95 verdicts over thirteen
+I2C1 the target. `test_stm32f4_fmpi2c` is 96 verdicts over thirteen
 letters.
 
 **The register file at reset is the chapter's**, and the one non-zero
@@ -619,8 +623,11 @@ which is the interrupt's whatever carries the data.
 Four probes through `I2cBus` gave four replies, all `i2c_nack_addr`; six
 posted into a four-deep queue gave six replies with one `i2c_rejected`
 from the queue; a Fast-mode Plus request on the HSI came back
-`i2c_rejected` through the arbiter, which is the one synchronous
-completion an I2C engine has; and an idle bus voted for the sleep.
+`i2c_rejected` through the arbiter, a synchronous completion of the
+engine; and an idle bus voted for the sleep. Letter `d` judges the other:
+0x00, 0x07, 0x78, 0x7A, 0x7B, 0x7C and 0x7F each answered true and
+`i2c_rejected` by `start()`, CR2 and the interrupt enables as they
+were.
 
 **`unstick()` left a free wire alone**, answering 0 pulses, and the pads
 came back to the peripheral after it.
@@ -651,7 +658,7 @@ being its own (23.4.9).
 own two vectors is a register file at 0x2C - the address match, each
 byte received and wanted, the controller's closing NACK (its byte asked
 for ahead dropped by 23.7.7's TXE flush) all reported by `service()` -
-through that suite's 67 verdicts, and CR2's NACK bit set as the byte
+through that suite's 68 verdicts, and CR2's NACK bit set as the byte
 before is taken refuses a chosen written byte (23.7.2: "a NACK is sent
 after current received byte"), 192 refusals of 192 on time with the core
 at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
@@ -712,9 +719,9 @@ arbiter (pending depth 4, the per-bus timeout at 20 ms) over the engined
 kernel clock, the Fm+ pad drive on) inside Rubato, while TIM2 posts to
 the pack's highest object every 97, 193 or 389 us and its dispatch spins
 300 or 3000 cycles. Every letter runs once with TIM2 silent and six
-times under it; **174 verdicts, green on every run: thirty of the
-letters `n`, `o`, `p`, `w` and `i`, ten of `h`**, the vocabulary letter
-`q` kept out of them (below). The pack and the letters
+times under it; **209 verdicts, green on every run: thirty of the
+letters `n`, `o`, `p`, `w` and `i`, ten of `h` and of `q`**. The pack
+and the letters
 are the I2C suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`), and
 [platform.md](platform.md) places the suite among the preemptive
 kernel's.
@@ -755,8 +762,10 @@ kernel's.
   byte of a six-byte write refused answers `i2c_nack_data`, and so does
   the last written byte of a 2+4 refused, whose two written bytes the
   partner reports received, its address matches the two a host that
-  lets go with a STOP makes - 28 verdicts of 28 in ten runs of the
-  letter, and the twin's `z` 202 of 202 in ten runs with it. The event
+  lets go with a STOP makes; a write to 0x7A and one to the general call
+  answer `i2c_rejected`, the partner, answering the general call,
+  matching only the probe that follows - 35 verdicts of 35 in ten runs
+  of the letter, and the twin's `z` 209 of 209 in three runs with it. The event
   vector reads the transmit stream's count at the NACK: the first TXIS
   comes after the address's ACK and none follows a NACK (23.4.9, figure
   260), and SxNDTR is post-decremented when a beat is stored into TXDR
@@ -820,9 +829,11 @@ Driver gaps, each with its reason:
 - 10-bit addressing in a Request: the descriptor carries a 7-bit address
   on every target, so the resource does ten bits and the host does not.
   A device that needs it would be the first.
-- The general call and the two SMBus addresses as HOST verbs: the
-  resource enables the target side's recognition of them, and no portable
-  program needs the other half yet.
+- The general call and the two SMBus addresses as HOST verbs: `start()`
+  refuses address 0x00 with every reserved address
+  ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
+  feature of its own, born with its first user. The resource enables the
+  target side's recognition of them.
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's, as
   on every other stratum.

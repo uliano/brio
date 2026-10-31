@@ -57,6 +57,30 @@ inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< protocol v
 /// docs/design/i2c-bus.md, "The per-bus timeout").
 inline constexpr uint8_t i2c_timeout = bus_timeout;
 
+/// The 7-bit addresses a Request may name: 0x08 to 0x77, the range the
+/// I2C specification leaves to devices (NXP UM10204 3.1.12). The sixteen
+/// outside it are reserved: 0x00 is the general call, 0x01 to 0x07 are
+/// the START byte, CBUS, other bus formats, Hs-mode codes and a future
+/// purpose, 0x78 to 0x7B are the first byte of a 10-bit address, and
+/// 0x7C to 0x7F the device ID and a future purpose. Every host's start()
+/// asks this one function and answers an address outside the range
+/// i2c_rejected at once, nothing on the wire - the path a speed the
+/// clock cannot produce already takes. The reason is the wire, not
+/// tidiness: the STM32F1's event machine, which several families carry,
+/// sends an address of 0x78 to 0x7B as a 10-bit header, so the same
+/// Request would mean two different things on two blocks. The general
+/// call is refused with the rest until it is a feature of its own, and
+/// 10-bit addressing is not offered by any host.
+inline constexpr uint8_t i2c_address_first = 0x08;
+inline constexpr uint8_t i2c_address_last = 0x77;
+
+/// Is `addr` a 7-bit address a Request may name (i2c_address_first to
+/// i2c_address_last)? One subtraction and one unsigned compare.
+constexpr bool i2c_address_in_range(uint8_t addr) {
+    return static_cast<uint8_t>(addr - i2c_address_first) <=
+           static_cast<uint8_t>(i2c_address_last - i2c_address_first);
+}
+
 /// The arbiter under I2C's name. `pending_depth` is how many requests
 /// may wait while one is in flight (a further one is answered
 /// i2c_rejected at once). `timeout_ticks` is per bus and in kernel ticks

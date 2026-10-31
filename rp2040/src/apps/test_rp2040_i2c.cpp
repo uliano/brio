@@ -4,7 +4,7 @@
 // tenure shape, the vocabulary produced on the wire, the three speeds
 // measured, the DMA engines, util/i2c_bus.hpp's arbiter with its timed
 // bus, the stuck bus, arbitration between two hosts, and this board as the
-// far host's client, its general call included.
+// far host's client.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -35,11 +35,11 @@
 //      trips, ten at each speed
 //   d  the tenure shapes against the peer: write, read, write-then-read
 //      with the repeated START counted from the far end, the probe, reads
-//      across the peer's refills, a 200-byte write through the pump, the
-//      general call
-//   e  the vocabulary: nack_addr from a deaf client, nack_data at the first
-//      and at the third data byte, the client's stretch priced on a read
-//      and absent on a write
+//      across the peer's refills, a 200-byte write through the pump
+//   e  the vocabulary: nack_addr from a deaf client, 0x7A and the general
+//      call refused inside start() with nothing on the wire, nack_data at
+//      the first and at the third data byte, the client's stretch priced
+//      on a read and absent on a write
 //   f  THE THREE SPEEDS byte-exact both ways and MEASURED on the ruler
 //   g  THE DMA ENGINES (channels 4 and 5): a 64-byte read timed, a
 //      write-then-read, the short reads on the pump, the bursts
@@ -50,7 +50,8 @@
 //      until it lets go, then a line nine clocks cannot free
 //   k  ARBITRATION on the wire, both directions
 //   l  THE ROLES INVERT: this board's client written to and read from by
-//      the peer's host, and its GENERAL CALL
+//      the peer's host, and a general call commanded of that host refused
+//      there, nothing reaching this client
 //   x  (outside z) the hand-made window traced: what the block reports of
 //      a START and a STOP it did not make, and a tenure written inside it
 //
@@ -232,7 +233,7 @@ int main() {
     bench.letter('a', "the block, wireless", ta_block);
     bench.letter('b', "the scan", tb_scan);
     bench.letter('c', "the peer: ident and the command channel", tc_peer);
-    bench.letter('d', "the tenure shapes, the general call", td_shapes);
+    bench.letter('d', "the tenure shapes", td_shapes);
     bench.letter('e', "the vocabulary on the wire, the stretch priced", te_vocabulary);
     bench.letter('f', "the three speeds, measured", tf_speeds);
     bench.letter('g', "the DMA engines", tg_dma);

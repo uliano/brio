@@ -241,9 +241,12 @@
 //      at speeds[0], each tenure at least the peer's holds long
 //      (stretch_read_holds, stretch_write_holds) and under the per-bus
 //      timeout.
-//   q  a deaf client - the peer's client parked at q_deaf_addr, letter q's
-//      own address (below) - the probe and a write of dut_addr
-//      i2c_nack_addr, the next tenure, a probe of q_deaf_addr, i2c_ok; the
+//   q  a deaf client - the peer's client parked at twi_link's deaf_addr -
+//      the probe and a write of dut_addr i2c_nack_addr, the next tenure, a
+//      probe of deaf_addr, i2c_ok; a write to 0x7A (a 10-bit prefix) and
+//      one to the general call 0x00 answered i2c_rejected by start(), with
+//      the peer's client at dut_addr answering the general call and
+//      matching only the probe of dut_addr that follows, i2c_ok; the
 //      third byte of six refused (i2c_nack_data, then a probe, and the
 //      peer's report: its word that it refused, its address matches); the
 //      last written byte of a 2+4 refused (i2c_nack_data, then a probe, and
@@ -1498,25 +1501,14 @@ void tp_speeds() {
 // q - the vocabulary under pressure
 // =============================================================================
 
-/// LETTER q'S OWN DEAF ADDRESS: its deaf case parks the peer's client here
-/// (a serve whose `addr` names it), not at twi_link's deaf_addr. That one,
-/// 0x7A, lies in 1111 0XX, the range I2C reserves for the first byte of a
-/// 10-bit address, and the F1 lineage's event machine (the STM32F4's I2C1,
-/// the CH32V203's and CH32V303's, the CH32X035's) sends its write byte 0xF4
-/// as that header, sets ADD10 where a 7-bit address sets ADDR, and the
-/// 7-bit engine waiting for ADDR never ends the tenure (each family's I2C
-/// page, a driver gap). 0x5D is an ordinary 7-bit address (0x08..0x77):
-/// no peer's client takes it in any mode of twi_link (command_addr 0x6B,
-/// dut_addr 0x2C, shared_addr 0x39, low_addr 0x11), the AVR suite's
-/// single-board half never names it (the list beside twi_link.hpp's
-/// command_addr), and no board page lists a device on a desk's I2C pair -
-/// so while the peer sits there the probe of it is the peer's alone, and
-/// the dut_addr it left answers nobody.
-constexpr uint8_t q_deaf_addr = 0x5D;
-static_assert(q_deaf_addr >= 0x08u && q_deaf_addr <= 0x77u, "a 7-bit address outside both reserved ranges");
-static_assert(q_deaf_addr != twilink::command_addr && q_deaf_addr != twilink::dut_addr &&
-                  q_deaf_addr != twilink::shared_addr && q_deaf_addr != twilink::low_addr,
-              "an address no mode of the protocol gives the peer's client");
+/// The addresses letter q aims at to see them refused: the second of the
+/// four 10-bit prefixes, which the STM32F1's event machine would send as a
+/// 10-bit header, and the general call. Each is outside the range every
+/// host's start() serves (util/i2c_bus.hpp, i2c_address_in_range).
+constexpr uint8_t q_prefix_addr = 0x7A;
+constexpr uint8_t q_general_call = 0x00;
+static_assert(!i2c_address_in_range(q_prefix_addr) && !i2c_address_in_range(q_general_call),
+              "letter q's refused addresses are outside the range");
 
 constexpr bool refusal_holds_address = i2c_traits::refusal_holds_address<I2cTraits>();
 constexpr uint8_t refused_close_hits = i2c_traits::refused_close_hits<I2cTraits>();
@@ -1566,10 +1558,12 @@ void tq_vocabulary() {
         }
         constexpr uint16_t deadline = 120;
         // A deaf client: the probe and a write meet nobody at dut_addr; the
-        // peer's client is at q_deaf_addr, which answers - the next tenure.
+        // peer's client is at twi_link's deaf_addr, which answers - the next
+        // tenure.
         twilink::Params deaf{};
         deaf.ms = deadline;
-        deaf.addr = q_deaf_addr;
+        deaf.addr = twilink::dut_addr;
+        deaf.flags = twilink::flag_deaf;
         uint8_t probe = no_reply, wdeaf = no_reply, next1 = no_reply;
         const bool a1 = serve(deaf);
         const uint32_t t1 = Ruler::now();
@@ -1577,9 +1571,32 @@ void tq_vocabulary() {
             const uint8_t w4[4] = {1, 2, 3, 4};
             probe = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
             wdeaf = arb_tenure(twilink::dut_addr, w4, 4, nullptr, 0, speeds[1]);
-            next1 = arb_tenure(q_deaf_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            next1 = arb_tenure(twilink::deaf_addr, nullptr, 0, nullptr, 0, speeds[1]);
             wait_past(t1, deadline);
         }
+        // The addresses no Request may name, refused by start() before the
+        // wire: a write to the 10-bit prefix 0x7A and a write to the general
+        // call, against a peer at dut_addr that ANSWERS the general call -
+        // so a byte of either on the wire would be one address match more on
+        // its count - then a probe of dut_addr, the host still sound. The
+        // arbiter has one request at a time here, so i2c_rejected is
+        // start()'s answer and not a full queue.
+        twilink::Params gc{};
+        gc.ms = deadline;
+        gc.addr = twilink::dut_addr;
+        gc.flags = twilink::flag_general_call;
+        uint8_t rprefix = no_reply, rcall = no_reply, rnext = no_reply;
+        const bool a0 = serve(gc);
+        const uint32_t t0 = Ruler::now();
+        if (a0) {
+            const uint8_t w2[2] = {0x5A, 0xA5};
+            rprefix = arb_tenure(q_prefix_addr, w2, 2, nullptr, 0, speeds[1]);
+            rcall = arb_tenure(q_general_call, w2, 2, nullptr, 0, speeds[1]);
+            rnext = arb_tenure(twilink::dut_addr, nullptr, 0, nullptr, 0, speeds[1]);
+            wait_past(t0, deadline);
+        }
+        twilink::Report r0{};
+        const bool rep0 = a0 && report(r0);
         // The third byte of six refused.
         twilink::Params n3{};
         n3.ms = deadline;
@@ -1620,8 +1637,9 @@ void tq_vocabulary() {
         const bool rep = a3 && report(r);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then the probe of ", hex(q_deaf_addr), " ", next1,
-              "; the third of six refused: ", nack3, ", then the probe ", after2.inside);
+        print(serial, "    deaf: probe ", probe, ", write ", wdeaf, ", then the probe of ", hex(twilink::deaf_addr), " ",
+              next1, "; refused: ", hex(q_prefix_addr), " ", rprefix, ", ", hex(q_general_call), " ", rcall,
+              ", then the probe ", rnext, "; the third of six refused: ", nack3, ", then the probe ", after2.inside);
         if (refusal_holds_address) {
             print(serial, " and after the deadline ", after2.next);
         }
@@ -1630,6 +1648,9 @@ void tq_vocabulary() {
             print(serial, " and after the deadline ", after3.next);
         }
         print(serial, crlf);
+        if (rep0) {
+            print_report(r0);
+        }
         if (rep2) {
             print_report(r2);
         }
@@ -1639,6 +1660,11 @@ void tq_vocabulary() {
         bench.verdict(pass_label(s), "a deaf client: the probe and a write answered i2c_nack_addr, the next tenure "
                                      "i2c_ok",
                       a1 && probe == i2c_nack_addr && wdeaf == i2c_nack_addr && next1 == i2c_ok);
+        bench.verdict(pass_label(s), "0x7A and the general call answered i2c_rejected, nothing on the wire (the "
+                                     "peer, which answers the general call, matched the probe alone), the next "
+                                     "tenure i2c_ok",
+                      a0 && rprefix == i2c_rejected && rcall == i2c_rejected && rnext == i2c_ok && rep0 &&
+                          r0.addr_hits == 1u);
         bench.verdict(pass_label(s), "the third byte of six refused: i2c_nack_data, the peer's word that it refused "
                                      "and its address matches, the next tenure i2c_ok",
                       a2 && nack3 == i2c_nack_data && after2.inside == inside_refusal && after2.next == i2c_ok &&

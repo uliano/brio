@@ -205,6 +205,65 @@ TEST_CASE("a clock that cannot carry a speed marks it unreachable and nothing el
     CHECK_FALSE(Host::init(SimDwApbI2cClock<2'000'000>{}));
 }
 
+TEST_CASE("the addresses a Request may name are 0x08 to 0x77, and no other") {
+    // The range itself (util/i2c_bus.hpp), at both edges and across the
+    // byte: the general call and the seven codes below 0x08, the 10-bit
+    // prefix 0x78..0x7B, the four above it, and a value that is not a
+    // 7-bit address at all.
+    static_assert(i2c_address_first == 0x08u && i2c_address_last == 0x77u);
+    for (uint16_t a = 0; a <= 0xFFu; ++a) {
+        CHECK(i2c_address_in_range(static_cast<uint8_t>(a)) == (a >= 0x08u && a <= 0x77u));
+    }
+}
+
+TEST_CASE("an address outside the range is refused at once, nothing on the wire") {
+    constexpr Clock clock;
+    const uint8_t out[2] = {0x5A, 0xA5};
+    // Every reserved class once, a write each (the shape that would put
+    // the address on the wire first), then the probe shape on the 10-bit
+    // prefix the STM32F1's machine sends as a header.
+    const uint8_t refused[] = {0x00, 0x01, 0x07, 0x78, 0x7A, 0x7B, 0x7C, 0x7F, 0x80, 0xFF};
+    for (const uint8_t a : refused) {
+        CAPTURE(a);
+        fresh();
+        REQUIRE(Host::init(clock));
+        const uint32_t tar_before = regs().IC_TAR;
+        const uint32_t entry_before = last_entry();
+        Host::Request r{};
+        r.addr = a;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+        r.tx_len = 2;
+        // TRUE is "nothing moved": the arbiter answers with status() alone.
+        CHECK(Host::start(r));
+        CHECK(Host::status() == i2c_rejected);
+        CHECK(Host::idle());
+        // Nothing reached the block: no target, no entry, no source armed.
+        CHECK(regs().IC_TAR == tar_before);
+        CHECK(last_entry() == entry_before);
+        CHECK(regs().IC_INTR_MASK == 0u);
+    }
+    fresh();
+    REQUIRE(Host::init(clock));
+    Host::Request probe{};
+    probe.addr = 0x7A;
+    CHECK(Host::start(probe));
+    CHECK(Host::status() == i2c_rejected);
+
+    // The two edges of the range are addresses: each tenure starts.
+    for (const uint8_t a : {uint8_t{0x08}, uint8_t{0x77}}) {
+        CAPTURE(a);
+        fresh();
+        REQUIRE(Host::init(clock));
+        Host::Request r{};
+        r.addr = a;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+        r.tx_len = 2;
+        CHECK_FALSE(Host::start(r));
+        CHECK(regs().IC_TAR == a);
+        CHECK(last_entry() == i2c_write_entry(0xA5, {.stop = true}));
+    }
+}
+
 TEST_CASE("a block that will not disable is answered, not waited on for ever") {
     fresh();
     constexpr Clock clock;

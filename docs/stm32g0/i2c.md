@@ -170,10 +170,12 @@ inequalities. The SMBus time-outs have the same pair,
 bus tenure in the four shapes I2C devices use (write, read,
 write-then-read joined by a repeated START, and the empty probe),
 asynchronous whenever the wire moves, with the `i2c_*` codes produced
-on the wire; the two failures that move nothing - a speed this kernel
-clock cannot produce (`i2c_rejected`) and a START still standing from
-a tenure the peripheral never closed (`i2c_bus_error`) - complete
-inside `start()` and reach the requester through the arbiter all the
+on the wire; the failures that move nothing - a speed this kernel
+clock cannot produce and an address outside 0x08..0x77 (`i2c_rejected`;
+the general call and the 10-bit prefixes are refused by every host,
+[../design/i2c-bus.md](../design/i2c-bus.md)), and a START still
+standing from a tenure the peripheral never closed (`i2c_bus_error`) -
+complete inside `start()` and reach the requester through the arbiter all the
 same.
 `init(clock, kernel, filters, bus)`, `rebase(hz)` (a ClockUser),
 `speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
@@ -625,8 +627,12 @@ bytes are the peer's own pattern byte-exact, and the combined
 write-then-read - which the peer counts as **FOUR address matches for
 two tenures**, the repeated START seen from the far end exactly as the
 self-link's letter `b` sees it from I2C2 - with the peer accounting
-every byte, 12 received and 12 served. A general call reaches the peer
-at address 0x00.
+every byte, 12 received and 12 served. A write to 0x7A and one to the
+general call are answered true and `i2c_rejected` by `start()`, and the
+peer's client, answering the general call, takes only the write to its
+own address that follows - one match, two bytes (letter `o`); on the
+self-link the client armed for the general call matches nothing of the
+two (letter `b`).
 
 **The vocabulary is real statuses across two architectures**: a client
 parked where nobody calls answers `i2c_nack_addr` both to a write and to
@@ -753,7 +759,7 @@ PLL at 64 MHz) inside Rubato, against the same STM32F446RE `twi_peer`,
 while TIM14 posts to the pack's highest object every 97, 193 or 389 us
 and its dispatch spins 300 or 3000 cycles - at 97 us x 3000, 48 % of
 the core. Every letter runs once with TIM14 silent and six times under
-it; **195 verdicts, green on every run: forty of the letters `n`, `o`,
+it; **202 verdicts, green on every run: forty of the letters `n`, `o`,
 `p`, `w` and `i`, ten of `q` and `h`**. The pack, the
 command channel through the arbiter and the letters are the I2C suites'
 shared body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes
@@ -805,10 +811,12 @@ takes or gives, the write's last falling after its tenure), under the
 20 ms timeout.
 
 **The vocabulary under pressure, and a refused byte ON THE ENGINE.**
-Letter `q`: a deaf client - the peer's client parked at 0x5D, the
-letter's own address - answers the probe and a four-byte write
+Letter `q`: a deaf client - the peer's client parked at twi_link's
+`deaf_addr`, 0x5D - answers the probe and a four-byte write
 `i2c_nack_addr` (the transmit channel's count never moved), and the
-probe of 0x5D `i2c_ok`; the third byte of six refused answers
+probe of 0x5D `i2c_ok`; a write to 0x7A and one to the general call
+answer `i2c_rejected`, the peer, answering the general call, matching
+only the probe that follows; the third byte of six refused answers
 `i2c_nack_data` - a write of six rides the transmit engine, so this is
 the NACK named mid-block from the channel's count, its untransmitted
 tail abandoned and counted - the peer reporting the refusal and two
@@ -951,6 +959,9 @@ Driver gaps:
 - **The Request is 7-bit**, as on all three targets - 10-bit addressing
   lives at the resource level and `design/i2c-bus.md` records that the
   arbiter's descriptor has no shape for it.
+- **The general call as a HOST verb**: `start()` refuses address 0x00
+  with every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 - **A tenure longer than 255 bytes is not a Request either**: the
   lengths are `uint8_t` on all three targets, so RELOAD is a resource
   feature and the suite drives it directly.
@@ -969,6 +980,11 @@ Driver gaps:
   arise.
 
 Implemented but not bench-verified:
+
+- **The client's general call** (`general_call`, GCEN): written and read
+  back, and taken on the wire no longer - every brio host refuses address
+  0x00, this chip's own and the desk partner's. A controller that sends a
+  general call would measure it.
 
 - **The held request of an I2C.** `test_stm32_dma` letter `r` measures a
   released requester on USART1, SPI1 and TIM3 with no wire; an I2C's

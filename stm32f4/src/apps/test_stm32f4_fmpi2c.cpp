@@ -532,6 +532,28 @@ void td_refusals() {
                   "start(), no byte moved - refused, never silently slowed",
                   st == i2c_rejected);
     (void)host_ready();
+
+    // The other: an address no Request may name (util/i2c_bus.hpp) - the
+    // general call, the codes below 0x08, the four 10-bit prefixes and the
+    // four above them - answered true and i2c_rejected by start() with
+    // nothing written: CR2 as it was (no START, no address) and no
+    // interrupt enabled.
+    const uint32_t cr2 = S::cr2();
+    const uint32_t ints = S::interrupts();
+    const uint8_t refused[] = {0x00, 0x07, 0x78, 0x7A, 0x7B, 0x7C, 0x7F};
+    uint8_t refusals = 0;
+    for (const uint8_t a : refused) {
+        Host::Request r{};
+        r.addr = a;
+        if (Host::start(r) && Host::status() == i2c_rejected && S::cr2() == cr2 && S::interrupts() == ints) {
+            ++refusals;
+        }
+    }
+    print(serial, "  addresses outside 0x08..0x77 refused inside start(), nothing written: ", refusals,
+          " of ", static_cast<uint8_t>(sizeof refused), crlf);
+    bench.verdict("an address outside 0x08..0x77 is answered i2c_rejected inside start(), CR2 and the "
+                  "interrupt enables untouched",
+                  refusals == sizeof refused);
 }
 
 // =============================================================================

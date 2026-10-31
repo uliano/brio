@@ -220,10 +220,17 @@ takes** - the inventory the costs below are read against:
   START already requested, is `i2c_nack_data`: the Sr the controller
   generates all the same is waited for, and its SB closes the tenure
   with a void write - the address with the write bit and STOP behind
-  it. A speed the clock cannot
-  produce is answered `i2c_rejected` inside `start()` - the one
-  synchronous completion, delivered through the arbiter with the wire
-  and the vector untouched. Before its START, `start()` waits for the
+  it. A speed the clock cannot produce, and an address outside
+  0x08..0x77 (the general call and the 10-bit prefixes among them,
+  [../design/i2c-bus.md](../design/i2c-bus.md)), are answered
+  `i2c_rejected` inside `start()` - the synchronous completion,
+  delivered through the arbiter with the wire and the vector untouched.
+  An address-phase entry of the event vector that finds ADD10, SB or BTF
+  where it waits for ADDR ends the tenure `i2c_bus_error` - the STOP,
+  then a DATAR store that clears ADD10 - instead of re-entering for
+  ever: this machine has no controller addressing mode (CTLR1 and
+  OADDR1 carry none), so a write's address byte 1111 0xx0 is a 10-bit
+  header to it, as on the STM32F1's block 15.3 follows. Before its START, `start()` waits for the
   last tenure's STOP to leave CTLR1 - no CTLR1 write may happen while
   STOP stands, and a client stretching the clock after the last
   acknowledge holds it there - for up to 5 ms of the dispatch's time,
@@ -310,7 +317,33 @@ part's return to the desk. What needs no peer:
   first image and 45 in the second, the four receive procedures, the
   vocabulary, the repeated START acknowledged and refused, the engines,
   the kernel letter, the two hosts and the raw sequences, each on the
-  first `z` after its flash.
+  first `z` after its flash. Letter `d` there: a write to 0x7A and one to
+  the general call answered `i2c_rejected`, the peer's client, answering
+  the general call, taking only the write to its own address that
+  follows - one match, two bytes (ten runs of the letter, three of each
+  image's `z`).
+- **AN ADDRESS OF 0x78 TO 0x7B IS A 10-BIT HEADER HERE TOO, AND THE
+  ENGINE ENDS IT.** Measured on the CH32V006 with `start()`'s refusal
+  compiled out of a scratch image, the CH32X035's client acknowledging
+  0x7A, a probe, a write of 4 and a 1+2 at 100 kHz. Without the address
+  phase's stray branch (the control) each tenure stormed the event vector
+  until the suite's guard cut the line at 60 000 entries, answered by the
+  bound of its wait. With the branch each ended `i2c_bus_error` in two
+  entries (SB, then ADD10), STAR1 0 and both lines high after, the peer
+  taking no byte and seeing one STOP, the next probe of nobody
+  `i2c_nack_addr` in one entry and the command address `i2c_ok`. With the
+  STOP alone ADD10 stood on (STAR1 0x0008) and the next tenure took four
+  entries of the vector where one serves it - this host raises its event
+  line after the START store, so the stale flag delays the tenure instead
+  of stopping it as on the CH32X035 and the CH32V303. A READ of 0x7A is
+  no header: 0xF5 went out as a plain 7-bit read, `i2c_ok`.
+- **The cost of the two guarantees.** On the CH32V003 every
+  `test_ch32_i2c` group image grew 128 to 140 bytes with them (two host
+  instantiations an image, each with its `unserved()`, 32 and 36 bytes,
+  and its check in `start()`): the groups `ai` and `r` now leave 4.7 and
+  4.5 % of the 15 KB. The stray branch adds nothing to a tenure's path:
+  `unserved()` is called only from an address-phase entry that found no
+  ADDR, below the switch.
 - **THE RATE ASKED, on the wire** (a tenure timed on the ticker's
   cycle count from `start()` to its completion, nine SCL periods a
   byte with the address's, START, STOP and the software inside; the
@@ -558,8 +591,9 @@ Driver gaps, each with its reason:
   (EV9) has no user.
 - PEC as part of a tenure: the resource has the enable, no request
   shape asks for it.
-- The general call as a host verb: a Request to address 0x00 sends it
-  (the suite does); no separate verb.
+- The general call as a host verb: `start()` refuses address 0x00 with
+  every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 - A wake from Standby on an address match: this family's PWR chapter
   offers none.
 - The collision case (twi_link's `coll`, two clients on one address with
@@ -571,6 +605,17 @@ Driver gaps, each with its reason:
   return to the desk.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The target's general call(ENGC, GENCALL): armed and read back,
+  and taken on the wire no longer - every brio host refuses address
+  0x00, the desk partner's included. A controller that sends a general
+  call would measure it.
+
+- The refusal of an address outside 0x08..0x77 and the address phase's
+  end on ADD10 on the CH32V003: measured on the CH32V006 (the findings),
+  the same code on the same registers; letter `d` in its group image
+  against a peer would measure it on that part, the board being off this
+  pair's bus.
 
 - The DMA engines on the CH32V003: `test_ch32_i2c` letter g in its
   group image against a peer, the board being off the desk (on the

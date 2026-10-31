@@ -55,8 +55,9 @@
 // address or data NACK, multi-host arbitration with both boards
 // combined (against an AVR peer: letter n says why it skips a SAM C21),
 // the collision case S4 with two clients on one address, a
-// really stuck SDA against `Twi<0>::unstick()`, a General Call
-// answered by two chips, the three bus speeds, a clock rebase, and a
+// really stuck SDA against `Twi<0>::unstick()`, the general call and
+// a 10-bit prefix refused inside start() with two clients listening
+// for the first, the three bus speeds, a clock rebase, and a
 // tenure parked behind the peer's held SDA answered by the timed I2cBus
 // (letter t, the one letter that runs the RTC PIT as the kernel's clock).
 // The peer's command-mode client answers ONE address exactly, with no
@@ -929,6 +930,20 @@ bool acked(uint8_t addr) {
     return run_request<C>({addr, {}, 0, {}, 0, {}}) == i2c_ok;
 }
 
+/// A write to an address no Request may name (util/i2c_bus.hpp): true when
+/// start() itself answered it i2c_rejected and the client, serviced for as
+/// long as a whole tenure would take, matched no address packet - nothing
+/// reached the wire.
+template <typename C>
+bool refused_quietly(uint8_t addr) {
+    cl_reset();
+    tx_buf[0] = 0x5A;
+    const bool sync = Host::start({addr, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
+    const uint8_t st = Host::status();
+    for (uint16_t i = 0; i < 20'000u; ++i) service_client<C>();
+    return sync && st == i2c_rejected && cl_addr_hits == 0u;
+}
+
 void td_addresses() {
     print(serial, "d the address-match space, proven by who ACKs", crlf);
     quiesce();
@@ -939,13 +954,16 @@ void td_addresses() {
     verdict("0x42 ACKs", acked<Client>(client_addr));
     verdict("the client stored the address it matched", cl_last_addr == client_addr);
     verdict("0x43 NACKs", !acked<Client>(0x43));
-    verdict("0x00 (general call) NACKs while the bit is clear", !acked<Client>(0x00));
 
+    // The general call is an address no Request may name: refused inside
+    // start() even with the client answering it, and nothing reaches the
+    // client - the same for 0x7A, a 10-bit prefix.
     verdict("client at 0x42 with the General Call bit",
             client_polled(client_addr, {.general_call = true}));
     verdict("0x42 still ACKs", acked<Client>(client_addr));
-    verdict("0x00 (general call) now ACKs", acked<Client>(0x00));
-    print(serial, "  the general call arrived as address ", hex(cl_last_addr), crlf);
+    verdict("0x00 (the general call) and 0x7A are refused inside start(), and the client, "
+            "answering the general call, sees nothing",
+            refused_quietly<Client>(0x00) && refused_quietly<Client>(0x7A));
 
     // A mask: the SET bits are the address bits the match logic IGNORES.
     verdict("client at 0x40 with mask 0x03 (a range)",
@@ -967,11 +985,11 @@ void td_addresses() {
     // PMEN answers everything.
     verdict("client promiscuous", client_polled(client_addr, {.promiscuous = true}));
     bool all = true;
-    const uint8_t probes[4] = {0x08, 0x33, absent_addr, 0x7E};
+    const uint8_t probes[4] = {0x08, 0x33, 0x66, absent_addr};
     for (uint8_t i = 0; i < 4; ++i) all = all && acked<Client>(probes[i]);
-    verdict("0x08, 0x33, 0x77 and 0x7E all ACK", all);
+    verdict("0x08, 0x33, 0x66 and 0x77 all ACK", all);
     print(serial, "  the last promiscuous match arrived as address ", hex(cl_last_addr), crlf);
-    verdict("the client reports the address it was called on", cl_last_addr == 0x7E);
+    verdict("the client reports the address it was called on", cl_last_addr == absent_addr);
 
     quiesce();
 }
@@ -2565,17 +2583,23 @@ void tp_recovery() {
     quiesce();
 }
 
-// ---- q: the General Call, answered by two chips ------------------------------
+// ---- q: the reserved addresses across two boards, and a quick command ------
 
-void tq_general_call() {
-    print(serial, "q the General Call across two boards, and a quick command a real "
-                  "second chip acknowledges", crlf);
+void tq_reserved() {
+    print(serial, "q the reserved addresses refused with two clients listening, and a quick "
+                  "command a real second chip acknowledges", crlf);
     quiesce();
     verdict("link up", link_up());
     verdict("this board's client answers 0x2C and the General Call",
             client_polled(twilink::dut_addr, {.general_call = true}));
     cl_read_address = true;
 
+    // Both clients answer the general call, and the peer's sits at the
+    // command address too: a write to 0x00 or to 0x7A (a 10-bit prefix) is
+    // an address no Request may name (util/i2c_bus.hpp) and is refused
+    // inside start(), so neither client sees an address packet; the write
+    // to the command address after them is the peer's one match, and its
+    // three bytes end the counted action.
     twilink::Params a{};
     a.ms = 400;
     a.addr = twilink::command_addr;
@@ -2583,45 +2607,31 @@ void tq_general_call() {
     a.flags = twilink::flag_general_call | twilink::flag_stop_interrupt;
     verdict("the peer's client answers the General Call too",
             peer_action(Op::serve, a));
-    for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x71 + i);
-    uint8_t st = run_request<Client>({0x00, lend<Lease::reply>(tx_buf), 3, {}, 0, {}});
-    const uint8_t local_n = cl_rx_n;
-    const uint8_t local_addr = cl_last_addr;
-    const uint8_t local0 = cl_rx[0];
-    peer_settle();
-    twilink::Report rep{};
-    bool got = peer_report(rep);
-    if (got) print_report(rep);
-    print(serial, "  general call: status ", st, "; this board took ", local_n,
-          " bytes on address ", hex(local_addr), crlf);
-    verdict("the general call is acknowledged", st == i2c_ok);
-    verdict("THIS board's client received it", local_n == 3 && local0 == 0x71 &&
-                                               local_addr == 0x00);
-    verdict("and so did the peer's, at the same time",
-            got && rep.aux0 == 3 && rep.first == 0x71 && rep.last_addr == 0x00);
-
-    // General Call OFF at the peer: the same call must miss it while its
-    // own address still answers - both inside ONE action, so there is no
-    // doubt the client was alive throughout.
-    a = twilink::Params{};
-    a.ms = 500;
-    a.addr = twilink::command_addr;
-    a.count = 3;
-    a.flags = twilink::flag_stop_interrupt;      // no flag_general_call
-    verdict("the peer commanded General Call OFF", peer_action(Op::serve, a));
-    st = run_request<Client>({0x00, lend<Lease::reply>(tx_buf), 3, {}, 0, {}});
-    const uint8_t gc_local = cl_rx_n;
-    wait_ms(3);
+    cl_reset();
+    tx_buf[0] = 0x71;
+    const bool sync_call = Host::start({0x00, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
+    const uint8_t st_call = Host::status();
+    const bool sync_prefix = Host::start({0x7A, lend<Lease::reply>(tx_buf), 1, {}, 0, {}});
+    const uint8_t st_prefix = Host::status();
+    for (uint16_t i = 0; i < 20'000u; ++i) service_client<Client>();
+    const uint16_t local_hits = cl_addr_hits;
     for (uint8_t i = 0; i < 3; ++i) tx_buf[i] = static_cast<uint8_t>(0x81 + i);
     const uint8_t st2 = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 3,
                                              {}, 0, {}});
     peer_settle();
-    got = peer_report(rep);
+    twilink::Report rep{};
+    const bool got = peer_report(rep);
     if (got) print_report(rep);
-    verdict("the general call is still acknowledged - by THIS board's client",
-            st == i2c_ok && gc_local == 3);
+    print(serial, "  0x00: ", sync_call ? "refused at start()" : "STARTED", " ", st_call, "; 0x7A: ",
+          sync_prefix ? "refused at start()" : "STARTED", " ", st_prefix, "; this board's client matched ",
+          local_hits, crlf);
+    verdict("0x00 and 0x7A are answered i2c_rejected inside start()",
+            sync_call && st_call == i2c_rejected && sync_prefix && st_prefix == i2c_rejected);
+    verdict("... and nothing reaches the wire: this board's client, answering the general call, "
+            "matched nothing",
+            local_hits == 0u);
     verdict("the exact address still reaches the peer", st2 == i2c_ok);
-    verdict("but the peer heard ONLY the exact address, not the general call",
+    verdict("and the peer, answering the general call, heard ONLY the exact address",
             got && rep.addr_hits == 1 && rep.last_addr == twilink::command_addr &&
             rep.aux0 == 3 && rep.first == 0x81);
 
@@ -2952,7 +2962,7 @@ void register_tests() {
     bench.second_letter('n', "multi-host arbitration", tn_arbitration);
     bench.second_letter('o', "collision S4", to_collision);
     bench.second_letter('p', "bus recovery", tp_recovery);
-    bench.second_letter('q', "general call", tq_general_call);
+    bench.second_letter('q', "the reserved addresses refused, a quick command", tq_reserved);
     bench.second_letter('r', "the three speeds", tr_speeds);
     bench.second_letter('s', "rebase", ts_rebase);
     bench.second_letter('t', "the timed bus", tt_timed);

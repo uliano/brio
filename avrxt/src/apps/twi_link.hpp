@@ -62,9 +62,10 @@ inline constexpr uint8_t magic = 0xC3;
 inline constexpr uint8_t max_payload = 32;
 
 /// The peer's command-mode client address. Chosen so that NO test of
-/// test_avr_twi's single-board half addresses it, mask-matches it or
-/// general-calls it: that half uses 0x42, 0x43, 0x00, 0x40..0x44,
-/// 0x3F, 0x55, 0x54, 0x08, 0x33, 0x77, 0x7E and 0x20.
+/// test_avr_twi's single-board half addresses it or mask-matches it:
+/// that half puts 0x42, 0x43, 0x40..0x44, 0x3F, 0x55, 0x54, 0x08, 0x33,
+/// 0x66, 0x77 and 0x20 on the wire, and names 0x00 and 0x7A only to see
+/// them refused before the wire.
 inline constexpr uint8_t command_addr = 0x6B;
 
 /// The DUT's own client address during the two-board half - what the
@@ -83,8 +84,20 @@ inline constexpr uint8_t shared_addr = 0x39;
 inline constexpr uint8_t low_addr = 0x11;
 
 /// Where a "deaf" peer parks its client: an address nobody on this bus
-/// sends, so an addressed write meets no ACK at all.
-inline constexpr uint8_t deaf_addr = 0x7A;
+/// sends, so an addressed write meets no ACK at all - and one every host
+/// may name (0x08..0x77, util/i2c_bus.hpp), since the suites probe it to
+/// see the peer there. 0x5D is chosen and checked so: no mode of this
+/// protocol gives the peer's client it (command_addr, dut_addr,
+/// shared_addr, low_addr above), the AVR suite's single-board half never
+/// names it (the list beside command_addr), no suite names it as a
+/// device, and a scan of every desk bus (each pair's partner dark, then
+/// on its `twi_peer` in command mode) found nobody there; the two touch
+/// controllers the STM32F4 suite meets sit at 0x41 and 0x38.
+inline constexpr uint8_t deaf_addr = 0x5D;
+static_assert(deaf_addr >= 0x08u && deaf_addr <= 0x77u, "an address every host may name");
+static_assert(deaf_addr != command_addr && deaf_addr != dut_addr && deaf_addr != shared_addr &&
+                  deaf_addr != low_addr,
+              "an address no other mode of the protocol gives the peer's client");
 
 /// How many bytes the DUT reads for one response frame. The longest
 /// answer is a Report: magic + op + len + 16 + checksum = 20.

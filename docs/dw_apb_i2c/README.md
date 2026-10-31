@@ -82,7 +82,8 @@ what an active object is and how a program lists them is the learning
 route's ([../learn/introduction.md](../learn/introduction.md)). Every
 transaction that moves the wire completes on the interrupt: the host has
 no polled path, and a refusal that moves nothing (a speed the clock
-cannot produce) is answered at once.
+cannot produce, or an address outside 0x08..0x77 that no host may name,
+[../design/i2c-bus.md](../design/i2c-bus.md)) is answered at once.
 
 The page goes on with what the stratum is for, the document of record,
 what lives here, what a family owes (the traits type member by member),
@@ -427,9 +428,12 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **GEN_CALL stands through the address's acknowledge**: a read of
   `IC_CLR_GEN_CALL` inside that bit does not hold, and the line re-enters
   - two to seventeen times in the 8 us after the address at 100 kHz,
-  measured on the RP2040. `service()` masks the source at the first
-  report and gives it back at the call's first data byte, which always
-  follows: one `general_call` event a call.
+  measured on the RP2040 against a host's general call - a stimulus no
+  brio host sends now, every host refusing address 0x00
+  ([../design/i2c-bus.md](../design/i2c-bus.md)), so no suite re-runs it.
+  `service()` masks the source at the first report and gives it back at
+  the call's first data byte, which always follows: one `general_call`
+  event a call.
 - **The block holds SCL as a transmitter only**: RD_REQ holds it until
   the transmit FIFO has a byte; a receiver holds it only with its
   receive FIFO full. A client's stretch is a read's, and a byte given a
@@ -480,6 +484,9 @@ family's own document.
   synthesis options, absent on the silicon here, which is why the
   unstick is by hand and why the arbiter's own timeout is what answers a
   client that holds the clock ([../design/i2c-bus.md](../design/i2c-bus.md)).
+- The general call as a host verb: `start()` refuses address 0x00 with
+  every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
+  a broadcast is a feature of its own, born with its first user.
 - 10-bit addressing on the host side: the resource has the mode and
   `IC_TAR` takes ten bits; the Request's `addr` is 7 bits on every
   stratum, and a 10-bit device is the first user.

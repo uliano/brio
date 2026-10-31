@@ -906,8 +906,9 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * is a level: it is enabled only while entries remain to be written.
  *
  * `speed` names a row of the timing table init() solves for ic_clk; a
- * speed the clock cannot produce is answered i2c_rejected inside
- * start(), no byte moved - a synchronous completion (the other is the
+ * speed the clock cannot produce, and an address outside 0x08..0x77
+ * (util/i2c_bus.hpp), are answered i2c_rejected inside start(), no byte
+ * moved - a synchronous completion (the other is the
  * block that will not disable, below), and the arbiter replies with
  * status() for it. The address and
  * the speed go into the block under a disable/enable pair (IC_TAR and
@@ -968,7 +969,10 @@ public:
     static constexpr bool has_engines = TxEngine::present;
 
     struct Request {
-        uint8_t addr;          ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, LENT until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -1057,10 +1061,11 @@ public:
     /// Begin a tenure (I2cBus calls it from main context). False
     /// whenever the wire moves: the tenure completes on the vector and
     /// a TransferDone{status()} follows. True for the refusals that
-    /// move nothing - a speed the clock cannot produce (i2c_rejected),
-    /// a block that would not disable to take the address
-    /// (i2c_bus_error) - answered through status(), the I2cHost
-    /// contract (docs/design/i2c-bus.md).
+    /// move nothing, answered through status(): a speed the clock
+    /// cannot produce or an address outside 0x08..0x77
+    /// (i2c_address_in_range), both i2c_rejected, and a block that
+    /// would not disable to take the address (i2c_bus_error) - the
+    /// I2cHost contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         return Hot<Placement>::run([&r] { return start_body(r); });
     }
@@ -1100,7 +1105,7 @@ private:
         issued_ = 0;
         received_ = 0;
         dma_active_ = false;
-        if (!speed_ok(r.speed)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;

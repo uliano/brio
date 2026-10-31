@@ -1978,7 +1978,10 @@ public:
     /// lands; the engine reads and writes them from the interrupt until
     /// then.
     struct Request {
-        uint8_t addr;          ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -2160,10 +2163,11 @@ public:
     /// Begin one bus tenure (called by I2cBus from main context, one
     /// tenure at a time - the arbiter serializes). It does not wait.
     /// Returns false whenever the wire moves - the tenure runs on the
-    /// ISR and a TransferDone{status()} follows - and true for the two
+    /// ISR and a TransferDone{status()} follows - and true for the
     /// failures that move nothing, answered through status(): a speed
-    /// this kernel clock cannot produce (i2c_rejected), and a START
-    /// still standing from a tenure the peripheral never closed
+    /// this kernel clock cannot produce or an address outside 0x08..0x77
+    /// (i2c_address_in_range), both i2c_rejected, and a START still
+    /// standing from a tenure the peripheral never closed
     /// (i2c_bus_error). That is the I2cHost contract
     /// (docs/design/i2c-bus.md). The Request's buffers stay the client's
     /// loans until the reply; the engine keeps its own copy of the other
@@ -2176,7 +2180,7 @@ public:
         t_.addr = r.addr;
         t_.tx_len = r.tx_len;
         t_.rx_len = r.rx_len;
-        if (!speed_ok(r.speed)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;

@@ -667,7 +667,7 @@ established:
   event armed, SPI1 and UART1 given back with their pads at no function,
   the mode line released, GP25 not an output, the ceiling the Console's.
 
-The I2C stack runs the same way in `test_rp2040_rubato_i2c` (230
+The I2C stack runs the same way in `test_rp2040_rubato_i2c` (237
 verdicts, a pack of five objects, the slice's wrap the pressure, and the
 shapes again with every pressure fed by core 1's doorbell), against the RP2350B's
 `twi_peer`: every shape byte-exact under every pressure, a preemption

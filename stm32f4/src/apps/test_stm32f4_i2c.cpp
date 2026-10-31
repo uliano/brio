@@ -290,6 +290,12 @@ using S = I2c<bus_instance>;
 using Host = I2cHost<bus_instance, bus_pins>;
 using DmaHost = I2cHost<bus_instance, bus_pins, TxEngine, RxEngine>;
 
+/// An address nobody on any of the three boards' buses answers - neither
+/// touch controller (0x41, 0x38), nor the F446's self-link peer (0x2C),
+/// nor the partner's twi_peer (dark for `z`) - and one every host may
+/// name (0x08..0x77): the arbiter letter's probe of nobody.
+constexpr uint8_t nobody_addr = 0x5D;
+
 /// The registers the letters read and write, by the peer's names.
 constexpr uint8_t reg_chip_id = peer.id_reg;
 constexpr uint8_t reg_id_ver = peer.ver_reg;
@@ -723,6 +729,32 @@ void tc_refusals() {
     print(serial, "  (a speed the clock in force cannot produce is answered i2c_rejected inside "
                   "start(), no byte moved - and at this clock there is no such speed to show)",
           crlf);
+
+    // The engine's other synchronous refusal: an address no Request may
+    // name (util/i2c_bus.hpp) - the general call, the codes below 0x08, the
+    // four 10-bit prefixes this block would send as a header (ADD10) and
+    // the four above them. Each is answered true and i2c_rejected by
+    // start() with nothing written: CR1 and CR2 as they were (no START, no
+    // event vector raised) and the controller never on the wire (MSL).
+    (void)host_ready();
+    const uint32_t cr1 = S::regs().CR1;
+    const uint32_t cr2 = S::regs().CR2;
+    const uint8_t refused[] = {0x00, 0x07, 0x78, 0x7A, 0x7B, 0x7C, 0x7F};
+    uint8_t refusals = 0;
+    for (const uint8_t a : refused) {
+        Host::Request r{};
+        r.addr = a;
+        const bool sync = Host::start(r);
+        if (sync && Host::status() == i2c_rejected && S::regs().CR1 == cr1 && S::regs().CR2 == cr2 &&
+            !S::host()) {
+            ++refusals;
+        }
+    }
+    print(serial, "  addresses outside 0x08..0x77 refused inside start(), nothing written: ", refusals,
+          " of ", static_cast<uint8_t>(sizeof refused), crlf);
+    bench.verdict("an address outside 0x08..0x77 is answered i2c_rejected inside start(), CR1 and "
+                  "CR2 untouched and the controller never on the wire",
+                  refusals == sizeof refused);
 }
 
 // =============================================================================
@@ -1210,7 +1242,7 @@ void ti_kernel() {
     // an address nobody answers is the scanner's own result.
     kl::Probe::clear_tally();
     Host::Request nobody{};
-    nobody.addr = 0x7Au;
+    nobody.addr = nobody_addr;
     nobody.reply = reply_to<kl::Probe, I2cDone>();
     post<kl::I2cArb>(nobody);
     kl::pump_until(1, 200);

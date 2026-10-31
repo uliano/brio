@@ -399,8 +399,8 @@ answer window is not heard until the peer is back in command mode
 (the suite waits between windows); the receive engine tells the port
 of a stream only at an idle line or a half lap, up to 1024 characters.
 
-`test_stm32f4_rubato_i2c`, 195 verdicts on the Nucleo-F446RE, and its
-twin `test_stm32f4_rubato_fmpi2c`, 174 (their target-free half the I2C
+`test_stm32f4_rubato_i2c`, 202 verdicts on the Nucleo-F446RE, and its
+twin `test_stm32f4_rubato_fmpi2c`, 209 (their target-free half the I2C
 suites' shared body, `avrxt/src/apps/rubato_i2c.hpp`), against the
 Nucleo-G0B1RE's unchanged `twi_peer` over the desk's I2C node: the I2C
 stack - `util/i2c_bus.hpp`'s arbiter over `I2cHost<1>` on I2C1 and, in
@@ -414,8 +414,10 @@ requesters of three priorities, and a held wire with requests arriving
 in the arbiter's draining window from above it: every request answered
 once, every byte exact - and the status vocabulary on both blocks. A
 preemption inside a host's `start()` delays the START and never
-stretches a tenure. An address the classic block takes as a 10-bit
-header wedges that block ([i2c.md](i2c.md)).
+stretches a tenure. An address outside 0x08..0x77 is refused by both
+hosts' `start()`, and the classic block's engine ends a tenure on the
+10-bit header it would make of 0x78 to 0x7B rather than spin on it
+([i2c.md](i2c.md)).
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
 four boards, and letters `w`, `k` and `t` beside them in `z` (49

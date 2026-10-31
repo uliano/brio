@@ -119,7 +119,8 @@
 //   p  100 and 400 kHz: a read of 16, a 1+4 and a write of 16 byte-exact,
 //      the wire's time printed; the peer's commanded stretch, 1000 us a
 //      byte at 100 kHz, priced from below by its holds (I2cTraits).
-//   q  the vocabulary: a deaf client's i2c_nack_addr; the third of six
+//   q  the vocabulary: a deaf client's i2c_nack_addr, 0x7A and the
+//      general call i2c_rejected with nothing on the wire; the third of six
 //      refused (i2c_nack_data, the write on the engines); the last written
 //      byte of a 2+4 refused (i2c_nack_data, the controller let go by its
 //      void write, the read half never begun); inside each refusing window

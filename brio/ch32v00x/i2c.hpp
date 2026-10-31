@@ -554,9 +554,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * comes back as i2c_bus.hpp's codes through TransferDone{status()}.
  *
  * `speed` names a row of the timing table init() solves for the bus
- * clock; a speed the clock cannot produce is answered i2c_rejected
- * inside start(), no byte moved - the one synchronous completion of
- * an I2C engine, and the arbiter replies with status() for it.
+ * clock; a speed the clock cannot produce, and an address outside
+ * 0x08..0x77 (util/i2c_bus.hpp), are answered i2c_rejected inside
+ * start(), no byte moved - the one synchronous completion of an I2C
+ * engine, and the arbiter replies with status() for it.
  *
  * The engine slots: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
  * neither. A plain write runs on the transmit engine; a read phase of
@@ -605,7 +606,10 @@ public:
     static constexpr bool has_engines = TxEngine::present;
 
     struct Request {
-        uint8_t addr;          ///< 7-bit client address (unshifted)
+        /// The 7-bit client address, unshifted: 0x08 to 0x77
+        /// (util/i2c_bus.hpp, i2c_address_in_range), any other
+        /// answered i2c_rejected by start() with nothing on the wire.
+        uint8_t addr;
         /// Bytes written after START, lent until the reply lands (may be
         /// null if tx_len == 0).
         Borrowed<const uint8_t, Lease::reply> tx;
@@ -706,8 +710,9 @@ public:
     /// whenever the wire moves: the tenure completes on the event
     /// vector and a TransferDone{status()} follows. True only for the
     /// one refusal that moves nothing - a speed the clock cannot
-    /// produce, answered i2c_rejected through status() - the I2cHost
-    /// contract (docs/design/i2c-bus.md). It waits, bounded: up to
+    /// produce, or an address outside 0x08..0x77
+    /// (i2c_address_in_range), answered i2c_rejected through status() -
+    /// the I2cHost contract (docs/design/i2c-bus.md). It waits, bounded: up to
     /// stop_drain_us for the last STOP to leave CTLR1 - past that the
     /// tenure parks, false with no START and no vector, for the per-bus
     /// timeout to answer - then up to bus_free_us for BUSY. It masks
@@ -721,7 +726,7 @@ public:
         t_.tx_len = r.tx_len;
         t_.rx_len = r.rx_len;
         pos_ = 0;
-        if (!speed_ok(r.speed)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;
@@ -769,7 +774,10 @@ public:
     /// nowhere else. Returns true when the tenure just completed: the
     /// edge the app's glue posts TransferDone on. It masks nothing; the
     /// one wait inside it is the last byte of a pumped read of three or
-    /// more (receive_step(), the file header).
+    /// more (receive_step(), the file header). An address phase that finds
+    /// no ADDR leaves the switch for unserved(), which ends the tenure when
+    /// ADD10, SB or BTF stands there instead - a level that phase could
+    /// otherwise re-enter on for ever.
     [[gnu::always_inline]] static bool isr() {
         const uint16_t s1 = S::status1();
         // STOPF is the slave half's flag - a STOP seen after a START this
@@ -815,7 +823,7 @@ public:
 
             case Phase::addr_tx:
                 if ((s1 & i2c_addr) == 0u) {
-                    return false;
+                    break;   // unserved(), below the switch
                 }
                 if (t_.tx_len == 0u) {
                     // The probe: acknowledged, and that was the question.
@@ -868,7 +876,7 @@ public:
 
             case Phase::addr_rx:
                 if ((s1 & i2c_addr) == 0u) {
-                    return false;
+                    break;   // unserved(), below the switch
                 }
                 return begin_receive();
 
@@ -882,12 +890,12 @@ public:
                 // The void write's address acknowledged: ADDR cleared, and
                 // the STOP requested behind it goes out.
                 if ((s1 & i2c_addr) == 0u) {
-                    return false;
+                    break;   // unserved(), below the switch
                 }
                 (void)S::clear_addr();
                 return finish(i2c_nack_data);
         }
-        return false;
+        return unserved(s1);
     }
 
     /// The error vector's body - call from i2c1_er's handler and
@@ -1099,6 +1107,71 @@ private:
         phase_ = Phase::idle;
         S::interrupts(0, i2c_itevten | i2c_itbufen);
         return true;
+    }
+
+    /**
+     * The event flags the address phases (addr_tx, addr_rx, closing) do
+     * not serve. With ITEVTEN alone - ITBUFEN is down from the START to
+     * the ADDR, so TxE and RxNE do not interrupt there - the event vector
+     * is entered by SB, ADDR, ADD10, STOPF and BTF (15.7, figure 15-8).
+     * STOPF is the slave half's and is cleared above every phase; ADDR is
+     * the answer the phase waits for. That leaves three: ADD10 (below),
+     * SB, which the address store cleared before the phase began, and
+     * BTF, which needs a data byte and none has moved. Any of them
+     * standing here is a level this phase cannot clear, and on a vector
+     * left waiting for ADDR it would re-enter the handler without end.
+     */
+    static constexpr uint16_t address_strays = i2c_add10 | i2c_sb | i2c_btf;
+
+    /**
+     * An entry of an address phase (addr_tx, addr_rx, closing) that found
+     * no ADDR comes here, below isr()'s switch and out of line. Nothing of
+     * address_strays standing is an entry to ignore, as it always was;
+     * anything of it ends the tenure: i2c_bus_error, the STOP requested,
+     * and the event and buffer enables down (finish()). No engine block is
+     * in flight in an address phase - the transmit block starts at a plain
+     * write's ADDR and the receive block at the read's - so there is
+     * nothing to put away.
+     *
+     * THE CASE IT EXISTS FOR IS ADD10. This machine has no addressing
+     * mode of its own as a controller: the byte written at SB decides,
+     * and one of the form 1111 0xx0 is sent as a 10-bit header - ADD10
+     * where a 7-bit address raises ADDR, the controller waiting for the
+     * second address byte (15.3) - which is a 7-bit address of 0x78 to
+     * 0x7B: CTLR1 and OADDR1 carry no controller addressing mode, so the
+     * header can only be told by its pattern, as on the STM32F1's block
+     * the chapter follows - and measured so on the CH32V006, whose event
+     * vector without this branch re-entered on ADD10 until its guard cut
+     * the line (docs/ch32v00x/i2c.md). start() refuses those addresses
+     * before the wire (i2c_address_in_range), so this branch is the
+     * engine's own guarantee and not the contract: whatever stands in the
+     * address phase, the vector ends the tenure instead of spinning on it.
+     * The STOP goes out at once - "after the current byte transfer"
+     * (15.10.1), and the header's transfer is over.
+     *
+     * ADD10 IS CLEARED BY A DATAR STORE MADE AFTER THE STOP REQUEST.
+     * 15.10.6's table names a STAR1 read followed by a CTLR1 write, 15.3's
+     * text a DATAR write of the second address byte. The CH32V303's
+     * chapter says the same, and there the STOP alone - a STAR1 read and a
+     * CTLR1 write - left ADD10 standing and the next tenure's START never
+     * came out, while the store behind the STOP cleared it with no byte on
+     * the wire (measured, docs/ch32vx03/i2c.md). On the CH32V006 the STOP
+     * alone left ADD10 standing too, and the next tenure took four entries
+     * of the vector where one serves it; with the store, STAR1 read 0 and
+     * the peer took no byte (docs/ch32v00x/i2c.md). The stored byte stays
+     * in DATAR, and the next tenure's address replaces it at SB.
+     *
+     * Out of line and cold, it costs a tenure's path nothing: the call is
+     * made only from an address-phase entry that found no ADDR, below the
+     * switch (docs/ch32v00x/i2c.md, the cost).
+     */
+    [[gnu::noinline, gnu::cold]] static bool unserved(uint16_t s1) {
+        if ((s1 & address_strays) == 0u) {
+            return false;   // nothing standing: an entry the address phase ignores
+        }
+        S::stop();
+        S::data(0x00);   // after the STOP request, never before: ADD10's clear
+        return finish(i2c_bus_error);
     }
 
     /// EV8 on the buffer vector, and EV8_2 on the event vector. A plain

@@ -62,7 +62,9 @@ the clock task's: the counts are computed from the rate the clock type
 claims for clk_sys, and `init()` answers false when that rate cannot
 reach the standard speed (under 2.7 MHz) or the block does not come up;
 a request for a speed the clock cannot reach is answered `i2c_rejected`
-and moves nothing on the wire. The vector is the program's to bind: the
+and moves nothing on the wire, and so is one whose address lies outside
+0x08..0x77 - the general call and the 10-bit prefixes among them, which
+every host refuses ([../design/i2c-bus.md](../design/i2c-bus.md)). The vector is the program's to bind: the
 crt gives `isr_i2c0` a weak alias to `Default_Handler`'s spin, so an
 unbound vector parks the core there at the host's first interrupt. The
 pull-ups are the board's: the pads take the internal pull-up the
@@ -222,10 +224,10 @@ enable in this chip's IC_CON: the unstick is by hand.
   `tx` / `tx_len`, `rx` / `rx_len`, `reply`, `speed`. `init(clock)`
   (clk_sys, the three speeds solved), `rebase(hz)`, `speed_ok`,
   `timing_of`, `scl_hz`, `reference_hz`, `idle` (the engine's phase),
-  `start` (false when the wire moves; true for the two refusals that
-  move nothing, i2c_rejected for an unreachable speed and
-  i2c_bus_error for a block that would not disable to take the
-  address), `isr()`, `dma_isr()`, `status()`, `unstick()` (the pulses
+  `start` (false when the wire moves; true for the refusals that
+  move nothing, i2c_rejected for an unreachable speed or an address
+  outside 0x08..0x77 and i2c_bus_error for a block that would not
+  disable to take the address), `isr()`, `dma_isr()`, `status()`, `unstick()` (the pulses
   it took, 0 for a healthy wire, 0xFF for one that stays low),
   `recover()` (the block reset and reconfigured), `release()`, and the
   two levels the pump runs at, `tx_level` and `rx_level` (half a FIFO
@@ -330,17 +332,13 @@ client finding below is measured from both sides. The cost figures are
   **24** interrupts - ceil(184 / 8) refills at half the FIFO and the
   STOP. The peer's tally (count, sum, first byte, tenures) agrees with
   every one.
-- THE GENERAL CALL, both ways. A host Request to address 0x00 - IC_TAR
-  holding 0 with SPECIAL clear - goes out as the general call: the
-  peer's client takes it and its two bytes. This block as the CLIENT,
-  IC_ACK_GENERAL_CALL on, takes the peer host's three-byte general call
-  - and GEN_CALL STANDS THROUGH THE ADDRESS'S ACKNOWLEDGE: a read of
-  IC_CLR_GEN_CALL inside that bit does not hold, the line re-entering
-  two to seventeen times in the 8 us after the address at 100 kHz
-  (traced: six entries 1 us apart, then RX_FULL a byte later). The
-  client's service() masks the source until the call's first data byte
-  and reports one event. No STOP_DET follows a general call
-  (STOP_DET_IFADDRESSED, the note on IC_CON bit 7), on either chip.
+- THE RESERVED ADDRESSES, refused both ways. A Request to 0x7A or to the
+  general call is answered true and `i2c_rejected` by `start()`, no
+  entry written, and the peer's client, answering the general call,
+  takes only the write to its own address that follows - one tenure,
+  two bytes (letter `e`). Commanded to write a general call at this
+  board's client, the peer's host refuses it the same way and this
+  client, IC_ACK_GENERAL_CALL on, hears nothing (letter `l`).
 - THE VOCABULARY: a deaf client is `i2c_nack_addr` on a write, the probe
   and a read; a client refusing from its first data byte
   (IC_SLV_DATA_NACK_ONLY) and from its third (a disable once the second
@@ -475,8 +473,9 @@ every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 97 us x 3000, 25 % of the core. Every letter runs once with the slice
 silent and six times under it, and letter `c` runs letter `o` again with
 every pressure fed by core 1's doorbell ([multicore.md](multicore.md)).
-**230 verdicts in the key `z`, green in ten runs; the letters `x`, `e`
-and `s`, outside it, green in ten runs each.** The pack, the command
+**237 verdicts in the key `z`, green in every run - the key three
+times, its vocabulary letter `q` ten more; the letters `x`, `e` and `s`, outside it, green
+in ten runs each.** The pack, the command
 channel through the arbiter and the letters are the I2C suites' shared
 body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them);
 what the two Raspberry Pi chips share over this block - the paths, the
@@ -559,7 +558,9 @@ timeout, the peer's tallies exact, 5.7 to 6.8 ms a pass. Letter `p`: a
 read of 16, a 1+4 and a write of 16 byte-exact at 100 kHz, 400 kHz and
 1 MHz, and the peer's commanded stretch of 1000 us a byte on a read of 8
 in 8827 to 8920 us against the 8762 its eight holds take at least.
-Letter `q`: the deaf client's probe and write `i2c_nack_addr`, the third
+Letter `q`: the deaf client's probe and write `i2c_nack_addr`, a write to
+0x7A and one to the general call `i2c_rejected` with the peer, answering
+the general call, matching only the probe that follows, the third
 byte of six refused `i2c_nack_data`, the last written byte of a 2+4
 refused `i2c_nack_data` with no read half after it, the next tenure
 `i2c_ok` after each.
@@ -571,8 +572,11 @@ Driver gaps, each with its reason:
 - 10-bit addressing on the host side: the resource has the mode and
   IC_TAR takes ten bits; the Request's `addr` is 7 bits on every
   stratum, and a 10-bit device is the first user.
-- The START byte as a host verb: `target(addr, general_call)` is in the
-  resource; no tenure shape asks for it.
+- The START byte and the general call as host verbs: `target(addr,
+  general_call)` is in the resource, and `start()` refuses both
+  addresses with every reserved one
+  ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
+  feature of its own, born with its first user.
 - A write phase on the DMA engines: an entry is a command word with a
   flag, which a byte buffer cannot carry; a halfword staging copy the
   size of the request is declined until a program needs a bulk write
@@ -593,6 +597,17 @@ Driver gaps, each with its reason:
   `host_read`). Born with the first util target object.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The client's general call (`ack_general_call`): GEN_CALL stood through
+  the address's acknowledge when a host's general call reached this
+  block - a read of IC_CLR_GEN_CALL inside that bit did not hold, the
+  line re-entering two to seventeen times in the 8 us after the address
+  at 100 kHz (traced: six entries 1 us apart, then RX_FULL a byte
+  later), and no STOP_DET followed (STOP_DET_IFADDRESSED, the note on
+  IC_CON bit 7) - which is why `service()` masks the source until the
+  call's first data byte and reports one event. No brio host sends a
+  general call now, the partner's included, so no suite reaches it; a
+  controller that sends one would measure it.
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
