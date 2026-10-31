@@ -1491,8 +1491,11 @@ private:
     static inline uint8_t tx_len_ = 0;
     static inline uint8_t rx_len_ = 0;
     static inline uint8_t pos_ = 0;
-    static inline Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    // Written by the vectors, read by the thread (status(), idle()): volatile,
+    // or a caller that polls and then reads may be handed a value cached from
+    // before the tenure.
+    static inline volatile Phase phase_ = Phase::idle;
+    static inline volatile uint8_t status_ = i2c_ok;
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cBaud table_[3]{};
     static inline bool valid_[3]{};

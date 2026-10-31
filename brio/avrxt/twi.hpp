@@ -1770,7 +1770,7 @@ private:
     static inline uint8_t* rx_next_ = nullptr;
     static inline uint8_t left_ = 0;
     static inline Phase phase_ = Phase::writing;
-    static inline uint8_t status_ = i2c_ok;
+    static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vector, read by the thread
     static inline bool smart_ = false;
 };
 

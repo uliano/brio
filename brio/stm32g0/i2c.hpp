@@ -2682,8 +2682,11 @@ private:
     static inline uint8_t pos_ = 0;
     static inline bool tx_dma_ = false;   ///< this tenure's write half is the engine's
     static inline bool rx_dma_ = false;   ///< and its read half
-    static inline Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    // Written by the vectors, read by the thread (status(), idle()): volatile,
+    // or a caller that polls and then reads may be handed a value cached from
+    // before the tenure.
+    static inline volatile Phase phase_ = Phase::idle;
+    static inline volatile uint8_t status_ = i2c_ok;
     // Bumped by the handler (ES0548 2.10.2), read from thread context by
     // spurious_bus_errors(): a volatile word, so a polling read sees it.
     static inline volatile uint16_t berr_count_ = 0;

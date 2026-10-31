@@ -1626,7 +1626,7 @@ private:
     static inline uint16_t issued_ = 0;
     static inline uint8_t received_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
     static inline volatile bool dma_active_ = false;
     static inline uint8_t rx_sink_ = 0;
     static constexpr uint16_t read_cmd_ = i2c_read_entry({});

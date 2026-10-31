@@ -1424,7 +1424,7 @@ private:
     static inline Tenure t_{};
     static inline uint8_t pos_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cDuty duty_ = I2cDuty::ratio_2;
     static inline uint32_t pclk_hz_ = 0;

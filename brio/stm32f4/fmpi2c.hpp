@@ -2572,7 +2572,7 @@ private:
     static inline Request req_{};
     static inline uint8_t pos_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
     // Bumped by error_isr(), read from thread context: a volatile word.
     static inline volatile uint16_t berr_count_ = 0;
     static inline FmpI2cSpeed applied_ = FmpI2cSpeed::standard_100k;
