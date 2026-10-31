@@ -81,17 +81,22 @@
  *    goes asynchronous does stay held until its completion has been
  *    answered or recovered; whether an engine may read the request
  *    there instead of keeping a copy is not part of this contract yet.)
- *    False means the engine runs on its interrupt handler and the
- *    program's glue posts TransferDone{status} to this object when it
- *    ends (the same pattern as the UART's RxActivity edge). True means
- *    the transaction completed synchronously inside start(): polled
- *    bulk transfers, degenerate empty requests, and a request the
- *    engine refuses without moving a byte. The reply is then sent right
- *    away with whatever Bus::status() reports (bus_ok as a rule; the
- *    engine's own code when the synchronous path failed: a polled DMA
- *    block that never completed, a bus speed the clock in force cannot
- *    produce) and no TransferDone must follow for it. Both styles
- *    interleave freely on one bus.
+ *    False means the engine runs on an interrupt - its own handler, or
+ *    its DMA engines' completion - and the program's glue posts
+ *    TransferDone{status} to this object when it ends (the same pattern
+ *    as the UART's RxActivity edge). True means the transaction ended
+ *    synchronously inside start(): polled bulk transfers, degenerate
+ *    empty requests, an asynchronous request the engine runs polled
+ *    because it is too short for its DMA, and a request the engine
+ *    refuses without moving a byte (an SPI host with no DMA engines
+ *    refuses every asynchronous one, docs/design/spi-bus.md). The reply
+ *    is then sent right away with whatever Bus::status() reports (bus_ok
+ *    as a rule; bus_rejected for a refusal; the engine's own code when
+ *    the synchronous path failed: a polled DMA block that never
+ *    completed, a bus speed the clock in force cannot produce) and no
+ *    TransferDone must follow for it. Both styles interleave freely on
+ *    one bus, and nothing here needs to know which one a request asked
+ *    for: the engine's return is the whole contract.
  *  - Bus::status() -> uint8_t: the last completion's code, the one the
  *    program's glue puts in TransferDone and the one this object reads
  *    right after a synchronous start().
@@ -158,12 +163,13 @@
  * request again from the same slot: a retrying policy costs no copy and
  * no storage either.
  *
- * The contract assumes a transaction that runs on interrupts and
- * completes later with a status only (buffers travel in the request);
- * a DMA engine or a peripheral with hardware chip-select or queues may
- * change it (docs/design/overview.md, "Authority of util/"). Which
- * targets this is validated on is a property of the target, stated
- * once in README.md's table, not a list that ages here.
+ * The contract assumes a transaction that runs on interrupts - a
+ * host's own, or its DMA engines' - and completes later with a status
+ * only (buffers travel in the request); a peripheral with hardware
+ * chip-select or queues may change it (docs/design/overview.md,
+ * "Authority of util/"). Which targets this is validated on is a
+ * property of the target, stated once in README.md's table, not a list
+ * that ages here.
  */
 
 #pragma once

@@ -70,10 +70,16 @@
 // LinkTraits it does not declare at all, keeps the default:
 //
 //   w_client_len, w_minor_len, w_press_len   (uint8_t; 6, 8 and 3) the
-//                            frames of each of letter w's requests, so that
-//                            a host whose engines take short runs can still
-//                            put Pressure's on the pump and Minor's on the
-//                            polled loop (at most 8 each)
+//                            frames of each of letter w's requests (at most
+//                            8 each), so that a family puts each requester
+//                            on the way its host runs it at w's rate: the
+//                            Client's and Pressure's requests are
+//                            asynchronous - on the DMA engines, or polled
+//                            inside start() where the host runs one too
+//                            short for them, or on a per-frame interrupt
+//                            where a host still has one - and Minor's are
+//                            polled (docs/design/spi-bus.md, "Two ways to
+//                            run a request")
 //   w_rate                   (SpiClock; link_clock) letter w's rate, so
 //                            that a host whose command rate keeps two
 //                            frames in flight can run w where one is, and
@@ -352,8 +358,9 @@ constexpr uint8_t arb_done = 2;
 constexpr uint8_t arb_other = 3;
 volatile uint8_t arb_event = arb_none;
 /// The source of the TransferDone the arbiter dispatches: true the DMA
-/// engines' completion, false the SPI vector's (the pump's). The suite's
-/// vectors write it before their post.
+/// engines' completion, false the SPI vector's (a host that still runs an
+/// asynchronous request on a per-frame interrupt). The suite's vectors
+/// write it before their post.
 volatile bool done_from_dma = false;
 /// LineSink's dispatch is running (it never nests in itself).
 volatile uint8_t sink_depth = 0;

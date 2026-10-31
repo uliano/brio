@@ -24,10 +24,15 @@
  *
  * Contexts: a single-threaded test, which is also the program's
  * interrupt glue when it wants to be. A polled request completes inside
- * start(); an unpolled one completes there too under the `immediate`
- * completion style (the default), and under `deferred` it is held until
- * the test calls finish(), which plays the handler that would post
- * TransferDone. Nothing waits: cs_setup_us is counted, never spent.
+ * start(); an asynchronous one (not polled) completes there too under the
+ * `immediate` completion style (the default), and under `deferred` it is
+ * held until the test calls finish(), which plays the DMA handler that
+ * would post TransferDone - unless it is shorter than the count set by
+ * short_frames(), when it completes inside start() as a family's host runs
+ * a request too short for its engines. A host instantiated without DMA
+ * (`dma` false) refuses every asynchronous request, spi_rejected at once
+ * and nothing on the wire, as the contract says an engineless family host
+ * does. Nothing waits: cs_setup_us is counted, never spent.
  * Storage: a request's buffers are read and written during the call
  * that performs it (start() or finish()) and not after; an attached
  * device model is held by reference and must outlive the bus.
@@ -50,9 +55,14 @@
  * null `rx` discarding, a frame of two bytes where the request asks for
  * one, and a select line with nothing on it reading 0xFF - which is a
  * bus with no device on it and not an error, exactly as a real one would
- * be. Both completion styles of the contract are here, because the
- * arbiter distinguishes them and a test of an asynchronous transfer
- * needs the one that does not answer inside `start()`.
+ * be. Both ways of the contract are here (docs/design/spi-bus.md, "Two
+ * ways to run a request"), because the arbiter distinguishes a request
+ * answered inside `start()` from one answered later and a test of an
+ * asynchronous transfer needs the one that does not answer inside
+ * `start()`; and so are the contract's two rules on the asynchronous
+ * way, the refusal of a host with no DMA (`has_dma`) and the short
+ * request run polled - its threshold a count the test sets, there being
+ * no rate here to derive one from.
  *
  * What it does not model: the wire and the time on it. There is no
  * clock rate, no mode, no setup or hold, no bit - a mode the device
@@ -94,7 +104,7 @@ enum class SimSpiDataSize : uint8_t { bits8 = 0, bits16 = 1 };
 /// be polled. See `SimSpiHost::completion()`.
 enum class SimSpiCompletion : uint8_t {
     immediate,   ///< every request completes inside start(): start() returns true
-    deferred,    ///< an unpolled request is HELD: start() returns false, finish() runs it
+    deferred,    ///< an asynchronous request is HELD: start() returns false, finish() runs it
 };
 
 /**
@@ -185,9 +195,10 @@ struct SimSpiTraceEntry {
  * buses with two device tables and two sets of counters, the way two
  * instances of a family's host are. `trace_depth` is the byte-level
  * trace's ring, kept small because a test asserts a choreography and
- * not a transfer.
+ * not a transfer. `dma` says whether the host has the DMA engines an
+ * asynchronous request rides: false refuses every one (`has_dma`).
  */
-template <uint8_t n, uint16_t trace_depth = 64>
+template <uint8_t n, uint16_t trace_depth = 64, bool dma = true>
 class SimSpiHost {
 public:
     SimSpiHost() = delete;
@@ -195,6 +206,10 @@ public:
     using PinRef = SimSpiPinRef;
 
     static constexpr uint8_t number = n;
+    /// Can this host run an asynchronous request? The contract's name
+    /// (docs/design/spi-bus.md): false refuses every request not marked
+    /// polled, so a program that posts one asserts it.
+    static constexpr bool has_dma = dma;
     /// What a line nobody drives reads: the pull-up, and the only thing
     /// a bus with no device on it can say.
     static constexpr uint8_t idle_level = 0xFF;
@@ -236,8 +251,9 @@ public:
         SimSpiMode mode = SimSpiMode::mode0;
         SimSpiDataSize bits = SimSpiDataSize::bits8;
 
-        /// Completion style: false = the engine answers later, true =
-        /// POLLED inside start().
+        /// The way to run it: true = POLLED inside start(); false =
+        /// asynchronous - answered later, inside start() when shorter than
+        /// short_frames(), refused (spi_rejected) by a host without DMA.
         bool polled = false;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
@@ -287,16 +303,20 @@ public:
     // ---- the engine ---------------------------------------------------------
 
     /**
-     * Run the transaction, or hold it.
+     * Run the transaction, hold it, or refuse it.
      *
      * A polled request always completes inside this call and returns
-     * true, in either completion mode. An unpolled one completes here
-     * too while the mode is `immediate` - the synchronous completion the
-     * contract allows, and the arbiter then sends the reply itself; in
-     * `deferred` mode it is held instead and this returns false, which
-     * is the engine saying "I run on my interrupt". The test is then the
-     * app's ISR glue: `finish()` performs the transfer and hands back
-     * the status a `TransferDone` would carry.
+     * true, in either completion mode. An asynchronous one, on a host
+     * without DMA, is refused: true at once, spi_rejected in status(),
+     * nothing on the wire and nothing counted as a transaction. On a host
+     * with DMA it completes here too while the mode is `immediate` - the
+     * synchronous completion the contract allows, and the arbiter then
+     * sends the reply itself - or, in `deferred` mode, when its frames
+     * (cmd_len + len) are fewer than short_frames(), the short request a
+     * family's host runs polled; otherwise it is held and this returns
+     * false, which is the engine saying "my DMA handler will end it". The
+     * test is then the app's ISR glue: `finish()` performs the transfer
+     * and hands back the status a `TransferDone` would carry.
      *
      * The arbiter starts one transaction at a time, so a second held
      * request is not a case the contract allows; it replaces the first.
@@ -305,19 +325,28 @@ public:
         if (r.polled) {
             ++polled_;
         } else {
-            ++pumped_;
-        }
-        if (completion_ == SimSpiCompletion::deferred && !r.polled) {
-            held_ = r;
-            has_held_ = true;
-            return false;
+            ++async_;
+            if constexpr (!dma) {
+                ++refused_;
+                status_ = spi_rejected;
+                return true;
+            }
+            if (completion_ == SimSpiCompletion::deferred) {
+                if (static_cast<uint32_t>(r.cmd_len) + r.len >= short_frames_) {
+                    held_ = r;
+                    has_held_ = true;
+                    return false;
+                }
+                ++short_;
+            }
         }
         perform(r);
         return true;
     }
 
-    /// The last completion's code. Nothing here can fail - there is no
-    /// wire to fail on and no engine to wedge - so it is always spi_ok.
+    /// The last completion's code: spi_rejected after a refused request,
+    /// spi_ok otherwise - there is no wire to fail on and no engine to
+    /// wedge.
     static uint8_t status() { return status_; }
 
     static bool pending() { return has_held_; }
@@ -355,6 +384,14 @@ public:
     static SimSpiCompletion completion() { return completion_; }
     static void completion(SimSpiCompletion c) { completion_ = c; }
 
+    /// The short request's threshold, in frames: an asynchronous request
+    /// of fewer frames completes inside start() in the `deferred` style. A
+    /// family's host derives its count from its rate and its measured
+    /// costs; here there is no rate, so the test sets one. 0 (the default):
+    /// no request is short.
+    static uint32_t short_frames() { return short_frames_; }
+    static void short_frames(uint32_t frames) { short_frames_ = frames; }
+
     // ---- what a test reads --------------------------------------------------
 
     static uint32_t transactions() { return transactions_; }
@@ -362,7 +399,12 @@ public:
     /// Transactions whose select line had no device on it.
     static uint32_t unaddressed() { return unaddressed_; }
     static uint32_t polled_requests() { return polled_; }
-    static uint32_t pumped_requests() { return pumped_; }
+    /// Requests not marked polled, refused and short ones included.
+    static uint32_t async_requests() { return async_; }
+    /// Asynchronous requests refused for want of DMA.
+    static uint32_t refused_requests() { return refused_; }
+    /// Asynchronous requests run inside start() as short.
+    static uint32_t short_requests() { return short_; }
     /// Every `cs_setup_us` the bus was asked for, added up and not spent.
     static uint32_t waited_us() { return waited_us_; }
     /// The stamp of the first and the last byte of the last transaction,
@@ -390,7 +432,9 @@ public:
         bytes_clocked_ = 0;
         unaddressed_ = 0;
         polled_ = 0;
-        pumped_ = 0;
+        async_ = 0;
+        refused_ = 0;
+        short_ = 0;
         waited_us_ = 0;
         first_byte_at_ = 0;
         last_byte_at_ = 0;
@@ -513,13 +557,16 @@ private:
     static inline Request held_{};
     static inline bool has_held_ = false;
     static inline SimSpiCompletion completion_ = SimSpiCompletion::immediate;
+    static inline uint32_t short_frames_ = 0;
     static inline uint8_t status_ = spi_ok;
 
     static inline uint32_t transactions_ = 0;
     static inline uint32_t bytes_clocked_ = 0;
     static inline uint32_t unaddressed_ = 0;
     static inline uint32_t polled_ = 0;
-    static inline uint32_t pumped_ = 0;
+    static inline uint32_t async_ = 0;
+    static inline uint32_t refused_ = 0;
+    static inline uint32_t short_ = 0;
     static inline uint32_t waited_us_ = 0;
     static inline uint32_t first_byte_at_ = 0;
     static inline uint32_t last_byte_at_ = 0;

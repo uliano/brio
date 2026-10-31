@@ -784,17 +784,12 @@ suite measured:
 - **The InRam bodies without the hardware prologue** (`test_x035_spi`
   letter `b`, three runs of an image built with `CH32X035_HPE=OFF` whose
   vectors were not aligned to four; no image of the current alignment
-  has been built so and run). In that image the SPI pump's frame - its
-  body placed in SRAM, called from a vector in the flash - took 289
-  cycles, and 332.5 with the body inline in the vector in the flash,
-  some 65 cycles a frame more either way than the image with the
-  prologue gave at that layout (224 and 268): the vector saves the
-  caller-saved registers in software around the call. Its handler bodies
-  took 148 cycles (the console), 69 (the tick) and 270 (the pump), all
-  under the SPI host's default hold-off of 380 cycles: the longest wait
-  behind another handler or a masked section the host allows for when it
-  writes ahead, sending the next frame before it has read the last, two
-  frames in flight ([spi.md](spi.md), "The hold-off"). The SRAM
+  has been built so and run). Its handler bodies took 148 cycles (the
+  console) and 69 (the tick), under the SPI host's default hold-off of
+  380 cycles: the longest wait behind another handler or a masked section
+  the host's polled receive loop allows for when it writes ahead, sending
+  the next frame before it has read the last, two frames in flight
+  ([spi.md](spi.md), "The hold-off"). The SRAM
   transmit-only loop read 17.0 cycles a frame at /2 against the wire's 16.
   The SPI host's cost constants are those of the default image, so the
   letter's two cost verdicts fail in an image built without the
@@ -1216,14 +1211,13 @@ per period over the pass, none dropped. The target-free half of the
 suite is the link suites' shared body,
 `avrxt/src/apps/rubato_link.hpp`; the UART key's command channel and
 the HSI's calibration are `x035_link_dut.hpp`, the helpers
-`test_x035_usart` shares. Key `y` (115 verdicts) ran three times on the
-SRAM image and nine on the flash image, every verdict green; key `z`
-(120 verdicts, its data windows in mode 3, the mode the CH32V006's client
-answers in) ran ten times on each image, every verdict green on the SRAM
-image and in nine runs of the flash image, the tenth losing one pumped
-frame at a transaction's opening, reported `spi_overrun`
-([spi.md](spi.md), "The SPI stack under the preemptive kernel" and "Not
-covered yet"). What it established:
+`test_x035_usart` shares. Key `y` (115 verdicts) ran three times on each
+image, every verdict green; key `z` (120 verdicts, its data windows in
+mode 3, the mode the CH32V006's client answers in) three times on each
+image, and its two SPI letters that judge the host's ways to run a
+request - the ladders and the arbiter under pressure - ten times on
+each, every verdict green ([spi.md](spi.md), "The SPI stack under the
+preemptive kernel"). What it established:
 
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the
@@ -1287,8 +1281,8 @@ covered yet"). What it established:
   character lost from a query's reply is retried at once; one lost from
   an action's acknowledgement leaves the peer acting while this end
   retries into it, so the suite waits that action's bound out and
-  commands it again: one such lost acknowledgement in each of 3 of the
-  flash image's nine runs of `y`, every leg then run and judged.
+  commands it again: lost acknowledgements in one of the flash image's
+  three runs of `y`, every leg then run and judged.
 - **Where the code runs.** The release maps: in the SRAM image
   `activate()` is 3074 bytes in SRAM, with the dispatches of Pressure,
   the borrower, the SPI client, the requester below the arbiter and the
@@ -1474,9 +1468,8 @@ suite with the path in the flash and in SRAM, nothing else moved:
 
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
-| the SPI pump, a frame at /2, behind the suite's vector (stamps, owner switch) | the driver (`InRam`) | 256.5 cycles | 224.5 | 302, 332 with engines |
-| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver | 24.0, its function aligned to a word | 15.9 | 998 a host type, both loops |
-| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0, aligned likewise | 28.9, 46.9 | (with the transmit-only loop's) |
+| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 15.9 to 16.8 | 998 a host type, both loops |
+| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0, aligned likewise | 26.6 to 30.6, 41.5 to 47.0 (by the image's layout) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
 | the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (207 at most); 79, 94 with the vector placed | 968 for one plain host |
@@ -1498,7 +1491,10 @@ by nothing else - 52.0 or 72.0 cycles a frame for the SPI receive loop
 at /4, 68 or 72 for a body of four taken forward branches - where
 straight-line code and three-instruction loops did not move and SRAM
 moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
-fetch"). gcc aligns a function to two bytes under -Os, so a function
+fetch"). From SRAM the SPI loops' frame still moved by up to four cycles
+between images and between two host types in one image, at the same
+address modulo four - a cause not established ([spi.md](spi.md), "Not
+covered yet"). gcc aligns a function to two bytes under -Os, so a function
 that keeps a stated flash cost is `aligned(4)` - the SPI host's polled
 loops, and every vector, through `BRIO_CH32_VECTOR` (pfic.hpp): a
 vector's own code costs the same wherever the image puts it, two bytes

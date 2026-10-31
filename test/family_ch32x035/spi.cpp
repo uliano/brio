@@ -1,7 +1,9 @@
 // SPI family smoke TU (RM ch. 16), every part: the map against table
 // 16-2, SPI1's four columns against what each package bonds, the
-// resource, the host on its default column with no engine, with byte
-// engines and with half-word engines, under util/spi_bus.hpp's arbiter
+// resource, the host on its default column with no engine (polled
+// requests alone: an asynchronous one is refused at run time, has_dma
+// false), with byte engines and with half-word engines, under
+// util/spi_bus.hpp's arbiter
 // untimed and timed, the client with its runs - instantiation only, no
 // main(), no hardware. The rate arithmetic is pinned in the header; what
 // this fixture adds is the columns per package (a host whose MOSI shares
@@ -107,7 +109,6 @@ void host_verbs(uint8_t* buf) {
     (void)H::start(r);
     r.polled = false;
     (void)H::start(r);
-    (void)H::isr();
     (void)H::dma_isr();
     (void)H::status();
     (void)H::recover();
@@ -156,7 +157,6 @@ void client_verbs() {
 template <SpiPins pins, bool formed = host_column_ok(pins)>
 struct Hosts {
     static void run() {}
-    static void spi_irq() { (void)Client::isr(); }
     static void dma_irq() {}
 };
 
@@ -170,11 +170,18 @@ struct Hosts<pins, true> {
     using RamHost = SpiHost<1, pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
     using RamHost16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
     static_assert(!Host::has_engines && Host8::has_engines && Host16::has_engines);
+    // has_dma is the contract's name for it (docs/design/spi-bus.md): an
+    // engineless host refuses every asynchronous request.
+    static_assert(!Host::has_dma && !RamHost::has_dma && Host8::has_dma && RamHost16::has_dma);
     static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
     // The costs follow the placement, and so do the thresholds drawn from
     // them; the hold-off and the write-ahead do not.
-    static_assert(RamHost::pump_frame_cycles < Host::pump_frame_cycles &&
+    static_assert(RamHost::polled_read_turn_cycles < Host::polled_read_turn_cycles &&
                   RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
+    static_assert(Host8::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
+                      spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) &&
+                  RamHost16::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
+                      spi_async_min_frames(spi_costs_in_ram, SpiClock::div4, SpiDataSize::bits8, true));
     static_assert(std::is_trivially_copyable_v<typename Host::Request> && sizeof(typename Host::Request) == 40u);
     static_assert(Host::write_ahead_from(SpiDataSize::bits8) ==
                   spi_write_ahead_from(SpiDataSize::bits8, spi_default_hold_off_cycles));
@@ -198,13 +205,6 @@ struct Hosts<pins, true> {
         post<PlainBus>(TransferDone{spi_overrun});
         post<TimedBus>(TransferDone{spi_dma_fault});
     }
-    static void spi_irq() {
-        if (Host::isr()) {
-            post<PlainBus>(TransferDone{Host::status()});
-        }
-        (void)RamHost::isr();
-        (void)RamHost16::isr();
-    }
     static void dma_irq() {
         if (Host16::dma_isr()) {
             post<TimedBus>(TransferDone{Host16::status()});
@@ -221,14 +221,14 @@ void everything() {
     AllHosts::run();
 }
 
-// The app's glue: the SPI vector and the two channels, bound both ways the
-// hardware prologue can be built. The SPI vector is placed in SRAM as a
-// program places one of its own plain functions (`.fast_text`), in the
-// translation unit that also emits the InRam hosts' trampolines
-// (`.fast_text.brio`): the two names are what lets GCC take both kinds in
-// one unit (util/placement.hpp, docs/ch32x035/platform.md, "A handler in
-// SRAM").
+// The app's glue: the client's SPI vector and the hosts' two channels,
+// bound both ways the hardware prologue can be built. The SPI vector is
+// placed in SRAM as a program places one of its own plain functions
+// (`.fast_text`), in the translation unit that also emits the InRam hosts'
+// trampolines (`.fast_text.brio`): the two names are what lets GCC take
+// both kinds in one unit (util/placement.hpp, docs/ch32x035/platform.md, "A
+// handler in SRAM").
 extern "C" [[gnu::section(".fast_text")]] void spi1_handler();
-BRIO_CH32_VECTOR(spi1_handler) { AllHosts::spi_irq(); }
+BRIO_CH32_VECTOR(spi1_handler) { (void)Client::isr(); }
 BRIO_CH32_VECTOR(dma1_channel2_handler) { AllHosts::dma_irq(); }
 BRIO_CH32_VECTOR(dma1_channel3_handler) { AllHosts::dma_irq(); }

@@ -16,9 +16,14 @@
  *
  * Everything about arbitration, the pending FIFO, replies, who owns the
  * request's buffers until when and the engine contract is documented
- * once, in bus_master.hpp; the SPI engine descriptor and its two
- * completion styles live in each target's SpiHost and in
- * docs/design/spi-bus.md.
+ * once, in bus_master.hpp; the SPI engine descriptor and its two ways to
+ * run a request live in each target's SpiHost and in
+ * docs/design/spi-bus.md: polled, the transaction done inside start(), or
+ * asynchronous, which is DMA - the host's engines carry it and their
+ * completion is the TransferDone, a host with no engines refuses it
+ * (spi_rejected at once, nothing on the wire; the host type's `has_dma`
+ * says so at compile time), and a request too short to repay the engines'
+ * fixed cost runs polled inside start().
  *
  * SPI has no wire-level failure the engine can detect (no acknowledge,
  * no arbitration): what a host can report is its own (a frame it lost,
@@ -40,12 +45,15 @@ namespace brio {
 using SpiDone = BusDone;
 
 inline constexpr uint8_t spi_ok = bus_ok;
+/// The request never reached the wire: the arbiter's pending FIFO was full,
+/// or the host refused it - an asynchronous request on a host with no DMA
+/// engines (docs/design/spi-bus.md, "Two ways to run a request").
 inline constexpr uint8_t spi_rejected = bus_rejected;
 /// The transaction never answered inside the arbiter's per-bus timeout:
 /// the engine was recover()ed and the requester is told here. On SPI
 /// the plausible wedge is not a wire (the host clocks itself) but a
 /// dead engine - a host demoted mid-transfer, a DMA channel stopped by
-/// a controller erratum - and the ISR-style completion that therefore
+/// a controller erratum - and the interrupt's completion that therefore
 /// never posts.
 inline constexpr uint8_t spi_timeout = bus_timeout;
 
@@ -78,8 +86,8 @@ inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 /// The arbiter under SPI's name. `pending_depth` is how many requests
 /// may wait while one is in flight (a further one is answered
 /// spi_rejected at once); `timeout_ticks` is per bus and in kernel
-/// ticks: size it to the longest legal transaction (a polled request
-/// completes inside start() and never arms it; only interrupt-style
+/// ticks: size it to the longest legal transaction (a request that
+/// completes inside start() never arms it; only the asynchronous ones'
 /// completions are on this clock), 0 for no timeout at all.
 /// ticks_from_ms<P>() (kernel/time.hpp) converts.
 template <typename Bus, Platform P, uint8_t pending_depth = 4,

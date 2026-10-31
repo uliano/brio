@@ -322,7 +322,7 @@ TEST_CASE("in deferred mode an unpolled request is held until finish, a polled o
     CHECK(other().bytes == 2);
 
     // And the counters say which style each requester chose.
-    CHECK(Host::pumped_requests() == 1);
+    CHECK(Host::async_requests() == 1);
     CHECK(Host::polled_requests() == 1);
 
     // recover() drops a held transfer without touching the wire.
@@ -702,7 +702,7 @@ TEST_CASE("the link's tenures are polled, so they complete inside start() in def
     CHECK_FALSE(Host::pending());
     CHECK(Host::transactions() == 1);
     CHECK(Host::polled_requests() == 1);
-    CHECK(Host::pumped_requests() == 0);
+    CHECK(Host::async_requests() == 0);
     REQUIRE(Host::trace_count() == 5);
     CHECK_FALSE(Host::trace(0).dc);
     CHECK(Host::trace(0).mosi == Dcs::caset);
@@ -734,5 +734,5 @@ TEST_CASE("a verb answers with the engine's status, and on a bus made of RAM it 
     CHECK(link.status() == spi_ok);
     CHECK(Host::status() == spi_ok);
     CHECK(Host::polled_requests() == 1);
-    CHECK(Host::pumped_requests() == 0);   // the link's tenures are polled
+    CHECK(Host::async_requests() == 0);   // the link's tenures are polled
 }
