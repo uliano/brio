@@ -72,11 +72,9 @@
 //   100, 400 and 1000 kHz (the G0 peer is solved for Fm+). THE HELD WIRE:
 //   the requirement judged; a START at the speed in force parks behind
 //   BUSY, and one after a PE cycle (a speed change, recover(): 23.4.6, PE =
-//   0 clears BUSY) goes out into the held line. ONE DEFECT FOUND: with the
-//   engines named, a refused DATA byte is answered i2c_nack_addr - the event
-//   vector tells the address from the data by the pump's byte position,
-//   which the engines never advance (fmpi2c.hpp's isr()) - so this image
-//   keeps letter q out of z, runnable by its name (main() below).
+//   0 clears BUSY) goes out into the held line. A refused DATA byte under
+//   the engines is told from a refused address by the transmit stream's own
+//   count (fmpi2c.hpp's nacked_address()), which letter q judges.
 //
 //   THE PRESSURE. TIM2's update interrupt, 32 bits on APB1's timer clock,
 //   2 x PCLK1 = 90 MHz at prescaler 0: 97 / 193 / 389 us are 8730 / 17370 /
@@ -128,8 +126,7 @@
 //      byte of a 2+4 refused (i2c_nack_data, the read half never begun),
 //      the next tenure i2c_ok after each. On I2C1 the refused last byte is
 //      closed by the F1 lineage's void write, which the peer acknowledges
-//      (refused_close_hits below). On FMPI2C1 the letter stands OUTSIDE z
-//      (the defect above).
+//      (refused_close_hits below).
 //   w  three requesters of three priorities at 400 kHz: the Client's
 //      write-then-reads of 1+6 (the read half on the engines), Minor's
 //      writes of two, Pressure's probes: in order, i2c_ok, nothing
@@ -601,17 +598,7 @@ int main() {
     bench.letter('n', "the command channel through the arbiter", tn_command_channel);
     bench.letter('o', "the tenure shapes on every path of the host", to_shapes);
     bench.letter('p', "the speeds, and the peer's commanded stretch", tp_speeds);
-    if constexpr (suite_on_fmpi2c) {
-        // STOPPED, OUTSIDE z: FmpI2cHost with its engines named answers a
-        // refused data byte i2c_nack_addr (the header says why) - measured
-        // on the third byte of six and the last of a 2+4's write, every
-        // pass. A driver defect this lane reports; the letter runs by its
-        // name and fails those two verdicts until the driver is mended.
-        bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary,
-                     false);
-    } else {
-        bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary);
-    }
+    bench.letter('q', "the vocabulary under pressure: deaf, a refused byte, a refused last byte", tq_vocabulary);
     bench.letter('w', "the arbiter with three requesters of three priorities", tw_arbiter);
     bench.letter('h', "the held wire, with requests arriving while it is held", th_held_wire);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);

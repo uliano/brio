@@ -76,12 +76,11 @@ until then, which the `Borrowed` type records and nothing checks. A
 speed the kernel clock cannot produce is answered `i2c_rejected` before
 a byte moves (`speed_ok()` says so beforehand); a Fast-mode Plus bus
 wants the 20 mA pad drive turned on by the program
-(`Bus::fast_plus_drive(true)`), which nothing turns on by itself. With
-the DMA engines named, a refused DATA byte is answered `i2c_nack_addr`,
-as a refused address is: the event vector tells the two apart by the
-byte pump's position in the tenure, which the engines never advance -
-measured with the transmit engine carrying the write ("Bench
-findings"); the engineless host tells them apart.
+(`Bus::fast_plus_drive(true)`), which nothing turns on by itself. A
+refused address and a refused DATA byte are told apart on both paths:
+`i2c_nack_addr` when nothing of the half's data reached the wire - the
+byte pump's position, or under the DMA engines the transmit stream's own
+count - and `i2c_nack_data` otherwise ("Bench findings").
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does (the block's identity and what differs
@@ -749,19 +748,22 @@ kernel's.
   read of 8 in 9208 to 9214 us against its nine holds, a write of 8 in
   8990 to 9025 against its eight (the write follows the read at once and
   meets most of one hold more, [i2c.md](i2c.md) has the arithmetic).
-- **THE REFUSED DATA BYTE IS NAMED AS A REFUSED ADDRESS under the
-  engines** (letter `q`, run by its name): the deaf client's probe and
-  write answer `i2c_nack_addr` and its next tenure - a probe of 0x5D,
-  where the partner parks - `i2c_ok`; but the third byte of a six-byte
-  write refused answers `i2c_nack_addr` too, and so does the last written
-  byte of a 2+4 refused, whose two written bytes the partner reports
-  received, its address matches the two a host that lets go with a STOP
-  makes - 14 verdicts of 28 failing, every pass of every run, the
-  status alone. The event vector names a NACK by the byte pump's position
-  in the half (`pos_ == 0`: the address), and with the engines carrying
-  the bytes the pump's position never moves. The engineless host tells
-  the two apart (letter `m` above); the twin keeps the letter out of its
-  all-key until the driver does with its engines (a driver gap below).
+- **A REFUSED DATA BYTE IS TOLD FROM A REFUSED ADDRESS under the
+  engines** (letter `q`): the deaf client's probe and its write, the
+  write on the transmit engine, answer `i2c_nack_addr` and the next
+  tenure - a probe of 0x5D, where the partner parks - `i2c_ok`; the third
+  byte of a six-byte write refused answers `i2c_nack_data`, and so does
+  the last written byte of a 2+4 refused, whose two written bytes the
+  partner reports received, its address matches the two a host that
+  lets go with a STOP makes - 28 verdicts of 28 in ten runs of the
+  letter, and the twin's `z` 202 of 202 in ten runs with it. The event
+  vector reads the transmit stream's count at the NACK: the first TXIS
+  comes after the address's ACK and none follows a NACK (23.4.9, figure
+  260), and SxNDTR is post-decremented when a beat is stored into TXDR
+  (9.3.3), not when direct mode preloads it (9.3.7), so a count still at
+  the half's length is the address. One stream read, on the NACK path
+  alone. The engineless host tells the two apart by its pump's position
+  (letter `m` above).
 - **The arbiter with three requesters of three priorities** (letter
   `w`): every reply `i2c_ok`, to its requester, in its order, nothing
   rejected, no timeout, the partner's tallies exact, in 5.8 to 6.3 ms a
@@ -824,12 +826,6 @@ Driver gaps, each with its reason:
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's, as
   on every other stratum.
-- The name of a refused data byte with the engines named: the event
-  vector answers a NACK `i2c_nack_addr` while the byte pump's position in
-  the tenure is zero, and the engines never advance it, so a data byte
-  refused under an engine is answered as a refused address (measured,
-  Bench findings). Telling the two apart by the streams' own counts, as
-  the STM32G0's host does by its channel's, is owed to the driver.
 - This chip as the bus's target, served from an active object, under the
   preemptive kernel. A target whose bytes come from an object (its vector
   posting "the host reads" and leaving SCL held, a dispatch giving the

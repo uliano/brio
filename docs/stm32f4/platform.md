@@ -412,13 +412,10 @@ tenure shapes on every path of each host, the speeds (100 and 400 kHz,
 and 1 MHz on the FMPI2C1) and the partner's commanded stretch, three
 requesters of three priorities, and a held wire with requests arriving
 in the arbiter's draining window from above it: every request answered
-once, every byte exact - and the status vocabulary on the classic
-block. A preemption inside a host's `start()` delays the START and
-never stretches a tenure. The suites found two driver defects: an
-address the classic block takes as a 10-bit header
-([i2c.md](i2c.md)), and a refused data byte under the FMPI2C1's engines
-answered as a refused address ([fmpi2c.md](fmpi2c.md)), for which the
-twin keeps its vocabulary letter out of its all-key.
+once, every byte exact - and the status vocabulary on both blocks. A
+preemption inside a host's `start()` delays the START and never
+stretches a tenure. An address the classic block takes as a 10-bit
+header wedges that block ([i2c.md](i2c.md)).
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
 four boards, and letters `w`, `k` and `t` beside them in `z` (49

@@ -2177,17 +2177,13 @@ public:
         }
 
         if ((p & FmpI2cFlag::nack) != 0u) {
-            // The position tells which byte went unanswered: at pos_ == 0 of
-            // the opening half nothing has moved, so it was the ADDRESS -
-            // the probe's answer and the nobody-home case alike. The
-            // peripheral sends the STOP by itself (23.4.9), so this only
-            // records and STOPF completes.
+            // Which byte went unanswered: with nothing of this half's data
+            // gone to the wire it was the ADDRESS - the probe's answer and
+            // the nobody-home case alike (nacked_address()). The peripheral
+            // sends the STOP by itself (23.4.9), so this only records and
+            // STOPF completes.
             S::clear(FmpI2cClear::nack);
-            // pos_ IS THE WHOLE TEST, and it works for both halves of a
-            // write-then-read because the repeated START resets it: a NACK
-            // with nothing moved in this half is a NACK on the address that
-            // opened it.
-            status_ = pos_ == 0u ? i2c_nack_addr : i2c_nack_data;
+            status_ = nacked_address() ? i2c_nack_addr : i2c_nack_data;
             // AND IT RETURNS. The STOP the peripheral sends by itself
             // arrives as its OWN interrupt a few microseconds later, and a
             // branch that fell through to the sweep at the bottom would
@@ -2472,6 +2468,30 @@ private:
             (void)S::data();   // an unwanted byte is cleared by reading it
         }
         return true;
+    }
+
+    /// A NACK on the address that opened the current half, rather than on
+    /// one of its data bytes. A read half takes no NACK on its data - the
+    /// target sends those bytes and the controller acknowledges them - so
+    /// there it is always the address. A write half's first TXIS comes
+    /// after the address's ACK and "the TXIS flag is not set when a NACK is
+    /// received" (23.4.9, figure 260): no byte delivered to TXDR means the
+    /// address. On the pump the delivered bytes are pos_ (the repeated
+    /// START resets it, so each half counts its own). On the transmit
+    /// engine they are the stream's: SxNDTR is post-decremented when a beat
+    /// is STORED into TXDR (9.3.3), not when direct mode preloads it from
+    /// memory (9.3.7), so a remaining count equal to the half's length
+    /// means no TXIS was served. One stream read, on the NACK path alone.
+    static bool nacked_address() {
+        if (phase_ == Phase::reading) {
+            return true;
+        }
+        if constexpr (has_engines) {
+            if (req_.tx.get() != nullptr) {   // launch_dma() put this write half on the engine
+                return TxEngine::progress().remaining == req_.tx_len;
+            }
+        }
+        return pos_ == 0u;
     }
 
     static void launch_dma() {
