@@ -317,7 +317,7 @@ extern "C" void isr_i2c1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_i2c`
-reports **63 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+reports **70 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
 pair, from one source, against the WeAct RP2040's peer over the pair's
 I2C wires. Nothing in this chapter reads differently between the halves,
 which is what a block outside the processor should look like. The same
@@ -465,6 +465,77 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   half; the RP2040's reading in a smaller size
   ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter judges the second.
 
+### The stack under the preemptive kernel (`test_rp2350_rubato_i2c`)
+
+Measured by `test_rp2350_rubato_i2c`, one source and two images:
+`util/i2c_bus.hpp`'s arbiter (pending depth 4, the per-bus timeout at
+20 ms) over the engined `I2cHost<0>` on GP36/GP37 (DMA channels 4 and 5
+on DMA_IRQ_0, clk_sys at 150 MHz) inside Rubato on core 0, against the
+WeAct RP2040's `twi_peer`, while TIMER1's alarm 0 posts to the pack's
+highest object every 97, 193 or 389 us and its dispatch spins 300 or
+3000 cycles - at 97 us x 3000, 21 % of the core. The host is brought up
+at every pass's opening, once the RP2040's rail reads up on the two
+pads, and given back at every letter's end. Every letter runs once with
+the alarm silent and six times under it. **202 verdicts in the key `z`,
+green in ten runs on the Cortex-M33 and ten on Hazard3; the letters `x`
+and `s`, outside it, green in ten runs each on each half.** The pack,
+the command channel through the arbiter and the letters are the I2C
+suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`); what the two
+Raspberry Pi chips share over this block is
+`rp2040/src/apps/rp_rubato_i2c.hpp`, whose header derives every bound,
+and the RP2040's run of it is [../rp2040/i2c.md](../rp2040/i2c.md)'s.
+
+**A preemption inside `start()`'s fill: no stretch at 400 kHz.**
+`start()`'s first entry starts the tenure, so a preemption after its
+k-th entry leaves the block (1 + k) byte times before it needs the next,
+and only a longer one holds SCL ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
+the host's engine). Letter `s`, Cortex-M33 / Hazard3: `start()` takes
+391 to 446 / 211 to 240 cycles for a one-byte write and 531 to 562 /
+336 to 339 for a write of sixteen, the fifteen entries after the first
+88 to 150 / 96 to 125 cycles, where 400 writes under independent ticks
+would land 2 to 4 times. Under 97 us x 3000, the longest preemption of
+`start()` 3245 / 3289 cycles against two byte times' 6750 at 400 kHz:
+5 to 14 / 3 to 9 landings in `start()` in 400 writes, 3 to 12 / 2 to 7
+with the host active on the wire, and **no stretch in ten runs on either
+half**. At 1 MHz (two byte times 2700 cycles) the Cortex-M33 landed 24
+to 37 times, 4 to 12 with the host active, and stretched 13 tenures in
+4000 writes, every write `i2c_ok` and the peer's tallies exact; Hazard3
+never landed in `start()` at 1 MHz, in ten runs, and neither half did
+under the 160 us spin at 389 us - the tenure cycle settled at a phase of
+the alarm's period clear of `start()`, so the letter's long-spin case is
+judged here only by its exactness and its stretches stay the RP2040's
+measurement. Letter `x`, 400 writes of sixteen at 400 kHz (`start()`
+347 to 349 / 338 to 340 cycles silent): 9 to 19 / 3 to 11 landings
+against the 9 independent ticks would give, 6 to 12 / 1 to 5 with the
+host active, no stretch. The key `z` stretched no tenure in ten runs on
+either half.
+
+**THE HELD WIRE PARKS THE START.** Letter `h`, both halves: the Client's
+write into the peer's 60 ms hold, after the disable, IC_TAR and enable
+cycle its address takes, answered `i2c_timeout` 19.9 to 20.1 ms after
+its `start()` in every pass of ten runs, and the same met at 400 kHz
+after commands at 100 kHz, ten of ten; the flood of probes answered
+`i2c_rejected` while the queue is full, one `i2c_timeout` a pass, and
+after the release `i2c_ok` or, once a pass, `i2c_nack_addr` from a peer
+not yet back. The parked one-entry tenure's false end on another node's
+STOP that the RP2040 measured ([../rp2040/i2c.md](../rp2040/i2c.md)) was
+not seen on this chip: none in twelve pressed passes on the Cortex-M33
+before the host required its state machine idle at a STOP, none in 120
+on the two halves after.
+
+**Every shape, and three requesters, under every pressure as in the
+control.** Letter `o` at 400 kHz, one serve counted to its end, every
+shape `i2c_ok` and byte-exact, the peer's count, sum and seventeen
+address matches exact; post to reply over ten runs, the control's and
+the worst under pressure, Cortex-M33 / Hazard3: the probe 71 to 78 and
+73 to 94 / 70 to 80 and 94 to 101 us, the 32-byte write 760 to 762 and
+761 to 797 / 761 to 763 and 762 to 763, the 32-byte read 760 to 761 and
+761 to 803 / 760 and 761 to 766. Letter `w`: every reply `i2c_ok`, to
+its requester, in its order, the peer's tallies exact, 5.4 to 6.2 / 5.3
+to 5.9 ms a pass. Letter `p`: the peer's commanded stretch of 1000 us a
+byte on a read of 8 in 8788 to 8809 / 8789 to 8804 us against the 8762
+its eight holds take at least.
+
 ## Not covered yet
 
 Driver gaps, each with its reason. The ones that belong to the block
@@ -493,14 +564,3 @@ Implemented but not bench-verified, each with what would measure it:
   clock chapter grows one, a tenure exact after a switch.
 - The QFN-60's pin table: the stratum compiles for that package and
   refuses the pads it has not got, but no QFN-60 part is on the bench.
-- The stack under the preemptive kernel, `test_rp2350_rubato_i2c` on
-  both halves: util/i2c_bus.hpp's arbiter over this host and its engines
-  inside Rubato, an object of the highest priority preempting it at prime
-  periods, the host brought up behind the partner's rail at every pass
-  and given back at every letter's end; built for the WeAct RP2350B and
-  not run against the partner: the pair's SCL wire (the RP2040's GP3 to
-  this board's GP37) does not reach its node, so the Tenuto suite's
-  two-board key fails the same way. What measures it: its key `z` ten to
-  twenty times on each half against the RP2040's `twi_peer`, then
-  letters `x` and `s` (the arithmetic in
-  `rp2040/src/apps/rp_rubato_i2c.hpp`'s header).

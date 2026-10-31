@@ -1087,6 +1087,12 @@ established, on both halves:
   given back with their pads at no function, the mode line released,
   GP25 not an output, the ceiling the Console's.
 
+The I2C stack runs the same way in `test_rp2350_rubato_i2c` (202
+verdicts on each half, a pack of five objects, TIMER1's alarm 0 the
+pressure), against the RP2040's `twi_peer`: every shape byte-exact under
+every pressure, no stretch of a tenure at 400 kHz -
+[i2c.md](i2c.md), "The stack under the preemptive kernel".
+
 ## A handler in SRAM
 
 **What the silicon does.** Both architectures execute the flash in place

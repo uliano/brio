@@ -56,8 +56,8 @@
 //      peer's commanded stretch on a read of 8 at 100 kHz (eight holds).
 //   q  the vocabulary: deaf, the third of six refused, the last written byte
 //      of a 2+4 refused (the probe after it a byte served: probe_bytes).
-//   w  three requesters of three priorities at 400 kHz, the close sixteen
-//      bytes long (closing_len).
+//   w  three requesters of three priorities at 400 kHz, Pressure's eight
+//      probes a byte served each (probe_bytes).
 //   h  the held wire, with Pressure's flood of probes, paced by the
 //      Console's turns.
 //   c  letter o with every pressure pass fed by core 1.

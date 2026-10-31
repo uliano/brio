@@ -1429,11 +1429,25 @@ private:
     /// while another host holds the bus waits for its STOP (the block's
     /// multi-master rule, RP2040 4.3.8), and that STOP is detected with
     /// this tenure's entries still queued. This tenure's own STOP follows
-    /// its last entry, so the transmit FIFO is empty then and only then
-    /// (measured on the RP pair: a two-byte write to an absent address,
-    /// written inside a window held by hand, ended i2c_ok on the window's
-    /// STOP before it had clocked a bit).
-    static bool own_stop() { return S::tx_empty(); }
+    /// its last entry, so the transmit FIFO is empty then (measured on the
+    /// RP pair: a two-byte write to an absent address, written inside a
+    /// window held by hand, ended i2c_ok on the window's STOP before it had
+    /// clocked a bit). An empty FIFO is not enough alone: the block takes
+    /// the waiting tenure's first entry the moment that other STOP frees
+    /// the bus, so a tenure of ONE entry (the probe, a one-byte read or
+    /// write) can show its FIFO empty to a vector that comes a little late
+    /// - measured on the RP2040 under the preemptive kernel: a probe parked
+    /// behind a client holding SDA, its entry still in the FIFO (IC_TXFLR 1)
+    /// at the vector's entry and gone by this read, ended i2c_bus_error on
+    /// the hold's release, its START still to come. The block runs that
+    /// entry with its host state machine out of IDLE (IC_STATUS.MST_ACTIVITY,
+    /// RP2040 4.3.17), and after its own STOP that machine is IDLE, so the
+    /// STOP is this tenure's when both FIFO and machine are at rest - one
+    /// read of IC_STATUS, both bits from the same sample.
+    static bool own_stop() {
+        const uint32_t f = S::flags();
+        return (f & (I2cFlag::tx_empty | I2cFlag::host_active)) == I2cFlag::tx_empty;
+    }
 
     static bool finish(uint8_t st) {
         status_ = st;

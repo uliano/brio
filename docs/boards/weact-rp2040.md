@@ -85,7 +85,10 @@ and `test_rp2350_serial`, each against the other board's `uart_peer`
 (its role chosen on wire 9 or 10, the driving board's GP21 into the
 peer's GP20); and the two link suites under the preemptive kernel,
 `test_rp2040_rubato_link` and `test_rp2350_rubato_link`, each against
-the other board's `spi_peer` (key `z`) and `uart_peer` (key `y`).
+the other board's `spi_peer` (key `z`) and `uart_peer` (key `y`), and
+the two I2C suites under the preemptive kernel, `test_rp2040_rubato_i2c`
+and `test_rp2350_rubato_i2c`, each against the other board's
+`twi_peer`.
 
 `brio flash` rescues the chip before programming it, so a freshly
 flashed image starts from the power-on state: core 1 in the bootrom,

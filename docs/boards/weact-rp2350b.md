@@ -112,7 +112,10 @@ board's GP21 into the peer's GP20; this board's peer reads its GP20 with
 the buffer pulsed, E9's way, and brings UART1 up only once the RP2040's
 rail reads up); and the two link suites under the preemptive kernel,
 `test_rp2350_rubato_link` and `test_rp2040_rubato_link`, each against
-the other board's `spi_peer` (key `z`) and `uart_peer` (key `y`). No other wire is on this board: every wire between two
+the other board's `spi_peer` (key `z`) and `uart_peer` (key `y`), and
+the two I2C suites under the preemptive kernel, `test_rp2350_rubato_i2c`
+and `test_rp2040_rubato_i2c`, each against the other board's
+`twi_peer`. No other wire is on this board: every wire between two
 of its own pads is retired, and the letters that judged one run by name
 only.
 

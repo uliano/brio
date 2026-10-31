@@ -206,11 +206,12 @@
 // was acknowledged before the peer saw it: so every counted serve here
 // ends on a plain write - letter o's table's last entry, letter p's write
 // after its read, letter w's closing write after its traffic. A peer that
-// gives a read FIFO-ahead (the RP pair's: up to sixteen bytes at each read
-// request, the untaken ones given back at the closing NACK) stands its
-// tally above the wire's while a read runs, so the writes after the last
-// read must outnumber that FIFO: letter w's close is `closing_len` long,
-// and a table's plain writes after its last read are the suite's to size.
+// gives a read FIFO-ahead and judges its count at a byte stands its tally
+// above the wire's while a read runs, so the writes after the last read
+// must outnumber that FIFO: letter w's close is `closing_len` long, and a
+// table's plain writes after its last read are the suite's to size. (The
+// RP pair's peer gives ahead but judges its count only at a STOP, after
+// the flush of the read that STOP closes: it needs neither.)
 // A peer that sees a STOP only with its stop interrupt on (the AVR's TWI,
 // PIEN) ends a counted serve only when the action asks for it, so every
 // serve here carries twilink::flag_stop_interrupt (every other peer maps

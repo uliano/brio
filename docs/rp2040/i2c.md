@@ -301,7 +301,7 @@ extern "C" void isr_i2c1() {
 
 The reference suite is `test_rp2040_i2c`, green on the WeAct board
 against the WeAct RP2350B's peer over the pair's I2C wires, on either
-of that chip's halves: **57 verdicts** in its letters a..l. The same block as the PEER, the RP2040 the
+of that chip's halves: **64 verdicts** in its key `z`. The same block as the PEER, the RP2040 the
 far end, is judged by `test_rp2350_i2c` (docs/rp2350/i2c.md), so every
 client finding below is measured from both sides. The cost figures are
 `bench_rp2040` letter i's, against the same peer.
@@ -378,8 +378,9 @@ client finding below is measured from both sides. The cost figures are
   keeps the bus and the PEER reports the loss. THE HOST'S STOP_DET IS
   EVERY STOP ON THE WIRE: a tenure written inside the window ended
   `i2c_ok` on the window's own STOP before it had clocked a bit, until
-  the engine required its transmit FIFO empty at the STOP (its own STOP
-  follows its last entry; the IP stratum's page). A new address written
+  the engine required its transmit FIFO empty and its host state machine
+  idle at the STOP (its own STOP follows its last entry; the IP stratum's
+  page, and below, the held wire under the preemptive kernel). A new address written
   while another node holds the bus costs a disable of 94 us at 100 kHz.
 - THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
   with their STOP; two reads of six served one byte a read request, the
@@ -425,11 +426,11 @@ client finding below is measured from both sides. The cost figures are
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 6830 (x 1.11) | 1 | 155 | 709 | 700 |
-  | write of 255 | 729 200 (x 1.00) | 31 | 8958 | 14 924 | 696 |
-  | read of 16 | 49 637 (x 1.01) | 2 | 581 | 1604 | 847 |
-  | read of 255 | 729 338 (x 1.00) | 32 | 13 085 | 19 300 | 834 |
-  | register read, 1 + 1 | 13 023 (x 1.06) | 1 | 209 | 816 | 763 |
+  | write of 1 | 6830 (x 1.11) | 1 | 157 | 709 | 700 |
+  | write of 255 | 729 200 (x 1.00) | 31 | 8960 | 14 924 | 696 |
+  | read of 16 | 49 637 (x 1.01) | 2 | 583 | 1604 | 847 |
+  | read of 255 | 729 338 (x 1.00) | 32 | 13 087 | 19 300 | 834 |
+  | register read, 1 + 1 | 13 023 (x 1.06) | 1 | 211 | 816 | 763 |
   | read of 255 on the engines | 729 216 (x 1.00) | 3 | 571 | 2406 | 712 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
@@ -463,6 +464,106 @@ client finding below is measured from both sides. The cost figures are
   the bus held a loop turn every byte, where the pump pours them by the
   FIFO.
 
+### The stack under the preemptive kernel (`test_rp2040_rubato_i2c`)
+
+Measured by `test_rp2040_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
+(pending depth 4, the per-bus timeout at 20 ms) over the engined
+`I2cHost<1>` on GP2/GP3 (DMA channels 4 and 5 on DMA_IRQ_0, clk_sys at
+125 MHz) inside Rubato on core 0, against the WeAct RP2350B's
+`twi_peer`, while PWM slice 7's wrap posts to the pack's highest object
+every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
+97 us x 3000, 25 % of the core. Every letter runs once with the slice
+silent and six times under it, and letter `c` runs letter `o` again with
+every pressure fed by core 1's doorbell ([multicore.md](multicore.md)).
+**230 verdicts in the key `z`, green in ten runs; the letters `x`, `e`
+and `s`, outside it, green in ten runs each.** The pack, the command
+channel through the arbiter and the letters are the I2C suites' shared
+body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them);
+what the two Raspberry Pi chips share over this block - the paths, the
+peer's arithmetic, the stretch instrument, letter `s` - is
+`rp2040/src/apps/rp_rubato_i2c.hpp`, whose header derives every bound.
+
+**Where a preemption reaches this host: inside `start()`'s fill, and a
+stretch only past two byte times.** `start()`'s first entry starts the
+tenure, and the block clocks the address and that byte while the fill
+goes on: a preemption after the k-th entry leaves the block (1 + k) byte
+times before it needs the next, and only a longer one empties the
+command FIFO with no STOP in it - the block then holds SCL until
+`start()` resumes, the bytes unchanged
+([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), the host's engine).
+Letter `s` measures the fill: `start()` takes 497 to 581 cycles for a
+one-byte write and 887 to 968 for a write of sixteen, so the fifteen
+entries after the first are 309 to 425 cycles (20 to 28 an entry), where
+400 writes under ticks independent of them would land 10 to 14 times.
+Under 97 us x 3000, the longest preemption of `start()` 3485 cycles: at
+400 kHz, where two byte times are 5625 cycles, the slice landed in
+`start()` 26 to 50 times in 400 writes, 7 to 17 of them with the host
+active on the wire, and **stretched no tenure in ten runs**; at 1 MHz
+(two byte times 2250 cycles), 23 to 41 landings, 8 to 21 with the host
+active, 9 stretches in 4000 writes; under a 160 us spin at 389 us,
+longer than a whole sixteen-byte write at 1 MHz, 47 stretches of 62
+landings with the host active - by the arithmetic, the other fifteen
+landed after the last entry, whose tenure ends on its own STOP inside
+the spin. Every
+write `i2c_ok` and the peer's tallies exact, stretched or not. A stretch
+is read on the pad: the host active, its FIFO empty and SCL low for
+10 us, longer than any low half this host clocks (6 us at 100 kHz) - an
+empty FIFO alone is the block still clocking the entry it took. The key
+`z`, whose letter `p` runs 1 MHz, stretched 11 tenures in ten runs.
+
+**THE TENURE CYCLE LOCKS TO THE DOORBELL.** Letter `x`, 400 writes of
+sixteen at 400 kHz (`start()` 933 to 961 cycles on average, silent):
+under the slice at 97 us x 3000 the landings in `start()` are 35 to 50
+against the 30 or 31 independent ticks would give; letter `e`, the same
+with every tick a doorbell from core 1, reads 180 to 200 - six times
+that, the tenure cycle settled at a phase of the doorbell's period - and
+`start()` averages 4039 to 4178 cycles there against 1368 to 1616 under
+the slice. No stretch in either, at 400 kHz.
+
+**THE HELD WIRE PARKS THE START, ACROSS A NEW ADDRESS AND A NEW SPEED.**
+Letter `h`: the peer holds SDA low 60 ms, and the Client's write into
+it, whose `start()` first takes the disable, IC_TAR and enable cycle for
+its address, is answered `i2c_timeout` 19.8 to 20.1 ms after its
+`start()` in every pass of ten runs - its START parked behind the hold,
+the re-enabled block still knowing the bus busy; met at 400 kHz after
+commands at 100 kHz, the same, ten of ten. The preempting object's flood
+of probes is answered `i2c_rejected` while the arbiter's queue is full,
+one probe a pass `i2c_timeout` (parked behind the hold in its turn), and
+after the release `i2c_ok`, or `i2c_nack_addr` for the one probe a pass
+that meets the peer before its client is back. THE ONE-ENTRY TENURE AND
+ANOTHER NODE'S STOP: while the host took a STOP for its own with its
+transmit FIFO empty alone, the probe parked at the release ended
+`i2c_bus_error` on the release's STOP in 15 of 24 pressed passes - its
+one entry still in the FIFO at the vector's entry (IC_TXFLR 1,
+MST_ACTIVITY clear) and taken by the block, the bus free, by the time
+the handler read TFE, its START then going out for a tenure already
+answered; with the host state machine's idle required beside the FIFO's
+empty, it ended on its own STOP, `i2c_nack_addr`, in 78 pressed passes
+of 78. The test costs the one-STOP handler two cycles (the cost table
+above).
+
+**Every shape, and three requesters, under every pressure as in the
+control.** Letter `o` at 400 kHz against one serve counted to its end:
+the probe, reads of 1 and 2 (the pump) and of 3, 8 and 32 (the engines),
+write-then-reads of 1+1 and 1+2 (the pump) and 2+8 (its read on the
+engines), writes of 1, 2, 3, 8 and 32 (the pump) - every one `i2c_ok`,
+every read byte-exact, the peer's count, sum and seventeen address
+matches exact (a write-then-read is two). Post to reply over ten runs,
+the control's and the worst under pressure: the probe 102 to 148 and 115
+to 179 us, the 32-byte write 782 to 798 and 796 to 844, the 32-byte read
+784 to 796 and 796 to 855. Letter `w`: the Client's 20 write-then-reads
+of 1+6 (two outstanding), a requester below the arbiter with 10 writes
+of 2, and in a pressure pass the preempting object's 8 probes - every
+reply `i2c_ok`, to its requester, in its order, nothing rejected, no
+timeout, the peer's tallies exact, 5.7 to 6.8 ms a pass. Letter `p`: a
+read of 16, a 1+4 and a write of 16 byte-exact at 100 kHz, 400 kHz and
+1 MHz, and the peer's commanded stretch of 1000 us a byte on a read of 8
+in 8827 to 8920 us against the 8762 its eight holds take at least.
+Letter `q`: the deaf client's probe and write `i2c_nack_addr`, the third
+byte of six refused `i2c_nack_data`, the last written byte of a 2+4
+refused `i2c_nack_data` with no read half after it, the next tenure
+`i2c_ok` after each.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -495,14 +596,3 @@ Implemented but not bench-verified, each with what would measure it:
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
-- The stack under the preemptive kernel, `test_rp2040_rubato_i2c`:
-  util/i2c_bus.hpp's arbiter over this host and its engines inside Rubato,
-  an object of the highest priority preempting it at prime periods, built
-  for the WeAct RP2040 and not run against the partner: the pair's SCL
-  wire (GP3 to the RP2350B's GP37) does not reach its node, so the
-  Tenuto suite's two-board key fails the same way. What measures
-  it: its key `z` ten to twenty times against the RP2350B's `twi_peer`,
-  then letters `x`, `e` and `s`, which count the landings inside
-  `start()` and the clock stretches a preemption there produces once the
-  block has run out of entries (the arithmetic in
-  `rp2040/src/apps/rp_rubato_i2c.hpp`'s header).

@@ -45,13 +45,25 @@
 //    SCL is held only once that is full (RX_FIFO_FULL_HLD_CTRL). So
 //    `hold_us` stretches every byte of a READ - one byte given per RD_REQ,
 //    after the hold - and a write not at all.
-//  - A READ UNHELD IS SERVED A FIFO AHEAD: up to sixteen bytes given per
-//    RD_REQ, so the far end's own pace is the wire's and not this loop's.
+//  - A READ UNHELD IS SERVED A FIFO AHEAD: up to seventeen bytes given per
+//    RD_REQ - the transmit FIFO's sixteen and the one the block takes at
+//    once (measured: seventeen given to a one-byte read, sixteen flushed) -
+//    so the far end's own pace is the wire's and not this loop's.
 //    The bytes the host does not take are flushed at its closing NACK
 //    (ABRT_SLVFLUSH_TXFIFO, the count in IC_TX_ABRT_SOURCE's
 //    TX_FLUSH_CNT) and the tally gives them back, so the counting pattern
 //    of the next read resumes where the host stopped. The `counters` query
 //    hands the drops to the DUT.
+//  - A COUNTED SERVE ENDS AT A STOP: twi_link.hpp ends it "at the end of
+//    the tenure that moved" the count's last byte, and this peer counts a
+//    tenure at its STOP (below), so the count is judged there and only
+//    there - with no byte moved since that STOP, and after the flush of the
+//    read it closes, which the loop takes first (the flush comes with the
+//    closing NACK, a bit time before the STOP). Judged at a byte, the count
+//    would end the serve before the STOP of the tenure that reached it
+//    (that tenure uncounted) or in the middle of a read whose gives reached
+//    it while the host still took bytes (the seventeen given ahead,
+//    above).
 //  - A DATA NACK AT BYTE n. IC_SLV_DATA_NACK_ONLY refuses every data byte
 //    and takes a write only with the block disabled and its client idle -
 //    never mid-tenure. So nack_at = 1 is that register, set before the
@@ -322,13 +334,16 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     bool gc_seen = false;
     uint16_t rx = 0, tx = 0;
     bool first_taken = false;
+    // A STOP counted and no byte moved since: the counted serve's one
+    // moment to end (the header).
+    bool at_stop = false;
     const uint32_t t0 = us_now();
     for (;;) {
         if (expired(t0, a.ms)) {
             r.flags |= twilink::report_timed_out;
             break;
         }
-        if (a.count != 0u && static_cast<uint16_t>(rx + tx) >= a.count && r.stops != 0u) {
+        if (a.count != 0u && at_stop && static_cast<uint16_t>(rx + tx) >= a.count) {
             break;
         }
         if (cut) {
@@ -347,6 +362,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 if (r.stops < 255u) {
                     ++r.stops;
                 }
+                at_stop = true;
             }
             continue;
         }
@@ -358,6 +374,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             }
             r.sum = static_cast<uint16_t>(r.sum + v);
             ++rx;
+            at_stop = false;
             if (a.nack_at > 1u && !refusing && rx + 1u == a.nack_at) {
                 // Byte nack_at is on the wire now: the disable refuses it
                 // (no spin: the loop watches the block go idle).
@@ -382,10 +399,12 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 hold_us(a.hold_us);
                 Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
                 ++tx;
+                at_stop = false;
             } else {
                 while (Client::writable()) {
                     Client::give(fixed_byte ? a.seed : twilink::pattern_value(a.pattern, a.seed, tx));
                     ++tx;
+                    at_stop = false;
                 }
             }
             Client::clear_read_request();
@@ -426,6 +445,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 ++r.stops;
             }
             r.last_addr = own_addr_;
+            at_stop = true;
             Raw::clear_pending(I2cInterrupt::stop_det);
             continue;
         }

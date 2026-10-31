@@ -82,22 +82,21 @@
 // I2cTraits::tick_spin_end()) counts the stretches wherever they happen,
 // and every pass prints them.
 //
-// THE PEER (rp_twi_peer.hpp), and what it changes in three letters:
+// THE PEER (rp_twi_peer.hpp), and what it changes in the letters:
 //
 //  - THE PROBE COUNTS: it is a one-byte read, so `probe_bytes` is 1 - letter
 //    o's tallies and its pattern index count the probe's byte, letter w's
 //    tallies count Pressure's eight, and letter q's last case finds the
 //    probe after the refused write served one byte, not none.
-//  - A READ IS SERVED A FIFO AHEAD: up to sixteen bytes given at each read
-//    request, those the host does not take flushed at its closing NACK and
-//    given back to the tally. The counted serve ends when the bytes RECEIVED
-//    and GIVEN reach the count and a STOP has been seen (run_serve's
-//    top-of-loop check), so while a read runs its tally stands up to fifteen
-//    bytes above what the wire moved: a count reached by a read's gives
-//    ends the serve in the middle of that read. Every counted serve here
-//    therefore ends on a write of sixteen bytes or more after its last read
-//    - letter o's table does (46 bytes of writes after the last read), and
-//    letter w's closing write is sixteen bytes (`closing_len`).
+//  - A TENURE IS COUNTED AT ITS STOP, and a repeated START is one more
+//    address match: the block has no address-match event (rp_twi_peer.hpp's
+//    header). So the peer judges a counted serve's count at a STOP and only
+//    there, after the flush of the read the STOP closes - a read is served a
+//    FIFO ahead, up to seventeen bytes given at its read request and those
+//    the host does not take given back at its closing NACK - and the serve
+//    ends at the end of the tenure that reached its count, that tenure
+//    counted, as twi_link.hpp defines it. Letter w's close is the shared
+//    body's single byte.
 //  - THE STRETCH IS A READ'S: `hold_us` holds before every byte the client
 //    GIVES (its read request holds SCL) and never on a write (a byte written
 //    lands in the sixteen-deep receive FIFO), so letter p's stretched read
@@ -136,9 +135,7 @@ struct I2cTraits {
     /// Letter o's table, each shape with the path this host takes: a read
     /// phase of three or more rides the engines, a shorter one and every
     /// write phase the pump; the probe a one-byte read the peer serves
-    /// (probe_bytes). The plain writes last, 46 bytes after the last read,
-    /// more than the peer's FIFO-ahead can stand its tally above the
-    /// wire's.
+    /// (probe_bytes). The plain writes last, as the shared body asks.
     static constexpr Shape shapes[] = {
         {0, 0, "pump: the probe, one read entry carrying STOP, its byte served and dropped"},
         {0, 1, "pump: one read entry carrying STOP, the byte taken at STOP_DET"},
@@ -168,12 +165,6 @@ struct I2cTraits {
     /// Letter x's write: sixteen entries, one fill of the command FIFO.
     static constexpr uint8_t fill_tx = 16;
     static_assert(fill_tx == Host::Resource::fifo_depth, "letter x's write is exactly one fill");
-    /// Letter w's closing write: sixteen bytes. During the last read before
-    /// the close the peer's tally stands up to fifteen bytes above the
-    /// wire's (the file header), and a closing write of one would let that
-    /// tally reach the count with the read still running.
-    static constexpr uint8_t closing_len = 16;
-    static_assert(closing_len >= Host::Resource::fifo_depth, "the close outlasts the peer's FIFO-ahead");
     static bool bring_up() { return rp_bring_up(); }
     /// The stretch instrument at the end of Pressure's spin.
     static void tick_spin_end() { stretch_check(); }
@@ -193,13 +184,27 @@ const char* binding_dark();
 
 /// Stretches found since the last pass's print: a Pressure spin that ended
 /// inside start(), before its mask store (IC_INTR_MASK is zero from the last
-/// tenure's finish() to start()'s last store), with the master active and
-/// its command FIFO empty - the block holding SCL with no STOP pushed. A
-/// one-entry tenure preempted between its only push and the mask store
-/// reads the same while its STOP goes out; that window is a few
-/// instructions, and letters x and s judge sixteen-entry writes, whose FIFO
-/// outlasts any preemption it does not stretch.
+/// tenure's finish() to start()'s last store), with the master active, its
+/// command FIFO empty - and SCL held low on the pad. The first two alone do
+/// not make a stall: the block takes an entry out of the FIFO to clock it,
+/// so after start()'s first push the FIFO reads empty while the address and
+/// that byte are still going out, and the block holds SCL only once they
+/// are. So the instrument then reads SCL until it is seen high (the clock
+/// running: no stall) or has stayed low for scl_held_us - longer than any
+/// low half this host clocks, the longest being 100 kHz's (LCNT 749 at
+/// 125 MHz, 899 at 150 MHz: 6 us, as letter a of test_rp2040_i2c and of
+/// test_rp2350_i2c prints them),
+/// and on a write nothing else holds SCL that long (the peer holds it as a
+/// receiver only with its sixteen-deep receive FIFO full, and its polled
+/// loop takes each byte well inside a byte time). A stall found at the end
+/// of the spin lasts until start() resumes, so the read finds it whole; the
+/// read adds at most scl_held_us to that one Pressure dispatch (1250 cycles
+/// at 125 MHz, 1500 at 150), which the shortest period still covers with
+/// the spin and its road (3000 + 465 + 1250 < 12125 on the RP2040, 3000 +
+/// 323 + 1500 < 14550 on the RP2350).
 volatile uint32_t stretches = 0;
+/// The read's window: one 100 kHz period, above the 6 us low half.
+constexpr uint32_t scl_held_us = 10;
 /// The ruler at the pressure's last landing, and the longest a preemption
 /// of start() lasted, from the landing to the end of Pressure's spin (the
 /// road back into start() not counted).
@@ -215,8 +220,15 @@ void stretch_check() {
     if (held > held_off_max) {
         held_off_max = held;
     }
-    if (S::interrupts() == 0u && S::host_active() && S::tx_empty()) {
-        stretches = stretches + 1u;
+    if (S::interrupts() != 0u || !S::host_active() || !S::tx_empty()) {
+        return;
+    }
+    const uint32_t t0 = Ruler::now();
+    while (!SclPin::read()) {
+        if (Ruler::now() - t0 >= scl_held_us * cycles_per_us) {
+            stretches = stretches + 1u;
+            return;
+        }
     }
 }
 
@@ -378,8 +390,7 @@ void ts_fill() {
         return;
     }
     // 1. start()'s own cycles, silent, for five shapes against a fixed
-    // pattern served to a deadline (the reads' gives make a counted end
-    // unsafe here, the file header).
+    // pattern served to a deadline.
     struct Cal {
         uint8_t tx;
         uint8_t rx;

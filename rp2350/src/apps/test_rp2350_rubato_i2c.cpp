@@ -59,8 +59,8 @@
 //      of 8 at 100 kHz (eight holds).
 //   q  the vocabulary (the probe after a refused 2+4 a byte served:
 //      probe_bytes).
-//   w  three requesters of three priorities, the close sixteen bytes long
-//      (closing_len).
+//   w  three requesters of three priorities, Pressure's eight probes a
+//      byte served each (probe_bytes).
 //   h  the held wire, with Pressure's flood of probes, paced by the
 //      Console's turns.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,

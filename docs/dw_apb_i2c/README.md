@@ -338,14 +338,37 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   chips), and a tenure written while another host holds the bus WAITS
   for that host's STOP - the block's multi-master rule - with its entries
   still queued; so a STOP ends a tenure only with the transmit FIFO empty
-  (`IC_STATUS.TFE`, one read at the STOP), its own STOP following its
-  last entry. Without that test a two-byte write to an absent address,
-  written inside a window another node held, ended `i2c_ok` on that
-  window's STOP before it had clocked a bit (measured on the RP pair).
+  and the host state machine idle (`IC_STATUS`'s TFE set and MST_ACTIVITY
+  clear, one read at the STOP), its own STOP following its last entry and
+  leaving that machine in IDLE. Without the FIFO's test a two-byte write
+  to an absent address, written inside a window another node held, ended
+  `i2c_ok` on that window's STOP before it had clocked a bit (measured on
+  the RP pair). Without the machine's, a tenure of ONE entry - the probe,
+  a one-byte read or write - fails the same way whenever its vector comes
+  a little late: the block takes the waiting entry the moment the other
+  STOP frees the bus, so the FIFO reads empty while that entry's START is
+  still to come (measured on the RP2040 under the preemptive kernel: a
+  probe parked behind a client holding SDA ended `i2c_bus_error` on the
+  hold's release, its entry still in `IC_TXFLR` at the vector's entry;
+  [../rp2040/i2c.md](../rp2040/i2c.md)). The test is one mask and one
+  compare more in the handler's STOP path.
 - **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
   instead of overrunning, and an empty command FIFO with no STOP holds it
   too (the block's own rule), so a handler that comes late stretches the
-  bus and loses nothing. The client takes it as a field
+  bus and loses nothing. So does a thread held off inside `start()`:
+  `start()` writes its first entry before the rest, so the tenure is on
+  the wire while the fill goes on, and a fill held off after its k-th
+  entry leaves the block the address and k bytes, (1 + k) byte times,
+  before it needs the next. A hold-off longer than that empties the
+  command FIFO with no STOP in it and the block holds SCL until the fill
+  resumes - a stretch inside the tenure, the bytes unchanged. Two byte
+  times are 45 us at 400 kHz and 18 us at 1 MHz, so a preempting dispatch
+  of 3000 cycles (some 23 to 28 us with its road on these chips)
+  stretched no tenure at 400 kHz and, at 1 MHz, 9 and 13 in 4000 writes
+  on the RP2040 and on the RP2350's Cortex-M33 - by the arithmetic, fills
+  preempted after their first entry or two (measured under the
+  preemptive kernel, [../rp2040/i2c.md](../rp2040/i2c.md) and
+  [../rp2350/i2c.md](../rp2350/i2c.md)). The client takes it as a field
   (`hold_when_rx_full`, on by default); off, the block still acknowledges
   every byte, keeps a FIFO's worth and loses the rest, RX_OVER raised
   once a byte lost (measured on both RP chips, their suites' letter m: 24
