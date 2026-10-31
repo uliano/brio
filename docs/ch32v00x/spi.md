@@ -68,8 +68,11 @@ are untouched by the sender from the post until `SpiDone` arrives (the
 host reads and writes them in between, and nothing checks that the
 sender keeps away). The vector must be bound: an unbound one lands in
 the startup code's spin at the first frame. The client is narrower than
-the host: on the CH32V006 `SpiClient` refuses modes 1 and 2, measured
-served in neither. And on the CH32V003 a sleeping core changes the
+the host: a client that answers needs CPOL = 1, modes 2 and 3 (16.2.3),
+and `SpiClient` refuses an answering client in modes 0 and 1 - there its
+window slips one bit at both ends whenever its first answer bit is 1 and
+the host's MOSI is low at the select's fall (measured); a client that
+only listens is served in all four. And on the CH32V003 a sleeping core changes the
 host's timing: its Sleep stops the DMA controller, so `idle()` does not
 sleep while an engined transaction is in flight, and the pump's two
 frames in flight overrun when the program idles between frames at
@@ -146,15 +149,19 @@ own key).
   both described as "16-bit" (0 is 8-bit), and 16.2.1 describes CPHA
   with the same words for both values (table 16-1 and the figures
   settle it).
-- **The client is restricted, and not as 16.2.3 says.** "If you need to
-  send in slave mode, you need to set CPOL to mode 2 or mode 3" - and
-  measured against a foreign host (the CH32X035's, below), this client is
-  served in modes 0 and 3 both ways, MSb and LSb first, and in modes 1 and
-  2 neither way: what it hears there is every byte one bit early (0x14
-  read 0x28), as a client that samples on the rising edge in every mode
-  would, and its MISO a fixed pattern whatever it was given. The host's
-  own waveforms are the standard's in all four modes (measured by the far
-  chip). `SpiClient` refuses modes 1 and 2 on the CH32V006.
+- **A client that answers needs CPOL = 1, as 16.2.3 says.** "If you need
+  to send in slave mode, you need to set CPOL to mode 2 or mode 3"; "if
+  you only need to receive from the mode, you only need to match the host
+  CPOL mode" (the CH32V003's manual, 14.2.3, says the same). Measured
+  against a foreign host (the CH32X035's, the bench findings' "THE
+  ANSWERING CLIENT NEEDS CPOL = 1"): in modes 0 and 1 a window whose first
+  answer bit is 1, with the host's MOSI low when the select falls, slips
+  one bit at both ends - the client's SCK pad sees an extra clock at the
+  select's fall - and the same window is exact in modes 2 and 3; a
+  client that only listens (MISO undriven) is exact in all four. A
+  configuration whose correctness depends on the data is refused:
+  `SpiClient` refuses an answering client in modes 0 and 1, on both
+  parts.
 
 ## Types and verbs
 
@@ -221,9 +228,12 @@ own key).
   one byte per 8-bit frame, two bytes low-first per 16-bit frame - one
   half-word in memory, which is what a 16-bit beat moves.
 - `SpiClient<1, pins>`: the target side - `init(clock, Config)`
-  refusing a mode this part's client is not served in (`config_served()`,
-  `spi_client_mode_served()`: modes 1 and 2 on the CH32V006) and
-  `init<cfg>(clock)`, where such a mode does not compile; the per-frame
+  refusing a configuration the client is not served in (`config_served()`:
+  an answering client - MISO driven - with CPOL = 0,
+  `spi_client_may_answer()`) and `init<cfg>(clock)`, where such a
+  configuration does not compile; `drive_output(true)` on a client
+  configured as a listener in mode 0 or 1 is not checked, the caller's
+  duty; the per-frame
   verbs - `enable(first)` with the first answer loaded before the host's
   clock, `enable()` with the buffer empty, `write()` on TXE (one frame
   ahead: no FIFO), `poll()`, `selected()` read off the NSS pad,
@@ -683,35 +693,40 @@ the desk.
   run); this host LSb first against the MSb-first client an exact two-way
   bit reversal in every mode; LSb first at both ends heard exact by the
   client listening (it cannot answer so, and refuses to).
-- **The ladder** (letter p, /256 to /2): the polled host and the engines
-  exact both ways against the client's DMA serve to /8 = 6 MHz; this
-  host's transmit-only paths heard whole by a listening client to /4 =
-  12 MHz; the client's polled run to /16 behind the polled host and to
-  /32 behind the engines' frames back to back (the /16 rung failed in
-  one run of four) - the far chip's run reloads its answers from code in
-  its flash. Above those rungs the pair is past its ceiling (below).
+- **The ladder** (letter p, /256 to /2, three runs): the polled host and
+  the engines exact both ways against the client's DMA serve to /4 = 12
+  MHz; at /2 the client hears every frame and this host reads its answers
+  wrong (6 of 8 and 29 of 32 bytes) - the read of an answer at 24 MHz has
+  no timing margin (the pair's ceiling, below); this host's transmit-only
+  paths heard whole by a listening client at every code to /2; the
+  client's polled run to /8 behind the polled host and to /16 behind the
+  engines' frames back to back - the far chip's run reloads its answers
+  from code in its flash.
 - **THIS CHIP AS CLIENT ON ITS HARDWARE NSS** (letter r: PC1 the NSS input,
   SSM clear, under the peer's `host_burst` at 1.5 MHz, one frame a
-  request): in modes 0 and 3, MSb and LSb first, twelve frames received
-  exact and the far host reading the answers exact from the first frame -
-  the preload before the select fell; eight 16-bit frames in mode 3 the
-  same; modes 1 and 2 refused by `SpiClient` before anything is commanded.
+  request): answering in modes 2 and 3, MSb and LSb first, with a first
+  answer bit of 0 and of 1, twelve frames received exact and the far host
+  reading the answers exact from the first frame - the preload before the
+  select fell; eight 16-bit frames in mode 3 the same; an answering client
+  in modes 0 and 1 refused by `SpiClient` before anything is commanded.
 - **MODF from a second chip** (letter m): the peer's PA4 held low 2 ms
   demotes a host whose NSS is a hardware input 24 ms after the enable,
   MSTR and SPE cleared, four of four; STATR 0x22 before 16.2.7's clearing
   sequence and 0x02 after it, once the pad has been high a millisecond.
-- **THE PAIR'S CEILING, the far client's MISO pad** (letter s, sixteen
-  frames on this host's engines against the client's DMA serve): to /8
-  every pattern is exact both ways. At /4 and /2 the client loses frames
-  whenever its own MISO pad stands high: with its answers 0xFF it heard 0
-  of 16 (its STATR showing the preload never taken), with 0x00 it heard
-  16 of 16 at /4 AND /2; listening with its MISO pad undriven it heard
-  16 at /4 and 6 at /2 - and with that pad held HIGH AS A GPIO (no SPI
-  output at all) 0 at /4, held LOW 16 at /4 and /2. The four wires are
-  not joined (each driven both ways against the others' pulls) and the
-  MISO wire carries no load; the cause - the far chip's pad, the two
-  boards' two rails, the wiring - is not isolated (the gap list).
-
+- **THE PAIR'S CEILING, reading an answer at 24 MHz** (letter s, sixteen
+  frames on this host's engines against the client's DMA serve, three
+  runs): to /4 every shape is exact both ways - a PRBS each way, MISO
+  quiet low, quiet high, toggling every bit under a quiet MOSI, mode 1,
+  mode 3, the client listening alone. At /2 the client hears every frame
+  of every shape, and this host reads its answers exact while MISO stands
+  still and in mode 1, and 14 to 16 of 16 wrong when MISO toggles in
+  modes 0 and 3. Table 3-19 of the far chip's datasheet gives a client's
+  data valid up to 25 ns after its shifting edge and a host 5 ns of
+  setup: 30 ns against the 20.8 ns half period of 24 MHz. The far chip's
+  own host closes that gap with its high-speed read (HSRXEN; its
+  document); this part's HSCR, the same bit, is not used by the host
+  (the gap list). The client's polled run is its own ceiling: wrong from
+  /8 in two runs of three.
 - **The host above the wire on the CH32V003F4P6** (`bench_ch32` letters
   s and e, MISO floating, the loop idling through the platform's
   `idle()`): the engined write at the wire - 31.3 cycles a byte at
@@ -765,9 +780,10 @@ the dark listener, the exchange served on the DMA engines (channels 2 and
 3, polled through the receive count, no interrupt) or on the client's
 runs (its tick held for the run), `sink_slow`, `ss_pulse` on PC1 as a GPIO,
 `host_burst` with PC1 the host's GPIO select; `mspi` refused (no USART of
-this part reaches the wires). Modes 1 and 2, which `SpiClient` refuses on
-this part, it serves all the same - the block configured by hand, the
-resource's verbs on the same pads - so a far suite measures them; of the
+this part reaches the wires). An answering exchange in modes 0 and 1,
+which `SpiClient` refuses, it serves all the same - the block configured
+by hand, the resource's verbs on the same pads - so a far suite measures
+them; of the
 extended exchange it serves the 16-bit frames (the engines in half-word
 beats, the runs over `uint16_t`) and the receive-only run (MISO dark) and
 refuses the CRC (`report_cfg_failed`, no host on the desk asking it),
@@ -776,25 +792,37 @@ crystal runs it (the PLL at 48 MHz), and its supply is read from VREFINT
 at boot (3275 mV on the desk). What the far chip measured of this client,
 on the four wires:
 
-- **The hardware select frames it**: a client on PC1's NSS input took
-  every exchange the far host clocked in modes 0 and 3, both bit orders,
-  on both serves - eight frames exact both ways each time - and the far
-  host's MODF letter took its select low four times on command.
-- **Modes 1 and 2 are served neither way**: eight runs in each, every one
-  wrong both ways - the first byte heard 0x28 for 0x14 (mode 1) and 0x2A
-  for 0x15 (mode 2), one bit early, and the far chip's sampling of MISO
-  in those modes a fixed 0x6D 0xB6 0xDB whatever the stream; the far
-  host's MOSI the standard's in both (its waveform letter).
-- **THE ANSWER WINDOWS ARE MODE 3.** In mode 0, an answer window served
-  by the polled run right after a command came back exact, and the one
-  served right after another answer window - ident's and report's data -
-  came back one bit early, every byte (t << 1) | the next byte's MSB, the
-  first bit racing; a DMA-served answer in mode 0 was exact. In mode 3
-  every window was exact, so the peer serves ack, nak, ident and report in
-  mode 3 - spi_link's alternate answer mode - and the far host finds that
-  at its rendezvous; what in this
-  block's state carries from one mode-0 window to the next is not
-  isolated (a logic analyser on SCK and MISO across two windows would).
+- **The hardware select frames it**: a client on PC1's NSS input heard
+  every exchange the far host clocked in all four modes, both bit orders,
+  on both serves - eight frames exact each time - and answered exact in
+  modes 2 and 3; the far host's MODF letter took its select low four times
+  on command.
+- **THE ANSWERING CLIENT NEEDS CPOL = 1** (scratch letters over the far
+  host's windows: the select's fall, 30 us, then 8 frames at HCLK/256 or
+  32 at HCLK/32): in modes 0 and 1, a window whose first answer bit is 1
+  while the host's MOSI is low at the select's fall comes back one bit off
+  at BOTH ends - the host reads every byte (t << 1) | the next byte's
+  MSB, the client hears the stream one bit late behind a stray bit - and
+  the same window is exact with a first answer bit of 0, or with the
+  host's MOSI high at the select's fall; in modes 2 and 3 every
+  combination is exact. At this pad, an EXTI line on PC5 counted SCK
+  edges from the select's fall: none before the host's first clock in an
+  exact window, and in a slipped one a stream of edges from the fall on,
+  at the rate the handler can count (137 in 20 us), while the host's own
+  SCK pad, sampled through its input register after the select's fall,
+  read low throughout. Not the wires: with MISO a GPIO held high, or
+  raised as a GPIO the instant the select falls, every other line the
+  same, the SCK pad counted no edge and the client heard every frame
+  exact; with MISO undriven the client heard exact too - the edge needs
+  this block's own MISO output rising with the select. Not the host's
+  mode change either: with the far host's SCK already at the new idle
+  level before this client was configured - no SCK edge from its
+  configuration to the select's fall - the same windows slipped and the
+  same ones did not. An answer window that follows another one whose
+  dummies were zeros meets the condition whenever its frame starts with
+  a 1. So the ack, nak, ident and report windows are mode 3 - spi_link's
+  alternate answer mode, found by the far host at its rendezvous - and
+  `SpiClient` refuses an answering client in modes 0 and 1.
 - **The rate ladder**: the DMA serve exact at every code to the far
   host's /2 = 24 MHz, behind its polled loop and its engines; the polled
   serve - the client's exchange run - exact to 6 MHz behind both, the
@@ -814,16 +842,18 @@ Driver gaps, each with its reason:
   has SSOE and the multi-host input for a program that wants them.
 - The CRC as part of a Request: the resource's verbs exist, born into a
   tenure shape with a device that checks one.
-- The CH32V003F4P6's client in modes 1 and 2: `SpiClient` refuses them on
-  the CH32V006 alone, where they were measured served neither way; the
-  CH32V003 shares the block and has not answered on its own die, and a
-  refusal stated for a part nobody measured would be a guess.
 
 Implemented but not bench-verified, each with what would measure it:
 
 - The client's runs on the CH32V003F4P6: they compile there (`brio check
   ch32v00x`); a CH32V003 wired to the CH32X035 as the CH32V006 is, under
   letter k, would measure them.
+- The answering client's CPOL rule on the CH32V003F4P6: `SpiClient`
+  refuses an answering client in modes 0 and 1 there as on the CH32V006,
+  from its manual's 14.2.3, which says what the CH32V006's 16.2.3 says;
+  the slip itself was measured on the CH32V006 alone. A CH32V003 wired to
+  the CH32X035 as the CH32V006 is, answering a mode-0 window whose first
+  bit is 1 after a window of zeros, would measure it.
 - The suite on the CH32V003F4P6: its fifteen group images link and fit
   (`brio fit`); the part is off the desk, and a CH32V003 wired to the
   CH32X035 as the CH32V006 is would run them.
@@ -831,13 +861,13 @@ Implemented but not bench-verified, each with what would measure it:
   code is the CH32V006's, and `spi.window`, which measures it there, is
   not in the 16 KB part's letter-e image (no room); a scratch image
   carrying that line alone on the CH32V003 would measure it.
-- The data both ways above 6 MHz: the pair's ceiling is the far client's
-  (bench findings, letter s), so the pump at HCLK/4 and /2 and the
-  engines' exchanges at /4 and /2 are judged by no witness - letter g
-  times the engines' frames at /2 on the wire alone. A client served to
-  24 MHz - the CH32X035 with its MISO pad's effect explained (a scope on
-  its PA5 with PA6 high at 12 MHz, the two boards on one rail), or
-  another part - would judge them.
+- The host's read of an answering client at HCLK/2: wrong whenever MISO
+  toggles in modes 0 and 3 (bench findings, letter s), the timing budget
+  of table 3-19 not closing at 24 MHz, so the pump and the engines'
+  exchanges at /2 are judged by what the client hears alone. The far
+  chip's host closes the same budget with its high-speed read; letter s
+  run with this part's HSRXEN set at /2 would say whether it does here,
+  and the host would take it as its option.
 - The CH32V003's default hold-off against its Sleep: the pump's two
   frames in flight overrun when the image idles between frames (the
   finding above), and nothing in the host or the platform keeps them

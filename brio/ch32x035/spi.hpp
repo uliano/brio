@@ -81,10 +81,15 @@
  *    written. The two texts agree at BR = 000 alone, so the host sets the
  *    bit only while the code in force is /2, keeps a copy, and drops it
  *    before any other code is written: a powers-of-two code means the same
- *    rate with the mode asked or not. On the desk's wires /2 = 24 MHz is
- *    exact against the CH32V006 with the bit and without, so
- *    `SpiHost::Config::high_speed_read` is off by default; the second
- *    ladder is declined (docs/ch32x035/spi.md).
+ *    rate with the mode asked or not. At /2 a client's answer has no
+ *    timing margin without it: table 3-19 gives a client's data valid up
+ *    to 25 ns after its shifting edge and the host 5 ns of setup, 30 ns
+ *    against the 20.8 ns half period of 24 MHz. MEASURED against the
+ *    CH32V006's client in mode 3: without the bit, a 32-frame window on
+ *    the engines read one frame's first bit as 1 where the client sent 0
+ *    in 29 of 70 windows; with it, none in 28. So
+ *    `SpiHost::Config::high_speed_read` is ON by default (applied at /2
+ *    alone); the second ladder is declined (docs/ch32x035/spi.md).
  *  - CTLR2.ODEN, open-drain NSS, SCK and MOSI "to support low-voltage SPI
  *    signals" (16.3.2): the one pad class this GPIO has for an SPI - the
  *    port has no speed field and no open-drain output of its own (RM
@@ -931,7 +936,7 @@ public:
     struct Config {
         uint32_t max_sck_hz = 0;   ///< the ceiling; 0 = none
         bool open_drain = false;
-        bool high_speed_read = false;
+        bool high_speed_read = true;   ///< HSRXEN at /2: on, the file header
     };
 
     /// Is the host's per-frame path placed in SRAM (the file header)?

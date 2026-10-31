@@ -88,6 +88,15 @@
 //                            request posted with no select, and at the
 //                            reply the hold and the rise - for a peer whose
 //                            client needs time after the last edge
+//   data_mode                (SpiMode; mode 0) the clock mode of the data
+//                            windows: letter w's requests, and an Exchange's
+//                            default (the peer commanded in it and the host
+//                            clocking it), so that a peer whose client
+//                            answers only in some modes is clocked in one -
+//                            the CH32V006 answers with CPOL = 1 alone
+//                            (docs/ch32v00x/spi.md). The suite commands its
+//                            peer and primes its host in w::mode for w's
+//                            window
 //   bus_settings(r, rate, mode, bits)   (static void) a request's rate,
 //                            clock mode and frame size written into a
 //                            Host::Request `r` whose fields spell them
@@ -261,6 +270,14 @@ constexpr SpiClock w_rate() {
     }
 }
 template <typename T>
+constexpr SpiMode data_mode() {
+    if constexpr (requires { T::data_mode; }) {
+        return T::data_mode;
+    } else {
+        return SpiMode::mode0;
+    }
+}
+template <typename T>
 constexpr uint8_t cs_hold_us() {
     if constexpr (requires { T::cs_hold_us; }) {
         return T::cs_hold_us;
@@ -360,6 +377,8 @@ constexpr uint8_t minor_len = link_traits::w_minor_len<LinkTraits>();
 constexpr uint8_t press_n = 8;
 constexpr uint8_t press_len = link_traits::w_press_len<LinkTraits>();
 constexpr SpiClock rate = link_traits::w_rate<LinkTraits>();
+/// The window's clock mode (the family's LinkTraits::data_mode).
+constexpr SpiMode mode = link_traits::data_mode<LinkTraits>();
 static_assert(client_len >= 1u && client_len <= 8u && minor_len >= 1u && minor_len <= 8u && press_len >= 1u &&
                   press_len <= 8u,
               "letter w's requests are 1 to 8 frames, the out buffer below");
@@ -424,7 +443,7 @@ Host::Request request(uint8_t* rx, uint8_t len, bool polled, ReplyTo<SpiDone> re
     r.len = len;
     r.polled = polled;
     r.cs_setup_us = 0;
-    bus_settings(r, rate, SpiMode::mode0, SpiDataSize::bits8);
+    bus_settings(r, rate, mode, SpiDataSize::bits8);
     r.reply = reply;
     return r;
 }
@@ -1109,9 +1128,18 @@ constexpr uint16_t cap = 64;   ///< frames a window carries at most
 alignas(4) uint8_t xtx[2u * cap + 4u];
 alignas(4) uint8_t xrx[2u * cap + 4u];
 
+/// The data windows' clock mode (the family's LinkTraits::data_mode), and
+/// its number as spi_link's Cfg carries it - spelled by name, since a
+/// family's SpiMode values may be its register's codes.
+constexpr SpiMode data_mode = link_traits::data_mode<LinkTraits>();
+constexpr uint8_t mode_number(SpiMode m) {
+    return m == SpiMode::mode1 ? 1u : m == SpiMode::mode2 ? 2u : m == SpiMode::mode3 ? 3u : 0u;
+}
+
 struct Exchange {
-    spilink::Cfg cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
-    SpiMode host_mode = SpiMode::mode0;
+    spilink::Cfg cfg{.apply = 1, .mode = mode_number(data_mode), .dord = 0,
+                     .regime = spilink::regime_buffer_wait};
+    SpiMode host_mode = data_mode;
     bool host_lsb = false;
     SpiClock rate = link_clock;
     uint16_t count = 32;     ///< frames

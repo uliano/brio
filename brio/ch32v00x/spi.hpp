@@ -152,14 +152,13 @@
  * resource's configuration bits - no user; the hardware NSS arrangements
  * as the engine's select (the resource has them, the engine's select is
  * a GPIO on purpose); the CRC beyond the resource's verbs - born with a
- * device that checks one; the CH32V003F4P6's client in modes 1 and 2,
- * which nothing refuses on that part because nobody measured it. Not
- * bench-verified: HSCR's high-speed read mode, whose rate formula
- * (16.3.1's note: HCLK/(BR+2)) wants a scope on SCK; the client's runs,
- * the suite and the pump's OVR test on the CH32V003F4P6; the data both
- * ways above 6 MHz, the pair's ceiling being the far client's; and the
- * CH32V003's default hold-off against that part's Sleep, which the pump
- * with two frames in flight overruns while the loop idles between frames.
+ * device that checks one. Not bench-verified: HSCR's high-speed read
+ * mode, whose rate formula (16.3.1's note: HCLK/(BR+2)) wants a scope on
+ * SCK; the client's runs, the suite, the pump's OVR test and the
+ * answering client's CPOL rule on the CH32V003F4P6; the host's read of
+ * an answering client at HCLK/2; and the CH32V003's default hold-off
+ * against that part's Sleep, which the pump with two frames in flight
+ * overruns while the loop idles between frames.
  */
 
 #pragma once
@@ -1794,23 +1793,26 @@ private:
 // =============================================================================
 
 /**
- * The modes this part's CLIENT is served in. 16.2.3: "if you need to
- * send in slave mode, you need to set CPOL to mode 2 or mode 3" - and
- * measured against a foreign host whose waveforms are the standard's in
- * all four modes (docs/ch32v00x/spi.md), the CH32V006K8U6's client is
- * served in modes 0 and 3 BOTH WAYS and in modes 1 and 2 NEITHER way:
- * what it hears there is every frame one bit early, what it sends a
- * fixed pattern. So a CH32V006 client is refused in modes 1 and 2,
- * listening or answering. The CH32V003F4P6 shares the block and has not
- * answered on its own die: it refuses nothing here (its gap list).
+ * The modes in which this part's CLIENT may ANSWER. The chapter of both
+ * parts (CH32V00x RM V1.5 16.2.3, CH32V003 RM V1.9 14.2.3): "if you need
+ * to send in slave mode, you need to set CPOL to mode 2 or mode 3"; "if
+ * you only need to receive from the mode, you only need to match the
+ * host CPOL mode". So a client that drives MISO needs CPOL = 1 (modes 2
+ * and 3, SCK idling high); a client that only listens is served in all
+ * four modes.
+ *
+ * Measured on the CH32V006K8U6 against the CH32X035's host
+ * (docs/ch32v00x/spi.md, "THE ANSWERING CLIENT NEEDS CPOL = 1"): in modes 0
+ * and 1 the client's SCK input sees an extra clock at the select's fall
+ * whenever its first answer bit is 1 and the host's MOSI stands low then -
+ * every frame of the window one bit off at BOTH ends, the frames it hears
+ * as well as the ones it sends - and is exact otherwise; in modes 2 and 3
+ * it is exact under the same data; a listener (MISO undriven) is exact in
+ * all four. A configuration whose correctness depends on the data is
+ * refused. The CH32V003F4P6 has not been measured; its manual's rule is
+ * the same, so the same configurations are refused there.
  */
-constexpr bool spi_client_mode_served(SpiMode m) {
-    if constexpr (device::part == Ch32Part::v006) {
-        return m == SpiMode::mode0 || m == SpiMode::mode3;
-    } else {
-        return true;
-    }
-}
+constexpr bool spi_client_may_answer(SpiMode m) { return spi_mode_cpol(m); }
 
 /**
  * SpiClient<n, pins>
@@ -1872,9 +1874,17 @@ public:
         bool drive_output = true;
     };
 
-    /// Is this configuration one the client is served in on this part
-    /// (spi_client_mode_served)?
-    static constexpr bool config_served(const Config& c) { return spi_client_mode_served(c.mode); }
+    /// Is this configuration one the client is served in? A client that
+    /// answers (MISO handed to the peripheral, full duplex or the
+    /// one-wire output) only with CPOL = 1 (spi_client_may_answer); a
+    /// listener in all four modes. Turning the pad on later with
+    /// drive_output(true) is not checked: that is the caller's duty.
+    static constexpr bool config_served(const Config& c) {
+        const bool answers = c.drive_output && pins.miso.valid() &&
+                             (c.direction == SpiDirection::full_duplex ||
+                              c.direction == SpiDirection::half_duplex_out);
+        return !answers || spi_client_may_answer(c.mode);
+    }
 
     /// Bring the instance up as a client. The bus clock is required
     /// even though the shifter runs on the host's SCK. False when the
@@ -1905,14 +1915,15 @@ public:
         return true;
     }
 
-    /// The same with the configuration known at compile time: a mode
-    /// this part's client is not served in does not compile.
+    /// The same with the configuration known at compile time: an answering
+    /// client with CPOL = 0 does not compile.
     template <Config cfg, typename Clock>
     static bool init(Clock clock) {
         static_assert(config_served(cfg),
-                      "brio SpiClient: the CH32V006's client is served in modes 0 and 3 alone - in modes 1 "
-                      "and 2 it hears every frame one bit early and sends a fixed pattern (measured, "
-                      "spi_client_mode_served)");
+                      "brio SpiClient: a client that answers needs CPOL = 1, mode 2 or 3 (RM 16.2.3; "
+                      "measured: in modes 0 and 1 a window whose first answer bit is 1 can slip one bit "
+                      "at both ends) - a listener (drive_output = false) is served in every mode "
+                      "(spi_client_may_answer)");
         return init(clock, cfg);
     }
 
@@ -2304,10 +2315,9 @@ static_assert(spi_write_ahead_safe(SpiClock::div256, SpiDataSize::bits8, spi_def
 static_assert(spi_write_ahead_from(SpiDataSize::bits8, 600u) == SpiClock::div128);
 static_assert(spi_write_ahead_from(SpiDataSize::bits16, 600u) == SpiClock::div64);
 
-// The client's modes: the CH32V006 refuses modes 1 and 2 (measured), the
-// CH32V003 nothing yet (unmeasured).
-static_assert(spi_client_mode_served(SpiMode::mode0) && spi_client_mode_served(SpiMode::mode3));
-static_assert(spi_client_mode_served(SpiMode::mode1) == (device::part != Ch32Part::v006));
+// The answering client's modes: CPOL = 1 (16.2.3), on both parts.
+static_assert(spi_client_may_answer(SpiMode::mode2) && spi_client_may_answer(SpiMode::mode3));
+static_assert(!spi_client_may_answer(SpiMode::mode0) && !spi_client_may_answer(SpiMode::mode1));
 
 // Table 16-1.
 static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));

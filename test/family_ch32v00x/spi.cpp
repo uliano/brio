@@ -135,10 +135,13 @@ void client_verbs() {
     constexpr SysClock clock;
     (void)Client::init(clock, {.mode = SpiMode::mode1, .nss = SpiNss::hardware_input, .drive_output = false});
     (void)Client::init<Client::Config{.mode = SpiMode::mode3}>(clock);
-    // The CH32V006's client is served in modes 0 and 3 alone (measured);
-    // the CH32V003 refuses nothing yet.
-    static_assert(Client::config_served({.mode = SpiMode::mode0}) && Client::config_served({.mode = SpiMode::mode3}));
-    static_assert(Client::config_served({.mode = SpiMode::mode2}) == (device::part == Ch32Part::v003));
+    (void)Client::init<Client::Config{.mode = SpiMode::mode0, .drive_output = false}>(clock);
+    // A client that answers needs CPOL = 1 (16.2.3); a listener is served
+    // in every mode.
+    static_assert(Client::config_served({.mode = SpiMode::mode2}) && Client::config_served({.mode = SpiMode::mode3}));
+    static_assert(!Client::config_served({.mode = SpiMode::mode0}) && !Client::config_served({.mode = SpiMode::mode1}));
+    static_assert(Client::config_served({.mode = SpiMode::mode0, .drive_output = false}) &&
+                  Client::config_served({.mode = SpiMode::mode1, .drive_output = false}));
     Client::drive_output(true);
     Client::enable(0xA5);
     Client::write(0x5A);

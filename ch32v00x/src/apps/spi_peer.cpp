@@ -69,22 +69,21 @@
 //    witness and the NSS pad the window's.
 //  - THE ANSWER WINDOWS ARE CLOCKED IN MODE 3, not spi_link's mode 0.
 //    16.2.3: "if you need to send in slave mode, you need to set CPOL to
-//    mode 2 or mode 3" - and measured against the CH32X035's host, this
-//    client's answers in mode 0 come back one bit early in the windows
-//    that follow another answer (the first sample racing the change), its
-//    answers in modes 1 and 2 are wrong, and mode 3's are exact. So the
-//    ack, nak, ident and report windows are served CPOL = 1, CPHA = 1 and
-//    the far host finds that at its rendezvous (spi_link's alternate
-//    answer mode); the command windows stay mode 0, where this client only
-//    receives. An exchange's answers go in whatever mode the command
-//    names, which is what the far host's matrix measures - and measured
-//    there, this client is served in modes 0 and 3 both ways and in NEITHER
-//    direction in modes 1 and 2 (its MISO a fixed pattern, what it hears
-//    wrong), the far host's waveforms the standard's in all four. The peer
-//    serves modes 1 and 2 all the same, so a DUT measures them - its
-//    driver's SpiClient refuses them (spi_client_mode_served), so there it
-//    configures the block BY HAND, the resource's verbs on the same pads;
-//    its report says what arrived.
+//    mode 2 or mode 3" - and measured against the CH32X035's host
+//    (docs/ch32v00x/spi.md, "THE ANSWERING CLIENT NEEDS CPOL = 1"): in
+//    modes 0 and 1 this client's SCK input sees one extra clock at the
+//    select's fall whenever its first answer bit is 1 and the host's MOSI
+//    stands low then, and the whole window slips one bit at both ends; in
+//    modes 2 and 3 it is exact under the same data. So the ack, nak, ident
+//    and report windows are served CPOL = 1, CPHA = 1 and the far host
+//    finds that at its rendezvous (spi_link's alternate answer mode); the
+//    command windows stay mode 0, where this client only listens - a
+//    listener is exact in every mode. An exchange's answers go in
+//    whatever mode the command names, so a DUT measures every mode: its
+//    driver's SpiClient refuses an answering client in modes 0 and 1
+//    (spi_client_may_answer), so there the peer configures the block BY
+//    HAND, the resource's verbs on the same pads, and its report says what
+//    arrived - exact or one bit off, as the data decides.
 //
 // THE DARK LISTENER discipline: the command-mode client never drives MISO
 // (drive_output = false, the pad a floating input), the answer line wakes
@@ -179,11 +178,11 @@ static_assert(device::part_name[0] == 'C' && device::part_name[1] == 'H' &&
                   device::part_name[2] == '3' && device::part_name[3] == '2',
               "spi_peer: the ident label is the part number after its CH32 prefix");
 
-/// THE ANSWER WINDOWS ARE SERVED IN MODE 3 (the header): this client's
-/// answers are exact in mode 3 and not in mode 0 (measured), so every ack,
-/// nak, ident and report window is configured CPOL = 1, CPHA = 1 and the
-/// host clocks it so; the command windows stay mode 0, which a receiving
-/// client is served in.
+/// THE ANSWER WINDOWS ARE SERVED IN MODE 3 (the header): an answering
+/// client needs CPOL = 1 (16.2.3, measured), so every ack, nak, ident and
+/// report window is configured CPOL = 1, CPHA = 1 and the host clocks it
+/// so; the command windows stay mode 0, which a listening client is
+/// served in.
 constexpr uint8_t answer_window_mode = 3;
 
 /// The exchange's engines at DATAR's width, bound once with NO interrupt:
@@ -260,8 +259,9 @@ SpiMode mode_of(uint8_t m) {
     }
 }
 
-/// A client in a mode SpiClient refuses on this part (modes 1 and 2,
-/// spi_client_mode_served), configured BY HAND for a DUT to measure: what
+/// An answering client with CPOL = 0 (modes 0 and 1), which SpiClient
+/// refuses (spi_client_may_answer), configured BY HAND for a DUT to
+/// measure: what
 /// Client::init() does, through the resource - the gate, the reset, the
 /// column, the configuration, the inputs, MISO handed over last.
 bool client_by_hand(const Client::Config& c) {
@@ -361,10 +361,13 @@ void account(spilink::Report& r, uint8_t got, uint8_t expected) {
 
 // ---- the actions -----------------------------------------------------------
 
-/// Frames an exchange carries at most; the buffers are half-words so that a
-/// 16-bit run and its engines take them whole, and an 8-bit one reads the
-/// same storage as bytes.
-constexpr uint16_t exchange_cap = 64;
+/// Frames an exchange carries at most: 256, the other strata's peers' figure,
+/// so that a far suite's one-window letters (the link suites' arbiter
+/// letter clocks up to 208 frames in one window) are counted whole - 1 KB of
+/// this part's 8 KB. The buffers are half-words so that a 16-bit run and its
+/// engines take them whole, and an 8-bit one reads the same storage as
+/// bytes.
+constexpr uint16_t exchange_cap = 256;
 alignas(4) uint16_t x_out[exchange_cap];
 alignas(4) uint16_t x_in[exchange_cap];
 

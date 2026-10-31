@@ -1,8 +1,8 @@
 // mcu: ch32v006k8
-// The CH32V006's client is served in modes 0 and 3 alone: in modes 1 and
-// 2 it hears every frame one bit early and sends a fixed pattern
-// (measured). A client configured in one of them at compile time must be
-// REFUSED.
+// A client that ANSWERS needs CPOL = 1 (RM 16.2.3): in modes 0 and 1 a
+// window whose first answer bit is 1 can slip one bit at both ends
+// (measured). An answering client in mode 1 configured at compile time
+// must be REFUSED.
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/spi.hpp"
 

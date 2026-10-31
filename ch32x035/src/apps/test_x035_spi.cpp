@@ -61,10 +61,11 @@
 //   n  (y) THE PEER: the command channel, ident (the CH32V006, kind 0x06),
 //      ten pings
 //   o  (y) the matrix: this host in the four modes and both bit orders
-//      against the foreign client on both of its serves, each direction
-//      judged where that client is served (modes 0 and 3), a bit-order
-//      mismatch as an exact two-way reversal, and the receive CRC over the
-//      foreign frames
+//      against the foreign client on both of its serves, what the client
+//      hears judged in all four, what this host reads where that client
+//      answers (modes 2 and 3, CPOL = 1; in modes 0 and 1 it listens
+//      alone), a bit-order mismatch as an exact
+//      two-way reversal, and the receive CRC over the foreign frames
 //   p  (y) THE LADDER against the peer, /256 to /2 on the polled host and
 //      on the engines, both of the peer's serves, /2 = 24 MHz with and
 //      without the high-speed read, and the high-speed read's own ladder
@@ -1622,7 +1623,7 @@ void to_peer_matrix() {
     // READS judged here against the client's stream. The two directions are
     // two facts: a receiving client need only match the polarity (16.2.3),
     // an answering one is the chapter's restricted case.
-    uint8_t heard = 0, read_ok = 0, read_m3 = 0;
+    uint8_t heard = 0, read_ok = 0;
     for (uint8_t m = 0; m < 4; ++m) {
         for (uint8_t o = 0; o < 2; ++o) {
             for (uint8_t serve = 0; serve < 2; ++serve) {
@@ -1632,6 +1633,11 @@ void to_peer_matrix() {
                 e.host_lsb = o != 0;
                 e.host_mode = static_cast<SpiMode>(m);
                 e.spare = serve != 0u ? spilink::spare_polled_pump : 0;
+                if (m < 2u) {
+                    // CPOL = 0: the CH32V006 client listens alone (it answers
+                    // with CPOL = 1 only, its RM 16.2.3, its document).
+                    e.spare = static_cast<uint8_t>(e.spare | spilink::spare_receive_only);
+                }
                 e.seed_a = static_cast<uint8_t>(0x13u + m + 4u * o + 16u * serve);
                 e.seed_b = static_cast<uint8_t>(0x57u + m + 4u * o + 16u * serve);
                 const bool ran = do_exchange(e);
@@ -1645,30 +1651,32 @@ void to_peer_matrix() {
                 if (r.mism != 0u) {
                     print(serial, " (idx ", r.idx, " got ", hex(r.got), " exp ", hex(r.exp), ")");
                 }
-                print(serial, ", this host read mism ", v.mism);
-                if (v.mism != 0u) {
-                    print(serial, " (idx ", v.idx, " got ", hex(v.got), " exp ", hex(v.exp), ")");
+                if (m >= 2u) {
+                    print(serial, ", this host read mism ", v.mism);
+                    if (v.mism != 0u) {
+                        print(serial, " (idx ", v.idx, " got ", hex(v.got), " exp ", hex(v.exp), ")");
+                    }
+                } else {
+                    print(serial, ", the client listening");
                 }
                 print(serial, crlf);
-                if (m == 0u || m == 3u) {
-                    heard = static_cast<uint8_t>(heard + (to_client ? 1u : 0u));
+                heard = static_cast<uint8_t>(heard + (to_client ? 1u : 0u));
+                if (m >= 2u) {
                     read_ok = static_cast<uint8_t>(read_ok + (to_host ? 1u : 0u));
-                }
-                if (m == 3u) {
-                    read_m3 = static_cast<uint8_t>(read_m3 + (to_host ? 1u : 0u));
                 }
             }
         }
     }
-    print(serial, "  -> modes 0 and 3: the client heard 8 frames exact in ", heard, " of 8 runs, this host read its "
-                  "answers exact in ", read_ok, " of 8 (", read_m3, " of 4 in mode 3); modes 1 and 2 printed - the "
-                  "CH32V006 client is not served there either way (letter w's waveforms: this host's MOSI is the "
-                  "standard's in every mode)",
+    print(serial, "  -> the client heard 8 frames exact in ", heard, " of 16 runs; in modes 2 and 3 this host read its "
+                  "answers exact in ", read_ok, " of 8; in modes 0 and 1 the client listens alone - the CH32V006 "
+                  "client answers with CPOL = 1 only (its RM 16.2.3, its document)",
           crlf);
-    bench.verdict("THIS HOST'S FRAMES reach a FOREIGN client exact in modes 0 and 3, both bit orders, both of its "
-                  "serves - the modes the CH32V006 client is served in",
-                  heard == 8u);
-    bench.verdict("and this host READS the foreign client's answers exact there", read_ok == 8u);
+    bench.verdict("THIS HOST'S FRAMES reach a FOREIGN client exact in all four modes, both bit orders, both of its "
+                  "serves",
+                  heard == 16u);
+    bench.verdict("and this host READS the foreign client's answers exact in modes 2 and 3, the modes the CH32V006 "
+                  "client answers in",
+                  read_ok == 8u);
 
     Exchange mism{};
     mism.cfg.mode = 3;
@@ -2321,6 +2329,21 @@ uint8_t wave[wave_samples];   ///< bit 0 NSS (PA4), 1 SCK (PA5), 2 MISO (PA6), 3
     return cycles_now() - t0;
 }
 
+/// The same, one frame written at sample `kick`: the frame's first SCK
+/// edge comes some cycles after the write - before the sampler's first
+/// look when the write comes first (letter w measured it) - so the line's
+/// idle level is read before the frame starts.
+[[gnu::noinline]] uint32_t sample_wave_frame(uint16_t n, uint16_t kick, uint16_t frame) {
+    const uint32_t t0 = cycles_now();
+    for (uint16_t i = 0; i < n; ++i) {
+        if (i == kick) {
+            S::data(frame);
+        }
+        wave[i] = static_cast<uint8_t>(Port<'A'>::in() >> 4);
+    }
+    return cycles_now() - t0;
+}
+
 /// The same, the DMA requests raised at sample `kick`: a block whose
 /// first edge must not fall before the first sample.
 [[gnu::noinline]] void sample_wave_kick(uint16_t n, uint16_t kick) {
@@ -2614,8 +2637,7 @@ void tw_waveforms() {
         host_ready();
         Host::prime(static_cast<SpiMode>(m), SpiClock::div256);
         (void)delay_us(clock, 50);
-        S::data(0x5A);
-        const uint32_t took = sample_wave(wave_samples);
+        const uint32_t took = sample_wave_frame(wave_samples, 8, 0x5A);
         console_drain();
         S::flush_rx();
         const WaveEdges e = wave_edges(wave_samples, 3, false);
@@ -2699,7 +2721,7 @@ void tw_waveforms() {
                                                                   mo.bytes[1] == tx_buf[1]
                                                               ? 1u
                                                               : 0u));
-        if (m == 0u || m == 3u) {
+        if (m >= 2u) {   // the modes the CH32V006 client answers in (CPOL = 1)
             client_ok = static_cast<uint8_t>(client_ok + (mi.count >= 2u &&
                                                                   mi.bytes[0] == spilink::pattern_value(a.pattern, a.seed_b, 0) &&
                                                                   mi.bytes[1] == spilink::pattern_value(a.pattern, a.seed_b, 1)
@@ -2716,7 +2738,8 @@ void tw_waveforms() {
     print(serial, "  -> the foreign client's MISO on the standard edge in ", client_std, " of 4 modes", crlf);
     bench.verdict("inside a block on this host's engines its MOSI carries the frames lent, back to back, in every mode",
                   host_framed == 4u);
-    bench.verdict("and the CH32V006 client's MISO carries its stream in modes 0 and 3", client_ok == 2u);
+    bench.verdict("and the CH32V006 client's MISO carries its stream in modes 2 and 3, the modes it answers in",
+                  client_ok == 2u);
     // w.3 THE FOREIGN HOST'S OUTPUTS: the peer's host_burst at 187.5 kHz,
     // every pad of this chip a floating input (it drives nothing).
     uint8_t far_std = 0;

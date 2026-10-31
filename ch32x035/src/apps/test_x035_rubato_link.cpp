@@ -46,14 +46,18 @@
 //   spi_ok over a run with a hole, because the loop cannot count the
 //   frames it asked for without the one that never came. The pump reads
 //   OVR after DATAR and ends spi_overrun.
-//   THE ANSWER MODE. The CH32V006's client answers in mode 3 and not in
-//   mode 0 (its spi_peer's header: mode-0 answers come back a bit early in
-//   a window that follows another answer), so it serves spi_link's ack,
-//   nak, ident and report windows in mode 3, the protocol's alternate
-//   answer mode. The shared body's rendezvous finds it so (its need_peer():
-//   a ping in mode 0 fails, the next in mode 3 is answered) and clocks
-//   every answer window in mode 3 from there; the command windows stay
-//   mode 0.
+//   THE ANSWER MODE. The CH32V006's client answers with CPOL = 1 only
+//   (its RM 16.2.3; measured, docs/ch32v00x/spi.md: in modes 0 and 1 a
+//   window whose first answer bit is 1, the host's MOSI low at the select's
+//   fall, slips one bit at both ends), so it serves spi_link's ack, nak,
+//   ident and report windows in mode 3, the protocol's alternate answer
+//   mode. The shared body's rendezvous finds it so (its need_peer(): a
+//   ping in mode 0 fails, the next in mode 3 is answered) and clocks every
+//   answer window in mode 3 from there; the command windows stay mode 0,
+//   where that client only listens. Every data window is clocked with
+//   CPOL = 1: the matrix (o) in modes 2 and 3, the ladders (p) and the
+//   arbiter's window (w) in mode 3, the shared body's data mode as this
+//   suite's LinkTraits names it.
 //   THE UART. USART4 on its default column, PB0 (TX) and PB1 (RX), both
 //   engines on the port's channels (RM 9.2.3: 1 transmits, 8 receives) - the
 //   receive engine a circular ring of 2048 over the whole storage, never
@@ -140,30 +144,34 @@
 //      pings, every frame on the engines at /256 = 187.5 kHz and its answer
 //      decoded by the Client.
 //   o  the matrix on the DMA engines (32 frames a window at /32 = 1.5 MHz,
-//      against the peer's DMA serve): modes 0 and 3 in 8- and 16-bit frames,
+//      against the peer's DMA serve): modes 2 and 3 in 8- and 16-bit frames,
 //      LSb first in both widths, and a bit-order mismatch as an exact
 //      two-way reversal - byte-exact at both ends; the data windows' bytes
-//      over their cycles printed against the control's. Modes 1 and 2 are
-//      not in it: the CH32V006's client is served in neither direction there
-//      (docs/ch32x035/spi.md, "Against a foreign client").
+//      over their cycles printed against the control's. Modes 0 and 1 are
+//      not in it: the CH32V006's client answers with CPOL = 1 only (THE
+//      ANSWER MODE above).
 //   p  the ladders through the arbiter, every BR code from /256 to /2: the
 //      POLLED LOOP in 16-bit frames (8, from an odd address) and in byte
 //      frames (8), the RXNE PUMP in 16-bit frames (16, from an odd address)
-//      and the DMA ENGINES (32 byte frames), against the peer's DMA serve.
-//      Judged to /2 = 24 MHz, table 3-19's ceiling for both roles, where
+//      and the DMA ENGINES (32 byte frames), against the peer's DMA serve,
+//      in mode 3. Judged to /2 = 24 MHz, table 3-19's ceiling for both roles, where
 //      test_x035_spi's ladder judges both host paths in byte frames. In the
 //      control every rung is byte-exact on every path. Under pressure the
-//      pump and the engines are, and the polled loop is byte-exact or cut
-//      short by a detected failure - spi_stalled, this loop's (above) - at a
-//      rung where two frames are in flight: never a run with a hole handed
-//      back spi_ok, never a failure where one frame is.
+//      engines are, and the polled loop is byte-exact or cut short by a
+//      detected failure - spi_stalled, this loop's (above) - at a rung where
+//      two frames are in flight: never a run with a hole handed back spi_ok,
+//      never a failure where one frame is. The pump's verdict asks
+//      byte-exact; a pressure that preempts the arbiter between the pump's
+//      first two writes and its arming of RXNE for longer than a frame
+//      loses the second frame, reported spi_overrun (docs/ch32x035/spi.md,
+//      "Not covered yet": measured on the flash placement, rare).
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
 //      frames, two outstanding, on the engines), Minor below it (10 POLLED
 //      requests of 8 frames, one outstanding: under dma_min_frames_polled,
 //      the polled loop) and, in a pressure pass, Pressure itself (8 requests
 //      of 1 frame, one outstanding: under dma_min_frames, the pump), all at
-//      /32 = 1.5 MHz inside ONE select window the letter holds - the peer's
-//      exchange is one burst - of constant frames. THE RATE IS w's OWN (the
+//      /32 = 1.5 MHz in mode 3 inside ONE select window the letter holds -
+//      the peer's exchange is one burst - of constant frames. THE RATE IS w's OWN (the
 //      shared body's LinkTraits): at the command rate /256 a byte frame is
 //      2048 cycles with two in flight, and a 3000-cycle preemption inside
 //      Minor's polled transaction would lose one (p's limit), turning w into
@@ -174,7 +182,10 @@
 //      counting every frame exact.
 //   i  dark: every object idle, TIM2 stopped with its line quiet and its
 //      DMA requests off, no time event armed, the SPI host idle with the
-//      select high, its requests down and both its channels disabled, the
+//      select high, its requests down and both its channels with nothing
+//      left to move (disabled, or enabled with a count of zero: this
+//      controller's EN stands after a completed block, docs/ch32x035/dma.md,
+//      and the engines' next start clears it), the
 //      link port given back (gate closed, pads not outputs, both channels
 //      disabled), the LED's pad not an output, the ceiling the Console's
 //      own.
@@ -360,10 +371,16 @@ constexpr const char* peer_name = "the CH32V006K8U6";
 
 /// Letter w's rate and Pressure's length on this host (the file header):
 /// /32, one frame in flight, and a request of one frame, under
-/// dma_min_frames, so that it takes the pump.
+/// dma_min_frames, so that it takes the pump; and the data windows' mode.
 struct LinkTraits {
     static constexpr SpiClock w_rate = SpiClock::div32;
     static constexpr uint8_t w_press_len = 1;
+    /// The data windows in mode 3: the CH32V006's client answers with CPOL =
+    /// 1 alone (THE ANSWER MODE above), and mode 3 is the mode its answer
+    /// windows already run in, so a data window that follows an answer
+    /// window changes nothing on the wire; mode 2 would flip CPHA between
+    /// them for no measurement mode 3 lacks (the matrix runs both).
+    static constexpr SpiMode data_mode = SpiMode::mode3;
 };
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's link suite
@@ -573,8 +590,9 @@ void to_matrix() {
                 sl::print_outcome(e, o);
             }
         };
-        // Modes 0 and 3 only: the far client's (the file header).
-        for (const uint8_t m : {uint8_t{0}, uint8_t{3}}) {
+        // Modes 2 and 3 only: the far client answers with CPOL = 1 (the
+        // file header).
+        for (const uint8_t m : {uint8_t{2}, uint8_t{3}}) {
             for (uint8_t wide = 0; wide < 2u; ++wide) {
                 sl::Exchange e{};
                 e.cfg.mode = m;
@@ -584,14 +602,14 @@ void to_matrix() {
             }
         }
         for (uint8_t wide = 0; wide < 2u; ++wide) {
-            sl::Exchange e{};
+            sl::Exchange e{};   // mode 3, LinkTraits::data_mode
             e.cfg.dord = 1;
             e.host_lsb = true;
             e.wide = wide != 0u;
             one(e);
         }
         {
-            sl::Exchange e{};
+            sl::Exchange e{};   // mode 3, LinkTraits::data_mode
             e.cfg.dord = 1;   // the peer LSb, this end MSb: each end checks the bit reverse
             one(e);
         }
@@ -611,7 +629,7 @@ void to_matrix() {
         print(serial, "    ", good, " of ", total, " exchanges exact; the data windows carried ", bytes,
               " bytes in ", cycles / cycles_per_us, " us, ", rate_x10 / 10u, ".", rate_x10 % 10u,
               " kB/s (", vs, " permille of the control's rate)", crlf);
-        bench.verdict(pass_label(s), "modes 0 and 3 x two widths, LSb first in both, a DORD mismatch: every "
+        bench.verdict(pass_label(s), "modes 2 and 3 x two widths, LSb first in both, a DORD mismatch: every "
                                      "window byte-exact at both ends on the DMA engines",
                       good == total);
         bench.verdict(pass_label(s), "the command channel still answers after the matrix", ping);
@@ -674,7 +692,7 @@ bool climb(Path path, uint8_t seed) {
     bool all = true;
     for (uint8_t k = 0; k < rung_count; ++k) {
         const SpiClock c = rungs[k];
-        sl::Exchange e{};
+        sl::Exchange e{};   // in LinkTraits::data_mode, mode 3
         e.rate = c;
         e.polled = path_polled(path);
         e.wide = path_wide(path);
@@ -799,7 +817,8 @@ void tw_arbiter() {
         const uint16_t frames = static_cast<uint16_t>(w::client_n * w::client_len + w::minor_n * w::minor_len +
                                                       (pressing ? w::press_n * w::press_len : 0u));
         spilink::Params a{};
-        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+        a.cfg = spilink::Cfg{.apply = 1, .mode = sl::mode_number(w::mode), .dord = 0,
+                             .regime = spilink::regime_buffer_wait};
         a.count = frames;
         a.ms = 2000;
         a.seed_a = w::seed_a;
@@ -823,7 +842,7 @@ void tw_arbiter() {
             // the protocol pays on each side of it. The bus is idle here: no
             // request is outstanding.
             sl::settle();
-            Host::prime(SpiMode::mode0, w::rate);
+            Host::prime(w::mode, w::rate);
             CsPin::clear();
             wait_us(30);
             w::live = true;
@@ -926,9 +945,14 @@ void ti_dark() {
                   !Pulse::enabled() && (Pulse::interrupts() & Pulse::update_interrupt) == 0u &&
                       (Pulse::interrupts() & tim_dma_enables) == 0u && !Pfic::pending(Pulse::update_irq()));
     bench.verdict("no time event is armed (the arbiter's timeout among them)", !TE::next_deadline().has_value());
-    bench.verdict("the SPI host idle with the select high, its DMA requests down and both its channels disabled",
+    // A channel with nothing left to move: disabled, or EN standing after a
+    // completed block with its count at zero (docs/ch32x035/dma.md).
+    auto spent = [](bool enabled, uint16_t count) { return !enabled || count == 0u; };
+    bench.verdict("the SPI host idle with the select high, its DMA requests down and both its channels with nothing "
+                  "left to move",
                   !SpiS::busy() && (SpiS::regs().CTLR2 & (spi_txdmaen | spi_rxdmaen)) == 0u &&
-                      !SpiTxChannel::enabled() && !SpiRxChannel::enabled() && pad_is_output<CsPin>() &&
+                      spent(SpiTxChannel::enabled(), SpiTxChannel::count()) &&
+                      spent(SpiRxChannel::enabled(), SpiRxChannel::count()) && pad_is_output<CsPin>() &&
                       CsPin::read());
     bench.verdict("the link port given back: its gate closed, its pads not outputs, both its channels disabled",
                   !Rcc::enabled(U4::bus, usart_gate_for(4)) && !pad_is_output<Tx4>() && !pad_is_output<Rx4>() &&
@@ -1173,7 +1197,7 @@ int main() {
         brio::Pfic::enable(Pulse::update_irq());
 
         bench.letter('n', "the peer's command channel through the arbiter", tn_peer_link);
-        bench.letter('o', "the matrix on the DMA engines: modes 0 and 3, widths, bit orders", to_matrix);
+        bench.letter('o', "the matrix on the DMA engines: modes 2 and 3, widths, bit orders", to_matrix);
         bench.letter('p', "the ladders: the polled loop both widths, the pump, the engines, every code", tp_ladders);
         bench.letter('w', "the arbiter under pressure: three requesters, one bus", tw_arbiter);
         bench.letter('i', "dark: every object idle, nothing lit", ti_dark);

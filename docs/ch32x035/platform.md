@@ -1217,9 +1217,13 @@ suite is the link suites' shared body,
 `avrxt/src/apps/rubato_link.hpp`; the UART key's command channel and
 the HSI's calibration are `x035_link_dut.hpp`, the helpers
 `test_x035_usart` shares. Key `y` (115 verdicts) ran three times on the
-SRAM image and nine on the flash image, every verdict green; key `z` is
-built and not judged ([spi.md](spi.md), "Not covered yet"). What it
-established:
+SRAM image and nine on the flash image, every verdict green; key `z`
+(120 verdicts, its data windows in mode 3, the mode the CH32V006's client
+answers in) ran ten times on each image, every verdict green on the SRAM
+image and in nine runs of the flash image, the tenth losing one pumped
+frame at a transaction's opening, reported `spi_overrun`
+([spi.md](spi.md), "The SPI stack under the preemptive kernel" and "Not
+covered yet"). What it established:
 
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the

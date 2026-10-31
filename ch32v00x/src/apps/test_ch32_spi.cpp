@@ -65,9 +65,10 @@
 //   q  THE KERNEL against the peer: four transactions queued from one
 //      dispatch in ONE select window, read back by the second chip
 //   r  THE ROLES INVERT: this chip as the CLIENT on its HARDWARE NSS
-//      (PC1) under the peer's host_burst - modes 0 and 3 judged both
-//      ways, MSb and LSb first, 16-bit frames; modes 1 and 2 refused by
-//      the driver
+//      (PC1) under the peer's host_burst - the answering client in modes
+//      2 and 3 judged both ways, MSb and LSb first, a first answer bit of
+//      0 and of 1, 16-bit frames; modes 0 and 1 refused by the driver as
+//      an answering client (spi_client_may_answer)
 //   m  MODF from a second chip: a host whose NSS is a hardware input,
 //      demoted four times by the peer's ss_pulse, and the clearing
 //      sequence
@@ -1588,16 +1589,19 @@ void tp_peer_rates() {
         }
         print(serial, crlf);
     }
-    // THE PAIR'S CEILING (letter s): the foreign client is exact at every
-    // pattern to /8 = 6 MHz, and from /4 not while its own MISO stands
-    // high; listening, with its MISO floating, to /4 = 12 MHz. The rungs
-    // above are printed; the verdicts stop at the ceiling.
+    // THE PAIR'S CEILING (letter s), from the far chip's datasheet, table
+    // 3-19: a client's answer is valid up to 25 ns after its shifting edge
+    // and this host needs 5 ns of setup, 30 ns - inside the 41.7 ns half
+    // period of /4 = 12 MHz, outside the 20.8 ns of /2. So an answer is
+    // read to /4; what this host sends (its own data valid 5 ns after its
+    // edge, the client's setup 5 ns) is heard to /2. The rungs above are
+    // printed; the verdicts stop at those ceilings.
     const auto held_to = [](uint8_t broke, uint8_t code) { return broke == 8u || broke < code; };
-    bench.verdict("BOTH HOST PATHS exact both ways against the peer's DMA serve at every code to /8 = 6 MHz, the "
-                  "pair's ceiling",
-                  held_to(broke_at[0], 2) && held_to(broke_at[1], 2));
-    bench.verdict("this host's TRANSMIT-ONLY paths reach a listening client exact at every code to /4 = 12 MHz",
-                  held_to(broke_at[4], 1) && held_to(broke_at[5], 1));
+    bench.verdict("BOTH HOST PATHS exact both ways against the peer's DMA serve at every code to /4 = 12 MHz, the "
+                  "ceiling of a read (table 3-19)",
+                  held_to(broke_at[0], 1) && held_to(broke_at[1], 1));
+    bench.verdict("this host's TRANSMIT-ONLY paths reach a listening client exact at every code to /2 = 24 MHz",
+                  held_to(broke_at[4], 0) && held_to(broke_at[5], 0));
     // The peer's polled run is ITS ceiling - the CH32X035 client's run,
     // each answer reloaded from code fetched from the flash on the TXE of
     // the frame before it - printed above: behind this polled host's
@@ -1804,7 +1808,7 @@ ClientBurst client_burst(uint8_t mode, bool lsb, bool wide, uint8_t seed_a, uint
 void print_burst(const char* label, const ClientBurst& c, uint16_t count) {
     print(serial, "  ", label, ": ");
     if (!c.admitted) {
-        print(serial, "REFUSED by SpiClient (spi_client_mode_served)", crlf);
+        print(serial, "REFUSED by SpiClient (spi_client_may_answer)", crlf);
         return;
     }
     print(serial, "received ", c.frames, "/", count, " mism ", c.mism);
@@ -1827,40 +1831,47 @@ void tr_peer_client() {
     if (!need_peer()) {
         return;
     }
-    // Modes 0 and 3, MSb first: the modes this part's client is served in.
+    // Modes 2 and 3 (CPOL = 1, the answering client's, 16.2.3), MSb first,
+    // the first answer bit 0 (0x7x) and 1 (0xDx): the bit the CPOL = 0
+    // modes slip on.
     uint8_t exact = 0;
-    for (uint8_t m = 0; m < 4u; m = static_cast<uint8_t>(m + 3u)) {
-        const ClientBurst c = client_burst(m, false, false, static_cast<uint8_t>(0x2C + m), static_cast<uint8_t>(0x71 + m));
-        char label[] = "mode 0 MSb";
-        label[5] = static_cast<char>('0' + m);
-        print_burst(label, c, 12);
-        exact = static_cast<uint8_t>(exact + (burst_exact(c, 12) ? 1u : 0u));
+    for (uint8_t m = 2; m < 4u; ++m) {
+        for (uint8_t b = 0; b < 2u; ++b) {
+            const ClientBurst c = client_burst(m, false, false, static_cast<uint8_t>(0x2C + m),
+                                               static_cast<uint8_t>((b != 0u ? 0xD1u : 0x71u) + m));
+            char label[] = "mode 0 MSb, first bit 0";
+            label[5] = static_cast<char>('0' + m);
+            label[22] = static_cast<char>('0' + b);
+            print_burst(label, c, 12);
+            exact = static_cast<uint8_t>(exact + (burst_exact(c, 12) ? 1u : 0u));
+        }
     }
-    bench.verdict("THIS CHIP AS CLIENT ON ITS HARDWARE NSS, modes 0 and 3: every frame of a foreign host exact, its "
-                  "answers exact FROM THE FIRST FRAME (the preload)",
-                  exact == 2u);
-    // Modes 1 and 2: refused by the driver before anything is commanded.
+    bench.verdict("THIS CHIP AS CLIENT ON ITS HARDWARE NSS, modes 2 and 3: every frame of a foreign host exact, its "
+                  "answers exact FROM THE FIRST FRAME (the preload), whatever the first answer bit",
+                  exact == 4u);
+    // Modes 0 and 1 as an answering client: refused by the driver before
+    // anything is commanded.
     uint8_t refused = 0;
-    for (uint8_t m = 1; m < 3u; ++m) {
+    for (uint8_t m = 0; m < 2u; ++m) {
         const ClientBurst c = client_burst(m, false, false, 0x11, 0x22);
         char label[] = "mode 0 MSb";
         label[5] = static_cast<char>('0' + m);
         print_burst(label, c, 12);
         refused = static_cast<uint8_t>(refused + (!c.admitted ? 1u : 0u));
     }
-    bench.verdict("modes 1 and 2 are REFUSED by SpiClient on this part (spi_client_mode_served: measured served "
-                  "neither way)",
-                  device::part != Ch32Part::v006 || refused == 2u);
-    // LSb first, modes 0 and 3: the peer's host clocks LSb first too.
+    bench.verdict("an ANSWERING client in modes 0 and 1 is REFUSED by SpiClient (spi_client_may_answer: 16.2.3's "
+                  "CPOL = 1, measured)",
+                  refused == 2u);
+    // LSb first, modes 2 and 3: the peer's host clocks LSb first too.
     uint8_t lsb_exact = 0;
-    for (uint8_t m = 0; m < 4u; m = static_cast<uint8_t>(m + 3u)) {
+    for (uint8_t m = 2; m < 4u; ++m) {
         const ClientBurst c = client_burst(m, true, false, static_cast<uint8_t>(0x3D + m), static_cast<uint8_t>(0x82 + m));
         char label[] = "mode 0 LSb";
         label[5] = static_cast<char>('0' + m);
         print_burst(label, c, 12);
         lsb_exact = static_cast<uint8_t>(lsb_exact + (burst_exact(c, 12) ? 1u : 0u));
     }
-    bench.verdict("and LSb first, both ends agreeing, in modes 0 and 3: exact both ways", lsb_exact == 2u);
+    bench.verdict("and LSb first, both ends agreeing, in modes 2 and 3: exact both ways", lsb_exact == 2u);
     // 16-bit frames, mode 3.
     const ClientBurst w = client_burst(3, false, true, 0x4E, 0x93);
     print_burst("mode 3 MSb 16-bit", w, 8);
