@@ -215,15 +215,15 @@ struct Rp2350Pl022 {
     /// What the host's two ways cost this chip's cores at 150 MHz, one set
     /// per architecture (Pl022Costs; docs/rp2350/spi.md, "The short
     /// request"), measured by test_rp2350_spi's letter f through one call:
-    /// E - F 210 to 220 for a read and 222 to 232 for a write on the
-    /// Cortex-M33, 215 and 223 on Hazard3 (the engines' fixed cost 483 /
-    /// 507 against the polled loop's 262 to 292), and the two loops'
+    /// E - F 223 to 230 for a read and 234 to 235 for a write on the
+    /// Cortex-M33, 222 and 231 on Hazard3 (the engines' fixed cost 481 / 513
+    /// against the polled loop's 251 and 248 / 291 and 285), and the two loops'
     /// frames at clk_peri / 2, 24 / 26 cycles received and stored and 16
     /// written on TNF - the wire's own frame there, so the transmit-only
     /// loop's turn is no longer and any figure up to 16 draws the same
     /// counts.
-    static constexpr Pl022Costs costs = core_kind == CoreKind::hazard3 ? Pl022Costs{215u, 225u, 26u, 16u}
-                                                                       : Pl022Costs{215u, 225u, 24u, 16u};
+    static constexpr Pl022Costs costs = core_kind == CoreKind::hazard3 ? Pl022Costs{220u, 230u, 26u, 16u}
+                                                                       : Pl022Costs{230u, 235u, 24u, 16u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).

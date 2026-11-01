@@ -190,6 +190,10 @@
 //        spi.poll.rx  the same requests as a RECEIVE (the in buffer set),
 //               the host's other polled shape.
 //        spi.poll16, spi.poll16.rx  both shapes in 16-bit frames.
+//        spi.frame  the polled loops' frame against the wire at every named
+//               divisor, 8 and 16 bits, modes 0 and 1, both shapes, under the
+//               mask, measured first and printed after (rp2040/src/apps/
+//               rp_spi_frame.hpp, which says how).
 //               Then THE RECEIVE SHAPE'S PROOF: 100 receive requests of 256
 //               frames on the loop-back at each rate with the tick's handler
 //               stretched to 1500 cycles - past eight frame times at both
@@ -1086,6 +1090,7 @@ void td_dma() {
 // =============================================================================
 using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop alone
 using SpiDc = Pin<22>;
+#include "../../../rp2040/src/apps/rp_spi_frame.hpp"
 uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
 
 struct SpiRate { SpiClock clock; const char* name; };
@@ -1345,6 +1350,8 @@ void te_host() {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     e_cold();   // FIRST: its first request must be the host's first
+    console_drain();
+    rp_spi_frame::measure_and_print(source_buffer, destination_buffer);
 
     // spi.poll (the write) and spi.poll.rx (the receive): rates x widths x
     // modes x sizes.

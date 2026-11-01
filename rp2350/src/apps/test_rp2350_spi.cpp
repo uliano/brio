@@ -61,8 +61,8 @@
 //      than its wire at the rate asked
 //   d  THE DMA ENGINES on the loop: 128-byte blocks with and without a
 //      command phase, ONE DMA interrupt a transaction (the transmit
-//      engine reports errors alone), a polled read long enough to ride
-//      them inside start(), 16-bit frames ON THE ENGINES at a half-word
+//      engine reports errors alone), a polled read of 64 frames on that
+//      host, the loop, no interrupt of either line, 16-bit frames ON THE ENGINES at a half-word
 //      beat, and a 16-bit request on a misaligned buffer run polled inside
 //      start() instead. The first block and
 //      the first polled request are timed TWICE, cold and then warm, with
@@ -78,6 +78,9 @@
 //      refusal on the host with no engines, the short request at the
 //      host's count, a command block chained to its data block, and E - F
 //      measured
+//   g  A POLLED WAIT THAT RUNS OUT (rp2040/src/apps/rp_spi_async.hpp):
+//      spi_stalled, the select released, the receive FIFO drained,
+//      recover() the way back
 //   n  THE PEER: ident (kind 0x08, on its crystal), ten pings, and the
 //      dark listener woken by nothing
 //   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
@@ -196,6 +199,10 @@ uint32_t xip_misses() {
     const uint32_t hits = Xip::hits();
     return Xip::accesses() - hits;
 }
+/// What a miss adds to a wall, the least seen on this chip at the boot's XIP
+/// setting: a line costs 66 to 82 cycles (docs/rp2350/spi.md's first item on the
+/// XIP cache; rp_spi_async.hpp takes the least so as never to flatter a run).
+constexpr uint32_t xip_line_cycles = 66u;
 
 // Aligned for the engines' half-word beat (letter d, the 16-bit frames).
 alignas(4) uint8_t tx_buf[256];
@@ -576,12 +583,10 @@ void td_dma() {
     for (uint16_t i = 0; i < 64; ++i) {
         rx_buf[i] = 0xEE;
     }
-    // A POLLED READ rides the engines inside start() from the host's count
-    // (the receive loop's turn beyond the wire's frame against E - F), at
-    // /2 in mode 3 64 frames on both cores. Its own first run, and the same
-    // request warm.
-    const uint16_t polled_count =
-        DmaHost::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8);
+    // A POLLED READ IS THE LOOP on a host with engines too, at a length and a
+    // rate where the loop's turn outlasts the wire's frame: no interrupt of
+    // either line, so no vector is asked of it, and exact. Its own first run,
+    // and the same request warm.
     Xip::reset_counters();
     t0 = us_now();
     const uint8_t st3 = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3,
@@ -590,19 +595,20 @@ void td_dma() {
     const uint32_t cold3 = xip_misses();
     const bool exact3 = same(tx_buf, rx_buf, 64);
     const uint32_t entries3 = dma_isr_entries;
+    const uint32_t spi3 = spi0_isr_entries;
     Xip::reset_counters();
     t0 = us_now();
     const uint8_t st3_warm = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3,
                                            SpiClocks::div2, SpiDataSize::bits8, true);
     const uint32_t took3_warm = us_now() - t0;
     const uint32_t warm3 = xip_misses();
-    print(serial, "  polled at div2 (75 MHz), mode 3, a command frame and 64 data frames (a polled "
-          "read rides the engines from ", polled_count, "): status ", st3, " in ", took3, " us cold (",
-          cold3, " XIP misses), ", took3_warm, " us warm (", warm3, " misses, status ", st3_warm,
-          "), ", entries3, " DMA interrupt(s); the wire alone ", 65u * 8u * 2u / 150u, crlf);
-    bench.verdict("a polled read past the host's count rides the engines and completes inside "
-                  "start(), exact",
-                  polled_count <= 64u && st3 == spi_ok && exact3 && entries3 == 1u);
+    print(serial, "  polled at div2 (75 MHz), mode 3, on the engined host, a command frame and 64 data "
+          "frames: status ", st3, " in ", took3, " us cold (", cold3, " XIP misses), ", took3_warm,
+          " us warm (", warm3, " misses, status ", st3_warm, "), ", entries3,
+          " DMA interrupt(s); the wire alone ", 65u * 8u * 2u / 150u, crlf);
+    bench.verdict("a polled read of 64 frames on the engined host runs the loop inside start(): "
+                  "exact, no interrupt of either line",
+                  st3 == spi_ok && exact3 && entries3 == 0u && spi3 == 0u);
     // THE BEAT IS THE FRAME: 16-bit frames on aligned buffers ride the
     // engines as half-words - no SPI interrupt at all - and the low-first
     // byte buffer comes back exact.
@@ -886,6 +892,7 @@ int main() {
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
     bench.letter('f', "the asynchronous way: the refusal, the short request, the costs", tf_async);
+    bench.letter('g', "a polled wait that runs out: spi_stalled, recover()", tg_stall);
     // The two-board letters drive link pads: each behind the partner-rail
     // guard (pair_power.hpp).
     bench.letter('n', "the peer: ident, the command channel, the dark listener",

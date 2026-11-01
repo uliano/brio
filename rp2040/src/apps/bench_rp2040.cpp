@@ -153,7 +153,10 @@
 //      names: spi.poll (a polled WRITE, no in buffer) and spi.poll.rx (the
 //      receive) of 16 and 256 frames at clk_peri / 2, / 4 and / 16 in mode
 //      0 and in mode 3, spi.poll16 and spi.poll16.rx the same in 16-bit
-//      frames, the receive shape's proof under a tick handler stretched
+//      frames, spi.frame - the polled loops' frame against the wire at
+//      every named divisor, 8 and 16 bits, modes 0 and 1, both shapes, under
+//      the mask, measured first and printed after (rp_spi_frame.hpp) - the
+//      receive shape's proof under a tick handler stretched
 //      past eight frame times, and spi.req - a command byte and 0, 2 and
 //      15 data bytes with D/C scripted at clk_peri / 16, wall less the
 //      wire's cycles the host's fixed cost per request, and spi.cold - the
@@ -903,6 +906,7 @@ void td_dma() {
 using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop alone
 using SpiSelect = Pin<17>;
 using SpiDc = Pin<22>;
+#include "rp_spi_frame.hpp"
 volatile bool plain_done = false;
 uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
 volatile uint32_t tick_stretch = 0;
@@ -1118,6 +1122,8 @@ void te_host() {
         spi_tx[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     e_cold();   // FIRST: its first request must be the host's first
+    drain();
+    rp_spi_frame::measure_and_print(spi_tx, spi_rx);
     struct Shape { bool polled; bool with_rx; };
     constexpr Shape shapes[] = {{true, false}, {true, true}};
     for (const Shape& shape : shapes) {

@@ -50,8 +50,9 @@
 //   d  THE DMA ENGINES on the loop - half-word engines, SSPDR's width:
 //      128-byte blocks with and without a command phase, timed, in ONE
 //      DMA interrupt a transaction (the transmit engine reports errors
-//      alone); a polled read long enough to ride them inside start();
-//      16-bit frames riding the same engines with no SPI interrupt; a
+//      alone); a polled read of 64 frames on that host, the loop, no
+//      interrupt of either line; 16-bit frames riding the same engines
+//      with no SPI interrupt; a
 //      16-bit request whose buffers are not half-word aligned run polled
 //      inside start() instead; and THE RATE ON THE WIRE - a
 //      frame inside an engined block timed (the difference of a 2048- and
@@ -62,6 +63,8 @@
 //   f  THE ASYNCHRONOUS WAY (rp_spi_async.hpp): the refusal on the host
 //      with no engines, the short request at the host's count, a command
 //      block chained to its data block, and E - F measured
+//   g  A POLLED WAIT THAT RUNS OUT (rp_spi_async.hpp): spi_stalled, the
+//      select released, the receive FIFO drained, recover() the way back
 //   n  THE PEER: ident (kind 0x09, on its crystal), ten pings, and the
 //      dark listener woken by nothing
 //   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
@@ -92,6 +95,7 @@
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/dma.hpp"
+#include "rp2040/flash.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
 #include "rp2040/pio.hpp"
@@ -166,6 +170,9 @@ bool bus_ao_live = false;
 
 uint32_t us_now() { return Timer::now_low(); }
 uint32_t cycles_now() { return Ticker::cycles(); }
+/// What a miss adds to a wall at the boot's XIP setting: the figure under which E
+/// reads 765 to 771 over runs counting 2 to 10 misses (rp_spi_async.hpp).
+constexpr uint32_t xip_line_cycles = 92u;
 
 alignas(4) uint8_t tx_buf[256];
 alignas(4) uint8_t rx_buf[256];
@@ -437,10 +444,9 @@ void td_dma() {
     bench.verdict("a command frame polled inside start(), then 32 data frames on the engines: exact, one DMA "
                   "interrupt",
                   st2 == spi_ok && same(tx_buf, rx_buf, 32) && entries2 == 1u);
-    // A POLLED READ rides the engines inside start() from the host's count
-    // (the receive loop's turn beyond the wire's frame against E - F): at
-    // /2 in mode 3, 64 frames on this core.
-    const uint16_t polled_count = DmaHost::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8);
+    // A POLLED READ IS THE LOOP on a host with engines too, at a length and a
+    // rate where the loop's turn outlasts the wire's frame: no interrupt of
+    // either line, so no vector is asked of it, and exact.
     fill_pattern(tx_buf, 64, 0x51);
     for (uint16_t i = 0; i < 64; ++i) {
         rx_buf[i] = 0xEE;
@@ -449,10 +455,11 @@ void td_dma() {
     const uint8_t st3 = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode3, SpiClocks::div2, SpiDataSize::bits8, true);
     const uint32_t took3 = us_now() - t0;
     const uint32_t entries3 = dma_isr_entries;
-    print(serial, "  polled at div2, mode 3, a command frame and 64 data frames (a polled read rides the engines "
-          "from ", polled_count, "): status ", st3, " in ", took3, " us, ", entries3, " DMA interrupt(s)", crlf);
-    bench.verdict("a polled read past the host's count rides the engines and completes inside start(), exact",
-                  polled_count <= 64u && st3 == spi_ok && same(tx_buf, rx_buf, 64) && entries3 == 1u);
+    print(serial, "  polled at div2, mode 3, on the engined host, a command frame and 64 data frames: status ", st3,
+          " in ", took3, " us (the wire alone ", 65u * 8u * 2u / 125u, "), ", entries3, " DMA interrupt(s)", crlf);
+    bench.verdict("a polled read of 64 frames on the engined host runs the loop inside start(): exact, no interrupt "
+                  "of either line",
+                  st3 == spi_ok && same(tx_buf, rx_buf, 64) && entries3 == 0u && spi0_isr_entries == 0u);
     fill_pattern(tx_buf, 32, 0x61);
     for (uint16_t i = 0; i < 32; ++i) {
         rx_buf[i] = 0xEE;
@@ -685,6 +692,7 @@ int main() {
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
     bench.letter('f', "the asynchronous way: the refusal, the short request, the costs", tf_async);
+    bench.letter('g', "a polled wait that runs out: spi_stalled, recover()", tg_stall);
     bench.letter('n', "the peer: ident, the command channel, the dark listener", link::tn_peer);
     bench.letter('o', "the matrix against the PIO client", link::to_matrix);
     bench.letter('p', "the ladder, judged to the client's ceiling", link::tp_ladder);

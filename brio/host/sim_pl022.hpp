@@ -265,9 +265,8 @@ struct SimPl022 {
     /// stage a request on either side of the edges they give. On this
     /// machine SSPCLK is the core's clock, so at clk / 2 in mode 3 a byte
     /// frame is 16 cycles: an asynchronous read rides the engines from 5
-    /// frames (100 over the receive loop's 20), a write from 7 (100 over
-    /// the wire's 16), and a polled read from 25 (100 over the 4 the loop
-    /// spends beyond the wire).
+    /// frames (100 over the receive loop's 20) and a write from 7 (100 over
+    /// the wire's 16).
     static constexpr Pl022Costs costs{100u, 100u, 20u, 12u};
 
     /// The two blocks, and the reset value the block comes up with:

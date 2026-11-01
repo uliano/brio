@@ -504,9 +504,8 @@ uint16_t path_frames(Path p) {
 }
 
 /// THE SHAPES, each from the host's own rule (pl022/spi.hpp, "THE SHORT
-/// ASYNCHRONOUS REQUEST"): a polled window runs the polled loop at every
-/// rung here (a polled read rides the engines only where the loop's turn
-/// outlasts the wire's frame, faster than any rung); an asynchronous one
+/// ASYNCHRONOUS REQUEST"): a polled window runs the polled loop, at any
+/// length and with engines bound; an asynchronous one
 /// rides the engines from the host's count at its rate and runs polled
 /// inside start() below it, and a 16-bit one whose buffers are not
 /// half-word aligned runs polled at any length (the DMA would move a

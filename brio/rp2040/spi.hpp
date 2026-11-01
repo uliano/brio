@@ -179,12 +179,12 @@ struct Rp2040Pl022 {
     static constexpr uint8_t no_pad = 0xFFu;
     /// What the host's two ways cost this chip's Cortex-M0+ at 125 MHz
     /// (Pl022Costs; docs/rp2040/spi.md, "The short request"), measured by
-    /// test_rp2040_spi's letter f through one call: E - F 282 for a read
-    /// and 294 for a write (the engines' fixed cost 757 against the polled
-    /// loop's 475 and 463), and the two loops' frames at clk_peri / 2, 42
+    /// test_rp2040_spi's letter f through one call: E - F 305 to 309 for a
+    /// read and 309 for a write (the engines' fixed cost 768 against the polled
+    /// loop's 462 and 459), and the two loops' frames at clk_peri / 2, 42
     /// cycles received and stored, 21 written on TNF - the Cortex-M0+'s
     /// floor where the wire's frame is 16.
-    static constexpr Pl022Costs costs{280u, 290u, 42u, 21u};
+    static constexpr Pl022Costs costs{305u, 310u, 42u, 21u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).

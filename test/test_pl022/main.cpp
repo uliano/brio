@@ -339,12 +339,20 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
     CHECK(regs().SSPDR == out_buf[15]);   // the last frame written
     CHECK(regs().SSPCR0 == ((15u << 8) | 7u));
 
-    // A loop whose frames never come back runs out of its budget: the
-    // engine's own status, the select released, the block left for
-    // recover().
+    // A loop whose frames never come back runs out of its budget:
+    // spi_stalled, as every family's host answers it, never the engines'
+    // spi_dma_fault; the select released, the block left for recover(). The
+    // drain is not judged here: a receive FIFO of plain memory holds nothing
+    // to drain (brio/host/sim_pl022.hpp); the suites' letter c judges it on
+    // silicon.
+    const uint32_t stalled_from = SimPl022Bench::pin_clear_at[cs_pin];
     CHECK(Host::start(r));
-    CHECK(Host::status() == spi_dma_fault);
+    CHECK(Host::status() == spi_stalled);
+    CHECK(Host::status() != spi_dma_fault);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] > stalled_from);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] > SimPl022Bench::pin_clear_at[cs_pin]);
     CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(regs().SSPIMSC == 0u);
 
     // recover() releases the select FIRST and puts the block back where
     // start() is legal, with the applied configuration standing and the
@@ -477,17 +485,13 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
 
     // THE SHORT ASYNCHRONOUS REQUEST (pl022/spi.hpp's arithmetic over
     // SimPl022's figures): at clk / 2 in mode 3 a byte frame is 16 cycles,
-    // so a read rides the engines from 5 frames, a write from 7, and a
-    // polled read from 25.
+    // so a read rides the engines from 5 frames and a write from 7.
     fresh();
     REQUIRE(Engined::init(clock));
     CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, true) == 5u);
     CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, false) == 7u);
-    CHECK(Engined::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8) == 25u);
-    // At clk / 16 in mode 0 a frame is 152 cycles: one frame repays them,
-    // and a polled read never rides them (the wire outlasts the loop).
+    // At clk / 16 in mode 0 a frame is 152 cycles: one frame repays them.
     CHECK(Engined::async_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8, true) == 1u);
-    CHECK(Engined::polled_dma_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8) == 0xFFFFu);
     Engined::Request brief{};
     brief.cs = SimPl022PinRef{cs_pin};
     brief.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
@@ -571,24 +575,63 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
 
-    // A POLLED READ past its count rides the engines inside start() and
-    // waits there for the completion - which no interrupt brings on this
-    // machine, so the bounded wait runs out: the block on the engines, the
-    // engine's own status. One frame short runs the polled loop.
+    // A POLLED REQUEST IS THE LOOP, at any length, on a host with engines
+    // too: a read and a write of the whole buffer, past every count above,
+    // no block on either engine, no request raised, inside start(), and so
+    // no vector needed. Its command phase and data phase alike.
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request held = brief;
     held.polled = true;
-    held.len = 25;
-    CHECK(Engined::start(held));
-    CHECK(TxEngine::blocks == 1u);
-    CHECK(Engined::status() == spi_dma_fault);
-    held.len = 24;
+    held.len = 32;
     frames_come_back(true);
     CHECK(Engined::start(held));
     frames_come_back(false);
-    CHECK(TxEngine::blocks == 1u);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(RxEngine::blocks == 0u);
+    CHECK(regs().SSPDMACR == 0u);
     CHECK(Engined::status() == spi_ok);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    Engined::Request held_write = held;
+    held_write.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    held_write.mode = SpiMode::mode3;
+    held_write.clock = SpiClocks::div16;
+    frames_come_back(true);
+    CHECK(Engined::start(held_write));
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(Engined::status() == spi_ok);
+    Engined::Request held_cmd = held;
+    held_cmd.dc = SimPl022PinRef{8};
+    held_cmd.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    held_cmd.cmd_len = 8;
+    frames_come_back(true);
+    CHECK(Engined::start(held_cmd));
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(Engined::status() == spi_ok);
+    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
+    // Its budget running out on the engined host is the same answer as on
+    // the host with none: spi_stalled, and no engine touched.
+    CHECK(Engined::start(held));
+    CHECK(Engined::status() == spi_stalled);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(TxEngine::faults == 0u);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(Engined::recover());
+    CHECK(regs().SSPCR1 == SpiControl1::enable);
+    // And a command phase polled ahead of an engined data block that runs
+    // out ends the request there with the same answer: no block launched,
+    // true from start(), the select released.
+    Engined::Request two_stalled = brief;
+    two_stalled.dc = SimPl022PinRef{8};
+    two_stalled.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    two_stalled.cmd_len = 1;
+    two_stalled.len = 16;
+    CHECK(Engined::start(two_stalled));
+    CHECK(Engined::status() == spi_stalled);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
 
     // Sixteen-bit frames on BYTE engines: the engines cannot carry them,
     // so the request runs polled inside start() whichever way it asked.

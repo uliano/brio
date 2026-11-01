@@ -767,11 +767,11 @@ What the rows say:
   closest to a warm one; what it still fetches is the caller's code, the
   idle path and the tick.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
-  `start()` 748 bytes without engines and 1344 with them, its shared
-  engine launch 584, the DMA line's body 668 (a command block chained to
+  `start()` 748 bytes without engines and 1040 with them, its shared
+  engine launch 576, the DMA line's body 620 (a command block chained to
   its data block from there); the
   I2C host's 592 to 1652; the UART's 156 to 720 - the bench's four
-  drivers, in all their types, 10.9 KB.
+  drivers, in all their types, 10.5 KB.
 
 So: a program that cannot afford the cold path - a first transaction
 after `init()` on a deadline, a handler that must answer within a frame

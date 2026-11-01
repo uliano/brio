@@ -7,7 +7,9 @@
 // request run polled inside start() at the edge the host's count draws, and
 // a command phase that repays a block of its own chained to its data block
 // from the vector - and MEASURES the figures the count is drawn from (the
-// chip traits' Pl022Costs), E - F as one difference through one call.
+// chip traits' Pl022Costs), E - F as one difference through one call. AND
+// LETTER g, A POLLED WAIT THAT RUNS OUT, on the same host, on the loop-back
+// (below, above tg_stall).
 //
 // What the including suite states before it includes this file, inside its
 // own anonymous namespace with `using namespace brio` in force:
@@ -24,6 +26,8 @@
 //                        written by the suite's glue
 //   cycles_now()         a ruler of clk_sys cycles
 //   us_now()             the microsecond ruler
+//   Xip                  the XIP cache's counters
+//   xip_line_cycles      what one miss adds to a wall, at the boot's XIP setting
 //
 // THE MEASUREMENT (Pl022Costs, pl022/spi.hpp's "THE SHORT ASYNCHRONOUS
 // REQUEST"). E - F is what decides the count, and it is taken AS ONE
@@ -40,7 +44,26 @@
 // pace: the difference of a 48- and a 16-frame polled request at clk_peri /
 // 2 in mode 3 (a byte frame 16 cycles), a read for the receive loop and a
 // write for the transmit-only one (taken there on a run past the FIFO) -
-// through the host WITHOUT engines, where a polled read cannot ride them.
+// through the host without engines.
+//
+// A WALL IS TAKEN NET OF ITS XIP MISSES, and the misses are printed beside E and
+// F. The cache is two-way, so three lines of one transaction in one set miss on
+// every pass and no warm-up cures them: the same host code then reads a wall
+// longer by one line's fill a miss. Measured on the RP2040, the same host code in
+// several layouts of this suite: E 1230 raw in one, its misses not counted, and net
+// of 92 cycles a miss 765 to 771 over runs counting 2 to 10 misses. That is the
+// image's and not the code's, and these figures describe the code, so a run's wall
+// counts less `xip_line_cycles` a miss. Not every miss costs a wall: one run in
+// thirteen on Hazard3 counted four misses on a wall of no extra length, E 246 for 510
+// when the least NET wall was taken (a handler landing inside the wire's time would
+// read so; which one it was is not established). So the run taken is the one with
+// the FEWEST misses and of those the least wall, and only what every run pays is
+// taken off. The
+// tolerance the verdict judges them by stays a quarter of the constant. The
+// counters themselves are one off at some call sites (a fetch between the two
+// resets, or between the two reads, which hit and access counts see apart): a window
+// with no request in it, through the very same instructions, reads that error, and
+// it is taken off (xfer_cycles()).
 
 #pragma once
 
@@ -84,29 +107,49 @@ AsyncRun async_once(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint
 }
 
 /// The best wall of one request through xfer<H>, in clk_sys cycles: three
-/// rounds of five, 3 ms apart, each after one run thrown away. Spread in
-/// time on purpose: one run of the letter in about thirty read every
-/// engined block of a round some 185 cycles long, the next round clean -
-/// a state of a few milliseconds this measurement has not explained, and
-/// does not judge.
+/// rounds of five, 3 ms apart, each after one run thrown away. The best is
+/// the run with the fewest XIP misses and of those the least wall; the
+/// misses go in `least_misses` and the wall comes back net of them (the
+/// file header). A round's first two windows hold no request and the
+/// second reads the counters' own error; the first request is thrown away.
+/// Spread in time on purpose: one run of the letter in about
+/// thirty read every engined block of a round some 185 cycles long, the next
+/// round clean - a state of a few milliseconds this measurement does not judge.
+inline uint32_t least_misses = 0;
+
 template <typename H = DmaHost>
 uint32_t xfer_cycles(uint16_t frames, bool read, bool polled, SpiClock rate = SpiClocks::div4) {
     uint32_t least = 0xFFFF'FFFFu;
+    uint32_t fewest = 0xFFFF'FFFFu;
     for (uint8_t round = 0; round < 3u; ++round) {
         const uint32_t pause = us_now();
         while (us_now() - pause < 3000u) {
         }
-        for (uint8_t k = 0; k < 6u; ++k) {
+        int32_t error = 0;
+        for (uint8_t k = 0; k < 8u; ++k) {
+            Xip::reset_counters();
             const uint32_t t0 = cycles_now();
-            (void)xfer<H>(nullptr, 0, tx_buf, read ? rx_buf : nullptr, frames, SpiMode::mode3, rate,
-                          SpiDataSize::bits8, polled);
+            if (k >= 2u) {
+                (void)xfer<H>(nullptr, 0, tx_buf, read ? rx_buf : nullptr, frames, SpiMode::mode3, rate,
+                              SpiDataSize::bits8, polled);
+            }
             const uint32_t took = cycles_now() - t0;
-            if (k != 0u && took < least) {
+            const uint32_t hits = Xip::hits();
+            const int32_t counted = static_cast<int32_t>(Xip::accesses() - hits);
+            if (k < 2u) {
+                error = counted;
+                continue;
+            }
+            const uint32_t misses = counted > error ? static_cast<uint32_t>(counted - error) : 0u;
+            if (k != 2u && (misses < fewest || (misses == fewest && took < least))) {
                 least = took;
+                fewest = misses;
             }
         }
     }
-    return least;
+    least_misses = fewest;
+    const uint32_t filled = fewest * xip_line_cycles;
+    return least > filled ? least - filled : 0u;
 }
 
 /// E - F for a read or a write, and the polled loop's frame at clk_peri / 4
@@ -116,6 +159,8 @@ struct Measured {
     uint32_t engines_fixed = 0;
     uint32_t polled_fixed = 0;
     uint32_t polled_frame_x10 = 0;
+    uint32_t engined_misses = 0;
+    uint32_t polled_misses = 0;
 };
 
 Measured measure_costs(bool read) {
@@ -124,9 +169,13 @@ Measured measure_costs(bool read) {
     const uint32_t wire = pl022_frame_cycles(pl022_core_per_sspclk_q8(SysClock::hz, SysClock::pclk_hz),
                                              SpiClocks::div4, SpiMode::mode3, SpiDataSize::bits8);
     const uint32_t engined = xfer_cycles(32, read, false);
+    const uint32_t engined_misses = least_misses;
     const uint32_t p8 = xfer_cycles(8, read, true);
+    const uint32_t polled_misses = least_misses;
     const uint32_t p24 = xfer_cycles(24, read, true);
     Measured m{};
+    m.engined_misses = engined_misses;
+    m.polled_misses = polled_misses;
     m.engines_fixed = engined > 32u * wire ? engined - 32u * wire : 0u;
     const uint32_t frame_x10 = p24 > p8 ? (p24 - p8) * 10u / 16u : 0u;
     m.polled_frame_x10 = frame_x10;
@@ -304,18 +353,75 @@ void tf_async() {
     print(serial, "  measured (clk_sys cycles), a read:  E ", rd.engines_fixed, ", F ", rd.polled_fixed, ", E - F ",
           rd.e_less_f, " (the host's ", DmaHost::async_read_budget_cycles, "), the loop's frame at /4 ",
           rd.polled_frame_x10 / 10u, ".", rd.polled_frame_x10 % 10u, ", its turn at /2 ", read_turn_x10 / 10u, ".",
-          read_turn_x10 % 10u, " (the host's ", DmaHost::costs.read_turn, ")", crlf);
+          read_turn_x10 % 10u, " (the host's ", DmaHost::costs.read_turn, "); XIP misses E ", rd.engined_misses,
+          ", F ", rd.polled_misses, crlf);
     print(serial, "                      a write: E ", wr.engines_fixed, ", F ", wr.polled_fixed, ", E - F ",
           wr.e_less_f, " (the host's ", DmaHost::async_write_budget_cycles, "), the loop's frame at /4 ",
           wr.polled_frame_x10 / 10u, ".", wr.polled_frame_x10 % 10u, ", its turn at /2 ", write_turn_x10 / 10u, ".",
-          write_turn_x10 % 10u, " (the host's ", DmaHost::costs.write_turn, ")", crlf);
-    bench.verdict("THE FIGURES THE COUNT IS DRAWN FROM, measured through one call: E - F for a read and for a "
-                  "write, and the two polled loops' turns at clk_peri / 2, each within a quarter of the constant "
-                  "the host carries (the chip traits' Pl022Costs)",
+          write_turn_x10 % 10u, " (the host's ", DmaHost::costs.write_turn, "); XIP misses E ", wr.engined_misses,
+          ", F ", wr.polled_misses, crlf);
+    bench.verdict("THE FIGURES THE COUNT IS DRAWN FROM, measured through one call and net of the XIP misses printed "
+                  "beside them: E - F for a read and for a write, and the two polled loops' turns at clk_peri / 2, "
+                  "each within a quarter of the constant the host carries (the chip traits' Pl022Costs)",
                   within_a_quarter(rd.e_less_f, DmaHost::async_read_budget_cycles) &&
                       within_a_quarter(wr.e_less_f, DmaHost::async_write_budget_cycles) &&
                       turn_within_a_quarter(read_turn_x10, DmaHost::costs.read_turn) &&
                       turn_within_a_quarter(write_turn_x10, DmaHost::costs.write_turn));
     spi0_owner = Spi0Owner::none;
     DmaHost::release();
+}
+
+// g - A POLLED WAIT THAT RUNS OUT. No clock is stopped: the block's enable is
+// taken down under the host, so frames written to the transmit FIFO stay there
+// and the loop's flag never rises, which is a stall on silicon with no clock
+// tree touched. The rate is applied first, so the request's compare finds
+// nothing to change and leaves the enable down. Three frames are left standing
+// in the receive FIFO before that, on the loop-back, and read back as RNE: the
+// request is a write of nine frames at /2 on 8-bit frames, the one shape that
+// reads nothing as it goes, so the frames still stand when its budget runs
+// out, and the drain is what takes them. The budget is 200 000 turns a frame
+// and one more (2 000 000 turns here), at some ten cycles a turn: under 200 ms
+// by a margin. Judged: spi_stalled, never the engines' code, the select released
+// (it was driven low by the request and reads high), the receive FIFO empty.
+// Then recover(), which resets the block, and a polled request exact: the
+// frames left in the transmit FIFO do not come out in front of it.
+void tg_stall() {
+    host_ready();
+    Host::loopback(true);
+    Host::prime(SpiMode::mode0, SpiClocks::div2);
+    Pl022<0>::write_data(0x11u);
+    Pl022<0>::write_data(0x22u);
+    Pl022<0>::write_data(0x33u);
+    const uint32_t t_wait = us_now();
+    while (Pl022<0>::busy() && us_now() - t_wait < 1000u) {
+    }
+    Pl022<0>::enable(false);
+    const bool stood = Pl022<0>::rx_not_empty();
+    fill_pattern(tx_buf, 16, 0x7C);
+    const uint32_t t0 = us_now();
+    const uint8_t st = xfer<Host>(nullptr, 0, tx_buf, nullptr, 9, SpiMode::mode0, SpiClocks::div2,
+                                  SpiDataSize::bits8, true);
+    const uint32_t took = us_now() - t0;
+    const bool released = CsPin::read_out();
+    const bool drained = !Pl022<0>::rx_not_empty();
+    const bool tx_stood = !Pl022<0>::tx_empty();
+    const bool recovered = Host::recover();
+    for (uint16_t i = 0; i < 16; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t st_after = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClocks::div16,
+                                        SpiDataSize::bits8, true);
+    const bool exact_after = same(tx_buf, rx_buf, 16);
+    print(serial, "  the enable down under a polled write of nine frames: three frames stood in the receive FIFO ",
+          stood ? "yes" : "NO", ", status ", st, " in ", took, " us, select released ", released ? "yes" : "NO",
+          ", receive FIFO drained ", drained ? "yes" : "NO", ", the transmit FIFO still held frames ",
+          tx_stood ? "yes" : "no", "; recover() ", recovered ? "true" : "FALSE", ", then 16 frames polled status ",
+          st_after, exact_after ? " exact" : " NOT EXACT", crlf);
+    bench.verdict("A POLLED WAIT THAT RUNS OUT answers spi_stalled, not the engines' code: the select released, "
+                  "the receive FIFO drained of what stood in it",
+                  stood && st == spi_stalled && st != spi_dma_fault && released && drained);
+    bench.verdict("and recover() is the way back: the frames left in the transmit FIFO gone, the next polled request "
+                  "exact",
+                  recovered && st_after == spi_ok && exact_after);
+    Host::release();
 }

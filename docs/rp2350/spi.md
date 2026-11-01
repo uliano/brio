@@ -86,7 +86,12 @@ requests alone and answers an asynchronous one `spi_rejected`, at once
 and with nothing on the wire - `static_assert(Bus::has_dma)` in a
 program that posts one makes it a compile error; and an asynchronous
 request too short to repay the engines at its rate runs polled and
-completes inside `start()` ("The short request" below). The two lent buffers must stay
+completes inside `start()` ("The short request" below). A request with
+`polled` set runs an explicit loop inside `start()`, at any length and with
+engines bound or not, so it needs no vector; a polled wait that runs out
+answers `spi_stalled`, the select released and the receive FIFO drained, and
+`recover()` is the program's way back ([the IP stratum's
+page](../pl022/README.md), "The host above the wire"). The two lent buffers must stay
 untouched and in scope from the post to the `SpiDone` the arbiter
 replies with; nothing checks it. The request is posted from an active
 object's handler, which is what the reply is sent back to. `init()`
@@ -261,8 +266,9 @@ body, the DMA line's, the client's surface) is in
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM").
 - `Rp2350Pl022::costs`, the figures the short request is drawn from, one
-  set per architecture - E - F 215 for a read and 225 for a write on
-  both, the receive loop's turn 24 on the Cortex-M33 and 26 on Hazard3,
+  set per architecture - E - F 230 for a read and 235 for a write on the
+  Cortex-M33, 220 and 230 on Hazard3, the receive loop's turn 24 on the
+  Cortex-M33 and 26 on Hazard3,
   the transmit-only loop's 16 (measured: "The short request" in the
   bench findings). The host's receive engine arms at HIGH_PRIORITY, a
   frame landing on a full receive FIFO being lost, its transmit engine
@@ -338,8 +344,8 @@ extern "C" void isr_spi1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 and clk_peri at 150 MHz, and all of them on BOTH architectures, from one
-source: `test_rp2350_spi` carries 66 verdicts, 36 of the loop-back
-letters a..f and 30 of eight letters on the pair's wire against the desk
+source: `test_rp2350_spi` carries 68 verdicts, 38 of the loop-back
+letters a..g and 30 of eight letters on the pair's wire against the desk
 partner's peer (the last group below), green on the Cortex-M33 pair and
 on the Hazard3 pair. Where a
 number differs between the halves both are given; every verdict reads
@@ -370,7 +376,8 @@ the same.
   a block of its own) then 32 data frames, the echo discarded; a read
   with no out buffer clocks 0xFF; an empty request completes on the spot.
 - **THE POLLED LADDER.** 64 frames on the loop-back, Cortex-M33 then
-  Hazard3: div2 19 / 17 us, div4 20 / 19, div8 35 / 36, div16 68 / 68, and
+  Hazard3: div2 23 to 25 / 27 to 30 us, div4 21 / 21, div8 35 / 37, div16 69
+  / 68, and
   the slower rungs the wire's own time. From div4 down the WIRE sets the
   pace on both halves; at div2 the receive loop's three accesses a frame
   do (the next item). Every rate is byte-exact.
@@ -396,6 +403,26 @@ the same.
     has finished) costs a short request 30 to 130 cycles the receive
     shape spends under the wire instead - measured with the shape taken
     unconditionally, the three-byte request 356 / 354 against 286 / 286.
+  - THE FRAME AGAINST THE WIRE AT EVERY DIVISOR (`spi.frame`: 8 and 16 bits,
+    modes 0 and 1, a frame by the difference of two lengths, the least of
+    five under the mask, the whole table measured before a line of it is
+    printed): at clk_peri / 4 and slower every row of both shapes reads the
+    wire with mode 0's gap, within 0.4 of a cycle a frame on both halves in
+    three runs of the letter, with the overrun flag never raised and no bad
+    status. At / 2, in core cycles, Cortex-M33 / Hazard3, the wire with the
+    gap in brackets:
+
+    | | mode 0 | mode 1 |
+    |---|---|---|
+    | read and stored, 8-bit | 24 / 26 (19) | 24 / 26 (16) |
+    | read and stored, 16-bit | the wire (35) | the wire (32) |
+    | no in buffer, 8-bit | the wire (19) | the wire (16) |
+    | no in buffer, 16-bit | the wire (35) | the wire (32) |
+
+    So the one rate and shape with dead bus is the 8-bit read at 75 MHz; a
+    long one that wants the wire asks asynchronously: on the engines 256
+    frames in mode 3 take the wire and the fixed cost, where the loop takes x
+    1.50 / 1.63 of the nominal wire.
   - THE RECEIVE SHAPE UNDER A LONG HANDLER: 100 receive requests of 256
     frames on the loop-back at each of the three rates with the tick's
     handler stretched to 1500 cycles - eight frames being 128, 256 and
@@ -413,9 +440,7 @@ the same.
     (the data frames wait for the command frame to come back whole, so
     D/C flips on the wire) one frame's latency; the host's own code under
     200. On the engined host the same three requests, polled, take the
-    same loop: 202 / 179, 400 / 256 and 611 / 578 (the Cortex-M33's
-    three-byte figure an image's set conflict, the request missing lines
-    warm there).
+    same loop: 192 / 169, 280 / 250 and 600 / 570.
   - THE VENDOR'S LOOP ON THE SAME BOARD (pico-sdk 2.3.1's
     `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
     the SDK's own placement, built by its CMake with its crt, the select a
@@ -438,22 +463,23 @@ the same.
   frames on the wire, F an 8-frame polled request's wall less 8 frames at
   the loop's pace (the difference of a 24- and an 8-frame request), both
   at clk_peri / 4 in mode 3, the best of fifteen in three rounds 3 ms
-  apart; Cortex-M33 / Hazard3, ten runs each: **E 485 / 509, F 274 / 294
-  for a read and 265 / 292 for a write, E - F 211 / 215 for a read and
-  224 / 220 for a write**, the figure the same in every run of an image
-  (an earlier image of the Cortex-M33 read 220 and 232); the two loops'
+  apart; Cortex-M33 / Hazard3, thirteen runs each: **E 481 / 513, F 251 /
+  291 for a read and 248 / 285 for a write, E - F 223 to 230 / 222 for a read
+  and 234 to 235 / 231 for a write**; the two loops'
   turns at clk_peri / 2 on the host with no engines, 24.0 / 26.0 received
   and stored and 16.0 written on TNF - the wire's own frame, so the
-  transmit-only loop's turn is no longer. The traits carry 215 and 225 on
-  both and the turns 24 / 26 and 16 (`Rp2350Pl022::costs`); letter f
-  judges each within a quarter of its measurement. The counts they draw,
-  judged at their edge in ten runs on each half (one frame under the
+  transmit-only loop's turn is no longer. The walls are net of the XIP
+  cache's misses, which the letter prints beside them ([the RP2040's
+  page](../rp2040/spi.md), "The short request", says why; these images
+  counted none in those runs). The traits carry 230 and 235 on the Cortex-M33, 220
+  and 230 on Hazard3, and the turns 24 / 26 and 16 (`Rp2350Pl022::costs`);
+  letter f judges each within a quarter of its measurement. The counts they
+  draw, judged at their edge in ten runs on each half (one frame under the
   count inside `start()` with no DMA interrupt, the count itself on the
   engines with one, every read byte-exact): a read rides the engines from
-  **9 frames at 75 MHz in mode 3, 6 at 37.5 MHz in mode 0 and 3 at 18.75
-  MHz**, a write from 15 at 75 MHz, on both halves; a polled read rides
-  them inside `start()` from 27 / 22 frames at 75 MHz in mode 3 and never
-  from 37.5 MHz down. A command phase of 15 frames at 75 MHz repays a
+  **10 / 9 frames at 75 MHz in mode 3, 7 / 6 at 37.5 MHz in mode 0 and 4 / 3
+  at 18.75 MHz in mode 0**, a write from 15 at 75 MHz on both. A command
+  phase of 15 frames at 75 MHz repays a
   block of its own and is chained to its data block from the vector, two
   DMA interrupts; a one-frame command runs polled ahead of the data
   block, one.
@@ -469,18 +495,19 @@ the same.
   interrupt; a 16-bit request on a buffer one byte off a half-word runs
   polled inside `start()` and is exact there, no interrupt of either
   line. A command frame polled inside `start()` then data on the engines,
-  a polled read of 64 frames at 75 MHz in mode 3 riding the engines past
-  its count and completing inside `start()`, and a read with no out
+  a polled read of 64 frames at 75 MHz in mode 3 on the same host, the loop
+  inside `start()` with no interrupt of either line, and a read with no out
   buffer through the transmit engine's fixed 0xFF cell are all exact.
   The letter times the 128-byte block, the polled read and the 16-bit
   block twice each - the first run and a repeat - with the XIP cache's
-  misses beside each, over ten runs on each half: the block takes **48
-  to 74 / 46 to 71 us cold, missing 28 to 61 / 20 to 59 lines, and 36 to
-  40 / 37 to 39 us warm**, where the wire with mode 0's frame gap is 32
+  misses beside each, over fifteen runs on each half: the block takes **61
+  to 121 / 61 to 101 us cold, missing 45 to 161 / 43 to 148 lines, and 40 to
+  45 / 36 to 44 us warm**, where the wire with mode 0's frame gap is 32
   (the next items); the polled read, a command frame and 64 data frames
-  at 75 MHz, 25 to 32 / 20 to 24 us cold and 13 to 17 / 16 warm; the
-  16-bit block in mode 3, 54 to 58 / 46 to 48 cold and 31 to 34 / 32
-  warm against a wire of 27. The repeat still misses up to 13 lines: the
+  at 75 MHz, 25 to 30 / 28 to 34 us cold and 15 to 17 / 16 to 17 warm,
+  against a wire of 7; the 16-bit block in mode 3, 50 to 61 / 46 to 61
+  cold and 32 to 36 / 33 to 37 warm against a wire of 27. The repeat still
+  misses up to 12 lines: the
   cache is two-way, and some lines of the image's transaction path
   share a set.
 - **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2350` letter d**, the
@@ -534,7 +561,7 @@ the same.
   three-byte polled request with every line of the cache invalidated
   first (`Xip::invalidate_all()`), under the mask so that no tick's
   handler lands in the one shot, the counters cleared before the start
-  and read after the wall - **5014 / 4444 cycles missing 70 / 65 lines
+  and read after the wall - **5014 / 4349 cycles missing 70 / 64 lines
   with the host in the flash (Cortex-M33 / Hazard3), 830 / 739 missing
   5 / 5 with it InRam, against 642 to 978 warm**; the few left are the
   caller's (the call site with the ruler's reads around it, and on the
@@ -569,6 +596,13 @@ the same.
   misses, 1158 to 1996 cycles - because it touches six to seven times
   fewer lines; this host's first transaction after `init()` pays 10161 /
   8549.
+- **A POLLED WAIT THAT RUNS OUT** (`test_rp2350_spi` letter g, both
+  halves): the block's enable taken down under a polled write of nine frames
+  at clk_peri / 2 with three frames left standing in the receive FIFO, so
+  the transmit FIFO fills and the loop's budget runs out, 2 000 000 turns in
+  171 / 157 ms: `spi_stalled`, the select released, the receive FIFO
+  drained; the transmit FIFO still holds its frames, and after `recover()`
+  sixteen frames polled come back exact. Twelve runs on each half.
 - **THE ARBITER IS UNTOUCHED.** `util/spi_bus.hpp` and
   `util/bus_master.hpp` carry four transactions over the engined host,
   on the engines and polled interleaved, reject the fifth of a four-deep
