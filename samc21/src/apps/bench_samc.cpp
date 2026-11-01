@@ -24,8 +24,8 @@
 // rate test_samc_platform runs at.
 //
 // WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler (and letter
-// e's and u's SERCOM1_Handler, letter u's DMAC_Handler and letter i's
-// SERCOM3_Handler) are bound through BENCH_PLACEMENT, and the SPI host and
+// u's SERCOM1_Handler and DMAC_Handler, and letter i's SERCOM3_Handler)
+// are bound through BENCH_PLACEMENT, and the SPI host and
 // letter u's transmit engine take their placement from HotSpi and
 // HotEngine (util/placement.hpp). In this file all of it is the flash:
 // the vectors, the ISR bodies they inline, the SPI host's polled
@@ -33,8 +33,8 @@
 // `.fast_text` (BENCH_VECTORS_IN_SRAM: the input section samc21/ld/
 // samc21j18a.ld puts first in .data and the crt copies to SRAM,
 // single-cycle at full speed, 9.1) and the SPI host InRam
-// (BENCH_SPI_IN_RAM: its polled transaction and its pump's entry each one
-// instance in SRAM) - this family's two ways to place a path, each where
+// (BENCH_SPI_IN_RAM: its polled transaction one instance in SRAM) - this
+// family's two ways to place a path, each where
 // it reaches (docs/samc21/platform.md, "A handler in SRAM").
 // BENCH_HOT_IN_RAM, which no committed image defines, gives the transmit
 // engine InRam too, the vectors left in the flash: the document's InRam
@@ -141,9 +141,9 @@
 //   e  THE SPI HOST ABOVE THE WIRE (samc21/spi.hpp, docs/samc21/spi.md):
 //      SpiHost<1> on PA16 (MOSI), PA19 (SCK) and PA18 (MISO, FLOATING: the
 //      time is the wire's, the bytes are not judged) - test_samc_spi's
-//      host pads - so what is measured is the polled loop and the byte
-//      pump, the host's two ways to move a run (it has no DMA slot,
-//      samc21/spi.hpp). Every line the
+//      host pads - so what is measured is the polled loop, the one way
+//      this host moves a run (it has no DMA slot, and asynchronous is DMA:
+//      samc21/spi.hpp refuses a request not marked polled). Every line the
 //      BEST of 8 by wall; the two rates are BAUD 1 (12 MHz, f_ref/4) and
 //      BAUD 7 (3 MHz, f_ref/16); a frame is eight bits on this family:
 //        spi.poll  a POLLED WRITE data phase (tx set, rx null - the
@@ -154,13 +154,6 @@
 //                  stood - the overrun the two-level receive buffer raises
 //                  if a loop ever leaves more unread than it holds;
 //        spi.poll.rx  the same, the RECEIVE shape (tx and rx both set);
-//        spi.pump  the same two sizes and rates ISR-style (tx and rx), the
-//                  thread IDLING for the completion (a masked test, then
-//                  Idle::idle(), bounded at 10 ms) - irq and isr are the
-//                  pump's shape (one interrupt a frame), busy its CPU cost;
-//                  the line after prints `launch`, the fewest cycles from
-//                  the interval's start to start()'s return, and BUFOVF
-//                  read after every run as above;
 //        spi.req   THE FIXED COST OF A REQUEST, the price of a DCS command:
 //                  a polled request of 1, 3 and 16 bytes (cmd_len 1, len 0,
 //                  2 and 15, the D/C scripted) at 3 MHz, the select on PA17
@@ -206,7 +199,7 @@
 //      peer's share beside the host's. The host is the byte pump (it has
 //      no DMA slot). SERCOM3_Handler is bound metered or plain per run (a
 //      flag): every op is the BEST of 8 by wall, metered (the thread idles
-//      masked between the vector's edges, as letter e's pump waits) and
+//      masked between the vector's edges) and
 //      plain (`.bare`: the thread spins on the completion edge and no
 //      stamp runs in the vector); n counts data bytes:
 //        i2c.write       n = 1, 2, 16, 255 bytes after the address;
@@ -247,7 +240,7 @@
 //           implementation's.
 //   memset  4 bytes a cycle x hz = 192 000 000 B/s: one STM beat a word,
 //           nothing loaded.
-//   spi.poll, spi.poll.rx, spi.pump, spi.req  SCK / 8 bytes a
+//   spi.poll, spi.poll.rx, spi.req  SCK / 8 bytes a
 //           second: one frame of eight bits a byte.
 //   uart.*  the loop's rate over the ten bits of an 8N1 frame; uart.edge
 //           wire=0 (a latency, not a rate).
@@ -319,9 +312,9 @@ constexpr const char* vectors_in = "SRAM (.fast_text)";
 #define BENCH_PLACEMENT
 constexpr const char* vectors_in = "flash";
 #endif
-// The drivers' placements (util/placement.hpp): the SPI host's (its pump's
-// entry and its polled transaction) and letter u's transmit engine's (its
-// completion). BENCH_SPI_IN_RAM places the first, BENCH_HOT_IN_RAM both.
+// The drivers' placements (util/placement.hpp): the SPI host's (its polled
+// transaction) and letter u's transmit engine's (its completion).
+// BENCH_SPI_IN_RAM places the first, BENCH_HOT_IN_RAM both.
 #if defined(BENCH_HOT_IN_RAM)
 using HotSpi = brio::InRam;
 using HotEngine = brio::InRam;
@@ -725,7 +718,7 @@ void tt_tick() {
 }
 
 // =============================================================================
-// e - the SPI host above the wire: spi.poll, spi.pump, spi.req
+// e - the SPI host above the wire: spi.poll, spi.poll.rx, spi.req
 // =============================================================================
 namespace ee {
 
@@ -742,60 +735,12 @@ constexpr SpiPads spi_pads{
     .data_in_pin = {'A', 18, PinFunction::c},
 };
 
-/// The host: the polled loop and the byte pump. It shares SERCOM1 with
-/// letter u's loop and the two are never up at once; `live` routes
-/// SERCOM1_Handler to this one.
+/// The host: the polled loop. It shares SERCOM1 with letter u's loop and
+/// the two are never up at once; it arms no interrupt.
 using SpiPoll = SpiHost<1, spi_pads, 0, HotSpi>;
-volatile bool live = false;
-volatile bool done = false;
 
 uint8_t spi_tx[256];
 uint8_t spi_rx[256];
-
-/// The wait for a completion: the core IDLES - a masked test, then the
-/// platform's sleep, as the kernel's loop does - bounded at 10 ms. Busy is
-/// then the launch, the completion's handler and the loop's own turns.
-template <typename Flag>
-bool wait_for(Flag finished) {
-    const uint32_t t0 = Ruler::now();
-    for (;;) {
-        disable_interrupts();
-        if (finished()) {
-            enable_interrupts();
-            return true;
-        }
-        Idle::idle();
-        if (Ruler::now() - t0 > Ruler::hz() / 100u) {
-            return finished();
-        }
-    }
-}
-
-/// One operation, the best of 8 by wall, and the launch's own share: the
-/// fewest cycles from the interval's start to start()'s return over the 8.
-template <typename Start, typename Done>
-BenchSample best_launch(Start start, Done finished, uint32_t& launch, bool& ok) {
-    BenchSample best{};
-    Interval iv;
-    launch = 0;
-    ok = true;
-    for (uint8_t run = 0; run < 8u; ++run) {
-        iv.start();
-        const bool started = start();
-        const uint32_t l = iv.elapsed();
-        const bool completed = started && wait_for(finished);
-        const BenchSample s = iv.stop();
-        asm volatile("" ::: "memory");
-        ok = ok && completed;
-        if (run == 0u || s.wall < best.wall) {
-            best = s;
-        }
-        if (run == 0u || l < launch) {
-            launch = l;
-        }
-    }
-    return best;
-}
 
 /// The two real pads of spi.req: the select on SERCOM1's SS pad, which a
 /// software-select host never claims, and the D/C on the board's LED.
@@ -864,44 +809,6 @@ void poll() {
     }
 }
 
-/// spi.pump: the byte pump ISR-style, the thread idling; BUFOVF read after
-/// every run.
-void pump() {
-    for (const uint8_t baud : bauds) {
-        const uint32_t sck = spi_sck_hz(SysClock::hz, baud);
-        for (const uint16_t n : sizes_e) {
-            (void)drain();
-            uint32_t launch = 0;
-            bool ok = false;
-            uint8_t overruns = 0;
-            // best_launch's 8 runs; the overflow flag is cleared before
-            // each and read after it by the completion wait's lambda.
-            const BenchSample s = best_launch(
-                [n, baud] {
-                    done = false;
-                    SpiPoll::Resource::clear_status(SpiStatus::overflow);
-                    const auto r = request<SpiPoll>(n, true, baud, false);
-                    return !SpiPoll::start(r);
-                },
-                [&overruns] {
-                    if (!done) {
-                        return false;
-                    }
-                    if (SpiPoll::Resource::overflow_flag()) {
-                        ++overruns;
-                        SpiPoll::Resource::clear_status(SpiStatus::overflow);
-                    }
-                    return true;
-                },
-                launch, ok);
-            bench_line(serial, "spi.pump", n, s, Ruler::hz(), sck / 8u);
-            print(serial, "  full duplex, SCK ", sck, " Hz: launch ", launch, " cycles, completions ",
-                  ok ? "all" : "MISSING", ", wire ", wire_cycles(n, baud), " cycles, BUFOVF after ",
-                  overruns, " of 8 runs", crlf);
-        }
-    }
-}
-
 /// spi.req: the fixed cost of a polled request with a scripted D/C and a
 /// real select.
 template <typename Host>
@@ -935,17 +842,14 @@ void te_spi_host() {
     ee::CsPin::set();
     ee::DcPin::output();
     ee::DcPin::clear();
-    ee::live = true;
     if (!ee::SpiPoll::init(clock)) {
         print(serial, "  the SPI host did not come up", crlf);
         bench.verdict("ran", false);
         return;
     }
     ee::poll();
-    ee::pump();
     ee::req<ee::SpiPoll>("spi.req");
     ee::SpiPoll::release();
-    ee::live = false;
     ee::CsPin::release();
     ee::DcPin::release();
     bench.verdict("ran", true);
@@ -1668,11 +1572,7 @@ extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
             uu::check_edge([] { return uu::LoopIrq::rx_pending(); });
             break;
         case uu::Live::txe: (void)uu::LoopTxE::isr(); break;
-        default:
-            if (ee::live && ee::SpiPoll::isr()) {
-                ee::done = true;
-            }
-            break;
+        default: break;
     }
     sercom1_meter.leave();
 }
@@ -1701,7 +1601,7 @@ int main() {
     bench.letter('m', "memcpy and memset, 1/16/256/4096 bytes", tm_memory);
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
-    bench.letter('e', "the SPI host above the wire: spi.poll, spi.pump, spi.req", te_spi_host);
+    bench.letter('e', "the SPI host above the wire: spi.poll, spi.poll.rx, spi.req", te_spi_host);
     bench.letter('u', "the UART on a loop: uart.tx, uart.rx, uart.edge", tu_uart);
     bench.letter('i', "the I2C host against the peer: i2c.write, i2c.read, i2c.wr, i2c.probe",
                  ti_i2c);

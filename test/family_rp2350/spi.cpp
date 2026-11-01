@@ -119,6 +119,7 @@ static_assert(S0::index == 0u && S1::index == 1u);
 static_assert(S0::fifo_depth == 8u);
 static_assert(S1::dreq_tx == Dreq::spi1_tx && S1::dreq_rx == Dreq::spi1_rx);
 static_assert(!Host::has_engines && DmaHost::has_engines);
+static_assert(!Host::has_dma && DmaHost::has_dma);   // an asynchronous request needs the engines
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(Client::frames_ahead == 8u);
 
@@ -186,7 +187,6 @@ void spi_host_verbs() {
     r.rx = lend<Lease::reply>(buf);
     r.len = 32;
     (void)Host::start(r);
-    (void)Host::isr();
     (void)Host::dma_isr();
     (void)Host::status();
     (void)Host::recover();
@@ -206,8 +206,9 @@ void spi_engine_verbs() {
     d.len = 32;
     d.polled = true;
     (void)DmaHost::start(d);
-    (void)DmaHost::isr();
     (void)DmaHost::dma_isr();
+    (void)DmaHost::async_min_frames(SpiClocks::div4, SpiMode::mode0, SpiDataSize::bits8, true);
+    (void)DmaHost::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits16);
     (void)DmaHost::status();
     (void)DmaHost::recover();
     DmaHost::release();

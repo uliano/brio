@@ -473,7 +473,7 @@ caller's loop about 3100 cycles later (126 on the V2C), the tick floor
 of an idle loop is 746 000 cycles a second (1.6 %), and an interrupt
 that finds the core freshly asleep is served up to 66 us late - a
 handler hold-off of some 3150 cycles that a transport timed against
-the image's handlers alone does not foresee ([spi.md](spi.md)).
+the image's handlers alone does not foresee.
 
 The Standby path takes the masked SRAM `wfi` too, its EXTI lines that
 interrupt made EVENTS for the Standby's span (5.2's item (1), the
@@ -498,8 +498,13 @@ offset 0 mod 4 and 3366 at every offset 2 mod 4 through 32 bytes, in
 three passes of the same sweep (a scratch program) - three cycles once,
 at the entry, and none a branch, where the CH32X035's QingKe V4C pays
 four cycles a turn of that body by its address modulo four
-([../ch32x035/platform.md](../ch32x035/platform.md)). The CH32V003's
-V2A has not been swept. Every vector is aligned to four all the same
+([../ch32x035/platform.md](../ch32x035/platform.md)). A LOOP THAT
+POLLS A PERIPHERAL'S FLAG is the exception measured: the SPI host's
+receive loop, the same instructions, took 57.0 and 27.0 cycles a frame
+at HCLK/4 and HCLK/2 with its function on a word and 51.0 and 30.0 with
+it half a word into one - the poll's turn meeting the flag at another
+phase - which is why the host aligns its loops to four ([spi.md](spi.md)).
+The CH32V003's V2A has not been swept. Every vector is aligned to four all the same
 (`BRIO_CH32_VECTOR`, pfic.hpp), because what a vector costs should not
 move with what the image puts before it: in two images of the platform
 suite that differ in the alignment alone, ten runs each, the minimal
@@ -566,8 +571,8 @@ the flash, and on this core the call and the return's refetch behind the
 wait states cost about twenty to thirty cycles: a short body loses them
 whole, a long or looping one repays them. So the driver places what
 repays it - the polled loops, a call a phase, and the transmit engine's
-block restart - and leaves inline in the vector what does not: the SPI
-pump, the USART's `isr()` and the I2C's event pump, which a program
+block restart - and leaves inline in the vector what does not: the
+USART's `isr()` and the I2C's event pump, which a program
 moves by placing the vector, the fastest of the three ways (no call at
 all). Measured on the CH32V006K8U6 at 48 MHz, a handler's body between
 the meter's stamps (about 46 cycles of them inside) and the hardware
@@ -575,15 +580,15 @@ prologue's entry and exit outside:
 
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
-| the SPI transmit-only loop, a frame at HCLK/2, 8 and 16 bits (the wire 16, 32) | the driver (`InRam`) | 24.9, 37.9 | 16.0, 33.7 | 446 a host type, both loops at both widths |
-| the SPI receive loop, an 8-bit frame at HCLK/2, /4, /16 (the wire 16, 32, 128) | the driver | 34.9, 56.8, 166.7 | 32.9, 42.8, 148.4 | (above) |
+| the SPI transmit-only loop, a frame at HCLK/2, 8 and 16 bits (the wire 16, 32) | the driver (`InRam`) | 24.9, 37.8 | 16.0, 33.6 | 804 to 820 a host type, both loops at both widths, the receive loop's two shapes |
+| the SPI receive loop, an 8-bit frame at HCLK/2, /4, /16 (the wire 16, 32, 128) | the driver | 28.8, 59.8, 154.4 | 29.8, 50.7, 144.4 (the dead bus moving with the instance's address, spi.md) | (above) |
 | the USART DMA vector's body, the transmit engine's block restart | the driver | 238 to 248 | 196 to 197 (207 to 210 with the restart alone placed); 141 with the vector placed instead | 268 (212) |
 | the USART interrupt transmitter's `isr()` | the program's vector | 135 to 136 | 76 with the vector placed (145 as an instance behind the flash's vector) | the vector |
-| the SPI pump, an 8-bit frame at HCLK/4 with an in buffer | the program's vector | 259.4 a frame, 167 an entry | 174.7 a frame with the vector placed (274.4 as an instance behind the flash's vector) | 1114, the benchmark's vector with four hosts inline |
 | the I2C event pump, an entry of a 255-byte write and read | the program's vector | 154, 182 | 92, 106 with the vector placed (161, 177 as an instance behind the flash's vector) | 1818, the benchmark's vector with three hosts inline |
 
 At the wire's level: the transmit-only loop holds HCLK/2 from SRAM, the
-receive loop's dead bus a frame falls from 25 cycles to 11 at HCLK/4,
+receive loop's dead bus a frame falls from 28 cycles to 19 at HCLK/4 in
+the benchmark's image,
 the interrupt transmitter goes from 1.42 times the wire at 3 Mbaud to
 1.08 with its vector placed, and the engine's block restart, inside its
 window at 3 Mbaud from both placements, keeps more of it from SRAM: 40
@@ -593,10 +598,10 @@ from the flash and 0 to 25 from SRAM (`bench_ch32` letters e and u,
 
 **What it costs.** The bytes in the last column, of the part's SRAM -
 the load image stays in the flash beside them. On the CH32V003's 2 KB
-the loops are 448 bytes a host type and the restart 208: with every
-eligible path placed, that part's SPI suite images would reach 2044 to
-2048 bytes of the 2048, and the benchmark's letter-e image would
-overflow by 316, which is why nothing is placed by default. A placed
+the loops are 820 bytes a host type (the receive loop's two shapes and
+the transmit-only loop, each at both widths, counted in the family
+fixture's object for that part) and the restart 208 - half the part's
+SRAM for the two - which is why nothing is placed by default. A placed
 function exists only from the crt's copy on, and the crt enters
 `main()` with interrupts masked, so no vector reaches SRAM the copy has
 not written. THE HOLD-OFF the SPI host draws its write-ahead from is a

@@ -32,8 +32,8 @@
 // which stamps the window around the platform's WFI.
 //
 // THE METERS: one IsrMeter per bound vector - UART0's (`uart_meter`, on
-// Ruler), DMA_IRQ_0's (`dma_meter`) and SPI0's (`spi_meter`, which a
-// request the engines leave to the pump would run), and SysTick's
+// Ruler), DMA_IRQ_0's (`dma_meter`) and SPI0's (`spi_meter`: no host arms
+// a source of that line, so it counts what should never come), and SysTick's
 // (`tick_meter`). The SysTick vector's meter runs on
 // `TickRuler`, SysTick's position in its period, and NOT on Ruler: inside
 // the SysTick handler, before Ticker::tick() has counted the tick, the
@@ -148,13 +148,12 @@
 //                 of the 240 frames between them) against the wire's.
 //   e  THE SPI HOST ABOVE THE WIRE (brio/pl022/spi.hpp over SPI0 on the
 //      same pads, GP17 the select and GP22 the D/C line, nothing on the
-//      wire), on a host WITHOUT engines so the polled loop and the pump
-//      are what runs - bench_rp2350's letter e on this chip, the same ops
-//      under the same names: spi.poll (a polled WRITE, no in buffer) and
-//      spi.poll.rx (the receive) of 16 and 256 frames at clk_peri / 2, / 4
-//      and / 16 in mode 0 and in mode 3, spi.poll16 and spi.poll16.rx the
-//      same in 16-bit frames, spi.pump and spi.pump16 the receives on the
-//      interrupt, the receive shape's proof under a tick handler stretched
+//      wire), on a host WITHOUT engines so the polled loop is what runs -
+//      bench_rp2350's letter e on this chip, the same ops under the same
+//      names: spi.poll (a polled WRITE, no in buffer) and spi.poll.rx (the
+//      receive) of 16 and 256 frames at clk_peri / 2, / 4 and / 16 in mode
+//      0 and in mode 3, spi.poll16 and spi.poll16.rx the same in 16-bit
+//      frames, the receive shape's proof under a tick handler stretched
 //      past eight frame times, and spi.req - a command byte and 0, 2 and
 //      15 data bytes with D/C scripted at clk_peri / 16, wall less the
 //      wire's cycles the host's fixed cost per request, and spi.cold - the
@@ -246,7 +245,7 @@
 //   spi.dma the clock over the bits of a byte: 31.25 MHz / 8 = 3 906 250
 //           B/s at div4, 3.906 MHz / 8 = 488 281 at div32 - a 16-bit frame
 //           is two bytes of the same wire.
-//   spi.poll, spi.pump, spi.req  the same: 7 812 500 B/s at div2,
+//   spi.poll, spi.req  the same: 7 812 500 B/s at div2,
 //           3 906 250 at div4 and 976 562 at div16.
 //   i2c.*   the tenure's own time on the bus at the MEASURED SCL period
 //           (letter i measures it first: the 255- and the 16-byte
@@ -685,9 +684,8 @@ using DmaHost = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, ui
 /// Set by the handler that ends the block under measure.
 volatile bool dma_done = false;
 /// DmaHost owns SPI0 from its init() to its release() in letter d, and
-/// only then are its two bodies called: letter e's Plain is the same
-/// instance, and an engined host's isr() run on Plain's frames would take
-/// them into its own stale tenure and leave Plain's pump waiting.
+/// only then is its DMA line's body called: letter e's Plain is the same
+/// instance, and the engines' line serves other letters' engines too.
 volatile bool dma_host_live = false;
 
 constexpr uint32_t copy_wire_bps = 4u * SysClock::hz;
@@ -900,12 +898,11 @@ void td_dma() {
 }
 
 // =============================================================================
-// e - the SPI host above the wire: the polled loop, the pump, a request's price
+// e - the SPI host above the wire: the polled loop, a request's price
 // =============================================================================
-using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop and the pump
+using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop alone
 using SpiSelect = Pin<17>;
 using SpiDc = Pin<22>;
-volatile bool plain_live = false;
 volatile bool plain_done = false;
 uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
 volatile uint32_t tick_stretch = 0;
@@ -921,9 +918,10 @@ struct SpiReqRun {
     bool overrun;
 };
 
-/// One request on host H, polled or pumped, the core idling to a pumped
-/// one's completion with the flag read under the mask (the kernel loop's
-/// shape, so a completion between the read and the sleep is not lost).
+/// One request on host H, polled (a request that completes inside start();
+/// the idle loop below is the shape an engined one would wait in, the flag
+/// read under the mask so a completion between the read and the sleep is
+/// not lost).
 template <typename H>
 SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, SpiDataSize bits,
                  bool polled, bool with_rx) {
@@ -987,11 +985,8 @@ SpiReqRun e_best(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     return best;
 }
 
-const char* e_op(bool polled, SpiDataSize bits, bool with_rx) {
+const char* e_op(SpiDataSize bits, bool with_rx) {
     const bool wide = bits == SpiDataSize::bits16;
-    if (!polled) {
-        return wide ? "spi.pump16" : "spi.pump";
-    }
     if (with_rx) {
         return wide ? "spi.poll16.rx" : "spi.poll.rx";
     }
@@ -1119,18 +1114,17 @@ void te_host() {
     (void)SpiSelect::output(true);
     (void)SpiDc::output(true);
     (void)Plain::init(clock);
-    plain_live = true;
     for (uint32_t i = 0; i < 512u; ++i) {
         spi_tx[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     e_cold();   // FIRST: its first request must be the host's first
     struct Shape { bool polled; bool with_rx; };
-    constexpr Shape shapes[] = {{true, false}, {true, true}, {false, true}};
+    constexpr Shape shapes[] = {{true, false}, {true, true}};
     for (const Shape& shape : shapes) {
         for (const SpiRate& rate : e_rates) {
             const uint32_t sck = Plain::sck_hz(rate.clock);
             for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
-                const char* const op = e_op(shape.polled, bits, shape.with_rx);
+                const char* const op = e_op(bits, shape.with_rx);
                 const uint32_t frame_bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
                 for (const SpiMode mode : {SpiMode::mode0, SpiMode::mode3}) {
                     uint32_t walls[2] = {0, 0};
@@ -1171,7 +1165,6 @@ void te_host() {
               wire, " cycles, the fixed cost ", run.sample.wall > wire ? run.sample.wall - wire : 0u,
               " cycles; overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
     }
-    plain_live = false;
     Plain::release();
     bench.verdict("ran", true);
 }
@@ -2057,14 +2050,11 @@ extern "C" BENCH_VECTOR void isr_i2c1() {
     }
     i2c_isr_sum = sum;
 }
+/// SPI0's own line: no host arms a source of it - an entry is counted by
+/// its meter (letter e prints the count) and the sources masked.
 extern "C" BENCH_VECTOR void isr_spi0() {
     spi_meter.enter();
-    if (dma_host_live && DmaHost::isr()) {
-        dma_done = true;
-    }
-    if (plain_live && Plain::isr()) {
-        plain_done = true;
-    }
+    brio::Pl022<0>::interrupts(brio::SpiInterrupt::all, false);
     spi_meter.leave();
 }
 extern "C" void isr_systick() {
@@ -2100,7 +2090,7 @@ int main() {
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA engines: copy, fill, paced, spi.dma", td_dma);
-    bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
+    bench.letter('e', "the SPI host above the wire: the polled loop, a request's price", te_host);
     bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", tu_uart);
     bench.letter('i', "the I2C host above the wire, against the partner's twi_peer: a tenure's price", ti_i2c, false);
     bench.letter('c', "toggle COLD: every timed run of d, e, u, i after an XIP flush", tc_cold, false);

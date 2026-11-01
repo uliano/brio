@@ -137,8 +137,8 @@ using RxEngine = DmaRxEngine<2, 0, 3>;   // SPI1_RX
 /// engined path is byte-exact against this panel at 12 MHz with the
 /// SCK pad at medium (the probe's letter v).
 using Host = SpiHost<1, spi_pins, TxEngine, RxEngine>;
-/// The panel's bring-up runs on the plain pump host - the path the probe
-/// proved - before the engined one takes the instance over.
+/// The panel's bring-up runs on the engineless host, polled, before the
+/// engined one takes the instance over.
 using BootHost = SpiHost<1, spi_pins>;
 using Bus = SpiBus<Host, P, 8>;
 /// The vectors post TransferDone to the bus AO only once the kernel
@@ -968,11 +968,6 @@ private:
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" void SPI1_IRQHandler() {
-    if (Host::isr() && bus_live) {
-        brio::post<Bus>(brio::TransferDone{Host::status()});
-    }
-}
 extern "C" void DMA2_Stream3_IRQHandler() {
     if (Host::dma_isr() && bus_live) {
         brio::post<Bus>(brio::TransferDone{Host::status()});

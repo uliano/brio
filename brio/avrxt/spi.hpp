@@ -26,11 +26,12 @@
  *    SpiHost<n, route>    the transfer engine: two-phase descriptor
  *                         transactions in one chip-select window, the
  *                         instance in buffer mode with two bytes in
- *                         flight on both completion styles - a polled
- *                         loop or the RXCIE pump -, the received bytes
- *                         read by count, CS and DC owned by the engine.
- *                         Driven by util/spi_bus.hpp (arbitration and
- *                         replies).
+ *                         flight, every transaction polled inside
+ *                         start() - these parts have no DMA controller,
+ *                         so an asynchronous request is refused -, the
+ *                         received bytes read by count, CS and DC owned
+ *                         by the engine. Driven by util/spi_bus.hpp
+ *                         (arbitration and replies).
  *    SpiClient<n, route>  the client side: the runs answer(), exchange()
  *                         and receive() - a transaction in one polled
  *                         call, in buffer mode read by the count the
@@ -52,15 +53,12 @@
  *   using SpiHw = brio::SpiHost<0>;
  *   using Bus = brio::SpiBus<SpiHw, brio::AvrPlatform>;
  *
- *   ISR(SPI0_INT_vect) {
- *       if (SpiHw::isr()) brio::post<Bus>(brio::TransferDone{SpiHw::status()});
- *   }
- *
  *   // in a handler of the active object Me, tx and rx its own buffers:
  *   brio::post<Bus>(SpiHw::Request{
  *       CsPin::ref(), {}, {}, 0,
  *       brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), len,
- *       brio::reply_to<Me, brio::SpiDone>()});
+ *       brio::reply_to<Me, brio::SpiDone>(),
+ *       brio::SpiClock::div16, brio::SpiMode::mode0, true});   // true: polled
  *
  *   int main() {
  *       SysClock::init();
@@ -71,10 +69,15 @@
  *       brio::Tenuto<brio::AvrPlatform, Me, Bus>::run();
  *   }
  *
- * The request leaves its clock (CLK_PER/16), mode (0) and completion
- * style (the interrupt pump) at their defaults; the reply, an SpiDone,
- * reaches Me when the transaction is over, and tx and rx are the
- * engine's until then.
+ * The request names CLK_PER/16 and mode 0 and asks to be run polled,
+ * the one way this host runs a request: the arbiter's dispatch runs the
+ * whole transaction inside start(), and the reply, an SpiDone, reaches
+ * Me once it is over - tx and rx are the engine's until then. Left at
+ * its default (false, asynchronous), `polled` asks for DMA, which these
+ * parts have not got: the request is refused, its SpiDone carrying
+ * spi_rejected and nothing on the wire (`has_dma` is false, for a
+ * program's static_assert). No vector is bound: the host arms no
+ * interrupt.
  *
  * Who calls what, and from where. Spi<n>::init() and release(),
  * SpiHost::init() and SpiClient::init() are setup verbs: main(), after
@@ -82,28 +85,23 @@
  * them waits (SpiHost::init() empties the receive FIFO with at most four
  * DATA reads). SpiHost::start() and recover() are the arbiter's, called
  * from its dispatch in main context; prime() is a main-context verb for
- * a caller that frames the select itself. start() of a polled request
- * spins inside the dispatch until the transaction ends - not bounded,
- * because with SSD set nothing can take the clock generator from this
- * host and a transfer written always completes - and before the first
- * clock it spins the request's cs_setup_us; global interrupts stay
- * enabled, masked only around the burst's last DATA store and the TXCIF
- * clear behind it (AvrPlatform::CriticalSection). A pumped request's
- * launch masks its two DATA stores and the flag clear behind them the
- * same way and returns. recover() waits for the bytes in flight, at most
- * 512 polls of TXCIF. SpiHost::isr() is the interrupt body: the
- * program's ISR(SPIn_INT_vect) calls it and nothing else does; it runs
- * to completion, no other handler interrupting it (avrxt/platform.hpp),
- * and masks nothing of its own. rebase() is the DynamicClock's fan-out,
+ * a caller that frames the select itself. start() spins inside the
+ * dispatch until the transaction ends - not bounded, because with SSD
+ * set nothing can take the clock generator from this host and a
+ * transfer written always completes - and before the first clock it
+ * spins the request's cs_setup_us; global interrupts stay enabled,
+ * masked only around the burst's last DATA store and the TXCIF clear
+ * behind it (AvrPlatform::CriticalSection). A refused request returns
+ * at once. recover() waits for nothing: no byte is in flight between
+ * two start()s. rebase() is the DynamicClock's fan-out,
  * with the bus idle. SpiClient's runs and per-byte verbs are polled
  * main-context verbs (setup, or an active object's handler): a run
  * spins until its bytes have moved, the host raises the select, a turn
  * comes late or its `spins` budget runs out, and wait() and the per-byte
  * exchange() are bounded by their `spins` (500000 by default). Storage:
  * a Request's cmd, tx and rx are lent until its SpiDone (Lease::reply);
- * the polled path reads every field through the reference it was lent
- * and copies nothing, the pump copies the pins, the data phase's spans
- * and its length at launch. A client run's spans are the caller's again
+ * start() reads every field through the reference it was lent and
+ * copies nothing. A client run's spans are the caller's again
  * when the call returns. Spi<n>'s configuring verbs (enable(), clock(),
  * mode(), lsb_first(), client_select_disable(), buffer_mode(), the
  * interrupt enables) are read-modify-writes of CTRLA, CTRLB or INTCTRL
@@ -174,9 +172,8 @@
  *    the flag back. A read that leaves a byte behind never meets that
  *    cycle, and neither does one made with nothing in flight. RXCIF is
  *    therefore a hint and never a count: SpiHost reads what the
- *    transmitter's flags prove has arrived, never empties the FIFO by a
- *    polled read while a byte shifts, and in the pump, which may, drops
- *    the repeated byte where the flags show the read was not taken;
+ *    transmitter's flags prove has arrived and never empties the FIFO
+ *    by a read while a byte shifts;
  *    SpiClient's runs count the host's transfers on the client's DREIF
  *    and read the byte before the newest, for the same reason.
  */
@@ -1006,8 +1003,17 @@ private:
  * The transfer engine: the target-side half of the SPI stack, driven by
  * util/spi_bus.hpp (which owns arbitration and replies). This task owns
  * the wire: chip select, the D/C line of display-style devices, and the
- * byte pump under the SPI interrupt (the AVR DA, DB and EA have no DMA
- * controller).
+ * polled loop that moves the bytes.
+ *
+ * ONE WAY TO RUN A REQUEST. docs/design/spi-bus.md gives a host two:
+ * polled, the transaction inside start(), and asynchronous, which is DMA.
+ * The AVR DA, DB and EA have no DMA controller, so this host runs every
+ * request polled: `has_dma` is false, and a request with `polled` false -
+ * the field's default - is refused, start() answering true at once with
+ * status() spi_rejected before the registers, the select or the D/C are
+ * touched. The SPI's own interrupt is never armed and the program binds
+ * no vector for this host: an interrupt's entry and exit alone outlast a
+ * byte at CLK_PER/4 (docs/avrxt/spi.md, "The engine's cost").
  *
  * Transaction descriptor (Request) - two phases in one chip-select
  * window, covering every device on the bench:
@@ -1033,8 +1039,8 @@ private:
  * transmitter is a shift register plus one buffer, so two bytes are in
  * flight and the wire never waits for the software while the software
  * keeps up; the receiver is a two-entry FIFO in front of the shifter,
- * read at least every second transfer. Both completion styles are
- * written from that chapter's three rules and from the order 28.3.2.2.2
+ * read at least every second transfer. The loop is written from that
+ * chapter's three rules and from the order 28.3.2.2.2
  * gives the flags of one transfer's end - DREIF as the buffered byte
  * moves into the shifter, then the received byte in the FIFO with RXCIF,
  * and TXCIF when nothing is left to send (measured: a DATA read made
@@ -1052,48 +1058,30 @@ private:
  *    prove has arrived - every written byte but the one shifting once
  *    DREIF stands, every written byte once TXCIF does -, never by RXCIF,
  *    which a read that empties the FIFO as a byte enters it loses (this
- *    file's header). The polled loop never makes that read: it leaves
- *    the newest byte in the FIFO until nothing shifts, so three bytes
- *    are outstanding there - one waiting, two in flight - and a late
- *    loop finds the FIFO full and the third byte held in the shifter,
- *    which the next read lets in before the next write starts a transfer
- *    (measured): BUFOVF cannot rise. The pump keeps two outstanding and
- *    reads right behind each arrival, so a late handler can make that
- *    read; it then drops the byte it is handed twice (isr()). A late
- *    loop or a late handler (an interrupt of the console's or the
- *    tick's inside a burst) idles the wire and loses nothing, at every
- *    division;
+ *    file's header). The loop never makes that read: it leaves the
+ *    newest byte in the FIFO until nothing shifts, so three bytes are
+ *    outstanding there - one waiting, two in flight - and a late loop
+ *    finds the FIFO full and the third byte held in the shifter, which
+ *    the next read lets in before the next write starts a transfer
+ *    (measured): BUFOVF cannot rise. A late loop (an interrupt of the
+ *    console's or the tick's inside a burst) idles the wire and loses
+ *    nothing, at every division;
  *  - TXCIF says shifter and buffer are both empty: a condition the
  *    register keeps (docs/avrxt/spi.md "Buffer mode"), so it speaks of a
  *    write only when it is cleared behind that write, while the byte
- *    shifts and no earlier emptiness can raise it again. A polled burst
- *    clears it behind its last write with the two stores masked together
- *    - an interrupt between them could let the byte finish and the clear
- *    wipe the one edge the tail waits for -; the pump's launch clears it
- *    behind its two writes, masked with them, and its handler behind the
- *    first write of every refill.
+ *    shifts and no earlier emptiness can raise it again. A burst clears
+ *    it behind its last write with the two stores masked together - an
+ *    interrupt between them could let the byte finish and the clear
+ *    wipe the one edge the tail waits for.
  *
  * Between transactions the transmitter is idle and the receive FIFO
- * empty: every burst and every pumped phase end so, and init() and
- * recover() make it so (one DATA read whatever the flag says, then the
- * FIFO drained).
+ * empty: every burst ends so, and init() and recover() make it so (one
+ * DATA read whatever the flag says, then the FIFO drained).
  *
- * The polled path completes inside start() and reads every field of the
- * request through the reference it was lent (the arbiter's contract:
- * the slot stays as it is until the dispatch ends) - it copies nothing.
- * The pump (polled false) copies at launch what its tenure needs - the
- * two pins, the data phase's spans and length - into the engine's own
- * state, and runs on RXCIE with TXCIE beside it: the handler reads by
- * the same count and writes the next bytes until two are in flight. A
- * read the silicon did not take costs one missed edge: the two in flight
- * complete, TXCIF rises with RXCIF down, and the handler drops the
- * repeated byte and reads both - a hiccup, not a stall.
- *
- * ISR wiring (app glue, as usual), with `using Bus = brio::SpiBus<SpiHw,
- * brio::AvrPlatform>;`:
- *   ISR(SPI0_INT_vect) {
- *       if (SpiHw::isr()) { brio::post<Bus>(brio::TransferDone{SpiHw::status()}); }
- *   }
+ * start() completes the transaction before it returns and reads every
+ * field of the request through the reference it was lent (the arbiter's
+ * contract: the slot stays as it is until the dispatch ends): it copies
+ * nothing, and the host keeps no state of a transaction past it.
  */
 template <uint8_t n, SpiRoute route = SpiRoute::def>
 class SpiHost {
@@ -1121,13 +1109,19 @@ public:
         spi_route_exists(n, route) &&
         (route == SpiRoute::none || spi_pin(n, route, SpiSignal::sck).bonded);
 
+    /// Can this host run an asynchronous request? Never: the AVR DA, DB
+    /// and EA have no DMA controller, and asynchronous is DMA
+    /// (docs/design/spi-bus.md). Every request not marked polled is
+    /// refused (spi_rejected), so a program that posts one asserts this
+    /// - `static_assert(SpiHw::has_dma)` - and fails to compile here.
+    static constexpr bool has_dma = false;
+
     /// The layout: 21 bytes and no padding on this core (every type here
     /// is byte-aligned): two PinRefs of three, three pointers of two, a
     /// byte and a word of lengths, the reply's two, four bytes of
-    /// settings. The first fifteen are the tenure's - what the pump
-    /// still needs once start() has returned - and lie together; the
-    /// rest is consumed inside start(). The field names are the
-    /// contract every stratum shares (docs/design/spi-bus.md).
+    /// settings, all read inside start() through the lent reference. The
+    /// field names are the contract every stratum shares
+    /// (docs/design/spi-bus.md).
     struct Request {
         PinRef cs;             ///< asserted low around the transaction
         PinRef dc;             ///< display D/C line; null = no such pin
@@ -1150,19 +1144,14 @@ public:
         // ceiling that clamps it.
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
-        // Completion style, also the client's call: false = the
-        // interrupt pump (the kernel keeps running between bytes -
-        // right for slow clocks and short transfers); true = polled
-        // inside start(), completing synchronously. The polled loop is
-        // wire-bound from CLK_PER/4 (a byte is 32 CPU cycles there and
-        // the loop fewer, counted in docs/avrxt/spi.md); the pump keeps
-        // two bytes in flight, so the wire runs while its handler does,
-        // but one interrupt per byte costs more than a byte at the fast
-        // divisions and the pump is CPU-bound there. The price of
-        // polling is that this dispatch blocks for the whole transfer
-        // (bounded, chosen here); global interrupts stay enabled
-        // throughout - the SPI's own interrupt is never armed for a
-        // polled request.
+        // The way to run it: true = polled inside start(), completing
+        // synchronously - the only way this host has; false =
+        // asynchronous, which is DMA, refused here (spi_rejected at once,
+        // nothing on the wire: has_dma). The loop is wire-bound from
+        // CLK_PER/4 (a byte is 32 CPU cycles there and the loop fewer,
+        // counted in docs/avrxt/spi.md); the price is that the arbiter's
+        // dispatch blocks for the whole transfer, global interrupts
+        // enabled throughout.
         bool polled = false;
         // Chip-select setup: microseconds the engine waits between
         // asserting CS and the first SCK edge. Most devices need tens of
@@ -1194,8 +1183,8 @@ public:
      * meaningful. 0 = no ceiling, the request's division is used as it
      * stands.
      *
-     * True with the instance enabled as a host, the receive FIFO empty
-     * and the pump idle. False, no register written, when this package
+     * True with the instance enabled as a host and the receive FIFO
+     * empty. False, no register written, when this package
      * does not bond the route's SCK (`available`), when even CLK_PER/128
      * is faster than the ceiling, or when the resource refuses the
      * configuration.
@@ -1229,9 +1218,7 @@ public:
             // the flag and leaves the bytes): what a former user left
             // there is read out here.
             flush();
-            ahead_ = 0;
-            to_write_ = 0;
-            in_cmd_ = false;
+            status_ = spi_ok;
             return true;
         }
     }
@@ -1261,11 +1248,12 @@ public:
         return spi_clock_for(clk_per_hz_, max_sck_hz);
     }
 
-    /// The engine's completion status, read by the app glue for the
-    /// TransferDone payload: always spi_ok on this engine, which has no
-    /// DMA path and therefore no fault of its own to report - the verb
-    /// exists so the glue is spelled the same way on every stratum.
-    static constexpr uint8_t status() { return spi_ok; }
+    /// The last request's status, which the arbiter reads after start()
+    /// returns: spi_rejected when it was refused (asynchronous, has_dma),
+    /// spi_ok otherwise - a polled transfer has no fault of its own to
+    /// report on this host (the spin is not bounded: with SSD set the
+    /// transfer written always completes).
+    static uint8_t status() { return status_; }
 
     /// For callers that frame the select window themselves (Request.cs
     /// null). start() applies a request's mode before it asserts the
@@ -1278,15 +1266,22 @@ public:
     /// Prime first, then assert the select. Main context.
     static void prime(SpiMode mode, SpiClock clock) { apply(mode, clamp(clock)); }
 
-    /// Begin a transaction (called by SpiBus from main context).
-    /// Returns true when the transaction completed synchronously
-    /// (polled requests, and the degenerate zero-length one); false
-    /// when it runs on the ISR and a TransferDone will follow.
+    /// Run a transaction (called by SpiBus from main context). Always
+    /// true: it completed inside the call - a polled request, the empty
+    /// one, or a refused one (an asynchronous request: spi_rejected in
+    /// status(), the wire untouched) - util/bus_master.hpp's engine
+    /// contract, its synchronous half.
     ///
-    /// The request is lent for this call and read through `r`: the
-    /// polled path, which completes before returning, keeps nothing;
-    /// the pump copies its tenure's fields in launch().
+    /// The request is lent for this call and read through `r`; nothing
+    /// of it is kept.
     static bool start(const Request& r) {
+        if (!r.polled) {
+            // Asynchronous is DMA, and this host has none: refused before
+            // the registers, the select or the D/C are touched.
+            status_ = spi_rejected;
+            return true;
+        }
+        status_ = spi_ok;
         if (static_cast<uint16_t>(r.cmd_len) + r.len == 0) {
             return true;  // nothing to move: complete on the spot
         }
@@ -1300,17 +1295,11 @@ public:
         if (r.cs_setup_us != 0) {
             delay_us_runtime(cycles_per_us_, r.cs_setup_us);
         }
-        if (!r.polled) {
-            launch(r);
-            return false;
-        }
-        // Polled: the SPI's own interrupt is not armed (the pump arms it
-        // at launch and its handler disarms it at the end, so an idle
-        // bus has it off), global interrupts STAY ENABLED - the
-        // console, the tick, anything else preempts these loops freely,
-        // and the drain-before-write discipline of burst() is what
-        // makes that safe. The loans are VIEWS: .get() hands out the
-        // raw pointer the loops index (Borrowed is not a container).
+        // The SPI's own interrupt is never armed; global interrupts STAY
+        // ENABLED - the console, the tick, anything else preempts these
+        // loops freely, and the drain-before-write discipline of burst()
+        // is what makes that safe. The loans are VIEWS: .get() hands out
+        // the raw pointer the loops index (Borrowed is not a container).
         if (r.cmd_len != 0) {
             burst<true, false>(r.cmd.get(), nullptr, r.cmd_len);
             r.dc.set();                    // the data phase, even an empty one
@@ -1337,108 +1326,23 @@ public:
         return true;
     }
 
-    /**
-     * SPI interrupt body - call from ISR(SPIn_INT_vect) and from nowhere
-     * else. The pump runs
-     * on RXCIE and TXCIE. The body reads the flags once, reads out of the
-     * FIFO every byte the transmitter's flags prove has arrived (all it
-     * wrote once TXCIF stands, all but the one shifting once DREIF does,
-     * all but two otherwise) and stores them where the request wanted
-     * them, then writes the next bytes until two are in flight again,
-     * clearing TXCIF behind the first. In the steady state that is one
-     * byte read and one written per RXCIF; a handler that ran late finds
-     * the transmitter idle and TXCIF up, reads both and writes two. A
-     * read of this handler that emptied the FIFO as the next byte entered
-     * it was not taken (this file's header): RXCIF stays down, the next
-     * edge is TXCIF's once the two in flight are done, and an entry with
-     * TXCIF up and RXCIF down while bytes are due is that case and no
-     * other - the flags are read some twenty cycles past the edge that
-     * took the vector, so they have settled - and reads the repeated byte
-     * once more and drops it. Returns true when the transaction just
-     * completed (CS released): the edge on which the glue posts
-     * TransferDone to the bus AO.
-     */
-    [[gnu::always_inline]] static bool isr() {
-        auto& s = S::regs();
-        const uint8_t f = s.INTFLAGS;
-        uint8_t keep = 0;                  // written bytes not yet received
-        uint8_t a = ahead_;
-        if ((f & SPI_TXCIF_bm) == 0) {
-            keep = (f & SPI_DREIF_bm) != 0 ? 1 : 2;
-        } else if ((f & SPI_RXCIF_bm) == 0 && a != 0) {
-            // Everything written has arrived and RXCIF says nothing has:
-            // a read of this handler met an arrival, and the byte it
-            // returned is still at the FIFO's head. Read again and drop.
-            (void)s.DATA;
-        }
-        while (a > keep) {                 // read by count, whatever RXCIF says
-            const uint8_t in = s.DATA;
-            if (in_ != nullptr) {
-                *in_++ = in;
-            }
-            --a;
-        }
-        if (to_write_ == 0) {
-            if (a != 0) {                  // the phase's last bytes still shift
-                ahead_ = a;
-                return false;
-            }
-            if (in_cmd_) {                 // the command phase is over
-                in_cmd_ = false;
-                dc_.set();
-                out_ = tx_;
-                in_ = rx_;
-                to_write_ = len_;
-            }
-            if (to_write_ == 0) {
-                cs_.set();                 // release: transaction done
-                s.INTCTRL = 0;             // the pump's enables, off until the next launch
-                ahead_ = 0;
-                return true;
-            }
-        }
-        if (a < 2) {                       // two in flight again
-            write_next();
-            s.INTFLAGS = SPI_TXCIF_bm;     // behind the write: TXCIF speaks of it
-            ++a;
-            if (a < 2 && to_write_ != 0) {
-                write_next();
-                ++a;
-            }
-        }
-        ahead_ = a;
-        return false;
-    }
-
-    /// The work-around for a wedged host: a lost completion, or a
-    /// demotion mid-transfer (SS driven low with SSD clear stops the pump
-    /// dead, 28.3.2.1.3 - measured; init() sets SSD, so here it is the
-    /// chapter's note honoured and not a path a request can reach). The
-    /// pump's interrupt is silenced, the Host role re-armed if the
-    /// hardware dropped it, the bytes still in flight waited for (bounded:
-    /// two transfers at CLK_PER/128 with room to spare - a clock that
-    /// does not run ends the wait), the receive FIFO read out whatever
-    /// RXCIF says, the select window closed; start() reprograms mode and
-    /// clock per request, so nothing else needs saving. The verb a timed
-    /// SpiBus calls (util/bus_master.hpp).
+    /// The work-around for a wedged host, the verb a timed SpiBus calls
+    /// on a transaction that never answered (util/bus_master.hpp) - which
+    /// no transaction of this host can be, every one ending inside
+    /// start(). What it still covers is a demotion (SS driven low with
+    /// SSD clear stops the host dead, 28.3.2.1.3 - measured; init() sets
+    /// SSD, so here it is the chapter's note honoured and not a path a
+    /// request can reach): the Host role re-armed if the hardware dropped
+    /// it, and the receive FIFO read out whatever RXCIF says. No byte is
+    /// in flight between two start()s, so nothing is waited for; start()
+    /// reprograms mode and clock per request, so nothing else needs
+    /// saving. Main context.
     static void recover() {
         if constexpr (available) {
-            auto& s = S::regs();
-            s.INTCTRL = 0;
             if (S::demoted()) {
                 S::restore_host();
             }
-            if (ahead_ != 0) {
-                // A turn is at least six cycles; two transfers at the
-                // slowest division are 2 x (8 x 128 + 2).
-                for (uint16_t i = 0; i < 512u && (s.INTFLAGS & SPI_TXCIF_bm) == 0; ++i) {
-                }
-            }
             flush();
-            cs_.set();
-            in_cmd_ = false;
-            ahead_ = 0;
-            to_write_ = 0;
         }
     }
 
@@ -1614,85 +1518,9 @@ private:
     /// resource's flush_receive()).
     static void flush() { S::flush_receive(); }
 
-    /// The pump's launch: the tenure's fields copied out of the lent
-    /// request (the pins; the data phase's spans and length, kept aside
-    /// while a command phase runs), up to two bytes written - the
-    /// shifter's and the buffer's - with the write-one flags cleared
-    /// behind them, the count set, and RXCIE and TXCIE armed last, over a
-    /// state already whole. The two stores and the clear are masked
-    /// together: a handler between the two writes could let the first
-    /// byte finish and raise TXCIF while the second had not yet gone, and
-    /// a TXCIF that predates a write tells the handler that byte has
-    /// arrived (measured: the read made for it found nothing, and the
-    /// byte, arriving after, was left over). A command phase never writes
-    /// ahead of its own end: the D/C edge must land between its last byte
-    /// and the data phase's first, so the data phase starts in the
-    /// handler.
-    static void launch(const Request& r) {
-        cs_ = r.cs;
-        dc_ = r.dc;
-        if (r.cmd_len != 0) {
-            in_cmd_ = true;
-            out_ = r.cmd.get();
-            in_ = nullptr;
-            to_write_ = r.cmd_len;
-            tx_ = r.tx.get();
-            rx_ = r.rx.get();
-            len_ = r.len;
-        } else {
-            in_cmd_ = false;
-            out_ = r.tx.get();
-            in_ = r.rx.get();
-            to_write_ = r.len;
-        }
-        auto& s = S::regs();
-        const uint8_t first = take_next();
-        uint8_t a = 1;
-        uint8_t second = 0;
-        if (to_write_ != 0) {
-            second = take_next();
-            a = 2;
-        }
-        {
-            AvrPlatform::CriticalSection cs;
-            s.DATA = first;                // the idle shifter
-            if (a == 2) {
-                s.DATA = second;           // the buffer
-            }
-            s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
-        }
-        ahead_ = a;
-        s.INTCTRL = static_cast<uint8_t>(SPI_RXCIE_bm | SPI_TXCIE_bm);
-    }
-
-    /// The current phase's next byte, counted out: the source's, or the
-    /// dummy where the phase has none.
-    [[gnu::always_inline]] static uint8_t take_next() {
-        uint8_t v = 0xFF;
-        if (out_ != nullptr) {
-            v = *out_++;
-        }
-        --to_write_;
-        return v;
-    }
-
-    /// The next byte of the current phase into DATA: the source's, or a
-    /// dummy where the phase has none.
-    [[gnu::always_inline]] static void write_next() { S::regs().DATA = take_next(); }
-
-    // The tenure: what the pump keeps of a request past start().
-    static inline PinRef cs_{};
-    static inline PinRef dc_{};
-    static inline const uint8_t* tx_ = nullptr;   ///< the data phase, waiting behind a command phase
-    static inline uint8_t* rx_ = nullptr;
-    static inline uint16_t len_ = 0;
-    // The current phase.
-    static inline const uint8_t* out_ = nullptr;  ///< next byte to write; null = 0xFF
-    static inline uint8_t* in_ = nullptr;         ///< next received byte's home; null = discard
-    static inline uint16_t to_write_ = 0;
-    /// Bytes written and not yet read out of the FIFO: 0, 1 or 2.
-    static inline uint8_t ahead_ = 0;
-    static inline bool in_cmd_ = false;
+    /// The last request's status (spi_ok / spi_rejected): written in
+    /// start(), read by the arbiter after it returns, one context.
+    static inline uint8_t status_ = spi_ok;
     // The register pair last written (init() reads it back once).
     static inline uint8_t ctrla_ = 0;
     static inline uint8_t ctrlb_ = 0;

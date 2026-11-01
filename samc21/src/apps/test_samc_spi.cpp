@@ -78,9 +78,10 @@
 //      nine-bit characters, BUFOVF and IBON, and what CTRLB.MSSEN really
 //      drives
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
-//      real kernel - queued requests, replies through ReplyTo,
-//      reject-when-full, and the PrepareSleep vote idle vs busy; the
-//      requests' rates timed on the wire
+//      real kernel - queued polled requests, replies through ReplyTo,
+//      an asynchronous request refused (spi_rejected: no DMA here) with
+//      the bus free for the next, and the PrepareSleep vote idle and
+//      right behind a request; the requests' rates timed on the wire
 //   h  THE AVR CLIENT'S FACTS, judged here because here the AVR is the
 //      instrument: when the peer's ident names the avrxt peer (the
 //      version's high byte 0x01, spi_link.hpp's Ident), the verdicts
@@ -99,9 +100,8 @@
 //      address recognition both ways, a handler timed into a run by the
 //      SSL interrupt, and the select's fall as the wake-up from IDLE and
 //      from STANDBY (RUNSTDBY; the RTC on OSCULP32K the backstop)
-//   k  the host's rare paths: the spin budget on a clockless SERCOM, an
-//      early TXC under a handler (into the peer's receive-only run), and
-//      a lost interrupt under a timed SpiBus over the loop-back engine
+//   k  the host's rare paths: the spin budget on a clockless SERCOM, and
+//      an early TXC under a handler (into the peer's receive-only run)
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -259,17 +259,6 @@ uint32_t wall() { return Ruler::count32(); }
 // ---------------------------------------------------------------------------
 // The bus, and the protocol over it
 // ---------------------------------------------------------------------------
-
-volatile bool isr_done = false;      ///< set by the engine's completion edge
-volatile uint32_t isr_completions = 0;
-
-/// The kernel letter re-binds this through a flag; outside it the suite
-/// runs polled requests and the handler is only the ISR-pump legs'.
-volatile bool bus_ao_live = false;
-
-/// Letter k's TIMED arbiter over the same loop-back engine, live only
-/// around its own kernel pumps.
-volatile bool timed_ao_live = false;
 
 /// Letter j: the vector belongs to this board's CLIENT, and its one source
 /// is INTFLAG.SSL (32.6.3.6) - the select's fall, counted and stamped on the
@@ -1554,10 +1543,15 @@ void tf_wireless() {
 
 namespace kl {
 
-/// Four loop-back transactions, queued at once from one dispatch. The
-/// data is deterministic and wireless, so what is under test here is the
-/// ARBITER and not the wire: the pending FIFO, the reply channel, the
-/// rejection when it is full, and the sleep vote.
+/// Four loop-back transactions, queued at once from one dispatch, and an
+/// asynchronous one among them. The data is deterministic and wireless,
+/// so what is under test here is the ARBITER over this engine and not the
+/// wire: the reply channel, the refusal of a request asking for DMA this
+/// host has not got, and the sleep vote. Every request this host takes
+/// ends inside start(), so the arbiter never holds one in flight and its
+/// pending FIFO never fills: the reject-when-full and the busy vote are
+/// the arbiter's own properties, judged against an asynchronous engine in
+/// the host tests (test/test_bus_master).
 constexpr uint8_t queued = 4;
 constexpr uint8_t payload = 6;
 
@@ -1565,24 +1559,29 @@ uint8_t tx[queued][payload];
 uint8_t rx[queued][payload];
 
 struct Kick {};
-struct Fill {};
+struct Refuse {};
 struct Ask {};
+struct AskBehind {};
 
 class Driver;
-using SpiArb = SpiBus<Loop, P, 3>;   ///< pending depth 3: one fewer than we queue
+using SpiArb = SpiBus<Loop, P, 3>;
 
-class Driver : public Fsm<Driver, SpiDone, Kick, Fill, Ask, SleepVote> {
+class Driver : public Fsm<Driver, SpiDone, Kick, Refuse, Ask, AskBehind, SleepVote> {
 public:
     static inline EventQueue<Event, 12, P> queue;
     static inline uint8_t replies = 0;
     static inline uint8_t rejected = 0;
     static inline uint8_t ok_replies = 0;
     static inline uint8_t votes = 0;
+    static inline uint8_t replies_at_vote = 0;
     static inline bool last_vote = false;
+    /// The status of each reply, in arrival order.
+    static inline uint8_t order[queued + 2] = {};
 
     static void init() {
-        replies = rejected = ok_replies = votes = 0;
+        replies = rejected = ok_replies = votes = replies_at_vote = 0;
         last_vote = false;
+        for (uint8_t& o : order) o = 0xEE;
         start(&running);
     }
     static void dispatch(const Event& e) { Fsm::dispatch(e); }
@@ -1593,17 +1592,16 @@ private:
             e,
             [](const Kick&) {
                 for (uint8_t i = 0; i < queued; ++i) {
-                    post<SpiArb>(request(i));
+                    post<SpiArb>(request(i, true));
                 }
                 return handled();
             },
-            [](const Fill&) {
-                // One more than the arbiter can hold in flight plus its
-                // FIFO: the last must come back bus_rejected, never
-                // silently dropped.
-                for (uint8_t i = 0; i < queued + 2; ++i) {
-                    post<SpiArb>(request(i % queued));
-                }
+            [](const Refuse&) {
+                // Polled, ASYNCHRONOUS, polled: the middle one asks for
+                // DMA and is refused; the bus is free again for the third.
+                post<SpiArb>(request(0, true));
+                post<SpiArb>(request(1, false));
+                post<SpiArb>(request(2, true));
                 return handled();
             },
             [](const Ask&) {
@@ -1613,7 +1611,19 @@ private:
                 });
                 return handled();
             },
+            [](const AskBehind&) {
+                // A request, and a vote right behind it in the same queue:
+                // the request ended inside its own dispatch, so the vote
+                // finds the bus idle.
+                post<SpiArb>(request(3, true));
+                post<SpiArb>(PrepareSleep{
+                    .depth = SleepDepth::standby,
+                    .reply = reply_to<Driver, SleepVote>(),
+                });
+                return handled();
+            },
             [](const SpiDone& d) {
+                if (replies < queued + 2) order[replies] = d.status;
                 ++replies;
                 if (d.status == spi_ok) ++ok_replies;
                 if (d.status == spi_rejected) ++rejected;
@@ -1622,12 +1632,13 @@ private:
             [](const SleepVote& v) {
                 ++votes;
                 last_vote = v.ok;
+                replies_at_vote = replies;
                 return handled();
             },
             [](auto) { return unhandled(); });
     }
 
-    static Loop::Request request(uint8_t i) {
+    static Loop::Request request(uint8_t i, bool polled) {
         return Loop::Request{
             .cs = {},
             .dc = {},
@@ -1636,10 +1647,7 @@ private:
             .rx = lend<Lease::reply>(rx[i]),
             .len = payload,
             .cmd_len = 0,
-            // The ISR PUMP, deliberately: this is where the engine's
-            // asynchronous half meets the arbiter's, which is the shape
-            // util/bus_master.hpp was written for.
-            .polled = false,
+            .polled = polled,
             .baud = command_baud,
             .mode = SpiMode::mode0,
             .reply = reply_to<Driver, SpiDone>(),
@@ -1648,6 +1656,17 @@ private:
 };
 
 using BusKernel = Tenuto<P, Driver, SpiArb>;
+
+/// Every queue drained, then again until `done` or 300 ms.
+template <typename Done>
+void run_until(Done done) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 300u) {
+        while (BusKernel::step()) {
+        }
+        if (done()) break;
+    }
+}
 
 }   // namespace kl
 
@@ -1665,16 +1684,8 @@ void tg_kernel() {
     }
 
     kl::BusKernel::init_all();
-    isr_completions = 0;
-    bus_ao_live = true;
-
     post<kl::Driver>(kl::Kick{});
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 300u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= kl::queued) break;
-    }
+    kl::run_until([] { return kl::Driver::replies >= kl::queued; });
 
     uint16_t data_mism = 0;
     for (uint8_t i = 0; i < kl::queued; ++i) {
@@ -1682,94 +1693,67 @@ void tg_kernel() {
             if (kl::rx[i][k] != kl::tx[i][k]) ++data_mism;
         }
     }
-    print(serial, "  ", kl::queued, " requests queued in ONE dispatch: ",
-          kl::Driver::replies, " replies (", kl::Driver::ok_replies, " ok), ",
-          isr_completions, " engine completions, ", data_mism, " byte mismatches", crlf);
-    bench.verdict("EVERY queued request came back through its own ReplyTo, in order, "
-                  "with spi_ok - the arbiter serialized four transactions on one bus",
-                  kl::Driver::replies == kl::queued &&
-                      kl::Driver::ok_replies == kl::queued);
-    bench.verdict("and every one of them moved its bytes: the ISR PUMP carried the "
-                  "loop-back byte-exact under the kernel",
+    print(serial, "  ", kl::queued, " polled requests queued in ONE dispatch: ",
+          kl::Driver::replies, " replies (", kl::Driver::ok_replies, " ok), ", data_mism,
+          " byte mismatches", crlf);
+    bench.verdict("EVERY queued request came back through its own ReplyTo with spi_ok - the "
+                  "arbiter serialized four transactions on one bus",
+                  kl::Driver::replies == kl::queued && kl::Driver::ok_replies == kl::queued);
+    bench.verdict("and every one of them moved its bytes: the loop-back byte-exact under the "
+                  "kernel, each request ended inside its start()",
                   data_mism == 0);
-    bench.verdict("the engine's completion edge fired once per transaction",
-                  isr_completions == kl::queued);
 
-    // Reject-when-full: never silent, never blocking.
-    kl::Driver::init();
-    post<kl::Driver>(kl::Fill{});
-    const uint32_t t1 = Ticker::millis();
-    while (Ticker::millis() - t1 < 400u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= kl::queued + 2) break;
+    // The refusal through the arbiter: an asynchronous request between
+    // two polled ones.
+    for (uint8_t i = 0; i < 3; ++i) {
+        for (uint8_t k = 0; k < kl::payload; ++k) kl::rx[i][k] = 0xEE;
     }
-    print(serial, "  ", kl::queued + 2, " requests into a bus holding one in flight "
-          "plus a 3-deep FIFO: ", kl::Driver::replies, " replies, ",
-          kl::Driver::rejected, " of them bus_rejected (arbiter tally ",
-          kl::SpiArb::rejected_count(), ")", crlf);
-    bench.verdict("an over-full arbiter answers bus_rejected IMMEDIATELY - never "
-                  "silent, never blocking, and every request still gets exactly one "
-                  "reply",
-                  kl::Driver::replies == kl::queued + 2 && kl::Driver::rejected >= 1 &&
-                      kl::SpiArb::rejected_count() >= 1);
+    kl::Driver::init();
+    post<kl::Driver>(kl::Refuse{});
+    kl::run_until([] { return kl::Driver::replies >= 3; });
+    bool rx1_untouched = true;
+    for (uint8_t k = 0; k < kl::payload; ++k) rx1_untouched = rx1_untouched && kl::rx[1][k] == 0xEE;
+    const bool ends_moved = kl::rx[0][kl::payload - 1] == kl::tx[0][kl::payload - 1] &&
+                            kl::rx[2][kl::payload - 1] == kl::tx[2][kl::payload - 1];
+    print(serial, "  polled, asynchronous, polled: replies ", kl::Driver::order[0], ", ",
+          kl::Driver::order[1], ", ", kl::Driver::order[2], " (spi_ok ", spi_ok, ", spi_rejected ",
+          spi_rejected, "); the asynchronous one's rx ", rx1_untouched ? "untouched" : "WRITTEN", crlf);
+    bench.verdict("an asynchronous request is answered spi_rejected through its own ReplyTo, "
+                  "nothing moved (has_dma is false), and the bus carries the next one",
+                  !Loop::has_dma && kl::Driver::replies == 3 && kl::Driver::order[0] == spi_ok &&
+                      kl::Driver::order[1] == spi_rejected && kl::Driver::order[2] == spi_ok &&
+                      rx1_untouched && ends_moved && kl::SpiArb::rejected_count() == 0);
 
-    // The sleep vote. Idle first...
+    // The sleep vote: idle, then right behind a request.
     kl::Driver::init();
     post<kl::Driver>(kl::Ask{});
-    for (uint8_t k = 0; k < 40 && kl::Driver::votes == 0; ++k) {
-        while (kl::BusKernel::step()) {
-        }
-    }
+    kl::run_until([] { return kl::Driver::votes != 0; });
     const bool idle_vote = kl::Driver::last_vote;
     const uint8_t idle_votes = kl::Driver::votes;
-
-    // ... then with a transaction genuinely in flight: one request
-    // posted, one vote posted right behind it, and the vote dispatched
-    // while the engine is still clocking. The slowest rate the generator
-    // has makes that window 4.4 ms wide, which no dispatch can miss.
     kl::Driver::init();
-    kl::SpiArb::init();
-    {
-        auto r = Loop::Request{
-            .cs = {}, .dc = {}, .cmd = {},
-            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(kl::tx[0])),
-            .rx = lend<Lease::reply>(kl::rx[0]),
-            .len = kl::payload, .cmd_len = 0, .polled = false, .baud = 255,
-            .mode = SpiMode::mode0, .reply = reply_to<kl::Driver, SpiDone>(),
-        };
-        post<kl::SpiArb>(r);
-    }
-    post<kl::Driver>(kl::Ask{});
-    for (uint8_t k = 0; k < 200 && kl::Driver::votes == 0; ++k) {
-        while (kl::BusKernel::step()) {
-        }
-    }
-    const bool busy_vote = kl::Driver::last_vote;
-    const uint8_t busy_votes = kl::Driver::votes;
-    // Drain whatever is still owed before judging anything else.
-    const uint32_t t2 = Ticker::millis();
-    while (Ticker::millis() - t2 < 200u) {
-        while (kl::BusKernel::step()) {
-        }
-        if (kl::Driver::replies >= 1) break;
-    }
+    post<kl::Driver>(kl::AskBehind{});
+    kl::run_until([] { return kl::Driver::votes != 0 && kl::Driver::replies != 0; });
+    const bool behind_vote = kl::Driver::last_vote;
+    const uint8_t behind_votes = kl::Driver::votes;
+    const uint8_t replied_first = kl::Driver::replies_at_vote;
 
     print(serial, "  PrepareSleep(standby): idle votes=", idle_votes, " ok=", idle_vote,
-          ", busy votes=", busy_votes, " ok=", busy_vote, crlf);
+          "; behind a request votes=", behind_votes, " ok=", behind_vote,
+          ", the request's reply before it: ", replied_first, crlf);
     bench.verdict("an IDLE bus votes ok on a PrepareSleep", idle_votes == 1 && idle_vote);
-    bench.verdict("a bus with a transaction IN FLIGHT votes NOT ok - the completion "
-                  "interrupt is exactly what a gated clock domain would swallow",
-                  busy_votes == 1 && !busy_vote);
+    bench.verdict("and so does a vote posted right behind a request: the request ended in its "
+                  "own dispatch, replied first, and left nothing in flight",
+                  behind_votes == 1 && behind_vote && replied_first == 1);
 
-    bus_ao_live = false;
-    // The rates this letter's requests ask for, timed on the wire.
+    // The rate this letter's requests ask for, and the generator's
+    // slowest, timed on the wire.
     const uint32_t pm_cmd = frame_permille(command_hz);
     const uint32_t pm_slow = frame_permille(spi_sck_hz(SysClock::hz, 255));
-    print(serial, "  a frame inside a polled block at the letter's rates, in thousandths of its "
+    print(serial, "  a frame inside a polled block at the letter's rate and the slowest, in "
+          "thousandths of its "
           "wire time: ", command_hz / 1000u, " kHz ", pm_cmd, ", ",
           spi_sck_hz(SysClock::hz, 255), " Hz ", pm_slow, crlf);
-    bench.verdict("and the bus runs at the rates the requests ask: a frame inside a polled block "
+    bench.verdict("and the bus runs at the rates asked: a frame inside a polled block "
                   "in its eight SCK periods within -1 % and +3 %",
                   wire_ok(pm_cmd) && wire_ok(pm_slow));
     Loop::release();
@@ -2614,7 +2598,7 @@ void tj_client_edges() {
 }
 
 // ===========================================================================
-// k - THE HOST'S RARE PATHS: the spin budget, an early TXC, a lost interrupt
+// k - THE HOST'S RARE PATHS: the spin budget, an early TXC
 // ===========================================================================
 
 // ---- the one-shot that lands a handler inside a host request ------------------
@@ -2643,72 +2627,6 @@ bool shot_arm(uint32_t after_us, uint32_t hold_us) {
     Nvic::enable(Shot::irq());
     return true;
 }
-
-namespace kw {
-
-/// 20 ms: a six-character request at the slowest rate is 0.5 ms.
-constexpr uint32_t timeout_ms = 20;
-using TimedArb = SpiBus<Loop, P, 3, BusPassThrough, ticks_from_ms<P>(timeout_ms)>;
-
-struct Send {};
-
-uint8_t tx[6];
-uint8_t rx[6];
-
-class Driver : public Fsm<Driver, SpiDone, Send> {
-public:
-    static inline EventQueue<Event, 8, P> queue;
-    static inline uint8_t replies = 0;
-    static inline uint8_t last_status = 0xEE;
-    static inline uint32_t last_at = 0;
-
-    static void init() {
-        replies = 0;
-        last_status = 0xEE;
-        last_at = 0;
-        start(&running);
-    }
-    static void dispatch(const Event& e) { Fsm::dispatch(e); }
-
-private:
-    static Status running(const Event& e) {
-        return brio::match(
-            e,
-            [](const Send&) {
-                post<TimedArb>(Loop::Request{
-                    .cs = {}, .dc = {}, .cmd = {},
-                    .tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx)),
-                    .rx = lend<Lease::reply>(rx),
-                    .len = 6, .cmd_len = 0, .polled = false, .baud = 255,
-                    .mode = SpiMode::mode0, .reply = reply_to<Driver, SpiDone>(),
-                });
-                return handled();
-            },
-            [](const SpiDone& d) {
-                ++replies;
-                last_status = d.status;
-                last_at = Ticker::millis();
-                return handled();
-            },
-            [](auto) { return unhandled(); });
-    }
-};
-
-using Kernel = Tenuto<P, Driver, TimedArb>;
-
-/// The kernel loop's turn as Tenuto::run() has it: time events, then
-/// every queue drained.
-void pump_until(uint8_t replies, uint32_t deadline_ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < deadline_ms) {
-        TimeEvents<P>::process();
-        while (Kernel::step()) {
-        }
-        if (Driver::replies >= replies) break;
-    }
-}
-
-}   // namespace kw
 
 void tk_host_paths() {
     // THE SPIN BUDGET RUNS OUT: a polled request with the SERCOM's core
@@ -2783,53 +2701,6 @@ void tk_host_paths() {
                       st == spi_ok && rep && r.count == 64 && r.mism == 0 && r.aux3 == 0);
     }
 
-    // A LOST INTERRUPT under the pump: a timed SpiBus over the loop-back
-    // engine; one request started, then SERCOM1's NVIC line taken away so
-    // the pump never turns. The arbiter's clock must answer spi_timeout
-    // in its place, recover() the engine, and carry the next request.
-    bench.verdict("the loop-back engine comes up for the timed arbiter", Loop::init(clock));
-    for (uint8_t k = 0; k < 6; ++k) {
-        kw::tx[k] = static_cast<uint8_t>(0xC1u + k);
-        kw::rx[k] = 0xEE;
-    }
-    kw::Kernel::init_all();
-    timed_ao_live = true;
-    post<kw::Driver>(kw::Send{});
-    uint32_t t1 = Ticker::millis();
-    kw::pump_until(1, 100);
-    const bool control = kw::Driver::replies == 1 && kw::Driver::last_status == spi_ok &&
-                         kw::rx[5] == 0xC6u;
-    // The reply's time is read from BEFORE the request is posted: the
-    // arming lands inside the dispatch, at most a tick boundary later
-    // (the step takes microseconds), and the timeout matures on the
-    // timeout_ms-th tick boundary after the arming, so the reply comes
-    // timeout_ms to timeout_ms + 1 whole ticks after t1, and one more
-    // for the pump's own pass: [timeout_ms, timeout_ms + 2].
-    kw::Driver::init();
-    t1 = Ticker::millis();
-    post<kw::Driver>(kw::Send{});
-    while (kw::Kernel::step()) {
-    }
-    Nvic::disable(Raw::irq());          // the request is on the wire: its interrupt is lost
-    kw::pump_until(1, 200);
-    const uint32_t reply_ms = kw::Driver::last_at - t1;
-    const uint8_t wedge = kw::Driver::last_status;
-    kw::Driver::init();
-    for (uint8_t k = 0; k < 6; ++k) kw::rx[k] = 0xEE;
-    post<kw::Driver>(kw::Send{});
-    kw::pump_until(1, 100);
-    const bool after = kw::Driver::replies == 1 && kw::Driver::last_status == spi_ok &&
-                       kw::rx[5] == 0xC6u;
-    timed_ao_live = false;
-    print(serial, "  the timed arbiter: control ", control ? "ok" : "BAD", "; the lost interrupt "
-                  "answered ", wedge, " at ", reply_ms, " ms (limit ", kw::timeout_ms,
-          "); the next ", after ? "ok" : "BAD", "; stale ", kw::TimedArb::stale_events(), crlf);
-    bench.verdict("a request whose interrupt is lost comes back spi_timeout ON THE ARBITER'S "
-                  "CLOCK, a reply in its place",
-                  control && wedge == spi_timeout && reply_ms >= kw::timeout_ms &&
-                      reply_ms <= kw::timeout_ms + 2u);
-    bench.verdict("and recover() gives the same bus back: the next request completes spi_ok",
-                  after);
     (void)link_command_mode();
 }
 
@@ -2841,37 +2712,15 @@ void tk_host_paths() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
-/// ONE vector for the whole SERCOM. Which engine is on it depends on
-/// what the current letter armed - the kernel letter's loop-back host,
-/// or the protocol's. Both are SpiHost instantiations over the same
-/// Spi<1>, and only one of them ever has RXC armed at a time.
+/// ONE vector for the whole SERCOM, and only letter j's client arms it:
+/// the hosts run every request polled and arm no interrupt.
 extern "C" void SERCOM1_Handler() {
-    if (client_isr) {
-        if (Raw::ssl_flag()) {
-            ssl_at = wall();
-            Raw::clear_flags(SpiFlag::ssl);
-            Raw::enable_ssl_interrupt(false);
-            ssl_seen = static_cast<uint8_t>(ssl_seen + 1u);
-            if (ssl_hold_us != 0u) (void)delay_us(clock, ssl_hold_us);
-        }
-        return;
-    }
-    if (timed_ao_live) {
-        if (Loop::isr()) {
-            brio::post<kw::TimedArb>(brio::TransferDone{brio::spi_ok});
-        }
-        return;
-    }
-    if (bus_ao_live) {
-        if (Loop::isr()) {
-            isr_completions = isr_completions + 1;
-            brio::post<kl::SpiArb>(brio::TransferDone{brio::spi_ok});
-        }
-        return;
-    }
-    if (Bus::isr()) {
-        isr_done = true;
-        isr_completions = isr_completions + 1;
+    if (client_isr && Raw::ssl_flag()) {
+        ssl_at = wall();
+        Raw::clear_flags(SpiFlag::ssl);
+        Raw::enable_ssl_interrupt(false);
+        ssl_seen = static_cast<uint8_t>(ssl_seen + 1u);
+        if (ssl_hold_us != 0u) (void)delay_us(clock, ssl_hold_us);
     }
 }
 
@@ -2926,8 +2775,7 @@ int main() {
     bench.letter('j', "THE CLIENT'S EDGES: its runs against the peer's burst, every end, "
                       "SSL as a wake-up (needs the peer)",
                  tj_client_edges);
-    bench.letter('k', "the host's rare paths: the spin budget, an early TXC, a lost interrupt",
-                 tk_host_paths);
+    bench.letter('k', "the host's rare paths: the spin budget, an early TXC", tk_host_paths);
 
     bench.menu();
     bench.prompt();

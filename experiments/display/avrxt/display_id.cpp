@@ -173,7 +173,8 @@ private:
             CsPin::ref(), DcPin::ref(),
             brio::lend<brio::Lease::reply>(&cur_cmd), 1,
             {}, {}, 0,
-            brio::reply_to<Prober, brio::SpiDone>()});
+            brio::reply_to<Prober, brio::SpiDone>(),
+            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
     }
 
     static void start_read() {
@@ -185,7 +186,8 @@ private:
             CsPin::ref(), DcPin::ref(),
             brio::lend<brio::Lease::reply>(&cur_cmd), 1,
             {}, brio::lend<brio::Lease::reply>(buf), probes[idx].len,     // rx-only data phase
-            brio::reply_to<Prober, brio::SpiDone>()});
+            brio::reply_to<Prober, brio::SpiDone>(),
+            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
     }
 
     static void report(brio::SpiDone d) {
@@ -205,11 +207,7 @@ private:
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
-    }
-}
+// No SPI vector: the AVR's SpiHost runs every request polled and arms none.
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

@@ -1,8 +1,9 @@
 // mcu: samc21e18a samc21g18a samc21j18a
-// The SPI host has no engine slot: its data phase is the polled loop or
-// the pump, the DMAC being driven for the Uart's transmitter alone
-// (samc21/dmac.hpp, erratum 1.10.4 - the full-duplex pair hung beside any
-// third active channel). An engine argument fails to compile.
+// The SPI host has no engine slot: every request runs polled (an
+// asynchronous one is refused, has_dma false), the DMAC being driven for
+// the Uart's transmitter alone (samc21/dmac.hpp, erratum 1.10.4 - the
+// full-duplex pair hung beside any third active channel). An engine
+// argument fails to compile.
 #include "samc21/spi.hpp"
 using namespace brio;
 

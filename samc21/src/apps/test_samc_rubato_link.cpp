@@ -36,15 +36,17 @@
 //   DMAC's erratum 1.10.4 corrupts the write-back of concurrently
 //   triggered channels and hung the full-duplex pair in 4 to 8 % of runs
 //   (docs/samc21/dmac.md), so the stratum admits one channel, the UART's
-//   transmit. Its two paths: the POLLED loop (32.6.2.6.1, a character
-//   ahead: k + 1 written on DRE, k read on RXC) and the RXC PUMP (one
-//   interrupt a character, RXC armed and never DRE, k + 2 written as k is
-//   read). Neither keeps more than two characters in flight, and the
-//   receive buffer is two levels deep (32.2, 32.6.2.7): a dispatch above
-//   the arbiter that holds the polled loop off for any length lets frames
-//   k and k + 1 complete and SCK stop - a GAP ON THE BUS, never a lost
-//   frame - so the verdict under pressure is STRICT, the host's BUFOVF
-//   read at every reply and judged never set. The host has no spi_overrun;
+//   transmit. Asynchronous is DMA (docs/design/spi-bus.md), so the host
+//   runs every request POLLED inside start() and refuses one that is not
+//   (has_dma false): the shared body's requests, asynchronous by default,
+//   are all posted polled here, the body reading has_dma. The polled loop (32.6.2.6.1, a
+//   character ahead: k + 1 written on DRE, k read on RXC) keeps no more
+//   than two characters in flight, and the receive buffer is two levels
+//   deep (32.2, 32.6.2.7): a dispatch above the arbiter that holds the
+//   loop off for any length lets frames k and k + 1 complete and SCK
+//   stop - a GAP ON THE BUS, never a lost frame - so the verdict under
+//   pressure is STRICT, the host's BUFOVF read at every reply and judged
+//   never set. The host has no spi_overrun;
 //   its one failure is spi_stalled, a polled budget counted in loop turns
 //   (200000 + 6000 a frame) that a preemption does not spend, so a stall
 //   under pressure is a finding. Characters are 8 or 9 bits (CTRLB.CHSIZE,
@@ -122,38 +124,36 @@
 // (the shared body's control and six pressures):
 //   n  the peer's command channel through the arbiter: a ping, ident (the
 //      sanity byte and the avrxt port's kind), and ten more pings, every
-//      frame at BAUD 119 = 200 kHz on the pump and its answer decoded by
-//      the Client.
-//   o  the matrix on the PUMP (32 frames a window at BAUD 23 = 1 MHz, a
-//      rung under the 2 MHz the peer's client is exact to back to back):
+//      frame at BAUD 119 = 200 kHz and its answer decoded by the Client.
+//   o  the matrix (32 frames a window at BAUD 23 = 1 MHz, a rung under
+//      the 2 MHz the peer's client is exact to back to back):
 //      the four modes in byte frames, and a DORD mismatch (the peer LSb
 //      first, this end MSb) as an exact two-way bit reversal - byte-exact at
 //      both ends; the data windows' bytes over their cycles printed against
 //      the control's.
-//   p  the ladders through the arbiter, 32 frames a window, the POLLED loop
-//      and the RXC PUMP at BAUD 119, 47, 23 and 11 (200 kHz, 500 kHz,
-//      1 MHz, 2 MHz) judged, and the polled loop at 7 and 5 (3 MHz, 4 MHz)
-//      printed with its outcomes counted: test_samc_spi's letter d finds
-//      the AVR client exact both ways to 2 MHz and wrong in its answers
-//      from 3 MHz (the AVR's clarification 3.5.2), 4 MHz past the EA
-//      client's CLK_PER/6 = 3.33 MHz. The pump stops at 2 MHz: above it a
-//      character is shorter than its handler, which then holds the
-//      interrupt level for the whole window (letter x). A frame at BAUD b
-//      is 16 (b + 1) core cycles, 192 at 2 MHz: a 3000-cycle preemption of
-//      the polled loop is 15.6 frames of a stopped bus. The verdict is
-//      STRICT under pressure as in the control, and BUFOVF, read at every
-//      reply before any other transaction (client_replied()), never set.
-//   x  (OUTSIDE z, no verdict) the pressure's ticks against the pump's
-//      windows: forty windows of 32 frames a shape under 97 us x 300 and
-//      97 us x 3000 - the pump at 4, 3 and 2 MHz, the polled loop at
-//      4 MHz - with TC4's ticks against the ruler's wall, the longest span
-//      between two of its entries and the spans past one and a half
-//      periods. The instrument behind letter p's pump ceiling.
+//   p  the ladder through the arbiter, 32 frames a window, the polled
+//      loop at BAUD 119, 47, 23 and 11 (200 kHz, 500 kHz, 1 MHz, 2 MHz)
+//      judged, and at 7 and 5 (3 MHz, 4 MHz) printed with its outcomes
+//      counted: test_samc_spi's letter d finds the AVR client exact both
+//      ways to 2 MHz and wrong in its answers from 3 MHz (the AVR's
+//      clarification 3.5.2), 4 MHz past the EA client's CLK_PER/6 =
+//      3.33 MHz. A frame at BAUD b is 16 (b + 1) core cycles, 192 at
+//      2 MHz: a 3000-cycle preemption of the polled loop is 15.6 frames of
+//      a stopped bus. The verdict is STRICT under pressure as in the
+//      control, and BUFOVF, read at every reply before any other
+//      transaction (client_replied()), never set.
+//   x  (OUTSIDE z, no verdict) the pressure's ticks against the polled
+//      loop's windows: forty windows of 32 frames a rate under 97 us x 300
+//      and 97 us x 3000 - the loop at 4, 3 and 2 MHz - with TC4's ticks
+//      against the ruler's wall, the longest span between two of its
+//      entries and the spans past one and a half periods: what a polled
+//      transaction, which masks nothing, costs the pressure's latency.
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
-//      frames on the pump, two outstanding), Minor below it (10 POLLED
-//      requests of 8 frames, one outstanding) and, in a pressure pass,
-//      Pressure itself (8 requests of 3 frames on the pump, posted from its
-//      tick, one outstanding), all at 200 kHz inside ONE select window the
+//      frames, two outstanding), Minor below it (10 requests of 8 frames,
+//      one outstanding) and, in a pressure pass, Pressure itself (8
+//      requests of 3 frames, posted from its tick, one outstanding), every
+//      one polled inside the arbiter's dispatch (THE SPI HOST, above), all
+//      at 200 kHz inside ONE select window the
 //      letter holds - the peer's exchange is one burst - of constant frames
 //      (pattern_fixed). Every reply to its requester in its order, every
 //      one spi_ok, nothing rejected, the per-bus timeout never firing, the
@@ -352,6 +352,7 @@ constexpr const char* bus_clock_name = "GCLK0";
 /// The shared body's defaults changed for this host (the file header):
 /// the select held 30 us after a window, and a window's rate and mode
 /// written into the Request's baud and mode (a frame is a byte here).
+/// The body posts every request polled on its own, has_dma being false.
 struct LinkTraits {
     static constexpr uint8_t cs_hold_us = 30;
     static void bus_settings(Host::Request& r, SpiClock rate, SpiMode mode, SpiDataSize) {
@@ -360,7 +361,8 @@ struct LinkTraits {
     }
 };
 
-/// SERCOM1 is the SPI host (key z), its vector the host's pump.
+/// SERCOM1 is the SPI host (key z); the host arms no interrupt, so its
+/// vector serves the UART personality alone.
 volatile bool spi_live = false;
 
 // ---- the UART link -------------------------------------------------------------------
@@ -757,7 +759,7 @@ void tn_peer_link() {
 // o - the matrix
 // =============================================================================
 
-/// The matrix's rate: BAUD 23 = 1 MHz on the pump (the file header).
+/// The matrix's rate: BAUD 23 = 1 MHz (the file header).
 constexpr SpiClock matrix_rate = 23;
 static_assert(spi_sck_hz(SysClock::hz, matrix_rate) == 1'000'000u);
 
@@ -819,8 +821,7 @@ void to_matrix() {
         print(serial, "    ", good, " of ", total, " exchanges exact; the data windows carried ", bytes,
               " bytes in ", cycles / cycles_per_us, " us, ", rate_x10 / 10u, ".", rate_x10 % 10u,
               " kB/s (", vs, " permille of the control's rate)", crlf);
-        bench.verdict(pass_label(s), "four modes and a DORD mismatch: every window byte-exact at both ends on "
-                                     "the pump",
+        bench.verdict(pass_label(s), "four modes and a DORD mismatch: every window byte-exact at both ends",
                       good == total);
         bench.verdict(pass_label(s), "the command channel still answers after the matrix", ping);
         judge_pressure(s, st);
@@ -833,15 +834,8 @@ void to_matrix() {
 // =============================================================================
 
 constexpr SpiClock rungs[] = {119, 47, 23, 11, 7, 5};
-/// Judged to BAUD 11 = 2 MHz; BAUD 7 = 3 MHz and 5 = 4 MHz printed on the
-/// polled loop, its outcome counted (the file header: the peer's client).
-/// The pump climbs to 2 MHz alone: above it a character (128 cycles at
-/// 3 MHz, 96 at 4) is shorter than the pump's handler, which re-enters at
-/// its own exit for the whole window, a polled loop at the interrupt level
-/// (docs/samc21/spi.md), and TC4 - the same priority, a higher exception
-/// number - waits the window out: letter x measured 10068 to 10485 cycles
-/// between two of its entries there, more than two of the 4656-cycle
-/// periods, against 5338 to 5341 at 2 MHz.
+/// Judged to BAUD 11 = 2 MHz; BAUD 7 = 3 MHz and 5 = 4 MHz printed, their
+/// outcomes counted (the file header: the peer's client).
 constexpr SpiClock judged_top = 11;
 
 /// A frame's core cycles at BAUD `c`: 8 bits x 2 (c + 1).
@@ -852,22 +846,19 @@ uint32_t frame_cycles(SpiClock c) { return 8u * division(c); }
 uint8_t top_exact[2] = {};
 uint8_t top_total[2] = {};
 
-/// One ladder on one path: every judged rung byte-exact, the first failure's
-/// outcome printed; the informational rungs counted apart.
-bool climb(bool polled, uint8_t seed) {
+/// The ladder: every judged rung byte-exact, the first failure's outcome
+/// printed; the informational rungs counted apart.
+bool climb(uint8_t seed) {
     bool all = true;
     uint8_t k = 0;
     for (const SpiClock c : rungs) {
         sl::Exchange e{};
         e.rate = c;
-        e.polled = polled;
+        e.polled = true;
         e.count = 32;
         e.seed_a = static_cast<uint8_t>(seed + 9u * k);
         e.seed_b = static_cast<uint8_t>(seed + 0x40u + 5u * k);
         ++k;
-        if (c < judged_top && !polled) {
-            continue;   // the pump above its handler-bound rate (judged_top's comment)
-        }
         const sl::Outcome o = sl::run(e);
         const bool ok = sl::exact(e, o);
         if (c < judged_top) {
@@ -879,7 +870,7 @@ bool climb(bool polled, uint8_t seed) {
             continue;
         }
         if (!ok) {
-            print(serial, "    ", polled ? "polled loop" : "RXC pump", " (a frame ", frame_cycles(c), " cycles):", crlf);
+            print(serial, "    polled loop (a frame ", frame_cycles(c), " cycles):", crlf);
             sl::print_outcome(e, o);
         }
         all = all && ok;
@@ -892,8 +883,8 @@ void tp_ladders() {
         bench.verdict("SERCOM1 comes up as the SPI host", false);
         return;
     }
-    print(serial, "  the polled loop and the pump keep two characters in flight against a two-level receive "
-                  "buffer; 32 frames a window at BAUD 119, 47, 23, 11 judged, 7 and 5 printed on the polled loop",
+    print(serial, "  the polled loop keeps two characters in flight against a two-level receive buffer; "
+                  "32 frames a window at BAUD 119, 47, 23, 11 judged, 7 and 5 printed",
           crlf);
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
@@ -906,8 +897,7 @@ void tp_ladders() {
         ovf_at_reply = 0;
         top_exact[0] = top_exact[1] = 0;
         top_total[0] = top_total[1] = 0;
-        const bool polled = climb(true, 0x21);
-        const bool pump = climb(false, 0x39);
+        const bool polled = climb(0x21);
         const uint32_t ovf = ovf_at_reply;
         const bool ping = sl::command(spilink::Op::ping);
         const PassStats st = pass_end(s);
@@ -921,7 +911,6 @@ void tp_ladders() {
         bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 32 frames byte-exact both ways at "
                                      "every BAUD to 2 MHz",
                       polled);
-        bench.verdict(pass_label(s), "THE RXC PUMP: 32 frames byte-exact both ways at every BAUD to 2 MHz", pump);
         bench.verdict(pass_label(s), "the host's BUFOVF never set at a reply: no frame left unread", ovf == 0u);
         bench.verdict(pass_label(s), "the command channel survives the ladders", ping);
         judge_pressure(s, st);
@@ -930,7 +919,7 @@ void tp_ladders() {
 }
 
 // =============================================================================
-// x - the pressure's ticks against the pump's windows (outside z, no verdict)
+// x - the pressure's ticks against the polled loop's windows (outside z, no verdict)
 // =============================================================================
 
 /// TC4's entries stamped while letter x runs: the longest span between two
@@ -942,8 +931,8 @@ volatile uint32_t x_most = 0;
 volatile uint32_t x_long = 0;
 volatile uint32_t x_period = 0;
 
-/// The instrument behind letter p's pressure verdict at the fast pump
-/// rungs: one shape at a time, forty windows under 97 us x 300 and forty
+/// What a polled transaction, which masks nothing, costs the pressure's
+/// latency: one rate at a time, forty windows under 97 us x 300 and forty
 /// under 97 us x 3000, TC4's ticks against the ruler's wall, the longest
 /// span between two of its entries and the spans past one and a half
 /// periods printed. No verdict.
@@ -951,13 +940,11 @@ void tx_ticks() {
     struct Shape {
         const char* name;
         SpiClock rate;
-        bool polled;
     };
     static const Shape shapes[] = {
-        {"RXC pump, BAUD 5 (4 MHz)", 5, false},
-        {"RXC pump, BAUD 7 (3 MHz)", 7, false},
-        {"RXC pump, BAUD 11 (2 MHz)", 11, false},
-        {"polled loop, BAUD 5 (4 MHz)", 5, true},
+        {"polled loop, BAUD 5 (4 MHz)", 5},
+        {"polled loop, BAUD 7 (3 MHz)", 7},
+        {"polled loop, BAUD 11 (2 MHz)", 11},
     };
     constexpr uint16_t windows = 40;
     if (!spi_up() || !sl::need_peer()) {
@@ -978,7 +965,7 @@ void tx_ticks() {
             for (uint16_t k = 0; k < windows; ++k) {
                 sl::Exchange e{};
                 e.rate = sh.rate;
-                e.polled = sh.polled;
+                e.polled = true;
                 e.count = 32;
                 e.seed_a = static_cast<uint8_t>(0x31u + 3u * k);
                 e.seed_b = static_cast<uint8_t>(0x75u + 7u * k);
@@ -1385,17 +1372,12 @@ extern "C" void TC4_Handler() {
     pressure_landed();
 }
 
-/// SERCOM1's one line, the live personality's: the SPI host's pump, or the
-/// Uart task's receiver and (the interrupt transmitter's) feed. The DMA
-/// transmitter's port receives nothing a leg reads, so its edge posts
-/// nothing.
+/// SERCOM1's one line, the UART personality's (the SPI host arms no
+/// interrupt): the Uart task's receiver and (the interrupt transmitter's)
+/// feed. The DMA transmitter's port receives nothing a leg reads, so its
+/// edge posts nothing.
 extern "C" void SERCOM1_Handler() {
-    if (spi_live) {
-        if (Host::isr()) {
-            done_from_dma = false;
-            brio::post<SpiArb>(brio::TransferDone{Host::status()});
-        }
-    } else if (link_live) {
+    if (link_live) {
         if (leg_dma) {
             (void)PortDma::isr();
         } else if (PortIrq::isr()) {
@@ -1425,11 +1407,11 @@ int main() {
     brio::scheduler_init();
 
     bench.letter('n', "the peer's command channel through the arbiter", tn_peer_link);
-    bench.letter('o', "the matrix on the pump: four modes, a DORD mismatch", to_matrix);
-    bench.letter('p', "the ladders: the polled loop and the pump, every BAUD to 4 MHz", tp_ladders);
+    bench.letter('o', "the matrix: four modes, a DORD mismatch", to_matrix);
+    bench.letter('p', "the ladder: the polled loop, every BAUD to 4 MHz", tp_ladders);
     bench.letter('w', "the arbiter under pressure: three requesters, one bus", tw_arbiter);
     bench.letter('i', "dark: every object idle, SERCOM1 given back, nothing lit", ti_dark);
-    bench.letter('x', "the pressure's ticks against the pump's windows, no verdict", tx_ticks, false);
+    bench.letter('x', "the pressure's ticks against the polled windows, no verdict", tx_ticks, false);
     bench.letter('q', "the peer's echo against the writer's pace, no verdict", tq_pace, false);
     bench.second_letter('t', "the UART received: numbered lines through the peer's echo", tt_lines);
     bench.second_letter('u', "the UART sent: a blast into the peer's sink, both transmitters", tu_blast);

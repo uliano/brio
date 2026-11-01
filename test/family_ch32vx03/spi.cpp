@@ -149,12 +149,24 @@ using Host2Dma = SpiHost<second_spi, spi_default_pins<second_spi>,
 using Host1SlowHandlers = SpiHost<1, spi_default_pins<1>, NoDmaEngine, NoDmaEngine, 300>;
 
 static_assert(!Host1::has_engines && Host1Dma::has_engines);
+// Asynchronous is DMA (docs/design/spi-bus.md): the engineless host refuses
+// every request not marked polled, and says so at compile time.
+static_assert(!Host1::has_dma && Host1Dma::has_dma && Host2Dma::has_dma);
+// The short request's count is a function of the code, the width, the
+// direction and the bus share alone - SPI1 at all of HCLK, SPI2 at half of
+// it above 72 MHz - and falls as the frame lengthens.
+static_assert(spi_hclk_over_pclk<1>(144'000'000UL) == 1u &&
+              spi_hclk_over_pclk<second_spi>(144'000'000UL) == (second_spi == 2u ? 2u : 1u));
+static_assert(Host1Dma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true, 1) >=
+                  Host1Dma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true, 1) &&
+              Host1Dma::async_min_frames(SpiClock::div256, SpiDataSize::bits8, true, 1) == 1u);
+static_assert(Host1Dma::dma_min_frames_polled > 1u);
 static_assert(Client1::frames_ahead == 1, "one buffer, no FIFO (figure 20-1)");
 static_assert(Client1::has_nss_pad == pad_bonded(spi_default_pins<1>.nss));
 static_assert(Host1::number == 1 && Host2::number == second_spi);
 
-/// The arbiter over the engine, which is what an application posts to.
-using Arb = SpiBus<Host1, P, 4>;
+/// The arbiter over the engined host, which is what an application posts to.
+using Arb = SpiBus<Host1Dma, P, 4>;
 
 class Sink {
 public:
@@ -272,7 +284,9 @@ void hosts()
     r.bits = SpiDataSize::bits8;
     r.polled = true;
     (void)Host1::start(r);
-    (void)Host1::isr();
+    // The same request asynchronous: refused, spi_rejected, nothing on the wire.
+    r.polled = false;
+    (void)Host1::start(r);
     (void)Host1::dma_isr();
     (void)Host1::status();
     (void)Host1::recover();
@@ -290,6 +304,17 @@ void hosts()
     w.len = 4;
     w.bits = SpiDataSize::bits16;
     (void)Host1Dma::start(w);
+    // A command phase alone and a command phase before a data block, both
+    // asynchronous: a block of their own, or polled inside start().
+    w.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    w.cmd_len = 2;
+    w.bits = SpiDataSize::bits8;
+    (void)Host1Dma::start(w);
+    w.len = 0;
+    (void)Host1Dma::start(w);
+    (void)Host1Dma::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true);
+    (void)Host1Dma::busy();
+    (void)Host1Dma::recover();
     Host1Dma::release();
 
     (void)Host1SlowHandlers::init(clock);
@@ -299,8 +324,8 @@ void hosts()
     slow.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     slow.rx = lend<Lease::reply>(in_buf);
     slow.len = 8;
+    slow.polled = true;
     (void)Host1SlowHandlers::start(slow);
-    (void)Host1SlowHandlers::isr();
     Host1SlowHandlers::release();
 
     (void)Host2::init(clock);
@@ -365,7 +390,7 @@ void clients()
 void kernel()
 {
     Kernel::init_all();
-    Host1::Request r{};
+    Host1Dma::Request r{};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.len = 8;
     r.reply = reply_to<Sink, SpiDone>();
@@ -384,14 +409,19 @@ int main()
     return 0;
 }
 
-/// The vectors an application binds: the instance's own, and the two DMA
-/// channels its engines ride.
-BRIO_CH32_VECTOR(spi1_handler)
+/// The vectors an application binds: the client's on its instance, and the
+/// two DMA channels the host's engines ride, each posting the arbiter's
+/// completion (the host arms no interrupt of the SPI block).
+BRIO_CH32_VECTOR(spi2_handler) { (void)Client2::isr(); }
+BRIO_CH32_VECTOR(spi_dma_tx_handler)
 {
-    if (Host1::isr()) {
-        post<Arb>(TransferDone{Host1::status()});
+    if (Host1Dma::dma_tx_isr()) {
+        post<Arb>(TransferDone{Host1Dma::status()});
     }
 }
-BRIO_CH32_VECTOR(spi2_handler) { (void)Client2::isr(); }
-BRIO_CH32_VECTOR(spi_dma_tx_handler) { (void)Host1Dma::dma_tx_isr(); }
-BRIO_CH32_VECTOR(spi_dma_rx_handler) { (void)Host1Dma::dma_rx_isr(); }
+BRIO_CH32_VECTOR(spi_dma_rx_handler)
+{
+    if (Host1Dma::dma_rx_isr()) {
+        post<Arb>(TransferDone{Host1Dma::status()});
+    }
+}

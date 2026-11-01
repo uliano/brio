@@ -134,7 +134,7 @@
 //      tick handler's cycles, busy = the floor. n=0, wire=0.
 //   d  THE DMA ENGINES (stm32g0/dma.hpp), each op the best of 8 runs, the
 //      completion an interrupt awaited on the masked idle path (one meter,
-//      `dma_meter`, on the three DMA vectors and SPI1's), and after each
+//      `dma_meter`, on the three DMA vectors), and after each
 //      line the start call alone - "the launch call" / "start()", timed
 //      with interrupts masked, one ruler read in it:
 //        copy, fill  DmaCopyEngine on DMA1 channel 1, word beats, 16, 256
@@ -149,39 +149,49 @@
 //                    eight walls;
 //        spi.dma     SpiHost<1> on its two engines (uint16_t, DMA1 channels
 //                    2 and 3), SPI1 on PB3/PB4/PB5 with nothing wired - MISO
-//                    floats: 16 and 256 frames of 8 bits (`spi.dma`) and of
-//                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, the wall
-//                    against the wire.
-//   e  THE SPI HOST ABOVE THE WIRE (stm32g0/spi.hpp): SpiHost<1> WITHOUT
-//      engines on letter d's pads, MISO floating, each op the best of 8
-//      runs of start() alone (the Request built outside the clock, as a
-//      client builds it; on the pump the wait for the completion on the
-//      masked idle path is inside the clock too), the frames read back
-//      into a buffer where the shape reads, every line followed by the
-//      wire's cycles, "the rest" above them, and SPI1's FTLVL, FRLVL and
-//      OVR read right after the run (both levels zero and the flag clear
-//      after every shape: a receive shape that moved every frame both
-//      ways, a transmit-only one that cleared the overrun its unread
-//      echoes raise; a frame lost to an overrun never completes the pump,
-//      which the 20 ms budget and recover() would then report):
-//        spi.poll    16 and 256 frames of 8 bits (`spi.poll`) and of 16
-//                    (`spi.poll16`) at PCLK/2, PCLK/4 and PCLK/16, POLLED - the
-//                    whole transaction inside start(): wall against the
-//                    wire - in the WRITE shape (rx null: the transmit-only
-//                    loop, nothing read back) and, as `.rx`, in the receive
-//                    shape (the frames read back into a buffer, the
-//                    answers paced by count);
-//        spi.pump    the same four on the frame pump, SPI1's own vector
-//                    counted apart (the last run's): its interrupts per
-//                    frame (one per RXNE where the handler keeps up with
-//                    the wire, fewer where it does not), its cycles per
-//                    entry and per frame;
+//                    floats: 64 and 256 frames of 8 bits (`spi.dma`) and of
+//                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, asynchronous -
+//                    every one of them long enough to ride the engines (the
+//                    host's async_min_frames()) - the wall against the wire.
+//   e  THE SPI HOST ABOVE THE WIRE (stm32g0/spi.hpp) on letter d's pads,
+//      MISO floating, each op the best of 8 runs of start() (the Request
+//      built outside the clock, as a client builds it; where the request
+//      goes to the engines, the wait for the completion on the masked idle
+//      path is inside the clock too), the frames read back into a buffer
+//      where the shape reads, every line followed by the wire's cycles,
+//      "the rest" above them, and SPI1's FTLVL, FRLVL and OVR read right
+//      after the run (both levels zero and the flag clear after every
+//      shape: a receive shape that moved every frame both ways, a
+//      transmit-only one that cleared the overrun its unread echoes
+//      raise):
+//        spi.poll    the ENGINELESS SpiHost<1>: 16 and 256 frames of 8 bits
+//                    (`spi.poll`) and of 16 (`spi.poll16`) at PCLK/2, PCLK/4
+//                    and PCLK/16, POLLED - the whole transaction inside
+//                    start(): wall against the wire - in the WRITE shape (rx
+//                    null: the transmit-only loop, nothing read back) and,
+//                    as `.rx`, in the receive shape (the frames read back
+//                    into a buffer, the answers paced by count); and each
+//                    shape's frame at PCLK/2 from its two lengths (the fixed
+//                    part cancels), the turn the short-request rule takes;
+//        refused     an asynchronous request on the same host: start()
+//                    answers at once, spi_rejected, both FIFOs empty and the
+//                    select high - no frame reached the wire (printed, not
+//                    timed);
 //        spi.req     THE FIXED COST OF A REQUEST, a DCS command's shapes: a
 //                    polled command of one byte and 0, 2 and 15 bytes of
 //                    data, write-only, the D/C scripted on PB6 and the
 //                    select on PA15 (two spare pads nothing is wired to),
 //                    at PCLK/16; "the rest" above the wire is the price of
-//                    a command.
+//                    a command;
+//        spi.async   THE SHORT REQUEST'S BUDGET on letter d's ENGINED host:
+//                    64 frames of 8 bits at PCLK/16, write and read,
+//                    asynchronous on the engines (the DMA vector counted
+//                    apart) and polled (`spi.e.poll`) through the same call,
+//                    so E - F is the least busy of the first's 8 runs (a
+//                    tick in none) less the rest of the second, the ruler's
+//                    own cycles cancelling: printed for a read and a write
+//                    beside the host's constants, with the frame counts
+//                    those give at every code.
 //   f  THE PREFETCH (FLASH_ACR.PRFTEN, RM0444 3.3.5) as a column of its
 //      own: the instrument's three cost lines and letters m, p and t run
 //      TWICE through stm32g0/flash.hpp's FlashAccel::prefetch() - off,
@@ -264,7 +274,7 @@
 //   spi.dma SCK / 8 bytes a second: PCLK/2 = 32 MHz -> 4 000 000 B/s,
 //           PCLK/8 -> 1 000 000; a 16-bit frame is two bytes in sixteen
 //           bit times, the same rate.
-//   spi.poll, spi.pump, spi.req  the same wire: PCLK/4 = 16 MHz ->
+//   spi.poll, spi.async, spi.req  the same wire: PCLK/4 = 16 MHz ->
 //           2 000 000 B/s, PCLK/16 -> 500 000.
 //   i2c.*   the tenure's own time on the bus: nine SCL periods a byte
 //           with its acknowledge (the address byte included), one period
@@ -389,7 +399,7 @@ static_assert(Platform<Idle>);
 IsrMeter<Ruler, Idle> usart_meter;
 IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
-IsrMeter<Ruler, Idle> dma_meter;   // letter d: the three DMA vectors and SPI1's
+IsrMeter<Ruler, Idle> dma_meter;   // letters d and e: the three DMA vectors
 IsrMeter<Ruler, Idle> loop_meter;  // letter u: USART1's vector
 IsrMeter<Ruler, Idle> i2c_meter;    // letter i: I2C1's vector, the host
 IsrMeter<Ruler, Idle> target_meter; // letter i: I2C2's, the client
@@ -1031,7 +1041,7 @@ void run_paced() {
 
 void run_spi(SpiDataSize bits, SpiClock rate, uint16_t div) {
     const bool wide = bits == SpiDataSize::bits16;
-    for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
+    for (const uint16_t frames : {uint16_t{64}, uint16_t{256}}) {
         const uint32_t bytes = wide ? 2u * frames : frames;
         bool ok = false;
         uint32_t worst = 0;
@@ -1109,45 +1119,52 @@ void td_dma() {
 }
 
 // =============================================================================
-// e - the SPI host above the wire: the polled loop, the pump, a request's
-//     fixed cost (stm32g0/spi.hpp over design/spi-bus.md)
+// e - the SPI host above the wire: the polled loop, the refusal, a request's
+//     fixed cost, the short request's budget (stm32g0/spi.hpp over
+//     design/spi-bus.md)
 // =============================================================================
-/// The ENGINELESS host on letter d's pads: its polled loop and its frame
-/// pump are what an engined host hands the command phase to, and what a
-/// host with no engines runs for everything.
+/// The ENGINELESS host on letter d's pads: its polled loop is what an
+/// engined host runs a short asynchronous request and a command phase
+/// on, and what a host with no engines runs for everything.
 using SpiSw = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, HotPlace>;
-volatile bool sw_live = false;   // the SPI1 vector's switch, as spi_live is
 /// The select and the D/C of `spi.req`, two spare pads nothing is wired
 /// to: PA15 (the SPI suite's own chip select on this board) and PB6.
 using ReqCs = Pin<'A', 15>;
 using ReqDc = Pin<'B', 6>;
 static const uint8_t req_cmd[1] = {0x2C};   // a DCS memory write's opcode
 
-/// SPI1's vector alone, between two instants: its count and its cycles,
-/// read under the mask as counters() are.
+/// The DMA vectors' meter alone, between two instants: its count and its
+/// cycles, read under the mask as counters() are.
 struct VectorSample {
     uint32_t irq;
     uint32_t isr;
 };
-VectorSample spi_vector() {
+VectorSample dma_vector() {
     const Idle::CriticalSection cs;
     return {dma_meter.count(), dma_meter.cycles()};
 }
 
+/// What run_host() found: the best run (the shortest wall, then the
+/// fewest interrupts) and the least busy of the eight.
+struct HostSample {
+    BenchSample best;
+    uint32_t least_busy;
+};
+
 /// One operation of letter e through `Host`: `frames` frames of `bits`
-/// at `rate`, polled or on the pump, after an optional command phase of
+/// at `rate`, polled or asynchronous, after an optional command phase of
 /// `cmd_len` frames with the D/C scripted; the best of 8 runs on the
 /// Stopwatch, every run's completion required. The bench line, then a
 /// line with the wire's cycles, "the rest" above them, the FIFO levels
-/// and the overrun flag read after the run, and - on the pump - SPI1's
-/// own interrupts and cycles per frame.
+/// and the overrun flag read after the run, and - where a request went
+/// to the engines - the DMA vectors' interrupts and cycles.
 template <typename Host>
-void run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, bool polled,
-              uint16_t frames, uint8_t cmd_len, PinRef cs, PinRef dc, bool read_back) {
+HostSample run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, bool polled,
+                    uint16_t frames, uint8_t cmd_len, PinRef cs, PinRef dc, bool read_back) {
     const bool wide = bits == SpiDataSize::bits16;
     const uint32_t bytes = (wide ? 2u : 1u) * (static_cast<uint32_t>(frames) + cmd_len);
     // The Request, built OUTSIDE the clock: what is timed is start() and,
-    // on the pump, the wait for its completion on the idle path.
+    // on the engines, the wait for its completion on the idle path.
     typename Host::Request r{};
     r.cs = cs;
     r.dc = dc;
@@ -1167,8 +1184,10 @@ void run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, boo
 
     (void)drain();
     BenchSample best{};
+    uint32_t least_busy = 0;
     uint32_t worst = 0;
     bool ok = true;
+    bool engined = false;
     uint8_t ftlvl = 0;
     uint8_t frlvl = 0;
     bool ovr = false;
@@ -1177,10 +1196,11 @@ void run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, boo
     Stopwatch<Ruler> sw;
     for (uint8_t run = 0; run < 8u; ++run) {
         spi_done = false;
-        v0 = spi_vector();
+        v0 = dma_vector();
         const BenchCounters c0 = counters();
         sw.start();
         bool done = Host::start(r);
+        const bool went = !done;
         if (!done) {
             done = idle_while([] { return !spi_done; }, 20u);
         }
@@ -1192,16 +1212,20 @@ void run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, boo
         ftlvl = Host::Resource::tx_level();
         frlvl = Host::Resource::rx_level();
         ovr = Host::Resource::overrun();
-        v1 = spi_vector();
+        v1 = dma_vector();
         if (!done) {
             (void)Host::recover();
         }
         ok = ok && done;
+        engined = went;
         if (wall > worst) {
             worst = wall;
         }
         if (run == 0u || s.wall < best.wall || (s.wall == best.wall && s.irq < best.irq)) {
             best = s;
+        }
+        if (run == 0u || s.busy < least_busy) {
+            least_busy = s.busy;
         }
     }
     const BenchSample& s = best;
@@ -1212,21 +1236,26 @@ void run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t div, boo
           " frames at PCLK/", div, ": the wire ", wire_cycles, " cycles, the rest ",
           s.wall > wire_cycles ? s.wall - wire_cycles : 0u, ", worst wall ", worst,
           "; after the run FTLVL ", ftlvl, " FRLVL ", frlvl, " OVR ", ovr ? 1u : 0u);
-    if (!polled) {
+    if (engined) {
         const uint32_t irq = v1.irq - v0.irq;
         const uint32_t isr = v1.isr - v0.isr;
-        const uint32_t all = static_cast<uint32_t>(frames) + cmd_len;
-        print(serial, "; SPI1 vector (the last run): irq ", irq, " = ",
-              (irq * 100u + all / 2u) / all, "/100 a frame, isr ", isr, " = ",
-              (isr + irq / 2u) / (irq == 0u ? 1u : irq), " an entry, ",
-              (isr + all / 2u) / all, " a frame");
+        print(serial, "; on the engines, the DMA vector (the last run): irq ", irq, ", isr ",
+              (isr + irq / 2u) / (irq == 0u ? 1u : irq), " an entry; the least busy ", least_busy);
+    } else if (!polled) {
+        print(serial, "; asynchronous, run polled inside start()");
     }
     print(serial, ok ? "" : " - A TRANSACTION TIMED OUT", crlf);
+    return {best, least_busy};
+}
+
+/// A figure in hundredths, printed as a decimal.
+void print_hundredths(uint32_t v) {
+    print(serial, v / 100u, '.', v % 100u < 10u ? "0" : "", v % 100u);
 }
 
 void te_host() {
-    print(serial, "  SpiHost<1> without engines on SPI1 PB3/PB4/PB5, MISO floating; "
-                  "spi.req's select PA15, D/C PB6",
+    print(serial, "  SpiHost<1> without engines, then letter d's engined one, on SPI1 "
+                  "PB3/PB4/PB5, MISO floating; spi.req's select PA15, D/C PB6",
           crlf);
     for (uint16_t i = 0; i < 512u; ++i) {
         spi_tx[i] = static_cast<uint8_t>(0x30u + i);
@@ -1234,47 +1263,115 @@ void te_host() {
     ReqCs::output(true);
     ReqDc::output(true);
     (void)SpiSw::init(clock);
-    sw_live = true;
-    // The polled loop and the pump in both shapes - the WRITE (rx null:
-    // nothing read back) and the receive (`.rx`: the frames read back
-    // into a buffer) - 16 and 256 frames, both widths, at PCLK/2, PCLK/4
-    // and PCLK/16, the select on PA15 and no D/C.
+    // The polled loop in both shapes - the WRITE (rx null: nothing read
+    // back) and the receive (`.rx`: the frames read back into a buffer) -
+    // 16 and 256 frames, both widths, at PCLK/2, PCLK/4 and PCLK/16, the
+    // select on PA15 and no D/C.
     struct Op {
         const char* name;
         bool wide;
-        bool polled;
         bool read_back;
     };
-    constexpr Op ops[8] = {
-        {"spi.poll", false, true, false},     {"spi.poll.rx", false, true, true},
-        {"spi.pump", false, false, false},    {"spi.pump.rx", false, false, true},
-        {"spi.poll16", true, true, false},    {"spi.poll16.rx", true, true, true},
-        {"spi.pump16", true, false, false},   {"spi.pump16.rx", true, false, true},
+    constexpr Op ops[4] = {
+        {"spi.poll", false, false},
+        {"spi.poll.rx", false, true},
+        {"spi.poll16", true, false},
+        {"spi.poll16.rx", true, true},
     };
-    for (const Op& op : ops) {
+    uint32_t at_div2[4][2] = {};
+    for (uint8_t k = 0; k < 4u; ++k) {
+        const Op& op = ops[k];
         const SpiDataSize bits = op.wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
         for (const uint16_t div : {uint16_t{2}, uint16_t{4}, uint16_t{16}}) {
             const SpiClock rate = div == 2u   ? SpiClock::div2
                                   : div == 4u ? SpiClock::div4
                                               : SpiClock::div16;
+            uint8_t i = 0;
             for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
-                run_host<SpiSw>(op.name, bits, rate, div, op.polled, frames, 0, ReqCs::ref(), {},
-                                op.read_back);
+                const HostSample h = run_host<SpiSw>(op.name, bits, rate, div, true, frames, 0,
+                                                     ReqCs::ref(), {}, op.read_back);
+                if (div == 2u) {
+                    at_div2[k][i] = h.best.wall;
+                }
+                ++i;
             }
         }
     }
+    // Each shape's frame at PCLK/2, from the two lengths: the fixed part
+    // cancels, and the wire's frame is 16 cycles a byte, 32 a half-word.
+    print(serial, "  the loop's frame at PCLK/2 (256 - 16 frames), against the wire's 16 and 32:");
+    for (uint8_t k = 0; k < 4u; ++k) {
+        print(serial, ' ', ops[k].name, ' ');
+        print_hundredths((at_div2[k][1] - at_div2[k][0]) * 100u / 240u);
+    }
+    print(serial, crlf);
+
+    // An asynchronous request on a host with no engines: refused at once,
+    // the wire untouched.
+    {
+        SpiSw::Request a{};
+        a.cs = ReqCs::ref();
+        a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
+        a.len = 16;
+        a.clock = SpiClock::div16;
+        const bool done = SpiSw::start(a);
+        print(serial, "  refused: an asynchronous request on the engineless host - start() ",
+              done ? "true" : "FALSE", ", status ", SpiSw::status(),
+              SpiSw::status() == spi_rejected ? " (spi_rejected)" : " (NOT spi_rejected)",
+              ", FTLVL ", SpiSw::Resource::tx_level(), " FRLVL ", SpiSw::Resource::rx_level(),
+              ", the select ", ReqCs::read() ? "high" : "LOW", crlf);
+    }
+
     // The fixed cost of a request: a polled command of one byte and 0, 2
     // and 15 bytes of data (a DCS command's shapes), write-only, the D/C
     // scripted, at PCLK/16.
     for (const uint16_t data : {uint16_t{0}, uint16_t{2}, uint16_t{15}}) {
-        run_host<SpiSw>("spi.req", SpiDataSize::bits8, SpiClock::div16, 16u, true, data, 1,
-                        ReqCs::ref(), ReqDc::ref(), false);
+        (void)run_host<SpiSw>("spi.req", SpiDataSize::bits8, SpiClock::div16, 16u, true, data, 1,
+                              ReqCs::ref(), ReqDc::ref(), false);
     }
-    sw_live = false;
     SpiSw::release();
+
+    // The short request's budget, E - F, on the engined host: the same
+    // 64-frame request asynchronous (on the engines at PCLK/16, the host's
+    // own counts say so) and polled, through the same call.
+    (void)SpiHw::init(clock);
+    spi_live = true;
+    uint32_t over[2] = {};
+    for (uint8_t read = 0; read < 2u; ++read) {
+        const HostSample e = run_host<SpiHw>(read != 0u ? "spi.async.rx" : "spi.async",
+                                             SpiDataSize::bits8, SpiClock::div16, 16u, false, 64, 0,
+                                             ReqCs::ref(), {}, read != 0u);
+        const HostSample f = run_host<SpiHw>(read != 0u ? "spi.e.poll.rx" : "spi.e.poll",
+                                             SpiDataSize::bits8, SpiClock::div16, 16u, true, 64, 0,
+                                             ReqCs::ref(), {}, read != 0u);
+        const uint32_t wire = 64u * 8u * 16u;
+        const uint32_t rest = f.best.wall > wire ? f.best.wall - wire : 0u;
+        over[read] = e.least_busy > rest ? e.least_busy - rest : 0u;
+    }
+    spi_live = false;
+    SpiHw::release();
+    print(serial, "  E - F (the engines' least busy less the polled rest): read ", over[1],
+          " (the host's ", SpiHw::async_read_budget_cycles, "), written ", over[0], " (the host's ",
+          SpiHw::async_write_budget_cycles, ")", crlf);
+    print(serial, "  an asynchronous request rides the engines from, PCLK/2..PCLK/256, 8-bit read:");
+    for (uint8_t c = 0; c < 8u; ++c) {
+        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, true));
+    }
+    print(serial, "; written:");
+    for (uint8_t c = 0; c < 8u; ++c) {
+        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, false));
+    }
+    print(serial, "; 16-bit read:");
+    for (uint8_t c = 0; c < 8u; ++c) {
+        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits16, true));
+    }
+    print(serial, crlf, "  a polled phase rides them from, at PCLK/2: 8-bit read ",
+          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, true), ", written ",
+          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, false), ", 16-bit read ",
+          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits16, true),
+          " (0 = never; from PCLK/4 down never)", crlf);
     bench.verdict("ran", true);
 }
-
 
 // =============================================================================
 // u - the serial transport on a loop of its own: USART1 on PA9
@@ -2038,15 +2135,6 @@ extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
     paced_vector();
     dma_meter.leave();
 }
-extern "C" void SPI1_IRQHandler() {
-    dma_meter.enter();
-    if (spi_live && SpiHw::isr()) {
-        spi_done = true;
-    } else if (sw_live && SpiSw::isr()) {
-        spi_done = true;
-    }
-    dma_meter.leave();
-}
 /// Letter i's host: whichever task the letter brought up.
 extern "C" void I2C1_IRQHandler() {
     i2c_meter.enter();
@@ -2096,7 +2184,8 @@ int main() {
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy and fill, a paced block, the engined SPI host", td_dma);
-    bench.letter('e', "the SPI host above the wire: polled, pumped, a request's fixed cost",
+    bench.letter('e', "the SPI host above the wire: polled, refused, a request's fixed cost, "
+                      "the short request's budget",
                  te_host);
     bench.letter('f', "the prefetch: the costs, m, p and t with PRFTEN off, then on", tf_prefetch);
     bench.letter('u', "the serial transport on USART1's own loop: tx, rx, the edge", tu_uart);

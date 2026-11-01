@@ -24,10 +24,10 @@
 //   (receive, the transaction's completion) - test_stm32_spi's engined
 //   host. Its paths: the polled loop in its receive shape, frame by frame
 //   below packed_min_frames (6) and PACKED from it (two frames an access to
-//   DR, 35.5.9); the RXNE pump; the engines from dma_min_frames (8). A
-//   16-bit window at an odd address goes to the pump (10.4.3: the DMA
-//   cannot read a half-word across one), which keeps letter p's pump
-//   ladder off the engines. THE FIFO IS THE WRITE-AHEAD (35.5.9): the
+//   DR, 35.5.9); an asynchronous request on the engines from the count
+//   async_min_frames() derives for its code (the engines' fixed cost
+//   against the polled frames at that rate), and polled inside start()
+//   under it. THE FIFO IS THE WRITE-AHEAD (35.5.9): the
 //   receive shapes keep no more frames in flight than the RXFIFO holds -
 //   three byte frames, two half-words, four packed - so a dispatch above
 //   the arbiter that holds the polled loop off for any length leaves a GAP
@@ -38,9 +38,10 @@
 //   "The peer link": the very-high class slips the rising-edge modes at
 //   the F446's client). The clock is static - a DynamicClock must not
 //   switch with a transaction in flight - and the host stays InFlash.
-//   SPI1's vector is the arbiter's for the image's whole life: nothing
-//   inits the host after main(), and Host::prime() in letter w is the one
-//   direct verb.
+//   The engines' vectors are the arbiter's for the image's whole life
+//   (the host arms no interrupt of the block, so SPI1's vector is
+//   unbound): nothing inits the host after main(), and Host::prime() in
+//   letter w is the one direct verb.
 //   THE UART. Uart<1> on PA9/PA10 with the receive engine on DMA1 channel
 //   3, a circular ring of 1024 (HardwareRing): isr() takes IDLE, dma_isr()
 //   the half and full marks, and the RXFIFO stays on under the engine with
@@ -86,9 +87,11 @@
 //      exact two-way bit reversal - byte-exact at both ends; the data
 //      windows' bytes over their cycles printed against the control's.
 //   p  the ladders through the arbiter, every BR code from PCLK/256 up:
-//      the POLLED loop PACKED (8 frames) and FRAME BY FRAME (5), the RXNE
-//      PUMP in byte frames (7, under the engines' crossover) and in 16-bit
-//      frames (16 from an odd address), and the DMA engines (32 frames).
+//      the POLLED loop PACKED (8 frames) and FRAME BY FRAME (5), THE SHORT
+//      ASYNCHRONOUS REQUEST (7 byte frames read: on the engines to
+//      PCLK/16, polled inside start() from PCLK/8, each rung's way read at
+//      the DMA vector and judged against the host's count), and the DMA
+//      engines (32 frames).
 //      Judged to PCLK/8 = 8 MHz; printed, each path's outcome counted,
 //      PCLK/2 = 32 MHz (above the F446 client's 22.5 MHz, DS10693 table 63,
 //      where test_stm32_spi's letter p prints it too) and PCLK/4 = 16 MHz,
@@ -96,7 +99,8 @@
 //      a hundred and sixty, with the pressure's timer silent as often as
 //      under it, on every path, the engines' included, which no preemption
 //      reaches (letter x). The
-//      polled loop runs inside the arbiter's dispatch, so a dispatch above
+//      polled loop - a short asynchronous request's too - runs inside the
+//      arbiter's dispatch, so a dispatch above
 //      it holds it off for its whole length; on this host that costs the
 //      bus a gap and nothing else, so the verdict is STRICT under pressure
 //      as in the control - every judged rung byte-exact on every path -
@@ -104,15 +108,16 @@
 //      transaction (client_replied()), never set.
 //   x  (OUTSIDE z, no verdict) the gap statistics: forty windows of one
 //      shape with the pressure's timer silent and forty under 97 us x
-//      3000, the windows not byte-exact counted - the 16-bit pump at
-//      PCLK/4 and PCLK/8, the 16-bit polled loop and engines at PCLK/4,
-//      the 8-bit pump at PCLK/4. The instrument behind letter p's judged
-//      ceiling.
+//      3000, the windows not byte-exact counted - the 16-bit polled loop
+//      at PCLK/4 and PCLK/8, the short asynchronous request of 7 byte
+//      frames at PCLK/4 (polled inside start()), the 16-bit engines at
+//      PCLK/4. The instrument behind letter p's judged ceiling.
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
 //      frames on the engines, two outstanding), Minor below it (10 POLLED
 //      requests of 8 frames, one outstanding) and, in a pressure pass,
-//      Pressure itself (8 requests of 3 frames on the pump, posted from its
-//      tick, one outstanding), all at PCLK/256 inside ONE select window the
+//      Pressure itself (8 asynchronous requests of 3 frames, on the engines
+//      at that rate, posted from its tick, one outstanding), all at
+//      PCLK/256 inside ONE select window the
 //      letter holds - the peer's exchange is one burst - of constant frames
 //      (pattern_fixed). Every reply to its requester in its order, every
 //      one spi_ok, nothing rejected, the per-bus timeout never firing, the
@@ -318,10 +323,28 @@ uint32_t division(SpiClock c) { return spi_division(c); }
 /// (the file header), the transmit-only shape clears what it raised in its
 /// own tail, so a set flag here is a frame the host did not read back.
 volatile uint32_t ovr_at_reply = 0;
+/// The DMA vectors' completions, counted where they post (the vectors at
+/// the end of this file), and the count at the last window's reply: a
+/// window that took the engines moves it, one completed inside start()
+/// does not.
+volatile uint32_t dma_completions = 0;
+uint32_t dma_seen = 0;
+/// Did the last data window (sl::xrx's) complete at a DMA vector?
+bool data_window_dma = false;
+/// At every window's reply: the overrun flag, and whether a DMA vector
+/// posted a completion since the reply before - the window's own, the
+/// windows being one at a time - latched for the data window (the shared
+/// body's sl::xrx is its receive buffer, and no other window's): which way
+/// a short asynchronous request went (letter p).
 void client_replied() {
     if (Host::Resource::overrun()) {
         ovr_at_reply = ovr_at_reply + 1u;
     }
+    const uint32_t now = dma_completions;
+    if (Client::rx == sl::xrx || Client::rx == sl::xrx + 1) {
+        data_window_dma = now != dma_seen;
+    }
+    dma_seen = now;
 }
 
 PortCounters read_port_counters() {
@@ -571,10 +594,12 @@ void tn_peer_link() {
 // o - the matrix
 // =============================================================================
 
-/// The matrix's rate: PCLK/32 = 2 MHz on the engines (32 frames, past
-/// dma_min_frames).
+/// The matrix's rate: PCLK/32 = 2 MHz on the engines (32 frames, past the
+/// host's short-request count in either width).
 constexpr SpiClock matrix_rate = SpiClock::div32;
-static_assert(Host::dma_min_frames <= 32u, "the matrix's windows ride the engines");
+static_assert(Host::async_min_frames(matrix_rate, SpiDataSize::bits8, true) <= 32u &&
+                  Host::async_min_frames(matrix_rate, SpiDataSize::bits16, true) <= 32u,
+              "the matrix's windows ride the engines");
 
 void to_matrix() {
     uint64_t control_bytes = 0, control_cycles = 0;
@@ -662,13 +687,12 @@ constexpr SpiClock rungs[] = {SpiClock::div256, SpiClock::div128, SpiClock::div6
 /// Both printed, each path's outcome counted, not judged.
 constexpr SpiClock judged_top = SpiClock::div8;
 
-enum class Path : uint8_t { packed, by_frame, pump8, pump16, engines };
+enum class Path : uint8_t { packed, by_frame, short8, engines };
 const char* path_name(Path p) {
     switch (p) {
         case Path::packed: return "polled loop, packed";
         case Path::by_frame: return "polled loop, frame by frame";
-        case Path::pump8: return "RXNE pump, 8-bit";
-        case Path::pump16: return "RXNE pump, 16-bit";
+        case Path::short8: return "asynchronous, 7 frames";
         default: return "DMA engines";
     }
 }
@@ -676,10 +700,21 @@ const char* path_name(Path p) {
 /// A frame's core cycles at code `c`: bits x the division, HCLK = PCLK.
 uint32_t frame_cycles(SpiClock c, bool wide) { return (wide ? 16u : 8u) * division(c); }
 
+/// Does an asynchronous read of `n` byte frames ride the engines at `c`?
+constexpr bool rides_engines(SpiClock c, uint16_t n) {
+    return n >= Host::async_min_frames(c, SpiDataSize::bits8, true);
+}
 static_assert(Host::packed_min_frames <= 8u && 5u < Host::packed_min_frames,
               "letter p's polled windows are one packed and one frame by frame");
-static_assert(Host::dma_min_frames <= 32u && 7u < Host::dma_min_frames,
-              "letter p's engine windows ride the engines, its 8-bit pump windows the pump");
+static_assert(rides_engines(SpiClock::div2, 32u),
+              "letter p's 32-frame windows ride the engines at every code");
+static_assert(rides_engines(SpiClock::div256, 7u) && rides_engines(SpiClock::div16, 7u) &&
+                  !rides_engines(SpiClock::div8, 7u) && !rides_engines(SpiClock::div2, 7u),
+              "letter p's seven-frame asynchronous window crosses the edge: the engines to /16, "
+              "polled from /8");
+
+/// The short request's rungs routed otherwise than the host's count says.
+uint8_t misrouted = 0;
 
 /// The informational rungs' outcomes, PCLK/4 and PCLK/2, printed after the
 /// pass.
@@ -695,18 +730,20 @@ bool climb(Path path, uint8_t seed) {
         sl::Exchange e{};
         e.rate = c;
         e.polled = path == Path::packed || path == Path::by_frame;
-        e.wide = path == Path::pump16;
-        e.odd = path == Path::pump16;
         e.count = path == Path::packed     ? 8u
                   : path == Path::by_frame ? 5u
-                  : path == Path::pump8    ? 7u
-                  : path == Path::pump16   ? 16u
+                  : path == Path::short8   ? 7u
                                            : 32u;
         e.seed_a = static_cast<uint8_t>(seed + 9u * k);
         e.seed_b = static_cast<uint8_t>(seed + 0x40u + 5u * k);
         ++k;
         const sl::Outcome o = sl::run(e);
         const bool ok = sl::exact(e, o);
+        if (path == Path::short8 && data_window_dma != rides_engines(c, e.count)) {
+            ++misrouted;
+            print(serial, "    the short window at PCLK/", division(c), " went ",
+                  data_window_dma ? "to the engines" : "polled", " where the host's count says otherwise", crlf);
+        }
         const bool judged = division(c) >= division(judged_top);
         if (!judged) {
             const uint8_t r = c == SpiClock::div4 ? 0u : 1u;
@@ -727,9 +764,11 @@ bool climb(Path path, uint8_t seed) {
 
 void tp_ladders() {
     print(serial, "  the polled loop packs from ", Host::packed_min_frames, " frames (", Host::ahead_bytes,
-          " byte frames in flight frame by frame, four packed), the pump keeps ", Host::ahead_halfwords,
-          " half-words in flight, the engines take a phase of ", Host::dma_min_frames,
-          " frames or more; PCLK/4 and PCLK/2 printed, not judged", crlf);
+          " byte frames in flight frame by frame, four packed); an asynchronous byte read rides the engines "
+          "from ", Host::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true), " frames at PCLK/2, ",
+          Host::async_min_frames(SpiClock::div8, SpiDataSize::bits8, true), " at /8, ",
+          Host::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true),
+          " at /16, polled inside start() under it; PCLK/4 and PCLK/2 printed, not judged", crlf);
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
         pass_begin(s);
@@ -738,12 +777,12 @@ void tp_ladders() {
             return;
         }
         ovr_at_reply = 0;
+        misrouted = 0;
         top_exact[0] = top_exact[1] = 0;
         top_total[0] = top_total[1] = 0;
         const bool packed = climb(Path::packed, 0x21);
         const bool by_frame = climb(Path::by_frame, 0x2D);
-        const bool pump8 = climb(Path::pump8, 0x39);
-        const bool pump16 = climb(Path::pump16, 0x35);
+        const bool short8 = climb(Path::short8, 0x39);
         const bool engines = climb(Path::engines, 0x43);
         const uint32_t ovr = ovr_at_reply;
         const bool ping = sl::command(spilink::Op::ping);
@@ -761,8 +800,10 @@ void tp_ladders() {
         bench.verdict(pass_label(s), "THE POLLED LOOP, FRAME BY FRAME: 5 frames byte-exact both ways at every "
                                      "code to PCLK/8",
                       by_frame);
-        bench.verdict(pass_label(s), "THE RXNE PUMP: 7 8-bit frames byte-exact at every code to PCLK/8", pump8);
-        bench.verdict(pass_label(s), "THE RXNE PUMP: 16 16-bit frames byte-exact at every code to PCLK/8", pump16);
+        bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST: 7 byte frames byte-exact at every code "
+                                     "to PCLK/8, on the engines where the host's count says so and polled inside "
+                                     "start() under it, every rung the way the count says",
+                      short8 && misrouted == 0u);
         bench.verdict(pass_label(s), "THE DMA ENGINES: 32 frames byte-exact at every code to PCLK/8", engines);
         bench.verdict(pass_label(s), "the host's OVR flag never set at a reply: no frame left unread", ovr == 0u);
         bench.verdict(pass_label(s), "the command channel survives the ladders", ping);
@@ -774,7 +815,7 @@ void tp_ladders() {
 // x - the gap statistics (outside z, no verdict)
 // =============================================================================
 
-/// The instrument behind letter p's pump finding: one shape at a time,
+/// The instrument behind letter p's judged ceiling: one shape at a time,
 /// forty windows with the pressure's timer silent and forty under 97 us x
 /// 3000 (the heaviest gaps a preemption leaves on the bus), the windows
 /// that were not byte-exact counted and the first printed. No verdict: a
@@ -788,13 +829,13 @@ void tx_gaps() {
         uint16_t count;
     };
     static const Shape shapes[] = {
-        {"RXNE pump, 16-bit, PCLK/4", SpiClock::div4, true, false, true, 16},
-        {"RXNE pump, 16-bit, PCLK/8", SpiClock::div8, true, false, true, 16},
         {"polled loop, 16-bit, PCLK/4", SpiClock::div4, true, true, false, 16},
-        {"RXNE pump, 8-bit, PCLK/4 (7 frames, under the engines' crossover)", SpiClock::div4, false, false, false, 7},
+        {"polled loop, 16-bit, PCLK/8", SpiClock::div8, true, true, false, 16},
+        {"asynchronous, 8-bit, PCLK/4 (7 frames, short: polled inside start())", SpiClock::div4, false, false,
+         false, 7},
         {"DMA engines, 16-bit, PCLK/4", SpiClock::div4, true, false, false, 32},
     };
-    static_assert(7u < Host::dma_min_frames, "the 8-bit shape rides the pump");
+    static_assert(!rides_engines(SpiClock::div4, 7u), "the 8-bit shape is a short request");
     constexpr uint16_t windows = 40;
     if (!sl::need_peer()) {
         return;
@@ -1120,29 +1161,25 @@ extern "C" void TIM14_IRQHandler() {
     pressure_landed();
 }
 
-extern "C" void SPI1_IRQHandler() {
-    if (Host::isr()) {
-        done_from_dma = false;
+/// The SPI host's completion, from either of its channels' vectors. The
+/// host arms no interrupt of the block: an asynchronous request is DMA,
+/// so SPI1's vector stays unbound.
+[[gnu::always_inline]] inline void spi_dma() {
+    if (Host::dma_isr()) {
+        done_from_dma = true;
+        dma_completions = dma_completions + 1u;
         brio::post<SpiArb>(brio::TransferDone{Host::status()});
     }
 }
 
 /// Channel 1, the transmit engine: armed for its errors alone.
-extern "C" void DMA1_Channel1_IRQHandler() {
-    if (Host::dma_isr()) {
-        done_from_dma = true;
-        brio::post<SpiArb>(brio::TransferDone{Host::status()});
-    }
-}
+extern "C" void DMA1_Channel1_IRQHandler() { spi_dma(); }
 
 /// Channels 2 and 3 share this line (RM0444 table 61): the SPI's receive
 /// engine and the link's receive ring. Each body answers for its own
 /// channel, so both run on every entry.
 extern "C" void DMA1_Channel2_3_IRQHandler() {
-    if (Host::dma_isr()) {
-        done_from_dma = true;
-        brio::post<SpiArb>(brio::TransferDone{Host::status()});
-    }
+    spi_dma();
     if (link_live && LinkPort::dma_isr()) {
         brio::post<LinePort>(brio::RxActivity{});
     }
@@ -1170,7 +1207,9 @@ int main() {
 
     bench.letter('n', "the peer's command channel through the arbiter", tn_peer_link);
     bench.letter('o', "the matrix on the DMA engines: modes, widths, bit orders", to_matrix);
-    bench.letter('p', "the ladders: the polled loop both shapes, the pump, the engines, every code", tp_ladders);
+    bench.letter('p', "the ladders: the polled loop both shapes, the short asynchronous request, the engines, "
+                      "every code",
+                 tp_ladders);
     bench.letter('w', "the arbiter under pressure: three requesters, one bus", tw_arbiter);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);
     bench.letter('x', "the gap statistics: which shape a long gap between frames breaks, no verdict", tx_gaps,

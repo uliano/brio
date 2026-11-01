@@ -176,7 +176,7 @@
 //   e  THE SPI HOST ABOVE THE WIRE (brio/pl022/spi.hpp over SPI0 on the same
 //      pads, GP17 the select and GP22 the D/C line, MISO floating as in d):
 //      what the host's own code costs around and between the frames, on a
-//      host WITHOUT engines so the polled loop and the pump are what runs.
+//      host WITHOUT engines so the polled loop is what runs.
 //        spi.poll  a polled WRITE (no in buffer: a display's pixel path) of
 //               16 and 256 frames at clk_peri / 2 (75 MHz), / 4 (37.5 MHz)
 //               and / 16 (9.375 MHz), IN MODE 0 AND IN MODE 3 - the mode is an axis because
@@ -197,9 +197,6 @@
 //               each: the frames in flight never exceed the receive FIFO's
 //               depth, so a handler that holds the loop off cannot overrun
 //               it.
-//        spi.pump, spi.pump16  the receive requests on the interrupt, the
-//               core idling to the completion: irq and isr are the SPI
-//               vector's own (the tick's split out on the plain line).
 //      The block's RECEIVE OVERRUN flag (SSPRIS.RORRIS) is read after every
 //      run of every op - an overrun would be more frames in flight than the
 //      receive FIFO holds; the write shape raises it by design and clears
@@ -1085,12 +1082,10 @@ void td_dma() {
 }
 
 // =============================================================================
-// e - the SPI host above the wire: the polled loop, the pump, a request's price
+// e - the SPI host above the wire: the polled loop, a request's price
 // =============================================================================
-using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop and the pump
+using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop alone
 using SpiDc = Pin<22>;
-volatile bool plain_live = false;
-volatile bool plain_done = false;
 uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
 
 struct SpiRate { SpiClock clock; const char* name; };
@@ -1106,8 +1101,9 @@ struct SpiReqRun {
 };
 
 /// One request on host H: a command phase of `cmd_len` frames when asked
-/// (D/C scripted), a data phase of `frames`, polled or pumped. Wall from the
-/// first stamp to the completion, the core idling through a pumped one.
+/// (D/C scripted), a data phase of `frames`, polled, or asynchronous on an
+/// engined host. Wall from the first stamp to the completion, the core
+/// idling through one on the engines.
 template <typename H>
 SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, SpiDataSize bits,
                  bool polled, bool with_rx) {
@@ -1127,7 +1123,6 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     r.polled = polled;
     console_drain();
     H::Resource::clear_pending(SpiInterrupt::overrun);
-    plain_done = false;
     spi_done = false;
     const uint32_t irq0 = spi_meter.count();
     const uint32_t isr0 = spi_meter.cycles();
@@ -1142,7 +1137,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     // first version of this letter measured as a stall of exactly one tick.
     while (!done) {
         disable_interrupts();
-        done = plain_done || spi_done;
+        done = spi_done;
         if (done || Ruler::now() - t0 >= Ruler::hz() / 10u) {
             enable_interrupts();
             break;
@@ -1202,13 +1197,10 @@ void e_print_per_frame(const char* op, const SpiRate& rate, SpiDataSize bits, Sp
           mode == SpiMode::mode0 ? wire_frame + 3u * Ruler::hz() / (2u * sck) : 0u, crlf);
 }
 
-/// The op's name: the completion style, the width, and for a polled
-/// request its SHAPE - the write with no in buffer, or the receive.
-const char* e_op(bool polled, SpiDataSize bits, bool with_rx) {
+/// The op's name: the width, and the polled request's SHAPE - the write
+/// with no in buffer, or the receive.
+const char* e_op(SpiDataSize bits, bool with_rx) {
     const bool wide = bits == SpiDataSize::bits16;
-    if (!polled) {
-        return wide ? "spi.pump16" : "spi.pump";
-    }
     if (with_rx) {
         return wide ? "spi.poll16.rx" : "spi.poll.rx";
     }
@@ -1349,21 +1341,20 @@ void te_host() {
     (void)SpiSelect::output(true);
     (void)SpiDc::output(true);
     (void)Plain::init(clock);
-    plain_live = true;
     for (uint32_t i = 0; i < sizeof(source_buffer); ++i) {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     e_cold();   // FIRST: its first request must be the host's first
 
-    // spi.poll (the write), spi.poll.rx (the receive) and spi.pump:
-    // rates x widths x modes x sizes.
+    // spi.poll (the write) and spi.poll.rx (the receive): rates x widths x
+    // modes x sizes.
     struct Shape { bool polled; bool with_rx; };
-    constexpr Shape shapes[] = {{true, false}, {true, true}, {false, true}};
+    constexpr Shape shapes[] = {{true, false}, {true, true}};
     for (const Shape& shape : shapes) {
         for (const SpiRate& rate : e_rates) {
             const uint32_t sck = Plain::sck_hz(rate.clock);
             for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
-                const char* const op = e_op(shape.polled, bits, shape.with_rx);
+                const char* const op = e_op(bits, shape.with_rx);
                 const uint32_t frame_bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
                 for (const SpiMode mode : {SpiMode::mode0, SpiMode::mode3}) {
                     uint32_t walls[2] = {0, 0};
@@ -1374,19 +1365,9 @@ void te_host() {
                         const uint32_t n = frames * frame_bytes;
                         walls[k++] = run.sample.wall;
                         bench_line(serial, op, n, run.sample, Ruler::hz(), sck / 8u);
-                        if (!shape.polled) {
-                            print(serial, "  ", op, " ", frames, " frames of ", spi_data_bits(bits),
-                                  " bits at ", rate.name, ", mode ", static_cast<uint8_t>(mode),
-                                  ": the SPI vector irq ", run.spi_irq, " isr ", run.spi_isr, " = ",
-                                  run.spi_irq == 0u ? 0u : (run.spi_isr + run.spi_irq / 2u) / run.spi_irq,
-                                  " a handler, ", (run.spi_isr + frames / 2u) / frames,
-                                  " a frame; the tick's irq ", run.sample.irq - run.spi_irq,
-                                  "; overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
-                        } else {
-                            print(serial, "  ", op, " ", frames, " frames of ", spi_data_bits(bits),
-                                  " bits at ", rate.name, ", mode ", static_cast<uint8_t>(mode),
-                                  ": overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
-                        }
+                        print(serial, "  ", op, " ", frames, " frames of ", spi_data_bits(bits),
+                              " bits at ", rate.name, ", mode ", static_cast<uint8_t>(mode),
+                              ": overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
                     }
                     e_print_per_frame(op, rate, bits, mode, sck, walls);
                 }
@@ -1414,7 +1395,6 @@ void te_host() {
               " ns (", run.sample.wall > wire + gap ? run.sample.wall - wire - gap : 0u,
               " over the wire with the gap); overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
     }
-    plain_live = false;
     Plain::release();
 
     // The same three requests on the ENGINED host of letter d.
@@ -2218,14 +2198,11 @@ extern "C" BENCH_VECTOR void isr_i2c0() {
     }
     i2c_isr_sum = sum;
 }
+/// SPI0's own line: no host arms a source of it - an entry is counted by
+/// its meter (letter e prints the count) and the sources masked.
 extern "C" BENCH_VECTOR void isr_spi0() {
     spi_meter.enter();
-    if (spi_live && Spi::isr()) {
-        spi_done = true;
-    }
-    if (plain_live && Plain::isr()) {
-        plain_done = true;
-    }
+    brio::Pl022<0>::interrupts(brio::SpiInterrupt::all, false);
     spi_meter.leave();
 }
 
@@ -2244,7 +2221,7 @@ int main() {
     bench.letter('p', "a print through the console at its rate", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy, fill, a paced block, the SPI engines", td_dma);
-    bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
+    bench.letter('e', "the SPI host above the wire: the polled loop, a request's price", te_host);
     bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", pair::guarded<bench, clock, tu_uart>);
     bench.letter('i', "the I2C host above the wire, against the partner's twi_peer: a tenure's price",
                  pair::guarded<bench, clock, ti_i2c>, false);

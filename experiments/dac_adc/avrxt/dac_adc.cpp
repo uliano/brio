@@ -200,7 +200,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, {}, 0,
                     {}, brio::lend<brio::Lease::reply>(spi_rx), 1,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, brio::SpiMode::mode3});
+                    brio::SpiClock::div64, brio::SpiMode::mode3, true});   // polled
                 return handled();
             },
             [](brio::BusDone d) {
@@ -236,7 +236,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, {}, 0,
                     {}, brio::lend<brio::Lease::reply>(spi_rx), 3,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, brio::SpiMode::mode3, false,
+                    brio::SpiClock::div64, brio::SpiMode::mode3, true,   // polled
                     adc_cs_setup_us});
                 return handled();
             },
@@ -311,11 +311,7 @@ ISR(TWI0_TWIM_vect) {
         brio::post<I2c>(brio::TransferDone{I2cHw::status()});
     }
 }
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Spi>(brio::TransferDone{brio::spi_ok});
-    }
-}
+// No SPI vector: the AVR's SpiHost runs every request polled and arms none.
 ISR(USART2_RXC_vect) { Serial::rxc(); }            // console is output-only here
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

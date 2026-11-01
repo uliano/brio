@@ -1066,7 +1066,7 @@ the bus contract's and the same in both.
 | paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 84, 80 |
 | SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 379, 1, 145, 571 |
 | SPI1 engined write at /16: fixed cost | 926 | 561 |
-| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (the pump), 36161 | 1, 582 |
+| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 582 |
 | bus masters still counted after the SPI requests | 1 | 0 |
 
 - **Six cycles an item, by the difference of two sizes**: (wall at 4096
@@ -1089,8 +1089,9 @@ the bus contract's and the same in both.
   cost is the wire's: 256 frames at /4 are 8192 cycles of SCK and the
   block adds nothing per frame.
 - **A 16-bit frame is one 16-bit access**: a 256-frame write of half-words
-  takes 16966 cycles for 16384 of wire, with one interrupt, where the pump
-  took 52545 and 256 interrupts (x 3.20 to 1.03 at /4) - and the frames
+  takes 16966 cycles for 16384 of wire, with one interrupt, where an
+  interrupt a frame took 52545 and 256 interrupts (x 3.20 to 1.03 at /4)
+  - and the frames
   are the buffer's, judged with no wire by the SPI's own transmit CRC
   ([spi.md](spi.md)).
 - **The pace holds to the cycle**: the 256 words of a 1440-cycle pace

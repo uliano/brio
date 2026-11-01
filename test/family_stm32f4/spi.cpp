@@ -402,11 +402,18 @@ void engined_smoke() {
     using Tx = std::conditional_t<known, DmaTxEngine<2, 3, 3>, NoDmaEngine>;
     using Rx = std::conditional_t<known, DmaRxEngine<2, 0, 3>, NoDmaEngine>;
     using EnginedBus = SpiHost<1, spi1_pins, Tx, Rx>;
-    static_assert(EnginedBus::has_engines == known);
+    static_assert(EnginedBus::has_engines == known && EnginedBus::has_dma == known);
     (void)EnginedBus::init(sys_clock, 1'000'000u);
     typename EnginedBus::Request r{};
     r.len = 4;
     (void)EnginedBus::start(r);
+    static const uint8_t c[2] = {0x2Au, 0x2Bu};
+    r.cmd = Borrowed<const uint8_t, Lease::reply>{c};
+    r.cmd_len = 2;
+    r.len = 0;
+    (void)EnginedBus::start(r);   // a command alone, on its own block when it repays one
+    (void)EnginedBus::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true);
+    (void)EnginedBus::polled_engines_from(SpiClock::div2, SpiDataSize::bits16, false);
     (void)EnginedBus::dma_isr();
     (void)EnginedBus::status();
     (void)EnginedBus::recover();
@@ -454,8 +461,9 @@ void host_smoke() {
     req.polled = true;
     (void)Bus::start(req);
     req.polled = false;
-    (void)Bus::start(req);
-    (void)Bus::isr();
+    (void)Bus::start(req);   // refused: spi_rejected, nothing on the wire
+    static_assert(!Bus::has_dma);
+    (void)Bus::overruns();
     (void)Bus::dma_isr();
     (void)Bus::status();
     (void)Bus::recover();
@@ -471,8 +479,8 @@ void host_smoke() {
     typename SlowServiceBus::Request slow{};
     slow.tx = Borrowed<const uint8_t, Lease::reply>{out};
     slow.len = 4;
+    slow.polled = true;
     (void)SlowServiceBus::start(slow);
-    (void)SlowServiceBus::isr();
     SlowServiceBus::release();
 }
 

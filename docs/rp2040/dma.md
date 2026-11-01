@@ -189,8 +189,9 @@ p, below), and the Uart takes no level option.
   transports' engines. `Elem` is the WIDEST beat the binding allows
   (the data register's width): a run of `uint8_t`, `uint16_t` or
   `uint32_t` up to it is legal, a wider one a compile error, one whose
-  address is not aligned to its beat refused at run time (the caller's
-  pump takes it). `arm(data, dreq, high_priority, report)` binds once,
+  address is not aligned to its beat refused at run time (the caller
+  runs it another way: a transport's interrupt engine, the SPI host's
+  polled loop). `arm(data, dreq, high_priority, report)` binds once,
   `high_priority` true by default on a receive engine and false on a
   transmit engine;
   `Report` names `DmaReport` through the engine. Transmit: `claim()`

@@ -158,7 +158,7 @@ static_assert(Host0::available);
 static_assert(Pinless::available);
 static_assert(Client1::available);
 static_assert(!SpiClient<0, SpiRoute::none>::available);
-static_assert(Host0::status() == spi_ok);       // no engine, no fault of its own
+static_assert(!Host0::has_dma);                 // no DMA: an asynchronous request is refused
 static_assert(Client1::frames_ahead == 1);       // the client pump's one integer
 
 void use_resource() {
@@ -215,7 +215,8 @@ void use_tasks() {
     (void)Host0::start(typename Host0::Request{
         PinRef{}, PinRef{}, {}, 0, {}, lend<Lease::reply>(rx_buf), 4, {},
         SpiClock::div64, SpiMode::mode3, true, 10});
-    (void)Host0::isr();
+    (void)Host0::start(typename Host0::Request{});   // asynchronous: refused, spi_rejected
+    (void)Host0::status();
     Host0::rebase(12'000'000u);
     (void)Host0::max_sck_hz();
     (void)Host0::ceiling_clock();
@@ -252,10 +253,10 @@ void use_tasks() {
 }
 
 // ---- the per-bus timeout instantiates over this engine ---------------------
-// A timed SpiBus static_asserts Bus::recover(); SpiHost's clears the
-// interrupt, re-arms a demoted host and closes the select window.
-// Compile proof on every package (the pinless host included); the
-// timed path itself has not run on AVR silicon yet (docs/avrxt/spi.md).
+// A timed SpiBus static_asserts Bus::recover(); SpiHost's re-arms a
+// demoted host and empties the receive FIFO. Compile proof on every
+// package (the pinless host included); the timeout itself cannot fire
+// over this host, every transaction ending inside start().
 using TimedSpiBus = SpiBus<Host0, AvrPlatform, 4, BusPassThrough,
                            ticks_from_ms<AvrPlatform>(100)>;
 

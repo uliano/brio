@@ -1012,39 +1012,42 @@ established:
   keeps two frames in flight from a frame of 256 cycles (/16 for byte
   frames, /8 for 16-bit ones on these PB1 instances), and a hold-off
   longer than a frame there loses one to OVR. The suite's polled windows
-  are the two shapes the engines leave to the loop: 8 16-bit frames
-  from an odd address and 2 byte frames. With TIM2 silent every rung
-  from /256 to /8 is byte-exact on both, and on the RXNE pump (16
-  16-bit frames from an odd address) and the engines (32 frames), in
-  all six control passes. Under pressure the pump and the engines
-  stay exact at every rung of every pass, and the polled loop is cut
-  short with `spi_overrun` - 17 rungs over 36 pressure passes - only
-  where two frames are in flight and a frame is shorter than the
-  preemption, never handing back a run with a hole: under a
-  3000-cycle spin and the scheduler's trip around it, at frames of
-  2048 cycles and under (16-bit /64 7 times, /32 4, /16 5; byte
-  frames /16 once), never at 4096 or more (16-bit /128 and
-  /256, byte frames /256); under a 300-cycle spin in none of the
-  eighteen passes.
+  are 8 16-bit frames from an odd address and 8 byte frames, both under
+  the length from which a polled read rides the engines. With TIM2
+  silent every rung from /256 to /8 is byte-exact on both, on the short
+  asynchronous request (one byte frame) and on the engines (32 frames),
+  in all ten control passes of each image. Under pressure the engines
+  and the short request stay exact at every rung of every pass - the
+  short request on the engines down to /16 on the CH32V203C8T6 and /32
+  on the CH32V303VCT6 and polled inside `start()` below, every rung the
+  way the host's count says - and the polled loop is cut short with
+  `spi_overrun` - 78 rungs over the CH32V203C8T6's 60 pressure passes,
+  82 over the CH32V303VCT6's - only where two frames are in flight and a
+  frame is shorter than the preemption, never handing back a run with a
+  hole: under a 3000-cycle spin and the scheduler's trip around it, at
+  frames of 2048 cycles and under (byte frames /128 to /16, 16-bit /64
+  to /8), never at 4096 or more (byte frames /256, 16-bit /128 and
+  /256); under a 300-cycle spin at frames of 512 cycles and under (byte
+  frames /32 and /16, 16-bit /16 and /8), in 19 of the 60 such passes
+  over the two images.
 - **/4 = 18 MHz exact, /2 not, both printed.** Letter `p` judges to /8,
   where the two datasheets' timing still holds the client's answer
   ([spi.md](spi.md), the pair's section), and prints the two codes
-  above: /4 byte-exact on every path in every pass on both images (84
-  of 84 windows each), /2 wrong on every one (the host reading the
+  above: /4 byte-exact on every path in every pass on both images (280
+  of 280 windows each), /2 wrong on every one (the host reading the
   answers one bit late, as the pair's ladder finds).
 - **The matrix and the arbiter.** The four modes in both widths, LSb
   first and a bit-order mismatch on the engines at /32, byte-exact in
   every pass, the data windows at 954 to 1000 per mille of the control's
   rate under pressure; three requesters of three priorities on one
-  select window - the one above the arbiter on the engines (6 frames),
-  the one below it on the polled loop and the preempting object on the
-  pump, their requests 2 frames each, under `dma_min_frames` - answered
-  every one `spi_ok`, to its requester, in its order, with no timeout
-  and no rejection and the peer counting every frame exact, in 9264 to
-  10103 us a window (three runs on each image); the polled loop keeps
-  both of its frames in flight there, 4096 cycles each at /256, longer
-  than the preemption that holds it. The command channel needed
-  no retry in the six runs of `z`.
+  select window at /8 - the one above the arbiter asynchronous on the
+  engines (6 frames), the one below it polled (8 frames, the loop) and
+  the preempting object asynchronous with one frame, under the engines'
+  count at /8 and so run polled inside `start()` - answered every one
+  `spi_ok`, to its requester, in its order, with no timeout and no
+  rejection and the peer counting every frame exact, in 5536 to 7999 us
+  a window (ten runs on each image); at /8 one frame is in flight on a
+  receive, so a preemption of the polled loop is a gap on the bus.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the
   ring and lent to the borrower: 200 a leg, none lost, out of order or

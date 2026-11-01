@@ -23,7 +23,7 @@
  *     SimPl022::reset_all();
  *     constexpr Clock clock;
  *     REQUIRE(Host::init(clock, 10'000'000));
- *     CHECK(SimPl022Interrupts::line_enabled[0]);
+ *     CHECK_FALSE(SimPl022Interrupts::line_enabled[0]);
  *     CHECK(SimPl022Bench::pad_claimed_at[host_pins.rx] < SimPl022Bench::enabled_at);
  *
  * Contexts: a single-threaded test is every party at once - the program
@@ -48,14 +48,20 @@
  * What it models, and what it does not. The register map is the PL022's,
  * at the PL022's offsets, and the reset values are the block's (SSPSR
  * comes up with the transmit FIFO empty and not full, which is what lets
- * a bring-up's flush of the receive FIFO stop and a pump write its first
- * batch). The FIFOs themselves are not modelled - a register block that
+ * a bring-up's flush of the receive FIFO stop and a polled loop write its
+ * first batch). The FIFOs themselves are not modelled - a register block that
  * is plain memory cannot: a store to SSPDR is a store and nothing
  * watches it - so nothing ever comes back, and the receive half of a
  * transfer stays the bench's to judge. What is judged here is what a
  * bench cannot see cheaply: the exact words a configuration leaves in
- * the two control registers, the frames a pump wrote, and the order of
- * the acts of a bring-up.
+ * the two control registers, the frames a polled loop wrote, the way a
+ * request was run, and the order of the acts of a bring-up. A test that
+ * runs a polled loop to its end sets SSPSR's receive-not-empty bit
+ * itself, and SSPDR then reads back whatever was written last: enough for
+ * the receive shape to run to its end, never a frame's worth of data
+ * judged (and a drain of the receive FIFO, which loops while that bit is
+ * up, is kept out of such a test: the bring-up's flush, recover(), the
+ * transmit-only shape's tail).
  *
  * What it records, beside the registers: which pad was claimed or
  * released when, when SSPCR1's enable went up, and which way a Request's
@@ -255,9 +261,14 @@ struct SimPl022 {
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 8;
     static constexpr uint8_t no_pad = 0xFFu;
-    /// No core measured anything here: a small number, so a test can
-    /// stage a data phase on either side of it.
-    static constexpr uint16_t dma_min_frames = 4;
+    /// No core measured anything here: small figures, so that a test can
+    /// stage a request on either side of the edges they give. On this
+    /// machine SSPCLK is the core's clock, so at clk / 2 in mode 3 a byte
+    /// frame is 16 cycles: an asynchronous read rides the engines from 5
+    /// frames (100 over the receive loop's 20), a write from 7 (100 over
+    /// the wire's 16), and a polled read from 25 (100 over the 4 the loop
+    /// spends beyond the wire).
+    static constexpr Pl022Costs costs{100u, 100u, 20u, 12u};
 
     /// The two blocks, and the reset value the block comes up with:
     /// everything zero but SSPSR, whose transmit-FIFO bits are set.

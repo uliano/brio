@@ -23,19 +23,21 @@ read, so that they know the chip without including any of its headers:
 | the host suite | `SimPl022` | `brio/host/sim_pl022.hpp` | none: the suite names the templates itself |
 
 On both chips the traits give two instances, 8-frame FIFOs and SSPCLK
-as `clk_peri` (the clock type's `pclk_hz`); the request length below
-which the engines are not used, `dma_min_frames`, is 13 frames on the
-RP2040 and 10 on the RP2350, each measured on its own cores. The
-smallest use, a host under the bus arbiter on the RP2040 as its own
+as `clk_peri` (the clock type's `pclk_hz`), and the figures the host
+decides a short request from (`costs`, measured on each family's own
+cores: "The short asynchronous request" below). The smallest use, a
+host on two DMA channels under the bus arbiter on the RP2040 as its own
 document spells it (an excerpt of [../rp2040/spi.md](../rp2040/spi.md),
 "How to use it"):
 
 ```cpp
 constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
-using Bus = brio::SpiHost<0, pins>;
+using Bus = brio::SpiHost<0, pins, brio::DmaTxEngine<4, uint16_t>,
+                          brio::DmaRxEngine<5, uint16_t>>;
 using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
 using Cs = brio::Pin<17>;
 
+brio::Dma::init();                                    // before the host binds its engines
 Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
 Cs::output(true);
 
@@ -46,16 +48,20 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);
+brio::post<Spi>(r);                                   // asynchronous: polled stays false
 
-extern "C" void isr_spi0() {
-    if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+extern "C" void isr_dma_0() {
+    if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```
 
 Line by line: `pins` names the clock, transmit and receive pads (no
 select: the select is a GPIO the request names); `Bus` is the family's
-`SpiHost` on instance 0, the engine; `Spi` is the arbiter, an active
+`SpiHost` on instance 0, the engine, with a transmit and a receive DMA
+engine on channels 4 and 5 (half-word engines, the data register's
+width), reporting on the controller's line 0; `Dma::init()` releases the
+DMA controller, which the host's `init()` binds its engines on; `Spi` is
+the arbiter, an active
 object (a component with its own event queue, served one event at a
 time by the kernel, here over the program's platform `P`) that takes
 requests from every active object that uses the bus in arrival order, with room for
@@ -67,45 +73,60 @@ rate as a prescaler pair (`div4` is 31.25 MHz at a 125 MHz SSPCLK, and
 the host clamps a request to the bus's ceiling, here 8 MHz), the SPI
 mode, and the active object the `SpiDone` reply goes to; it is posted
 to the arbiter, and `post` copies the request into the arbiter's queue,
-so `r` itself may go out of scope - what it lends may not. The handler is
-the program's, under the name the family's startup code gives SPI0's
-vector (`isr_spi0` on both RP chips): when the engine's interrupt body returns true, the transaction
-has just completed (select released), and the handler posts the
-engine's status to the arbiter, which sends the reply.
+so `r` itself may go out of scope - what it lends may not. The request is
+ASYNCHRONOUS (`polled` stays false), and on this host that means the DMA
+engines: the 64 data frames ride them, the core free for the wire's time
+(the one command frame, too short to repay a block of its own, goes out
+polled inside `start()` first). The
+handler is the program's, under the name the family's startup code gives
+the DMA controller's line 0 (`isr_dma_0` on both RP chips): when the
+engine's DMA body returns true, the transaction has just completed
+(select released), and the handler posts the engine's status to the
+arbiter, which sends the reply.
 
 What decides correctness even there: **the buffers a request lends
 stay untouched by the requester until its `SpiDone` arrives**; the select
-is high before the first request; the vector is bound and posts
-`TransferDone`, or the arbiter never learns that a transaction ended;
-the arbiter is in the program's list of active objects; and `init()`
-runs after the clock's, since the ceiling it is given is turned into a
-divisor of the rate the clock type claims for SSPCLK. The bus
-vocabulary itself (the Request, the reply, the status codes) is
+is high before the first request; the DMA line's vector is bound and
+posts `TransferDone`, or the arbiter never learns that a transaction
+ended; the arbiter is in the program's list of active objects; and
+`init()` runs after the clock's and after `Dma::init()`, since the
+ceiling it is given is turned into a divisor of the rate the clock type
+claims for SSPCLK and the engines are bound on a released controller. A
+host with no engines bound runs polled requests alone and answers an
+asynchronous one `spi_rejected`, at once and with nothing on the wire;
+`static_assert(Bus::has_dma)` in the program makes that a compile error
+instead. The bus vocabulary itself (the Request, the reply, the status
+codes) is
 [../design/spi-bus.md](../design/spi-bus.md)'s; what an active object
 is and how a program lists them is the learning route's
 ([../learn/introduction.md](../learn/introduction.md)).
 
-The host runs a request in one of two completion styles, each
-described below: a request marked `polled` completes inside `start()`,
-the arbiter sending its reply in the same dispatch; any other runs on
-the pump, the interrupt-driven loop that keeps the FIFOs fed ("The host
-above the wire"), and completes on the interrupt. With the family's two
-engine slots filled, the data phase of either moves on the DMA engines
-instead once it is at least `dma_min_frames` long - except a phase of
-16-bit frames on byte engines, or on half-word engines with a buffer not
-aligned to a half-word, which runs as it would with no engines ("The
-engine slots"). A
-polled request the engines take still needs the DMA line's handler
-bound to `dma_isr()`: the polled path spins, bounded, on the completion
-only that body records, and without it the spin runs out and the request
-ends `spi_dma_fault`. The slots are empty by default (`NoDmaEngine` on
-both RP chips).
+The host runs a request one of the two ways
+[../design/spi-bus.md](../design/spi-bus.md) gives every SPI host ("Two
+ways to run a request"): a request marked `polled` completes inside
+`start()`, the arbiter sending its reply in the same dispatch; any other
+is ASYNCHRONOUS, and asynchronous is the DMA engines - `start()` launches
+them and returns, and the engines' one interrupt a block ends it. Three
+rules complete that, each described below ("The engine slots", "The
+short asynchronous request"): with no engines bound the request is
+refused (`spi_rejected`, nothing on the wire); a request too short to
+repay the engines' fixed cost at its rate runs polled and completes
+inside `start()`; and one the engines cannot carry - 16-bit frames on
+byte engines, or on half-word engines with a buffer not aligned to a
+half-word - runs polled inside `start()` whichever way it asked. A
+polled read long enough to gain from the engines rides them inside
+`start()`, which spins, bounded, on the completion only the DMA line's
+body records: without that handler bound the spin runs out and the
+request ends `spi_dma_fault`. The slots are empty by default
+(`NoDmaEngine` on both RP chips). The host arms no source of the
+block's own interrupt line: that vector is a client's.
 
 The page goes on with what the stratum is for, the documents of record,
 what lives here, what a family owes (the traits type member by member),
-the include contract, the engine slots, the host above the wire (its
-cost and shape, measured), what stays per family, the host suite that
-proves the file knows no chip, and what is not covered.
+the include contract, the engine slots, the short asynchronous request,
+the host above the wire (its cost and shape, measured), what stays per
+family, the host suite that proves the file knows no chip, and what is
+not covered.
 
 ## What the stratum is
 
@@ -161,10 +182,12 @@ every family that drives an SPI. This file takes them.
   request against (`spi_control_word`), every register's bit layout as constants
   (`SpiControl0`, `SpiControl1`, `SpiDataField`, `SpiFlag`,
   `SpiInterrupt`, `SpiDmaControl`), the engine's own status code
-  `spi_dma_fault`, the resource `Pl022Ssp<Chip, n>`, the host engine
-  `Pl022Host<Chip, n, pins, TxEngine, RxEngine>` with its Request, its
-  two optional DMA engine slots and its two ISR bodies, and the client
-  `Pl022Client<Chip, n, pins>`.
+  `spi_dma_fault`, the short request's arithmetic (`Pl022Costs`,
+  `pl022_frame_cycles`, `pl022_async_min_frames`,
+  `pl022_polled_dma_min_frames`), the resource `Pl022Ssp<Chip, n>`, the
+  host engine `Pl022Host<Chip, n, pins, TxEngine, RxEngine>` with its
+  Request, its two optional DMA engine slots and its one interrupt body
+  (the DMA line's), and the client `Pl022Client<Chip, n, pins>`.
 - Not here, by design: which pads carry the signals and under which
   function, how the block is taken out of reset, which interrupt
   controller owns the line and what it calls it, which rate of the
@@ -199,9 +222,9 @@ The constants:
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the PL022 and therefore the family's fact, not this file's. It is the pump's window (how many frames may be in flight), the polled loop's and the client's `frames_ahead` |
+| `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the PL022 and therefore the family's fact, not this file's. It is the polled loop's window (how many frames may be in flight) and the client's `frames_ahead` |
 | `no_pad` | what the family's pin set puts in a signal it does not route: a host with no receive pad is a write-only bus, and a client with no transmit pad is a listener |
-| `dma_min_frames` | below how many data frames a request takes the pump even on a host with engines bound: the engines' fixed cost per transaction over the pump's cost per frame, both MEASURED on the family's core and stated with their arithmetic in the family's document. A number of the core and the flash around the block, never of the block |
+| `costs` | a `Pl022Costs`: what the host's two ways cost the family's core - E - F for a read and for a write (the engines' fixed cost beyond a polled transaction's fixed part) and the two polled loops' turns - from which a host with engines decides which asynchronous request is too short to repay them and which polled read gains from them ("The short asynchronous request"). MEASURED on the family's own cores and stated with their arithmetic in the family's document: numbers of the core and the flash around the block, never of the block |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -257,9 +280,13 @@ which is also what makes the host suite below possible.
 
 ## The engine slots
 
-A transmit and a receive engine, both or neither: the data phase moves
-as one block each way, the command phase on the pump. ONE INTERRUPT A
-TRANSACTION - every frame that came back was sent, so the receive block's
+A transmit and a receive engine, both or neither, and with them the
+host's asynchronous way (`has_dma`). A phase moves as one block each
+way: the data phase, and the command phase when it repays a block of its
+own or is the whole request - its completion then raises D/C and launches
+the data block from the DMA line's body - while a shorter command phase
+runs polled inside `start()` ahead of the data block. ONE INTERRUPT A
+BLOCK - every frame that came back was sent, so the receive block's
 completion proves the transmit block's, and the host arms its transmit
 engine to report a bus error and nothing else (`arm(data, request,
 false, Engine::Report::errors)`); the owner then completes the transmit
@@ -268,9 +295,13 @@ engines' element is `uint8_t` or `uint16_t`, the same on both. Half-word
 engines carry 8-bit frames at a byte beat and 16-bit frames at a
 half-word beat, the Request's byte buffers handed over as runs of the
 frame - two bytes low-first ARE a half-word on a little-endian core - and
-a 16-bit request whose buffers are not aligned to a half-word goes to the
-pump; byte engines leave every 16-bit request to the pump. The requests
-are raised around the engines and dropped at the end of the data phase.
+a 16-bit request whose buffers are not aligned to a half-word runs
+polled inside `start()`; byte engines leave every 16-bit request to the
+polled loop. A refusal there would make the answer depend on where a
+buffer happens to sit, which is why the family exception
+[../design/spi-bus.md](../design/spi-bus.md) allows is taken. The
+requests are raised around the engines and dropped at the end of each
+block.
 THE LEVELS ARE THE RULE'S (docs/design/dma.md): the receive engine at
 the family's high level - the host's clock does not wait for a starved
 receive channel, and a frame landing on a full receive FIFO is lost
@@ -289,19 +320,49 @@ same by the vendor's own library doing the same transfer on the same
 board ([../rp2350/spi.md](../rp2350/spi.md)): a device that takes mode 1
 or 3 saves the 19 % by saying so.
 
-A data phase SHORTER THAN `dma_min_frames` takes the pump even with the
-engines bound, polled or not: the engines cost a transaction a fixed
-sum (two starts, one interrupt, the requests raised and dropped) that a
-short request never earns back, and the family's measured pair says
-where the two meet ([../rp2350/spi.md](../rp2350/spi.md): ten frames on
-both of that chip's cores). A command phase always runs on the pump or
-the polled loop, whatever the data phase does.
-
 What the host asks of an engine: `present`, `channel`, `element`,
 `Report` with `errors`, `arm(data, request, high_priority[, report])`,
 `start(pointer, count)` at the frame's beat, `start_fixed(cell, count)`
 and `start_discard(cell, count)`, `complete()`, `busy()`, `service()`
 with `flag_complete` and `flag_error`, `abandon()`, `stop()`.
+
+## The short asynchronous request
+
+On the engines a transaction costs the core a fixed sum, E - `start()`,
+the two channels' launch, the one interrupt, the completion - whatever
+its length: the wire's time is the core's own. Polled, it costs the
+core the whole transaction: a fixed part F and each frame, which is the
+wire's frame or the loop's own turn, the longer. A frame on the wire is
+its bits in SCK periods and, in modes 0 and 2, the 1.5 periods of the
+block's frame gap (below); an SCK period is the divisor's SSPCLK
+cycles, scaled to the core's clock by the ratio of the two rates the
+host was given (`pl022_frame_cycles`). So a request is cheaper polled
+while F and its frames stay under E, and rides the engines from the
+smallest count N with F + N x frame >= E, ceil((E - F) / frame)
+(`pl022_async_min_frames`), its command phase counted as frames written
+and its data phase as frames read or written. Only the difference E - F
+enters, one for a read and one for a write, and each family measures it
+as one difference through one call (its traits' `costs`): the engines'
+32-frame block less its 32 frames on the wire, against the polled
+loop's 8-frame request less 8 frames at the loop's own pace.
+
+The same figures say when a POLLED read is better off on the engines:
+the FIFOs keep eight frames in flight, so the polled loop has no dead
+bus below its own turn, and where that turn is longer than the wire's
+frame - the fastest rates - each frame read costs the difference, and
+a polled read rides the engines inside `start()` from ceil((E - F) /
+(turn - frame)) frames (`pl022_polled_dma_min_frames`); where the wire
+is the longer, never.
+
+The host keeps the two frame costs and that count for the configuration
+in force, computed where the control word is written and when the
+clocks move (`reconfigure()`, `init()`, `rebase()`), never per request:
+an asynchronous request pays two multiplies and a compare in `start()`,
+a polled one a compare. `async_min_frames(clock, mode, bits, read)` and
+`polled_dma_min_frames(clock, mode, bits)` answer the counts for a
+program or a suite. The figures and the counts they draw are each
+family's ([../rp2040/spi.md](../rp2040/spi.md),
+[../rp2350/spi.md](../rp2350/spi.md), "The short request").
 
 ## The host above the wire
 
@@ -311,17 +372,15 @@ measured on the RP2350 in both of its architectures
 ([../rp2350/spi.md](../rp2350/spi.md) carries the numbers; the vendor's
 polled loop on the same board is the figure beside them).
 
-- THE REQUEST IS LENT, AND THE POLLED PATH KEEPS NOTHING. The arbiter's
-  contract lends the request for the call; a polled request completes
-  inside `start()`, so it is read field by field through the reference
-  and no copy is made. The asynchronous path (the pump, the engines)
-  copies what its tenure (the time one transaction holds the bus)
-  needs into one working set, `tenure_`: the
-  request AS WORDS - one load and one store a word, inline on every core,
-  because a struct copy of this size is a `memcpy` call on a RISC-V
-  build at `-Os` and a byte copy on a core that cannot load a misaligned
-  word - plus the two advancing pointers and the counts the pump keeps.
-  The reply capsule is never copied: it is the arbiter's.
+- THE REQUEST IS LENT, AND WHAT COMPLETES INSIDE `start()` KEEPS
+  NOTHING. The arbiter's contract lends the request for the call; a
+  request that completes inside `start()` is read field by field through
+  the reference and no copy is made. An engined one copies what its
+  tenure (the time one transaction holds the bus) needs into `tenure_`:
+  the request AS WORDS - one load and one store a word, inline on every
+  core, because a struct copy of this size is a `memcpy` call on a
+  RISC-V build at `-Os` and a byte copy on a core that cannot load a
+  misaligned word.
 - THE REQUEST IS LAID OUT WITHOUT PADDING: the four words first (the two
   out buffers, the in buffer, the reply), then the two half-words (the
   length, the prescaler pair), then the bytes - 28 bytes where the
@@ -336,12 +395,12 @@ polled loop on the same board is the figure beside them).
   again, and only then pays the disable/enable pair the block demands
   for its control registers (12.3.4.2 of the RP2350 data sheet). The
   loop-back bit lives in SSPCR1 and outside the word.
-- THE FIFOS ARE THE WRITE-AHEAD, ON BOTH COMPLETION STYLES. A FIFO's
-  worth of frames is in flight at once, written with NO FLAG READ: a
-  transmit FIFO holding fewer than its depth cannot be full, and a
-  receive FIFO handed back no more than its depth cannot overrun
-  (12.3.3.4, 12.3.3.5) - which is what makes the receive-overrun
-  interrupt a thing the host need never arm.
+- THE FIFOS ARE THE POLLED LOOP'S WRITE-AHEAD. A FIFO's worth of frames
+  is in flight at once, written with NO FLAG READ: a transmit FIFO
+  holding fewer than its depth cannot be full, and a receive FIFO handed
+  back no more than its depth cannot overrun (12.3.3.4, 12.3.3.5) -
+  which is what makes the receive-overrun interrupt a thing the host
+  need never arm.
 - THE POLLED LOOP HAS TWO SHAPES, by the request's `rx`. The RECEIVE
   shape primes the transmit FIFO with the first `fifo_depth` frames and
   then, per frame, waits for RNE, reads the frame and writes the one a
@@ -369,21 +428,20 @@ polled loop on the same board is the figure beside them).
   three accesses a frame at / 2 - the vendor's full-duplex loop on the
   same board reads the same number on the Cortex-M33 and a slower one on
   Hazard3, its write-only loop the same as this one's.
-- THE PUMP is the same window on the interrupt. `start()` fills the
-  FIFO and THEN arms the receive level (RXIM, the FIFO at or above half)
-  and the timeout (RTIM, a frame waiting and no further frame for 32
-  bit periods - the tail's edge, measured to rise 130 to 190 cycles
-  after the last frame at 37.5 MHz in every one of the four modes);
-  each interrupt takes what came back and writes as many more. The
-  order matters: a fill with the line already armed let the handler run
-  INSIDE the fill with both sides counting the same frames, which was
-  measured to overrun the receive FIFO at 37.5 MHz on the Hazard3 half.
-  One interrupt per FIFO level, four to eight frames a handler; the
-  handler's own cost per frame is the family's number.
+- THE BLOCK'S OWN INTERRUPT LINE IS DECLINED BY THE HOST. Four sources
+  on one line (RXIM at the receive FIFO's half, RTIM a frame waiting
+  with no clock for 32 bit periods, TXIM, RORIM) are what a per-frame
+  interrupt engine would run on; a handler a FIFO level costs the core
+  more than the wire's own frames at every rate a program uses, where
+  the engines cost a fixed sum
+  ([../design/spi-bus.md](../design/spi-bus.md), "Two ways to run a
+  request"), so the host masks all four and leaves the line to a client.
 - THE PHASE BOUNDARY DRAINS: the first data frame goes out only when the
-  last command frame has come back, so D/C flips between the two phases
-  on the wire. That drain is the one idle gap a two-phase request pays,
-  and a one-phase request pays none.
+  last command frame has come back - the polled loop's command turn ends
+  on its last echo, a command block on the receive channel's completion
+  - so D/C flips between the two phases on the wire. That drain is the
+  one idle gap a two-phase request pays, and a one-phase request pays
+  none.
 - THE RECEIVE FIFO IS NOT FLUSHED AT `start()`. Every transaction takes
   back every frame it wrote, so a frame can stand in the FIFO only after
   a fault, and the fault paths - a polled wait that ran out, `recover()`
@@ -412,24 +470,24 @@ polled loop on the same board is the figure beside them).
   signal between two frames like any end of a run.
 - THE HOT PATH'S PLACE IS THE PROGRAM'S, BY A TAG. On a chip that
   executes in place out of a flash behind a cache, a cold transaction
-  pays the cache its fill of the host's code - on the RP2350 some 4400
-  cycles more than the warm 665 for a three-byte request, 70 lines of 8
-  bytes. A section attribute takes a string literal and this file knows
+  pays the cache its fill of the host's code - on the RP2350's Cortex-M33
+  some 4100 cycles more than the warm figure for a three-byte request,
+  70 lines of 8 bytes. A section attribute takes a string literal and this file knows
   no family, so it places nothing by itself: `Pl022Host`'s last template
-  parameter is util/placement.hpp's tag, and three paths run through its
+  parameter is util/placement.hpp's tag, and two paths run through its
   `Hot<P>` - `start()` (the polled loops, the tenure's copy, the
-  engines' launch and wait all folded in), the pump (`isr()`, its fill
-  and take) and the DMA line's body (`dma_isr()`). `InFlash`, the
-  default, leaves each where it would be without the trampoline - the
-  pump and the DMA body inline in the app's vectors, `start()` a
-  function in the flash; `InRam` makes each ONE flattened instance in
-  `.fast_text.brio`, which a family that can place code in SRAM
-  collects into `.data`. The engines' launch has three call sites and
-  stays ONE body under either tag (out of line in the flash, or its own
-  instance in SRAM - flattened it is some 1 KB of the engines'
-  programming); a change of mode, rate or width (`reconfigure()`) and a
-  polled wait that ran out (`settle_fault()`) stay out of line in the
-  flash under both. `InRam` compiles only where the family's chip
+  short-request decision and the polled wait on the engines all folded
+  in) and the DMA line's body (`dma_isr()`). `InFlash`, the default,
+  leaves each where it would be without the trampoline - the DMA body
+  inline in the app's vector, `start()` a function in the flash; `InRam`
+  makes each ONE flattened instance in `.fast_text.brio`, which a family
+  that can place code in SRAM collects into `.data`. The engines' launch
+  has three call sites (a command block, a data block from `start()`, a
+  data block chained from the vector) and stays ONE body under either
+  tag (out of line in the flash, or its own instance in SRAM - flattened
+  it is some 1 KB of the engines' programming); a change of mode, rate or
+  width (`reconfigure()`, the frame costs with it) and a polled wait that
+  ran out (`settle_fault()`) stay out of line in the flash under both. `InRam` compiles only where the family's chip
   traits say `places_fast_text` (`HotPlacement`); a third tag does not
   compile. THE ENGINES' DUMMY CELL IS IN RAM, never a constant: the
   transmit engine reads it once a frame of a read with no out buffer, and
@@ -467,13 +525,15 @@ Each family's document is where its measurements live
 `brio/host/sim_pl022.hpp` is a SECOND realization with no silicon under
 it: the register block as an array in RAM (at the PL022's offsets, with
 the block's reset values, so a bring-up's flush of the receive FIFO
-terminates and a pump can write its first batch), a reset that memsets
+terminates and a polled loop can write its first batch), a reset that memsets
 it, an interrupt controller that counts, pads that remember what they
 were handed to and when, a run-time pin that records which way it was
 driven, and a busy-wait that COUNTS the microseconds it is asked for
 instead of spending them. It is compiled twice - by the host suite
 `test_pl022`, which judges the exact words a configuration leaves in the
-block, the frames a pump wrote and the ORDER of the acts of a bring-up,
+block, the way each request was run - refused, polled inside `start()`,
+a command block chained to its data block, the short request's edge -
+and the ORDER of the acts of a bring-up,
 and by a family's compile check (`test/family_rp2040/pl022_ip.cpp`),
 which names every verb of the resource, of the host with both engine
 slots empty and both filled, and of the client. A driver that needed a
@@ -483,9 +543,10 @@ it by name.
 
 What the fake does NOT model is the FIFOs: a register block that is
 plain memory cannot, since a store to `SSPDR` is a store and nothing
-watches it. So nothing ever comes back, and the receive half of a
-transfer - the pump's batching, the phase boundary, the frames on the
-wire - stays the bench's to judge.
+watches it. So nothing comes back by itself - a case that runs a polled
+loop to its end sets the receive-not-empty flag and reads back whatever
+was written last - and the receive half of a transfer, the phase
+boundary and the frames on the wire stay the bench's to judge.
 
 ## Not covered yet
 

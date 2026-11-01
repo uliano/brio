@@ -43,23 +43,27 @@
 //
 // and defines after it pressure_arm/go/halt/quiet (rubato_link.hpp's
 // declarations), pressure_silent() with its verdict's text, and
-// console_banner(); its glue binds isr_spi1 (Host::isr, a TransferDone to
-// the arbiter on true), isr_dma_1 (Host::dma_isr, the same), isr_uart1
+// console_banner(); its glue binds isr_dma_1 (Host::dma_isr, a TransferDone
+// to the arbiter on true, `dma_completions` counted below), isr_uart1
 // (link_rx_vector() below) and isr_uart0 (the console, a post to the
-// Console).
+// Console). SPI1's own line is nobody's: the host arms no source of it.
 //
 // THE SPI HOST. SpiHost<1> on the pair's wires with half-word engines, the
-// one host every path goes through, under util/spi_bus.hpp's arbiter. The
-// PL022's 8-deep FIFOs are the write-ahead on every path (pl022/spi.hpp,
-// "The FIFOs are the write-ahead"): the polled loop in its receive shape
-// primes eight frames and from there writes one for each one it reads, the
-// pump fills while fewer than eight are in flight, so whatever holds either
-// off, the frames that can land in the receive FIFO are never more than it
-// holds. The polled loop's waits are a budget counted in loop turns, which
-// a preemption does not spend. So the prediction here is the STM32G0's,
-// not the STM32F4's: STRICT at every judged rung under every pressure,
-// and the overrun flag (SSPRIS.RORRIS, which nothing on these paths
-// clears) never set at a reply. The transmit-only shape (run_write), the
+// one host every path goes through, under util/spi_bus.hpp's arbiter. An
+// asynchronous request rides the engines - one interrupt a block, no
+// handler a frame - or, too short to repay them at its rate (the host's
+// count, async_min_frames()) or 16-bit on a buffer off a half-word, runs
+// polled inside start(); a polled request runs the polled loop. The
+// PL022's 8-deep FIFOs are the polled loop's write-ahead (pl022/spi.hpp,
+// "The FIFOs are the polled loop's write-ahead"): in its receive shape it
+// primes eight frames and from there writes one for each one it reads, so
+// whatever holds it off, the frames that can land in the receive FIFO are
+// never more than it holds; and the engines' receive channel runs at the
+// controller's high level. The polled loop's waits are a budget counted in
+// loop turns, which a preemption does not spend. So the prediction here is
+// the STM32G0's, not the STM32F4's: STRICT at every judged rung under every
+// pressure, and the overrun flag (SSPRIS.RORRIS, which nothing on these
+// paths clears) never set at a reply. The transmit-only shape (run_write), the
 // one that lets the receive FIFO overrun by design, is taken only for a
 // write longer than the FIFO with no in buffer at a divisor under four,
 // which no window here asks. MSb FIRST ONLY: the PL022 has no bit-order
@@ -147,11 +151,36 @@ uint32_t division(SpiClock c) { return c.divisor(); }
 /// a frame lost since the last reply; it is cleared here so that each reply
 /// speaks for its own transaction.
 volatile uint32_t ovr_at_reply = 0;
+/// The DMA line's completions, counted by the binding's glue where it
+/// posts, and the count at the last window's reply: a window that took the
+/// engines moves it, one that completed inside start() does not.
+volatile uint32_t dma_completions = 0;
+uint32_t dma_seen = 0;
+/// Did the last data window (sl::xrx's) complete on the DMA line?
+bool data_window_dma = false;
 void client_replied() {
     if ((Host::Resource::raw_pending() & SpiInterrupt::overrun) != 0u) {
         ovr_at_reply = ovr_at_reply + 1u;
         Host::Resource::clear_pending(SpiInterrupt::overrun);
     }
+    // Which way the data window went, latched for it alone (the shared
+    // body's sl::xrx is its receive buffer and no other window's) - the
+    // windows run one at a time.
+    const uint32_t now = dma_completions;
+    if (Client::rx == sl::xrx || Client::rx == sl::xrx + 1) {
+        data_window_dma = now != dma_seen;
+    }
+    dma_seen = now;
+}
+
+/// The frames from which an asynchronous request rides the engines at a
+/// rate, mode and width, `read` with an in buffer: the host's own count,
+/// stated for a static_assert (clk_peri is clk_sys on both bindings).
+constexpr uint16_t async_count(SpiClock c, SpiMode m, bool wide, bool read) {
+    return pl022_async_min_frames(Host::costs,
+                                  pl022_frame_cycles(pl022_core_per_sspclk_q8(SysClock::hz, SysClock::pclk_hz), c, m,
+                                                     wide ? SpiDataSize::bits16 : SpiDataSize::bits8),
+                                  read);
 }
 
 uint32_t skips_at_up = 0;
@@ -338,9 +367,11 @@ void tn_peer_link() {
 // =============================================================================
 
 /// The matrix's rate: clk_peri / 32 (3.9 and 4.7 MHz) on the engines, 32
-/// frames a window, past dma_min_frames on both chips.
+/// frames a window, far past the host's count on both chips.
 constexpr SpiClock matrix_rate = SpiClocks::div32;
-static_assert(Host::dma_min_frames <= 32u && Host::wide_engines, "the matrix's windows ride the engines");
+static_assert(async_count(matrix_rate, SpiMode::mode1, false, true) <= 32u &&
+                  async_count(matrix_rate, SpiMode::mode1, true, true) <= 32u && Host::wide_engines,
+              "the matrix's windows ride the engines");
 
 /// One pass of the matrix: the four modes x two widths x the client MSb and
 /// LSb (the LSb rows an exact two-way reversal against this MSb-only host),
@@ -451,27 +482,57 @@ constexpr uint16_t judged_top = judged_divisor();
 /// faster printed with their counts, not judged.
 constexpr uint16_t rung_list[] = {256, 128, 64, 32, 24, 16, 14, 12, 10, 8};
 
-enum class Path : uint8_t { polled8, polled16, pump8, pump16, engines8, engines_polled16 };
+enum class Path : uint8_t { polled8, polled16, short8, odd16, engines8, engines16 };
 constexpr uint8_t path_count = 6;
+/// The short asynchronous window's frames (the shapes below).
+constexpr uint16_t short_frames = 1;
 const char* path_name(Path p) {
     switch (p) {
         case Path::polled8: return "polled loop, 8-bit, 9 frames";
-        case Path::polled16: return "polled loop, 16-bit, 32 frames off the engines";
-        case Path::pump8: return "pump, 8-bit, 9 frames";
-        case Path::pump16: return "pump, 16-bit, 32 frames off the engines";
+        case Path::polled16: return "polled loop, 16-bit, 32 frames off a half-word";
+        case Path::short8: return "asynchronous, 8-bit, 1 frame";
+        case Path::odd16: return "asynchronous, 16-bit, 32 frames off a half-word";
         case Path::engines8: return "DMA engines, 8-bit, 32 frames";
-        default: return "DMA engines under a polled request, 16-bit, 32 frames";
+        default: return "DMA engines, 16-bit, 32 frames";
     }
 }
+bool path_polled(Path p) { return p == Path::polled8 || p == Path::polled16; }
+bool path_wide(Path p) { return p == Path::polled16 || p == Path::odd16 || p == Path::engines16; }
+bool path_odd(Path p) { return p == Path::polled16 || p == Path::odd16; }
+uint16_t path_frames(Path p) {
+    return p == Path::polled8 ? 9u : p == Path::short8 ? short_frames : 32u;
+}
 
-/// THE SHAPES, each from the host's own rule (pl022/spi.hpp, engines_serve):
-/// a data phase under dma_min_frames takes the polled loop or the pump; a
-/// 16-bit one whose buffers are not half-word aligned takes them at any
-/// length (the DMA would move a half-word across an odd address wrongly).
-/// So 9 frames - one past the FIFO, so the polled loop refills once and the
-/// pump twice - and 32 16-bit frames from an odd address, 24 refills.
-static_assert(9u < Host::dma_min_frames, "letter p's 9-frame windows take the polled loop and the pump");
-static_assert(32u >= Host::dma_min_frames, "letter p's 32-frame aligned windows ride the engines");
+/// THE SHAPES, each from the host's own rule (pl022/spi.hpp, "THE SHORT
+/// ASYNCHRONOUS REQUEST"): a polled window runs the polled loop at every
+/// rung here (a polled read rides the engines only where the loop's turn
+/// outlasts the wire's frame, faster than any rung); an asynchronous one
+/// rides the engines from the host's count at its rate and runs polled
+/// inside start() below it, and a 16-bit one whose buffers are not
+/// half-word aligned runs polled at any length (the DMA would move a
+/// half-word across an odd address wrongly). So 9 polled frames - one past
+/// the FIFO, so the loop refills once - 32 16-bit frames from an odd
+/// address both ways, 24 refills, 32 aligned frames on the engines in each
+/// width, and ONE asynchronous frame, which crosses the count on the ladder:
+/// on the engines at the slow rungs, polled inside start() at the fast ones.
+static_assert(async_count(SpiClocks::div256, sl::data_mode, false, true) <= short_frames &&
+                  async_count(divisor_clock(judged_divisor()), sl::data_mode, false, true) > short_frames,
+              "letter p's one-frame asynchronous window crosses the host's count on the judged rungs");
+static_assert(async_count(divisor_clock(8), sl::data_mode, false, true) <= 32u &&
+                  async_count(divisor_clock(8), sl::data_mode, true, true) <= 32u,
+              "letter p's 32-frame aligned asynchronous windows ride the engines at every rung");
+
+/// Does an asynchronous read of `n` frames ride the engines at rate `c`?
+/// The host's own count, at the clocks it was given.
+bool rides_engines(SpiClock c, uint16_t n, bool wide) {
+    return n >= Host::async_min_frames(c, sl::data_mode, wide ? SpiDataSize::bits16 : SpiDataSize::bits8, true);
+}
+
+/// Asynchronous windows that went another way than the host's count says.
+uint8_t misrouted = 0;
+/// Rungs where the short window rode the engines, and where it ran polled.
+uint8_t short_on_engines = 0;
+uint8_t short_inside = 0;
 
 /// A frame's core cycles at divisor `d`: bits x the divisor, clk_peri =
 /// clk_sys.
@@ -494,15 +555,31 @@ bool climb(Path path, uint8_t seed) {
         }
         sl::Exchange e{};
         e.rate = divisor_clock(d);
-        e.polled = path == Path::polled8 || path == Path::polled16 || path == Path::engines_polled16;
-        e.wide = path == Path::polled16 || path == Path::pump16 || path == Path::engines_polled16;
-        e.odd = path == Path::polled16 || path == Path::pump16;
-        e.count = path == Path::polled8 || path == Path::pump8 ? 9u : 32u;
+        e.polled = path_polled(path);
+        e.wide = path_wide(path);
+        e.odd = path_odd(path);
+        e.count = path_frames(path);
         e.seed_a = static_cast<uint8_t>(seed + 9u * k);
         e.seed_b = static_cast<uint8_t>(seed + 0x40u + 5u * k);
         ++k;
         const sl::Outcome o = sl::run(e);
         const bool ok = sl::exact(e, o);
+        // The way it went, against the host's rule: polled windows and the
+        // odd ones never on the engines, the aligned asynchronous ones on
+        // them from the host's count.
+        const bool want_dma = !e.polled && !e.odd && rides_engines(e.rate, e.count, e.wide);
+        if (o.clocked && data_window_dma != want_dma) {
+            ++misrouted;
+            print(serial, "    ", path_name(path), " at /", d, " went ", data_window_dma ? "to the engines" : "polled",
+                  " where the host's count says otherwise", crlf);
+        }
+        if (judged && path == Path::short8 && o.clocked) {
+            if (data_window_dma) {
+                ++short_on_engines;
+            } else {
+                ++short_inside;
+            }
+        }
         if (!judged) {
             ++info_total[info];
             if (ok) {
@@ -536,8 +613,11 @@ void tp_ladders() {
             }
         }
     }
-    print(serial, "  every path keeps at most 8 frames in flight (the FIFOs); the engines take a phase of ",
-          Host::dma_min_frames, " frames or more; judged to clk_peri/", judged_top, " (", SysClock::pclk_hz / judged_top / 1000u,
+    print(serial, "  the polled loop keeps at most 8 frames in flight (the FIFOs); an asynchronous byte read rides the "
+          "engines from ", Host::async_min_frames(divisor_clock(256), sl::data_mode, SpiDataSize::bits8, true),
+          " frames at /256, ", Host::async_min_frames(divisor_clock(32), sl::data_mode, SpiDataSize::bits8, true),
+          " at /32, ", Host::async_min_frames(divisor_clock(judged_top), sl::data_mode, SpiDataSize::bits8, true), " at /",
+          judged_top, "; judged to clk_peri/", judged_top, " (", SysClock::pclk_hz / judged_top / 1000u,
           " kHz, the PIO client's ceiling at ", partner_sys_hz / 1'000'000u, " MHz); /", info_div[0], " and /",
           info_div[1], " printed, not judged", crlf);
     for (uint8_t p = 0; p < pass_count; ++p) {
@@ -549,6 +629,9 @@ void tp_ladders() {
             return;
         }
         ovr_at_reply = 0;
+        misrouted = 0;
+        short_on_engines = 0;
+        short_inside = 0;
         info_exact[0] = info_exact[1] = 0;
         info_total[0] = info_total[1] = 0;
         info_mask[0] = info_mask[1] = 0;
@@ -563,8 +646,9 @@ void tp_ladders() {
         print(serial, "    the host's overrun flag at a reply over the pass: ", ovr, "; /", info_div[0], " exact on ",
               info_exact[0], " of ", info_total[0], " paths (mask ", hex(info_mask[0]), "), /", info_div[1], " on ",
               info_exact[1], " of ", info_total[1], " (mask ", hex(info_mask[1]), "); the mask's bits from 0: polled "
-              "8-bit, polled 16-bit, pump 8-bit, pump 16-bit, engines, engines polled",
-              crlf);
+              "8-bit, polled 16-bit, asynchronous short, asynchronous 16-bit off a half-word, engines 8-bit, "
+              "engines 16-bit; the short window on the engines at ", short_on_engines, " judged rungs, polled at ",
+              short_inside, crlf);
         // A dispatch above the arbiter holds the polled loop off for its
         // whole length; with the FIFO as the write-ahead that is a gap on
         // the bus and never a lost frame (the file header), so the verdict
@@ -572,14 +656,22 @@ void tp_ladders() {
         bench.verdict(pass_label(s), "THE POLLED LOOP, 8-bit: 9 frames byte-exact both ways at every rung to the "
                                      "ceiling",
                       ok[0]);
-        bench.verdict(pass_label(s), "THE POLLED LOOP, 16-bit: 32 frames off the engines byte-exact at every rung",
+        bench.verdict(pass_label(s), "THE POLLED LOOP, 16-bit: 32 frames off a half-word byte-exact at every rung",
                       ok[1]);
-        bench.verdict(pass_label(s), "THE PUMP, 8-bit: 9 frames byte-exact at every rung", ok[2]);
-        bench.verdict(pass_label(s), "THE PUMP, 16-bit: 32 frames off the engines byte-exact at every rung", ok[3]);
+        bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST, 1 frame: byte-exact at every rung, on the "
+                                     "engines where the host's count says and polled inside start() below it, both "
+                                     "ways met on the ladder",
+                      ok[2] && short_on_engines != 0u && short_inside != 0u);
+        bench.verdict(pass_label(s), "ASYNCHRONOUS, 16-bit off a half-word: 32 frames run polled inside start(), "
+                                     "byte-exact at every rung",
+                      ok[3]);
         bench.verdict(pass_label(s), "THE DMA ENGINES, 8-bit: 32 frames byte-exact at every rung", ok[4]);
-        bench.verdict(pass_label(s), "THE DMA ENGINES under a polled request, 16-bit: 32 frames byte-exact at every "
+        bench.verdict(pass_label(s), "THE DMA ENGINES, 16-bit: 32 frames at a half-word beat byte-exact at every "
                                      "rung",
                       ok[5]);
+        bench.verdict(pass_label(s), "every asynchronous window went the way the host's count says (the DMA line "
+                                     "read at each reply)",
+                      misrouted == 0u);
         bench.verdict(pass_label(s), "the host's overrun flag never set at a reply: no frame lost", ovr == 0u);
         bench.verdict(pass_label(s), "the command channel survives the ladders", ping);
         judge_pressure(s, st);
@@ -590,6 +682,14 @@ void tp_ladders() {
 // =============================================================================
 // w - the arbiter under pressure
 // =============================================================================
+
+/// Letter w at the command rate, clk_peri / 128, where a byte frame is 1216
+/// cycles: the Client's six-frame and Pressure's three-frame asynchronous
+/// requests repay the engines many times over and ride them, Minor's run
+/// polled - arbitration across the two ways under preemption.
+static_assert(async_count(w::rate, w::mode, false, true) <= w::press_len &&
+                  async_count(w::rate, w::mode, false, true) <= w::client_len,
+              "letter w's asynchronous requests ride the engines");
 
 void tw_arbiter() {
     if (!spi_up()) {

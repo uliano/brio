@@ -43,9 +43,9 @@ using Host3 = SpiHost<3>;
 using Host3Moved = SpiHost<3, spi_pins_for(3, 1)>;
 using Host3Dma = SpiHost<3, spi3_default_pins, DmaTxEngine<2, 2>, DmaRxEngine<2, 1>>;
 using Client3 = SpiClient<3>;
-using Arb = SpiBus<Host3, P, 4>;
+using Arb = SpiBus<Host3Dma, P, 4>;
 
-static_assert(Host3Dma::has_engines && !Host3::has_engines);
+static_assert(Host3Dma::has_engines && !Host3::has_engines && Host3Dma::has_dma && !Host3::has_dma);
 static_assert(Client3::frames_ahead == 1 && Client3::has_nss_pad);
 
 class Sink {
@@ -98,13 +98,17 @@ void tasks() {
     r.len = 8;
     r.polled = true;
     (void)Host3::start(r);
-    (void)Host3::isr();
     (void)Host3::recover();
     Host3::release();
     (void)Host3Moved::init(clock);
     Host3Moved::release();
     (void)Host3Dma::init(clock);
     (void)Host3Dma::dma_isr();
+    Host3Dma::Request a{};
+    a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    a.len = 8;
+    (void)Host3Dma::start(a);   // asynchronous: the engines, or polled when short
+    (void)Host3Dma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, false);
     Host3Dma::release();
 
     (void)Client3::init(clock, {.mode = SpiMode::mode3});
@@ -116,12 +120,23 @@ void tasks() {
     Client3::release();
 
     Kernel::init_all();
-    r.polled = false;
-    r.reply = reply_to<Sink, SpiDone>();
-    post<Arb>(r);
+    Host3Dma::Request q{};
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    q.rx = lend<Lease::reply>(in_buf);
+    q.len = 8;
+    q.reply = reply_to<Sink, SpiDone>();
+    post<Arb>(q);
     (void)Kernel::step();
 }
 
-BRIO_CH32_VECTOR(spi3_handler) { (void)Host3::isr(); }
-BRIO_CH32_VECTOR(dma2_channel1_handler) { (void)Host3Dma::dma_rx_isr(); }
-BRIO_CH32_VECTOR(dma2_channel2_handler) { (void)Host3Dma::dma_tx_isr(); }
+BRIO_CH32_VECTOR(spi3_handler) { (void)Client3::isr(); }
+BRIO_CH32_VECTOR(dma2_channel1_handler) {
+    if (Host3Dma::dma_rx_isr()) {
+        post<Arb>(TransferDone{Host3Dma::status()});
+    }
+}
+BRIO_CH32_VECTOR(dma2_channel2_handler) {
+    if (Host3Dma::dma_tx_isr()) {
+        post<Arb>(TransferDone{Host3Dma::status()});
+    }
+}

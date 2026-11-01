@@ -3,8 +3,7 @@
 // stamp loop in `.fast_text` (samc21/ld/samc21j18a.ld puts it first in
 // .data, and the crt's copy of .data moves it to SRAM before main), and
 // the SPI host given util/placement.hpp's InRam - its polled transaction,
-// which no vector reaches, and its pump's entry, then a call from the
-// placed vector. Every letter, read beside bench_samc's, is the
+// which no vector reaches. Every letter, read beside bench_samc's, is the
 // measurement of what executing out of the flash costs this family, and
 // the program-side spelling of both placements (docs/samc21/platform.md,
 // "A handler in SRAM").

@@ -310,8 +310,9 @@ void resource_verbs() {
 using Host = SpiHost<0, host_pads>;
 using Peer = SpiClient<0, client_pads>;
 
-// No engine slot: the data phase is the polled loop or the pump
+// No engine slot: every request runs polled, an asynchronous one refused
 // (samc21/spi.hpp; neg/spi_engine_slot_absent.cpp).
+static_assert(!Host::has_dma);
 
 // The Request is the bus arbiter's token and must be copyable into its
 // pending FIFO (util/bus_master.hpp).
@@ -346,18 +347,21 @@ void host_verbs() {
         .mode = SpiMode::mode3,
         .reply = {},
     };
-    (void)Host::start(r);
-    (void)Host::isr();
+    (void)Host::start(r);   // asynchronous: refused, spi_rejected
+    (void)Host::status();
     // A degenerate request completes inside start() - the arbiter's
     // synchronous-completion path.
-    (void)Host::start(Host::Request{});
+    Host::Request empty{};
+    empty.polled = true;
+    (void)Host::start(empty);
+    (void)Host::recover();
     Host::release();
 }
 
 // ---- the placement (util/placement.hpp) -----------------------------------------
 // The host's last parameter: InFlash by default (Host above), InRam here -
-// the pump's entry and the polled transaction each ONE instance in
-// `.fast_text.brio`. A program's own placed function names `.fast_text`
+// the polled transaction ONE instance in `.fast_text.brio`. A program's
+// own placed function names `.fast_text`
 // in the SAME translation unit as those COMDAT instances (the section-
 // type trap util/placement.hpp states): this TU is the proof it compiles.
 // An unknown tag is refused (neg/spi_host_placement_unknown.cpp).
@@ -367,9 +371,9 @@ using RamHost = SpiHost<0, host_pads, 0, InRam>;
 // The placement moves code, never the Request a device client fills.
 static_assert(sizeof(RamHost::Request) == sizeof(Host::Request));
 
-extern "C" [[gnu::section(".fast_text")]] void fixture_placed_vector() {
-    (void)RamHost::isr();
-    (void)Host::isr();
+extern "C" [[gnu::section(".fast_text")]] void fixture_placed_function() {
+    (void)RamHost::status();
+    (void)Host::status();
 }
 
 void ram_host_verbs() {
@@ -382,8 +386,8 @@ void ram_host_verbs() {
     r.polled = true;
     (void)RamHost::start(r);   // the polled transaction, in SRAM
     r.polled = false;
-    (void)RamHost::start(r);   // the pump, its entry in SRAM
-    fixture_placed_vector();
+    (void)RamHost::start(r);   // refused before the placed path
+    fixture_placed_function();
     RamHost::release();
 }
 

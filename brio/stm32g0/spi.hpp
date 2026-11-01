@@ -21,8 +21,8 @@
  *                 transactions on it. It is the transfer engine, with
  *                 the Request shape and the public surface every
  *                 target's SpiHost carries, so a device client compiles
- *                 here untouched, and the placement of its two hot paths
- *                 (util/placement.hpp);
+ *                 here untouched, and the placement of its hot path, the
+ *                 polled transaction (util/placement.hpp);
  *   SpiClient<..> the other end of the wire: the hardware NSS input, the
  *                 preload and the one-ahead pump, polled runs and an ISR
  *                 body. A client is a protocol and the protocol is the
@@ -32,12 +32,16 @@
  * ordinary GPIO the engine drives around the transaction
  * (docs/stm32g0/spi.md opens with it in full):
  *
- *     using Bus = brio::SpiHost<1, bus_pins>;  // SCK, MISO, MOSI, each with its AF number
+ *     using Bus = brio::SpiHost<1, bus_pins,   // SCK, MISO, MOSI, each with its AF number
+ *                               brio::DmaTxEngine<1, 1, uint16_t>, brio::DmaRxEngine<1, 2, uint16_t>>;
  *     using Arb = brio::SpiBus<Bus, P, 4>;     // the arbiter, an active object
  *     (void)Bus::init(clock, 8'000'000);       // after the clock task; an 8 MHz ceiling
  *     brio::post<Arb>(Bus::Request{.cs = Cs::ref(), .cmd = ..., .rx = ..., .reply = ..., .len = 8});
- *     extern "C" void SPI1_IRQHandler() {
- *         if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+ *     extern "C" void DMA1_Channel1_IRQHandler() {
+ *         if (Bus::dma_isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *     extern "C" void DMA1_Channel2_3_IRQHandler() {
+ *         if (Bus::dma_isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
  *     }
  *
  * Who calls what. An active object is an object the kernel serves one
@@ -47,12 +51,15 @@
  * enabled globally; when the host names DMA engines, init() arms them
  * itself, and their arm() opens the controller's clock (the controller
  * has no init() of its own). start() is called by the bus arbiter inside
- * its dispatch, and a request completes in one of two ways: on the
- * interrupt, the vector's glue posting TransferDone to the arbiter when
- * isr() or dma_isr() returns true, or - when the request says `polled`
- * - inside start() itself, which then blocks that dispatch for the
- * whole transfer with global interrupts enabled. isr() and dma_isr()
- * are interrupt bodies the program binds to their vectors. The verbs
+ * its dispatch, and a request completes in one of two ways: on the DMA
+ * engines, the vectors' glue posting TransferDone to the arbiter when
+ * dma_isr() returns true, or inside start() itself, which then blocks
+ * that dispatch for the whole transfer with global interrupts enabled -
+ * a request that says `polled`, and an asynchronous one too short to
+ * repay the engines (an asynchronous request on a host with no engines
+ * is refused there, spi_rejected, nothing on the wire). dma_isr() is the
+ * interrupt body the program binds to the channels' vectors; the
+ * instance's own vector is the client's, never the host's. The verbs
  * that reshape the bus (prime(), bit_order(), the pad classes,
  * rebase(), recover(), release()) want an idle bus and belong to setup
  * or to the arbiter's dispatch. Spi<n>'s own verbs are plain register
@@ -64,8 +71,9 @@
  * kernel - and reports false rather than spinning. A request's buffers
  * are lent: the client hands them over under Lease::reply
  * (kernel/borrowed.hpp) and owns them again when its SpiDone arrives;
- * the Request itself is read through the reference on the polled path
- * and copied once on the asynchronous one. A client's polled runs block
+ * the Request itself is read through the reference when it completes
+ * inside start() and copied once when it goes to the engines. A client's
+ * polled runs block
  * their caller for the run, bounded by the spins they are given, and
  * use the caller's spans for the call alone.
  *
@@ -116,17 +124,18 @@
  *    BSY: a received frame is RXNE, and the end of a transaction is the
  *    NSS pad going high.
  *
- *  - RXNE drives the host pump and the FIFO is its write-ahead. TXE means
- *    "the transmit FIFO has room", which is true well before a frame is
- *    on the wire and true again immediately after; RXNE means "a frame
- *    has been shifted in", which on a full-duplex bus is exactly "one
- *    frame moved, both ways" - and reading DR is both the capture and
- *    the acknowledgement. The host keeps the TXFIFO's worth of frames in
- *    flight (35.5.9: three byte frames, two half-words), drains what
- *    RXNE announces and refills by that count, so the clock runs
- *    continuously while the software keeps up and the transaction ends
- *    when the last frame has come back rather than when the last one
- *    was handed to the shifter.
+ *  - RXNE paces the host's receive loop and the FIFO is its
+ *    write-ahead. TXE means "the transmit FIFO has room", which is true
+ *    well before a frame is on the wire and true again immediately
+ *    after; RXNE means "a frame has been shifted in", which on a
+ *    full-duplex bus is exactly "one frame moved, both ways" - and
+ *    reading DR is both the capture and the acknowledgement. The loop
+ *    keeps the TXFIFO's worth of frames in flight (35.5.9: three byte
+ *    frames, two half-words), reads one back on RXNE and writes the
+ *    next, so the clock runs continuously while the loop keeps up and
+ *    the transaction ends when the last frame has come back rather than
+ *    when the last one was handed to the shifter - the edge the DMA
+ *    engines end a block on too, the receive channel's last beat.
  *
  *  - The FIFO access width is part of the frame size (35.5.9, figure
  *    363): with DS <= 8 a frame is right-aligned in a byte and DR must
@@ -1548,17 +1557,145 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // rate, many times over), the select is raised and the FIFOs drained.
 // It cannot happen on a host whose clock runs, and a report beats a
 // frame of garbage returned in silence. No spi_overrun here: the
-// polled loops and the pump keep no more frames in flight than the
-// receive FIFO holds under the longest handler (the file header), so a
-// frame is never lost to one.
+// polled loops keep no more frames in flight than the receive FIFO
+// holds, and the engines' receive channel outranks their transmit one
+// (the class comment), so a frame is never lost to one.
+
+/*
+ * THE SHORT ASYNCHRONOUS REQUEST, and the arithmetic behind it.
+ *
+ * On the engines a transaction costs the core a fixed E - start(), the
+ * two channels programmed, the one completion interrupt - whatever its
+ * length: the wire's time is the core's own. Polled, it costs the core
+ * the whole transaction: a fixed part F and each frame's time, which is
+ * the wire's frame or the loop's own turn, the longer. Both loops keep
+ * frames in flight in the FIFO (35.5.9), so no frame pays an idle bus;
+ * for a frame of W PCLK cycles at the code and size (spi_frame_cycles())
+ *
+ *     a frame read     max(W, the receive loop's shortest turn at its width)
+ *     a frame written  max(W, the transmit-only loop's shortest turn at its width)
+ *
+ * and a request is cheaper polled while F plus its frames stays under E:
+ * it rides the engines from the smallest count N with F + N x frame >= E,
+ * ceil((E - F) / frame) (spi_async_min_frames()). Only the difference
+ * E - F enters, one for a read and one for a write (the transmit-only
+ * loop's fixed part is not the receive loop's), and it is measured as one:
+ * bench_stm32 letter e times an asynchronous request on the engines and
+ * the polled one of the same shape through the same call, the busy of the
+ * first less the second's cycles above the wire, so that the ruler's own
+ * cycles cancel. The turns are the same letter's polled lines at PCLK/2,
+ * the one code where the loop and not the wire is the bound. Each
+ * placement has its figures (SpiHostCosts below); a request folds its
+ * cost from two frame figures kept for the code and size in force -
+ * computed when they change, never per request - as cmd_len frames
+ * written and len frames read or written: two multiplies and a compare in
+ * start(), on the asynchronous path alone. Two approximations, both
+ * small against the order of magnitude the rule needs: a receive phase
+ * shorter than packed_min_frames turns frame by frame, slower than the
+ * packed turn the figure is (it matters only at PCLK/2 and PCLK/4, where
+ * every count under the threshold is above that minimum), and a command
+ * phase on the engines is a block of its own judged by the same E, though
+ * a block chained from the interrupt costs less than one start() does.
+ * The cycles are HCLK's at 64 MHz, the flash at two wait states (RM0444
+ * 3.3.4); at a slower clock the same code takes fewer of them, and the
+ * counts are a little high there, which costs a short request some
+ * microseconds of polling and nothing else.
+ *
+ * THE SAME FIGURES DECIDE WHERE A POLLED REQUEST RIDES THE ENGINES. The
+ * thread spins on their completion as it would in the loop, so the
+ * engines buy it no core time, only the wall time the loop's turn loses to
+ * the wire where the turn is the longer: from the count at which that
+ * deficit over the phase reaches E - F (spi_polled_engines_from()) - at
+ * PCLK/2 alone, both widths (the turns are under the wire's frame from
+ * PCLK/4 down) - and never where there is none.
+ */
+/// What the two ways cost the core on this family at 64 MHz, for one
+/// placement of the polled transaction (the host's constants are these).
+struct SpiHostCosts {
+    uint16_t engines_over_read;      ///< E - F for a read (the receive loop's F)
+    uint16_t engines_over_written;   ///< E - F for a write (the transmit-only loop's F)
+    uint8_t read_turn_bytes;         ///< the receive loop's frame, 4..8-bit frames packed, at PCLK/2
+    uint8_t read_turn_halfwords;     ///< the receive loop's frame, 9..16-bit frames, at PCLK/2
+    uint8_t write_turn_bytes;        ///< the transmit-only loop's frame, 4..8-bit frames, at PCLK/2
+    uint8_t write_turn_halfwords;    ///< the transmit-only loop's frame, 9..16-bit frames, at PCLK/2
+};
+/// Measured on the STM32G0B1RE at 64 MHz (bench_stm32 and bench_stm32_ram,
+/// letter e; docs/stm32g0/spi.md, "The short request"). E runs start() and
+/// the completion's vector from the flash under either placement; F and the
+/// turns are the placement's.
+inline constexpr SpiHostCosts spi_costs_in_flash{550u, 555u, 26u, 43u, 17u, 32u};
+inline constexpr SpiHostCosts spi_costs_in_ram{580u, 560u, 23u, 38u, 16u, 32u};
+
+/// A frame's PCLK cycles at a code and size: bits x 2^(code + 1). PCLK is
+/// HCLK on this family (every Clock task pins PPRE at 1, the file header
+/// of stm32g0/clock.hpp), so these are core cycles too.
+constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
+    return static_cast<uint32_t>(spi_data_bits(bits)) << (static_cast<uint8_t>(c) + 1u);
+}
+/// What a polled frame costs the core at a code and size, read (with an in
+/// buffer) or written (the arithmetic above).
+constexpr uint32_t spi_polled_frame_cost(const SpiHostCosts& k, SpiClock c, SpiDataSize bits, bool read) {
+    const uint32_t w = spi_frame_cycles(c, bits);
+    const bool wide = spi_frame_is_halfword(bits);
+    const uint32_t turn = read ? (wide ? k.read_turn_halfwords : k.read_turn_bytes)
+                               : (wide ? k.write_turn_halfwords : k.write_turn_bytes);
+    return w > turn ? w : turn;
+}
+/// What a polled frame loses to the wire: the loop's turn beyond the
+/// wire's frame, 0 where the wire is the bound.
+constexpr uint32_t spi_polled_frame_deficit(const SpiHostCosts& k, SpiClock c, SpiDataSize bits, bool read) {
+    return spi_polled_frame_cost(k, c, bits, read) - spi_frame_cycles(c, bits);
+}
+/// E - F: what the engines cost beyond a polled transaction's fixed part,
+/// a read's (`read`) or a write's.
+constexpr uint32_t spi_async_budget(const SpiHostCosts& k, bool read) {
+    return read ? k.engines_over_read : k.engines_over_written;
+}
+/// The frames from which an asynchronous request of one phase rides the
+/// engines at a code and size (`read`: with an in buffer); a shorter one
+/// runs polled and completes inside start().
+constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDataSize bits, bool read) {
+    const uint32_t f = spi_polled_frame_cost(k, c, bits, read);
+    const uint32_t n = (spi_async_budget(k, read) + f - 1u) / f;
+    return static_cast<uint16_t>(n > 1u ? n : 1u);
+}
+/// The frames from which a POLLED phase rides the engines at a code and
+/// size, start() waiting on their completion; 0 where the loop keeps up
+/// with the wire and the engines would buy nothing.
+constexpr uint16_t spi_polled_engines_from(const SpiHostCosts& k, SpiClock c, SpiDataSize bits, bool read) {
+    const uint32_t d = spi_polled_frame_deficit(k, c, bits, read);
+    if (d == 0u) {
+        return 0u;
+    }
+    const uint32_t n = (spi_async_budget(k, read) + d - 1u) / d;
+    return static_cast<uint16_t>(n < 0xFFFFu ? n : 0xFFFFu);
+}
+
+// The counts those figures give from the flash, 8-bit frames (docs/
+// stm32g0/spi.md, "The short request"): a read rides the engines from 22
+// frames at PCLK/2, 18 at /4, 9 at /8, 5 at /16 and 1 from /128 down; a
+// write from 33, 18, 9 and 5; a 16-bit read from 13 at /2. A polled read
+// rides them from 55 frames at PCLK/2, a polled write from 555, and
+// neither from PCLK/4 down.
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 22u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 18u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 9u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 5u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div128, SpiDataSize::bits8, true) == 1u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 33u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, false) == 5u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits16, true) == 13u);
+static_assert(spi_polled_engines_from(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 55u);
+static_assert(spi_polled_engines_from(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 555u);
+static_assert(spi_polled_engines_from(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 0u);
 
 /**
- * SpiHost<n, pins, TxEngine, RxEngine>
+ * SpiHost<n, pins, TxEngine, RxEngine, Placement>
  *
  * The transfer ENGINE util/spi_bus.hpp drives (which owns arbitration,
  * the pending FIFO, replies and the per-bus timeout). This task owns the
- * wire: the chip select, the D/C line of display-style devices, and the
- * frame pump under the SPI interrupt.
+ * wire: the chip select, the D/C line of display-style devices, the
+ * polled loops and the two optional DMA engines.
  *
  * TRANSACTION DESCRIPTOR (Request) - two phases in ONE chip-select
  * window, the shape every target's SpiHost carries:
@@ -1574,18 +1711,36 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * SpiDone comes back). A zero-total-length request completes on the spot
  * without touching the wire.
  *
+ * THE TWO WAYS (docs/design/spi-bus.md, "Two ways to run a request"):
+ *
+ *  - POLLED (`polled` true): the loops below inside start(), and a phase
+ *    the loop runs slower than the wire long enough to repay the engines
+ *    on them inside start() too, start() waiting on their completion
+ *    (the arithmetic above SpiHostCosts).
+ *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
+ *    request is refused: start() answers true at once with spi_rejected
+ *    in status(), before it touches the block, the select or the D/C, so
+ *    nothing reaches the wire; `has_dma` says so at compile time. With
+ *    engines bound, a request whose polled transfer would cost the core
+ *    less than the engines' fixed cost runs polled and completes inside
+ *    start() - async_min_frames(), the rule above SpiHostCosts. A longer
+ *    one goes to the engines: a command phase on them too when it would be
+ *    worth a block of its own (or is the whole request), polled inside
+ *    start() otherwise, and the data phase on them, start() returning
+ *    false and dma_isr() ending the transaction. The block's own
+ *    interrupts are never armed: the instance's vector is not the host's.
+ *
  * THE REQUEST IS LENT FOR THE CALL and the layout says what a tenure
- * costs (util/bus_master.hpp's contract): a POLLED request completes
- * inside start(), which therefore reads every field through the
- * reference and copies nothing; the ASYNCHRONOUS path keeps the request
- * for its tenure - the pump reads the buffers, the lengths, the width
- * and the two pins from its own copy, because the slot it was lent from
- * is the arbiter's and may be written again once the dispatch is over.
- * The fields are laid out with the pointers and the pins first and the
- * bytes last, so that the descriptor is forty bytes with no padding and
- * the one copy is ten word moves (ldm/stm pairs, no call). THE FIELD
- * NAMES ARE THE CONTRACT every family's Request shares; the order is
- * this family's, and a designated initializer follows it.
+ * costs (util/bus_master.hpp's contract): a request that completes
+ * inside start() is read through the reference and copied nowhere; one
+ * that goes to the engines is copied once, because the slot it was lent
+ * from is the arbiter's and may be written again once the dispatch is
+ * over, and the vector reads the pins, the buffers, the lengths and the
+ * width from the copy. The fields are laid out with the pointers and the
+ * pins first and the bytes last, so that the descriptor is forty bytes
+ * with no padding and the one copy is ten word moves (ldm/stm pairs, no
+ * call). THE FIELD NAMES ARE THE CONTRACT every family's Request shares;
+ * the order is this family's, and a designated initializer follows it.
  *
  * LEN IS A FRAME COUNT AND THE FRAME SIZE IS THE REQUEST'S. With the
  * default 8-bit frames a frame is a byte and `len` is a byte count,
@@ -1606,29 +1761,20 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * carries a PinRef of its own and the two hardware arrangements stay
  * resource facts the bench measures.
  *
- * THE FIFO IS THE WRITE-AHEAD (35.5.9, "RXFIFO and TXFIFO"). The pump
- * and the receiving polled loops keep AHEAD frames in flight - written
- * to the TXFIFO and not yet read back from the RXFIFO - so that the
- * shifter always finds its next frame in the FIFO and the clock never
- * stops between frames while the software keeps up: three 8-bit frames
- * or two 16-bit ones, the number the chapter gives for the TXFIFO
- * ("TXFIFO can only store up to three when the data frame format is not
- * greater than 8 bits"; two half-words fill its 32 bits), four for the
- * packed loop whose pairs the chapter's TXE rule admits. What a late
- * handler costs is a GAP ON THE BUS, never a frame: once the TXFIFO has
- * run dry the clock waits for the refill.
- *
- * RXNE DRIVES THE PUMP, with the threshold the frame size implies (FRXTH
- * at a quarter for byte frames, a half for half-word ones - 35.5.7 step
- * 3e): "a frame has come back" is the one event that means one frame
- * moved both ways, and reading DR is both the capture and the
- * acknowledgement. The handler DRAINS every frame the RXFIFO holds and
- * REFILLS the TXFIFO by that count, so it takes one interrupt per RXNE
- * where it keeps up with the wire and one per several frames where it
- * does not; the transaction ends when the LAST frame has come back,
- * which is the only edge that means the wire is idle. It does mean the
- * receiver runs even for a write-only transfer, which costs the MISO
- * pad and nothing else.
+ * THE FIFO IS THE WRITE-AHEAD (35.5.9, "RXFIFO and TXFIFO"). The
+ * receiving polled loops keep AHEAD frames in flight - written to the
+ * TXFIFO and not yet read back from the RXFIFO - so that the shifter
+ * always finds its next frame in the FIFO and the clock never stops
+ * between frames while the loop keeps up: three 8-bit frames or two
+ * 16-bit ones, the number the chapter gives for the TXFIFO ("TXFIFO can
+ * only store up to three when the data frame format is not greater than
+ * 8 bits"; two half-words fill its 32 bits), four for the packed loop
+ * whose pairs the chapter's TXE rule admits. What a late handler costs is
+ * a GAP ON THE BUS, never a frame: once the TXFIFO has run dry the clock
+ * waits for the refill. RXNE, with the threshold the frame size implies
+ * (FRXTH at a quarter for byte frames, a half for half-word ones - 35.5.7
+ * step 3e), is the one flag that means one frame moved both ways, and
+ * reading DR is both the capture and the acknowledgement.
  *
  * THE POLLED LOOP comes in two shapes, decided once per phase. A phase
  * that reads nothing back - every command phase, a display's pixel run
@@ -1662,8 +1808,9 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * sequences: the data phase is written only after the LAST command frame
  * has come back, because the D/C pin must change between the last
  * command bit and the first data bit and the FIFO would run the two
- * phases back to back. The gap is the loop's turnaround, once per
- * request that has both phases.
+ * phases back to back. The gap is the turnaround, once per request that
+ * has both phases - the loop's, or the command block's completion
+ * interrupt where the command rides the engines.
  *
  * NOTHING IS FLUSHED BEFORE A TRANSACTION. In master mode a frame enters
  * the RXFIFO only for a frame the master clocked (35.5.9: the clock runs
@@ -1687,41 +1834,36 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * THE TWO OPTIONAL DMA ENGINE SLOTS (stm32g0/usart.hpp's shape, for
  * the same reason: an engineless build must stay byte-identical, so the
  * slots default to NoDmaEngine and every DMA branch folds away under
- * `if constexpr`). With engines named, the DATA PHASE of a request LONG
- * ENOUGH runs on the DMA: the RX channel drains DR on the RXNE request,
- * the TX channel feeds it on TXE, and the transaction is complete when
- * the RECEIVE block completes - the last frame is on the wire until it
- * has been shifted back in, the same reason the pump arms RXNE. The
- * command phase stays on the frame pump (it is a few frames with a DC
- * flip at its end); a null tx feeds all-ones from a held source, a null
- * rx drains into a held sink.
+ * `if constexpr`). With engines named, a block runs on the DMA: the RX
+ * channel drains DR on the RXNE request, the TX channel feeds it on TXE,
+ * and the block is complete when the RECEIVE block completes - the last
+ * frame is on the wire until it has been shifted back in. A null tx
+ * feeds all-ones from a held source, a null rx (and a command block's
+ * echo) drains into a held sink.
  *
- * THE ENGINES SERVE A DATA PHASE OF dma_min_frames OR MORE. The two
- * blocks cost a fixed sum per transaction (their programming, the
- * completion interrupt, the idle path's wake) whatever the length, and
- * the pump costs its own sum per frame; the two meet where the engines'
- * fixed cost equals the pump's per-frame cost times the length, and
- * below that a request is cheaper pumped. The constant is the quotient
- * of the two measured numbers named beside it (docs/stm32g0/spi.md).
- *
- * ONE INTERRUPT PER TRANSACTION. The transmit engine is armed for its
- * ERRORS alone (DmaIrq::error_only): its completion proves nothing the
- * receive block's does not - every frame that came back was clocked out
- * first, so the receive channel's last beat is strictly after the
- * transmit channel's - and finish_dma() completes it on that proof.
+ * ONE INTERRUPT A BLOCK. The transmit engine is armed for its ERRORS
+ * alone (DmaIrq::error_only): its completion proves nothing the receive
+ * block's does not - every frame that came back was clocked out first,
+ * so the receive channel's last beat is strictly after the transmit
+ * channel's - and the host completes it on that proof. A command block
+ * and its data block are two interrupts; the data block is launched
+ * from the first, D/C raised between them.
  *
  * THE BEAT IS THE FRAME. A frame of eight bits or fewer is a byte access
  * to DR and a 9- to 16-bit frame a half-word one (35.5.9, figure 363),
  * and the engines take the width per block from the span they are
  * handed: engines whose element is uint16_t serve both, engines of
- * uint8_t serve the byte frames alone. A wide request goes to the frame
- * pump when the engines are bytes or when either buffer is not
- * half-word aligned (10.4.3's note - the DMA cannot read a half-word
- * across one) - dma_serves() decides BEFORE the select, so a request
- * never changes path in the middle. The PACKED arrangement (8-bit frames
- * through 16-bit DMA accesses, with LDMA_TX/LDMA_RX for an odd count) is
- * a RESOURCE fact and not this task's: it needs the caller's own buffer
- * layout, and the bench drives it with raw engines.
+ * uint8_t serve the byte frames alone. A wide request whose engines are
+ * bytes or whose buffer is not half-word aligned (10.4.3's note - the
+ * DMA cannot read a half-word across one) runs polled inside start()
+ * whichever way it asked - the one exception to "asynchronous is DMA",
+ * since the engines cannot move it and a refusal would make the answer
+ * depend on where a buffer happens to sit - and beats_serve() decides
+ * BEFORE the select, so a request never changes path in the middle. The
+ * PACKED arrangement (8-bit frames through 16-bit DMA accesses, with
+ * LDMA_TX/LDMA_RX for an odd count) is a RESOURCE fact and not this
+ * task's: it needs the caller's own buffer layout, and the bench drives
+ * it with raw engines.
  *
  * THE DMA CONTROLLER IS THE APP'S. The engines arm CHANNELS of a
  * controller somebody else owns (their arm() opens its clock and never
@@ -1748,31 +1890,28 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * empty) and util/bus_master.hpp's PrepareSleep voter is the pattern; no
  * engine can enforce it from below, so it is stated and not pretended.
  *
- * WHERE THE HOT PATHS RUN FROM: the host's placement, its last template
- * parameter (util/placement.hpp). Two paths take it, each ONE function of
- * it: the pump's entry (isr()), and the polled transaction - the command
- * phase, the D/C flip and the data phase in whichever of the loops below
- * the request picks, both widths - which start() calls once a request.
- * Under InFlash, the default, the entry is what it would be without the
- * placement, inline in the vector that binds it, and the transaction a
- * function of its own in the flash (polled_transaction() says why); under
- * InRam each is one instance in SRAM (`.fast_text.brio`), called through
- * the linker's long-branch veneer from the flash. At 64 MHz the flash answers at two wait states
- * behind the prefetch and the cache (RM0444 3.3.4, 3.3.5), which hide a
- * fifth of what that costs these bodies, and the SRAM at none (2.3): the
- * pump's entry is an eighth shorter from SRAM behind a vector left in the
- * flash, the veneer and the call's frame counted, the receive loop at
- * PCLK/2 a twentieth and a short request some 15 to 30 cycles
- * (docs/stm32g0/spi.md has every figure, both placements). The pump's cost per frame follows the placement, and the
- * crossover to the engines with it (dma_min_frames). The engines'
- * completion (dma_isr()) takes no placement: one entry a transaction,
- * inline in its vector, which a program may place in `.fast_text`.
+ * WHERE THE HOT PATH RUNS FROM: the host's placement, its last template
+ * parameter (util/placement.hpp), taken by ONE function - the polled
+ * transaction: the command phase, the D/C flip and the data phase in
+ * whichever of the loops below the request picks, both widths - which
+ * start() calls once a request. Under InFlash, the default, it is a
+ * function of its own in the flash (polled_transaction() says why);
+ * under InRam one instance in SRAM (`.fast_text.brio`), called through
+ * the linker's long-branch veneer from the flash. At 64 MHz the flash
+ * answers at two wait states behind the prefetch and the cache (RM0444
+ * 3.3.4, 3.3.5), which hide most of what that costs this body, and the
+ * SRAM at none (2.3): the receive loop at PCLK/2 is a twentieth faster
+ * from SRAM and a short request some 15 to 30 cycles
+ * (docs/stm32g0/spi.md has every figure, both placements). The engines'
+ * path takes no placement: their completion (dma_isr()) is one entry a
+ * block, inline in its vector, which a program may place in
+ * `.fast_text`, and start() programs a block once a transaction.
  *
- * ISR wiring (app glue, as usual):
- *   extern "C" void SPI1_IRQHandler() {
- *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
+ * ISR wiring (app glue): the engines' vectors alone - the instance's own
+ * vector is not the host's:
+ *   extern "C" void DMA1_Channel1_IRQHandler() {
+ *       if (SpiHw::dma_isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
  *   }
- *   // engine users bind the channels' vectors as well:
  *   extern "C" void DMA1_Channel2_3_IRQHandler() {
  *       if (SpiHw::dma_isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
  *   }
@@ -1788,9 +1927,9 @@ class SpiHost {
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
                   "DmaRxEngine from stm32g0/dma.hpp, or NoDmaEngine (the default)");
-    // BOTH OR NEITHER: the transaction's completion is the RECEIVE
-    // block's, so a TX engine alone has no edge to complete on and an RX
-    // engine alone would race the frame pump for DR.
+    // BOTH OR NEITHER: a block's completion is the RECEIVE channel's, so a
+    // TX engine alone has no edge to complete on and an RX engine alone
+    // would have nothing to clock its frames.
     static_assert(TxEngine::present == RxEngine::present,
                   "brio SpiHost: name both DMA engines or neither - the data phase is "
                   "full-duplex and its completion is the RECEIVE block's");
@@ -1802,8 +1941,8 @@ class SpiHost {
                   "of this device and no two signals may name the same pin");
     static_assert(pins.sck.valid() && pins.mosi.valid(),
                   "brio SpiHost: a host needs SCK and MOSI; MISO is optional only for a "
-                  "write-only bus, and this engine's pump reads it (see the class "
-                  "comment on why RXNE drives it)");
+                  "write-only bus, and every path of this engine reads the receive side "
+                  "back (see the class comment on RXNE)");
 
     using SckPin = Pin<pins.sck.port, pins.sck.pin>;
     using MosiPin = Pin<pins.mosi.port, pins.mosi.pin>;
@@ -1818,10 +1957,15 @@ public:
     using Resource = S;
     static constexpr SpiPins pin_pads = pins;
     static constexpr bool has_engines = TxEngine::present;
+    /// Can this host run an asynchronous request? The contract's name for
+    /// has_engines (docs/design/spi-bus.md): false refuses every request
+    /// not marked polled, so a program that posts one asserts it -
+    /// `static_assert(Bus::has_dma)`.
+    static constexpr bool has_dma = has_engines;
 
-    /// The frames kept in flight by both loops - the TXFIFO's capacity
-    /// under the chapter's own discipline (the class comment): three
-    /// byte frames, two half-word ones.
+    /// The frames kept in flight by the receiving loops - the TXFIFO's
+    /// capacity under the chapter's own discipline (the class comment):
+    /// three byte frames, two half-word ones.
     static constexpr uint8_t ahead_bytes = 3;
     static constexpr uint8_t ahead_halfwords = 2;
     /// The byte phase from which the polled loop PACKS two frames an
@@ -1832,27 +1976,25 @@ public:
     /// two-byte phase packed cost 35 cycles more than unpacked).
     static constexpr uint8_t packed_min_frames = 6;
 
-    /// Whether the pump's entry and the polled transaction run from SRAM
-    /// (the class comment).
+    /// Whether the polled transaction runs from SRAM (the class comment).
     static constexpr bool placed_in_ram = std::same_as<Placement, InRam>;
 
-    /// The data phase from which the engines are cheaper than the pump,
-    /// in FRAMES, and its two measured inputs (`bench_stm32` and
-    /// `bench_stm32_ram` letters d and e on the STM32G0B1RE - a letter is
-    /// one command key of a test suite's console and the group of
-    /// verdicts it runs -, docs/stm32g0/spi.md): what a transaction costs above the wire on
-    /// the engines, whatever its length - none of its path placed, so one
-    /// figure for both, `bench_stm32`'s (`bench_stm32_ram` reads 24 cycles
-    /// less, the bench's shared DMA vector shorter there) - and what the
-    /// pump costs per frame, which follows the placement. A shorter data
-    /// phase takes the pump even on an engined host.
-    static constexpr uint16_t dma_fixed_cycles = 1093;
-    static constexpr uint16_t pump_cycles_per_frame = placed_in_ram ? 122 : 138;
-    static constexpr uint16_t dma_min_frames =
-        static_cast<uint16_t>((dma_fixed_cycles + pump_cycles_per_frame - 1u) /
-                              pump_cycles_per_frame);
-    static_assert(dma_min_frames == (placed_in_ram ? 9u : 8u),
-                  "brio SpiHost: the crossover moved - docs/stm32g0/spi.md states it");
+    /// The two ways' costs for this host's placement (SpiHostCosts above).
+    static constexpr SpiHostCosts costs = placed_in_ram ? spi_costs_in_ram : spi_costs_in_flash;
+    /// E - F for a read and for a write (the arithmetic above SpiHostCosts).
+    static constexpr uint32_t async_read_budget_cycles = spi_async_budget(costs, true);
+    static constexpr uint32_t async_write_budget_cycles = spi_async_budget(costs, false);
+    /// The frames from which an asynchronous request of one phase rides the
+    /// engines at this placement, a code and a size (`read`: with an in
+    /// buffer); a shorter one runs polled and completes inside start().
+    static constexpr uint16_t async_min_frames(SpiClock c, SpiDataSize bits, bool read) {
+        return spi_async_min_frames(costs, c, bits, read);
+    }
+    /// The frames from which a POLLED phase rides the engines, start()
+    /// waiting on them; 0 = never at this code and size.
+    static constexpr uint16_t polled_engines_from(SpiClock c, SpiDataSize bits, bool read) {
+        return spi_polled_engines_from(costs, c, bits, read);
+    }
 
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
@@ -1882,15 +2024,12 @@ public:
         /// like the shared Request it is.
         SpiDataSize bits = SpiDataSize::bits8;
 
-        /// Completion style, the client's call: false = the frame pump
-        /// under the SPI interrupt (the kernel keeps running between
-        /// frames); true = POLLED inside start(), completing
-        /// synchronously. At fast SCK the polled loop wins on every axis
-        /// - a frame at PCLK/2 is sixteen CPU cycles while an interrupt
-        /// entry alone costs more. The price is that THIS dispatch blocks
-        /// for the whole transfer (bounded, chosen here); global
-        /// interrupts stay enabled throughout, only this SPI's own RXNE
-        /// is silenced.
+        /// The way to run it, the client's call: true = POLLED inside
+        /// start(), this dispatch blocked for the whole transfer (bounded,
+        /// chosen here) with global interrupts enabled; false =
+        /// asynchronous, on the DMA engines - polled inside start() when
+        /// too short to repay them (async_min_frames()), refused
+        /// (spi_rejected) on a host with none (has_dma).
         bool polled = false;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
@@ -1915,8 +2054,11 @@ public:
         PinSpeed mosi_speed = PinSpeed::very_high;
     };
 
-    /// Bring the instance up as a host: bus clock, reset,
-    /// configuration, pads, the NVIC line.
+    /// Bring the instance up as a host: bus clock, reset, configuration,
+    /// the engines' binding, pads. The instance's NVIC line is neither
+    /// enabled nor disabled: the host arms no interrupt of the block, and
+    /// SPI2 and SPI3 share one line where the part has a SPI3 (the file
+    /// header), which the other instance may be using.
     ///
     /// Call AFTER the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag, so the
@@ -1938,7 +2080,6 @@ public:
                       "list it among its Users: its SCK ceiling and its cs_setup timing "
                       "would go stale on a clock change");
 
-        Nvic::disable(S::irq());
         const uint32_t max_sck_hz = cfg.max_sck_hz;
         ceiling_hz_ = max_sck_hz;
         sck_speed_ = cfg.sck_speed;
@@ -1959,6 +2100,7 @@ public:
 
         applied_ = boot_config();
         applied_key_ = setting_key(applied_.mode, applied_.clock, applied_.bits);
+        costs_for(applied_.clock, applied_.bits);
         if (!S::configure(applied_)) {
             return false;
         }
@@ -1991,7 +2133,6 @@ public:
         // states it in one place, and so that a bench can measure them.
         S::enable();
         S::flush_rx();
-        Nvic::enable(S::irq());
         return true;
     }
     /// The shared SpiHost surface: a ceiling alone, both pads `very_high`.
@@ -2086,15 +2227,26 @@ public:
 
     // ---- the transfer -------------------------------------------------------
 
-    /// Begin a transaction (called by SpiBus from main context).
-    /// Returns true when it completed SYNCHRONOUSLY (polled requests, and
-    /// the degenerate zero-length one); false when it runs on the ISR and
-    /// a TransferDone will follow. Exactly util/bus_master.hpp's engine
-    /// contract.
+    /// Begin a transaction (called by SpiBus from main context). True when
+    /// it completed inside the call - a polled request, an asynchronous one
+    /// too short for the engines or one they cannot carry, the empty one,
+    /// and on a host with no engines a refused one (spi_rejected, the wire
+    /// untouched); false when it went to the engines and dma_isr() will end
+    /// it, a TransferDone following. Exactly util/bus_master.hpp's engine
+    /// contract. True is "ended", not "succeeded": status() is the answer.
     ///
-    /// The request is READ THROUGH THE REFERENCE on the polled path and
-    /// copied once on the asynchronous one (the class comment).
+    /// A request that completes here is READ THROUGH THE REFERENCE; one
+    /// that goes to the engines is copied once (the class comment).
     static bool start(const Request& r) {
+        if constexpr (!has_dma) {
+            if (!r.polled) {
+                // Asynchronous is DMA, and this host has no engines:
+                // refused before the block, the select or the D/C is
+                // touched, so nothing reaches the wire.
+                status_ = spi_rejected;
+                return true;
+            }
+        }
         status_ = spi_ok;
         if (r.cmd_len == 0u && r.len == 0u) {
             return true;   // nothing to move: complete on the spot
@@ -2110,40 +2262,15 @@ public:
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
 
-        if (!r.polled) {
-            // The tenure's copy: the pump reads the buffers, the
-            // lengths, the width and the pins from here (the class
-            // comment says why the slot cannot be kept).
-            req_ = r;
-            in_cmd_ = (r.cmd_len != 0u);
-            recv_ = 0;
-            sent_ = 0;
-            if constexpr (has_engines) {
-                dma_ = dma_serves(r);
-                if (!in_cmd_ && dma_) {
-                    launch_dma(r);
-                    return false;   // dma_isr() is the completion edge
-                }
+        if constexpr (has_dma) {
+            if (!r.polled && repays_engines(r)) {
+                return start_engines(r);   // false: dma_isr() is the completion edge
             }
-            // The first frames of the first phase into the FIFO, and
-            // RXNE armed AFTER them: a frame that comes back while the
-            // prime is still writing waits in the RXFIFO and raises the
-            // line the moment it is armed, with the pump's count already
-            // stored - armed first, the handler ran at PCLK/4 between
-            // the second write and the count's store, refilled from a
-            // count of zero and overran the FIFO (measured).
-            if (spi_frame_is_halfword(r.bits)) {
-                prime_phase<true>();
-            } else {
-                prime_phase<false>();
-            }
-            S::rxne_interrupt(true);
-            return false;
         }
 
-        // The polled transaction, the whole of it inside this call.
-        // RXNE's interrupt is never armed outside an asynchronous tenure
-        // and the arbiter serializes the two, so nothing is silenced
+        // Polled: asked, or an asynchronous request too short for the
+        // engines (async_min_frames()) or that they cannot carry. The
+        // block's own interrupts are never armed, so nothing is silenced
         // here; what blocks is this dispatch, and global interrupts stay
         // enabled under it.
         const bool ok = polled_transaction(r);
@@ -2155,24 +2282,15 @@ public:
         return true;
     }
 
-    /// The instance's interrupt body - call from its vector.
-    ///
-    /// Only RXNE is ever armed by this engine (see the class comment),
-    /// and reading DR is both the capture and the acknowledgement. The
-    /// body drains the RXFIFO and refills the TXFIFO by the same count.
-    ///
-    /// Returns true when the transaction just completed (CS released):
-    /// the edge on which the app's glue posts TransferDone to the bus AO.
-    /// Through the host's placement (the class comment).
-    [[gnu::always_inline]] static bool isr() {
-        return Hot<Placement>::run([] { return pump_entry(); });
-    }
-
     /// The DMA channels' interrupt body - call from whichever
     /// vector each channel reports on (three vectors serve twelve
     /// channels here, so the same call is safe on a shared line: each
     /// engine's service() answers for its own channel and returns 0
-    /// otherwise). Compiles away on an engineless host.
+    /// otherwise), and from nowhere else. The receive channel's completion
+    /// ends a block: a command block's end raises D/C and puts the data
+    /// block on the engines, a data block's end (or a command block with
+    /// no data phase after it) ends the transaction, the select released.
+    /// Compiles away on an engineless host.
     ///
     /// A TRANSFER ERROR ON EITHER CHANNEL ENDS THE TRANSACTION with
     /// spi_dma_fault: a stopped transmit block starves the receive side
@@ -2181,7 +2299,8 @@ public:
     /// the fault is REPORTED rather than retried - retry policy is the
     /// bus AO's, not the engine's.
     ///
-    /// Returns true when the transaction just completed.
+    /// Returns true when the transaction just completed: the edge the
+    /// program's glue posts TransferDone{status()} on.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
@@ -2191,7 +2310,7 @@ public:
             }
             if ((tx & TxEngine::flag_complete) != 0u) {
                 (void)TxEngine::complete();
-                // The transmit side never completes a transaction.
+                // The transmit side never completes a block.
             }
             const uint8_t rx = RxEngine::service();
             if (rx != 0u && dma_active_) {
@@ -2199,6 +2318,9 @@ public:
                     return finish_dma(spi_dma_fault);
                 }
                 if ((rx & RxEngine::flag_complete) != 0u) {
+                    if (in_cmd_) {
+                        return next_block();
+                    }
                     return finish_dma(spi_ok);
                 }
             }
@@ -2206,22 +2328,22 @@ public:
         return false;
     }
 
-    /// The engine's completion status, read by the app glue for the
-    /// TransferDone payload. Always spi_ok on an engineless host.
+    /// The engine's status, for the TransferDone payload: read in the
+    /// vector right after dma_isr() answered true, or after a start() that
+    /// answered true.
     static uint8_t status() { return status_; }
 
     /// Put the ENGINE back where start() is legal: engines put
     /// away and re-claimed, the peripheral disabled by its own procedure,
-    /// reconfigured to the applied state and re-enabled, the select
+    /// reset, reconfigured to the applied state and re-enabled, the select
     /// window closed. Clocks, pads and the ceiling arithmetic are
     /// untouched.
     ///
     /// The verb a timed SpiBus calls on a transaction that never answered
-    /// (util/bus_master.hpp) - here that means an ISR-style completion
-    /// that never posted: a client that never clocked, a lost interrupt,
-    /// a DMA channel that stopped. The in-flight request's CS is
-    /// deasserted FIRST: its device sees the transaction end, however
-    /// garbled, rather than a select held for ever.
+    /// (util/bus_master.hpp) - here that means a DMA completion that never
+    /// came: a lost interrupt, a channel that stopped. The in-flight
+    /// request's CS is deasserted FIRST: its device sees the transaction
+    /// end, however garbled, rather than a select held for ever.
     ///
     /// Returns false when a bounded wait ran out (a false engine is
     /// refusing, not hanging).
@@ -2231,11 +2353,9 @@ public:
             (void)TxEngine::abandon();   // a block in flight is counted
             arm_engines();
         }
-        Nvic::disable(S::irq());
         in_cmd_ = false;
         dma_active_ = false;
         dma_done_ = false;
-        S::rxne_interrupt(false);
         // 35.5.9 for a wedged master: the RCC reset is what the chapter
         // itself offers when no sequence applies, and it is the only
         // thing that clears a FIFO the disable procedure cannot drain.
@@ -2244,22 +2364,20 @@ public:
         const bool cfg = S::configure(applied_);
         S::enable();
         S::flush_rx();
-        Nvic::enable(S::irq());
         return ok && cfg;
     }
 
-    /// Give the instance back: the engines stopped, the vector disabled,
-    /// the peripheral disabled by its procedure and reset, its bus clock
-    /// off, SCK, MOSI and MISO returned to analog. For an idle bus, from
-    /// setup or the arbiter's dispatch; the next use is a fresh init().
-    /// The disable procedure's bounded wait is spent and its answer
-    /// dropped: the reset that follows puts the block right either way.
+    /// Give the instance back: the engines stopped, the peripheral
+    /// disabled by its procedure and reset, its bus clock off, SCK, MOSI
+    /// and MISO returned to analog. For an idle bus, from setup or the
+    /// arbiter's dispatch; the next use is a fresh init(). The disable
+    /// procedure's bounded wait is spent and its answer dropped: the reset
+    /// that follows puts the block right either way.
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();
             RxEngine::stop();
         }
-        Nvic::disable(S::irq());
         (void)S::disable();
         // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
         // contract): a DMA request this block raised is not left standing
@@ -2364,7 +2482,7 @@ private:
      * phase runs here, and a byte phase shorter than packed_min_frames.
      */
     template <bool wide, bool has_tx, bool has_rx>
-    [[gnu::always_inline]] static bool pump(const uint8_t* tx, uint8_t* rx, uint16_t count,
+    [[gnu::always_inline]] static bool loop_frames(const uint8_t* tx, uint8_t* rx, uint16_t count,
                                             uint32_t& budget) {
         uint16_t sent = 0;
         uint16_t recv = 0;
@@ -2446,7 +2564,7 @@ private:
      * is left as the configuration states it, a quarter, on the way out.
      */
     template <bool has_tx, bool has_rx>
-    [[gnu::always_inline]] static bool pump_packed(const uint8_t* tx, uint8_t* rx, uint16_t count,
+    [[gnu::always_inline]] static bool loop_packed(const uint8_t* tx, uint8_t* rx, uint16_t count,
                                                    uint32_t& budget) {
         uint16_t sent = 0;
         uint16_t recv = 0;
@@ -2523,7 +2641,7 @@ private:
      * on until FRLVL = 00), so the next phase reads nothing stale.
      */
     template <bool wide, bool has_tx>
-    [[gnu::always_inline]] static bool pump_tx(const uint8_t* tx, uint16_t count,
+    [[gnu::always_inline]] static bool loop_tx(const uint8_t* tx, uint16_t count,
                                                uint32_t& budget) {
         uint16_t sent = 0;
         uint32_t left = budget;
@@ -2564,18 +2682,19 @@ private:
     /// One byte phase in whichever shape it has: packed from
     /// packed_min_frames, frame by frame below it.
     template <bool has_tx, bool has_rx>
-    [[gnu::always_inline]] static bool pump_bytes(const uint8_t* tx, uint8_t* rx, uint16_t count,
+    [[gnu::always_inline]] static bool loop_bytes(const uint8_t* tx, uint8_t* rx, uint16_t count,
                                                   uint32_t& budget) {
         if (count >= packed_min_frames) {
-            return pump_packed<has_tx, has_rx>(tx, rx, count, budget);
+            return loop_packed<has_tx, has_rx>(tx, rx, count, budget);
         }
-        return pump<false, has_tx, has_rx>(tx, rx, count, budget);
+        return loop_frames<false, has_tx, has_rx>(tx, rx, count, budget);
     }
-
     /// The polled transaction's two phases, the width decided once: the
     /// command (transmit-only), the D/C flip, the data in whichever of
     /// its shapes the request has - transmit-only when nothing is read
-    /// back, else the receive shape with its answers paced by count.
+    /// back, else the receive shape with its answers paced by count - or
+    /// on the engines, start() waiting on them, where the loop's turn
+    /// loses more to the wire over the phase than they cost.
     template <bool wide>
     [[gnu::always_inline]] static bool run_polled(const Request& r) {
         // The budget: the slowest frame is 256 x 16 PCLK cycles and an
@@ -2584,13 +2703,13 @@ private:
         uint32_t budget = 100'000u + ((static_cast<uint32_t>(r.cmd_len) + r.len) << 10);
         bool ok = true;
         if (r.cmd_len != 0u) {
-            ok = pump_tx<wide, true>(r.cmd.get(), r.cmd_len, budget);
+            ok = loop_tx<wide, true>(r.cmd.get(), r.cmd_len, budget);
             r.dc.set();   // data phase (a no-op when len == 0)
         }
         if (ok && r.len != 0u) {
             if constexpr (has_engines) {
-                if (dma_serves(r)) {
-                    launch_dma(r);
+                if (polled_rides_engines(r)) {
+                    launch_dma(r.tx.get(), r.rx.get(), r.len, wide, true);
                     spin_dma(r.len);
                     return true;
                 }
@@ -2598,14 +2717,14 @@ private:
             const uint8_t* tx = r.tx.get();
             uint8_t* rx = r.rx.get();
             if (rx == nullptr) {
-                ok = tx != nullptr ? pump_tx<wide, true>(tx, r.len, budget)
-                                   : pump_tx<wide, false>(nullptr, r.len, budget);
+                ok = tx != nullptr ? loop_tx<wide, true>(tx, r.len, budget)
+                                   : loop_tx<wide, false>(nullptr, r.len, budget);
             } else if constexpr (wide) {
-                ok = tx != nullptr ? pump<true, true, true>(tx, rx, r.len, budget)
-                                   : pump<true, false, true>(nullptr, rx, r.len, budget);
+                ok = tx != nullptr ? loop_frames<true, true, true>(tx, rx, r.len, budget)
+                                   : loop_frames<true, false, true>(nullptr, rx, r.len, budget);
             } else {
-                ok = tx != nullptr ? pump_bytes<true, true>(tx, rx, r.len, budget)
-                                   : pump_bytes<false, true>(nullptr, rx, r.len, budget);
+                ok = tx != nullptr ? loop_bytes<true, true>(tx, rx, r.len, budget)
+                                   : loop_bytes<false, true>(nullptr, rx, r.len, budget);
             }
         }
         return ok;
@@ -2633,101 +2752,6 @@ private:
         return spi_frame_is_halfword(r.bits) ? run_polled<true>(r) : run_polled<false>(r);
     }
 
-    // ---- the pump under the interrupt ---------------------------------------
-
-    /// The pump's entry, written once: isr() runs it through the host's
-    /// placement.
-    [[gnu::always_inline]] static bool pump_entry() {
-        if ((S::isr() & SpiFlag::rxne) == 0u) {
-            return false;
-        }
-        if (spi_frame_is_halfword(req_.bits)) {
-            return serve<true>();
-        }
-        return serve<false>();
-    }
-
-    /// The first AHEAD frames of the phase in force, from the tenure's
-    /// copy. The data phase's source is the request's tx or the dummy.
-    template <bool wide>
-    [[gnu::always_inline]] static void prime_phase() {
-        const uint16_t count = in_cmd_ ? req_.cmd_len : req_.len;
-        const uint16_t first = count < ahead<wide> ? count : ahead<wide>;
-        const uint8_t* src = in_cmd_ ? req_.cmd.get() : req_.tx.get();
-        uint16_t sent = 0;
-        while (sent < first) {
-            put<wide>(src != nullptr ? load_frame<wide>(src + sent * stride<wide>)
-                                     : dummy<wide>);
-            ++sent;
-        }
-        sent_ = sent;
-    }
-
-    /**
-     * The handler's body for one width: drain the RXFIFO into the phase's
-     * buffer (the command's echoes are discarded), refill the TXFIFO by
-     * the same count, and at the end of a phase flip the D/C, hand the
-     * data to the engines where they serve it, or close the select.
-     */
-    template <bool wide>
-    [[gnu::always_inline]] static bool serve() {
-        const bool cmd = in_cmd_;
-        const uint16_t count = cmd ? req_.cmd_len : req_.len;
-        uint16_t recv = recv_;
-        uint16_t sent = sent_;
-        // Drain: every frame the FIFO holds, as RXNE says - and not as
-        // FRLVL says, whose two bits cannot tell three byte frames from
-        // two (01, 10, 11 read one, two-or-three and four bytes, measured)
-        // - never more than this phase still owes, the only frames it
-        // can hold.
-        uint8_t* rx = cmd ? nullptr : req_.rx.get();
-        while (recv < count && (S::regs().SR & SPI_SR_RXNE) != 0u) {
-            const uint16_t in = take<wide>();
-            if (rx != nullptr) {
-                store_frame<wide>(rx + recv * stride<wide>, in);
-            }
-            ++recv;
-        }
-        if (recv < count) {
-            // Refill by the count drained: the phase's next frames.
-            const uint8_t* src = cmd ? req_.cmd.get() : req_.tx.get();
-            const uint16_t want = static_cast<uint16_t>(recv + ahead<wide>);
-            const uint16_t limit = want < count ? want : count;
-            while (sent < limit) {
-                put<wide>(src != nullptr ? load_frame<wide>(src + sent * stride<wide>)
-                                         : dummy<wide>);
-                ++sent;
-            }
-            recv_ = recv;
-            sent_ = sent;
-            return false;
-        }
-        if (!cmd) {
-            S::rxne_interrupt(false);
-            req_.cs.set();   // release: transaction done
-            return true;
-        }
-        // The command phase is over: D/C high, then the data phase on
-        // the pump or on the engines - or nothing, for a command alone.
-        in_cmd_ = false;
-        req_.dc.set();
-        if (req_.len == 0u) {
-            S::rxne_interrupt(false);
-            req_.cs.set();
-            return true;
-        }
-        if constexpr (has_engines) {
-            if (dma_) {
-                S::rxne_interrupt(false);
-                launch_dma(req_);
-                return false;   // dma_isr() is the completion edge
-            }
-        }
-        recv_ = 0;
-        prime_phase<wide>();
-        return false;
-    }
-
     // ---- the engines ---------------------------------------------------------
 
     /// The two engines bound to THIS instance's DR and its two DMAMUX
@@ -2747,73 +2771,158 @@ private:
         RxEngine::arm(S::data_address(), S::dma_rx_request(), DmaPriority::very_high);
     }
 
-    /// Whether the engines serve THIS request's data phase, decided
-    /// before the select: a data phase of dma_min_frames or more, a byte
-    /// frame always, a wide one when both engines take a half-word beat
-    /// and both buffers are aligned for it (a null buffer is a held cell,
-    /// aligned by declaration).
-    static bool dma_serves(const Request& r) {
-        if (r.len < dma_min_frames) {
-            return false;
-        }
-        if (!spi_frame_is_halfword(r.bits)) {
+    /// Whether the engines can carry a block of frames of this size out of
+    /// `out` and into `in`: a byte frame always, a wide one when both
+    /// engines take a half-word beat and both buffers are aligned for it
+    /// (a null buffer is a held cell, aligned by declaration).
+    static bool beats_serve(SpiDataSize bits, const uint8_t* out, const uint8_t* in) {
+        if (!spi_frame_is_halfword(bits)) {
             return true;
         }
         if constexpr (sizeof(typename TxEngine::element) < 2u ||
                       sizeof(typename RxEngine::element) < 2u) {
+            (void)out;
+            (void)in;
             return false;
         } else {
-            return dma_beat_aligned(r.tx.get(), 2u) && dma_beat_aligned(r.rx.get(), 2u);
+            return dma_beat_aligned(out, 2u) && dma_beat_aligned(in, 2u);
         }
     }
 
-    /// The data phase onto the two channels: DmaRxEngine::start() and
+    /// Does an asynchronous request repay the engines (the arithmetic above
+    /// SpiHostCosts, folded from the two frame costs kept for the code and
+    /// size in force), and can they carry it? Its command phase counts as
+    /// frames written, its data phase as frames read or written.
+    [[gnu::always_inline]] static bool repays_engines(const Request& r) {
+        const bool read = r.rx.get() != nullptr;
+        const uint32_t cost = static_cast<uint32_t>(r.cmd_len) * write_frame_cost_ +
+                              static_cast<uint32_t>(r.len) * (read ? read_frame_cost_ : write_frame_cost_);
+        if (cost < (read ? async_read_budget_cycles : async_write_budget_cycles)) {
+            return false;
+        }
+        return r.len != 0u ? beats_serve(r.bits, r.tx.get(), r.rx.get())
+                           : beats_serve(r.bits, r.cmd.get(), nullptr);
+    }
+
+    /// Does a POLLED data phase ride the engines (the class comment): the
+    /// loop's deficit to the wire over the phase reaches E - F, and the
+    /// engines can carry it.
+    [[gnu::always_inline]] static bool polled_rides_engines(const Request& r) {
+        const bool read = r.rx.get() != nullptr;
+        const uint32_t deficit = read ? read_frame_deficit_ : write_frame_deficit_;
+        if (deficit == 0u ||
+            static_cast<uint32_t>(r.len) * deficit < (read ? async_read_budget_cycles : async_write_budget_cycles)) {
+            return false;
+        }
+        return beats_serve(r.bits, r.tx.get(), r.rx.get());
+    }
+
+    /// An asynchronous request onto the engines - once a transaction, kept
+    /// out of the vectors' way. The tenure's copy first (the class
+    /// comment); then its command phase rides the engines as a block of its
+    /// own when it is the whole request or would repay a block alone, and
+    /// runs polled here otherwise; then the data block. False: dma_isr()
+    /// ends it. True only when the polled command phase stalled.
+    [[gnu::noinline]] static bool start_engines(const Request& r) {
+        req_ = r;
+        const bool wide = spi_frame_is_halfword(r.bits);
+        if (r.cmd_len != 0u) {
+            const bool cmd_block =
+                r.len == 0u || (static_cast<uint32_t>(r.cmd_len) * write_frame_cost_ >= async_write_budget_cycles &&
+                                beats_serve(r.bits, r.cmd.get(), nullptr));
+            if (cmd_block) {
+                in_cmd_ = true;
+                launch_dma(r.cmd.get(), nullptr, r.cmd_len, wide, false);   // the echoes discarded
+                return false;
+            }
+            if (!command_polled(r)) {
+                r.cs.set();
+                status_ = spi_stalled;
+                S::flush_rx();
+                return true;
+            }
+            r.dc.set();
+        }
+        in_cmd_ = false;
+        launch_dma(r.tx.get(), r.rx.get(), r.len, wide, false);
+        return false;
+    }
+
+    /// The command phase of an asynchronous request too short for a block
+    /// of its own, polled in the transmit-only shape before the data block
+    /// goes to the engines. In the flash under either placement: the path
+    /// runs once a request, and the placement's SRAM instance is the polled
+    /// transaction's alone.
+    [[gnu::noinline]] static bool command_polled(const Request& r) {
+        uint32_t budget = 100'000u + (static_cast<uint32_t>(r.cmd_len) << 10);
+        return spi_frame_is_halfword(r.bits) ? loop_tx<true, true>(r.cmd.get(), r.cmd_len, budget)
+                                             : loop_tx<false, true>(r.cmd.get(), r.cmd_len, budget);
+    }
+
+    /// A block onto the two channels: DmaRxEngine::start() and
     /// DmaTxEngine::start() with the frame's own beat - five stores each.
     /// The buffers of a wide request hold each frame low byte first, the
     /// CPU's own order, so a half-word beat reads and writes them as the
-    /// frame pump's load_frame()/store_frame() do. OUT OF LINE: once a
-    /// transaction, from the pump's entry and the polled transaction
-    /// both, so the placement's flatten does not copy it into either -
-    /// nor, under InRam, into SRAM.
-    [[gnu::noinline]] static void launch_dma(const Request& r) {
+    /// loops' load_frame()/store_frame() do. `polled`: start() waits on
+    /// the block (spin_dma()) and keeps the select. OUT OF LINE: once a
+    /// block, from start(), the polled transaction and the vector that
+    /// chains a data block to its command block, so the placement's
+    /// flatten does not copy it into the polled transaction - nor, under
+    /// InRam, into SRAM.
+    [[gnu::noinline]] static void launch_dma(const uint8_t* tx, uint8_t* rx, uint16_t count, bool wide,
+                                            bool polled) {
         dma_done_ = false;
-        dma_polled_ = r.polled;
+        dma_polled_ = polled;
         dma_active_ = true;
         // The RECEIVE channel goes first: its request rises only when a
         // frame has come back, and the transmit side is what starts the
         // clock.
-        if (spi_frame_is_halfword(r.bits)) {
+        if (wide) {
             if constexpr (sizeof(typename TxEngine::element) >= 2u &&
                           sizeof(typename RxEngine::element) >= 2u) {
-                if (r.rx.get() != nullptr) {
-                    (void)RxEngine::start(std::span<uint16_t>(
-                        reinterpret_cast<uint16_t*>(r.rx.get()), r.len));
+                if (rx != nullptr) {
+                    (void)RxEngine::start(std::span<uint16_t>(reinterpret_cast<uint16_t*>(rx), count));
                 } else {
-                    (void)RxEngine::start_discard(&rx_sink_, r.len);
+                    (void)RxEngine::start_discard(&rx_sink_, count);
                 }
-                if (r.tx.get() != nullptr) {
-                    (void)TxEngine::start(std::span<const uint16_t>(
-                        reinterpret_cast<const uint16_t*>(r.tx.get()), r.len));
+                if (tx != nullptr) {
+                    (void)TxEngine::start(std::span<const uint16_t>(reinterpret_cast<const uint16_t*>(tx), count));
                 } else {
-                    (void)TxEngine::start_fixed(&tx_dummy_, r.len);
+                    (void)TxEngine::start_fixed(&tx_dummy_, count);
                 }
             }
             return;
         }
-        if (r.rx.get() != nullptr) {
-            (void)RxEngine::start(std::span<uint8_t>(r.rx.get(), r.len));
+        if (rx != nullptr) {
+            (void)RxEngine::start(std::span<uint8_t>(rx, count));
         } else {
-            (void)RxEngine::start_discard(reinterpret_cast<uint8_t*>(&rx_sink_), r.len);
+            (void)RxEngine::start_discard(reinterpret_cast<uint8_t*>(&rx_sink_), count);
         }
-        if (r.tx.get() != nullptr) {
-            (void)TxEngine::start(std::span<const uint8_t>(r.tx.get(), r.len));
+        if (tx != nullptr) {
+            (void)TxEngine::start(std::span<const uint8_t>(tx, count));
         } else {
-            (void)TxEngine::start_fixed(reinterpret_cast<const uint8_t*>(&tx_dummy_), r.len);
+            (void)TxEngine::start_fixed(reinterpret_cast<const uint8_t*>(&tx_dummy_), count);
         }
     }
 
-    /// One exit for the data phase, from either flavour of dma_isr().
-    /// True when the ISR-style caller should post completion.
+    /// A command block ended: every command frame has come back, so the
+    /// wire is idle and D/C may move; then the data block onto the
+    /// engines, or - no data phase - the transaction's end. Interrupt
+    /// context.
+    static bool next_block() {
+        in_cmd_ = false;
+        req_.dc.set();
+        if (req_.len == 0u) {
+            return finish_dma(spi_ok);
+        }
+        (void)TxEngine::complete();   // the receive block's end proves the transmit one's
+        launch_dma(req_.tx.get(), req_.rx.get(), req_.len, spi_frame_is_halfword(req_.bits), false);
+        return false;
+    }
+
+    /// One exit for a block that ends a transaction, from either flavour
+    /// of dma_isr(). True when the vector's caller should post completion:
+    /// an asynchronous tenure, its select released.
     static bool finish_dma(uint8_t st) {
         if (st != spi_ok) {
             status_ = st;
@@ -2826,6 +2935,7 @@ private:
             // and is completed here, on that proof.
             (void)TxEngine::complete();
         }
+        in_cmd_ = false;
         dma_active_ = false;
         dma_done_ = true;
         if (!dma_polled_) {
@@ -2891,7 +3001,9 @@ private:
      * rate and CR2's frame size are all enable-protected, so any change
      * costs the disable procedure and an enable - which is why the
      * applied key is kept and the pair is paid only when the word
-     * differs. A run of requests to one device costs one compare.
+     * differs. A run of requests to one device costs one compare. The
+     * frame costs the short-request rule folds a request from follow the
+     * code and size (costs_for()), on the change alone.
      */
     [[gnu::always_inline]] static void apply(SpiMode m, SpiClock c, SpiDataSize bits) {
         const uint32_t key = setting_key(m, c, bits);
@@ -2905,25 +3017,43 @@ private:
         (void)S::disable();
         (void)S::configure(applied_);
         S::enable();
+        costs_for(c, bits);
+    }
+
+    /// The frame costs (and the polled loop's deficits) the two rules fold
+    /// a request from, kept for the code and size in force: computed where
+    /// the configuration changes, never per request.
+    static void costs_for(SpiClock c, SpiDataSize bits) {
+        if constexpr (has_engines) {
+            read_frame_cost_ = static_cast<uint16_t>(spi_polled_frame_cost(costs, c, bits, true));
+            write_frame_cost_ = static_cast<uint16_t>(spi_polled_frame_cost(costs, c, bits, false));
+            read_frame_deficit_ = static_cast<uint8_t>(spi_polled_frame_deficit(costs, c, bits, true));
+            write_frame_deficit_ = static_cast<uint8_t>(spi_polled_frame_deficit(costs, c, bits, false));
+        } else {
+            (void)c;
+            (void)bits;
+        }
     }
 
     // ---- the state -----------------------------------------------------------
 
-    /// The asynchronous tenure's own copy of the request (the class
-    /// comment). The polled path never writes it.
+    /// An asynchronous tenure's own copy of the request (the class
+    /// comment). A request that completes inside start() never writes it.
     static inline Request req_{};
-    /// The pump's position in the phase in force: frames read back and
-    /// frames written.
-    static inline uint16_t recv_ = 0;
-    static inline uint16_t sent_ = 0;
+    /// A command block is on the engines; its end puts the data block there.
     static inline bool in_cmd_ = false;
-    /// Whether the engines take this tenure's data phase (decided at
-    /// start(), read at the end of the command phase).
-    static inline bool dma_ = false;
+    /// The block in flight is a polled request's: start() waits on it and
+    /// keeps the select.
     static inline bool dma_polled_ = false;
     /// The last completion's status. Plain: written before the
     /// completion edge and read after it.
     static inline uint8_t status_ = spi_ok;
+    /// A frame's cost to the core at the code and size in force, read and
+    /// written, and the loop's deficit to the wire (costs_for()).
+    static inline uint16_t read_frame_cost_ = 0;
+    static inline uint16_t write_frame_cost_ = 0;
+    static inline uint8_t read_frame_deficit_ = 0;
+    static inline uint8_t write_frame_deficit_ = 0;
     /// ISR-written, thread-polled (the polled DMA spin): volatile, the
     /// ticker doctrine.
     static inline volatile bool dma_done_ = false;
@@ -2931,7 +3061,7 @@ private:
     /// The held cells of a null rx and a null tx, half-words so they serve
     /// either beat: a byte beat reads and writes their low byte (the CPU's
     /// order), so the dummy is 0xFF on a byte frame and 0xFFFF on a wide
-    /// one, as the frame pump's.
+    /// one, as the loops'.
     static inline uint16_t rx_sink_ = 0;
     static constexpr uint16_t tx_dummy_ = 0xFFFFu;
     /// The configuration really in the registers - what recover() puts
@@ -2950,6 +3080,7 @@ private:
     static void apply_sck_pad() { SckPin::function(pins.sck.function, {.speed = sck_speed_}); }
     static void apply_mosi_pad() { MosiPin::function(pins.mosi.function, {.speed = mosi_speed_}); }
 };
+
 
 // =============================================================================
 // The client task

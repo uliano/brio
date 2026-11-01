@@ -12,8 +12,9 @@
 //
 // Without the jumper MISO floats and reads whatever the pad settles
 // at (all 0x00 on the bench board): FAIL is the expected no-jumper
-// outcome, OK proves the whole chain - request event ->
-// arbiter -> engine -> per-byte ISR -> TransferDone -> reply.
+// outcome, OK proves the whole chain - request event -> arbiter ->
+// engine (polled inside start(): the AVR has no DMA, so a request not
+// marked polled is refused, its SpiDone carrying spi_rejected) -> reply.
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -94,7 +95,8 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
                     CsPin::ref(), {},              // cs, no dc
                     {}, 0,                         // no command phase
                     brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), pattern_len,  // full duplex
-                    brio::reply_to<Tester, brio::SpiDone>()});
+                    brio::reply_to<Tester, brio::SpiDone>(),
+                    brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
                 return handled();
             },
             [](brio::SpiDone d) {
@@ -133,11 +135,7 @@ private:
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{SpiHw::status()});
-    }
-}
+// No SPI vector: the host runs every request polled and arms no interrupt.
 ISR(USART2_RXC_vect) { Serial::rxc(); }            // console is output-only here
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

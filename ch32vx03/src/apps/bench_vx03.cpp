@@ -58,11 +58,11 @@
 //   usart1_handler   USART1's ISR body, on the full Ruler: this handler
 //                    may straddle a restart, where the position alone
 //                    would go back by a period.
-// and letter d's five, each on the full Ruler: dma1_channel1_handler (the
+// and letter d's four, each on the full Ruler: dma1_channel1_handler (the
 // copy engine), dma1_channel7_handler (TIM4's update, the paced block),
 // dma1_channel2_handler and dma1_channel3_handler (SPI1's receive and
-// transmit engines - the second armed for a transfer error alone), and
-// spi1_handler (the pump, which an engined write never enters). SPI1's
+// transmit engines - the second armed for a transfer error alone; the SPI
+// host arms no interrupt of the block, so spi1_handler is unbound). SPI1's
 // pads are SCK PA5, MISO PA6 and MOSI PA7 - its NSS pad PA4 is left alone,
 // the host framing nothing with it. On the CH32V203 board MOSI and MISO
 // share a node through PA8 (the SPI suite's loopback strap, PA8 never
@@ -186,10 +186,10 @@
 //      after the SPI requests - zero when every engine stopped its channel.
 //   e  THE SPI HOST ABOVE THE WIRE (ch32vx03/spi.hpp's SpiHost with NO
 //      engines, on SPI1's same pads, MISO floating; the counters are
-//      SPI1's vector's alone, each run from a fresh tick), in two SHAPES
-//      the host tells apart - a WRITE (no in buffer: the display's pixel
-//      path, every command phase) and a RECEIVE (an in buffer) - and two
-//      widths:
+//      SPI1's two DMA vectors', which a polled request never enters, each
+//      run from a fresh tick), in two SHAPES the host tells apart - a
+//      WRITE (no in buffer: the display's pixel path, every command phase)
+//      and a RECEIVE (an in buffer) - and two widths:
 //        spi.poll       a POLLED WRITE of 16 and 256 8-bit frames at SCK /4
 //                       (36 MHz) and /16 (9 MHz): wall against the frames'
 //                       wire time, the note line giving the fixed cost
@@ -199,10 +199,6 @@
 //        spi.poll16     the same in 16-bit frames
 //        spi.poll.rx    the polled RECEIVE, 8-bit, the frames landing in
 //        spi.poll16.rx  a buffer; and in 16-bit frames
-//        spi.pump,      the same four on the INTERRUPT pump: irq and isr
-//        spi.pump16,    are the vector's, per frame on the note line, the
-//        spi.pump.rx,   core spinning on the completion (busy is wall
-//        spi.pump16.rx  again); the overrun flag read after every run
 //        spi.req        THE PRICE OF A DCS COMMAND: a polled request of 1, 3
 //                       and 16 bytes (cmd_len 1, len 0, 2 and 15 - the D/C
 //                       scripted low then high, no in buffer) at /16, the
@@ -227,38 +223,23 @@
 //                       longest handler is where a second frame in flight
 //                       loses one; this measures where that is on this
 //                       image.
-//        spi.live       the HOST under the same load: both shapes, the
-//                       pump and the polled loop, every code and width,
-//                       1024 frames a run, eight runs: the overruns and the
-//                       statuses other than spi_ok counted - what the
-//                       host's own threshold makes of it (a write tolerates
-//                       the overrun and finishes; a receive must never see
+//        spi.live       the HOST under the same load: both shapes of the
+//                       polled loop, every code and width, 1024 frames a
+//                       run, eight runs: the overruns and the statuses
+//                       other than spi_ok counted - what the host's own
+//                       threshold makes of it (a write tolerates the
+//                       overrun and finishes; a receive must never see
 //                       one).
 //        spi.held       THE HOLD-OFF AN IMAGE DECLARES (SpiHost's last
 //                       parameter) against the one it has: the default
 //                       host (200 cycles, two frames of a receive in
 //                       flight from /32) and one declaring 100 (from /16),
-//                       a receive of 1024 8-bit frames at /16 - a frame of
-//                       128 cycles, shorter than the console's handler -
-//                       pumped and polled, eight runs each under the same
-//                       load: the overruns and the statuses counted. The
+//                       a polled receive of 1024 8-bit frames at /16 - a
+//                       frame of 128 cycles, shorter than the console's
+//                       handler - eight runs each under the same load:
+//                       the overruns and the statuses counted. The
 //                       declared-short host is the one that must lose
 //                       frames, the honest one none.
-//        spi.window     THE PUMP'S OVR WINDOW, swept: a pumped write of 2
-//                       and of 3 16-bit frames at /4 and /8 on the plain
-//                       host, two in flight, SPI1's line masked at the
-//                       PFIC around start() and unmasked after a number of
-//                       empty turns that grows by one a run, 0 to 127,
-//                       four sweeps - so the handler for frame 0 enters
-//                       before frame 1 completes, after it, and ON it,
-//                       where the completion falls between the handler's
-//                       status read and its DATAR read. The line counts
-//                       the runs that completed, those that took fewer
-//                       interrupts than frames (frame 1 lost and counted:
-//                       with two frames the LAST frame's loss), those that
-//                       never completed (recovered after a bound) and
-//                       those after which OVR stood; every run must
-//                       complete.
 //        spi2.ahead,    THE SAME ORACLE AND THE SAME HOST ON SPI2, a PB1
 //        spi2.live      instance (72 MHz at 144 of HCLK): SCK PB13 and MOSI
 //                       PB15 driven - on the CH32V203C8T6 board the desk
@@ -822,7 +803,6 @@ Meter copy_meter;    // dma1_channel1_handler: the copy engine
 Meter paced_meter;   // dma1_channel7_handler: TIM4's update
 Meter spi_rx_meter;  // dma1_channel2_handler: SPI1's receive engine
 Meter spi_tx_meter;  // dma1_channel3_handler: SPI1's transmit engine (errors alone)
-Meter spi_meter;     // spi1_handler: the pump
 
 /// Letter d's counters: the DMA vectors and SPI1's, not the tick (each
 /// short operation starts on a fresh tick, and the paced one says how many
@@ -830,7 +810,7 @@ Meter spi_meter;     // spi1_handler: the pump
 /// keeps the core awake on this family (ch32vx03/bus_activity.hpp), so the
 /// core spins on the completion and busy is wall by construction.
 BenchCounters dma_counters() {
-    return bench_counters<Plat>(copy_meter, paced_meter, spi_rx_meter, spi_tx_meter, spi_meter);
+    return bench_counters<Plat>(copy_meter, paced_meter, spi_rx_meter, spi_tx_meter);
 }
 
 // ---- copy and fill: DmaCopyEngine on DMA1's first channel -----------------
@@ -1258,39 +1238,27 @@ void td_dma() {
 // ---------------------------------------------------------------------------
 // e - the SPI host above the wire
 // ---------------------------------------------------------------------------
-using SpiPlain = SpiHost<1, spi_pins>;   // no engines: the polled loop and the pump
+using SpiPlain = SpiHost<1, spi_pins>;   // no engines: the polled loops alone
 /// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
 /// shorter than this image's console handler with its stamps, about 200.
 using SpiShort = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, 100>;
-volatile bool spi_plain_done = false;
-/// Which host spi1_handler serves: letter e's plain one (zero, so the
-/// pump's path is a load and one branch before the body, the bench's
-/// own), letter d's engined one, or spi.held's short one. VOLATILE: the
-/// vector is the only reader, and gcc, seeing none between two stores of
-/// the main path, drops the first as dead - spi.held's store of the
-/// short host, read in the listing - and that host's interrupts would go
-/// to the plain one.
-constexpr uint8_t spi1_plain = 0;
-constexpr uint8_t spi1_dma = 1;
-constexpr uint8_t spi1_short = 2;
-volatile uint8_t spi1_serves = spi1_dma;
 
-/// Letter e's counters: SPI1's vector alone (each run starts on a fresh
-/// tick and ends inside it; spi.ahead and spi.live run under the console
-/// on purpose and count overruns, not cycles).
-BenchCounters spi_counters() { return bench_counters<Plat>(spi_meter); }
+/// Letter e's counters: SPI1's two DMA vectors, which a polled request
+/// never enters (each run starts on a fresh tick and ends inside it;
+/// spi.ahead and spi.live run under the console on purpose and count
+/// overruns, not cycles).
+BenchCounters spi_counters() { return bench_counters<Plat>(spi_rx_meter, spi_tx_meter); }
 
 constexpr uint32_t frame_bits_of(SpiDataSize bits) {
     return bits == SpiDataSize::bits16 ? 16u : 8u;
 }
 
-/// One request on the plain host, MISO floating: the wall from start()
-/// to the completion - inside start() when polled, the vector's edge
-/// otherwise - the best of 4 from a fresh tick. `ovr` says whether the
-/// overrun flag stood after ANY of the runs (cleared each time), `status`
-/// is the host's last.
-BenchSample spi_plain_once(uint16_t frames, SpiClock rate, SpiDataSize bits, bool polled,
-                           bool receive, bool& ovr, uint8_t& status) {
+/// One polled request on the plain host, MISO floating: the wall from
+/// start() to its return, the best of 4 from a fresh tick. `ovr` says
+/// whether the overrun flag stood after ANY of the runs (cleared each
+/// time), `status` is the host's last.
+BenchSample spi_plain_once(uint16_t frames, SpiClock rate, SpiDataSize bits, bool receive, bool& ovr,
+                           uint8_t& status) {
     BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
     for (uint8_t run = 0; run < 4u; ++run) {
         SpiPlain::Request r{};
@@ -1302,16 +1270,12 @@ BenchSample spi_plain_once(uint16_t frames, SpiClock rate, SpiDataSize bits, boo
         r.mode = SpiMode::mode0;
         r.clock = rate;
         r.bits = bits;
-        r.polled = polled;
-        spi_plain_done = false;
+        r.polled = true;
         fresh_tick();
         const BenchCounters before = spi_counters();
         Stopwatch<Ruler> sw;
         sw.start();
         const bool sync = SpiPlain::start(r);
-        uint32_t spins = 4'000'000UL;
-        while (!sync && !spi_plain_done && spins-- != 0u) {
-        }
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, before, spi_counters());
         if (Spi<1>::overrun()) {
@@ -1319,51 +1283,43 @@ BenchSample spi_plain_once(uint16_t frames, SpiClock rate, SpiDataSize bits, boo
             Spi<1>::clear_overrun();
         }
         status = SpiPlain::status();
-        if ((sync || spi_plain_done) && s.wall < best.wall) {
+        if (sync && s.wall < best.wall) {
             best = s;
         }
     }
     return best;
 }
 
-/// The eight op names: the completion style, the width and the shape.
-constexpr const char* spi_op_name(bool polled, bool wide, bool receive) {
-    if (polled) {
-        return wide ? (receive ? "spi.poll16.rx" : "spi.poll16") : (receive ? "spi.poll.rx" : "spi.poll");
-    }
-    return wide ? (receive ? "spi.pump16.rx" : "spi.pump16") : (receive ? "spi.pump.rx" : "spi.pump");
+/// The four op names: the width and the shape.
+constexpr const char* spi_op_name(bool wide, bool receive) {
+    return wide ? (receive ? "spi.poll16.rx" : "spi.poll16") : (receive ? "spi.poll.rx" : "spi.poll");
 }
 
-/// The polled and the pumped lines: both shapes, both widths, 16 and 256
-/// frames at /4 and /16, each point warmed by a one-frame request (a
-/// rate or width change costs a disable and an enable once, outside the
-/// measurement).
-void spi_plain_report(bool polled) {
+/// The polled lines: both shapes, both widths, 16 and 256 frames at /4 and
+/// /16, each point warmed by a one-frame request (a rate or width change
+/// costs a disable and an enable once, outside the measurement).
+void spi_plain_report() {
     constexpr SpiClock rates[2] = {SpiClock::div4, SpiClock::div16};
     for (const bool receive : {false, true}) {
         for (const SpiClock rate : rates) {
             const uint32_t sck = spi_sck_hz(Spi<1>::bus_hz(clock), rate);
             for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
                 const bool wide = bits == SpiDataSize::bits16;
-                const char* const op = spi_op_name(polled, wide, receive);
+                const char* const op = spi_op_name(wide, receive);
                 const uint32_t frame_bits = frame_bits_of(bits);
                 const uint32_t frame_cycles = frame_bits * (Ruler::hz() / sck);
                 for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
                     bool ovr = false;
                     uint8_t status = 0;
-                    (void)spi_plain_once(1, rate, bits, polled, receive, ovr, status);
+                    (void)spi_plain_once(1, rate, bits, receive, ovr, status);
                     ovr = false;
-                    const BenchSample s =
-                        spi_plain_once(frames, rate, bits, polled, receive, ovr, status);
+                    const BenchSample s = spi_plain_once(frames, rate, bits, receive, ovr, status);
                     const uint32_t bytes = frames * (frame_bits / 8u);
                     const uint32_t wire_cycles = frames * frame_cycles;
                     print(serial, "  ", op, " SCK ", sck, " Hz, ", frame_bits, "-bit frames x ", frames,
                           ": fixed ", s.wall - wire_cycles, " (wall less ", wire_cycles, " of wire), ",
                           s.wall / frames, " cycles a frame against the wire's ", frame_cycles, ", ",
                           s.irq, " interrupts");
-                    if (!polled && s.irq != 0u) {
-                        print(serial, " = ", s.isr / s.irq, " isr each");
-                    }
                     print(serial, ", status ", status, ovr ? ", OVERRUN" : ", no overrun", crlf);
                     bench_line(serial, op, bytes, s, Ruler::hz(), sck / 8u);
                 }
@@ -1490,14 +1446,13 @@ void spi_ahead_report(const char* name) {
     }
 }
 
-/// spi.live: the host at every code and width under the same load, the
-/// pump and the polled loop, 1024 frames a run, eight runs: the overruns
-/// and the statuses other than spi_ok counted.
+/// spi.live: the host's polled loops at every code and width under the
+/// same load, 1024 frames a run, eight runs: the overruns and the statuses
+/// other than spi_ok counted.
 template <uint8_t n, typename H>
 void spi_live_report(const char* name) {
     constexpr uint16_t frames = 1024;
     for (const bool receive : {false, true}) {
-    for (const bool polled : {true, false}) {
         for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
             for (uint8_t code = 0; code < 8u; ++code) {
                 const SpiClock rate = static_cast<SpiClock>(code);
@@ -1516,15 +1471,10 @@ void spi_live_report(const char* name) {
                     r.mode = SpiMode::mode0;
                     r.clock = rate;
                     r.bits = bits;
-                    r.polled = polled;
-                    spi_plain_done = false;
+                    r.polled = true;
                     console_drain();
                     print(serial, live_line.text);
-                    const bool sync = H::start(r);
-                    uint32_t spins = 8'000'000UL;
-                    while (!sync && !spi_plain_done && spins-- != 0u) {
-                    }
-                    if (!sync && !spi_plain_done) {
+                    if (!H::start(r)) {
                         ++hung;
                         (void)H::recover();
                     }
@@ -1537,13 +1487,12 @@ void spi_live_report(const char* name) {
                     }
                 }
                 console_drain();
-                print(serial, "  ", name, " ", polled ? "polled" : "pump", receive ? " receive" : " write",
+                print(serial, "  ", name, " polled", receive ? " receive" : " write",
                       " /", spi_division(rate), " ", frame_bits_of(bits), "-bit: ", frame_cycles,
                       " cycles a frame, ", overran, " overruns, ", faulted, " statuses not spi_ok, ",
-                      hung, " never completed, in 8 runs under the console's interrupts", crlf);
+                      hung, " not completed inside start(), in 8 runs under the console's interrupts", crlf);
             }
         }
-    }
     }
 }
 
@@ -1554,12 +1503,10 @@ void spi_live_report(const char* name) {
 /// whose pads are inputs.
 constexpr uint8_t second_spi = device::spi_count >= 2u ? 2u : 1u;
 using Spi2Plain = SpiHost<second_spi, spi_pins_for(second_spi, 0)>;
-volatile bool spi2_live = false;
 
 template <bool on = (device::spi_count >= 2u)>
 void spi2_threshold_report() {
     if constexpr (on) {
-        spi2_live = true;
         const bool up = Spi2Plain::init(clock);
         const auto ahead8 = Spi2Plain::write_ahead_from(SpiDataSize::bits8);
         const auto ahead16 = Spi2Plain::write_ahead_from(SpiDataSize::bits16);
@@ -1572,17 +1519,16 @@ void spi2_threshold_report() {
         spi_ahead_report<m, Spi2Plain>("spi2.ahead");
         spi_live_report<m, Spi2Plain>("spi2.live");
         Spi2Plain::release();
-        spi2_live = false;
     }
 }
 
 /// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
-/// receive of 1024 8-bit frames at /16 - a frame of 128 cycles, between
-/// the two hosts' thresholds - eight runs under the console's interrupts
-/// on each host, the pump and the polled loop: the host declaring 100
-/// keeps two frames in flight there and the honest default one.
+/// polled receive of 1024 8-bit frames at /16 - a frame of 128 cycles,
+/// between the two hosts' thresholds - eight runs under the console's
+/// interrupts on each host: the host declaring 100 keeps two frames in
+/// flight there and the honest default one.
 template <typename H>
-void spi_held_line(const char* name, bool polled) {
+void spi_held_line(const char* name) {
     constexpr uint16_t frames = 1024;
     uint8_t overran = 0;
     uint8_t faulted = 0;
@@ -1596,15 +1542,10 @@ void spi_held_line(const char* name, bool polled) {
         r.mode = SpiMode::mode0;
         r.clock = SpiClock::div16;
         r.bits = SpiDataSize::bits8;
-        r.polled = polled;
-        spi_plain_done = false;
+        r.polled = true;
         console_drain();
         print(serial, live_line.text);
-        const bool sync = H::start(r);
-        uint32_t spins = 8'000'000UL;
-        while (!sync && !spi_plain_done && spins-- != 0u) {
-        }
-        if (!sync && !spi_plain_done) {
+        if (!H::start(r)) {
             ++hung;
             (void)H::recover();
         }
@@ -1620,106 +1561,17 @@ void spi_held_line(const char* name, bool polled) {
     console_drain();
     const auto ahead = H::write_ahead_from(SpiDataSize::bits8);
     print(serial, "  spi.held ", name, " (two in flight from /", ahead ? spi_division(*ahead) : 0u, ") ",
-          polled ? "polled" : "pump", " receive /16 8-bit: ", overran, " overruns, ", faulted,
+          "polled receive /16 8-bit: ", overran, " overruns, ", faulted,
           " statuses not spi_ok (", lost, " spi_overrun), ", hung,
           " never completed, in 8 runs under the console's interrupts", crlf);
 }
 
 void spi_held_report() {
-    for (const bool polled : {false, true}) {
-        spi1_serves = spi1_plain;
-        (void)SpiPlain::init(clock);
-        spi_held_line<SpiPlain>("hold-off 200 (the default)", polled);
-        spi1_serves = spi1_short;
-        (void)SpiShort::init(clock);
-        spi_held_line<SpiShort>("hold-off 100 (declared short)", polled);
-    }
-    spi1_serves = spi1_plain;
-}
-
-/// spi.window: THE PUMP'S OVR WINDOW, swept. A pumped WRITE of `frames`
-/// 16-bit frames at /4 or /8 (64 or 128 cycles a frame), two in flight: SPI1's line
-/// masked at the PFIC around start(), then `d` empty turns, then unmasked,
-/// so the handler for frame 0 enters at a delay that moves one turn a run
-/// across the moment frame 1 completes - before it (two interrupts), after
-/// it (one: the overrun counted as the frame it is), and on it, where the
-/// completion falls between the handler's status read and its DATAR read.
-/// Every delay from 0 to 127, four sweeps: the runs that completed, those
-/// that completed in fewer interrupts than frames (a frame lost and
-/// counted), those that never completed (recovered after a bound), and
-/// those after which OVR stood; the delays at which a frame was first lost
-/// and at which a run first and last hung. With two frames the loss is the
-/// LAST frame's; with three, the first pair's inside the run.
-void spi_window_line(uint16_t frames, SpiClock rate) {
-    constexpr uint16_t delays = 128;
-    uint32_t done = 0;
-    uint32_t lost = 0;
-    uint32_t hung = 0;
-    uint32_t ovr = 0;
-    uint16_t first_lost = 0xFFFF;
-    uint16_t first_hung = 0xFFFF;
-    uint16_t last_hung = 0;
-    for (uint8_t sweep = 0; sweep < 4u; ++sweep) {
-        for (uint16_t d = 0; d < delays; ++d) {
-            SpiPlain::Request r{};
-            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
-            r.len = frames;
-            r.mode = SpiMode::mode0;
-            r.clock = rate;
-            r.bits = SpiDataSize::bits16;
-            spi_plain_done = false;
-            const uint32_t n0 = spi_meter.count();
-            Pfic::disable(Spi<1>::irq);
-            const bool sync = SpiPlain::start(r);
-            for (uint32_t k = d; k != 0u; --k) {
-                __asm__ volatile("");
-            }
-            Pfic::enable(Spi<1>::irq);
-            uint32_t spins = 20'000u;
-            while (!sync && !spi_plain_done && spins-- != 0u) {
-            }
-            // The meter's count is a plain word the vector writes: the
-            // barrier makes the read below a fresh one.
-            asm volatile("" ::: "memory");
-            if (sync || spi_plain_done) {
-                ++done;
-                if (spi_meter.count() - n0 < frames) {
-                    ++lost;
-                    if (d < first_lost) {
-                        first_lost = d;
-                    }
-                }
-            } else {
-                ++hung;
-                if (d < first_hung) {
-                    first_hung = d;
-                }
-                last_hung = d;
-                (void)SpiPlain::recover();
-            }
-            if (Spi<1>::overrun()) {
-                ++ovr;
-                Spi<1>::clear_overrun();
-            }
-        }
-    }
-    console_drain();
-    print(serial, "  spi.window write of ", frames, " 16-bit frames at /", spi_division(rate), ", two in flight, the entry swept over ",
-          delays, " delays x 4: ", done, " completed (", lost, " with a frame lost and counted, the first at delay ",
-          first_lost, "), ", hung, " never completed");
-    if (hung != 0u) {
-        print(serial, " (delays ", first_hung, " to ", last_hung, ")");
-    }
-    print(serial, ", ", ovr, " with OVR standing after", crlf);
-}
-
-void spi_window_report() {
-    spi1_serves = spi1_plain;
     (void)SpiPlain::init(clock);
-    for (const SpiClock rate : {SpiClock::div4, SpiClock::div8}) {
-        spi_window_line(2, rate);
-        spi_window_line(3, rate);
-    }
+    spi_held_line<SpiPlain>("hold-off 200 (the default)");
+    (void)SpiShort::init(clock);
+    spi_held_line<SpiShort>("hold-off 100 (declared short)");
+    (void)SpiPlain::init(clock);
 }
 
 void te_spi() {
@@ -1727,25 +1579,20 @@ void te_spi() {
     for (uint32_t k = 0; k < 4096u; ++k) {
         buffer_a[k] = static_cast<uint8_t>(k * 7u + 3u);
     }
-    spi1_serves = spi1_plain;
     const bool up = SpiPlain::init(clock);
     const auto ahead8 = SpiPlain::write_ahead_from(SpiDataSize::bits8);
     const auto ahead16 = SpiPlain::write_ahead_from(SpiDataSize::bits16);
     print(serial, "  SpiHost<1> with no engines: ", up ? "up" : "REFUSED",
           "; a receive runs two frames ahead from /", ahead8 ? spi_division(*ahead8) : 0u,
           " in 8-bit frames and from /", ahead16 ? spi_division(*ahead16) : 0u, " in 16-bit ones", crlf);
-    spi_plain_report(true);
-    console_drain();
-    spi_plain_report(false);
+    spi_plain_report();
     console_drain();
     spi_req_report();
     console_drain();
     spi_ahead_report<1, SpiPlain>("spi.ahead");
     spi_live_report<1, SpiPlain>("spi.live");
     spi_held_report();
-    spi_window_report();
     spi2_threshold_report();
-    spi1_serves = spi1_dma;
     spi_up = false;   // letter d brings its own host up again
     bench.verdict("ran", true);
 }
@@ -2884,29 +2731,6 @@ BRIO_CH32_VECTOR(dma1_channel3_handler) {
     spi_tx_meter.leave();
 }
 
-BRIO_CH32_VECTOR(spi1_handler) {
-    spi_meter.enter();
-    if (spi1_serves == spi1_plain) {
-        if (SpiPlain::isr()) {
-            spi_plain_done = true;
-        }
-    } else if (spi1_serves == spi1_short) {
-        if (SpiShort::isr()) {
-            spi_plain_done = true;
-        }
-    } else if (SpiDma::isr()) {
-        spi_done = true;
-    }
-    spi_meter.leave();
-}
-
-/// Letter e's SPI2 host, its pump.
-BRIO_CH32_VECTOR(spi2_handler) {
-    if (spi2_live && Spi2Plain::isr()) {
-        spi_plain_done = true;
-    }
-}
-
 /// Letter i: I2C1 the host against the far end's target.
 BRIO_CH32_VECTOR(i2c1_ev_handler) {
     i2c_meter.enter();
@@ -2943,7 +2767,7 @@ int main() {
     bench.letter('p', "a print through the console against the wire", tp_print);
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
     bench.letter('d', "the DMA engines: copy, fill, a paced block, SPI1's engined write", td_dma);
-    bench.letter('e', "the SPI host above the wire: polled, pumped, a request's price, the overrun oracle",
+    bench.letter('e', "the SPI host above the wire: polled, a request's price, the overrun oracle",
                  te_spi);
     bench.letter('u', "the serial transport on the crossed pair: transmit, receive, the edge", tu_uart<>);
     bench.letter('i', "the I2C host above the wire against a second chip: tenures, their fixed cost, the STOP's drain",

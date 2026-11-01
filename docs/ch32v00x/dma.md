@@ -294,8 +294,8 @@ BRIO_CH32_VECTOR(dma1_channel4_handler) { (void)Serial::dma_isr(); }
 ```
 
 The SPI host with engines at DATAR's width, so that 16-bit frames ride
-them in half-word beats (a request whose buffer sits on an odd address
-goes to the pump):
+them in half-word beats (a request whose buffer sits on an odd address,
+which no half-word beat can move, runs polled inside `start()`):
 
 ```cpp
 using Bus = brio::SpiHost<1, brio::spi1_default_pins,
@@ -384,7 +384,7 @@ and i and letter d's writes measured on the CH32V006K8U6:
   on the CH32V006K8U6 (`test_ch32_serial` letter i), the SPI host's on
   the PC6-PC7 jumper (`test_ch32_spi` letter d: 16-bit frames in
   half-word beats with no SPI interrupt, an odd buffer's 16-bit request
-  on the pump, and ONE DMA interrupt a transaction, the transmit
+  run polled inside `start()`, and ONE DMA interrupt a transaction, the transmit
   channel armed for its errors alone) and the I2C host's against an
   STM32G0 peer on the CH32V006K8U6 (`test_ch32_i2c` letter g: a write
   ended by BTF with no interrupt from its channel, one a read).
@@ -402,9 +402,9 @@ and i and letter d's writes measured on the CH32V006K8U6:
   1.00 of its pace, the intervals 4794 to 4812 cycles against 4800 as a
   polling core sees them. The SPI host's engined write at the wire,
   32.0 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both widths,
-  846 to 852 cycles a transaction above it - some 360 of them the
-  bench's own instrument and some 500 the host's, the split
-  [spi.md](spi.md) gives ("The engines against the pump"). Stamps
+  943 to 946 cycles a transaction above it - some 360 of them the
+  bench's own instrument, the rest the host's ([spi.md](spi.md), "The
+  host above the wire" and "The short request"). Stamps
   placed in a scratch build put the launch at 587 cycles with two of
   the ruler's reads (41 to 48 each) and the request's construction
   inside - `start()`'s write path, `launch_dma()` and `launch_beats()`,

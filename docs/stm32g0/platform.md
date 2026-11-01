@@ -625,7 +625,7 @@ derives from the core's own counts over the release listing:
 
 **The drivers under the preemptive kernel** - the suite is
 `test_stm32_rubato_link`, two keys against the Nucleo-F446RE's unchanged
-`spi_peer` (`z`, 140 verdicts) and `usart_peer` (`y`, 111 verdicts), three
+`spi_peer` (`z`, 133 verdicts) and `usart_peer` (`y`, 111 verdicts), three
 runs of each alike, every verdict green. It runs the real SPI and UART
 stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
 arbiter over the engined `SpiHost<1>` ([spi.md](spi.md); half-word
@@ -647,20 +647,22 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   pass. With the RXFIFO as the write-ahead (no more frames in flight
   than it holds, [spi.md](spi.md)), a held-off loop leaves a gap on the
   bus and never a lost frame: the polled loop packed (8 frames) and
-  frame by frame (5), the RXNE pump in byte frames (7) and in 16-bit
-  frames (16, from an odd address) and the DMA engines (32) all
-  byte-exact at both ends at every code from PCLK/256 to PCLK/8, under
-  every pressure as in the control, and the host's OVR flag read clear
-  at every one of the replies (the receive shapes never let it rise).
-  This host has no `spi_overrun` and needs none.
+  frame by frame (5), the short asynchronous request (7 byte frames:
+  on the engines to PCLK/16, polled inside `start()` from PCLK/8, every
+  rung the way the host's count says, read at the DMA vector) and the
+  DMA engines (32) all byte-exact at both ends at every code from
+  PCLK/256 to PCLK/8, under every pressure as in the control, and the
+  host's OVR flag read clear at every one of the replies (the receive
+  shapes never let it rise). This host has no `spi_overrun` and needs
+  none.
 - **PCLK/4 = 16 MHz is this fitting's, not the service's.** The same
   rungs at PCLK/4 slip in up to one window in ten of a run, with TIM14
   silent as well as under it and on the DMA engines too, which no
   preemption reaches
   (the suite's letter `x`, forty windows a shape and a pressure, four
   runs: 16-bit frames on the engines 2 of 160 windows silent and 4 of
-  160 pressed, on the pump 2 and 4, on the polled loop 1 and 0; byte
-  frames on the pump 0 and 0; 16-bit frames at PCLK/8 0 and 0). Letter
+  160 pressed, on the polled loop 1 and 0; 16-bit frames at PCLK/8 0
+  and 0). Letter
   `p` therefore judges to PCLK/8 and prints PCLK/4 (exact on 105 of 105
   path rungs over three runs) and PCLK/2 (above the F446 client's
   22.5 MHz, wrong on every path, as [spi.md](spi.md)'s peer ladder
@@ -670,7 +672,8 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   every pass, the data windows at 725 to 1000 per mille of the control's
   rate under pressure; three requesters of three priorities on one
   select window (the Client above the arbiter on the engines, a
-  requester below it polled, the preempting object itself on the pump)
+  requester below it polled, the preempting object itself on the
+  engines)
   answered every one `spi_ok`, to its requester, in its order, with no
   timeout, no rejection and the peer counting every frame exact.
 - **The UART receive side under preemption.** Numbered lines echoed by
@@ -732,10 +735,9 @@ caveat is about.
 states (RM0444 3.3.4, table 13) behind the prefetch and the
 instruction cache (3.3.5), both on as [clock.md](clock.md) sets them;
 the SRAM answers at none (2.3), and the Cortex-M0+ fetches both over
-its one bus (2.1). The prefetch and the cache hide a fifth of the
-flash's cost on a driver's hot body and no more: the SPI pump's entry,
-inline and unflattened in its vector, measured 416 cycles with both on
-and 507 with both off, and 305 from SRAM with either. SRAM sits 512 MB
+its one bus (2.1). The prefetch and the cache hide part of the flash's
+cost on a driver's hot body and not all of it ([clock.md](clock.md),
+the prefetch measured as a column). SRAM sits 512 MB
 above the flash and a Thumb `bl` reaches 16 MB, so A CALL BETWEEN THE
 TWO MEMORIES GOES THROUGH A VENEER the linker puts beside the caller:
 `push {r0}; ldr r0, [pc, #8]; mov ip, r0; pop {r0}; bx ip`, a pad and
@@ -758,8 +760,8 @@ stratum's. An image that places nothing gets zero bytes from either.
 Two drivers take util/placement.hpp's tag as their last template
 parameter, `InFlash` by default:
 
-- `SpiHost` - the pump's entry (`isr()`) and the polled transaction,
-  each ONE flattened instance under `InRam` ([spi.md](spi.md));
+- `SpiHost` - the polled transaction, ONE flattened instance under
+  `InRam` ([spi.md](spi.md));
 - `UartTask` (`Uart`, `LpUart`, `Rs485`) - `isr()` and `dma_isr()`, each
   one instance ([usart.md](usart.md)).
 
@@ -800,15 +802,11 @@ wall of 256 frames:
 
 | path | flash | SRAM (`InRam`, the vector in the flash) | SRAM bytes |
 |---|---|---|---|
-| SPI pump, an entry (three 8-bit frames; PCLK/2 and /4 alike, the handler is the bound) | 397 | 347 | 624 an engineless host's, 684 an engined one's |
-| the same, 16-bit frames (two an entry) | 356 | 308 | |
-| SPI pump, the thread's busy a frame at PCLK/16 (256 frames read back: `pump_cycles_per_frame`) | 138 | 122 | |
-| SPI pump, 256 8-bit frames at PCLK/2, wall (the wire 4096) | 43824 | 39125 | |
-| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6470 | 6189 | 1644 a host's polled transaction, both widths (1612 engined) |
-| the same at PCLK/4 (the wire 8192) | 8609 | 8535 | |
-| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 10536 | 10028 | |
-| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4687 | 4467 | |
-| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 797, 2504 | 429, 765, 2476 | |
+| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6193 | 1644 a host's polled transaction, both widths (1696 engined) |
+| the same at PCLK/4 (the wire 8192) | 9230 | 8539 | |
+| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11309 | 10032 | |
+| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4662 | 4471 | |
+| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 798, 2485 | 430, 766, 2477 | |
 | USART transmit engine's completion, a block at 2 Mbaud | 232 | 212 | 264 (340 with a receive engine) |
 | USART transmitter's FIFO refill, eight bytes an entry at 115200 | 323 | 318 | 404 an engineless port's `isr()` |
 | USART receive, four bytes an entry at 115200 | 355 | 316 | 332 the `isr()` of a port whose transmitter is on its engine |
@@ -818,12 +816,15 @@ wall of 256 frames:
 
 What the rows say:
 
-- THE PUMP PAYS MOST: an eighth off every entry, 4700 cycles off 256
-  frames at PCLK/2. The polled transaction is a function of its own in
-  either memory (spi.md says why), and from SRAM its receive loop is a
-  twentieth shorter at PCLK/2 (x 1.58 of the wire to 1.51), its 16-bit
-  loop likewise, a polled request 15 to 32 cycles. Where a loop is the
-  wire's already (everything at PCLK/4 and below) SRAM changes nothing.
+- THE SPI'S RECEIVE LOOP PAYS MOST. The polled transaction is a
+  function of its own in either memory (spi.md says why), and from SRAM
+  its receive loop is a tenth shorter at PCLK/2 (x 1.67 of the wire to
+  1.51), its 16-bit loop likewise (1.38 to 1.22), a polled request 8 to
+  32 cycles. Where a loop is the wire's already (everything from PCLK/16
+  down, the write shape from PCLK/4) SRAM changes nothing; at PCLK/4 the
+  receive loop's flash figure moves with where the image places it
+  (x 1.05 in one image, 1.12 in this one: spi.md's open finding), and
+  SRAM's is the wire's within a twenty-fifth.
 - THE USART'S BODIES PAY LESS, because both placements flatten them:
   the completion's launch is inline in the flash too, so SRAM takes a
   tenth off it; the receiver a ninth (at 2 Mbaud the flash's slower
@@ -833,10 +834,10 @@ What the rows say:
   is `harvest()` out of line: from SRAM that is a veneer back into the
   flash, once a burst.
 - The SPI engines' transaction takes no placement: letter d reads
-  1093..1115 cycles above the wire in the flash image and 1069..1083 in
+  1165..1179 cycles above the wire in the flash image and 1119..1125 in
   the SRAM one, the difference the bench's DMA vector, which binds
-  letter u's ports beside the SPI host's completion - its entry 267
-  cycles where their bodies are inline, 246 where they are calls into
+  letter u's ports beside the SPI host's completion - its entry 298
+  cycles where their bodies are inline, 263 where they are calls into
   SRAM ([spi.md](spi.md)).
 - A path's cost from the flash moves with where it sits: two builds of
   `bench_stm32` that differed in the SPI host alone measured the USART
@@ -852,14 +853,14 @@ an instance calls back in the flash (five there: `launch_dma()`,
 of `.data` already moves the section, a word a turn of its loop. A
 placed function exists only from that copy on - a vector taken earlier
 would enter SRAM the copy has not written yet. A default image has no
-byte of code in SRAM. The whole of `bench_stm32_ram` is 7040 bytes of
+byte of code in SRAM. The whole of `bench_stm32_ram` is 5896 bytes of
 SRAM above `bench_stm32`'s. On the STM32G031K8, where it counts, a
 console's `isr()` is 324 bytes (its USART2 is a BASIC instance, no FIFO)
 and every image of the stratum's suites with every eligible driver
-`InRam` grows by 324 to 2840 bytes: `test_stm32_serial`'s fourth image
-3396 to 6236 of 8192, `spi_peer` 1552 to 3520, and `test_stm32_spi`
-past the part by 496 bytes and `bench_stm32`'s first two images by 3604
-and 4532 - which is why `bench_stm32_ram` is not built there.
+`InRam` grows by at least that: `test_stm32_serial`'s fourth image 3396
+to 6236 of 8192, and an image with an SPI host by its polled
+transaction's 1644 to 1696 bytes besides - which is why
+`bench_stm32_ram`, every driver placed at once, is not built there.
 
 ## On the STM32G071RB
 
@@ -935,9 +936,8 @@ the architecture's, ARMv6-M ARM B1.4.2, and the same read is measured
 on the STM32F4's Cortex-M4, [../stm32f4/usart.md](../stm32f4/usart.md)
 letter h - a letter that asks it from a vector, from the main loop and
 under a critical section would measure it here); a VECTOR the program
-places in `.fast_text` over the flattened bodies ("Code in SRAM" gives the pump's
-entry inline and unflattened, 305 cycles) - a `bench_stm32` built with
-its vectors in `.fast_text` would measure it;
+places in `.fast_text` over the flattened bodies - a `bench_stm32` built
+with its vectors in `.fast_text` would measure it;
 `bench_stm32_ram` on the STM32G071RB (the same image, run there, is the
 measurement); letters `w` and `k` on the
 STM32G071RB and the STM32G031K8 (the same image, run there, is the

@@ -133,24 +133,14 @@
 //   e  THE SPI HOST (avrxt/spi.hpp, docs/avrxt/spi.md): SpiHost<0> on
 //      ALT1 - PE0 (MOSI), PE2 (SCK) and PE1 (MISO, FLOATING: the bytes
 //      are not judged, the time is the wire's) - the pins test_avr_spi
-//      runs on, its own vector SPI0_INT metered (`spi_meter`). Every
-//      line is the BEST of 8 by wall. No kernel: a pumped request is
-//      launched by start() and the thread IDLES until the vector's
-//      completion edge, so busy is the launch, the handlers and the
-//      loop's turns. n counts BYTES (the frame is a byte here).
+//      runs on. Every request is polled, the one way this host runs one
+//      (no DMA on these parts): no SPI vector is bound. Every line is
+//      the BEST of 8 by wall. n counts BYTES (the frame is a byte here).
 //        spi.poll    a polled full-duplex data phase (tx and rx both
 //                    set) of 16 and 256 bytes at CLK_PER/4 and /16: no
 //                    command, no select, no D/C;
 //        spi.poll.tx the same, write-only (rx null) - the display's
 //                    shape, the one A1 of the retrospective counted;
-//        spi.pump    spi.poll's requests on the interrupt pump (polled
-//                    false): irq and isr are the pump's shape, the line
-//                    after prints both PER BYTE and the BUFOVF flag read
-//                    after the run (a one means the two-entry receive
-//                    FIFO overflowed: the pump lost a byte). They run
-//                    AFTER the polled lines, on the receiver those left:
-//                    the letter's verdict is that every one of their
-//                    requests completed and left BUFOVF clear;
 //        spi.req     THE PRICE OF A DCS COMMAND: a polled request with a
 //                    one-byte command phase and a data phase of 0, 2 and
 //                    15 bytes (n = 1, 3, 16) at CLK_PER/16, the select on
@@ -160,6 +150,9 @@
 //                    runs; the DB's PF0/PF1 carry the DA's 32 kHz
 //                    crystal) - and the line after prints wall minus the
 //                    wire's cycles, the fixed cost of the request.
+//      The letter's verdict judges the engine's refusal: a request not
+//      marked polled answers start() at once with spi_rejected, and
+//      SCK, counted on its event, never moves.
 //      The vendor's column (`spi.vendor` in benchmark.md's protocol) is
 //      not in this image: the AVR has no vendor library, and the data
 //      sheet's own sequence (28.3.2.1.1 and 28.3.2.1.2) runs as a bare
@@ -387,7 +380,6 @@ static_assert(Platform<Idle>);
 IsrMeter<Ruler, Idle> rxc_meter;
 IsrMeter<Ruler, Idle> dre_meter;
 IsrMeter<Ruler, Idle> tick_meter;
-IsrMeter<Ruler, Idle> spi_meter;
 IsrMeter<Ruler, Idle> u4_meter;
 IsrMeter<Ruler, Idle> twim_meter;
 IsrMeter<Ruler, Idle> twis_meter;
@@ -396,8 +388,8 @@ IsrMeter<Ruler, Idle> empty_meter;
 /// The counters, read quiescent and under the mask (the file header).
 BenchCounters counters() {
     P::CriticalSection cs;
-    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter,
-                                twim_meter, twis_meter);
+    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, u4_meter, twim_meter,
+                                twis_meter);
 }
 
 TestBench<Serial> bench;
@@ -472,8 +464,7 @@ constexpr uint16_t reps = 1000u;
 /// What the meters and the ruler print beside letter r's runs.
 BenchCounters counters_with_empty() {
     P::CriticalSection cs;
-    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter,
-                                empty_meter);
+    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, u4_meter, empty_meter);
 }
 
 volatile uint32_t ruler_sink = 0;
@@ -663,7 +654,7 @@ void tt_tick() {
 }
 
 // =============================================================================
-// e - the SPI host: spi.poll, spi.poll.tx, spi.pump, spi.req
+// e - the SPI host: spi.poll, spi.poll.tx, spi.req
 // =============================================================================
 namespace de {
 
@@ -675,9 +666,9 @@ using SpiHw = SpiHost<0, SpiRoute::alt1>;   // PE0 MOSI, PE1 MISO, PE2 SCK
 using Cs = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 2>, Pin<'A', 2>>;
 using Dc = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 3>, Pin<'A', 3>>;
 using S0 = SpiHw::Resource;
-
-/// The pump's completion edge, written by the vector.
-volatile bool spi_done = false;
+/// The refusal's witness: the SPI's SCK event counted by TCB0.
+using ChSck = EventChannel<0>;
+using SckCount = PulseCounter<Tcb<0>>;
 
 /// The two rates letter e runs at: the family's second fastest and the
 /// one the DCS link reads at.
@@ -706,45 +697,6 @@ SpiHw::Request data_request(SpiClock c, uint16_t n, bool duplex, bool polled) {
     return r;
 }
 
-/// A pumped request: start() launches it, the thread idles until the
-/// vector's edge; bounded at 20 ms on the ruler so a lost completion
-/// ends the run instead of the bench. `ok` is false if any run timed
-/// out. The best of 8 by wall.
-template <typename Launch>
-BenchSample best_pump(Launch launch, bool& ok) {
-    BenchSample best{};
-    Stopwatch<Ruler> sw;
-    ok = true;
-    constexpr uint32_t bound = Ruler::hz() / 50u;
-    for (uint8_t run = 0; run < 8u; ++run) {
-        spi_done = false;
-        const BenchCounters c0 = counters();
-        sw.start();
-        const bool sync = launch();
-        bool done = sync;
-        while (!done) {
-            cli();
-            if (spi_done) {
-                sei();
-                done = true;
-                break;
-            }
-            if (sw.elapsed() >= bound) {
-                sei();
-                break;
-            }
-            Idle::idle();
-        }
-        const uint32_t wall = sw.elapsed();
-        const BenchSample s = bench_sample(wall, c0, counters());
-        ok = ok && done;
-        if (run == 0u || s.wall < best.wall) {
-            best = s;
-        }
-    }
-    return best;
-}
-
 /// spi.poll and spi.poll.tx: the polled loop, both shapes.
 void poll() {
     for (const bool duplex : {true, false}) {
@@ -762,25 +714,28 @@ void poll() {
     }
 }
 
-/// spi.pump: the same full-duplex requests on the interrupt pump.
-bool pump() {
-    bool all = true;
-    for (const SpiClock c : rates) {
-        for (const uint16_t n : lengths) {
-            drain();
-            S0::clear_overflow();
-            const SpiHw::Request r = data_request(c, n, true, false);
-            bool ok = false;
-            const BenchSample s = best_pump([&r] { return SpiHw::start(r); }, ok);
-            const bool overflow = S0::overflow_flag();
-            bench_line(serial, "spi.pump", n, s, Ruler::hz(), wire_bps(c));
-            print(serial, "  CLK_PER/", spi_division(c), ": per byte irq=",
-                  (s.irq + n / 2u) / n, " isr=", (s.isr + n / 2u) / n, ", completions ",
-                  ok ? "all" : "MISSING", ", BUFOVF after the run ", overflow ? "1" : "0", crlf);
-            all = all && ok && !overflow;
-        }
-    }
-    return all;
+/// The refusal: a request not marked polled (asynchronous is DMA, and
+/// these parts have none) answers start() true at once with
+/// spi_rejected, and SCK - its event counted by TCB0 - never moves; the
+/// same request polled, the control, counts its 16 x 8 edges.
+bool refusal() {
+    drain();
+    ChSck::source(S0::SckEvent{});
+    SckCount::init(ChSck{});
+    SckCount::reset();
+    SpiHw::Request r = data_request(SpiClock::div16, 16u, true, false);
+    const bool sync = SpiHw::start(r);
+    const uint8_t status = SpiHw::status();
+    const uint16_t edges = SckCount::count();
+    r.polled = true;
+    const bool ran = SpiHw::start(r) && SpiHw::status() == spi_ok;
+    const uint16_t control = SckCount::count();
+    Tcb<0>::disable();
+    ChSck::off();
+    print(serial, "  a request not marked polled: start() ", sync ? "true" : "false",
+          ", status ", status, " (spi_rejected ", spi_rejected, "), SCK edges ", edges,
+          "; the same request polled: ", control - edges, " edges (128)", crlf);
+    return sync && status == spi_rejected && edges == 0u && ran && control == 128u;
 }
 
 /// spi.req: the price of a DCS command - one command byte, a data
@@ -824,12 +779,12 @@ void te_spi() {
         return;
     }
     de::poll();
-    const bool pumped = de::pump();
     de::req();
+    const bool refused = de::refusal();
     SpiHw::release();
     Cs::input();
     Dc::input();
-    bench.verdict("every pumped request completed and left BUFOVF clear", pumped);
+    bench.verdict("a request not marked polled is refused, the wire untouched", refused);
 }
 
 // =============================================================================
@@ -1511,13 +1466,6 @@ ISR(TCB0_INT_vect) {
         di::scl_min = t;
     }
 }
-ISR(SPI0_INT_vect) {
-    spi_meter.enter();
-    if (de::SpiHw::isr()) {
-        de::spi_done = true;
-    }
-    spi_meter.leave();
-}
 
 int main() {
     xtal = SysClock::init();
@@ -1531,7 +1479,7 @@ int main() {
     bench.letter('m', "memcpy and memset, 1/16/256/4096 bytes", tm_memory);
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
-    bench.letter('e', "the SPI host: spi.poll, spi.poll.tx, spi.pump, spi.req", te_spi);
+    bench.letter('e', "the SPI host: spi.poll, spi.poll.tx, spi.req", te_spi);
     bench.letter('u', "the UART transport on USART4's loop: uart.tx, uart.rx, uart.edge", tu_uart);
     bench.letter('i', "the I2C host on TWI0's dual loop: i2c.write, i2c.read, i2c.wr, i2c.probe",
                  ti_i2c);

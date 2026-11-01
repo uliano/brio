@@ -2,7 +2,7 @@
 // a chip that is not a chip: two register blocks in RAM
 // (brio/host/sim_pl022.hpp). What is judged here is what a bench cannot
 // see cheaply - the exact WORDS a configuration leaves in the block, the
-// frames a pump wrote, and the ORDER of the acts of a bring-up - and
+// way each request was run, and the ORDER of the acts of a bring-up - and
 // what a bench cannot see at all: that the driver compiles and runs with
 // no silicon under it. The receive half is not here, because a register
 // block of plain memory never hands a frame back.
@@ -192,7 +192,9 @@ TEST_CASE("a host bring-up leaves the block set up, in the order it promises") {
     CHECK(regs().SSPCR0 == ((6u << 8) | 7u));
     CHECK(regs().SSPCR1 == SpiControl1::enable);
     CHECK(regs().SSPIMSC == 0u);
-    CHECK(SimPl022Interrupts::line_enabled[0]);
+    // The host arms no source of the instance's line, and leaves the line
+    // itself disabled: that vector is a client's.
+    CHECK_FALSE(SimPl022Interrupts::line_enabled[0]);
 
     // THE ORDER init() promises: the pads go over only once the
     // registers hold the idle polarity, and SSE comes after them.
@@ -257,7 +259,52 @@ TEST_CASE("the ceiling clamps from below, and a no-op re-application writes noth
     CHECK(Host::ceiling_clock()->divisor() == 6u);   // 8 MHz, the fastest under 10
 }
 
-TEST_CASE("a transaction asserts its select, waits its setup and fills the FIFO once") {
+/// Let the polled loops run to their end: SSPSR says a frame waits, and
+/// SSPDR reads back whatever was written last (brio/host/sim_pl022.hpp).
+/// Nothing that drains the receive FIFO may run meanwhile.
+void frames_come_back(bool on) {
+    if (on) {
+        regs().SSPSR = regs().SSPSR | SpiFlag::rx_not_empty;
+    } else {
+        regs().SSPSR = regs().SSPSR & ~SpiFlag::rx_not_empty;
+    }
+}
+
+TEST_CASE("an asynchronous request on a host with no engines is refused, and touches nothing") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    static_assert(!Host::has_dma && Engined::has_dma);
+    for (uint8_t i = 0; i < 32u; ++i) {
+        out_buf[i] = static_cast<uint8_t>(0xA0u + i);
+    }
+    const uint32_t cr0 = regs().SSPCR0;
+
+    // Asynchronous is DMA, and there are no engines: start() answers at
+    // once with spi_rejected, before the block, the select, the D/C or the
+    // setup time is touched - even for a request whose mode would flip
+    // the clock's idle level, and even for an empty one.
+    Host::Request r = plain_request(16);
+    r.dc = SimPl022PinRef{8};
+    r.cs_setup_us = 5;
+    r.mode = SpiMode::mode3;
+    r.clock = SpiClocks::div2;
+    CHECK(Host::start(r));
+    CHECK(Host::status() == spi_rejected);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] == 0u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] == 0u);
+    CHECK(SimPl022Bench::pin_clear_at[8] == 0u);
+    CHECK(SimPl022Bench::pin_set_at[8] == 0u);
+    CHECK(SimPl022Bench::waited_us == 0u);
+    CHECK(regs().SSPCR0 == cr0);
+    CHECK(regs().SSPDR == 0u);
+    Host::Request empty = plain_request(0);
+    CHECK(Host::start(empty));
+    CHECK(Host::status() == spi_rejected);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] == 0u);
+}
+
+TEST_CASE("a polled transaction asserts its select, waits its setup and runs inside start()") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Host::init(clock));
@@ -265,50 +312,66 @@ TEST_CASE("a transaction asserts its select, waits its setup and fills the FIFO 
         out_buf[i] = static_cast<uint8_t>(0xA0u + i);
     }
 
-    // An EMPTY request completes on the spot and never touches the wire.
+    // An EMPTY polled request completes on the spot and never touches the
+    // wire.
     Host::Request empty = plain_request(0);
+    empty.polled = true;
     CHECK(Host::start(empty));
+    CHECK(Host::status() == spi_ok);
     CHECK(SimPl022Bench::pin_clear_at[cs_pin] == 0u);
 
-    // A real one: the select asserted LOW, the D/C line high (no command
-    // phase), the setup time asked for, and the transmit FIFO filled to
-    // its depth and no further.
+    // A real one: the select asserted LOW and released at the end, the
+    // setup time asked for, the rate applied, and no interrupt source armed.
     Host::Request r = plain_request(16);
     r.cs_setup_us = 5;
     r.clock = SpiClocks::div32;
-    CHECK_FALSE(Host::start(r));   // it runs on the interrupt
-    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);
+    r.polled = true;
+    frames_come_back(true);
+    CHECK(Host::start(r));
+    frames_come_back(false);
+    CHECK(Host::status() == spi_ok);
     CHECK(SimPl022Bench::pin_clear_at[cs_pin] != 0u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] > SimPl022Bench::pin_clear_at[cs_pin]);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
     CHECK(SimPl022Bench::waited_us == 5u);
     CHECK(SimPl022Bench::waited_cycles == 125u);
-    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
-    CHECK(regs().SSPDR == out_buf[7]);   // eight frames in flight, the FIFO's depth
+    CHECK(regs().SSPIMSC == 0u);
+    CHECK(regs().SSPDR == out_buf[15]);   // the last frame written
     CHECK(regs().SSPCR0 == ((15u << 8) | 7u));
 
-    // The interrupt body answers nothing when nothing of its own is up.
-    regs().SSPMIS = 0;
-    CHECK_FALSE(Host::isr());
+    // A loop whose frames never come back runs out of its budget: the
+    // engine's own status, the select released, the block left for
+    // recover().
+    CHECK(Host::start(r));
+    CHECK(Host::status() == spi_dma_fault);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
 
     // recover() releases the select FIRST and puts the block back where
-    // start() is legal, with the applied configuration standing.
+    // start() is legal, with the applied configuration standing and the
+    // line still the host's to leave alone.
     CHECK(Host::recover());
     CHECK(SimPl022Bench::pin_level[cs_pin]);
     CHECK(regs().SSPCR0 == ((15u << 8) | 7u));
     CHECK(regs().SSPCR1 == SpiControl1::enable);
     CHECK(regs().SSPIMSC == 0u);
-    CHECK(SimPl022Interrupts::line_enabled[0]);
+    CHECK_FALSE(SimPl022Interrupts::line_enabled[0]);
 
-    // A request with a command phase drives D/C LOW first, and sends the
-    // command frames alone - the data waits for them to come back.
+    // A request with a command phase drives D/C LOW first and raises it
+    // between the phases.
     fresh();
     REQUIRE(Host::init(clock));
     Host::Request cmd = plain_request(16);
     cmd.dc = SimPl022PinRef{8};
     cmd.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     cmd.cmd_len = 2;
-    CHECK_FALSE(Host::start(cmd));
-    CHECK_FALSE(SimPl022Bench::pin_level[8]);
-    CHECK(regs().SSPDR == out_buf[1]);   // the second command frame, and no data
+    cmd.polled = true;
+    frames_come_back(true);
+    CHECK(Host::start(cmd));
+    frames_come_back(false);
+    CHECK(Host::status() == spi_ok);
+    CHECK(SimPl022Bench::pin_clear_at[8] != 0u);
+    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
+    CHECK(SimPl022Bench::pin_set_at[8] < SimPl022Bench::pin_set_at[cs_pin]);
 }
 
 TEST_CASE("release puts the pads back and the block into reset") {
@@ -380,7 +443,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(TxEngine::length == 24u);
     CHECK(TxEngine::beat == 1u);
     CHECK(regs().SSPDMACR == (SpiDmaControl::tx | SpiDmaControl::rx));
-    CHECK(regs().SSPIMSC == 0u);   // the pump is not in this path
+    CHECK(regs().SSPIMSC == 0u);   // the block's own line is not in this path
 
     // The RECEIVE block's completion is the transaction's: the requests
     // go down, the select goes up, the status is clean - and the transmit
@@ -412,29 +475,123 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(Engined::status() == spi_dma_fault);
     CHECK(regs().SSPDMACR == 0u);
 
-    // A data phase shorter than dma_min_frames takes the pump even with
-    // the engines bound: the FIFO filled, the line armed, no block.
+    // THE SHORT ASYNCHRONOUS REQUEST (pl022/spi.hpp's arithmetic over
+    // SimPl022's figures): at clk / 2 in mode 3 a byte frame is 16 cycles,
+    // so a read rides the engines from 5 frames, a write from 7, and a
+    // polled read from 25.
     fresh();
     REQUIRE(Engined::init(clock));
-    static_assert(Engined::dma_min_frames == SimPl022::dma_min_frames);
+    CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, true) == 5u);
+    CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, false) == 7u);
+    CHECK(Engined::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8) == 25u);
+    // At clk / 16 in mode 0 a frame is 152 cycles: one frame repays them,
+    // and a polled read never rides them (the wire outlasts the loop).
+    CHECK(Engined::async_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8, true) == 1u);
+    CHECK(Engined::polled_dma_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8) == 0xFFFFu);
     Engined::Request brief{};
     brief.cs = SimPl022PinRef{cs_pin};
     brief.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
-    brief.len = Engined::dma_min_frames - 1u;
-    CHECK_FALSE(Engined::start(brief));
+    brief.rx = lend<Lease::reply>(in_buf);
+    brief.clock = SpiClocks::div2;
+    brief.mode = SpiMode::mode3;
+    // One frame short: polled inside start(), no block, no interrupt.
+    brief.len = 4;
+    frames_come_back(true);
+    CHECK(Engined::start(brief));
+    frames_come_back(false);
+    CHECK(Engined::status() == spi_ok);
     CHECK(TxEngine::blocks == 0u);
     CHECK(regs().SSPDMACR == 0u);
-    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
-    CHECK(regs().SSPDR == out_buf[Engined::dma_min_frames - 2u]);
-    // And one exactly at the threshold rides them.
-    fresh();
-    REQUIRE(Engined::init(clock));
-    brief.len = Engined::dma_min_frames;
+    CHECK(regs().SSPIMSC == 0u);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    // At the count: the engines.
+    brief.len = 5;
     CHECK_FALSE(Engined::start(brief));
     CHECK(TxEngine::blocks == 1u);
-    CHECK(TxEngine::length == Engined::dma_min_frames);
+    CHECK(TxEngine::length == 5u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    // A write of six is short, of seven is not.
+    Engined::Request write = brief;
+    write.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    write.len = 6;
+    frames_come_back(true);
+    CHECK(Engined::start(write));
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 1u);
+    write.len = 7;
+    CHECK_FALSE(Engined::start(write));
+    CHECK(TxEngine::blocks == 2u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
 
-    // Sixteen-bit frames fall back to the pump on BYTE engines.
+    // A COMMAND PHASE THAT REPAYS A BLOCK OF ITS OWN (8 frames written,
+    // 128 cycles against 100) rides the engines first, D/C low, its echo
+    // discarded; its completion raises D/C and launches the data block
+    // from the vector - one interrupt a block, the transaction ending on
+    // the second.
+    fresh();
+    REQUIRE(Engined::init(clock));
+    Engined::Request two{};
+    two.cs = SimPl022PinRef{cs_pin};
+    two.dc = SimPl022PinRef{8};
+    two.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    two.cmd_len = 8;
+    two.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 8));
+    two.rx = lend<Lease::reply>(in_buf);
+    two.len = 16;
+    two.clock = SpiClocks::div2;
+    two.mode = SpiMode::mode3;
+    CHECK_FALSE(Engined::start(two));
+    CHECK(TxEngine::blocks == 1u);
+    CHECK(TxEngine::length == 8u);
+    CHECK(RxEngine::discarded);
+    CHECK_FALSE(SimPl022Bench::pin_level[8]);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK_FALSE(Engined::dma_isr());
+    CHECK(SimPl022Bench::pin_level[8]);
+    CHECK(TxEngine::blocks == 2u);
+    CHECK(TxEngine::length == 16u);
+    CHECK_FALSE(RxEngine::discarded);
+    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(Engined::status() == spi_ok);
+    // A command phase too short for a block of its own (one frame) runs
+    // polled inside start(), and the data block follows it there.
+    two.cmd_len = 1;
+    frames_come_back(true);
+    CHECK_FALSE(Engined::start(two));
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 3u);
+    CHECK(TxEngine::length == 16u);
+    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
+    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);   // held across both phases
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+
+    // A POLLED READ past its count rides the engines inside start() and
+    // waits there for the completion - which no interrupt brings on this
+    // machine, so the bounded wait runs out: the block on the engines, the
+    // engine's own status. One frame short runs the polled loop.
+    fresh();
+    REQUIRE(Engined::init(clock));
+    Engined::Request held = brief;
+    held.polled = true;
+    held.len = 25;
+    CHECK(Engined::start(held));
+    CHECK(TxEngine::blocks == 1u);
+    CHECK(Engined::status() == spi_dma_fault);
+    held.len = 24;
+    frames_come_back(true);
+    CHECK(Engined::start(held));
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 1u);
+    CHECK(Engined::status() == spi_ok);
+
+    // Sixteen-bit frames on BYTE engines: the engines cannot carry them,
+    // so the request runs polled inside start() whichever way it asked.
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request wide{};
@@ -442,10 +599,12 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     wide.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     wide.len = 8;
     wide.bits = SpiDataSize::bits16;
-    CHECK_FALSE(Engined::start(wide));
+    frames_come_back(true);
+    CHECK(Engined::start(wide));
+    frames_come_back(false);
     CHECK(TxEngine::blocks == 0u);
-    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
-    // Two bytes low-first make one frame, and the FIFO took eight.
+    CHECK(regs().SSPIMSC == 0u);
+    // Two bytes low-first make one frame, and the loop wrote eight.
     CHECK(regs().SSPDR == static_cast<uint32_t>(out_buf[14] | (out_buf[15] << 8)));
 
     Engined::release();
@@ -501,16 +660,19 @@ TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
     CHECK(WideHost::dma_isr());
 
     // A buffer one byte off a half-word is not one the DMA can take: the
-    // request goes to the pump and no block starts.
+    // request runs polled inside start() and no block starts.
     const uint32_t blocks = WideTx::blocks;
     WideHost::Request odd{};
     odd.cs = SimPl022PinRef{cs_pin};
     odd.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
     odd.len = 4;
     odd.bits = SpiDataSize::bits16;
-    CHECK_FALSE(WideHost::start(odd));
+    frames_come_back(true);
+    CHECK(WideHost::start(odd));
+    frames_come_back(false);
+    CHECK(WideHost::status() == spi_ok);
     CHECK(WideTx::blocks == blocks);
-    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
+    CHECK(regs().SSPIMSC == 0u);
 
     WideHost::release();
 }

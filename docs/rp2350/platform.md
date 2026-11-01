@@ -1021,7 +1021,7 @@ nineteen instructions in the listing, the single body's seventeen.
 
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2350_rubato_link`, one source and two images, two keys against
-the WeAct RP2040's unchanged `spi_peer` (`z`, 147 verdicts) and
+the WeAct RP2040's unchanged `spi_peer` (`z`, 154 verdicts) and
 `uart_peer` (`y`, 55 verdicts), three runs of each key on each half alike,
 every verdict green. It runs the real SPI and UART stacks inside a Rubato
 pack of seven objects on core 0: `util/spi_bus.hpp`'s arbiter over the
@@ -1046,16 +1046,19 @@ established, on both halves:
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
   off for its whole length - the alarm landed there 36 to 189 times a
   pass in letter `p` on the Cortex-M33 and 34 to 171 on Hazard3. The
-  FIFOs are the write-ahead on every path (no more than 8 frames in
-  flight, `brio/pl022/spi.hpp`), so a held-off loop or pump leaves a gap
-  on the bus and never a lost frame: the polled loop in 8-bit frames (9)
-  and in 16-bit frames from an odd address (32, off the engines), the
-  pump the same two ways, the engines (32 byte frames) and the engines
-  under a polled request (32 half-words), all byte-exact at both ends at
-  every even divisor from 256 to 16 (9.4 MHz, the PIO client's ceiling as
+  FIFOs are the polled loop's write-ahead (no more than 8 frames in
+  flight, `brio/pl022/spi.hpp`), so a held-off loop leaves a gap on the
+  bus and never a lost frame: the polled loop in 8-bit frames (9) and in
+  16-bit frames from an odd address (32), the asynchronous way short
+  (one byte frame: on the engines at the slow rungs, polled inside
+  `start()` at the fast ones, as the host's count says) and from an odd
+  address (32 16-bit frames, polled inside `start()`), and the engines in
+  8- and 16-bit frames (32), all byte-exact at both ends at every even
+  divisor from 256 to 16 (9.4 MHz, the PIO client's ceiling as
   [spi.md](spi.md) derives it against the RP2040's 125 MHz), under every
   pressure as in the control, the block's overrun flag clear at every
-  reply. Past that ceiling, /14 is exact on all six paths in every pass
+  reply, and every asynchronous window gone the way the host's count
+  says. Past that ceiling, /14 is exact on all six paths in every pass
   of both halves and /12 on none to three, varying, the control's as the
   pressures'.
 - **The matrix and the arbiter.** The four modes in both widths, the
@@ -1127,8 +1130,6 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
 | SPI polled request, a command byte and 2 data bytes | 671 / 5333 | 676 / 1241 | 671 / 5404 | 676 / 1241 |
-| SPI pump, 16 frames at clk_peri / 2, wall | 945 / 8810 | 980 / 3294 | 946 / 5088 | 973 / 1812 |
-| ... its handler, two entries | 608 / 3785 | 647 / 1577 | 607 / 610 | 639 / 642 |
 | SPI on the engines, 16 frames, wall | 1433 / 12525 | 791 / 4192 | 770 / 7800 | 788 / 1776 |
 | ... the DMA line's handler | 342 / 5010 | 139 / 1877 | 116 / 116 | 135 / 135 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
@@ -1140,8 +1141,6 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
 | SPI polled request, a command byte and 2 data bytes | 633 / 4621 | 637 / 1034 | 639 / 4610 | 637 / 1034 |
-| SPI pump, 16 frames at clk_peri / 2, wall | 948 / 8490 | 988 / 3731 | 964 / 5481 | 988 / 2590 |
-| ... its handler, two entries | 603 / 3192 | 635 / 1302 | 615 / 1261 | 633 / 636 |
 | SPI on the engines, 16 frames, wall | 844 / 9980 | 749 / 3700 | 737 / 7072 | 748 / 2439 |
 | ... the DMA line's handler | 100 / 2657 | 119 / 1104 | 99 / 99 | 119 / 762 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
@@ -1164,10 +1163,9 @@ What the rows say - the RP2040's reading on both halves:
 - The vector placed reaches what the vector runs; InRam reaches
   `start()`; BOTH is the image whose cold transaction is closest to its
   warm one. On Hazard3 the dispatch in front of a placed vector still
-  misses, and two of its placed bodies read cold above warm (the pump's
-  handler under V 1261 against 615, the DMA line's under B 762 against
-  119) with no call into the flash in their listings - a residue this
-  chapter has not split.
+  misses, and a placed body read cold above warm (the DMA line's under B
+  762 against 119) with no call into the flash in its listing - a
+  residue this chapter has not split.
 
 ## Not covered yet
 
@@ -1182,7 +1180,7 @@ Driver gaps, each with its reason:
 - The Hazard3 dispatch in SRAM: the crt's trap entry, its register save
   and its `meinext` loop run from the flash in front of every vector, a
   placed one too ("A handler in SRAM"), and the residue measured there on
-  two placed bodies is not split. A placed copy of the dispatch is born
+  a placed body is not split. A placed copy of the dispatch is born
   with a program whose handlers must answer cold within a deadline.
 - The reboot and the causes of a boot: they belong to another chapter -
   [reset.md](reset.md) for the causes and the two reset verbs,

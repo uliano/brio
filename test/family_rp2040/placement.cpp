@@ -1,6 +1,6 @@
 // Placement family smoke TU: util/placement.hpp on this stratum - the
 // platform says places_fast_text, and the three IP drivers' hosts take
-// InRam as well as InFlash: SpiHost (start, the pump, the DMA line),
+// InRam as well as InFlash: SpiHost (start, the DMA line),
 // Uart (the vector, the DMA line), I2cHost (the vector, the DMA line).
 // THE COMDAT TRAP, proved absent: the InRam instances (.fast_text.brio)
 // and the flash engine's window (.ram_text.brio), both a header's grouped
@@ -37,7 +37,6 @@ uint8_t page[Flash::page_size];
 
 /// A program's own placed functions, plain, beside the grouped ones.
 extern "C" [[gnu::section(".fast_text")]] void placed_vector() {
-    (void)RamHost::isr();
     (void)RamDmaHost::dma_isr();
     (void)RamUart::isr();
     (void)RamEngined::dma_isr();
@@ -56,14 +55,12 @@ void placement_verbs() {
     (void)RamHost::start(r);
     r.polled = true;
     (void)RamHost::start(r);
-    (void)RamHost::isr();
     (void)RamDmaHost::init(clock);
     RamDmaHost::Request d{};
     d.cs = Pin<17>::ref();
     d.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     d.len = 16;
     (void)RamDmaHost::start(d);
-    (void)RamDmaHost::isr();
     (void)RamDmaHost::dma_isr();
     (void)RamUart::init(clock, 115200);
     (void)RamUart::isr();

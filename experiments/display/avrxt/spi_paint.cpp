@@ -508,18 +508,14 @@ private:
             {}, 0,
             brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), n,
             brio::reply_to<Touch, brio::SpiDone>(),
-            brio::SpiClock::div16});           // 1.5 MHz, ISR path
+            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // 1.5 MHz, polled
     }
 };
 
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
-    }
-}
+// No SPI vector: the AVR's SpiHost runs every request polled and arms none.
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

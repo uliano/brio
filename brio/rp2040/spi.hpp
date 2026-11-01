@@ -12,24 +12,26 @@
  * of a wire; `Pl022<n>` the resource, one function per register fact.
  * The smallest use, a device on SPI0 through the arbiter, is written out
  * at `SpiHost` below as docs/rp2040/spi.md spells it: the pin set, the
- * host and the arbiter types, `Bus::init(clock, 8'000'000)` after the
- * clock task, a GPIO select driven high, a Request posted to the
- * arbiter, and the program's `isr_spi0` posting `TransferDone` when
- * `Bus::isr()` says the transaction ended.
+ * host on two DMA channels and the arbiter types, `Dma::init()` and then
+ * `Bus::init(clock, 8'000'000)` after the clock task, a GPIO select
+ * driven high, a Request posted to the arbiter, and the program's
+ * `isr_dma_0` posting `TransferDone` when `Bus::dma_isr()` says the
+ * transaction ended.
  *
  * Who calls what. init(), rebase() and release() are setup verbs, main
  * context, after the clock task's init(); init() answers false when the
  * ceiling cannot be produced at this clk_peri or the block did not come
  * up. start() is the arbiter's, called from its dispatch, and returns
  * true when the request completed inside it: a polled request (`r.polled`
- * set), which spins there for its whole wire time, and the empty request
- * (no command, no data). Any other returns false, runs on an interrupt
- * and a TransferDone follows: on the instance's, or, when DMA engines
- * carry the data, on the DMA line's (an engined request without a command
- * completes there alone; a command goes out first on the instance's
- * interrupt). isr() is the vector's body and dma_isr() the DMA line's,
- * each called by the program's handler and nothing else, each true when
- * the transaction just completed. The Request's buffers (`cmd`, `tx`,
+ * set), which spins there for its whole wire time, an asynchronous one
+ * too short to repay the DMA engines (run polled the same way), the empty
+ * request (no command, no data), and on a host with no engines an
+ * asynchronous one, refused (spi_rejected, nothing on the wire). Any
+ * other returns false, rides the engines and a TransferDone follows on
+ * the DMA line: dma_isr() is that line's body, called by the program's
+ * handler and nothing else, true when the transaction just completed.
+ * The host arms no source of the instance's own line. The Request's
+ * buffers (`cmd`, `tx`,
  * `rx`) are lent (`brio::lend<brio::Lease::reply>`) from the post until
  * the arbiter's reply reaches the requester: untouched and in scope until
  * then, which nothing checks. The client's verbs are its owner's - a
@@ -89,8 +91,8 @@
  * the pad.
  *
  * The line. The four maskable sources of an instance combine into one
- * NVIC line (SPI0_IRQ, SPI1_IRQ, 2.3.2); the app binds isr_spi0 /
- * isr_spi1 to the instance's isr() body.
+ * NVIC line (SPI0_IRQ, SPI1_IRQ, 2.3.2); a client's program binds
+ * isr_spi0 / isr_spi1 to its isr() body. A host leaves the line alone.
  *
  * The DMA engines ride any two channels, told the instance's requests
  * (Dreq::spi{n}_tx / spi{n}_rx, table 119) at arm(), which init() calls:
@@ -175,14 +177,14 @@ struct Rp2040Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
-    /// Below how many data frames the pump beats the engines: the
-    /// engines' fixed cost per transaction over the pump's cost per
-    /// frame, both measured on this chip by bench_rp2040's letters d
-    /// and e (docs/rp2040/spi.md): an engined request costs 902 cycles
-    /// plus 38 a frame at 31.25 MHz, the pump 284 plus 87 a frame - the
-    /// Cortex-M0+'s handler is the dearer term, not the launch - so the
-    /// two cost the same at twelve and a half frames.
-    static constexpr uint16_t dma_min_frames = 13;
+    /// What the host's two ways cost this chip's Cortex-M0+ at 125 MHz
+    /// (Pl022Costs; docs/rp2040/spi.md, "The short request"), measured by
+    /// test_rp2040_spi's letter f through one call: E - F 282 for a read
+    /// and 294 for a write (the engines' fixed cost 757 against the polled
+    /// loop's 475 and 463), and the two loops' frames at clk_peri / 2, 42
+    /// cycles received and stored, 21 written on TNF - the Cortex-M0+'s
+    /// floor where the wire's frame is 16.
+    static constexpr Pl022Costs costs{280u, 290u, 42u, 21u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).
@@ -275,10 +277,12 @@ using Pl022 = Pl022Ssp<Rp2040Pl022, n>;
  * The engine `SpiBus` (= `BusMaster`) drives, over Pl022<n>.
  *
  *   constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
- *   using Bus = brio::SpiHost<0, pins>;
+ *   using Bus = brio::SpiHost<0, pins, brio::DmaTxEngine<4, uint16_t>,
+ *                             brio::DmaRxEngine<5, uint16_t>>;
  *   using Spi = brio::SpiBus<Bus, P, 4>;              // the arbiter AO
  *   using Cs = brio::Pin<17>;
  *
+ *   brio::Dma::init();                                // before the host binds its engines
  *   Bus::init(clock, 8'000'000);                      // a ceiling for the bus
  *   Cs::output(true);
  *
@@ -289,33 +293,40 @@ using Pl022 = Pl022Ssp<Rp2040Pl022, n>;
  *   r.clock = brio::SpiClocks::div4;                  // clamped to the ceiling
  *   r.mode = brio::SpiMode::mode0;
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Spi>(r);
+ *   brio::post<Spi>(r);                               // asynchronous: polled stays false
  *
- *   extern "C" void isr_spi0() {
- *       if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+ *   extern "C" void isr_dma_0() {
+ *       if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
  *   }
  *
  * Line by line: the pin set names SPI0's own pads under function 1
  * (spi_pins_valid refuses another instance's at compile time); `Bus` is
- * the engine, its other arguments at their defaults (no DMA engines,
- * InFlash); `Spi` is the arbiter with a queue of four requests; `Cs` is
- * the GPIO the Request selects through, driven high before the first
- * request; init() takes the clock task's tag and a ceiling for the whole
- * bus - here 8 MHz, so the request's `div4`, 31.25 MHz at a 125 MHz
- * clk_peri, runs at the ceiling's setting, 7.8125 MHz. `cmd` goes out
- * first, then `pixels`, with a D/C line low for the command and high for
- * the data only when the request names one in `r.dc` (none here). `cmd`
+ * the engine with rp2040/dma.hpp's two engines on channels 4 and 5,
+ * reporting on DMA_IRQ_0 (the placement at its default, InFlash); `Spi`
+ * is the arbiter with a queue of four requests; `Cs` is the GPIO the
+ * Request selects through, driven high before the first request;
+ * `Dma::init()` comes before init(), which binds the engines; init()
+ * takes the clock task's tag and a ceiling for the whole bus - here 8
+ * MHz, so the request's `div4`, 31.25 MHz at a 125 MHz clk_peri, runs at
+ * the ceiling's setting, 7.8125 MHz, and enables the line the engines
+ * report on (their arm() does). `cmd` goes out first, then `pixels`, with
+ * a D/C line low for the command and high for the data only when the
+ * request names one in `r.dc` (none here); 64 data frames at 7.8 MHz
+ * repay the engines many times over, so they ride them, the one command
+ * frame going out polled inside start() first - a request too short to
+ * repay them runs polled whole and completes inside start()
+ * (`Bus::async_min_frames()`). `cmd`
  * and `pixels` are lent until `Display` receives its SpiDone. The handler
- * is the instance's vector under the pico-sdk's name, and its post is
+ * is the DMA line's vector under the pico-sdk's name, and its post is
  * legal from an interrupt handler (kernel/post.hpp).
  *
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine / DmaRxEngine
  * on any two channels, both or neither, both of one element: uint16_t
- * (SSPDR's width) carries 8- and 16-bit frames alike. With engines the
- * program binds the DMA line's vector to `Bus::dma_isr()` the same way,
- * and `Dma::init()` runs before `Bus::init()`. `Placement`, the last
- * parameter, is util/placement.hpp's tag: InRam makes start(), the pump
- * and the DMA line's body one flattened instance each in SRAM
+ * (SSPDR's width) carries 8- and 16-bit frames alike. A host with no
+ * engines (both slots left at NoDmaEngine) runs polled requests alone and
+ * refuses an asynchronous one (`has_dma`). `Placement`, the last
+ * parameter, is util/placement.hpp's tag: InRam makes start() and the DMA
+ * line's body one flattened instance each in SRAM
  * (docs/rp2040/platform.md, "A handler in SRAM").
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,

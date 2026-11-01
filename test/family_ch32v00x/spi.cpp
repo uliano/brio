@@ -1,7 +1,8 @@
 // SPI family smoke TU: ch32v00x/spi.hpp's resource, host and client
-// instantiated, the host in both engine arrangements and with the
-// SpiBus arbiter of util/spi_bus.hpp over it - instantiation only, no
-// main(), no hardware. The chapter's arithmetic is pinned in the header
+// instantiated, the host in both engine arrangements (with no engine it
+// runs polled requests alone: an asynchronous one is refused at run time,
+// has_dma false) and with the SpiBus arbiter of util/spi_bus.hpp over it
+// - instantiation only, no main(), no hardware. The chapter's arithmetic is pinned in the header
 // itself; what this fixture adds is the util contract: SpiHost is the
 // Bus a BusMaster accepts, on this architecture as on the other three.
 #include "ch32v00x/clock.hpp"
@@ -27,7 +28,8 @@ using HostDma16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxE
 constexpr SpiPins write_only{.sck = {'C', 5}, .mosi = {'C', 6}};
 using HostNoMiso = SpiHost<1, write_only>;
 // The hold-off an image declares (the class comment): a longer one moves
-// two frames in flight to a slower code, the default keeping /64 and /32.
+// the receive loop's two frames in flight to a slower code, the default
+// keeping /64 and /32.
 using HostSlowHandlers = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 600>;
 using Client = SpiClient<1>;
 // Both placements (util/placement.hpp): the default above, and a plain and
@@ -35,12 +37,18 @@ using Client = SpiClient<1>;
 using RamHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
 using RamHost16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
 static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
-// The loops' cost follows the placement, and so does the polled threshold
-// drawn from it; the pump's, the hold-off and the write-ahead do not.
+// The loops' cost follows the placement, and so do the thresholds drawn
+// from it; the hold-off and the write-ahead do not.
 static_assert(RamHost::polled_gap_cycles < Host::polled_gap_cycles &&
               RamHost::dma_min_frames_polled > Host::dma_min_frames_polled &&
-              RamHost::pump_frame_cycles == Host::pump_frame_cycles &&
               RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
+// The short asynchronous request: one count per code, width and kind, the
+// same at every placement's code from /128 on (a frame of 1024 cycles and
+// more repays E - F by itself).
+static_assert(HostDma::async_min_frames(SpiClock::div128, SpiDataSize::bits8, true) == 1u &&
+              RamHost16::async_min_frames(SpiClock::div128, SpiDataSize::bits8, false) == 1u);
+static_assert(HostDma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true) >
+              HostDma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true));
 
 static_assert(Host::write_ahead_from(SpiDataSize::bits8) == SpiClock::div64 &&
               Host::write_ahead_from(SpiDataSize::bits16) == SpiClock::div32);
@@ -48,6 +56,7 @@ static_assert(HostSlowHandlers::write_ahead_from(SpiDataSize::bits8) == SpiClock
               HostSlowHandlers::write_ahead_from(SpiDataSize::bits16) == SpiClock::div64);
 
 static_assert(!Host::has_engines && HostDma::has_engines && HostDma16::has_engines);
+static_assert(!Host::has_dma && HostDma::has_dma && HostDma16::has_dma && !RamHost::has_dma && RamHost16::has_dma);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(std::is_same_v<Host::Request, Host::Request>);
 
@@ -100,7 +109,6 @@ void host_verbs(uint8_t* buf) {
     (void)H::start(r);
     r.polled = true;
     (void)H::start(r);
-    (void)H::isr();
     (void)H::dma_isr();
     (void)H::status();
     (void)H::recover();
@@ -126,9 +134,9 @@ void all_hosts() {
 // SRAM").
 extern "C" [[gnu::section(".fast_text")]] void spi1_handler();
 BRIO_CH32_VECTOR(spi1_handler) {
-    (void)Host::isr();
-    (void)RamHost::isr();
-    (void)RamHost16::isr();
+    (void)Client::isr();
+    (void)RamHost::dma_isr();
+    (void)RamHost16::dma_isr();
 }
 
 void client_verbs() {

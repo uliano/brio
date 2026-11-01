@@ -7,13 +7,15 @@
  * the shared bus arbiter, or a client that answers another chip's host.
  * The smallest use, a host whose select is an ordinary pin, is written
  * out at the SpiHost alias below: the pads named by number, `using Bus =
- * brio::SpiHost<0, pins>`, `using Spi = brio::SpiBus<Bus, P, 4>` (the
- * arbiter, an active object - a component with its own event queue that
- * the kernel serves one event at a time), `Bus::init(clock, ceiling)`
- * after the clock task, the select driven high, `isr_spi0` bound to
- * Bus::isr() posting TransferDone, and a Bus::Request posted to Spi with
- * its buffers lent and a reply channel inside (docs/rp2350/spi.md reads
- * it line by line).
+ * brio::SpiHost<0, pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5,
+ * uint16_t>>` (two DMA channels, the host's asynchronous way), `using
+ * Spi = brio::SpiBus<Bus, P, 4>` (the arbiter, an active object - a
+ * component with its own event queue that the kernel serves one event at
+ * a time), `Dma::init()` and then `Bus::init(clock, ceiling)` after the
+ * clock task, the select driven high, `isr_dma_0` bound to
+ * Bus::dma_isr() posting TransferDone, and a Bus::Request posted to Spi
+ * with its buffers lent and a reply channel inside (docs/rp2350/spi.md
+ * reads it line by line).
  *
  * The chapter's driver is not here: the PL022 is a licensed design this
  * chip shares with others, so the resource, the host engine and the
@@ -42,11 +44,13 @@
  * the block did not come up, and it hands the pads over itself. A
  * client of the bus posts its Request to the arbiter from its own
  * dispatch; the arbiter calls start() from main context, which runs a
- * polled request to its end inside the call and starts any other on the
- * interrupt. isr() and dma_isr() are interrupt bodies, called from the
- * program's handlers for the instance's line and the engines' DMA line
- * and nowhere else; true from either means the transaction completed
- * and the glue posts TransferDone. The Request's buffers are lent from
+ * polled request to its end inside the call, and an asynchronous one on
+ * the DMA engines - or polled, when too short to repay them, and refused
+ * (spi_rejected) on a host with none. dma_isr() is the interrupt body,
+ * called from the program's handler for the engines' DMA line and
+ * nowhere else; true means the transaction completed and the glue posts
+ * TransferDone. The host arms no source of the instance's own line. The
+ * Request's buffers are lent from
  * the post to the SpiDone the arbiter replies with: untouched and in
  * scope until then, which nothing checks. The select pin a Request
  * carries is the program's, configured before the first request. A
@@ -91,9 +95,9 @@
  * stays a bit of the resource.
  *
  * The line. The four maskable sources of an instance combine into ONE
- * interrupt line (SPI0_IRQ = 31, SPI1_IRQ = 32, datasheet 3.2); the app
- * binds isr_spi0 / isr_spi1 to the instance's isr() body, and those names
- * are bound on both architectures - a Cortex-M vector table on one half,
+ * interrupt line (SPI0_IRQ = 31, SPI1_IRQ = 32, datasheet 3.2); a
+ * client's program binds isr_spi0 / isr_spi1 to its isr() body (a host
+ * leaves the line alone), and those names are bound on both architectures - a Cortex-M vector table on one half,
  * Hazard3's own dispatch on the other - because the interrupt numbering
  * is shared (3.8.4.2). Which is also why `Interrupts` below is the
  * controller core.hpp names and never an NVIC.
@@ -208,15 +212,18 @@ struct Rp2350Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
-    /// Below how many data frames the pump beats the engines, measured
-    /// by bench_rp2350 (docs/rp2350/spi.md): the engines' fixed cost per
-    /// transaction - letter d's spi.dma at 16 frames, wall less the
-    /// wire's cycles and less the block's mode-0 gap: 514 cycles on the
-    /// Cortex-M33, 473 on Hazard3 - over the pump's cost per frame -
-    /// letter e's spi.pump, the handler's 49 / 48 cycles a frame plus the
-    /// interrupt's own entry and exit over a batch of eight: 52 / 54 -
-    /// gives 9.9 / 8.8; the larger, rounded up.
-    static constexpr uint16_t dma_min_frames = 10;
+    /// What the host's two ways cost this chip's cores at 150 MHz, one set
+    /// per architecture (Pl022Costs; docs/rp2350/spi.md, "The short
+    /// request"), measured by test_rp2350_spi's letter f through one call:
+    /// E - F 210 to 220 for a read and 222 to 232 for a write on the
+    /// Cortex-M33, 215 and 223 on Hazard3 (the engines' fixed cost 483 /
+    /// 507 against the polled loop's 262 to 292), and the two loops'
+    /// frames at clk_peri / 2, 24 / 26 cycles received and stored and 16
+    /// written on TNF - the wire's own frame there, so the transmit-only
+    /// loop's turn is no longer and any figure up to 16 draws the same
+    /// counts.
+    static constexpr Pl022Costs costs = core_kind == CoreKind::hazard3 ? Pl022Costs{215u, 225u, 26u, 16u}
+                                                                       : Pl022Costs{215u, 225u, 24u, 16u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).
@@ -314,16 +321,18 @@ template <uint8_t n>
 using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
 
 /**
- * The engine `SpiBus` (= `BusMaster`) drives, over Pl022<n>. `init()` in
- * main after the clock task, the handler bound to `isr()` posting
- * TransferDone to the arbiter, then every transaction a Request posted
- * to that arbiter:
+ * The engine `SpiBus` (= `BusMaster`) drives, over Pl022<n>. `Dma::init()`
+ * and then `init()` in main after the clock task, the DMA line's handler
+ * bound to `dma_isr()` posting TransferDone to the arbiter, then every
+ * transaction a Request posted to that arbiter:
  *
  *   constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
- *   using Bus = brio::SpiHost<0, pins>;
+ *   using Bus = brio::SpiHost<0, pins, brio::DmaTxEngine<4, uint16_t>,
+ *                             brio::DmaRxEngine<5, uint16_t>>;
  *   using Spi = brio::SpiBus<Bus, P, 4>;              // the arbiter AO
  *   using Cs = brio::Pin<17>;
  *
+ *   brio::Dma::init();                                // before the host binds its engines
  *   Bus::init(clock, 8'000'000);                      // a ceiling for the bus
  *   Cs::output(true);
  *
@@ -334,18 +343,20 @@ using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
  *   r.clock = brio::SpiClocks::div4;                  // 37.5 MHz at 150
  *   r.mode = brio::SpiMode::mode0;
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Spi>(r);
+ *   brio::post<Spi>(r);                               // asynchronous: polled stays false
  *
- *   extern "C" void isr_spi0() {
- *       if (Bus::isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
+ *   extern "C" void isr_dma_0() {
+ *       if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
  *   }
  *
- * The same source builds for both architectures: `isr_spi0` is a
+ * The same source builds for both architectures: `isr_dma_0` is a
  * Cortex-M vector on one half and a Hazard3 dispatch entry on the other,
  * under one name.
  *
  * The two engine slots take rp2350/dma.hpp's DmaTxEngine / DmaRxEngine
- * on any two channels, both or neither.
+ * on any two channels, both or neither; with neither (NoDmaEngine, the
+ * default) the host runs polled requests alone and refuses an
+ * asynchronous one (`has_dma`).
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

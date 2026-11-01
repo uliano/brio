@@ -25,8 +25,9 @@
 //   clk_sys, so a frame at divisor d is 8 or 16 x d core cycles.
 //   THE SPI HOST. SpiHost<1> on GP10 (SCK), GP11 (TX), GP8 (RX), GP29 the
 //   select as a GPIO; half-word engines on DMA channels 6 and 7 reporting
-//   on DMA_IRQ_1 (test_rp2040_spi's LinkDmaHost); dma_min_frames 13 on this
-//   chip (rp2040/spi.hpp).
+//   on DMA_IRQ_1 (test_rp2040_spi's LinkDmaHost): an asynchronous request
+//   rides them from the host's count (rp2040/spi.hpp's Pl022Costs), and
+//   SPI1's own line is nobody's.
 //   THE PRESSURE. PWM slice 7's wrap interrupt (rp2040/pwm.hpp's
 //   PwmPeriodicTick shape: free-running, divider 1, no pad handed over -
 //   the slice's pads GP14/GP15 carry nothing of the link or the console),
@@ -78,15 +79,19 @@
 //   p  the ladders through the arbiter at every even divisor from 256 down
 //      to the PIO client's ceiling, clk_peri / 12 = 10.4 MHz (derived in
 //      rp_rubato_link.hpp), on six paths: the polled loop in 8-bit frames
-//      (9) and in 16-bit frames off the engines (32 from an odd address),
-//      the pump the same two ways, the engines (32 byte frames) and the
-//      engines under a polled request (32 half-words); /10 and /8 printed.
-//      STRICT under pressure as in the control, the host's overrun flag
-//      never set at a reply.
-//   w  the arbiter under pressure: the Client above it (20 requests of 6
-//      frames on the pump, two outstanding), Minor below it (10 POLLED
-//      requests of 8, one outstanding) and, in a pressure pass, Pressure
-//      itself (8 requests of 3 on the pump, from its tick), all at the
+//      (9) and in 16-bit frames off a half-word (32 from an odd address),
+//      the asynchronous way short (1 byte frame: on the engines at the
+//      slow rungs, polled inside start() at the fast ones) and off a
+//      half-word (32, polled inside start()), and the engines in both
+//      widths (32 frames); /10 and /8 printed. Every asynchronous window's
+//      way judged against the host's count at the DMA line. STRICT under
+//      pressure as in the control, the host's overrun flag never set at a
+//      reply.
+//   w  the arbiter under pressure: the Client above it (20 asynchronous
+//      requests of 6 frames on the engines, two outstanding), Minor below
+//      it (10 POLLED requests of 8, one outstanding) and, in a pressure
+//      pass, Pressure itself (8 asynchronous requests of 3 on the engines,
+//      from its tick), all at the
 //      command rate inside ONE select window the letter holds, of constant
 //      frames: every reply to its requester in its order, every one
 //      spi_ok, nothing rejected, no timeout, the peer counting every frame.
@@ -434,18 +439,13 @@ extern "C" void isr_timer_1() { bell_alarm_isr(); }
 /// crossed recorded where it landed.
 extern "C" void isr_sio_proc0() { bell_doorbell_isr<note_landing>(); }
 
-extern "C" void isr_spi1() {
-    if (Host::isr()) {
-        done_from_dma = false;
-        brio::post<SpiArb>(brio::TransferDone{Host::status()});
-    }
-}
-
-/// DMA_IRQ_1, the engines' line: the receive block's completion (the
-/// transmit engine reports its errors alone).
+/// DMA_IRQ_1, the engines' line and the host's one interrupt body: the
+/// receive block's completion (the transmit engine reports its errors
+/// alone), counted for letter p's ways.
 extern "C" void isr_dma_1() {
     if (Host::dma_isr()) {
         done_from_dma = true;
+        dma_completions = dma_completions + 1u;
         brio::post<SpiArb>(brio::TransferDone{Host::status()});
     }
 }
@@ -465,7 +465,7 @@ int main() {
 
     bench.letter('n', "the peer's command channel through the arbiter", tn_peer_link);
     bench.letter('o', "the matrix on the DMA engines: modes, widths, the client's bit orders", to_matrix);
-    bench.letter('p', "the ladders: the polled loop, the pump, the engines, every rung", tp_ladders);
+    bench.letter('p', "the ladders: the polled loop, the short request, the engines, every rung", tp_ladders);
     bench.letter('w', "the arbiter under pressure: three requesters, one bus", tw_arbiter);
     bench.letter('i', "dark: every object idle, core 1 parked, nothing lit", ti_dark);
     bench.letter('x', "where a pressure pass's XIP misses come from, no verdict", tx_xip, false);

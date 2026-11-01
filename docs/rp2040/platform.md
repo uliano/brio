@@ -581,7 +581,7 @@ unseen. clk_sys cycles:
 
 **The drivers under the preemptive kernel** - the suite is
 `test_rp2040_rubato_link`, two keys against the WeAct RP2350B's
-unchanged `spi_peer` (`z`, 150 verdicts) and `uart_peer` (`y`, 58
+unchanged `spi_peer` (`z`, 157 verdicts) and `uart_peer` (`y`, 58
 verdicts), three runs of each alike, every verdict green. It runs the real
 SPI and UART stacks inside a Rubato pack of seven objects on core 0:
 `util/spi_bus.hpp`'s arbiter over the engined `SpiHost<1>`
@@ -605,25 +605,29 @@ established:
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds it
   off for its whole length - the slice landed there 57 to 255 times a
-  pass in letter `p`. The FIFOs are the write-ahead on every path (no
-  more than 8 frames in flight, `brio/pl022/spi.hpp`), so a held-off loop
-  or pump leaves a gap on the bus and never a lost frame: the polled loop
-  in 8-bit frames (9) and in 16-bit frames from an odd address (32, off
-  the engines), the pump the same two ways, the engines (32 byte frames)
-  and the engines under a polled request (32 half-words), all byte-exact
-  at both ends at every even divisor from 256 to 12 (10.4 MHz, the PIO
-  client's ceiling as [spi.md](spi.md) derives it), under every pressure
-  as in the control, the block's overrun flag clear at every reply. The
-  first rung past that ceiling, /10 (a half period of 40 ns where the
-  client needs 41.7), is exact on a subset of the six paths that varies
-  from pass to pass, the control's as the pressures'; /8 on none.
+  pass in letter `p`. The FIFOs are the polled loop's write-ahead (no
+  more than 8 frames in flight, `brio/pl022/spi.hpp`), so a held-off
+  loop leaves a gap on the bus and never a lost frame: the polled loop
+  in 8-bit frames (9) and in 16-bit frames from an odd address (32), the
+  asynchronous way short (one byte frame: on the engines at the slow
+  rungs, polled inside `start()` at the fast ones, as the host's count
+  says) and from an odd address (32 16-bit frames, polled inside
+  `start()`), and the engines in 8- and 16-bit frames (32), all
+  byte-exact at both ends at every even divisor from 256 to 12 (10.4
+  MHz, the PIO client's ceiling as [spi.md](spi.md) derives it), under
+  every pressure as in the control, the block's overrun flag clear at
+  every reply, and every asynchronous window gone the way the host's
+  count says. The first rung past that ceiling, /10 (a half period of 40
+  ns where the client needs 41.7), is exact on a subset of the six paths
+  that varies from pass to pass, the control's as the pressures'; /8 on
+  none.
 - **The matrix and the arbiter.** The four modes in both widths, the
   client MSb and LSb first (the LSb rows an exact two-way reversal
   against this MSb-only host) on the engines at clk_peri / 32, byte-exact
   in every pass, the data windows at 907 to 1006 per mille of the
   control's rate under the slice's pressure; three requesters of three
   priorities on one select window (the Client above the arbiter and the
-  preempting object itself on the pump, a requester below it polled)
+  preempting object itself on the engines, a requester below it polled)
   answered every one `spi_ok`, to its requester, in its order, with no
   timeout, no rejection and the peer counting every frame exact.
 - **Road 1 from the other core under the traffic.** In the eighth pass
@@ -714,7 +718,7 @@ it:
 - A DRIVER IS GIVEN util/placement.hpp's `InRam`, its last template
   parameter, for a path no vector reaches - a host's `start()`, in main
   context - or a program that keeps its vectors in the flash: `SpiHost`
-  (`start()`, the pump, the DMA line's body), `Uart` (the vector's body,
+  (`start()`, the DMA line's body), `Uart` (the vector's body,
   the DMA line's), `I2cHost` (`start()`, the vector's body, the DMA
   line's). Each path is ONE flattened instance in `.fast_text.brio`, a
   call from the flash through a veneer; `InFlash`, the default, leaves
@@ -735,8 +739,6 @@ every timed run). F: every driver InFlash and every vector in the flash
 | path | F | R | V | B |
 |---|---|---|---|---|
 | SPI polled request, a command byte and 2 data bytes (`spi.req`) | 788 / 11364 | 801 / 2944 | 788 / 11364 | 801 / 2944 |
-| SPI pump, 16 frames at clk_peri / 2, wall | 1527 / 20936 | 1598 / 9968 | 1527 / 11100 | 1580 / 4280 |
-| ... its handler, two entries | 929 / 7889 | 997 / 3790 | 929 / 929 | 979 / 979 |
 | SPI on the engines, 16 frames, wall | 1631 / 34002 | 1473 / 18028 | 1447 / 22782 | 1464 / 10768 |
 | ... the DMA line's handler | 190 / 8622 | 202 / 4664 | 190 / 190 | 193 / 193 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 5274 / 16628 | 1826 / 9865 | 823 / 2897 | 1391 / 2964 |
@@ -748,8 +750,7 @@ every timed run). F: every driver InFlash and every vector in the flash
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
-  a polled request 13 cycles dearer under InRam, a pump entry some 35,
-  an I2C entry 26-35 - the cache serves a warm path at the SRAM's pace,
+  a polled request 13 cycles dearer under InRam, an I2C entry 26-35 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
   (`spi.poll` of 256 frames 5744 against 5757). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
@@ -766,10 +767,11 @@ What the rows say:
   closest to a warm one; what it still fetches is the caller's code, the
   idle path and the tick.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
-  `start()` 944 bytes without engines and 1344 with them, its shared
-  engine launch 568, the pump 268 to 320, the DMA line's body 540; the
+  `start()` 748 bytes without engines and 1344 with them, its shared
+  engine launch 584, the DMA line's body 668 (a command block chained to
+  its data block from there); the
   I2C host's 592 to 1652; the UART's 156 to 720 - the bench's four
-  drivers, in all their types, 11.6 KB.
+  drivers, in all their types, 10.9 KB.
 
 So: a program that cannot afford the cold path - a first transaction
 after `init()` on a deadline, a handler that must answer within a frame

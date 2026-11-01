@@ -15,9 +15,12 @@
 // file scope:
 //
 //   SysClock, clock, P, Serial, serial, bench
-//   LinkHost, LinkDmaHost    SpiHost<1, {sck, tx, rx}>: the pump and the
-//                            polled loop; the same with half-word engines on
-//                            DMA channels 6 and 7, reporting on DMA_IRQ_1
+//   LinkHost, LinkDmaHost    SpiHost<1, {sck, tx, rx}>: the polled loop
+//                            alone (no engines: an asynchronous request is
+//                            refused); the same with half-word engines on
+//                            DMA channels 6 and 7, reporting on DMA_IRQ_1,
+//                            which run every request of the letters
+//                            asynchronously
 //   LinkClient               SpiClient<1, {sck, tx, rx, cs}>
 //   SckPin, TxPin, RxPin,    the four link pads; CsPin is this end's GPIO
 //   CsPin                    select while it hosts, its client's select pad
@@ -69,7 +72,7 @@ volatile PairOwner pair_owner = PairOwner::none;
 volatile bool pair_done = false;
 volatile uint8_t pair_status = 0;
 volatile uint32_t pair_isr_entries = 0;
-/// Letter w's wedge: the pump's ISR body runs and its completion is NOT
+/// Letter w's wedge: the DMA line's body runs and its completion is NOT
 /// posted to the arbiter - the lost completion the per-bus timeout answers.
 volatile bool pair_swallow = false;
 
@@ -127,9 +130,13 @@ bool link_dma_mode() {
 /// side, for the client's loop to see the edge.
 void link_hold() { spin_us(30); }
 
-/// One request through a host, polled; the status or no_answer.
+/// One request through a host, the status or no_answer: POLLED on a host
+/// without engines, and ASYNCHRONOUS on one with them - on the engines, or
+/// polled inside start() where the host's count says the request is too
+/// short for them - its completion awaited on the DMA line's flag, bounded
+/// at 200 ms (the slowest window here, 256 frames at /512, is 33 ms).
 template <typename H>
-uint8_t polled(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode mode, SpiDataSize bits) {
+uint8_t run_request(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode mode, SpiDataSize bits) {
     typename H::Request r{};
     r.cs = {};
     r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
@@ -140,8 +147,12 @@ uint8_t polled(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMod
     r.clock = rate;
     r.mode = mode;
     r.bits = bits;
-    r.polled = true;
-    return H::start(r) ? H::status() : no_answer;
+    r.polled = !H::has_dma;
+    pair_done = false;
+    if (H::start(r)) {
+        return H::status();
+    }
+    return wait_until([] { return pair_done; }, 200'000u) ? pair_status : no_answer;
 }
 
 /// One protocol window: prime, select, hold, the transaction, hold,
@@ -157,7 +168,7 @@ uint8_t link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = li
     spin_us(10);
     CsPin::clear();
     link_hold();
-    const uint8_t st = polled<H>(tx, rx, n, rate, mode, bits);
+    const uint8_t st = run_request<H>(tx, rx, n, rate, mode, bits);
     link_hold();
     CsPin::set();
     return st;
@@ -314,7 +325,7 @@ struct Exchange {
     uint8_t spare = 0;
     bool wide = false;      ///< 16-bit frames (spilink::spare_wide), `count` frames
     uint16_t ms = 400;
-    bool engines = false;   ///< this end clocks the data on its DMA engines
+    bool engines = false;   ///< this end runs the data asynchronously, on its DMA engines
 };
 
 /// The most BYTES an exchange carries.
@@ -669,8 +680,11 @@ namespace pk {
 
 /// A 100-tick per-bus timeout (100 ms of the ticker): three orders of
 /// magnitude above the longest transaction here (8 frames at /128, 65 us),
-/// so only a completion that never comes meets it (letter w).
-using SpiArb = SpiBus<LinkHost, P, 4, BusPassThrough, 100>;
+/// so only a completion that never comes meets it (letter w). Over the
+/// engined host: an asynchronous request of 8 frames at /128 repays the
+/// engines many times over, so the three asynchronous requests ride them
+/// and complete on the DMA line.
+using SpiArb = SpiBus<LinkDmaHost, P, 4, BusPassThrough, 100>;
 
 class Probe {
 public:
@@ -699,8 +713,8 @@ void pump() {
     }
 }
 
-LinkHost::Request request(const uint8_t* tx, uint8_t* rx, bool polled) {
-    LinkHost::Request r{};
+LinkDmaHost::Request request(const uint8_t* tx, uint8_t* rx, bool polled) {
+    LinkDmaHost::Request r{};
     r.cs = {};   // the letter holds the select across the four
     r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
     r.cmd_len = 0;
@@ -745,9 +759,10 @@ void tq_kernel() {
             }
         }
     }
+    (void)link_dma_mode();
     pk::BusKernel::init_all();
     pair_owner = PairOwner::bus_ao;
-    LinkHost::prime(SpiMode::mode0, link_clock);
+    LinkDmaHost::prime(SpiMode::mode0, link_clock);
     spin_us(10);
     CsPin::clear();
     link_hold();
@@ -782,7 +797,8 @@ void tq_kernel() {
     const bool rep = peer_report(r);
     print(serial, "  kernel: ", pk::Probe::n, " replies; host mism=", mism, "; the peer read ", r.count, " of ", total,
           " with mism=", r.mism, " flags=", hex(r.flags), crlf);
-    bench.verdict("FOUR TRANSACTIONS QUEUED FROM ONE DISPATCH (one polled among three pumped) come back in order, "
+    bench.verdict("FOUR TRANSACTIONS QUEUED FROM ONE DISPATCH (one polled among three on the engines) come back in "
+                  "order, "
                   "every one spi_ok, and the bytes on the wire are what each request lent - read back by A SECOND "
                   "CHIP, util/spi_bus.hpp and kernel/ unchanged",
                   replies_ok && mism == 0u && rep && r.count == total && r.mism == 0u);
@@ -1437,12 +1453,13 @@ void tw_wedge() {
     }
     // The select stays HIGH: the peer is not addressed, the transactions
     // run against nobody (its answer line dark, this end reading the pull-up)
-    // and only their completions matter. The first is pumped with its
-    // completion swallowed (the ISR body run, nothing posted): the arbiter's
-    // 100-tick timeout must answer it spi_timeout and recover() the engine.
+    // and only their completions matter. The first rides the engines with
+    // its completion swallowed (the DMA line's body run, nothing posted):
+    // the arbiter's 100-tick timeout must answer it spi_timeout and
+    // recover() the engine.
     // The bound: the time event is armed at the start and matures on the
     // 100th tick, the first of which comes anywhere within a tick: 99 to
-    // 100 ms, plus the pump's turn - judged 99 to 102 ms.
+    // 100 ms, plus the kernel loop's turn (pk::pump()) - judged 99 to 102 ms.
     static uint8_t wtx[4][8];
     static uint8_t wrx[4][8];
     for (uint8_t i = 0; i < 4u; ++i) {
@@ -1450,6 +1467,7 @@ void tw_wedge() {
             wtx[i][k] = static_cast<uint8_t>(0x30u + 8u * i + k);
         }
     }
+    (void)link_dma_mode();
     pk::BusKernel::init_all();
     pair_owner = PairOwner::bus_ao;
     pair_swallow = true;
@@ -1488,7 +1506,7 @@ void tw_wedge() {
                   "timeout, 99 to 102 ms after the request (100 ticks)",
                   first_n == 1u && first == spi_timeout && took_us >= 99'000u && took_us <= 102'000u);
     bench.verdict("and recover() puts the engine back where start() is legal: the next four transactions on the same "
-                  "bus AO (three pumped, one polled) run to spi_ok",
+                  "bus AO (three on the engines, one polled) run to spi_ok",
                   after_n == 4u && ok == 4u);
     (void)link_command_mode();
     bench.verdict("the command channel is back after the wedge", command(Op::ping));
@@ -1595,34 +1613,29 @@ void tx_slips() {
 
 // ---- the vectors --------------------------------------------------------------------------
 
+/// The instance's own line: the client's alone (letters r, m, s) - no host
+/// arms a source of it - and masked whole for anyone else.
 [[gnu::always_inline]] inline void pair_spi_isr() {
     pair_isr_entries = pair_isr_entries + 1u;
-    switch (pair_owner) {
-        case PairOwner::host:
-            if (LinkHost::isr()) {
-                pair_status = LinkHost::status();
-                pair_done = true;
-            }
-            break;
-        case PairOwner::bus_ao:
-            if (LinkHost::isr() && !pair_swallow) {
-                post<pk::SpiArb>(TransferDone{LinkHost::status()});
-            }
-            break;
-        case PairOwner::client: client_vector_serve(); break;
-        case PairOwner::dma_host:
-            if (LinkDmaHost::isr()) {
-                pair_status = LinkDmaHost::status();
-                pair_done = true;
-            }
-            break;
-        default: Pl022<1>::interrupts(SpiInterrupt::all, false); break;
+    if (pair_owner == PairOwner::client) {
+        client_vector_serve();
+    } else {
+        Pl022<1>::interrupts(SpiInterrupt::all, false);
     }
 }
 
+/// The DMA line: the engined host's one interrupt body, its completion a
+/// flag for the letters' own waits, or a TransferDone for the arbiter of
+/// letters q and w (swallowed for w's wedge).
 [[gnu::always_inline]] inline void pair_dma_isr() {
-    if (pair_owner == PairOwner::dma_host && LinkDmaHost::dma_isr()) {
-        pair_status = LinkDmaHost::status();
-        pair_done = true;
+    if (pair_owner == PairOwner::dma_host) {
+        if (LinkDmaHost::dma_isr()) {
+            pair_status = LinkDmaHost::status();
+            pair_done = true;
+        }
+    } else if (pair_owner == PairOwner::bus_ao) {
+        if (LinkDmaHost::dma_isr() && !pair_swallow) {
+            post<pk::SpiArb>(TransferDone{LinkDmaHost::status()});
+        }
     }
 }

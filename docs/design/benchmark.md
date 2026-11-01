@@ -154,7 +154,7 @@ beyond the console:
 - `t`: the tick's floor: a second of idle with nothing to do, the tick
   handler and the loop's turnaround being all that is busy.
 
-The bus operations (a bus request polled, pumped and engined; a
+The bus operations (a bus request polled and engined; a
 receive run; an I2C tenure) join the application as the driver they
 measure is reworked, each with its own document carrying the numbers.
 A service whose cost depends on the kernel it runs under is measured in
@@ -283,15 +283,15 @@ named are SCK.
 
 | family | copy 4096 x (the DMA's rate) | fill 4096 x | copy fixed cost | paced x | spi.dma x, irq | spi fixed cost per transaction |
 |---|---|---|---|---|---|---|
-| STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.06 at 8 MHz, 1.26 at 32 MHz; 16-bit frames 1.03, 1 | 1083 cycles (was 1291) |
-| STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (was 1027) | 1.00 | 1.04 at 22.5 MHz; 16-bit frames 1.01, 1 | 652 to 664 cycles = 3.7 us (was 13.7 us, two interrupts) |
-| CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 864 cycles (871 in 16-bit frames) |
-| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles (was 360) | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 514 cycles (was 1087, two interrupts): 332 the launch |
-| CH32V303VCT6 | 6.28 (6 cycles an item) | 6.25 | 298 cycles | 1.00 | 1.07 at 36 MHz; 16-bit frames 1.03, 1 | 595 cycles: 397 the launch |
+| STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.07 at 8 MHz, 1.28 at 32 MHz; 16-bit frames 1.03, 1 | 1165 to 1179 cycles |
+| STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (was 1027) | 1.00 | 1.03 at 22.5 MHz; 16-bit frames 1.01, 1 | 603 to 639 cycles = 3.4 us |
+| CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 943 cycles (946 in 16-bit frames), at 32 and 256 frames |
+| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles (was 360) | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 539 cycles: 339 the launch |
+| CH32V303VCT6 | 6.28 (6 cycles an item) | 6.25 | 298 cycles | 1.00 | 1.07 at 36 MHz; 16-bit frames 1.04, 1 | 595 cycles: 390 the launch |
 | CH32X035F8U6 (48 MHz HSI, 2 WS) | 6.56 (6 cycles an item from SRAM, 11.6 from the flash) | 6.48 | ~890 cycles (the instrument inside, the core held awake by the console's ring) | 1.00 (1024 bytes paced by a USART's transmitter at 1 Mbaud: the stratum has no timer driver) | - (not measured in this grammar: the host's costs are in [the CH32X035 SPI page](../ch32x035/spi.md)) | - |
-| RP2040 | 1.38 (the bus's rate; the completion's interrupt in the wall) | 1.63 | ~460 cycles to the completion's interrupt (the instrument inside) | 1.04 | 1.30 at 31.25 MHz (38 cycles a byte: the block's mode-0 gap); 16-bit frames 1.15, 1 | 1021 cycles = 8.2 us |
-| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles (was 163) | 1.00 | 1.32 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.16, 1 | 562 cycles over the wire and its gap = 3.7 us (was 5.2, two interrupts) |
-| RP2350, Hazard3 | 1.04 | 1.29 | 47 cycles | 1.00 | 1.30 at 75 MHz; 16-bit frames 1.15, 1 | 494 cycles over the wire and its gap = 3.3 us |
+| RP2040 | 1.38 (the bus's rate; the completion's interrupt in the wall) | 1.63 | ~460 cycles to the completion's interrupt (the instrument inside) | 1.04 | 1.29 at 31.25 MHz (38 cycles a byte: the block's mode-0 gap); 16-bit frames 1.15, 1 | 954 cycles = 7.6 us |
+| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles (was 163) | 1.00 | 1.30 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.15, 1 | 534 cycles over the nominal wire, 48 of them the gap = 3.6 us |
+| RP2350, Hazard3 | 1.04 | 1.29 | 47 cycles | 1.00 | 1.29 at 75 MHz; 16-bit frames 1.14, 1 | 492 cycles over the nominal wire = 3.3 us |
 
 What the rows say:
 
@@ -329,12 +329,12 @@ What the rows say:
   engine's. What is brio's is the number of lines: about 1.15 KB of
   code per transaction against the SDK's two inlined calls, a size
   still to shrink ([the RP2350 SPI page](../rp2350/spi.md)).
-- The engined transaction's fixed cost moves with the host's `start()`
-  and the platform's wake: the CH32V203's 571 cycles became 514 when
-  its idle path took one turn per wake (the second turn a stale event
-  made is gone from every completion); the STM32F446RE's 558 are 652
-  to 664 with the hold-off threshold `start()` derives and the image's
-  placement, not split.
+- The engined transaction's fixed cost is the host's `start()`, its
+  vector and the platform's wake more than the engines': on the
+  STM32G0 the short request's decision, the chained command block's
+  test and the request's copy in `start()` and in the vector are inside
+  its 1165 to 1179 cycles, and the CH32V203's idle path takes one turn
+  per wake, so no stale event costs a completion a second one.
 
 ## Letter e: the SPI host above the wire
 
@@ -344,8 +344,10 @@ frames (no receive buffer: the display's pixel path), `spi.poll.rx`
 the same with one (the shape that keeps as many frames in flight as
 the receive side holds under any handler of the image: a FIFO's depth,
 two on a two-level buffer, and on a one-deep register two only above
-the family's computed rate threshold), `spi.pump` the write on
-interrupts, `spi.req` a polled request of one command byte and two of
+the family's computed rate threshold), the asynchronous column the
+host's count (the fewest byte frames a read must have to ride the
+engines, a shorter one running polled inside `start()`; a family with no
+DMA refuses an asynchronous request), `spi.req` a polled request of one command byte and two of
 data at the family's /16 with the select and the D/C on real pads (the
 fixed cost = wall minus the wire's time, the price of a DCS command),
 and the vendor's own polled full-duplex loop on the same board in a
@@ -353,64 +355,60 @@ scratch program (ST's `HAL_SPI_TransmitReceive`, the EVT's 2Lines
 loop, the pico-sdk's blocking loop, the data sheet's sequence where no
 library was read). The rates named are SCK.
 
-| family (clock) | spi.poll x at /4, /16 | spi.poll.rx x at /4, /16 | spi.pump x at /4, /16; interrupts per 256 | spi.req 3 bytes, fixed cost (before) | the vendor's loop, x at /4, /16 |
+| family (clock) | spi.poll x at /4, /16 | spi.poll.rx x at /4, /16 | asynchronous: a byte read on the engines from, at /4 | spi.req 3 bytes, fixed cost | the vendor's loop, x at /4, /16 |
 |---|---|---|---|---|---|
-| AVR128DB48 (24 MHz; 6 and 1.5 MHz) | 1.09, 1.02 (two cycles a byte the block's, beyond the wire) | 1.09, 1.02 | 7.17, 1.79; 130 (two bytes an entry; the handler, 230 cycles a byte, bounds both rates) | 286, the stopwatch's 65 inside | the data sheet's buffer-mode sequence 1.09, 1.01 |
-| AVR64EA48 (20 MHz; 5 and 1.25 MHz) | 1.09, 1.02 (the DB's cycles a byte, to the cycle) | 1.09, 1.02 | 7.00, 1.75; 131 (the handler, 223 cycles a byte, bounds both rates) | 280, the stopwatch's 60 inside | not run on this board |
-| SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.38, 1.01 (44 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | 12.64, 3.16; 258 (the handler, 404 cycles a character, outlasts the character at both rates) | 568 (943) | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
-| STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.17, 1.01 | 5.31, 1.34; 86 (three byte frames an interrupt, the FIFO's capacity) | 384 (998) | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
-| STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.60 (one in flight below the 236-cycle threshold), 1.00 (two) | 2.61, 1.00 (two in flight from /16); 256 | 243 (517) | HAL 2.97, 1.30 |
-| CH32V006K8U6 (48 MHz; 12 and 3 MHz) | 1.03, 1.00 | 1.80 (one in flight), 1.17 (one in flight below /64) | 8.32, 2.08 (the handler, 265 cycles a frame, bounds both rates; the wire's from /64); 257 | 387 | not run on this board |
-| CH32V203C8T6 (144 MHz; 36 and 9 MHz) | 1.02, 1.00 | 1.61 (one in flight), 1.09 | 2.88 (two ahead on a write, 128 interrupts), 1.22; 256 | 263 (468) | the EVT's 2Lines loop 1.23, 1.00, and it loses a frame in every run at /4 on 8-bit frames |
-| CH32V303VCT6 (144 MHz; 36 and 9 MHz; the V4F, ilp32f) | 1.02, 1.00 | 1.36, 1.13 | 2.57 (128 interrupts), 1.11 (256) | 235 | not run on this board |
-| RP2040 (125 MHz; 31.25 and 7.8125 MHz) | 1.13, 1.00 in mode 3 (1.22, 1.19 in mode 0: the block's gap) | 1.19, 1.00 in mode 3 | 2.76, 1.04 in mode 3; 32 (51 at /16) | 462 | pico-sdk ([the RP2040 SPI page](../rp2040/spi.md)) |
-| RP2350, Cortex-M33 (150 MHz; 37.5 and 9.375 MHz) | 1.02, 1.00 in mode 3 (1.21, 1.19 in mode 0: the block's gap) | 1.02, 1.00 | 1.69, 1.02; 32 (52 at /16) | 312 (593) | pico-sdk 1.00 at /4 in mode 3, 1.00 at /16 |
-| RP2350, Hazard3 | 1.02, 1.00 | 1.02, 1.00 | 1.65, 1.02; 32 (52 at /16) | 277 (621) | pico-sdk 1.19, 1.00 |
+| AVR128DB48 (24 MHz; 6 and 1.5 MHz) | 1.09, 1.02 (two cycles a byte the block's, beyond the wire) | 1.09, 1.02 | refused: no DMA | 283 by the listing (the AVR64EA48's measured drop of 3 cycles on the same instructions; not re-run on this board), the stopwatch's 65 inside | the data sheet's buffer-mode sequence 1.09, 1.01 |
+| AVR64EA48 (20 MHz; 5 and 1.25 MHz) | 1.09, 1.02 (the DB's cycles a byte, to the cycle) | 1.09, 1.02 | refused: no DMA | 277, the stopwatch's 60 inside | not run on this board |
+| SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.32, 1.01 (42 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | refused: no DMA slot (erratum 1.10.4) | 539 | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
+| STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.12, 1.01 (1.05 at /4 in an image placing the loop elsewhere) | 18 frames (5 at /16) | 414 with the loop in the flash, 382 in SRAM, the stopwatch's ~62 inside | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
+| STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.44 (one in flight below the 236-cycle threshold), 1.00 (two) | 5 frames (2 at /16) | 250 | HAL 2.97, 1.30 |
+| CH32V006K8U6 (48 MHz; 12 and 3 MHz) | 1.03, 1.00 | 1.87 (one in flight), 1.21 (one in flight below /64; the wire's from /64 with two) | 9 frames (4 at /16) | 371 | not run on this board |
+| CH32V203C8T6 (144 MHz; 36 and 9 MHz) | 1.02, 1.00 | 1.62 (one in flight), 1.09 | 5 frames (2 at /16) | 256 | the EVT's 2Lines loop 1.23, 1.00, and it loses a frame in every run at /4 on 8-bit frames |
+| CH32V303VCT6 (144 MHz; 36 and 9 MHz; the V4F, ilp32f) | 1.02, 1.00 | 1.37, 1.14 | 9 frames (3 at /16) | 223 | not run on this board |
+| RP2040 (125 MHz; 31.25 and 7.8125 MHz) | 1.28, 1.00 in mode 3 (1.28, 1.19 in mode 0: the loop's 40 cycles a frame, then the block's gap) | 1.34, 1.00 in mode 3 (42 cycles a frame received and stored) | 7 frames in mode 0 (4 at /8) | 401 | pico-sdk ([the RP2040 SPI page](../rp2040/spi.md)) |
+| RP2350, Cortex-M33 (150 MHz; 37.5 and 9.375 MHz) | 1.02, 1.00 in mode 3 (1.20, 1.19 in mode 0: the block's gap) | 1.02, 1.00 | 6 frames in mode 0 (3 at /8) | 277 | pico-sdk 1.00 at /4 in mode 3, 1.00 at /16 |
+| RP2350, Hazard3 | 1.01, 1.00 | 1.01, 1.00 | 6 frames in mode 0 (3 at /8) | 254 | pico-sdk 1.19, 1.00 |
 
 What the rows say:
 
 - The polled write is the wire's from the second-fastest rate on every
   family measured but two (x 1.01 to 1.05 at /4): the AVR's 1.09 is
   the block's two cycles a byte, the data sheet's own loop the same
-  ([the AVR SPI page](../avrxt/spi.md)), and the RP2040's 1.13 in mode
-  3 its loop's 35 cycles a frame against 32 on the M0+. Every command
-  phase and a display's pixel run pay the wire and a fixed cost of 235
-  to 390 cycles a request on the 32-bit cores, 460 on the RP2040 and
-  570 on the SAM behind two wait states, 286 on the AVR.
+  ([the AVR SPI page](../avrxt/spi.md)), and the RP2040's 1.28 in mode
+  3 its loop's 40 cycles a frame against 32 on the M0+. Every command
+  phase and a display's pixel run pay the wire and a fixed cost of 223
+  to 414 cycles a request on the 32-bit cores, 539 on the SAM behind
+  two wait states, 277 to 283 on the AVR.
 - The polled read is bounded by the receive side: where the block has
   a FIFO or a two-level buffer it reads at the wire too; on the
   one-deep F1 lineage (the STM32F4, the CH32V203, the CH32V303, the
   CH32V006) it keeps one frame in flight below the family's threshold
-  and pays the turnaround every frame, 1.36 to 1.80 at /4, because two
+  and pays the turnaround every frame, 1.37 to 1.87 at /4, because two
   in flight lose a frame to any handler longer than the frame time,
   measured on every family that tried it; above the threshold it is
   the wire's. A loop that refills on TXE whenever it can (the EVT's
   shape) falls behind the wire cumulatively at /4 and loses frames
   with nothing live but the tick.
-- The pump is the handler's: where a frame outlasts the handler (the
-  FIFO families from /16, the one-deep ones from their threshold) the
-  bus never idles; faster than that the handler bounds the bus and the
-  thread, and the polled style or the engines are the bulk path; each
-  family's `dma_min_frames` is that quotient.
-- Priming before arming is the rule on every family with a
-  write-ahead: the G0, the CH32V203, the PL022 and the SAM each
-  measured a handler entering between the first two writes when the
-  line was armed first, a frame written twice or a FIFO overrun.
+- An asynchronous request is the engines' alone: after their fixed
+  cost (letter d) the core is free for the wire's whole time. A request
+  shorter than that cost runs polled inside `start()`, and each family's
+  count is ceil((E - F) / frame): E - F the engines' fixed cost above a
+  polled request's, measured as one difference through one call, over a
+  polled frame's cost at the rate (the wire's frame or the loop's turn,
+  the longer) - from 5 to 18 byte frames read at /4. The AVR and the
+  SAM C21 have no engines and refuse an asynchronous request
+  ([spi-bus.md](spi-bus.md), "Two ways to run a request").
 - The vendor's loops are not wire-bound at /4 on any of these cores (a
   tick call per turn in the HAL, a two-flag alternation elsewhere);
   brio's write shape is ahead of every one of them and its read shape
   within a fifth or ahead, the gaps named in each family's SPI
   document.
-- The request's fixed cost fell with the pin edges made inline
-  (`PinRef::set/clear`): the SAM's 608 to 568, the CH32V203's 280 to
-  263, the G0's 399 to 384. On the RP2350 the host's place is the
+- The select's and the D/C's edges are inline stores in the request's
+  path (`PinRef::set/clear`). On the RP2350 the host's place is the
   program's (`util/placement.hpp`): warm, the flash and SRAM read
   within the call's few cycles, and what SRAM buys is the cold request
   ([the RP2350 platform page](../rp2350/platform.md), "A handler in
-  SRAM"). The SAM's pump reads 12.64 and 3.16 because the bench's
-  SERCOM1 vector serves letter u's loop too: its dispatch and a larger
-  prologue stand in front of every pumped character (404 cycles a
-  character, 377 with the pump alone on the vector).
+  SRAM").
 
 ## Letter u: the UART transport
 

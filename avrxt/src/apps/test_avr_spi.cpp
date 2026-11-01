@@ -8,13 +8,13 @@
 // idle levels, the write-collision flag and its documented clear
 // sequence, the buffer mode's four flags and their clear disciplines,
 // the host demotion an SS pin can force, the two ISR bodies, the clock
-// rebase with an SCK ceiling, the transfer engine (SpiHost) with both
-// its completion styles (the pump also with the core in IDLE between its
-// interrupts), and the read the silicon does not take - its own sweep and
-// the sweep of the repair read a cure by RXCIF would make, then the
-// engine through it under a handler that holds the core at every phase
-// (TCB2), and the engine's init() and recover() emptying the FIFO it
-// leaves (recover() waiting for the bytes in flight).
+// rebase with an SCK ceiling, the transfer engine (SpiHost) - its polled
+// requests, and its refusal of an asynchronous one (no DMA on these
+// parts: spi_rejected, nothing on the wire) -, and the read the silicon
+// does not take - its own sweep and the sweep of the repair read a cure
+// by RXCIF would make, then the engine through it under a handler that
+// holds the core at every phase (TCB2), and the engine's init() and
+// recover() emptying the FIFO it leaves.
 //
 // THE RATE ON THE WIRE, which a board answering itself cannot tell by
 // its data: a frame inside a polled block of the engine timed on the
@@ -165,6 +165,9 @@ using SckMeter = FrequencyMeter<T0>;
 using ChMosi = EventChannel<4>;
 using T1 = Tcb<1>;
 using MosiCount = PulseCounter<T1>;
+// The same TCB counting the SCK event instead: letter j's witness that a
+// refused request clocks nothing.
+using SckCount = PulseCounter<T1>;
 
 // THE RULER of the wire-time verdicts (docs/design/benchmark.md, the
 // family's row): TCB3 and TCB2 cascaded into one 32-bit count of CLK_PER
@@ -191,8 +194,6 @@ volatile uint16_t captures = 0;
 volatile uint16_t min_ticks = 0xFFFF;
 volatile uint16_t last_ticks = 0;
 
-volatile bool engine_mode = false;      // the SPI vector belongs to the engine
-volatile bool engine_done = false;
 volatile bool buffer_isr = false;       // which INTFLAGS layout the ISR must use
 volatile uint16_t isr_count = 0;
 volatile uint8_t isr_flags = 0;
@@ -214,13 +215,12 @@ TwoKeyTestBench<Serial, 'y'> bench;
 // once, or lets `hold_skip` whole transfers pass on the SCK pad and
 // returns inside the next one (a write then meets a transfer) or in the
 // gap after it (a write then meets none). Every wait on the pad is
-// bounded; a wait that ran out counts in `hold_lost`. TCA1 is also the
-// backstop of letter j's sleep: there its overflow is a wake-up nobody
-// else gives, and is counted. Mode 0 throughout: SCK idles low.
+// bounded; a wait that ran out counts in `hold_lost`. Mode 0 throughout:
+// SCK idles low.
 
 using Hold = Tca<1>;
 
-enum class HoldShape : uint8_t { off, plain, into_transfer, into_gap, backstop };
+enum class HoldShape : uint8_t { off, plain, into_transfer, into_gap };
 volatile HoldShape hold_shape = HoldShape::off;
 volatile uint16_t hold_offset = 0;    ///< TCA1 ticks at CLK_PER from the select's fall
 volatile uint16_t hold_spin = 0;      ///< the handler's length, four-cycle turns
@@ -259,7 +259,7 @@ void hold_arm(HoldShape shape, uint16_t offset_us, uint16_t spin_us, uint8_t ski
     hold_lost = 0;
     Ss::sense(PinSense::none);
     Ss::clear_flag();
-    if (shape != HoldShape::off && shape != HoldShape::backstop) Ss::sense(PinSense::falling);
+    if (shape != HoldShape::off) Ss::sense(PinSense::falling);
 }
 
 void verdict(const char* name, bool ok) { bench.verdict(name, ok); }
@@ -289,8 +289,6 @@ void quiesce() {
     Ss::pull(PinPull::none);
     Ss::invert(false);
     hold_arm(HoldShape::off, 0, 0, 0);
-    engine_mode = false;
-    engine_done = false;
     buffer_isr = false;
     isr_count = 0;
     captures = 0;
@@ -1212,21 +1210,14 @@ void ti_rebase() {
 uint8_t eng_rx[8];
 const uint8_t eng_cmd[3] = {0x11, 0x22, 0x33};
 
-bool run_engine(const Host::Request& r, uint32_t spins = 400'000u) {
-    engine_done = false;
-    engine_mode = true;
-    if (Host::start(r)) {
-        engine_mode = false;
-        return true;                       // completed synchronously
-    }
-    for (uint32_t i = 0; i < spins && !engine_done; ++i) {}
-    engine_mode = false;
-    return engine_done;
-}
+/// One request through the engine: true when start() completed it
+/// (every request this host takes completes inside the call) with
+/// spi_ok.
+bool run_engine(const Host::Request& r) { return Host::start(r) && Host::status() == spi_ok; }
 
 void tj_engine() {
-    print(serial, "j the transfer engine: descriptors, both completion styles, CS and "
-                  "DC, the pinless refusal", crlf);
+    print(serial, "j the transfer engine: descriptors, the polled requests and the refusal of "
+                  "an asynchronous one, CS and DC, the ceiling", crlf);
     quiesce();
     verdict("engine init on ALT1", Host::init(clock));
     verdict("the engine took the route", S0::routed() == SpiRoute::alt1);
@@ -1243,56 +1234,65 @@ void tj_engine() {
     verdict("a polled request completes synchronously and fills rx", all_ff);
     verdict("the engine released CS", Ss::read());
 
-    // The ISR pump.
-    for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
-    ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                     SpiClock::div64, SpiMode::mode0, false, 0});
-    bool pumped = ok;
-    for (uint8_t i = 0; i < 8; ++i) pumped = pumped && eng_rx[i] == 0xFF;
-    verdict("the ISR pump moves the same bytes", pumped);
-    verdict("the pump released CS", Ss::read());
-
-    // The pump with the core ASLEEP: IDLE between its interrupts, each of
-    // them the wake-up (DS40002247B 28.1, "Wake-up from Idle mode"). The
-    // test, the arm and SEI; SLEEP back to back close the lost wake-up
-    // (the instruction after SEI runs before a pending interrupt). TCA1's
-    // overflow 20 ms on is the backstop - a wake-up nobody else gives, and
-    // counted: eight bytes at CLK_PER/64 take 0.17 ms.
+    // THE REFUSAL: asynchronous is DMA, and this host has none. A request
+    // not marked polled answers start() true at once with spi_rejected,
+    // before the registers or the select are touched. The witnesses: the
+    // SCK event counted on TCB1 stays at zero; the select (PE3) never
+    // falls - its falling edge sensed into the pin's flag with interrupts
+    // masked, so that no handler takes the flag, and read after; CTRLA and
+    // CTRLB stay what the polled request before left (mode 0 at
+    // CLK_PER/16) although the refused request asks for mode 3 at
+    // CLK_PER/64, so no CPOL flip reaches the SCK pad, which stays low; rx
+    // keeps its marker. The same request polled is the control of every
+    // witness: 64 edges counted, the select's fall seen, status() spi_ok.
     {
-        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
+        static_assert(!Host::has_dma);
+        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0x5A;
         quiet();
-        hold_arm(HoldShape::backstop, 0, 0, 0);
-        (void)Hold::init({.mode = TcaMode::normal, .clock = TcaClock::div64, .period = 7500});
-        Hold::enable_ovf_interrupt(true);
-        engine_done = false;
-        engine_mode = true;
-        uint8_t wakes = 0;
+        ChSck::source(S0::SckEvent{});
+        SckCount::init(ChSck{});
+        SckCount::reset();
+        const uint8_t ctrla = S0::regs().CTRLA;
+        const uint8_t ctrlb = S0::regs().CTRLB;
+        cli();
+        Ss::sense(PinSense::falling);
+        Ss::clear_flag();
         const bool sync = Host::start({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                                       SpiClock::div64, SpiMode::mode0, false, 0});
-        while (!sync && wakes < 64u) {
-            cli();
-            if (engine_done) {
-                sei();
-                break;
-            }
-            Sleep::arm(SleepMode::idle);
-            sei();
-            Sleep::sleep();
-            Sleep::disarm();
-            ++wakes;
-        }
-        engine_mode = false;
-        Hold::enable_ovf_interrupt(false);
-        Hold::disable();
-        const bool backstop = hold_fired != 0;
-        hold_arm(HoldShape::off, 0, 0, 0);
-        bool slept = !sync && engine_done;
-        for (uint8_t i = 0; i < 8; ++i) slept = slept && eng_rx[i] == 0xFF;
-        print(serial, "  the pump with the core in IDLE: ", wakes, " wake-ups, the backstop ",
-              backstop ? "FIRED" : "silent", crlf);
-        verdict("the pump completes with the core in IDLE between its interrupts, the SPI's own "
-                "interrupt the wake-up",
-                slept && wakes >= 1u && !backstop);
+                                       SpiClock::div64, SpiMode::mode3, false, 0});
+        const uint8_t status = Host::status();
+        const uint16_t edges = SckCount::count();
+        const bool cs_fell = Ss::flag();
+        const bool regs_kept = S0::regs().CTRLA == ctrla && S0::regs().CTRLB == ctrlb;
+        const bool sck_low = !Sck::read();
+        bool untouched = true;
+        for (uint8_t i = 0; i < 8; ++i) untouched = untouched && eng_rx[i] == 0x5A;
+        Ss::clear_flag();
+        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
+        ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
+                         SpiClock::div64, SpiMode::mode0, true, 0});
+        const uint16_t control = SckCount::count();
+        const bool control_fell = Ss::flag();
+        Ss::sense(PinSense::none);
+        Ss::clear_flag();
+        sei();
+        T1::disable();
+        ChSck::off();
+        bool filled = ok;
+        for (uint8_t i = 0; i < 8; ++i) filled = filled && eng_rx[i] == 0xFF;
+        print(serial, "  an asynchronous request: start() ", sync ? "true" : "false", ", status ",
+              status, " (spi_rejected ", spi_rejected, "), SCK edges ", edges, ", the select fell ",
+              cs_fell ? "yes" : "no", ", CTRLA/CTRLB ", regs_kept ? "kept" : "CHANGED", ", SCK ",
+              sck_low ? "low" : "HIGH", crlf);
+        print(serial, "  the same request polled: ", control - edges, " SCK edges (64), the select fell ",
+              control_fell ? "yes" : "no", crlf);
+        verdict("an asynchronous request is refused at once: start() true, status spi_rejected",
+                sync && status == spi_rejected);
+        verdict("the refusal touches nothing: no SCK edge, the select never asserted, the registers "
+                "and SCK's idle level kept, rx untouched",
+                edges == 0u && !cs_fell && regs_kept && sck_low && untouched);
+        verdict("the same request polled runs: 64 SCK edges, the select's fall seen, rx filled, "
+                "status spi_ok",
+                filled && control == 64u && control_fell);
     }
 
     // A command phase with a DC pin: the D/C line ends HIGH (the data
@@ -1321,7 +1321,7 @@ void tj_engine() {
                      SpiClock::div16, SpiMode::mode3, true, 10});
     verdict("a request with a chip-select setup delay still runs", ok);
     verdict("a mode-3 request leaves SCK idle high", Sck::read());
-    ok = Host::start({{}, {}, {}, 0, {}, {}, 0, {}});
+    ok = run_engine({{}, {}, {}, 0, {}, {}, 0, {}, SpiClock::div16, SpiMode::mode0, true, 0});
     verdict("a zero-length request completes on the spot without the wire", ok);
 
     // The ceiling clamps a too-fast request.
@@ -1358,13 +1358,13 @@ void tj_engine() {
 // leaves it there, the arrival queues behind it, RXCIF falls, and the next
 // read returns the first byte AGAIN. Shown first as the silicon's own
 // sweep (MISO held low for the byte in the FIFO and high for the arrival,
-// so the repeat is visible as a value), then provoked INSIDE the engine:
-// a TCB2 handler of a fixed length, fired at a swept time after each
-// request starts, holds the core so that the pump's handler reads at
-// every phase of the next arrival. The glue counts the entries that find
-// TXCIF up and RXCIF down - the one signature of that read. Every request
-// alternates the MISO level, so a byte read twice or left behind shows as
-// a wrong level in the next one. Beside the sweep of the read itself, the
+// so the repeat is visible as a value), then the engine through it: a
+// TCB2 handler of a fixed length, fired at a swept time after each
+// request starts, holds the core so that the polled loop resumes at every
+// phase of the next arrival - the loop never makes the read that empties
+// the FIFO while a byte shifts, so no phase may cost it a byte. Every
+// request alternates the MISO level, so a byte read twice or left behind
+// shows as a wrong level in the next one. Beside the sweep of the read itself, the
 // sweep of the REPAIR READ a cure by RXCIF would make - after a read, RXCIF
 // down means read once more and drop it - against the same arrival: the
 // phase where that read takes the arriving byte is why the client's runs
@@ -1372,7 +1372,6 @@ void tj_engine() {
 
 using T2 = Tcb<2>;
 volatile uint8_t hold_turns = 0;          ///< the TCB2 handler's length, 3-cycle turns
-volatile uint16_t untaken_entries = 0;    ///< engine entries with TXCIF up, RXCIF down
 
 template <uint8_t nops>
 [[gnu::always_inline]] inline void spin3(uint8_t cnt) {
@@ -1596,7 +1595,7 @@ struct Swept {
 };
 
 /// 16 bytes full duplex at CLK_PER/16 under the TCB2 handler fired at C.
-void swept_request(bool polled, uint16_t C, bool level, Swept& w) {
+void swept_request(uint16_t C, bool level, Swept& w) {
     static uint8_t out[16];
     for (uint8_t i = 0; i < 16; ++i) out[i] = 0xFF;   // a constant MOSI: immune to coupling
     static uint8_t in[16];
@@ -1606,10 +1605,9 @@ void swept_request(bool polled, uint16_t C, bool level, Swept& w) {
     T2::enable_capt_interrupt(true);
     const bool ok = run_engine({{}, {}, {}, 0, lend<Lease::reply>(static_cast<const uint8_t*>(out)),
                                 lend<Lease::reply>(static_cast<uint8_t*>(in)), 16, {},
-                                SpiClock::div16, SpiMode::mode0, polled, 0});
+                                SpiClock::div16, SpiMode::mode0, true, 0});
     T2::enable_capt_interrupt(false);
     T2::disable();
-    if (!ok) Host::recover();
     bool exact = true;
     for (uint8_t i = 0; i < 16; ++i) exact = exact && in[i] == (level ? 0xFF : 0x00);
     ++w.runs;
@@ -1751,26 +1749,19 @@ void tt_untaken() {
     verdict("a store of one to RXCIF drops the flag and leaves the bytes", store_ok == 16);
 
     bool level = false;
-    for (const bool polled : {false, true}) {
+    {
         Swept w;
-        const uint16_t u0 = untaken_entries;
         for (const uint8_t hold : {16, 18, 20, 22, 24, 26}) {
             hold_turns = hold;
             for (uint16_t C = 100; C < 700; ++C) {
                 level = !level;
-                swept_request(polled, C, level, w);
+                swept_request(C, level, w);
             }
         }
-        const uint16_t untaken = static_cast<uint16_t>(untaken_entries - u0);
-        print(serial, "  ", polled ? "polled" : "pumped", " 16 bytes at CLK_PER/16 under a held core, ",
-              w.runs, " runs: completed ", w.completed, ", every byte the level MISO held ", w.exact,
-              ", receiver empty after ", w.clean, "; handler entries with TXCIF up and RXCIF down ",
-              untaken, crlf);
-        if (!polled) {
-            verdict("the held core made the pump's read meet an arrival", untaken != 0);
-        }
-        verdict(polled ? "every polled request completed" : "every pumped request completed",
-                w.completed == w.runs);
+        print(serial, "  polled 16 bytes at CLK_PER/16 under a held core, ", w.runs,
+              " runs: completed ", w.completed, ", every byte the level MISO held ", w.exact,
+              ", receiver empty after ", w.clean, crlf);
+        verdict("every polled request completed", w.completed == w.runs);
         verdict("and read every byte once, none left behind", w.exact == w.runs && w.clean == w.runs);
     }
 
@@ -1810,46 +1801,8 @@ void tt_untaken() {
     verdict("SpiHost::init() empties it", by_init == 8);
     verdict("SpiHost::recover() empties it", by_recover == 8);
 
-    // recover()'s bounded wait for the bytes in flight: a pumped request
-    // launched with interrupts masked has written its first two bytes and
-    // no handler can run; recover() must wait for both before it flushes.
-    // Two transfers at CLK_PER/128 are 2 x (8 x 128 + 2) = 2052 CLK_PER
-    // after the first write (letter b's two-cycle gap), and that write
-    // comes after t_a - so recover() cannot return before t_a + 2052.
     (void)Host::init(clock);
-    miso_level(true);
-    quiet();
-    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
-    Ruler::reset();
-    uint8_t waited = 0;
-    uint32_t span_least = 0xFFFFFFFFu, span_most = 0;
-    for (uint8_t t = 0; t < 8; ++t) {
-        for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
-        cli();
-        const uint32_t t_a = Ruler::read();
-        (void)Host::start({{}, {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div128,
-                           SpiMode::mode0, false, 0});
-        Host::recover();
-        const uint32_t t_b = Ruler::read();
-        Host::prime(SpiMode::mode0, SpiClock::div16);
-        raw_one(0xFF);
-        const uint8_t v = S0::read();
-        const bool empty = !S0::rxc_flag();
-        sei();
-        const uint32_t span = t_b - t_a;
-        span_least = span < span_least ? span : span_least;
-        span_most = span > span_most ? span : span_most;
-        if (span >= 2052u && v == 0xFF && empty) ++waited;
-    }
-    RulerLo::disable();
-    RulerHi::disable();
-    ChCarry::off();
-    ChSnap::off();
-    print(serial, "  a pumped request's launch then recover(), interrupts masked, CLK_PER/128: ",
-          span_least, "..", span_most, " CLK_PER from before the launch to recover()'s return "
-          "(two bytes in flight: 2052)", crlf);
-    verdict("recover() waits for the two bytes in flight, then leaves the FIFO empty", waited == 8);
-    verdict("and the engine runs a request after it",
+    verdict("and the engine runs a request after them",
             run_engine({{}, {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div16,
                         SpiMode::mode0, true, 0}));
     quiesce();
@@ -3844,13 +3797,6 @@ ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
 ISR(SPI0_INT_vect) {
-    if (engine_mode) {
-        if ((S0::flags() & (SPI_RXCIF_bm | SPI_TXCIF_bm)) == SPI_TXCIF_bm) {
-            untaken_entries = untaken_entries + 1;
-        }
-        if (Host::isr()) engine_done = true;
-        return;
-    }
     if (buffer_isr) {
         isr_flags = S0::take_buffer();      // TXCIF/SSIF/BUFOVF written one
         const uint8_t d = S0::read();       // RXCIF follows the data
@@ -3886,19 +3832,19 @@ ISR(PORTE_PORT_vect) {
     }
     Ss::clear_flag();
     Ss::sense(PinSense::none);
-    if (hold_shape == HoldShape::off || hold_shape == HoldShape::backstop) return;
+    if (hold_shape == HoldShape::off) return;
     (void)Hold::init({.mode = TcaMode::normal, .clock = TcaClock::div1, .period = hold_offset});
     Hold::enable_ovf_interrupt(true);
 }
 
-/// The hold itself, or letter j's backstop (a wake-up only it gives).
+/// The hold itself.
 ISR(TCA1_OVF_vect) {
     Hold::ovf();
     Hold::enable_ovf_interrupt(false);
     Hold::disable();
     hold_fired = static_cast<uint8_t>(hold_fired + 1u);
     const HoldShape shape = hold_shape;
-    if (shape == HoldShape::backstop || shape == HoldShape::off) return;
+    if (shape == HoldShape::off) return;
     uint16_t n = hold_spin;
     if (n != 0) __asm__ __volatile__("1: sbiw %0, 1\n\tbrne 1b" : "+w"(n));
     if (shape == HoldShape::plain) return;

@@ -12,11 +12,11 @@
 // events to the same SpiBus; the AO's queue + pending FIFO serialize
 // them, each request carries its OWN clock rate (per-transaction
 // engine reconfiguration), and every reply finds its way home through
-// the ReplyTo capsule. The two clients also exercise BOTH completion
-// styles: display rows go POLLED (bulk at wire speed, ~2.2 ms per
-// 960-byte row, completed synchronously inside start()), the touch
-// conversions ride the per-byte ISR pump. A touch request at worst
-// waits out the row in flight - invisible at 20 Hz.
+// the ReplyTo capsule. Both run POLLED, the one way the AVR's SpiHost
+// runs a request: display rows at wire speed (~2.2 ms per 960-byte
+// row), the touch conversions at 1.5 MHz, each completed inside
+// start(). A touch request at worst waits out the row in flight -
+// invisible at 20 Hz.
 //
 // Touch feedback on the panel itself: the fill color follows the
 // touched screen half - top half = next color, bottom half = previous.
@@ -355,18 +355,14 @@ private:
             {}, 0,
             brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), 3,
             brio::reply_to<Touch, brio::SpiDone>(),
-            brio::SpiClock::div16});           // 1.5 MHz, XPT2046 limit
+            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // 1.5 MHz, XPT2046 limit; polled
     }
 };
 
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
-    }
-}
+// No SPI vector: the AVR's SpiHost runs every request polled and arms none.
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

@@ -1435,9 +1435,13 @@ void ty_census() {
     ili::set_rotation(ili::rotation);
 }
 
-/// (by name) THE INTERRUPT-STYLE PUMP: the same block written through
-/// requests with polled = false, each completing off SPI1's vector,
-/// then read back polled - is the ISR path's stream the polled one's?
+/// (by name) THE ASYNCHRONOUS WAY ON THE ENGINELESS HOST: the same block
+/// written through requests with polled = false, then read back polled.
+/// The host's per-frame interrupt pump these letters measured is gone -
+/// an asynchronous request is DMA, and a host with no engines refuses it
+/// (spi_rejected, nothing on the wire) - so this path now reports the
+/// refusal as a failed transfer; the engined variant below carries the
+/// asynchronous way.
 volatile bool isr_done = false;
 volatile uint32_t spi1_vectors = 0;
 bool wait_reads_sr = false;   // DIAGNOSTIC: the wait loop reads SPI1's SR on the APB
@@ -1468,7 +1472,7 @@ bool transfer_isr(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len, Spi
     r.polled = false;
     isr_done = false;
     if (Host::start(r)) {
-        return true;   // the empty request completes synchronously
+        return Host::status() == spi_ok;   // refused: spi_rejected
     }
     return isr_wait();
 }
@@ -2454,18 +2458,6 @@ void banner() {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" void SPI1_IRQHandler() {
-    if (dma_host_live) {
-        if (DmaHost::isr()) {
-            isr_done = true;
-        }
-        return;
-    }
-    spi1_vectors = spi1_vectors + 1u;
-    if (Host::isr()) {
-        isr_done = true;
-    }
-}
 extern "C" void DMA2_Stream3_IRQHandler() {
     if (dma_host_live && DmaHost::dma_isr()) {
         isr_done = true;

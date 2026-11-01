@@ -45,8 +45,11 @@
 //   Host, CsPin              the link's SpiHost with its engines, and the
 //                            select, a GPIO. The body writes a Request's
 //                            cs, tx, rx, len, polled, cs_setup_us and
-//                            reply, and calls Host::prime(mode, rate) where
-//                            it frames a select itself (cs_hold_us below);
+//                            reply - every request polled on a host whose
+//                            Host::has_dma is false, which refuses an
+//                            asynchronous one -, and calls
+//                            Host::prime(mode, rate) where it frames a
+//                            select itself (cs_hold_us below);
 //                            it asks the bit order through Host::lsb_first()
 //                            and Host::bit_order(lsb) only where the host
 //                            has them - a host without them clocks MSb
@@ -76,10 +79,10 @@
 //                            Client's and Pressure's requests are
 //                            asynchronous - on the DMA engines, or polled
 //                            inside start() where the host runs one too
-//                            short for them, or on a per-frame interrupt
-//                            where a host still has one - and Minor's are
-//                            polled (docs/design/spi-bus.md, "Two ways to
-//                            run a request")
+//                            short for them - and Minor's are polled
+//                            (docs/design/spi-bus.md, "Two ways to run a
+//                            request"); on a host without engines all
+//                            three are polled
 //   w_rate                   (SpiClock; link_clock) letter w's rate, so
 //                            that a host whose command rate keeps two
 //                            frames in flight can run w where one is, and
@@ -448,7 +451,7 @@ Host::Request request(uint8_t* rx, uint8_t len, bool polled, ReplyTo<SpiDone> re
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
     r.rx = lend<Lease::reply>(rx);
     r.len = len;
-    r.polled = polled;
+    r.polled = polled || !Host::has_dma;
     r.cs_setup_us = 0;
     bus_settings(r, rate, mode, SpiDataSize::bits8);
     r.reply = reply;
@@ -790,7 +793,8 @@ struct Client {
                 r.tx = win.tx;
                 r.rx = win.rx;
                 r.len = win.len;
-                r.polled = win.polled;
+                // A host without engines refuses an asynchronous request.
+                r.polled = win.polled || !Host::has_dma;
                 if constexpr (cs_hold_us == 0u) {
                     // The 30 us the protocol pays between the select's fall
                     // and the first clock.

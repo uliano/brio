@@ -347,38 +347,6 @@ void exp_z(brio::SpiMode mode, uint16_t trig_len, brio::SpiClock clk, bool prime
     brio::print(serial, brio::crlf);
 }
 
-/// i. the read through the ISR pump (as dac_adc does): SPI0 vector bound
-/// below, non-polled request, wait for completion. Trigger polled.
-volatile bool spi_done = false;
-void exp_i(bool isr_trigger) {
-    using SpiHw = brio::SpiHost<0>;
-    brio::print(serial, "i ISR pump (trigger via ISR=", isr_trigger, "): ");
-    rest();
-    SpiHw::init(clock);
-    static uint8_t rx[3];
-    SpiHw::Request trig{Cs::ref(), {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 1, {},
-                        brio::SpiClock::div64, brio::SpiMode::mode3, !isr_trigger};
-    SpiHw::Request read{Cs::ref(), {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 3, {},
-                        brio::SpiClock::div64, brio::SpiMode::mode3, false};
-    spi_done = false;
-    if (!SpiHw::start(trig)) {
-        while (!spi_done) {}
-    }
-    brio::delay_us(clock, 120000);
-    spi_done = false;
-    SpiHw::start(read);
-    while (!spi_done) {}
-    const uint32_t raw = (static_cast<uint32_t>(rx[0]) << 16) |
-                         (static_cast<uint32_t>(rx[1]) << 8) | rx[2];
-    SPI0.CTRLA = 0;
-    Sck::set(); Sck::output();
-    Sdo::input();
-    Mosi::input();
-    Cs::set();
-    decode(raw);
-    brio::print(serial, brio::crlf);
-}
-
 void exp_t() {
     brio::print(serial, "t marker: 3 x (CS low 100 us, high 100 us)", brio::crlf);
     Cs::set();
@@ -400,7 +368,6 @@ void help() {
 
 } // namespace
 
-ISR(SPI0_INT_vect) { if (brio::SpiHost<0>::isr()) { spi_done = true; } }
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 
@@ -438,8 +405,6 @@ int main() {
             case 'x': exp_x(); break;
             case 'y': exp_y(); break;
             case 'z': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64); break;
-            case 'i': exp_i(false); break;
-            case 'I': exp_i(true); break;
             case 'u': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, true, false); break;
             case 'U': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, true, true); break;
             case 'v': exp_z(brio::SpiMode::mode3, 1, brio::SpiClock::div64, false, true); break;

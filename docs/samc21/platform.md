@@ -632,11 +632,13 @@ lengthened:
 
 **The drivers under the preemptive kernel** - the suite is
 `test_samc_rubato_link`, two keys against the AVR64EA48's unchanged
-`spi_peer` (`z`, 119 verdicts) and `usart_peer` (`y`, 125 verdicts), every
-verdict green in every run (three of each key). It runs the
+`spi_peer` (`z`, 112 verdicts) and `usart_peer` (`y`, 125 verdicts), every
+verdict green in every run (three of each key, and the SPI letters `n`,
+`o`, `p` and `w` ten times each). It runs the
 real SPI and UART stacks inside a Rubato pack of seven objects: `util/spi_bus.hpp`'s
-arbiter over `SpiHost<1>` ([spi.md](spi.md); the polled loop and the RXC
-pump, no DMA data phase), `util/line_reader.hpp`'s `LineReader` over
+arbiter over `SpiHost<1>` ([spi.md](spi.md); every request polled - the
+suite marks each one so as it fills its rate and mode -, no DMA data
+phase), `util/line_reader.hpp`'s `LineReader` over
 `Uart<1>` and its interrupt receiver ([sercom.md](sercom.md)), a
 borrower of the reader's lines above it, and on top an object that
 TC4's overflow in match-frequency mode posts to every 97, 193 or 389 us,
@@ -657,37 +659,32 @@ character its polled loop has not fetched yet. What it established:
 
 - **The polled SPI loop under preemption loses nothing.** The loop runs
   inside the arbiter's dispatch, so a dispatch above the arbiter holds
-  it off for its whole length - TC4 landed there 8 to 151 times a pass.
-  With two characters in flight against the two-level receive buffer
-  ([spi.md](spi.md)), a held-off loop leaves a gap on the bus and never
-  a lost frame: the polled loop and the pump, 32 frames a window, both
-  byte-exact at both ends at every BAUD from 119 (200 kHz) to 11
-  (2 MHz), under every pressure as in the control, BUFOVF read clear at
-  every reply in all 21 passes, no `spi_stalled`. This host has no
+  it off for its whole length - TC4 landed there 121 to 659 times a pass
+  of letter `p`. With two characters in flight against the two-level
+  receive buffer ([spi.md](spi.md)), a held-off loop leaves a gap on the
+  bus and never a lost frame: 32 frames a window byte-exact at both ends
+  at every BAUD from 119 (200 kHz) to 11 (2 MHz), under every pressure
+  as in the control, BUFOVF read clear at every reply in every pass of
+  the ten runs, no `spi_stalled`. This host has no
   `spi_overrun` and needs none. The polled loop at 3 and 4 MHz is
   printed, wrong in every pass as the AVR client's ceiling makes it
   ([spi.md](spi.md)'s peer ladder).
-- **A handler-bound pump holds the interrupt level.** At 3 and 4 MHz a
-  character (128 and 96 cycles) is shorter than the pump's handler, which
-  then re-enters at its own exit for the whole window
-  ([spi.md](spi.md)); TC4, at the same priority with a higher exception
-  number, waits that window out: the suite's letter `x` (three runs)
-  measured 10068 to 10485 cycles between two of its entries there
-  against a period of 4656, a span past one and a half periods in every
-  one of the 40 windows - and under 97 us x 3000 one tick in every
-  32-frame window merged into the next one's flag (40 to 41 ticks short
-  of the wall's periods over the 40 windows), under 97 us x 300 2 to 16
-  - and 5338 to 5341 at 2 MHz, where the handler is shorter than the
-  character. Letter `p` therefore climbs the pump to
-  2 MHz alone.
-- **The matrix and the arbiter.** The four modes and a DORD mismatch on
-  the pump at 1 MHz, byte-exact in every pass, the data windows at 610
-  to 1000 per mille of the control's rate under pressure; three
-  requesters of three priorities on one select window (the Client above
-  the arbiter on the pump, a requester below it polled, the preempting
-  object itself on the pump) answered every one `spi_ok`, to its
-  requester, in its order, with no timeout, no rejection and the peer
-  counting every frame exact.
+- **A polled window masks nothing.** The loop runs with interrupts
+  enabled, so TC4 enters on time whatever window is on the wire: the
+  suite's letter `x` (one run; forty windows of 32 frames at 2, 3 and
+  4 MHz, under 97 us x 300 and x 3000) measured 5318 to 5351 cycles at
+  most between two of TC4's entries against a period of 4656, no span
+  past one and a half periods, and as many ticks as the wall's periods
+  (one short of 19795 in one shape of the six) - the same spans at
+  every rate.
+- **The matrix and the arbiter.** The four modes and a DORD mismatch at
+  1 MHz, byte-exact in every pass, the data windows at 241 to 972 per
+  mille of the control's rate under pressure; three requesters of three
+  priorities on one select window (the Client above the arbiter, a
+  requester below it, the preempting object itself, every request
+  polled inside the arbiter's dispatch) answered every one `spi_ok`, to
+  its requester, in its order, with no timeout, no rejection and the
+  peer counting every frame exact.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the AVR64EA48 at 460800 and 921600, assembled by `LineReader` from
   the interrupt receiver's ring and lent to the borrower: 200 a leg,
@@ -1053,16 +1050,16 @@ reaches it:
 
   What the vector inlines moves with it - the driver's
   `[[gnu::always_inline]]` body, whole where the body calls nothing on
-  its common path (the USART's per-byte transport, the SPI pump, the
-  transmit engine's completion, the I2C entry's read byte); what it
+  its common path (the USART's per-byte transport, the transmit
+  engine's completion, the I2C entry's read byte); what it
   calls stays in the flash, through a veneer in SRAM beside it - the
   rare paths (a receive error, a full ring, an abandoned block, a
   tenure's end) and the I2C written byte's SYSOP wait, measured no
   faster inlined ([i2c.md](i2c.md)).
 - A DRIVER IS GIVEN util/placement.hpp's `InRam`, for a path the vector
   does not reach or a program that keeps the vector in the flash:
-  `SpiHost` (its last template parameter: the polled transaction and the
-  pump's entry) and an engined `Uart` (after the engine: the transmit
+  `SpiHost` (its last template parameter: the polled transaction) and
+  an engined `Uart` (after the engine: the transmit
   completion). Each path is ONE flattened instance in `.fast_text.brio`,
   a call from the flash through a veneer in the flash; `InFlash`, the
   default, leaves the path where it would be without the trampoline -
@@ -1102,10 +1099,9 @@ SRAM (letter r), at 48 MHz:
 | the USART's per-byte transmit (letter u, 4096 bytes) | 189; x 2.03 at 3 Mbaud | not offered (181 against 185 in the variant's build) | 124; x 1.32 | - |
 | the USART's per-byte receive (letter u, 256 bytes at 115200) | 203 | not offered (207 against 202) | 135 | - |
 | the transmit engine's completion (letter u, a block) | 220 | 197 | 145 | the instance 228 B, the vector 400 B |
-| the SPI pump at 12 MHz (letter e, 256 frames): an entry, a frame | 252, 391 | 223, 356 | 162, 261 with the host `InFlash`; 180, 270 with it `InRam` | the instance 232 B |
-| the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 42.4 | 38.9 | the driver's alone | the transaction 696 B |
-| the SPI polled write loop at 12 MHz, a frame | 33.7 | 33.6 | the driver's alone | (above) |
-| a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 651, 942, 2695 | 643, 931, 2668 | the driver's alone | (above) |
+| the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 42.3 | 38.8 | the driver's alone | the transaction 696 B |
+| the SPI polled write loop at 12 MHz, a frame | 33.6 | 33.5 | the driver's alone | (above) |
+| a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 632, 923, 2676 | 627, 915, 2652 | the driver's alone | (above) |
 | the I2C event entry at 100 kHz: a written byte, a read one (letter i) | 187, 159 | not offered (183 against 195, 167 against 161) | 120, 103 | - |
 
 What the rows say:
@@ -1117,21 +1113,19 @@ What the rows say:
 - AN InRam BODY BEHIND A VECTOR IN THE FLASH BUYS A TENTH AT MOST: the
   vector's own code still runs from the flash, and the body is a call
   through the veneer with a frame of its own. Where the body is long
-  (the completion's launch, the pump's write-ahead) it comes out ahead;
+  (the completion's launch) it comes out ahead;
   where it is short (a byte in or out) it comes out a few cycles either
   way, which is why those two take no placement.
 - BOTH TOGETHER ARE SLOWER THAN THE VECTOR ALONE: an `InRam` body called
-  from a placed vector is a call where the inline body had none - the
-  pump 270 cycles a frame against 261, and measured on every path (the
-  completion 160 against 145, the I2C entry 142 and 126 against 123 and
+  from a placed vector is a call where the inline body had none -
+  measured on every path that takes both (the completion 160 against 145, the I2C entry 142 and 126 against 123 and
   104, the USART 134 and 166 against 123 and 133). A program that places
   a vector leaves its drivers at `InFlash`, and names `InRam` only for
   what the vector cannot reach - the SPI host's polled transaction.
 - THE VENEER'S OWN COST, measured against a build whose `InRam`
   instance is called by address (`ldr`, `blx`: GCC's ARM `long_call`):
-  8 to 10 cycles a call on the USART, the completion and the I2C entry,
-  18 on the SPI pump's entry - the nine cycles of its instructions and
-  their fetch from the flash.
+  8 to 10 cycles a call on the USART, the completion and the I2C entry -
+  the veneer's instructions and their fetch from the flash.
 - The prints stay wire-bound either way (x = 1.00): the placement buys
   CPU, not time - at 115200 the console's interrupts take 3.7 per cent
   of the core from the flash and 2.5 from SRAM, stamps included; an
@@ -1139,7 +1133,7 @@ What the rows say:
   vector placed.
 
 A path's cost from the flash moves with where it sits: the same source
-measured 242 and 252 cycles an SPI pump entry in two builds that
+measured ten cycles apart an interrupt entry in two builds that
 differed in other functions; the same vectors placed in SRAM moved by
 two cycles at most between two builds.
 

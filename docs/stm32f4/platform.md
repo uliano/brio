@@ -509,8 +509,6 @@ figure per entry with the meter's stamps inside it:
 
 | path | flash | flash, ART off | SRAM, vector placed | SRAM, body `InRam` behind a flash vector | SRAM bytes |
 |---|---|---|---|---|---|
-| SPI frame pump, an entry (one 8-bit frame, SCK 45 MHz) | 103 | 152 | 123 | 158 | 368 the body, 880 an engined host's |
-| the same pump, 256 frames, the wall (the wire 8192) | 38199 | 56807 | 46386 | 51502 | |
 | SPI receive loop, 256 8-bit frames at SCK 45 / 22.5 MHz (the wire 8192 / 16384) | 19110 / 26278 | 17714 / 25394 | - | 21764 / 28420 | 500 a host's polled loops |
 | SPI transmit-only loop, 256 8-bit frames at SCK 45 / 22.5 MHz | 9392 / 16568 | 10012 / 16659 | - | 8472 / 16681 | |
 | USART per-byte transmit, 5.625 Mbaud | 64 | 97 | 83 | 111 | 316 |
@@ -521,7 +519,8 @@ figure per entry with the meter's stamps inside it:
 | FMPI2C1 event pump, a byte written / read | 136 / 151 | - | 164 / 166 | - | 1060 the suite's vector |
 
 The accelerator hides the five wait states: a warm handler runs from
-the flash faster than from SRAM, the pump a fifth faster. The core's
+the flash faster than from SRAM, the USART's per-byte transmit a quarter
+faster. The core's
 own bus map says why SRAM cannot win it back: code at 0x20000000 is
 fetched over the System interface, which also carries every SRAM and
 peripheral data access the handler makes, data first (DDI 0439B
@@ -534,8 +533,8 @@ receive loop is FASTER with the accelerator off, 17714). A body behind
 a flash vector pays the call besides: SRAM lies out of a BL's 16 MB
 reach, so GNU ld puts an 8-byte stub in the path, `ldr.w pc, [pc]` and
 the target's address - LDR to PC 2+P cycles against the BL's 1+P
-(DDI 0439B 3.3.1, table 3-1, P 1 to 3) - and the pump's body there is
-35 cycles an entry above the vector placed.
+(DDI 0439B 3.3.1, table 3-1, P 1 to 3) - and the USART's per-byte
+bodies there are 26 to 28 cycles an entry above the vector placed.
 
 RECOMMENDATION: decline util/placement.hpp's opt-in on this stratum -
 the ART already hides the wait states, and SRAM execution shares the

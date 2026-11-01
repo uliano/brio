@@ -30,7 +30,8 @@
 //   THE SPI HOST. SpiHost<1> on GP30 (SCK), GP31 (TX, 47 Ohm on its way to
 //   the partner), GP28 (RX), GP41 the select as a GPIO; half-word engines
 //   on DMA channels 6 and 7 reporting on DMA_IRQ_1 (test_rp2350_spi's
-//   LinkDmaHost); dma_min_frames 10 on this chip (rp2350/spi.hpp).
+//   LinkDmaHost): an asynchronous request rides them from the host's
+//   count (rp2350/spi.hpp's Pl022Costs), and SPI1's own line is nobody's.
 //   THE PRESSURE. TIMER1's alarm 0 with the timer's source on clk_sys
 //   (rp2350/timer.hpp, datasheet 12.8.1.1), re-armed in its handler at
 //   absolute counts - the last match plus the period - so the period does
@@ -73,15 +74,19 @@
 //   p  the ladders through the arbiter at every even divisor from 256 down
 //      to the PIO client's ceiling, clk_peri / 16 = 9.4 MHz (derived in
 //      rp_rubato_link.hpp), on six paths: the polled loop in 8-bit frames
-//      (9) and in 16-bit frames off the engines (32 from an odd address),
-//      the pump the same two ways, the engines (32 byte frames) and the
-//      engines under a polled request (32 half-words); /14 and /12
-//      printed. STRICT under pressure as in the control, the host's overrun
-//      flag never set at a reply.
-//   w  the arbiter under pressure: the Client above it (20 requests of 6
-//      frames on the pump, two outstanding), Minor below it (10 POLLED
-//      requests of 8, one outstanding) and, in a pressure pass, Pressure
-//      itself (8 requests of 3 on the pump, from its tick), all at the
+//      (9) and in 16-bit frames off a half-word (32 from an odd address),
+//      the asynchronous way short (1 byte frame: on the engines at the
+//      slow rungs, polled inside start() at the fast ones) and off a
+//      half-word (32, polled inside start()), and the engines in both
+//      widths (32 frames); /14 and /12 printed. Every asynchronous window's
+//      way judged against the host's count at the DMA line. STRICT under
+//      pressure as in the control, the host's overrun flag never set at a
+//      reply.
+//   w  the arbiter under pressure: the Client above it (20 asynchronous
+//      requests of 6 frames on the engines, two outstanding), Minor below
+//      it (10 POLLED requests of 8, one outstanding) and, in a pressure
+//      pass, Pressure itself (8 asynchronous requests of 3 on the engines,
+//      from its tick), all at the
 //      command rate inside ONE select window the letter holds, of constant
 //      frames: every reply to its requester in its order, every one
 //      spi_ok, nothing rejected, no timeout, the peer counting every frame.
@@ -287,18 +292,13 @@ extern "C" void isr_timer1_0() {
     pressure_landed();
 }
 
-extern "C" void isr_spi1() {
-    if (Host::isr()) {
-        done_from_dma = false;
-        brio::post<SpiArb>(brio::TransferDone{Host::status()});
-    }
-}
-
-/// DMA_IRQ_1, the engines' line: the receive block's completion (the
-/// transmit engine reports its errors alone).
+/// DMA_IRQ_1, the engines' line and the host's one interrupt body: the
+/// receive block's completion (the transmit engine reports its errors
+/// alone), counted for letter p's ways.
 extern "C" void isr_dma_1() {
     if (Host::dma_isr()) {
         done_from_dma = true;
+        dma_completions = dma_completions + 1u;
         brio::post<SpiArb>(brio::TransferDone{Host::status()});
     }
 }
@@ -319,7 +319,7 @@ int main() {
     bench.letter('n', "the peer's command channel through the arbiter", pair::guarded<bench, clock, tn_peer_link>);
     bench.letter('o', "the matrix on the DMA engines: modes, widths, the client's bit orders",
                  pair::guarded<bench, clock, to_matrix>);
-    bench.letter('p', "the ladders: the polled loop, the pump, the engines, every rung",
+    bench.letter('p', "the ladders: the polled loop, the short request, the engines, every rung",
                  pair::guarded<bench, clock, tp_ladders>);
     bench.letter('w', "the arbiter under pressure: three requesters, one bus", pair::guarded<bench, clock, tw_arbiter>);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);

@@ -14,8 +14,8 @@
 //     RAMWR 0x2C + continuation writes 0x3C
 //
 // One request per row (320 px * 3 = 960 bytes <= uint16_t len); a full
-// frame is 480 requests. SPI at 6 MHz (div4): a fill takes ~1-2 s,
-// dominated by the per-byte ISR pump - fine for a probe.
+// frame is 480 requests. SPI at 6 MHz (div4), every request polled
+// inside the arbiter's dispatch (the AVR's SpiHost has no other way).
 //
 // Wiring per README bench map (3.3 V logic!), BL tied high.
 
@@ -214,11 +214,7 @@ private:
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(SPI0_INT_vect) {
-    if (SpiHw::isr()) {
-        brio::post<Bus>(brio::TransferDone{brio::spi_ok});
-    }
-}
+// No SPI vector: the AVR's SpiHost runs every request polled and arms none.
 ISR(USART2_RXC_vect) { Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { brio::Ticker::pit(); }

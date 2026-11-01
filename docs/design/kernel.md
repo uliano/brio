@@ -1071,11 +1071,11 @@ where the
 write-ahead is a receive FIFO that holds every frame in flight (the
 STM32G0's SPI and the PL022 of the RP2040 and the RP2350, measured), or a write-ahead of two against a two-level
 receive buffer (the SAM C21's SERCOM, measured), the same hold-off is a
-gap on the bus and no frame is lost; the DMA engines and the interrupt
-pump carry no such limit - a pump whose handler outlasts a character
-holds the interrupt level instead, a limit of the image's interrupts
-and not of Rubato (the SAM C21's at 3 MHz, [its platform
-page](../samc21/platform.md)). For a UART that is one direct writer per
+gap on the bus and no frame is lost, and the polled window masks
+nothing: the SAM C21's preempting object entered at most 1.15 of its
+periods apart across polled windows at 2 to 4 MHz (one run, [its
+platform page](../samc21/platform.md)); the DMA engines carry no such
+limit. For a UART that is one direct writer per
 instance, in one of two forms, independent and never stacked on one
 instance: a bookable transport object (a `Request` with a run lent
 `Lease::reply`, a `Done`, the bus arbiter's shape) for heterogeneous
@@ -1251,17 +1251,18 @@ the CH32V303's each against the other's, the SAM C21's against the
 AVR64EA48's, the RP2040's and the RP2350's (both halves) each against
 the other's, and the CH32X035's UART stack alone against the CH32V006's,
 with an object preempting at prime periods: on every SPI stack the
-interrupt pump and the arbiter with three requesters of three
-priorities, and the DMA engines on all but the SAM C21's, whose host
-has none; on every UART stack `LineReader`'s line loans to a borrower
+arbiter with three requesters of three priorities, the DMA engines
+with a short asynchronous request run polled inside `start()`, and on
+the SAM C21's, whose host has no engines and refuses an asynchronous
+request, every request polled; on every UART stack `LineReader`'s line loans to a borrower
 above it and the one-writer UART; all byte-exact (`test_stm32f4_rubato_link`, 230 verdicts, [the
 STM32F4 platform page](../stm32f4/platform.md); `test_stm32_rubato_link`,
-251, [the STM32G0 platform page](../stm32g0/platform.md);
+244, [the STM32G0 platform page](../stm32g0/platform.md);
 `test_vx03_rubato_link`, 231 and 232, [the CH32V203/CH32V303 platform
-page](../ch32vx03/platform.md); `test_samc_rubato_link`, 244, [the SAM
+page](../ch32vx03/platform.md); `test_samc_rubato_link`, 237, [the SAM
 C21 platform page](../samc21/platform.md); `test_rp2040_rubato_link`,
-208, [the RP2040 platform page](../rp2040/platform.md);
-`test_rp2350_rubato_link`, 202 on each half, [the RP2350 platform
+215, [the RP2040 platform page](../rp2040/platform.md);
+`test_rp2350_rubato_link`, 209 on each half, [the RP2350 platform
 page](../rp2350/platform.md); `test_x035_rubato_link` and
 `test_x035_rubato_link_flash`, 115 each, the UART key alone, [the
 CH32X035 platform page](../ch32x035/platform.md)); the polled loop's limit

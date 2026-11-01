@@ -30,6 +30,7 @@ static_assert(Block::fifo_depth == 8u);
 static_assert(Block::index == 1u);
 static_assert(Block::dreq_tx == SimPl022Request::spi1_tx && Block::dreq_rx == SimPl022Request::spi1_rx);
 static_assert(!Plain::has_engines && Engined::has_engines);
+static_assert(!Plain::has_dma && Engined::has_dma);   // an asynchronous request needs the engines
 static_assert(Client::frames_ahead == 8u);
 static_assert(std::is_trivially_copyable_v<Plain::Request>);
 static_assert(Pl022ChipClock<SimPl022, Clock>);
@@ -89,7 +90,6 @@ void pl022_host_verbs() {
     r.rx = lend<Lease::reply>(buf);
     r.len = 16;
     (void)Plain::start(r);
-    (void)Plain::isr();
     (void)Plain::dma_isr();
     (void)Plain::status();
     (void)Plain::recover();
@@ -106,8 +106,9 @@ void pl022_engine_verbs() {
     d.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     d.len = 8;
     (void)Engined::start(d);
-    (void)Engined::isr();
     (void)Engined::dma_isr();
+    (void)Engined::async_min_frames(SpiClocks::div4, SpiMode::mode0, SpiDataSize::bits8, true);
+    (void)Engined::polled_dma_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits16);
     (void)Engined::status();
     (void)Engined::recover();
     Engined::release();
