@@ -382,6 +382,69 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
     CHECK(SimPl022Bench::pin_set_at[8] < SimPl022Bench::pin_set_at[cs_pin]);
 }
 
+// cmd_len + len of 65536, the first sum a 16-bit total cannot hold: it would read
+// as an empty request, spi_ok with nothing on the wire. One command frame and
+// 65535 data frames, the most a Request's fields carry with a command phase of
+// one; 65536 frames of 8 bits at clk_peri / 2 are 1 048 576 cycles of wire, so a
+// request that really ran had to walk both buffers to their last frame.
+alignas(4) uint8_t wrap_out[65535];
+alignas(4) uint8_t wrap_in[65535];
+
+TEST_CASE("a request of 65536 frames in all is a request, not an empty one") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    out_buf[0] = 0xC1;
+    wrap_out[0] = 0x11;
+    wrap_out[65534] = 0x5A;
+    wrap_in[65534] = 0;
+
+    Host::Request r{};
+    r.cs = SimPl022PinRef{cs_pin};
+    r.dc = SimPl022PinRef{8};
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    r.cmd_len = 1;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(wrap_out));
+    r.rx = lend<Lease::reply>(wrap_in);
+    r.len = 65535;
+    r.clock = SpiClocks::div16;
+    r.polled = true;
+    frames_come_back(true);
+    CHECK(Host::start(r));
+    frames_come_back(false);
+    CHECK(Host::status() == spi_ok);
+    // The select framed it and D/C rose between the phases.
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] != 0u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] > SimPl022Bench::pin_clear_at[cs_pin]);
+    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
+    // The last frame written is the out buffer's last, and it read back into
+    // the in buffer's last byte: the loop ran the whole length.
+    CHECK(regs().SSPDR == 0x5Au);
+    CHECK(wrap_in[65534] == 0x5Au);
+
+    // The same sum asynchronously on a host with engines goes to them: at /16 the
+    // one command frame repays a block of its own (152 cycles of frame against the
+    // fixture's budget), chained to the data block of 65535 from the vector.
+    fresh();
+    REQUIRE(Engined::init(clock));
+    Engined::Request a{};
+    a.cs = SimPl022PinRef{cs_pin};
+    a.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    a.cmd_len = 1;
+    a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(wrap_out));
+    a.rx = lend<Lease::reply>(wrap_in);
+    a.len = 65535;
+    a.clock = SpiClocks::div16;
+    CHECK_FALSE(Engined::start(a));
+    CHECK(TxEngine::length == 1u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK_FALSE(Engined::dma_isr());
+    CHECK(TxEngine::length == 65535u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    CHECK(Engined::status() == spi_ok);
+}
+
 TEST_CASE("release puts the pads back and the block into reset") {
     fresh();
     constexpr Clock clock;

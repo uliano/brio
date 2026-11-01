@@ -1230,9 +1230,11 @@ public:
     static uint8_t status() { return status_; }
 
     /// Put the engine back where start() is legal (the verb a timed SpiBus
-    /// calls on a transaction that never answered): the select released
-    /// first, the engines put away, the block reset and reconfigured to
-    /// the applied state. False when a bounded wait ran out.
+    /// calls on a transaction that never answered, and the program's to call
+    /// after a start() that answered spi_stalled, with nothing on the
+    /// engines; the arbiter calls it on no synchronous answer): the select
+    /// released first, the engines put away, the block reset and
+    /// reconfigured to the applied state. False when a bounded wait ran out.
     static bool recover() {
         tenure_.cs.set();
         if constexpr (has_dma) {

@@ -738,9 +738,9 @@ every timed run). F: every driver InFlash and every vector in the flash
 
 | path | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes (`spi.req`) | 788 / 11364 | 801 / 2944 | 788 / 11364 | 801 / 2944 |
-| SPI on the engines, 16 frames, wall | 1631 / 34002 | 1473 / 18028 | 1447 / 22782 | 1464 / 10768 |
-| ... the DMA line's handler | 190 / 8622 | 202 / 4664 | 190 / 190 | 193 / 193 |
+| SPI polled request, a command byte and 2 data bytes (`spi.req`) | 784 / 11362 | 802 / 2849 | 784 / 11362 | 802 / 2849 |
+| SPI on the engines, 16 frames, wall | 1459 / 33954 | 1488 / 18040 | 1459 / 23086 | 1479 / 10776 |
+| ... the DMA line's handler | 188 / 8176 | 204 / 4574 | 188 / 188 | 195 / 195 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 5274 / 16628 | 1826 / 9865 | 823 / 2897 | 1391 / 2964 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1109 / 9738 | 2081 / 6449 | 459 / 2032 | 452 / 2025 |
 | I2C one-byte write at 400 kHz, `start()` | 349 / 12429 | 366 / 5209 | 349 / 15865 | 366 / 5209 |
@@ -750,13 +750,13 @@ every timed run). F: every driver InFlash and every vector in the flash
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
-  a polled request 13 cycles dearer under InRam, an I2C entry 26-35 - the cache serves a warm path at the SRAM's pace,
+  a polled request 18 cycles dearer under InRam, an I2C entry 26-35 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
-  (`spi.poll` of 256 frames 5744 against 5757). A warm figure that
+  (`spi.poll` of 256 frames 5738 against 5756). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
   rows: the ops of letter u each run once, after other code).
 - COLD IS WHERE IT PAYS, and it pays on every path: a three-byte request
-  11364 cycles (136 misses) from the flash against 2944 (41, the
+  11362 cycles (136 misses) from the flash against 2849 (41, the
   caller's) with the host InRam; a handler cold from the flash 6000 to
   8600 cycles, from SRAM what it costs warm.
 - THE VECTOR PLACED REACHES WHAT A VECTOR RUNS, and nothing else: the

@@ -1245,7 +1245,9 @@ private:
             }
         }
         status_ = spi_ok;
-        const uint16_t total = static_cast<uint16_t>(static_cast<uint16_t>(r.cmd_len) + r.len);
+        // 32 bits: cmd_len + len reaches 65790, and a 16-bit sum of 65536 would
+        // read as an empty request and answer spi_ok with nothing on the wire.
+        const uint32_t total = static_cast<uint32_t>(r.cmd_len) + r.len;
         if (total == 0u) {
             return true;
         }
@@ -1281,7 +1283,7 @@ private:
         }
         // THE POLLED LOOP: the whole request, or the command phase before a
         // data phase on the engines.
-        uint32_t budget = spin_budget(engines ? static_cast<uint16_t>(r.cmd_len) : total);
+        uint32_t budget = spin_budget(engines ? static_cast<uint32_t>(r.cmd_len) : total);
         bool data = !has_cmd;
         const uint8_t* out = data ? r.tx.get() : r.cmd.get();
         uint8_t* in = data ? r.rx.get() : nullptr;
@@ -1673,8 +1675,8 @@ private:
     /// which the receive shape spends under the wire instead - so this
     /// shape is taken only where the receive shape would fall behind the
     /// wire, which on both of the RP2350's cores is a divisor below four
-    /// on 8-bit frames (letter e: 27 and 38 cycles a frame of loop against
-    /// 16 of wire at clk_peri / 2; at / 4 and below both shapes read the
+    /// on 8-bit frames (letter e: 24 and 26 cycles a frame of loop against
+    /// 16 of wire at clk_peri / 2; at / 4 and slower both shapes read the
     /// wire's own figure), and only on a run longer than the FIFO, where
     /// the tail is shorter than what it saves.
     template <bool wide>

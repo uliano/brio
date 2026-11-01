@@ -1129,9 +1129,9 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 671 / 5333 | 676 / 1241 | 671 / 5404 | 676 / 1241 |
-| SPI on the engines, 16 frames, wall | 1433 / 12525 | 791 / 4192 | 770 / 7800 | 788 / 1776 |
-| ... the DMA line's handler | 342 / 5010 | 139 / 1877 | 116 / 116 | 135 / 135 |
+| SPI polled request, a command byte and 2 data bytes | 658 / 5027 | 662 / 947 | 658 / 4960 | 662 / 947 |
+| SPI on the engines, 16 frames, wall | 776 / 13452 | 812 / 3978 | 777 / 8765 | 803 / 1718 |
+| ... the DMA line's handler | 113 / 4245 | 146 / 1685 | 113 / 113 | 140 / 140 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
 | I2C one-byte write at 400 kHz, `start()` | 182 / 4354 | 189 / 477 | 184 / 4311 | 189 / 477 |
@@ -1140,9 +1140,9 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 633 / 4621 | 637 / 1034 | 639 / 4610 | 637 / 1034 |
-| SPI on the engines, 16 frames, wall | 844 / 9980 | 749 / 3700 | 737 / 7072 | 748 / 2439 |
-| ... the DMA line's handler | 100 / 2657 | 119 / 1104 | 99 / 99 | 119 / 762 |
+| SPI polled request, a command byte and 2 data bytes | 637 / 4342 | 643 / 740 | 637 / 4275 | 642 / 739 |
+| SPI on the engines, 16 frames, wall | 746 / 10371 | 757 / 4022 | 743 / 7188 | 759 / 2619 |
+| ... the DMA line's handler | 102 / 2924 | 124 / 1114 | 98 / 98 | 124 / 124 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
 | I2C one-byte write at 400 kHz, `start()` | 178 / 4009 | 185 / 1831 | 176 / 3963 | 185 / 1831 |
@@ -1153,11 +1153,10 @@ What the rows say - the RP2040's reading on both halves:
 
 - WARM, the placement buys nothing on a path the cache holds and costs
   the call: 4 to 40 cycles under InRam. A warm figure that differs more
-  is one image's set conflicts, not the place: the F column's engined
-  SPI block (1433 against 770 to 791) and its UART and I2C handlers miss
-  lines warm that the other three images do not.
-- COLD it pays on every path, on both cores: a three-byte request 5333
-  cycles from the flash against 1241 with the host InRam on the M33, a
+  is one image's set conflicts, not the place: the F column's UART and I2C
+  handlers miss lines warm that the other three images do not.
+- COLD it pays on every path, on both cores: a three-byte request 5027
+  cycles from the flash against 947 with the host InRam on the M33, a
   handler cold from the flash 2000 to 5000 cycles, from SRAM what it
   costs warm.
 - The vector placed reaches what the vector runs; InRam reaches

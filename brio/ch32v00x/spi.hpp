@@ -99,9 +99,9 @@
  * buffer, one receive buffer, one shift register (figure 16-1), so TXE
  * means "the buffer moved into the shifter" and RXNE "a frame has
  * been shifted both ways" (16.2.2). A frame written while another
- * shifts waits in the buffer and follows it with no gap on SCK - "if
- * the TXE flag is set, fill the data register, maintain the complete
- * data flow" - which is what the host's transmit-only loop builds on; and
+ * shifts waits in the buffer and follows it with no gap on SCK - "If
+ * the TXE flag position bit needs to fill the data register, maintain
+ * the complete data flow." - which is what the host's transmit-only loop builds on; and
  * the receive buffer is one frame deep (16.2.7, OVR), which is why the
  * host's receive loop declines that write-ahead (the class comment). The
  * frame is 8 or 16 bits (DFF), and both DFF
@@ -130,8 +130,9 @@
  * buffer moved into the shifter) and then for BSY to fall (the shifter
  * idle) before it drops the bit, each wait bounded, and reports whether
  * a wait ran out; it does not wait for RXNE. Clearing MODF is a STATR
- * read followed by a CTLR1 write; clearing OVR a DATAR read followed by
- * a STATR read - two sequences the resource keeps.
+ * read followed by a CTLR1 write; clearing OVR takes STATR, DATAR, STATR
+ * here, 16.2.7's DATAR then STATR leaving it standing on the CH32V003
+ * (flush_rx()) - two sequences the resource keeps.
  *
  * Where the polled loops run from: the host's placement, its last template
  * parameter (util/placement.hpp). The code flash answers behind two wait
@@ -500,9 +501,13 @@ struct Spi {
     static bool busy() { return (regs().STATR & spi_bsy) != 0u; }
     static uint16_t status() { return regs().STATR; }
 
-    /// Throw away whatever the receive buffer holds and the OVR it may
-    /// have raised.
+    /// Throw away what the receive buffer holds and the OVR it raised:
+    /// STATR, DATAR, STATR. The two dies clear the flag differently, so
+    /// neither pair is enough (test_ch32_spi letter v, docs/ch32v00x/spi.md):
+    /// on the CH32V006 it falls at a STATR load after a DATAR read, 16.2.7's
+    /// order; on the CH32V003 at a DATAR read after a load that showed it.
     static void flush_rx() {
+        (void)regs().STATR;
         (void)regs().DATAR;
         (void)regs().STATR;
     }
@@ -510,11 +515,8 @@ struct Spi {
     // ---- errors (16.2.7) --------------------------------------------------
 
     static bool overrun() { return (regs().STATR & spi_ovr) != 0u; }
-    /// DATAR then STATR, in that order.
-    static void clear_overrun() {
-        (void)regs().DATAR;
-        (void)regs().STATR;
-    }
+    /// STATR, DATAR, STATR (flush_rx(), which says why).
+    static void clear_overrun() { flush_rx(); }
     static bool mode_fault() { return (regs().STATR & spi_modf) != 0u; }
     /// STATR then a CTLR1 write, in that order. MODF has also cleared
     /// SPE and MSTR; the caller reconfigures.
@@ -777,9 +779,10 @@ constexpr SpiAsyncCounts spi_async_counts(const SpiHostCosts& k) {
  * and an interrupt that delays the loop only pauses the stream; the
  * answers pile into the receive buffer and overrun it, which costs
  * nothing (16.2.7: the buffer keeps the old frame, the transmit side is
- * untouched) and is cleared at the phase's end by the DATAR-then-STATR
- * read the chapter prescribes, after TXE and then BSY have said the last
- * frame is out. A phase with an in buffer runs the receive loop, ONE frame
+ * untouched) and is cleared at the phase's end by a DATAR read and a STATR
+ * read, after TXE and then BSY have said the last frame is out: the wait's
+ * last STATR load shows the flag, which on both dies makes that pair clear
+ * it (flush_rx()). A phase with an in buffer runs the receive loop, ONE frame
  * in flight at every rate: write k, wait RXNE, read k and write k + 1 in
  * the next instruction, the next frame's load and the store of the one just
  * read inside the wire time. This host owns the clock, and the clock waits
@@ -1174,8 +1177,10 @@ public:
     static uint8_t status() { return status_; }
 
     /// Put the ENGINE back where start() is legal (the verb a timed
-    /// SpiBus calls on a transaction that never answered): the select
-    /// released FIRST, the engines put away, the peripheral reset and
+    /// SpiBus calls on a transaction that never answered, and the program's
+    /// to call after a start() that answered spi_stalled, with nothing on
+    /// the engines; the arbiter calls it on no synchronous answer): the
+    /// select released FIRST, the engines put away, the peripheral reset and
     /// reconfigured to the applied state. False when a bounded wait ran
     /// out.
     static bool recover() {
@@ -1281,7 +1286,7 @@ private:
     /// a phase, the loop flattened into it. The closure (the buffers, the
     /// count, the budget's address) is built once and passed by address.
     /// NOT INLINED into start(): both widths of a loop would be copied into
-    /// it, measured a kilobyte more of flash on the CH32V003's suite images.
+    /// it, once for each of its call sites.
     /// ALIGNED TO THE FETCH'S
     /// WORD: from the flash the receive loop's frame is a function of where
     /// the loop starts modulo four - half a word moved it by 6 cycles at /4
@@ -1313,7 +1318,8 @@ private:
     /// the clock never pauses - and the answers left to overrun the
     /// receive buffer, which 16.2.7 makes harmless for the transmit side.
     /// The tail waits TXE (the last frame into the shifter) and then not
-    /// BSY (out of it); the DATAR-then-STATR read clears RXNE and OVR.
+    /// BSY (out of it); BSY's last load, a DATAR read and a STATR read clear
+    /// RXNE and OVR on both dies (flush_rx()).
     /// A null `out` clocks 0xFF dummies from a fixed cell. `count` >= 1.
     template <typename T>
     [[gnu::always_inline]] static bool poll_write(const uint8_t* out, uint16_t count, uint32_t& budget) {
@@ -1936,7 +1942,7 @@ public:
      * select; the frames past the run's end carry what the shifter is left
      * with. The receive buffer overruns from the second frame (nothing is
      * read, harmless to the transmit side by 16.2.7) and the tail clears
-     * it with the chapter's DATAR-then-STATR read.
+     * it, STATR, DATAR, STATR (flush_rx()).
      */
     template <typename T>
     [[gnu::always_inline]] static Run answer(std::span<const T> out, uint32_t spins) {
@@ -1977,7 +1983,8 @@ public:
             how = RunEnd::complete;
         }
     tail:
-        (void)regs.DATAR;   // 16.2.7's clear: DATAR, then STATR
+        (void)regs.STATR;   // STATR, DATAR, STATR: flush_rx(), inline
+        (void)regs.DATAR;
         (void)regs.STATR;
         return {static_cast<uint16_t>(p - first), how};
     }
@@ -2002,7 +2009,8 @@ public:
             return {0, RunEnd::complete};
         }
         SpiRegs& regs = S::regs();
-        (void)regs.DATAR;   // the receive side cleared: DATAR, then STATR (16.2.7)
+        (void)regs.STATR;   // the receive side cleared: flush_rx(), inline
+        (void)regs.DATAR;
         (void)regs.STATR;
         const T* p = out.data();
         const T* const p_end = p + len;

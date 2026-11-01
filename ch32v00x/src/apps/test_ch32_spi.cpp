@@ -69,6 +69,9 @@
 //      asynchronous request answered spi_rejected (the peer deselected)
 //   h  THE STALLED EXIT, wireless: a polled request over a block held in
 //      reset ends spi_stalled within its budget, and recover() after it
+//   v  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
+//      what raises the flag, which reads clear it, flush_rx(), the polled
+//      write's tail
 //   k  A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS, against the
 //      peer: the tick's handler dragged past a frame, ten windows of 128
 //      frames at /64 exact both ways, spi_ok, OVR never standing, the
@@ -94,12 +97,12 @@
 //   x  (outside z) the slip statistics: each mode ten times
 //
 // build: boards = v006k8,v003f4
-// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s
-// build: groups.v006k8 = abcdh,gef,knopqrmxs
+// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v
+// build: groups.v006k8 = abcdh,gefv,knopqrmxs
 // (on the CH32V006 the suite whole passes the 40 KB of program flash, so it
 // builds as three images there: the block, the asynchronous way, the polled
 // path, the engines and the stalled exit; the rate on the wire with the
-// host's costs, the CRC and the kernel; and the command channel, the
+// host's costs, the CRC, the kernel and OVR's clear; and the command channel, the
 // matrix, the ladder, the handler beside the polled loop, the kernel against
 // the peer, the client, MODF and the two statistics letters)
 // build: monitor_speed = 115200
@@ -1990,6 +1993,106 @@ void th_stalled() {
 }
 
 // ===========================================================================
+// v - OVR and its clear, on the resource (wireless)
+// ===========================================================================
+//
+// 16.2.7 (14.2.7 on the CH32V003): DATAR then STATR clears OVR. Two frames
+// clocked with nothing read, the first left in the buffer, the second lost
+// under OVR; then the ways a program goes at the flag, each from a block just
+// reset, judged at /32 with MISO floating (the frames' data is not read). Every
+// judged load comes a microsecond after the read or load before it, so a flag
+// that falls a load late is not read as standing. A FLAG TEST HAS NO TOLERANCE:
+// each verdict reads STATR's bits after the frames have certainly ended, and the
+// arithmetic is two_frames_unread()'s.
+
+/// Two frames at /32 with nothing read: 8 x 32 = 256 cycles each, 512 in all
+/// from the first write, against the delay's 15 us = 720 cycles at 48 MHz.
+void two_frames_unread() {
+    SpiRegs& regs = S::regs();
+    (void)Host::recover();   // OVR and RXNE down whatever the last sequence left
+    regs.DATAR = 0x11u;
+    for (uint32_t i = 2000u; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
+    }
+    regs.DATAR = 0x22u;
+    (void)delay_us(clock, 15);
+}
+
+void tv_overrun() {
+    host_ready();
+    Host::prime(SpiMode::mode0, SpiClock::div32, SpiDataSize::bits8);
+    SpiRegs& regs = S::regs();
+    auto settled = [&regs] {
+        (void)delay_us(clock, 1);
+        return static_cast<uint16_t>(regs.STATR);
+    };
+
+    // A load that shows the flag, then a read, then two loads.
+    two_frames_unread();
+    const uint16_t raised = regs.STATR;
+    (void)regs.DATAR;
+    const uint16_t shown_read_1 = settled();
+    const uint16_t shown_read_2 = settled();
+
+    // 16.2.7's order, no load first: a read, then two loads.
+    two_frames_unread();
+    (void)regs.DATAR;
+    const uint16_t order_1 = settled();
+    const uint16_t order_2 = settled();
+
+    // A read again after those loads, the buffer empty.
+    (void)regs.DATAR;
+    const uint16_t order_read = settled();
+
+    // RW0 (16.3.3): a zero written.
+    two_frames_unread();
+    regs.STATR = static_cast<uint16_t>(~spi_ovr);
+    const uint16_t wrote_zero = settled();
+
+    // The verbs.
+    two_frames_unread();
+    S::clear_overrun();
+    const uint16_t verb_clear = settled();
+    two_frames_unread();
+    S::flush_rx();
+    const uint16_t verb_flush = settled();
+
+    // The host's polled write: the answers overrun the buffer from the second
+    // frame, and its tail leaves neither flag. Sixteen frames at /8.
+    (void)Host::recover();
+    fill_pattern(tx_buf, 16, 0x5A);
+    const uint8_t write_status = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, nullptr, 16, SpiMode::mode0,
+                                           SpiClock::div8, SpiDataSize::bits8, true);
+    const uint16_t after_write = settled();
+    (void)Host::recover();
+
+    print(serial, "  two frames unread at /32: STATR ", hex(raised), "; a read after that load, then two loads ",
+          hex(shown_read_1), " ", hex(shown_read_2), crlf, "  no load first, a read then two loads ", hex(order_1), " ",
+          hex(order_2), ", a read again ", hex(order_read), crlf, "  a zero written to OVR ", hex(wrote_zero),
+          ", clear_overrun() ", hex(verb_clear), ", flush_rx() ", hex(verb_flush), crlf,
+          "  a polled write of 16 frames, status ", write_status, ": STATR ", hex(after_write), crlf);
+
+    const uint16_t both = spi_ovr | spi_rxne;
+    bench.verdict("OVR RISES on a frame completed with one standing unread, the buffer still full",
+                  (raised & both) == both);
+    if constexpr (device::part == Ch32Part::v003) {
+        bench.verdict("ON THE CH32V003 16.2.7'S ORDER DOES NOT CLEAR IT: a read then loads leave it standing, RXNE down; "
+                      "a read after a load that showed it clears it, the buffer full or empty",
+                      (order_1 & both) == spi_ovr && (order_2 & both) == spi_ovr && (order_read & both) == 0u &&
+                          (shown_read_1 & both) == 0u && (shown_read_2 & both) == 0u);
+    } else {
+        bench.verdict("ON THE CH32V006 16.2.7'S ORDER CLEARS IT: after a read, the first load still shows it, RXNE down, "
+                      "and the next does not, with or without a load before the read",
+                      (order_1 & both) == spi_ovr && (order_2 & both) == 0u && (order_read & both) == 0u &&
+                          (shown_read_1 & both) == spi_ovr && (shown_read_2 & both) == 0u);
+    }
+    bench.verdict("A ZERO WRITTEN TO OVR CLEARS NOTHING (the register table's RW0)", (wrote_zero & both) == both);
+    bench.verdict("clear_overrun() and flush_rx() leave neither flag after a frame unread and a frame lost",
+                  (verb_clear & both) == 0u && (verb_flush & both) == 0u);
+    bench.verdict("a polled write leaves neither flag, its answers having overrun the buffer",
+                  write_status == spi_ok && (after_write & both) == 0u);
+}
+
+// ===========================================================================
 // n - the peer's command channel
 // ===========================================================================
 
@@ -2762,6 +2865,7 @@ int main() {
     bench.letter('e', "THE HARDWARE CRC against a foreign CRC unit, 8 and 16 bits, a mismatch caught", te_crc);
     bench.letter('f', "THE KERNEL: SpiBus over SpiHost, the rejection, the votes", tf_kernel);
     bench.letter('h', "the stalled exit: a polled request over a block held in reset", th_stalled);
+    bench.letter('v', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, flush_rx()", tv_overrun);
     bench.letter('k', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: ten windows exact under a dragged tick",
                  tk_handler_gap);
     bench.letter('n', "THE PEER: the spi_link command channel, ident, ten pings", tn_peer_link);

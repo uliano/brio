@@ -228,7 +228,7 @@ cycles); a receive run 27 instructions, about 60 cycles, one read
 (BUSY) and three stores (the credit clear, the address, the count);
 an SPI data phase on two engines 89 instructions, about 180 cycles,
 and ONE DMA interrupt for the transaction - the block start alone: a
-whole engined request of 16 frames at 31.25 MHz costs 998 cycles over
+whole engined request of 16 frames at 31.25 MHz costs 947 cycles over
 the wire, the host's start(), the completion and the block's mode-0
 gap on top of this launch ([spi.md](spi.md)); a copy 25 instructions,
 about 40 cycles, one read and three stores.
@@ -365,7 +365,7 @@ travelled by DMA):
   claim, the copy engine at three widths); `bench_rp2040` letter d - a
   copy of 16 bytes wall 442 and busy 279 cycles with a 79-cycle
   handler, and an engined SPI request of 16 frames at 31.25 MHz wall
-  1510 with ONE interrupt, a fixed cost of 998 cycles (8.0 us) of which
+  1459 with ONE interrupt, a fixed cost of 947 cycles (7.6 us) of which
   96 the block's mode-0 gap; inside the block the engines run at the
   wire plus that gap, 38.00 cycles a byte at 31.25 MHz and 304.00 at
   3.906 MHz, 35.00 a byte in 16-bit frames.

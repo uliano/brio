@@ -1914,7 +1914,7 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
     bench.letter('d', "the DMA: copy, fill, a paced block", td_dma);
     bench.letter('s', "the SPI host's engines: an engined write at two rates and two widths", ts_spi_dma);
-    bench.letter('e', "the SPI host above the wire: polled, the hold-off, a request's fixed cost", te_spi_host);
+    bench.letter('e', "the SPI host above the wire: polled, a request's fixed cost", te_spi_host);
     bench.letter('u', "the serial transport: USART2's transmit, the console's receive and edge (brio stress)",
                  tu_uart, false);
     bench.letter('w', "the console's bridge, both ways at eight rates (brio stress)", tw_bridge, false);

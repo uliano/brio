@@ -1207,7 +1207,7 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * and in buffers, the data length, the width - copied into the engine's
  * own Tenure in word stores, and the reply stays the arbiter's.
  * The Request is laid out so that nothing in it is padding: the two
- * PinRefs, the three buffers and the reply first (seven words), then the
+ * PinRefs, the three buffers and the reply first (eight words), then the
  * lengths and the four settings in two words.
  *
  * TWO WAYS TO RUN A REQUEST (docs/design/spi-bus.md, "Two ways to run a
@@ -1396,7 +1396,7 @@ public:
     };
     static_assert(std::is_trivially_copyable_v<Request>);
     static_assert(sizeof(Request) == 2u * sizeof(PinRef) + 4u * sizeof(void*) + 8u,
-                  "brio SpiHost: the Request is laid out with no padding - seven words of "
+                  "brio SpiHost: the Request is laid out with no padding - eight words of "
                   "pins, buffers and reply, then two of lengths and settings");
 
     // ---- lifecycle ----------------------------------------------------------
@@ -1670,7 +1670,9 @@ public:
     static bool busy() { return dma_active_; }
 
     /// Put the ENGINE back where start() is legal (the verb a timed
-    /// SpiBus calls on a transaction that never answered): the select
+    /// SpiBus calls on a transaction that never answered, and the program's
+    /// to call after a start() that answered spi_stalled, busy() false; the
+    /// arbiter calls it on no synchronous answer): the select
     /// released FIRST, the engines put away and re-claimed, the
     /// peripheral reset and reconfigured to the applied state. False when
     /// a bounded wait ran out.

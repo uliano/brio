@@ -373,12 +373,13 @@ polled loop on the same board is the figure beside them).
   core, because a struct copy of this size is a `memcpy` call on a
   RISC-V build at `-Os` and a byte copy on a core that cannot load a
   misaligned word.
-- THE REQUEST IS LAID OUT WITHOUT PADDING: the four words first (the two
-  out buffers, the in buffer, the reply), then the two half-words (the
-  length, the prescaler pair), then the bytes - 28 bytes where the
-  family's `PinRef` is one byte, where the field order of the other
-  strata cost 36 with nine of padding. The names are the other strata's
-  and do not move; the order is this file's.
+- The request is laid out with nothing padded but the tail: the four words
+  first (the two out buffers, the in buffer, the reply), then the two
+  half-words (the length, the prescaler pair), then the bytes - fields of
+  27 bytes and one of tail padding, 28 where the family's `PinRef` is one
+  byte, where the field order of the other strata cost 36 with nine of
+  padding. The names are the other strata's and do not move; the order is
+  this file's.
 - `apply()` IS ONE COMPARE. The prescaler pair, the mode and the width
   are folded into the word the block takes (`spi_control_word`: SSPCPSR
   over SSPCR0, a handful of shifts on the request's three bytes) and
@@ -393,31 +394,37 @@ polled loop on the same board is the figure beside them).
   back no more than its depth cannot overrun (12.3.3.4, 12.3.3.5) -
   which is what makes the receive-overrun interrupt a thing the host
   need never arm.
-- THE POLLED LOOP HAS TWO SHAPES, by the request's `rx`. The RECEIVE
-  shape primes the transmit FIFO with the first `fifo_depth` frames and
-  then, per frame, waits for RNE, reads the frame and writes the one a
-  FIFO's depth ahead: three accesses of the block a frame (SSPSR, SSPDR
-  in, SSPDR out). The frames IN FLIGHT - written and not yet read back -
-  are never more than the receive FIFO's depth, so whatever handler
-  holds the loop off, the frames that can land in that FIFO are the ones
-  in flight and the FIFO holds them all: no handler can overrun this
-  shape, which the RP2350's bench proves with its tick handler stretched
-  past eight frame times. The TRANSMIT-ONLY shape - a null `rx`, which
-  is a display's pixel path, and every command phase - paces on TNF and
-  reads nothing per frame, two accesses a frame; the receive FIFO fills
-  and OVERRUNS BY DESIGN (a frame pushed on a full receive FIFO is
+- The polled loop has two shapes, chosen per phase. The receive shape
+  runs every phase but one: it primes the transmit FIFO with the first
+  `fifo_depth` frames and then, per frame, waits for RNE, reads the frame
+  and writes the one a FIFO's depth ahead: three accesses of the block a
+  frame (SSPSR, SSPDR in, SSPDR out). With a null in buffer it reads and
+  throws away. The frames in flight - written and not yet read back - are
+  never more than the receive FIFO's depth, so whatever handler holds the
+  loop off, the frames that can land in that FIFO are the ones in flight
+  and the FIFO holds them all: no handler can overrun this shape, which
+  the RP2350's bench proves with its tick handler stretched past eight
+  frame times. The transmit-only shape is taken only when all four hold: a
+  null in buffer, 8-bit frames, a run longer than the FIFO and a divisor
+  under four, the one place the receive shape would fall behind the wire on
+  the RP2350's cores (`run_polled`). A command phase of a FIFO's depth or
+  less, a write at clk_peri / 4 or slower and every 16-bit write therefore
+  run the receive shape, discarding. The transmit-only shape paces on TNF
+  and reads nothing per frame, two accesses a frame; the receive FIFO fills
+  and overruns by design (a frame pushed on a full receive FIFO is
   dropped and RORRIS raised while the block keeps shifting - harmless
   with RORIM masked, which this host never arms), and the tail waits for
   BSY to clear, drains the receive FIFO and clears the overrun. Both: the
   width a template parameter, the buffers advancing pointers, no accessor
   call, no interrupt asked of anything, the waits bounded by ONE budget for
-  the whole transaction - one slowest frame per frame and one more. Measured on both
-  of the RP2350's cores: the write shape at the nominal wire (plus the
-  block's gap in modes 0 and 2) at every rate, clk_peri / 2 included;
-  the receive shape at the wire from clk_peri / 4 down and bound by its
-  three accesses a frame at / 2 - the vendor's full-duplex loop on the
-  same board reads the same number on the Cortex-M33 and a slower one on
-  Hazard3, its write-only loop the same as this one's.
+  the whole transaction - one slowest frame per frame and one more, 200 000
+  turns of the wait a frame. Measured on both of the RP2350's cores: the
+  write shape at the nominal wire (plus the block's gap in modes 0 and 2) at
+  clk_peri / 2, where it is taken; the receive shape at the wire at clk_peri
+  / 4 and slower and bound by its three accesses a frame at / 2, where it
+  reads ahead of the vendor's full-duplex loop on both cores, the vendor's
+  write-only loop reading the same as this one's
+  ([../rp2350/spi.md](../rp2350/spi.md)).
 - A POLLED WAIT THAT RUNS OUT ANSWERS `spi_stalled` (`util/spi_bus.hpp`),
   with or without engines; `spi_dma_fault` is what the engines answer. The
   select is released and the receive FIFO drained, the frames still in
@@ -427,8 +434,18 @@ polled loop on the same board is the figure beside them).
   to the state applied, which throws away what a block that does not clock
   still holds in its transmit FIFO. The arbiter calls it only when a timed
   asynchronous request goes unanswered, so after a `spi_stalled` it is the
-  program's to call, with the bus idle; before it, a later request is
-  promised nothing. Each family's suite stages this on its silicon, the
+  program's to call, with nothing on the engines; before it, a later request
+  is promised nothing. That later request does not wait for the program: one
+  already in the arbiter's FIFO starts in the same dispatch, before the
+  requester's handler can run. On a block that still does not clock, a polled
+  one spends its own budget and answers `spi_stalled` too, and an asynchronous
+  one goes to the engines and has no completion, which is `spi_timeout` on a
+  timed bus and a bus busy for ever on an untimed one; on a block that clocks
+  again, the frames left in the transmit FIFO go out first, under the new
+  select. No verb says the engines are idle, and `recover()` under a request on
+  them takes it away, its completion never coming, so a program calls it when
+  it knows: every request it has posted answered, on a bus with one client.
+  Each family's suite stages this on its silicon, the
   block's enable taken down under a polled write (letter g of
   `test_rp2040_spi` and `test_rp2350_spi`), and the next polled request
   after `recover()` is exact.
@@ -475,8 +492,8 @@ polled loop on the same board is the figure beside them).
 - THE HOT PATH'S PLACE IS THE PROGRAM'S, BY A TAG. On a chip that
   executes in place out of a flash behind a cache, a cold transaction
   pays the cache its fill of the host's code - on the RP2350's Cortex-M33
-  some 4100 cycles more than the warm figure for a three-byte request,
-  70 lines of 8 bytes. A section attribute takes a string literal and this file knows
+  some 4250 cycles more than the warm figure for a three-byte request,
+  69 lines of 8 bytes. A section attribute takes a string literal and this file knows
   no family, so it places nothing by itself: `Pl022Host`'s last template
   parameter is util/placement.hpp's tag, and two paths run through its
   `Hot<P>` - `start()` (the polled loops, the tenure's copy and the
