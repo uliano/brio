@@ -69,8 +69,11 @@
  * request runs an explicit loop and completes inside it, whatever its
  * length and whatever engines the host names: it spins with interrupts
  * enabled under one budget for the whole transaction (400 000 polls plus
- * 4096 a frame), no interrupt of the block or of a stream armed, and a
- * Request's `cs_setup_us` is spent there too; on a stall it resets the
+ * 4096 a frame; a rate, mode or width change's disable runs before it, with
+ * bounded waits of its own and an answer dropped), no interrupt of the block
+ * or of a stream armed, and a Request's `cs_setup_us` is spent there too, on
+ * SysTick's counter (stopped, the delay returns at once and the setup time
+ * is skipped in silence, cortexm/delay.hpp); on a stall it resets the
  * block, sets `spi_stalled` and still returns true, so status() is the
  * answer. An asynchronous request on the engines returns false
  * at once and dma_isr() - the body the program's handlers for the two
@@ -1150,7 +1153,7 @@ constexpr uint32_t spi_frame_hclk_cycles(SpiClock c, SpiDataSize bits, uint8_t r
  * The transmit-only turn and the dead bus are the same letter's polled
  * lines on the engineless host,
  * from the difference of two lengths. The cycles are HCLK's at 180 MHz
- * behind the ART (RM0390 3.4.3); a request folds its cost from two frame
+ * behind the ART (RM0390 3.4.2); a request folds its cost from two frame
  * figures kept for the code, width and bus in force - computed when they
  * change, never per request - as cmd_len frames written and len frames
  * read or written: two multiplies and a compare in start(), on the
@@ -1168,7 +1171,9 @@ struct SpiHostCosts {
     uint8_t write_turn;              ///< the transmit-only loop's shortest frame, HCLK cycles
 };
 /// Measured on the STM32F446RE at 180 MHz, SPI1 on APB2 (bench_stm32f4
-/// letter e; docs/stm32f4/spi.md, "The short request").
+/// letter e; docs/stm32f4/spi.md, "The short request"). The letter reads the
+/// transmit-only turn at 38; the 36 kept here moves no count: (430 + 35) / 36
+/// and (430 + 37) / 38 are both 12.
 inline constexpr SpiHostCosts spi_costs{460u, 430u, 15u, 36u};
 
 /// What a polled frame costs the core: `w` the frame's HCLK cycles,
@@ -1279,7 +1284,8 @@ static_assert((spi_costs.engines_over_read + 512u - 1u) / 512u ==
  * so this host, which owns the clock, cannot lose a frame: a handler or a
  * preemption is a gap on the bus. What that costs is the turn between two
  * frames, bench_stm32f4 letter e's spi.frame lines on the STM32F446RE at
- * 180 MHz, in HCLK cycles a frame over the wire: in the CPHA = 0 modes 18
+ * 180 MHz, in HCLK cycles a frame over the wire at /4 to /256, modes 0 and 1
+ * being the two run: in the CPHA = 0 modes 18
  * to 38 on APB2 and 20 to 56 on APB1 from /4 to /16, nothing at /64 and
  * slower on APB2 or at /32 and slower on APB1, the half bit before the
  * frame's end hiding the turn (RXNE rises on the last sampling edge,
@@ -1298,11 +1304,12 @@ static_assert((spi_costs.engines_over_read + 512u - 1u) / 512u ==
  * BR, CPOL and CPHA "should not be changed when communication is
  * ongoing" (26.7.1).
  *
- * THE RECEIVE BUFFER IS NOT FLUSHED PER REQUEST. Every path reads back
- * every frame it clocks - the polled loop, the receive stream - so
- * nothing stands in the buffer when a transaction ends well; the end that
- * can leave a frame there (a stall) and recover() flush it themselves,
- * and init() does once.
+ * THE RECEIVE BUFFER IS NOT FLUSHED PER REQUEST. The receive loop and the
+ * receive stream read every frame they clock and the transmit-only loop
+ * clears what stands at its tail, so nothing stands in the buffer when a
+ * transaction ends well; a stall and recover() flush it themselves, init()
+ * does once, and a spi_dma_fault does not, so a frame may stand there until
+ * the program's recover().
  *
  * THE ENGINE SLOTS, both or neither (a block is full duplex and its
  * completion is the RECEIVE block's), on cells the request mapping really
@@ -1610,7 +1617,9 @@ public:
             }
         }
         s.status = spi_ok;
-        const uint16_t total = static_cast<uint16_t>(static_cast<uint16_t>(r.cmd_len) + r.len);
+        // cmd_len is a byte and len sixteen bits: the sum needs seventeen, or
+        // a request of 65536 frames would read as a request of none.
+        const uint32_t total = static_cast<uint32_t>(r.cmd_len) + r.len;
         if (total == 0u) {
             return true;
         }
@@ -1636,7 +1645,7 @@ public:
         // own interrupts are never armed by this host, so no handler steals
         // a frame; global interrupts STAY ENABLED. One budget bounds the
         // whole transaction.
-        uint32_t budget = 400'000u + 4'096u * static_cast<uint32_t>(total);
+        uint32_t budget = 400'000u + 4'096u * total;
         bool ok = true;
         if (r.cmd_len != 0u) {
             ok = loop_write(r.cmd.get(), r.cmd_len, wide, budget);
@@ -1974,8 +1983,9 @@ private:
     /// last answer, and the overrun the unread ones raised - is cleared
     /// by DR then SR (26.3.13), the transmit side being untouched by an
     /// overrun. Nothing is ever waited for on the receive side, so a
-    /// handler landing on the loop delays it and loses nothing:
-    /// wire-bound at every rate. False when the budget ran out.
+    /// handler landing on the loop delays it and loses nothing. At the wire
+    /// at SCK 22.5 MHz and slower, its own turn of 38 cycles the bound at 45
+    /// MHz on APB2 at 180 MHz. False when the budget ran out.
     [[gnu::always_inline]] static bool loop_write(const uint8_t* out, uint16_t count, bool wide,
                                                   uint32_t& budget) {
         SPI_TypeDef& r = S::regs();

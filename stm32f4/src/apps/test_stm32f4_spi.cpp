@@ -98,8 +98,8 @@
 //   u  16-BIT FRAMES against the peer (spi_link's extended exchange,
 //      spare_wide): the polled loop and the half-word streams at every BR
 //      code, the wire's time from two window lengths,
-//      and the peer's own 16-bit client run; the streams' read-back judged
-//      to PCLK1/4 and printed at /2, past the answer line's budget
+//      and the peer's own 16-bit client run; this end's read judged to
+//      PCLK1/4 and printed at /2, every frame heard by the peer judged at /2
 //   v  RECEIVE-ONLY and ODD COUNTS (spare_receive_only): this host's
 //      transmit-only shapes witnessed by a client whose answer line is
 //      dark, the peer's receive() run at 7 and 33 frames in both widths,
@@ -107,7 +107,8 @@
 //   w  THE CRC against the peer's unit (spare_crc): both widths, both of
 //      the peer's serves, every BR code, this end's unit on the resource
 //      with the last data frame queued behind its predecessor and CRCNEXT
-//      after it; a wrong CRC frame caught as report_crcerr
+//      after it; a wrong CRC frame caught as report_crcerr; this end's read
+//      judged to PCLK1/4, the peer's check at /2 too
 //   f  THE SOFTWARE SELECT AND THE SELECT OUTPUT: a client with no select
 //      pad (SSM) deaf with SSI high and exact with it low, under the
 //      peer's host_burst; SSOE, the select the block drives from SPE to
@@ -123,6 +124,8 @@
 //      the engined host's own count completes inside start(), the count
 //      rides the streams with one completion, both exact; a command phase
 //      worth a block chained to its data block
+//   j  THE COUNT PAST SIXTEEN BITS: one command frame and 65535 data frames,
+//      a request of 65536 frames in all, on the wire and timed
 //   t  (OUTSIDE z) THE CRCNEXT WINDOW and the receive CRC at PCLK1/2: the
 //      store walked away from the last data store, one frame in flight,
 //      and the received CRC against the SCK pad's class - the instrument
@@ -265,6 +268,14 @@ void settle_ms(uint32_t ms) {
     }
 }
 void settle() { settle_ms(spilink::settle_ms); }
+
+/// A measurement window the console's transmit interrupt walks through is not
+/// a measurement: drain, then two more milliseconds for the last character.
+void console_drain() {
+    for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
+    }
+    settle_ms(2);
+}
 
 // ---- what the registers held before this program touched them ---------------------
 
@@ -1760,6 +1771,7 @@ struct Outcome {
     uint16_t idx = 0xFFFF;
     uint8_t got = 0, exp = 0;
     uint32_t cycles = 0;      ///< start() to completion, core cycles
+    bool ticked = false;      ///< the kernel tick landed inside that time
     bool inside = false;      ///< start() answered true: it ended inside the call
     uint16_t completions = 0; ///< the engined host's completions under it
     uint16_t blocks = 0;      ///< its receive stream's block ends
@@ -1823,6 +1835,7 @@ Outcome run(const Ext& e) {
         r.polled = false;
         dma_completions = 0;
         dma_blocks = 0;
+        const uint32_t tick0 = Ticker::ticks();
         const uint32_t t0 = cycle_stamp();
         bool done = DmaHost::start(r);
         o.inside = done;
@@ -1830,6 +1843,7 @@ Outcome run(const Ext& e) {
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
         o.cycles = cycles_since(t0);
+        o.ticked = Ticker::ticks() != tick0;
         o.clocked = done || host_done;
         o.completions = dma_completions;
         o.blocks = dma_blocks;
@@ -1850,12 +1864,14 @@ Outcome run(const Ext& e) {
         r.mode = SpiMode::mode0;
         r.bits = bits;
         r.polled = true;
+        const uint32_t tick0 = Ticker::ticks();
         const uint32_t t0 = cycle_stamp();
         bool done = Host::start(r);
         const uint32_t m0 = Ticker::millis();
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
         o.cycles = cycles_since(t0);
+        o.ticked = Ticker::ticks() != tick0;
         o.clocked = done || host_done;
         link_hold();
         CsPin::set();
@@ -1902,27 +1918,26 @@ constexpr SpiClock rungs[] = {SpiClock::div256, SpiClock::div128, SpiClock::div6
                               SpiClock::div32,  SpiClock::div16,  SpiClock::div8,
                               SpiClock::div4,   SpiClock::div2};
 
-/// THE ANSWER LINE'S BUDGET AT PCLK1/2, AND IT IS MEASURED. Where this
-/// end's frames run back to back in 16 bits (the streams), the peer's MSB
-/// of a frame comes after the last sampling edge of the one before, and at
-/// 22.5 MHz the round trip it must make inside one SCK low phase does not
-/// fit the data sheets: this end's tw(SCKL) is TPCLK - 1.5 = 20.7 ns
-/// (DS10693 table 63), the G0B1's tv(SO) up to 14 ns (DS13560 table 76)
-/// and this end's tsu(MI) 4 ns - 18.7 of the 20.7 before the SCK pad at
-/// medium (the class the slips set, peer_sck_speed above) and the wire
-/// both ways. Measured: 10 of 7200 frames wrong in 150 windows of 48, every
-/// one in bit 15 alone and every one the previous frame's last bit (the
-/// MSB late), at random frame positions; none of 9600 8-bit frames at the
-/// same rung, none of 2880 at PCLK1/4, none on the polled loop (whose
-/// frames are not back to back), and none of 7200 with the SCK pad at high
-/// - the round trip shortened by the faster edge. So the streams' 16-bit
-/// read-back is judged to PCLK1/4 and PRINTED at PCLK1/2.
-constexpr SpiClock wide_stream_readback_top = SpiClock::div4;
+/// WHAT THIS END'S READ IS JUDGED TO, FROM THE ANSWER LINE'S BUDGET. A bit of
+/// the peer's answer must cross the wire inside one SCK low phase: this end's
+/// tw(SCKL) is division/2 x TPCLK - 1.5 ns (DS10693 table 63, TPCLK = 22.2 ns),
+/// against the G0B1's tv(SO) up to 14 ns (DS13560 table 76) and this end's
+/// tsu(MI) of 4 ns, 18 ns before the SCK pad at medium (the class the slips set,
+/// peer_sck_speed above) and the wire both ways.
+///   PCLK1/2: 20.7 - 18 = 2.7 ns left for the pad and two runs of wire: no budget.
+///   PCLK1/4: 42.9 - 18 = 24.9 ns left, nine times that.
+/// So every read is judged to PCLK1/4, zero frames wrong. At PCLK1/2 what is
+/// judged is the far side, every frame clocked and heard exact by the peer, and
+/// this end's read is printed: on these wires 16-bit frames read wrong there,
+/// from the polled loop and the streams alike (docs/stm32f4/spi.md, "Findings
+/// left open"). The 8-bit windows of letters p and l, which hold at PCLK1/2 in
+/// every run, keep their verdicts there.
+constexpr SpiClock wide_readback_top = SpiClock::div4;
 
-/// Whether this end's read-back is judged at `c` on `e`'s path and width.
+/// Whether this end's read-back is judged at `c` on `e`'s width.
 bool readback_judged(const Ext& e, SpiClock c) {
-    return !(e.path == Path::engines && e.wide && !e.receive_only &&
-             static_cast<uint8_t>(c) < static_cast<uint8_t>(wide_stream_readback_top));
+    return !(e.wide && !e.receive_only &&
+             static_cast<uint8_t>(c) < static_cast<uint8_t>(wide_readback_top));
 }
 
 /// Climb every BR code with `e` and say whether every rung was exact - on
@@ -1953,15 +1968,33 @@ bool climb(Ext e) {
 /// permille of the frame's SCK periods (a bit is division x HCLK/PCLK1 =
 /// 4 x division core cycles). The time asks that every frame was clocked
 /// and heard by the peer, and the read-back where readback_judged() says;
-/// zero otherwise, the window that failed named first.
+/// zero otherwise, the window that failed named first. WHAT LENGTHENS A WINDOW
+/// IS NOT JUDGED: at PCLK1/2 the difference is 32 x 128 = 4096 cycles, so a
+/// handler of 41 cycles in the shorter window alone is the -1 % of wire_ok().
+/// The console is drained first, and a pair a tick landed in, printed, is run
+/// again. The two windows last 50 us at PCLK1/2 against a 1 ms tick, so one
+/// pair in twenty takes one and four tries leave one chance in 160 000 of a
+/// tick still judged; at PCLK1/8 they last some 200 us, one pair in five and
+/// one in 600 in four tries, and there a tick of 76 cycles is 0.5 % of the
+/// difference, inside the bound.
 uint32_t frame_permille(Ext e) {
     Ext shorter = e;
     shorter.count = 16;
     Ext longer = e;
     longer.count = 48;
     longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
-    const Outcome a = run(shorter);
-    const Outcome b = run(longer);
+    console_drain();
+    Outcome a{};
+    Outcome b{};
+    for (uint8_t attempt = 0; attempt < 4u; ++attempt) {
+        a = run(shorter);
+        b = run(longer);
+        if (!a.ticked && !b.ticked) {
+            break;
+        }
+        print(serial, "      a tick landed in that pair of windows: run again", crlf);
+        console_drain();
+    }
     const bool judged = readback_judged(e, e.rate);
     auto timed = [judged](const Ext& x, const Outcome& o) {
         return judged ? exact(x, o) : peer_heard(x, o) && o.clocked;
@@ -2010,10 +2043,11 @@ void tu_wide() {
               " at every code", crlf);
     }
     bench.verdict("16-BIT FRAMES ON THE POLLED LOOP: thirty-two frames byte-exact both ways at "
-                  "every code to PCLK1/2, the peer serving them in 16-bit beats (report_extended)",
+                  "every code to PCLK1/4, every frame heard exact by the peer at PCLK1/2 and this "
+                  "end's read printed there, the peer serving them in 16-bit beats (report_extended)",
                   path_ok[0]);
     bench.verdict("...and on the DMA1 STREAMS, a half-word beat a frame (the beat is the "
-                  "frame), likewise - this end's read-back to PCLK1/4, every frame heard at /2",
+                  "frame), likewise",
                   path_ok[1]);
 
     // THE WIRE'S TIME: the engines at every rate. The polled loop keeps one
@@ -2056,7 +2090,8 @@ void tu_wide() {
     run.spare = spilink::spare_polled_pump;
     const bool run_ok = ext::climb(run);
     bench.verdict("the PEER'S CLIENT RUN in 16-bit frames (its exchange() over uint16_t, one "
-                  "frame an access) is exact both ways at every code to PCLK1/2",
+                  "frame an access) is exact both ways at every code to PCLK1/4, and hears every "
+                  "frame at PCLK1/2, this end's read printed there",
                   run_ok);
     (void)link_command_mode();
     bench.verdict("the command channel survives the 16-bit climbs", command(Op::ping));
@@ -2345,11 +2380,11 @@ bool crc_agrees(const Crc& c, bool wide) {
 }
 
 /// The far side of a CRC exchange alone: this end's TXCRCR, the peer's
-/// check, and every DATA frame both ways - what this end makes of the
-/// CRC it receives left out (letter t: ES0298 2.14.5's CRC signature at
-/// PCLK1/2).
+/// check, and every data frame heard by the peer - this end's read left out,
+/// printed at PCLK1/2 (readback_judged() above; letter t: ES0298 2.14.5's CRC
+/// signature there).
 bool crc_far_agrees(const Crc& c) {
-    return c.o.accepted && c.o.clocked && c.o.reported && c.frames_ok && c.o.mism == 0u &&
+    return c.o.accepted && c.o.clocked && c.o.reported && c.frames_ok &&
            (c.o.r.flags & spilink::report_extended) != 0u && c.o.r.count == 16u &&
            c.o.r.mism == 0u && (c.o.r.flags & spilink::report_crcerr) == 0u &&
            c.tx_crc == c.tx_ref;
@@ -2480,8 +2515,8 @@ void tw_crc() {
     print(serial, "  at PCLK1/2 this end's receive CRC (RXCRCR, or the CRC frame read or come) missed in ",
           top_rx_wrong, " of 2 windows - ES0298 2.14.5's CRC signature, letter t", crlf);
     bench.verdict("AT PCLK1/2 = 22.5 MHz THE FAR SIDE HOLDS: this end's TXCRCR is the "
-                  "arithmetic, the peer's DMA serve checks the CRC frame clean, and every data "
-                  "frame arrives exact both ways - both widths",
+                  "arithmetic, the peer's DMA serve checks the CRC frame clean and hears every "
+                  "data frame exact, this end's read printed - both widths",
                   top_far);
 
     // A WRONG CRC ON A REAL WIRE: this end's unit off, the CRC frame sent as
@@ -2499,16 +2534,19 @@ void tw_crc() {
             print(serial, "  CORRUPTED, ");
             ext::print_crc(legs[l].name, c, r);
             const uint16_t mask = legs[l].wide ? 0xFFFFu : 0x00FFu;
+            // This end's read judged to PCLK1/4 (readback_judged() above), the
+            // peer's check at every rung.
+            const bool read_ok = c == SpiClock::div2 || (r.o.mism == 0u && (r.frame & mask) == r.peer_ref);
             caught = caught && r.o.accepted && r.o.reported && r.frames_ok &&
                      (r.o.r.flags & spilink::report_crcerr) != 0u && r.o.r.count == 16u &&
-                     r.o.r.mism == 0u && r.o.mism == 0u && (r.frame & mask) == r.peer_ref;
+                     r.o.r.mism == 0u && read_ok;
         }
     }
     bench.verdict("A WRONG CRC FRAME IS CAUGHT BY THE FOREIGN UNIT: one flipped bit in the "
                   "frame where the CRC belongs and the peer reports CRCERR (report_crcerr), "
                   "every data frame still exact, its own CRC frame still the arithmetic - both "
-                  "widths, both serves, at the command rate and at PCLK1/4, and on the DMA "
-                  "serve at PCLK1/2",
+                  "widths, both serves, at the command rate and at PCLK1/4; on the DMA serve at "
+                  "PCLK1/2 the peer's check and every frame it heard, this end's read printed",
                   caught);
     (void)link_command_mode();
     bench.verdict("the command channel survives the CRC", command(Op::ping));
@@ -3342,6 +3380,49 @@ void ts_short() {
     bench.verdict("the command channel survives the short requests", command(Op::ping));
 }
 
+// =============================================================================
+// j - THE COUNT PAST SIXTEEN BITS
+// =============================================================================
+//
+// `cmd_len` is a byte and `len` sixteen bits, so their sum needs seventeen:
+// one command frame and 65535 data frames are 65536 frames, which a 16-bit
+// sum reads as a request of none. The select stays null and the pad high, so
+// the peer hears nothing of it; the frames are on the wire all the same.
+
+void tj_count() {
+    static constexpr uint8_t one_command[1] = {0x5A};
+    (void)CycleCounter::init();
+    (void)link_command_mode();
+    Host::Request rq{};
+    rq.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(one_command));
+    rq.cmd_len = 1;
+    rq.len = 65535;
+    rq.bits = SpiDataSize::bits8;
+    rq.clock = SpiClock::div8;
+    rq.mode = SpiMode::mode0;
+    rq.polled = true;
+    const uint32_t t0 = CycleCounter::now();
+    const bool done = Host::start(rq);
+    const uint32_t wall = CycleCounter::now() - t0;
+    const uint8_t st = Host::status();
+    // The wire: 65536 frames x 8 bits x 8 PCLK1 cycles x HCLK/PCLK1 = 4, 256
+    // cycles a frame, 16 777 216 cycles, 93.2 ms. The last frame's last edge
+    // is half a bit, 16 cycles, before its eighth period ends. The counter runs
+    // on the clock SCK is divided from, so no wander enters and its resolution
+    // is one cycle; a handler can only lengthen the wall. So the wall is at
+    // least 16 777 200 cycles; a request read as empty takes some hundreds.
+    constexpr uint32_t wire = 65536u * 8u * 8u * (SysClock::hz / SysClock::pclk1_hz);
+    constexpr uint32_t half_bit = 8u * (SysClock::hz / SysClock::pclk1_hz) / 2u;
+    print(serial, "  1 + 65535 frames at PCLK1/8: start() ", done ? "true" : "false", ", status ", st,
+          ", ", wall, " cycles against the wire's ", wire, " (x1000 ",
+          static_cast<uint32_t>(static_cast<uint64_t>(wall) * 1000u / wire), ")", crlf);
+    bench.verdict("A REQUEST OF 65536 FRAMES RUNS THEM: one command frame and 65535 data frames "
+                  "end spi_ok inside start(), and the wall is at least the wire's 93.2 ms less "
+                  "half a bit",
+                  done && st == spi_ok && wall >= wire - half_bit);
+    (void)link_command_mode();
+}
+
 void banner() {
     print(serial, crlf, "test_stm32f4_spi - SPI2 on the Nucleo-F446RE against the STM32G0B1RE's "
                         "spi_peer",
@@ -3457,6 +3538,8 @@ int main() {
     bench.letter('s', "THE SHORT ASYNCHRONOUS REQUEST against the peer: the split at the "
                       "host's count, a command block chained",
                  ts_short);
+    bench.letter('j', "THE COUNT PAST SIXTEEN BITS: one command frame and 65535 data frames",
+                 tj_count);
     bench.letter('t', "THE CRCNEXT WINDOW and the receive CRC at PCLK1/2, no verdict",
                  tt_crc_window, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no verdict",

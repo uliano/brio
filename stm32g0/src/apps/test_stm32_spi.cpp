@@ -1561,8 +1561,9 @@ void td_ladder() {
     (void)Host::init(clock);
     dma_host_live = false;
 
-    // ---- the PACED ladder: the engine's own polled loop, one frame at
-    // a time, which is what a device driver really does ----
+    // ---- the PACED ladder: the engine's own polled loop, its write-ahead
+    // and its refill setting the pace, which is what a device driver really
+    // does ----
     uint8_t paced = 0;
     for (uint8_t c = static_cast<uint8_t>(SpiClock::div256);; --c) {
         const SpiClock rate = static_cast<SpiClock>(c);
@@ -1585,11 +1586,8 @@ void td_ladder() {
                   "ways, up to PCLK/2 = ", spi_sck_hz(SysClock::pclk_hz(), SpiClock::div2) / 1000u,
           " kHz", crlf);
     bench.verdict("ALL EIGHT BR CODES CARRY THE LINK BYTE-EXACT WHEN THE HOST "
-                  "PACES IT - up to PCLK/2, the peripheral's own maximum - "
-                  "because a polled loop writes one frame, waits for it to come "
-                  "back, and only then writes the next: the gap between frames is "
-                  "the HOST's loop, and the client has all of it to answer in. A "
-                  "rate ladder run this way measures the wire and nothing else",
+                  "PACES IT - up to PCLK/2, the peripheral's own maximum - the "
+                  "pace being the polled loop's write-ahead and refill",
                   paced == 8u);
 
     // ---- the BURST ladder: the transmit FIFO kept full, so that the

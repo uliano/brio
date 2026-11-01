@@ -318,9 +318,8 @@ private:
         r.rx = lend<Lease::reply>(rx);
         r.len = static_cast<uint16_t>(n);
         // A polled request completes inside start() by the arbiter's
-        // contract (util/bus_master.hpp): start() answers true, a request
-        // the engine refuses included, and the status carries the
-        // engine's code - and the member it was lent is not read after
+        // contract (util/bus_master.hpp): start() answers true and the
+        // status carries the engine's code - and the member it was lent is not read after
         // the return. The false branch of start() is the asynchronous
         // one, and no host in the tree takes it for a polled request.
         return Host::start(r) && Host::status() == spi_ok;

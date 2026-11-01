@@ -22,8 +22,10 @@
  * request's buffers until when and the engine contract is documented
  * once, in bus_master.hpp; the SPI engine descriptor and its two ways to
  * run a request live in each target's SpiHost and in
- * docs/design/spi-bus.md. Polled is an explicit loop at any length: no
- * DMA and no interrupt vector, and start() returns when it is done.
+ * docs/design/spi-bus.md. Polled is an explicit loop at any length, in the
+ * arbiter's dispatch: no DMA and no interrupt vector, start() returning when
+ * it is done; the poster does not wait, and its buffers stay lent until the
+ * reply. A program reads the outcome in the reply, `SpiDone::status`.
  * Asynchronous is DMA: the host's engines carry the request and their
  * completion is the TransferDone, a host with no engines refuses it
  * (spi_rejected at once, nothing on the wire; the host type's `has_dma`
@@ -55,7 +57,8 @@ inline constexpr uint8_t spi_ok = bus_ok;
 /// engines (docs/design/spi-bus.md, "Two ways to run a request").
 inline constexpr uint8_t spi_rejected = bus_rejected;
 /// The transaction never answered inside the arbiter's per-bus timeout:
-/// the engine was recover()ed and the requester is told here. On SPI
+/// the arbiter itself has called the engine's recover() and the requester
+/// is told here, with nothing to call. On SPI
 /// the plausible wedge is not a wire (the host clocks itself) but a
 /// dead engine - a host demoted mid-transfer, a DMA channel stopped by
 /// a controller erratum - and the interrupt's completion that therefore
@@ -68,7 +71,9 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 // host has DMA engine slots and by none that has not: the engines reported
 // a block they could not finish. Only the engines answer it, so only an
 // asynchronous request that rode them can carry it; a block that simply
-// never completes is the arbiter's spi_timeout, on a bus with a timeout.
+// never completes is the arbiter's spi_timeout, on a bus with a timeout. No
+// letter on any family provokes a transfer error, so what follows it is read
+// in the code (docs/design/spi-bus.md, "What follows each code").
 // The code below has one spelling and one value on every family, distinct
 // from that one.
 
@@ -79,9 +84,11 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 /// asked for the loop or was short enough to run it; the AVR's has none,
 /// a transfer written there always completing. The select is released
 /// and the receive side drained; what else the host does to the block (a
-/// reset and a reconfiguration, or nothing) is the family's. On the
-/// PL022 hosts it does nothing else: the way back is recover(), the
-/// program's to call with the bus idle.
+/// reset and a reconfiguration on the STM32F4, nothing on the other hosts)
+/// is the family's. Where it does nothing else the way back is recover(),
+/// the program's to call with the bus idle: the arbiter does not call it, and
+/// goes on at once to the next waiting request (docs/design/spi-bus.md,
+/// "What follows each code").
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
 /// The arbiter under SPI's name. `pending_depth` is how many requests

@@ -68,7 +68,9 @@
  * this file masks interrupts (a critical section around the
  * read-modify-write of CR2, which the handler shares). Every wait in
  * the file is bounded - a bus whose clock never runs must not hang the
- * kernel - and reports false rather than spinning. A request's buffers
+ * kernel - and reports false rather than spinning, though the host drops
+ * that answer from the disable a rate, mode or width change runs before a
+ * transaction, whose own budget then meets what it left. A request's buffers
  * are lent: the client hands them over under Lease::reply
  * (kernel/borrowed.hpp) and owns them again when its SpiDone arrives;
  * the Request itself is read through the reference when it completes
@@ -1552,11 +1554,13 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // =============================================================================
 
 // A polled wait that ran out ends the transaction with spi_stalled
-// (util/spi_bus.hpp's code): the peripheral clocked no frame back in
-// the budget a transaction is given (its own length at the slowest
-// rate, many times over), the select is raised and the FIFOs drained.
-// It cannot happen on a host whose clock runs, and a report beats a
-// frame of garbage returned in silence. No frame is lost here: the
+// (util/spi_bus.hpp's code): no frame came back within the budget a
+// transaction is given (a thousand polls a frame, some twice the slowest
+// frame by the listing), the select is raised and the RXFIFO drained. The
+// peripheral is left as it is, with whatever its TXFIFO holds, and recover()
+// is the way back, the program's to call with the bus idle. It cannot happen
+// on a host whose clock runs, and a report beats a frame of garbage returned
+// in silence. No frame is lost here: the
 // polled loops keep no more frames in flight than the receive FIFO
 // holds, and the engines' receive channel outranks their transmit one
 // (the class comment).
@@ -1584,7 +1588,9 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * the polled one of the same shape through the same call, the busy of the
  * first less the second's cycles above the wire, so that the ruler's own
  * cycles cancel. The turns are the same letter's polled lines at PCLK/2,
- * the one code where the loop and not the wire is the bound. Each
+ * where the loop and not the wire is the bound; at PCLK/4 byte frames read
+ * from the flash run over the wire too (34.75 cycles a frame against 32),
+ * and the model takes the wire's there, a count at most a frame high. Each
  * placement has its figures (SpiHostCosts below); a request folds its
  * cost from two frame figures kept for the code and size in force -
  * computed when they change, never per request - as cmd_len frames
@@ -1648,7 +1654,7 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
 }
 // The counts those figures give from the flash, 8-bit frames (docs/
 // stm32g0/spi.md, "The short request"): a read rides the engines from 21
-// frames at PCLK/2, 17 at /4, 9 at /8, 5 at /16 and 1 from /128 down; a
+// frames at PCLK/2, 17 at /4, 9 at /8, 5 at /16 and 1 at /128 and slower; a
 // write from 31, 17, 9 and 5; a 16-bit read from 13 at /2.
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 21u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 17u);
@@ -1766,7 +1772,7 @@ static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize
  * by a byte access with the threshold moved for it - so that a byte
  * frame costs half a loop turn (measured: the frame-by-frame loop ran
  * at 41 cycles a frame against the wire's 32 at PCLK/4, the packed one
- * at 34). The bounded wait is one budget for the whole transaction.
+ * at 36 in all, its slope 34.75). The bounded wait is one budget for the whole transaction.
  *
  * NO FRAME IN FLIGHT IS EVER LOST TO AN OVERRUN, UNDER ANY INTERRUPT.
  * The loops run with interrupts enabled, so every handler of the image
@@ -1788,12 +1794,13 @@ static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize
  *
  * NOTHING IS FLUSHED BEFORE A TRANSACTION. In master mode a frame enters
  * the RXFIFO only for a frame the master clocked (35.5.9: the clock runs
- * "while any data is present in the TXFIFO"), and every path here reads
- * back exactly what it wrote - the two loops by count, the engines by
- * their block - so a fresh transaction finds the RXFIFO empty. The
- * abnormal exits (a polled wait that ran out, recover()) are where a
- * frame could stand unread, and they drain it (35.5.9's step 4, Spi::flush_rx()); init() drains after the
- * enable, once.
+ * "while any data is present in the TXFIFO"), and every path here leaves
+ * it empty - the receive loops by count, the transmit-only loop by draining
+ * on FRLVL at its tail, the engines by their block - so a fresh transaction
+ * finds the RXFIFO empty. A polled wait that ran out and recover() drain it
+ * (35.5.9's step 4, Spi::flush_rx()), init() after the enable, once; a
+ * spi_dma_fault does not, so frames may stand there until the program's
+ * recover().
  *
  * THE PER-REQUEST CHIP-SELECT DELAY:
  * cs_setup_us is spent spinning in start() (main context, bounded by the
@@ -1873,9 +1880,9 @@ static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize
  * the linker's long-branch veneer from the flash. At 64 MHz the flash
  * answers at two wait states behind the prefetch and the cache (RM0444
  * 3.3.4, 3.3.5), which hide most of what that costs this body, and the
- * SRAM at none (2.3): the receive loop at PCLK/2 is a twentieth faster
- * from SRAM and a short request some 15 to 30 cycles
- * (docs/stm32g0/spi.md has every figure, both placements). The engines'
+ * SRAM at none (2.3): the receive loop at PCLK/2 is a tenth faster from
+ * SRAM and a short request 1 to 25 cycles (docs/stm32g0/spi.md has every
+ * figure, both placements). The engines'
  * path takes no placement: their completion (dma_isr()) is one entry a
  * block, inline in its vector, which a program may place in
  * `.fast_text`, and start() programs a block once a transaction.
@@ -2664,9 +2671,10 @@ private:
     /// back, else the receive shape with its answers paced by count.
     template <bool wide>
     [[gnu::always_inline]] static bool run_polled(const Request& r) {
-        // The budget: the slowest frame is 256 x 16 PCLK cycles and an
-        // empty poll a handful, so a thousand polls a frame is many
-        // times the wire, plus a floor for the shortest request.
+        // The budget: the slowest frame is 256 x 16 = 4096 PCLK cycles and
+        // an empty poll some nine by the listing, so a thousand polls a frame
+        // is some twice the slowest frame, plus a floor for the shortest
+        // request.
         uint32_t budget = 100'000u + ((static_cast<uint32_t>(r.cmd_len) + r.len) << 10);
         bool ok = true;
         if (r.cmd_len != 0u) {
@@ -2695,9 +2703,10 @@ private:
     /// in it: under InRam the instance in SRAM, under InFlash a function
     /// of its own in the flash, flattened the same way. OUT OF LINE UNDER
     /// BOTH: inline in start() the flattened loops share start()'s
-    /// registers and spill them - the receive loop measured 7752 cycles at
-    /// PCLK/2 there and 6470 in a function of its own (256 frames, the
-    /// wire 4096), the call costing a request nothing measurable.
+    /// registers and spill them - measured in a scratch build, the receive
+    /// loop took 9576 cycles at PCLK/2 there against the 6470 of a function
+    /// of its own (256 frames, the wire 4096), the call costing a request
+    /// nothing that matters beside it.
     [[gnu::always_inline]] static bool polled_transaction(const Request& r) {
         if constexpr (placed_in_ram) {
             return Hot<InRam>::run([&r] { return polled_body(r); });

@@ -33,10 +33,15 @@
  *  - the power manager (util/power.hpp) posts PrepareSleep and gets a
  *    SleepVote back;
  *  - this object's dispatch, in main context, calls Bus::start(), reads
- *    Bus::status(), sends every reply, and on a timed bus calls
- *    Bus::recover(). Nothing here waits or masks interrupts; a
- *    synchronous engine's start() may wait, and that wait is inside
- *    this object's dispatch.
+ *    Bus::status(), sends every reply, and on a timed bus, on a transfer
+ *    that never answered and on nothing else, calls Bus::recover(): after
+ *    any code the engine reports, a stall included, it answers the requester
+ *    and starts the next waiting request in the same dispatch. Nothing here
+ *    waits or masks interrupts; a synchronous engine's start() may wait, and
+ *    that wait is inside this object's dispatch, so requests queued behind a
+ *    polled one add up. No verb here tells a program whether the bus is
+ *    idle: an engine's recover() called from a client is the client's to
+ *    prove safe (docs/design/spi-bus.md, "What follows each code").
  *
  * Who owns the request's buffers, until when: the request carries spans
  * into the client's memory, and the client must not touch them (read
@@ -45,9 +50,9 @@
  * in the client's queue, the client cannot run while the engine still
  * uses the buffers, so the rule is race-free; nothing checks it.
  *
- * Why the event queue alone is not the arbiter: a transaction outlives
- * the dispatch that starts it (it runs on interrupts and completes
- * later), so while busy the kernel may well deliver the next request.
+ * Why the event queue alone is not the arbiter: an asynchronous
+ * transaction outlives the dispatch that starts it (it runs on interrupts
+ * and completes later), so while busy the kernel may well deliver the next request.
  * It needs to wait, and it waits where post() built it: the arbiter
  * holds the request's queue slot (kernel/event_queue.hpp's hold(),
  * Lease::hold) and keeps the slot's number in a small pending FIFO of
@@ -92,8 +97,8 @@
  *    refuses every asynchronous one, docs/design/spi-bus.md). The reply
  *    is then sent right away with whatever Bus::status() reports (bus_ok
  *    as a rule; bus_rejected for a refusal; the engine's own code when
- *    the synchronous path failed: a polled DMA block that never
- *    completed, a bus speed the clock in force cannot produce) and no
+ *    the synchronous path failed: a polled wait that ran out, a bus
+ *    speed the clock in force cannot produce) and no
  *    TransferDone must follow for it. Both styles interleave freely on
  *    one bus, and nothing here needs to know which one a request asked
  *    for: the engine's return is the whole contract.

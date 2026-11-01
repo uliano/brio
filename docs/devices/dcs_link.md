@@ -196,9 +196,9 @@ Four rules the realization keeps, each of which a suite checks:
 - **A verb is `Host::start(r) && Host::status() == spi_ok`.** A polled
   request completes inside `start()` by the arbiter's contract
   ([../design/spi-bus.md](../design/spi-bus.md)), so `start()` answers
-  `true` for it - a request the engine refuses without moving a byte
-  included - and the status carries the engine's code: a polled transfer
-  whose block does not clock comes back `spi_stalled` from inside
+  `true` for it and the status carries the engine's code: on a host whose
+  polled loop has a spin budget, every host but the AVR's, a polled transfer
+  whose peripheral does not clock comes back `spi_stalled` from inside
   `start()`.
   A `false` from `start()` is the asynchronous answer, which no host in
   the tree gives for a polled request. Only the link's own refusals
