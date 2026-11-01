@@ -229,8 +229,10 @@
 //      included), then at 100 kHz, 400 kHz and 1 MHz (the Fm+ drive on
 //      both instances for the last): the SCL period MEASURED as the
 //      slope of two engined writes of 16 and 255 bytes, and every op
-//      through the pump (`i2c.*`) and through the engines (`i2c.*.dma`,
-//      DmaTxEngine<1, 2> + DmaRxEngine<1, 3>): i2c.write and i2c.read of
+//      through the engineless host (`i2c.*`) and through the engined host
+//      under `automatic` (`i2c.*.dma`, DmaTxEngine<1, 2> +
+//      DmaRxEngine<1, 3>, so a half of one byte stays on its pump there):
+//      i2c.write and i2c.read of
 //      1, 2, 16 and 255 bytes, i2c.wr (one written, a repeated START, 1,
 //      2 and 16 read; n counts both), i2c.probe (the client's address)
 //      and i2c.probe.nack (0x23, nobody), i2c.write.nack (1 and 2 bytes
@@ -240,6 +242,11 @@
 //      irq and isr are I2C1's vector, the DMA's and the tick's - the
 //      client's vector is the instrument's and printed apart, with
 //      start() alone (launch_cost) and "the rest" above the wire.
+//      Then i2c.choice, the figures behind `automatic`: one Request on the
+//      engined host, a write and a read of 1, 2, 3, 4, 8 and 16 bytes, its
+//      `engine` field the only change between I2cEngine::interrupt and
+//      I2cEngine::dma, each side start() plus the host's vector plus the
+//      DMA's in one run, the difference printed (i2c_choice() below).
 //
 //      The rise is printed beside the same steps timed on a line already
 //      high: the difference is the edge to the input's threshold, to the
@@ -1789,12 +1796,12 @@ bool target_up() {
 
 /// The two vectors' meters apart, between two instants.
 struct I2cSnap {
-    uint32_t host_irq, host_isr, tgt_irq, tgt_isr, dma_irq;
+    uint32_t host_irq, host_isr, tgt_irq, tgt_isr, dma_irq, dma_isr;
 };
 I2cSnap i2c_snap() {
     const Idle::CriticalSection cs;
     return {i2c_meter.count(), i2c_meter.cycles(), target_meter.count(), target_meter.cycles(),
-            dma_meter.count()};
+            dma_meter.count(), dma_meter.cycles()};
 }
 /// The line's counters: the HOST's vector, the DMA's and the tick; the
 /// client's vector is the instrument's and is printed apart.
@@ -1942,6 +1949,95 @@ void run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
           ok ? "" : ", A TENURE FAILED", crlf);
 }
 
+/// What one tenure costs the CORE through `Host`: start() timed alone
+/// (masked, one ruler read in it), I2C1's vector and the DMA vectors
+/// metered (one stamp pair an entry in each), all in the SAME run; the
+/// run of 8 with the smallest sum kept. The client's vector is the
+/// instrument's and not in it.
+struct I2cCost {
+    uint32_t start, host, host_irq, dma, dma_irq;
+    uint32_t core() const { return start + host + dma; }
+};
+
+template <typename Host>
+I2cCost i2c_cost(const typename Host::Request& r, I2cShape k, uint8_t n, bool& good) {
+    I2cCost best{};
+    for (uint8_t run = 0; run < 8u; ++run) {
+        tgt_seed = static_cast<uint8_t>(0x50u + run);
+        for (uint32_t i = 0; i < n; ++i) {
+            i2c_rx[i] = 0xEE;
+            i2c_tx[i] = static_cast<uint8_t>(0x20u + run + i);
+        }
+        tgt_rx_n = 0;
+        tgt_hits = 0;
+        (void)drain();
+        const I2cSnap v0 = i2c_snap();
+        i2c_done = false;
+        disable_interrupts();
+        const uint32_t t0 = Ruler::now();
+        asm volatile("" ::: "memory");
+        const bool started = Host::start(r);
+        asm volatile("" ::: "memory");
+        const uint32_t d = Ruler::now() - t0;
+        enable_interrupts();
+        bool done = started || idle_while([] { return !i2c_done; }, 40u);
+        if (!done) {
+            (void)Host::recover();
+        }
+        const I2cSnap v1 = i2c_snap();
+        done = done && Host::status() == i2c_ok;
+        if (k == I2cShape::write) {
+            done = done && tgt_rx_n == n;
+            for (uint8_t i = 0; i < n; ++i) {
+                done = done && tgt_rx[i] == i2c_tx[i];
+            }
+        } else {
+            for (uint8_t i = 0; i < n; ++i) {
+                done = done && i2c_rx[i] == static_cast<uint8_t>(tgt_seed + i);
+            }
+        }
+        good = good && done;
+        const I2cCost c{d, v1.host_isr - v0.host_isr, v1.host_irq - v0.host_irq,
+                        v1.dma_isr - v0.dma_isr, v1.dma_irq - v0.dma_irq};
+        if (run == 0u || c.core() < best.core()) {
+            best = c;
+        }
+    }
+    return best;
+}
+
+/// THE ENGINE CHOICE, measured as one difference through one call: the
+/// same Request on the same engined host, its `engine` field the only
+/// change - I2cEngine::interrupt (the pump) against I2cEngine::dma (the
+/// engines) - for writes and reads of 1, 2, 3, 4, 8 and 16 bytes. The
+/// difference engines - pump is E - F - (n - 1) x b (the pump's first
+/// byte of a half takes no interrupt: the write's is preloaded, the
+/// read's taken at the STOPF), so its value at n = 1 is E - F and its
+/// slope -b; automatic's count is the first n where it is not positive.
+/// Each side carries one stamp pair an entry (letter r's `stamp`) and
+/// none of the core's own exception entry and return: the line prints
+/// both raw.
+void i2c_choice(I2cSpeed speed) {
+    for (const I2cShape k : {I2cShape::write, I2cShape::read}) {
+        for (const uint8_t n :
+             {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{8}, uint8_t{16}}) {
+            I2cDma::Request r = i2c_request<I2cDma>(k, n, speed);
+            bool good = true;
+            r.engine = I2cEngine::interrupt;
+            const I2cCost p = i2c_cost<I2cDma>(r, k, n, good);
+            r.engine = I2cEngine::dma;
+            const I2cCost e = i2c_cost<I2cDma>(r, k, n, good);
+            const int32_t diff = static_cast<int32_t>(e.core()) - static_cast<int32_t>(p.core());
+            print(serial, "  i2c.choice ", k == I2cShape::write ? "write" : "read", " n=", n,
+                  " at ", i2c_speed_hz(speed) / 1000u, " kHz: interrupt start ", p.start,
+                  " + host ", p.host, " (", p.host_irq, " irq) + dma ", p.dma, " (", p.dma_irq,
+                  ") = ", p.core(), "; engines start ", e.start, " + host ", e.host, " (",
+                  e.host_irq, " irq) + dma ", e.dma, " (", e.dma_irq, ") = ", e.core(),
+                  "; engines - interrupt ", diff, good ? ", data exact" : ", DATA WRONG", crlf);
+        }
+    }
+}
+
 /// The SCL period at `speed`, measured: engined writes of 16 and 255
 /// bytes, the best of 8 each, and the difference over the 239 bytes' 9 x
 /// 239 periods - the slope, free of every fixed cost.
@@ -2038,6 +2134,7 @@ void ti_i2c() {
         i2c_ops<I2cPump>(pump_names, speed);
         i2c_bring_up<I2cDma>(I2cMode::dma);
         i2c_ops<I2cDma>(dma_names, speed);
+        i2c_choice(speed);
     }
     i2c_mode = I2cMode::none;
     I2cDma::fast_plus_drive(false);

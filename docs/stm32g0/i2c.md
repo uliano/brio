@@ -127,11 +127,11 @@ takes** - the inventory every cost below is read against:
 | RELOAD and TCR past 255 bytes (32.4.9) | resource only | the Request's lengths are eight bits on every target (below, "Not covered yet") |
 | one TXDR and one RXDR, no FIFO (32.9.10, 32.9.11) | the silicon's | one interrupt per data byte is this block's pump; the engines below are the run's path |
 | the first byte written before the START (TXE stands at rest, 32.9.7) | yes | the TXIS for that byte never rises (the TXIS events count NBYTES, 32.4.9): a one-byte write is the STOPF alone, the vendor's library does the same |
-| a TXDR flush by writing TXE (32.9.7) | yes, at every start() | a byte an unanswered address left in TXDR refuses the next write (32.9.11) and would go out in its place |
+| a TXDR flush by writing TXE (32.9.7) | yes, at every start() with a write half, whichever engine fills it | a byte an unanswered address left in TXDR refuses a preload (32.9.11) and goes out in its place, and goes out ahead of an engine's block with the block's last byte never sent (measured, below) |
 | the last byte of a read left in RXDR | yes | nothing follows it - the controller NACKs it and stops under AUTOEND - so RXIE goes down after the second-to-last and the STOPF entry reads it: a one-byte read is one interrupt |
 | NACKIE (table 181) | declined | a STOP follows every NACK by itself (32.4.9), so the STOPF entry reads NACKF from the status register and one entry serves a refused tenure |
 | the six enables at their flags' bit positions (table 181, 32.9.7) | yes | the pending mask is CR1 masked and shifted, no test per enable |
-| TXDMAEN and RXDMAEN (32.7) | yes, two engine slots | a half of two bytes or more rides a channel and takes no interrupt; a half of one is the pump's, which takes none for it either |
+| TXDMAEN and RXDMAEN (32.7) | yes, two engine slots | each data half chooses per request, one compare (`Request::engine`, below): under `automatic` a half of two bytes or more rides a channel and takes no interrupt, a half of one the pump, which takes none for it either; a half with no buffer stays on the pump under every value |
 | the independent kernel clock, the Fm+ drive, the wake, SMBus, the PEC, both filters | yes, measured (below) | none of them bears on a transfer's cost but the filters' share of the SCL period |
 
 ## Types and verbs
@@ -183,10 +183,19 @@ same.
 `spurious_bus_errors()`. A tenure writes its interrupt and DMA enables
 in one store at `start()` and puts them back to ERRIE alone at its end,
 so nothing one tenure armed or dropped reaches the next. The two DMA
-engine slots default to `NoDmaEngine` and every DMA branch folds away.
-Named, they carry the DATA of a tenure (32.7: the address cannot be
-moved by DMA) - each half of two bytes or more; a half of one byte, or
-one with no buffer, stays on the pump - and both are armed for their
+engine slots default to `NoDmaEngine` and every DMA branch folds away,
+and `has_dma` says which a host is. Named, they may carry the DATA of a
+tenure (32.7: the address cannot be moved by DMA), each half on its own,
+as `Request::engine` asks: `automatic`, the default, from
+`automatic_min_write` and `automatic_min_read` bytes, two each; `interrupt`
+the pump at any length; `dma` the engines at any length
+([../design/i2c-bus.md](../design/i2c-bus.md), "Which engine moves a
+half"). The one half the engines cannot carry is a half with no buffer,
+which stays on the pump under every value, writing its filler, and `dma`
+on a host with no engines is refused like the address above
+(`i2c_rejected`, nothing on the wire). The byte the field takes sits in the
+padding after `speed`: `Request` is 28 bytes with it and without it, a
+`static_assert` beside it says so. Both engines are armed for their
 errors alone: the tenure's own STOP after NBYTES proves every byte went
 through TXDR and RXDR, so a tenure takes the I2C's interrupts and no DMA
 one, and `finish()` completes the transmit engine on that proof
@@ -249,6 +258,25 @@ brio::post<Sensors>(I2cHw::Request{
 });
 ```
 
+On a host with engines bound a request names how its data moves only when
+the rule is not what the program wants - a frame or an EEPROM page that
+should leave the core free however short. An excerpt; it assumes `Engined`
+is an `I2cHost<1, bus_pins, brio::DmaTxEngine<1, 1>,
+brio::DmaRxEngine<1, 2>>` behind the bus `Sensors`, and `page` the
+client's three bytes, kept until `I2cDone`:
+
+```cpp
+static_assert(Engined::has_dma);   // or `dma` is answered i2c_rejected at run time
+brio::post<Sensors>(Engined::Request{
+    .addr = 0x50,
+    .tx = brio::lend<brio::Lease::reply>(page), .tx_len = 3,
+    .rx = {}, .rx_len = 0,
+    .reply = brio::reply_to<MyAo, brio::I2cDone>(),
+    .speed = brio::I2cSpeed::fast_400k,
+    .engine = brio::I2cEngine::dma,
+});
+```
+
 A target answers on its own vector:
 
 ```cpp
@@ -273,13 +301,13 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 190 verdicts
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 219 verdicts
 in two sets, green ten times running in one boot (the letters named
 below are the suite's console keys, each the group of verdicts it
 runs). The findings down to
 "ES0548 2.10.2 did not fire once" are the SELF-LINK's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
-letters `a`..`m`, **155 verdicts**. The ones under "The peer bus" are a
+letters `a`..`m` and `u`, **184 verdicts**. The ones under "The peer bus" are a
 SECOND CHIP's, the STM32F446RE running `twi_peer` on the same two nodes:
 the second all-key `w`, letters `n`..`t`, **35 verdicts**.
 
@@ -530,20 +558,20 @@ every column). The vendor's column is ST's HAL v1.4.7 on the same board,
 the same client and the same TIMINGR words (`HAL_I2C_Master_Transmit_IT`,
 `_Receive_IT`, `Mem_Read_IT`, a zero-length transmit as the probe, the
 DMA variants), CubeMX's G0 handler shape on the vector. At the 400 kHz
-rung - 369.9 kHz on the desk's wire under the ceiling default for brio,
+rung - 374.4 kHz on the desk's wire under the ceiling default for brio,
 the HAL's TIMINGR words solved against the manual's budgets:
 
 | tenure | the rest (cycles), interrupts: brio | ST HAL |
 |---|---|---|
-| write 1 | 1028, 1 | 1362, 1 |
-| write 2 | 1031, 2 | 1361, 2 |
-| write 16 | 1040, 16 | 1374, 16 |
-| read 1 | 1228, 1 | 1545, 2 |
-| read 16 | 1248, 16 | 1560, 17 |
-| register read 1 + 1 | 1651, 2 | 2289, 4 |
-| register read 1 + 16 | 1670, 17 | 2313, 19 |
-| probe answered | 1128, 1 | 1393, 1 |
-| probe not answered | 816, 1 | - |
+| write 1 | 1050, 1 | 1362, 1 |
+| write 2 | 1054, 2 | 1361, 2 |
+| write 16 | 1062, 16 | 1374, 16 |
+| read 1 | 1230, 1 | 1545, 2 |
+| read 16 | 1239, 16 | 1560, 17 |
+| register read 1 + 1 | 1659, 2 | 2289, 4 |
+| register read 1 + 16 | 1668, 17 | 2313, 19 |
+| probe answered | 1153, 1 | 1393, 1 |
+| probe not answered | 832, 1 | - |
 | write 255 through the engine, x | 1.00 | 1.00 |
 
 - **The interrupts are the silicon's floor.** N for a write or a read of
@@ -552,27 +580,26 @@ the HAL's TIMINGR words solved against the manual's budgets:
   each took one out, and the engines take every data byte - an engined
   tenure is one interrupt (two for a register read), the STOPF (and the
   TC).
-- **The pump's entry is 127 cycles a byte** (169 between the meter's
-  stamps, 42 of them the stamps' own), where it was 163 and ST's is
-  168; at 400 kHz a byte is 1193 cycles of wire, so the pump costs a
-  tenth of the core and keeps the wire's pace (x 1.00 at 255 bytes).
-  The decode is one mask from CR1 (the six enables sit at their flags'
-  positions) and one test for the six errors.
-- **`start()` is 228 cycles** (290 on the ruler, one read of it 62),
-  where it was 371: the tenure copies the five fields its entries read
+- **The pump's entry is 123 cycles a written byte and 133 a read one**
+  (165 and 175 between the meter's stamps, 42 of them the stamps' own),
+  where ST's is 168; at 400 kHz a byte is 1538
+  cycles of wire, so the pump costs a tenth of the core and keeps the
+  wire's pace (x 1.00 at 255 bytes). The decode is one mask from CR1 (the
+  six enables sit at their flags' positions) and one test for the six
+  errors.
+- **`start()` is 237 cycles** (299 on the ruler, one read of it 62) on
+  the engineless host: the tenure copies the five fields its entries read
   and not the whole Request, and the CR2 word is built inline.
-- **The engines' fixed cost** is the channel programmed at `start()` (432
-  on the ruler where the pump's is 290) and one fewer branch in the
-  STOPF entry; from two bytes a half they save an interrupt a byte, and
-  a 255-byte write or read runs at x 1.00 at 400 kHz and 1.01 at the
-  1 MHz rung.
-- **At the 1 MHz rung the pump is the core's limit, not the wire's**:
-  both ends of the self-link are this core's interrupts, about 300
-  cycles of handler for a byte of 474 - a 255-byte write at x 1.11
-  (1.28 before), the engines at 1.01.
+- **The engines' fixed cost** is measured whole under "Which engine, by
+  the cycles" below. On the wire a 255-byte write or read through them
+  runs at x 1.00 at every rung.
+- **At the 1 MHz rung the pump keeps the wire too**: a byte is 674 cycles
+  of it on the measured 854 kHz, and both ends of the self-link together
+  spend about 300 of them in this core's handlers - a 255-byte write at
+  x 1.00, as the engines.
 - **Against ST's HAL**: every shape within a fifth and ahead - the HAL
   preloads too, but its entry is the generic `I2C_Master_ISR_IT` (168
-  cycles a byte, 403 for its STOPF entry against 242), it reads a
+  cycles a byte, 403 for its STOPF entry against 228), it reads a
   one-byte read through an RXNE entry, and its register read takes four
   interrupts to this engine's two.
 - **The pump takes no placement** ([platform.md](platform.md), "Code in
@@ -589,8 +616,8 @@ the HAL's TIMINGR words solved against the manual's budgets:
   124 cycles a written byte and 137 a read one against 169 and 176 from
   the flash (`bench_stm32` with its vectors in `.fast_text`, a scratch
   build).
-- **The rungs are measured as the slope**: 98.0 kHz, 369.9 kHz and
-  827.1 kHz on the desk's wire under the ceiling default; the HAL's
+- **The rungs are measured as the slope**: 98.3 kHz, 374.4 kHz and
+  854.0 kHz on the desk's wire under the ceiling default; the HAL's
   column was taken at the words solved against the manual's 1000 / 750
   / 500 ns of tSYNC, 106.5 kHz, 482.8 kHz and 1.216 MHz on the same
   board. `the rest` is a handler's and a channel's cost and the wire's
@@ -603,12 +630,100 @@ the HAL's TIMINGR words solved against the manual's budgets:
   30 to 70 per cent, the second over the 120 ns Fm+ allows a rise. The
   data is byte-exact at that rung all the same, on this short link.
 
+### Which engine, by the cycles (bench_stm32 letter i, `i2c.choice`)
+
+The figures behind `automatic`: one Request on one engined host, a write
+and a read of 1, 2, 3, 4, 8 and 16 bytes, its `engine` field the only
+change between `interrupt` and `dma`, each side `start()` alone (masked,
+one ruler read in it), the host's vector and the DMA's metered in the same
+run, the run of eight with the smallest sum kept, the client's vector
+outside it and the data judged every run. The figures are identical at
+100 kHz, 400 kHz and 1 MHz, to the cycle:
+
+| half | `interrupt`: start + vector (entries) | `dma`: start + vector (entries) | `dma` - `interrupt` |
+|---|---|---|---|
+| write 1 | 387 + 285 (1) | 441 + 312 (1) | +81 |
+| write 2 | 388 + 453 (2) | 441 + 312 (1) | -88 |
+| write 3 | 388 + 621 (3) | 441 + 312 (1) | -256 |
+| write 16 | 388 + 2805 (16) | 441 + 312 (1) | -2440 |
+| read 1 | 361 + 316 (1) | 454 + 286 (1) | +63 |
+| read 2 | 368 + 496 (2) | 460 + 286 (1) | -118 |
+| read 3 | 368 + 669 (3) | 460 + 286 (1) | -291 |
+| read 16 | 368 + 2918 (16) | 460 + 286 (1) | -2540 |
+
+The rule of [../design/i2c-bus.md](../design/i2c-bus.md) on this block is
+E - F <= (N - 1) x b, since a half's first byte takes the pump no interrupt:
+the write's is preloaded, the read's taken at the STOPF.
+
+- **E - F** is the one-byte row, one entry on each side, so the stamps
+  cancel: **81 written** (54 at `start()`, the channel's five stores over
+  the preload; 27 at the STOPF, completing the transmit engine) and **63
+  read** (93 at `start()`; -30 at the STOPF, the pump's last byte no longer
+  read there).
+- **b** is the slope, 168 written and 173 read between the stamps; less
+  the stamps' 42 (letter `r`), plus about 35 for the core's own entry and
+  return, which no stamp sees (the Cortex-M0+'s 15 for an entry, RP2040
+  datasheet 2.4.3.6 reproducing ARM's figure, at two wait states): **about
+  160 and 166**.
+- **So N = 2 in both directions**: 81 <= 160 and 63 <= 166 at N - 1 = 1,
+  the rows' -88 and -118 with the meter's extra stamp in them. A channel's
+  two bus beats a byte are not in E: the core sleeps through them, and a
+  running program would lose a few cycles of contention at most against a
+  margin of 79 and 103. The two counts happen to be equal; the rule keeps
+  them apart (`automatic_min_write`, `automatic_min_read`).
+- **The speed changes neither figure, so the counts are constants.** The
+  pump does not stretch at the top rung: SCL stretches only when TXDR is
+  still empty or RXDR still full a whole byte after TXIS or RXNE rose
+  (32.4.7), which at 64 MHz is at least nine periods of 64 cycles, 576,
+  against an entry of about 200 (and x 1.00 on the wire, above) - so
+  another vector may hold the core some 370 cycles before the pump stretches,
+  and a program with a longer one asks `dma`. A stretch costs the wire's
+  time and no core cycle, so it would not move the count.
+- **The core sleeps while a channel works.** `idle()` is DSB and WFI and
+  asks no channel anything (`stm32g0/platform.hpp`), and in Sleep the DMA
+  stays clocked (RM0444 table 27, and 5.4.18's DMA1SMEN and DMA2SMEN are set
+  at reset and written by no verb here). A Stop stops the DMA (table 27), and
+  a busy bus votes against one (the arbiter's PrepareSleep voter, above).
+- **Both sides carry what the engined host costs beyond the engineless
+  one**, so it is in neither E nor F: 87 more cycles of `start()` for the
+  decision and the two engine flags whichever path the tenure takes (382
+  on the ruler for a write of one, 295 on the engineless host). In the
+  listing that decision is a halfword load from a table in the flash and a
+  compare, a half, and start()'s refusal one byte load and one compare; the
+  vector's byte branches hold no call.
+
+**A preloaded byte outlives an unanswered address.** A pumped write to
+an address nobody answers leaves its preloaded byte in TXDR, and with no
+flush the next engined write sends that byte first: measured with the
+flush left out of the engines' path, `test_stm32_i2c`'s letter `u` read
+0x41 at the client where 0x5C was written, four bytes in all, the block's
+last never sent. Under `automatic` it takes no more than a one-byte write
+to an absent device and then a longer one. So the flush is every write
+half's, whichever engine fills TXDR, and costs the engines' path one store.
+
+**What judges the choice, letter `u`.** An exact count of the host
+vector's entries, a half of m bytes on the pump taking m (m - 1 TXIS or
+RXNE, and the STOPF), a half on the engines the STOPF alone and no DMA
+vector; and because one byte costs the pump one entry too, the channel's
+memory address, zeroed with the channel stopped before each tenure, which
+`DmaChannel::restart()` alone writes: naming this tenure's buffer afterwards
+means the engine was started for it. Both identities, no tolerance. At
+400 kHz and at 1 MHz, the same counts splitting the same way: a write and a
+read one byte under the count on the pump, of the count on the engines, a
+register read deciding per half; `interrupt` on 64 bytes both ways, 64
+entries; `dma` on one byte both ways; `dma` on a write and a read with no
+buffer, the pump's filler and drain, 3 entries each. The refusal is judged on the engineless host with
+the Request naming the client's own address, so anything on the wire would
+raise ADDR at the client within 28 us (a START and nine periods at the
+slowest rate letter `d` reads at this speed): over 400 us, no address match,
+no entry on either vector, no BUSY.
+
 ### The peer bus (letters n..t)
 
 The same two nodes carry a PEER BOARD running `twi_peer` - the desk's
 STM32F446RE, its I2C1 on PB8/PB9 (`ident` fw 0x0400) - beside I2C2's
 taps, so this desk carries the self-link AND the peer at once and the
-suite runs both: letters b..l, x and y skip only when the boot probe
+suite runs both: letters b..l, u, x and y skip only when the boot probe
 finds no self-link, and the peer letters - their own all-key, `w`, so
 that `z` runs with the far board on its dark console - FAIL when nobody
 answers. The two do not disturb each other: the peer's command client answers 0x6B
@@ -921,8 +1036,10 @@ hosts. NOTHING IS COMPILED OUT HERE FOR A PACKAGE, unlike the SPI
 suite's self-link: the LQFP32 bonds every pad of both links - I2C1's
 PB8/PB9 and I2C2's PA11/PA12, which are the Nucleo-32's own A5 and A4 -
 so this board asks the wire at boot like any other (`self-link probe:
-SCL 0 SDA 0` today) and its eleven self-link letters skip on that
-answer, claiming nothing. The image is 52676 bytes of the part's 64 K.
+SCL 0 SDA 0` today) and its twelve self-link letters skip on that
+answer, claiming nothing. The suite builds as two group images on this
+part (its groups line: the self-link's letters and the peer's, 55.0 and
+28.0 KB of the part's 64).
 
 **TABLE 165's COLUMN AGAIN, one part further down.** This part's I2C2
 has no `RCC_CCIPR_I2C2SEL`, so - as on the G071 - it has no independent
@@ -994,8 +1111,14 @@ Implemented but not bench-verified:
   owner of its request line, would measure it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
+- **Letter `u` and the engine figures on the two smaller parts.** Both are
+  built for the STM32G071RB and the STM32G031K8 and measured on the
+  STM32G0B1RE alone, the counts being compile-time constants and the cycle
+  figures the G0B1RE's; the letter's own self-link on those two boards, and
+  letter `i` there, would measure them. The suite's two group images on the
+  STM32G031K8 are built and not yet run there: its keys `a` and `w` would.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
-  it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the eleven self-link
+  it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the twelve self-link
   letters are compiled there and probe for it at boot - but that desk
   carries the peer link on the same two pads, the probe answers no, and
   I2C2 AS A CLIENT HAS NEVER RUN ON THAT DIE. Two jumpers from CN3-11
@@ -1018,7 +1141,7 @@ Implemented but not bench-verified:
   write-then-read's write half, repeated until a TC lands there, would
   measure it.
 - **The self-link roles on the STM32G071RB and the STM32G031K8**: the
-  eleven self-link letters - the own-address match, the NOSTRETCH
+  twelve self-link letters - the own-address match, the NOSTRETCH
   target, 10-bit addressing both ways, the PEC, the time-outs, the wake
   from Stop, the whole stretching census, and with them ES0418's 2.11.3,
   2.11.5 and 2.11.7 - skip on those boards because their PB8/PB9 carry

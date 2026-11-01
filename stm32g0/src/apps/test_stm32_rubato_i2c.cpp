@@ -27,8 +27,9 @@
 //   pumped write PRELOADED into TXDR before the START; a read's last byte
 //   taken at STOPF; a NACK read at STOPF with no NACKIE; one interrupt a
 //   data byte on the pump (no FIFO: TXDR, RXDR and the shifter); the
-//   engines carry halves of two bytes or more (the driver's dma_min_bytes,
-//   a private constant: a half of one costs the pump no data interrupt),
+//   engines carry halves of two bytes or more (the driver's
+//   automatic_min_write and automatic_min_read, what a Request that does not
+//   name its engine gets: a half of one costs the pump no data interrupt),
 //   armed for their errors alone, STOPF the edge; at rest ERRIE alone and
 //   both DMA request enables clear; ES0548 2.10.2's spurious BERR counted
 //   (spurious_bus_errors()) and never a status. start() writes the enables
@@ -207,9 +208,9 @@ struct Shape {
 struct I2cTraits {
     /// Letter o's table, each shape with the path this host takes: a half
     /// of two bytes or more rides the engines, a half of one the pump
-    /// (the driver's dma_min_bytes, 2: the preload or the read at the STOP
-    /// costs the pump no data interrupt for it). Ends on a plain write (the
-    /// shared body's counted serve).
+    /// (the driver's automatic counts, 2 each way: the preload or the read
+    /// at the STOP costs the pump no data interrupt for it). Ends on a plain
+    /// write (the shared body's counted serve).
     static constexpr Shape shapes[] = {
         {0, 0, "the probe: the address alone, STOPF its one interrupt"},
         {0, 1, "pump: the one byte read at STOPF"},
@@ -226,7 +227,9 @@ struct I2cTraits {
         {8, 0, "engines"},
         {32, 0, "engines"},
     };
-    static_assert(Host::has_engines, "the table names engine paths");
+    static_assert(Host::has_dma && Host::automatic_min_write == 2u &&
+                      Host::automatic_min_read == 2u,
+                  "the table names engine paths");
     /// Minor's writes of one: the pump's preload, so that letter w puts one
     /// requester on each path (the Client's read halves on the engines).
     static constexpr uint8_t w_minor_len = 1;

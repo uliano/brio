@@ -238,14 +238,14 @@ static_assert(One::has_ten_bit && One::has_fast_plus);
 
 using Host = I2cHost<1, host_pins>;
 using Peer = I2cClient<2, client_pins>;
-static_assert(!Host::has_engines);
+static_assert(!Host::has_dma);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 
 // The engined host, on two channels of DMA1.
 using HostTx = DmaTxEngine<1, 1>;
 using HostRx = DmaRxEngine<1, 2>;
 using DmaHost = I2cHost<1, host_pins, HostTx, HostRx>;
-static_assert(DmaHost::has_engines);
+static_assert(DmaHost::has_dma);
 
 #if defined(I2C3_BASE)
 using Three = I2c<3>;
@@ -357,6 +357,24 @@ void use() {
 
     (void)DmaHost::init(clock);
     (void)DmaHost::dma_isr();
+    // Request::engine: the three values, each host taking every one of
+    // them at compile time; `dma` on the engineless host is start()'s
+    // run-time refusal, a program's compile-time check being has_dma.
+    static_assert(!Host::has_dma && DmaHost::has_dma);
+    static_assert(sizeof(Host::Request) == sizeof(DmaHost::Request));
+    static_assert(Host::Request{}.engine == brio::I2cEngine::automatic);
+    r.engine = brio::I2cEngine::dma;
+    (void)Host::start(r);
+    const DmaHost::Request d{.addr = 0x42,
+                             .tx = {},
+                             .tx_len = 0,
+                             .rx = {},
+                             .rx_len = 0,
+                             .reply = {},
+                             .speed = brio::I2cSpeed::fast_400k,
+                             .engine = brio::I2cEngine::interrupt};
+    (void)DmaHost::start(d);
+    (void)DmaHost::isr();
     DmaHost::release();
 
     (void)Peer::init(clock, addr7, I2cSpeed::fast_400k);

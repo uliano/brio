@@ -547,7 +547,7 @@ run on the same core.
 | CH32V203C8T6 (120 MHz for the letter, the bus clock's 60 MHz ceiling; the CH32V303VCT6's `twi_peer`, its target polled by its own core) | 835, three interrupts | 1468, five | 1.00 through the pump (256 interrupts, 118 cycles a byte) and the engine (4, the core kept awake under a DMA block: 486 k busy against the pump's 51 k) | - | 838 | the EVT, against a target on the same core: 174 and 227 cycles a byte written and read, against 118 and 131 | 165 |
 | CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core) | 767, three interrupts | 1393, five | 1.00 through the pump (256 interrupts, 93 cycles a byte) and the engine (4, the core kept awake: 505 k busy against the pump's 44 k) | - | 746 | not run on this board | 183 |
 | CH32V006K8U6 (48 MHz; the STM32G0's `twi_peer`) | 1373 (1896), four interrupts (five) | 1905 through the pump (2456) | 1.00 through the pump (264 interrupts) and the engine (9) | 262 through the pump, 9 through the engine | 1488 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
-| STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 369.9 kHz on the desk's wire) | 1028 (1554), one interrupt (two) | 1651 (2377), two interrupts (four) | 1.00 through the pump (255 interrupts, 123 cycles a byte against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1189 | HAL v1.4.7: 1362 and 2289 fixed | 509, an engined write to an absent address |
+| STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 374.4 kHz on the desk's wire) | 1050 (1554), one interrupt (two) | 1659 (2377), two interrupts (four) | 1.00 through the pump (255 interrupts, 123 cycles a byte against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1426 | HAL v1.4.7: 1362 and 2289 fixed | 487, an engined write to an absent address |
 | RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires) | 722, the same at 100 kHz and 1 MHz | 786 | 1.00, 31 | 32, 13 385 | 754 | the pico-sdk 2.3.1's polled loop: 398 fixed on a one-byte write, the core held the whole tenure (6528 busy) | 439 |
 | RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`) | 392, the same at 100 kHz and 1 MHz | 441 | 1.00, 31 | 32, 9008 | 767 | the pico-sdk: 362 fixed (7714 busy) | 298 |
 | RP2350, Hazard3 (150 MHz; the same) | 403 | 447 | 1.00, 31 | 32, 8417 | 385 | the pico-sdk: 354 fixed (7706 busy) | 279 |
@@ -587,7 +587,12 @@ What the rows say:
   the enables written in one store each way; one interrupt for a
   one-byte write where there were two, a quarter under the HAL's
   ([the STM32G0 I2C page](../stm32g0/i2c.md), whose table is the same
-  rung's).
+  rung's). Each data half picks pump or engines from the core's cycles
+  ([i2c-bus.md](i2c-bus.md), "Which engine moves a half"): the engines'
+  fixed cost over the pump's is 81 cycles written and 63 read against
+  about 160 and 166 a byte, and a half's first byte costs the pump no
+  interrupt, so `automatic` gives them a half of two bytes or more, the
+  same at every rung.
 - On the RP2350's Cortex-M33 a handler's cost from flash moves with
   where the linker puts it (188 to 365 cycles across three builds of
   one handler, up to six XIP misses a tenure); from SRAM 84. The
@@ -709,7 +714,7 @@ Gaps, each with what would explain or measure it:
   628 cycles against 400, three of them missed by the poll. Not
   explained; what would: the request credits at the block's start and
   its first step read as the RP2350's letter reads them.
-- The STM32G0's busy of a one-byte write is 979, 1189 and 833 cycles at
+- The STM32G0's busy of a one-byte write is 976, 1426 and 830 cycles at
   the three rungs, its handlers and `start()` the same at each: the
   idle turns between the host's, the client's and the tick's entries,
   not split. What would: the stamps on each of the three vectors in

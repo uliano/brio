@@ -347,13 +347,13 @@ and a peer is a second board on the other end of a link.
 | `test_stm32_analog` | 139 | **136** | COMP3's register block and its whole signal path |
 | `test_stm32_serial` | 120 (+ y/w/v/x; + `t` 174, the STM32F446RE as peer) | **112** (+ y/w/v) | LPUART2 (two verdicts), and four to ES0418 2.2.4 ([usart.md](usart.md)) |
 | `test_stm32_spi` | 83 (the STM32F446RE as peer) | - | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent; the peer letters want a board paired with this one, and none is ([spi.md](spi.md)) |
-| `test_stm32_i2c` | 155 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
+| `test_stm32_i2c` | 184 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
 | `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
 | `test_stm32_journal` | 52 | - | the same |
 | `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
 | `test_stm32_rubato` | 39 | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14, its ruler and its interrupt, exist on this part ([platform.md](platform.md)) |
 | `test_stm32_rubato_link` | 133 (`z`, the STM32F446RE's `spi_peer`) + 111 (`y`, its `usart_peer`) | - | built for the G0B1RE alone (its boards line): a two-board suite runs only where its partner is wired ([platform.md](platform.md)) |
-| `test_stm32_rubato_i2c` | 195 (`z`, the STM32F446RE's `twi_peer`) | - | built for the G0B1RE alone (its boards line): a two-board suite runs only where its partner is wired ([i2c.md](i2c.md), [platform.md](platform.md)) |
+| `test_stm32_rubato_i2c` | 202 (`z`, the STM32F446RE's `twi_peer`) | - | built for the G0B1RE alone (its boards line): a two-board suite runs only where its partner is wired ([i2c.md](i2c.md), [platform.md](platform.md)) |
 
 The I2C suite's figures on this part were measured with the other board
 as its peer, roles exchanged, in one set (the peer letters have since
@@ -414,13 +414,13 @@ the G071RB:
 | `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
 | `test_stm32_serial` | 118 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
 | `test_stm32_spi` | 83 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
-| `test_stm32_i2c` | 155 (+ `w` 35) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
+| `test_stm32_i2c` | 184 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its two images | the twelve self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
 | `test_stm32_rubato` | 39 | - | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14 exist on this part too |
 
 How the images fit: `brio check stm32g0` links each, `brio fit stm32g0`
-lists what each takes, and one suite does not fit whole.
+lists what each takes, and three suites do not fit whole.
 `test_stm32_serial` is built as five group images on the G031K8 (its
 groups line): 47.4, 40.4, 20.0, 45.1 and 39.2 KB, the tightest with 26 %
 left; on the G071RB as two (93.6 and 69.5 KB of its 128). The hungriest
@@ -433,7 +433,8 @@ fits) and gives the console's two DMA channels back to the letters.
 `test_stm32_spi` compiles its eleven self-link letters out (a package
 fact, not a budget one) and, the peer half grown past 95 % of the part,
 builds as two group images (its groups line: 42.4 and 37.2 KB);
-`test_stm32_i2c` keeps every letter it has anywhere.
+`test_stm32_i2c` keeps every letter it has anywhere and builds as two, the
+self-link's and the peer's (its groups line: 55.0 and 28.0 KB).
 
 What the part has not got, all of it read off the header by the
 reserve: TIM4, TIM6, TIM7, TIM15, USART3..6, LPUART2, I2C3, SPI3, DMA2
@@ -495,7 +496,7 @@ in the document.
 | [pwr.md](pwr.md) | The stopping half of the platform: chapter 4 and `util/power.hpp`'s depth ladder realized here unchanged; the sleep mode as two registers in two places; Standby and Shutdown off the ladder on purpose; a Stop's length on a bare board and under a debugger, the timed sleep site's resync from the RTC, the tickless platform's plain site through a Stop 1 |
 | [lptim.md](lptim.md) | The two low-power timers, which are not copies of each other; the opposite enable rules of the two register halves; both errata answered by construction (no verb ever clears ENABLE; flags cleared only where the erratum allows); the waveform arithmetic the chapter never prints; through a Stop only LSE and LSI keep counting |
 | [crc.md](crc.md) | The CRC unit, chapter 14 whole: words, half-words and bytes through one register, the programmable polynomial with the two rules the register does not enforce, big-endian feeding; 2056 cycles per 1000 bytes against the bitwise loop's 109216, and the DMA feeding it with no CPU |
-| [i2c.md](i2c.md) | Chapter 32 whole, both roles, over the Nucleo's own self-link; the `I2cHost` request the other targets share verbatim; the timing register's arithmetic both ways; a repeated START as one CR2 store, RXNE before STOPF, a held SDA as a park and not an error; the errata's floors against a 2 MHz core; the far-board tenures and the wake from Stop by the other chip's address; the I2C stack under the preemptive kernel (`test_stm32_rubato_i2c`), and the held wire's two answers told apart by the PE cycle |
+| [i2c.md](i2c.md) | Chapter 32 whole, both roles, over the Nucleo's own self-link; the `I2cHost` request the other targets share verbatim, each data half on the pump or the DMA engines by the cycles (`Request::engine`: two bytes or more on the engines by default, and either at any length on request); the timing register's arithmetic both ways; a repeated START as one CR2 store, RXNE before STOPF, a held SDA as a park and not an error; the errata's floors against a 2 MHz core; the far-board tenures and the wake from Stop by the other chip's address; the I2C stack under the preemptive kernel (`test_stm32_rubato_i2c`), and the held wire's two answers told apart by the PE cycle |
 | [spi.md](spi.md) | Chapter 35 whole, both roles, over the self-link; the silicon enforces none of the configuration rule, so the driver's refusals are the only protection; the disable procedure as the erratum's workaround; the host's two ways - polled, and asynchronous on the DMA engines, refused on a host with none and run polled when shorter than the engines' fixed cost (the count measured: 22 frames of a byte read at PCLK/2, 5 at PCLK/16); every baud code to PCLK/2 with the host pacing and PCLK/4 with both ends on DMA; hardware NSS against a GPIO chip select; the CRC and its window; I2S; the client's polled runs; the extended exchange against the F446 |
 | [fdcan.md](fdcan.md) | The Bosch M_CAN, the first chapter of this stratum a part can be missing entirely; one enable, reset and divider for both modules; measured with no transceiver, no wire and no second node through the chapter's own loop-backs; the 0xCC padding paragraph that does not describe this part; bus-off recovery timed |
 | [vendor/README.md](vendor/README.md) | RM0444, DS13560, ES0548 (with ES0418 and ES0487 for the STM32G071RB and the STM32G031K8) by revision, the vendored cmsis-device-g0 headers and SVD, the bench chips' IDCODEs, the errata pass |

@@ -121,7 +121,7 @@ CH32V006 with the refusal compiled out, each family's I2C page).
 |---|---|---|
 | avrxt | `I2cHost<n, route>` over `Twi<n>` (`avrxt/twi.hpp`), a resource that carries the client half too | the rate readback is `actual_scl_hz(t_rise_ns)`, what the register in force gives, under the chapter's rise-time budget; `speed_ok(speed)` as on the other two, plus `speed_ok()` for the speed in force; `quick_command(bool)` is the TWI's own hardware mode (QCEN: every request an address-only frame); `bus_state()` is the wire's state from the bus monitor; `speed()`, `baud()`; the host's handler calls nothing, every register function it touches inlined, since one call in an AVR vector saves the whole call-clobbered set, and tests the two common cases with one masked compare each; smart mode the engine's default (`Options::smart`), ACK armed once a read tenure; a read to an absent address answers `i2c_nack_addr`; the client's SDASETUP is eight clocks in every default, four losing a smart client in a long read on the AVR EA ([the AVR TWI page](../avrxt/twi.md)) |
 | samc21 | `I2cHost<n, pads, generator>` over `I2cm<n>` (`samc21/i2c.hpp`; `I2cs<n>` is the client's resource, two over one SERCOM) | `init` takes the stated core rate (`reference_hz()`); the rates are a per-speed cache: `speed_ok(speed)`, `scl_hz(speed)`, `baud_of(speed)`; `idle()` is the engine's phase, not the wire's; smart mode always on (the pump's last read byte closed STOP+NACK first, ACK reset at every read phase, since a read's closing NACK persists on this block); no engine slot, every tenure on the pump, one interrupt a byte, the family's DMA serving its Uart's transmitter alone ([the SAM C21 DMAC page](../samc21/dmac.md)); `configuration(speed)` for code that reconfigures the peripheral behind the engine |
-| stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's; the byte counter with AUTOEND carries the tenure, the first data byte preloaded into TXDR before the START, a read's last byte taken at STOPF, a NACK named at STOPF with no NACKIE armed (the address's when the preloaded byte never left TXDR); a tenure's interrupt and DMA enables written in one CR1 store at `start()` and put back in one at the end (`enables()`), so an engined tenure leaves no enable behind; the engines carry halves of two bytes or more |
+| stm32g0 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32g0/i2c.hpp`, one TIMINGR word) | the same stated rate and per-speed cache (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer); two optional DMA engine slots with `dma_isr()`; `fast_plus_drive()` (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter); `idle()` as the SAM's; the byte counter with AUTOEND carries the tenure, the first data byte preloaded into TXDR before the START, a read's last byte taken at STOPF, a NACK named at STOPF with no NACKIE armed (the address's when the preloaded byte never left TXDR); a tenure's interrupt and DMA enables written in one CR1 store at `start()` and put back in one at the end (`enables()`), so an engined tenure leaves no enable behind; the one host today that takes `Request::engine` and publishes `has_dma` (below, "Which engine moves a half"), `automatic` giving the engines a half of two bytes or more in either direction |
 | stm32f4 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`stm32f4/i2c.hpp`, the F1's event machine with the rise-time register the CH32V00x's has not) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = the instance's own APB1 clock); an `I2cHostConfig` at init (fast mode's duty shape, the wire's two rise times, the noise filters); `digital_filter_max()` (table 122's ceiling, advice and not a refusal) and `repeated_start_setup_at_risk()` (an erratum's window a write-then-read sits in); `spurious_bus_errors()` as the G0's, and here a bus error never ends a tenure at all, the manual and the erratum agreeing that a controller's transfer is unaffected; two vectors, `isr()` and `error_isr()`; the engine slots on the request mapping's own cells with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the pulses it took; `start()` waits, bounded, for the last STOP to leave, as the CH32V00x's does, about one bit period when a tenure is started at the last one's completion, nothing in the chapter signalling the STOP's leaving; the event interrupt raised by `start()` and dropped at the completion in one CR2 store (`control2()`), so the BTF a write's STOP leaves standing no longer re-enters the vector; the first two data bytes loaded in the ADDR entry (TxE rises within twenty cycles of the ADDR clear), so a one- or two-byte write and a register index take no TxE interrupt; the repeated START of a write-then-read requested on the last byte's TxE with a dummy store into DR (RM0090 27.3.3's note), and a NACK of that last byte answered `i2c_nack_data` with no CR1 access while START stands (27.6.1 forbids one; a withdrawal there hung the event vector with the core at 48 MHz, measured), the Sr the controller generates closed with a void write and its STOP; `claim_smba_pad()` for the SMBus alert; the address phase total, an ADD10 or any event it does not serve ending the tenure `i2c_bus_error` with the STOP and then a DR store that clears ADD10, which the STOP alone does not (measured) |
 | stm32f4 (2) | `FmpI2cHost<n, pins, TxEngine, RxEngine>` over `FmpI2c<n>` (`stm32f4/fmpi2c.hpp`, the second I2C design of this family: the STM32G0's register file under the name FMPI2C1, on the F410, F412, F413/F423 and F446) | the STM32G0's surface almost entire (`speed_ok`, `scl_hz`, `timing_of`, `kernel_hz()` for the kernel-clock multiplexer, `fast_plus_drive()`, `spurious_bus_errors()`, `idle()`, `unstick()` returning the pulses it took, `recover()` = 23.4.6's PE cycle and nothing more), and three speeds where every other realization of this family has two; `reference_hz()` is the APB clock the registers are on while `kernel_hz()` is the one the arithmetic divides, which here are two different rates, and `transmit_stall_risk()` publishes the erratum's band on the ratio between them; two vectors, `isr()` and `error_isr()`, with a NACK on the event one (it is not an error on this block) - the address's told from the data's by what of the half reached the wire, the byte pump's position or under the engines the transmit stream's count - and a controller's BERR counted and never acted on; the engine slots on the mapping's single cell per direction with `dma_isr()`, both phases carried and the engines armed before the START (23.4.16's order, and an erratum's workaround); `start()` does not wait for the last STOP, since this block queues a START behind one itself; `claim_smba_pad()` for the SMBus alert |
 | ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | the stated bus rate and the per-speed cache as the SAM's (`speed_ok`, `scl_hz`, `timing_of`, `reference_hz()` = HCLK); a `duty` at init (fast mode's 2 or 16/9 shape); two vectors, `isr()` for the events and `error_isr()` for AF/ARLO/BERR; the engine slots fixed to DMA channels 6 (TX) and 7 (RX) with `dma_isr()`, a one-byte read kept on the pump; `unstick()` returns the clocks it took; `start()` waits, bounded, for the last STOP to leave (the F1 lineage cannot queue a START behind one), the one engine whose `start()` spends dispatch time on the bus; the event line (ITEVTEN) raised by `start()` and dropped when the tenure ends, so the BTF a requested STOP leaves standing (15.10.6) does not re-enter the vector; a START with POS and ACK down in one CTLR1 store; the repeated START of a write-then-read requested on the TxE that says the last written byte went into the shifter (15.10.1, 15.3), the order a polled CH32 target needs, the write half on the pump; a NACK of that last byte answered as `i2c_nack_data` without a CTLR1 store at the NACK (the controller generates the requested Sr anyway, and a store there races it: a withdrawal wedged the bus at 400 kHz, measured) but by closing the tenure behind that Sr with a void write and its STOP, one address byte on the wire when a byte is refused; `unstick()` clears the STOPF its own STOP leaves; the address phase total as the CH32V303's, an ADD10 or any event it does not serve ending the tenure `i2c_bus_error` with the STOP and a DATAR store (measured on the CH32V006) |
@@ -205,6 +205,76 @@ may only be written with the host disabled), paid only when the speed
 actually moves and never per byte. How MBAUD is solved, and why the
 bus's rise and fall times are arguments rather than assumptions,
 belongs to the engine ([the AVR TWI page](../avrxt/twi.md)).
+
+## Which engine moves a half (`Request::engine`)
+
+A tenure has up to two data halves, the bytes it writes and the bytes it
+reads. Everything else in it - the address, the repeated START, the end -
+belongs to the host's interrupt on every block, and a host may move the
+data the same way: the interrupt PUMP, one entry per byte or per FIFO
+level, is present on every host. Where DMA channels are bound to the
+host (its ENGINES), each half can ride them instead, and this section
+decides who picks. The program may leave the choice to the host and may
+overrule it, per request:
+
+| `I2cEngine` | what it asks |
+|---|---|
+| `automatic` | the rule below; what a request that does not name the field gets |
+| `interrupt` | the pump, at any length |
+| `dma` | the engines, at any length, for every half they can carry |
+
+**The rule is in core cycles.** Under `automatic` the engines carry a
+half from the smallest length N at which they cost the core no more than
+the pump would:
+
+```
+E - F <= N x b
+```
+
+E is the engines' fixed cost to the core for that half: programming and
+starting the channel, any interrupt its completion needs, the finish and
+the release. F is what the pump spends on the same half beyond its work
+per byte. b is the pump's cost of a byte: its entry, the byte, its exit.
+A block whose pump takes no interrupt for a half's first byte says so in
+the arithmetic, N - 1 in place of N. The figures may be measured, or
+estimated by counting cycles in the release listing, whichever is cheaper
+on the family: the right order of magnitude decides a count this small.
+The count is per direction, since a write and a read do not cost the same,
+and a tenure pays one compare for each half. Each family's figures and the
+arithmetic over them are in its own document.
+
+**Speed enters only where it changes a cost.** A count that depends on
+the speed is fixed when the speed is applied, and otherwise it is a
+constant. Two things can make it depend:
+
+- A pump whose service of a byte outlasts that byte on the wire stretches
+  the clock, and the tenure runs slower than the speed asked. A family
+  says, with the arithmetic, whether this happens at its top speed.
+- A platform whose idle cannot sleep while a DMA channel works keeps the
+  core awake for the whole half, and then the time awake is the engines'
+  cost, far above any count of cycles. The case is the three WCH families
+  (the CH32V00x, the CH32V203 and CH32V303, the CH32X035), whose `idle()`
+  asks the chip traits' `bus_masters_working()` before it sleeps
+  (`qingke/platform.hpp`): there the rule keeps a tenure on the pump, and
+  `dma` is how a program that wants the core free for other work asks for
+  the engines anyway.
+
+**A half the engines cannot carry stays on the pump** under every value,
+and is not refused: it is the same exception as an SPI request its
+engines cannot carry, a beat off its boundary ([spi-bus.md](spi-bus.md),
+"Two ways to run a request"), and each family's document names its own
+such halves. `dma` on a host
+with no engines bound is another matter, a request that cannot be served
+as asked: `start()` returns true with `i2c_rejected` in `status()`,
+nothing armed and nothing on the wire, the path the out-of-range address
+and the unproducible speed take. A host publishes `static constexpr bool
+has_dma`, so a program that depends on the engines can say so in a
+`static_assert`.
+
+**Which hosts take the field today**: the STM32G0's alone. The other
+hosts, the three WCH families' among them, do not carry it yet, and a
+request that names it does not compile on them; a host there that has
+engines bound picks by the rule its own page states.
 
 ## Engine behaviour on the wire
 
