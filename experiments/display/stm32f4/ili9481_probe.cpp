@@ -1497,7 +1497,7 @@ bool transfer_isr_dma(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len,
     }
     return isr_wait();
 }
-bool transfer_dma_polled(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len, SpiClock rate) {
+bool transfer_polled_on_dma_host(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len, SpiClock rate) {
     static uint8_t c = 0;
     c = cmd;
     DmaHost::Request r{};
@@ -1732,11 +1732,11 @@ void tv_isr_pump() {
             uint8_t wq[4];
             wq[0] = static_cast<uint8_t>(x >> 8); wq[1] = static_cast<uint8_t>(x);
             wq[2] = static_cast<uint8_t>((x + w - 1u) >> 8); wq[3] = static_cast<uint8_t>(x + w - 1u);
-            (void)transfer_dma_polled(ili::caset, wq, nullptr, 4, ili::write_rate);
+            (void)transfer_polled_on_dma_host(ili::caset, wq, nullptr, 4, ili::write_rate);
             wq[0] = static_cast<uint8_t>((y + r) >> 8); wq[1] = static_cast<uint8_t>(y + r);
             wq[2] = wq[0]; wq[3] = wq[1];
-            (void)transfer_dma_polled(ili::paset, wq, nullptr, 4, ili::write_rate);
-            (void)transfer_dma_polled(ili::ramrd, nullptr, got2, static_cast<uint16_t>(w * 3u + ili::read_extra), ili::read_rate);
+            (void)transfer_polled_on_dma_host(ili::paset, wq, nullptr, 4, ili::write_rate);
+            (void)transfer_polled_on_dma_host(ili::ramrd, nullptr, got2, static_cast<uint16_t>(w * 3u + ili::read_extra), ili::read_rate);
             (void)ili::realign(got2, static_cast<uint16_t>(w * 3u + ili::read_extra), aligned, w * 3u, ili::read_format);
             for (uint16_t c = 0; c < w; ++c) {
                 ili::put_pixel(ili::scratch, c, ili::pattern(x + c, y + r, salt));

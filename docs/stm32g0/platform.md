@@ -776,8 +776,7 @@ inline in its vector or in `start()`; both placements FLATTEN it, so
 what it calls on its common path is inline in it - the transmit
 engine's completion carries the next block's launch (`pump_tx()`) - and
 what it calls once a burst or on an error stays out of line in the
-flash (the SPI's `launch_dma()` and `spin_dma()`, the USART's
-`harvest()`, the engines' `abandon()`). The I2C host takes no placement:
+flash (the USART's `harvest()`, the engines' `abandon()`). The I2C host takes no placement:
 measured, its event pump as an instance behind a vector in the flash
 came out no shorter ([i2c.md](i2c.md)). A third tag, and a placement on
 the I2C host, do not compile (`test/family_stm32g0/neg/`). THE NAME IS
@@ -802,11 +801,11 @@ wall of 256 frames:
 
 | path | flash | SRAM (`InRam`, the vector in the flash) | SRAM bytes |
 |---|---|---|---|
-| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6193 | 1644 a host's polled transaction, both widths (1696 engined) |
-| the same at PCLK/4 (the wire 8192) | 9230 | 8539 | |
-| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11309 | 10032 | |
-| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4662 | 4471 | |
-| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 798, 2485 | 430, 766, 2477 | |
+| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6199 | 1644 a host's polled transaction, both widths, engined or not |
+| the same at PCLK/4 (the wire 8192) | 9230 | 8545 | |
+| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11309 | 10038 | |
+| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4662 | 4477 | |
+| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 798, 2485 | 437, 773, 2484 | |
 | USART transmit engine's completion, a block at 2 Mbaud | 232 | 212 | 264 (340 with a receive engine) |
 | USART transmitter's FIFO refill, eight bytes an entry at 115200 | 323 | 318 | 404 an engineless port's `isr()` |
 | USART receive, four bytes an entry at 115200 | 355 | 316 | 332 the `isr()` of a port whose transmitter is on its engine |
@@ -819,8 +818,8 @@ What the rows say:
 - THE SPI'S RECEIVE LOOP PAYS MOST. The polled transaction is a
   function of its own in either memory (spi.md says why), and from SRAM
   its receive loop is a tenth shorter at PCLK/2 (x 1.67 of the wire to
-  1.51), its 16-bit loop likewise (1.38 to 1.22), a polled request 8 to
-  32 cycles. Where a loop is the wire's already (everything from PCLK/16
+  1.51), its 16-bit loop likewise (1.38 to 1.22), a polled request 1 to
+  25 cycles. Where a loop is the wire's already (everything from PCLK/16
   down, the write shape from PCLK/4) SRAM changes nothing; at PCLK/4 the
   receive loop's flash figure moves with where the image places it
   (x 1.05 in one image, 1.12 in this one: spi.md's open finding), and
@@ -847,19 +846,19 @@ What the rows say:
 **What it costs.** The bytes in the last column - of the G0B1's 144 KB,
 the G071's 36 and the G031's 8, the load image staying in the flash
 beside them - plus 16 bytes of flash for every function the flash calls
-in SRAM (twelve in `bench_stm32_ram`) and 16 of SRAM for every function
-an instance calls back in the flash (five there: `launch_dma()`,
-`spin_dma()`, `harvest()` and two `abandon()`). No code: the crt's copy
+in SRAM (ten in `bench_stm32_ram`) and 16 of SRAM for every function
+an instance calls back in the flash (three there: `harvest()` and two
+`abandon()`). No code: the crt's copy
 of `.data` already moves the section, a word a turn of its loop. A
 placed function exists only from that copy on - a vector taken earlier
 would enter SRAM the copy has not written yet. A default image has no
-byte of code in SRAM. The whole of `bench_stm32_ram` is 5896 bytes of
+byte of code in SRAM. The whole of `bench_stm32_ram` is 5808 bytes of
 SRAM above `bench_stm32`'s. On the STM32G031K8, where it counts, a
 console's `isr()` is 324 bytes (its USART2 is a BASIC instance, no FIFO)
 and every image of the stratum's suites with every eligible driver
 `InRam` grows by at least that: `test_stm32_serial`'s fourth image 3396
 to 6236 of 8192, and an image with an SPI host by its polled
-transaction's 1644 to 1696 bytes besides - which is why
+transaction's 1644 bytes besides - which is why
 `bench_stm32_ram`, every driver placed at once, is not built there.
 
 ## On the STM32G071RB

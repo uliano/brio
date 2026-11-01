@@ -56,18 +56,16 @@
 //      the data windows' bytes over their cycles printed against the
 //      control's.
 //   p  letter p's ladders through the arbiter, every BR code from PCLK1/256
-//      to PCLK1/2: the POLLED loop (8 frames; one frame in flight where a
-//      frame is shorter than write_ahead_min_frame_cycles, two from /8
-//      down), THE SHORT ASYNCHRONOUS REQUEST (2 byte frames read: on the
+//      to PCLK1/2: the POLLED loop (8 frames, one frame in flight at every
+//      rate), THE SHORT ASYNCHRONOUS REQUEST (2 byte frames read: on the
 //      engines to PCLK1/8, polled inside start() at /4 and /2, each rung's
 //      way read at the DMA vector and judged against the host's count),
 //      and the DMA engines (32 frames). The polled loop - a short
-//      asynchronous request's too - runs inside the arbiter's
-//      dispatch, so a dispatch above the arbiter holds it off for its whole
-//      length, which the host's hold_off_cycles (the image's longest handler
-//      or masked window) does not count: where two frames are in flight and
-//      the preemption outlasts a frame, the transaction ends spi_overrun -
-//      the service seeing it, never handing back a run with a hole in it.
+//      asynchronous request's too - runs inside the arbiter's dispatch, so
+//      a dispatch above the arbiter holds it off for its whole length, and
+//      a 3000-cycle preemption outlasts a frame at /64 and faster. One frame
+//      in flight: the clock waits for the read, so that is a gap on the bus
+//      and the bound on lost frames is ZERO in every pass.
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
 //      frames on the engines, two outstanding), Minor below it (10 POLLED
 //      requests of 8 frames, one outstanding) and, in a pressure pass,
@@ -82,9 +80,8 @@
 //      k + 1 untouched: a requester above the arbiter is answered before
 //      the next transaction starts), every one spi_ok, nothing rejected,
 //      the per-bus timeout never firing (no spi_timeout, no stale event),
-//      and the peer counts every frame exact. Minor's polled windows keep
-//      two frames in flight at a frame of 8192 cycles, longer than any
-//      preemption here (a 3000-cycle spin and the scheduler).
+//      and the peer counts every frame exact. Minor's polled windows run
+//      inside the arbiter's dispatch at a frame of 8192 cycles.
 //   i  dark: every object idle, TIM2 stopped and its line quiet, no time
 //      event armed, SPI2 idle with the select high and no DMA request
 //      raised, USART1 given back, the LED's pad not an output, the ceiling
@@ -271,8 +268,7 @@ bool data_window_dma = false;
 /// the reply before - the window's own, the windows being one at a time -
 /// latched for the data window (the shared body's sl::xrx is its receive
 /// buffer, and no other window's): which way a short asynchronous request
-/// went (letter p). The host counts its overruns itself
-/// (Host::overruns(), letter p).
+/// went (letter p).
 void client_replied() {
     const uint32_t now = dma_completions;
     if (Client::rx == sl::xrx) {
@@ -615,26 +611,17 @@ bool rides_engines(SpiClock c, uint16_t n) { return n >= Host::async_min_frames(
 /// The short request's rungs routed otherwise than the host's count says.
 uint8_t misrouted = 0;
 
-/// A frame's core cycles at code `c`: bits x 2^(code + 1) PCLK1 cycles,
-/// HCLK = 4 x PCLK1.
-uint32_t frame_cycles(SpiClock c, bool wide) {
-    return (wide ? 16u : 8u) * division(c) * (SysClock::hz / SysClock::pclk1_hz);
-}
-
-/// What the polled ladder's failures were, when it had any: cut short by
-/// an overrun the host detected (status spi_overrun, the run never handed
-/// back with a hole), or something else.
-uint8_t polled_cut_short = 0;     ///< rungs that ended spi_overrun
-bool polled_failed_otherwise = false;
+/// The polled ladder's rungs that were not exact, over the pass: lost
+/// frames, whose bound is zero.
+uint8_t polled_not_exact = 0;
 
 /// One ladder on one path: every rung judged, the first failure's outcome
-/// printed, the two-in-flight rungs named.
+/// printed.
 bool climb(Path path, uint8_t seed) {
     bool all = true;
     uint8_t k = 0;
     if (path == Path::polled) {
-        polled_cut_short = 0;
-        polled_failed_otherwise = false;
+        polled_not_exact = 0;
     }
     for (const SpiClock c : rungs) {
         sl::Exchange e{};
@@ -652,15 +639,10 @@ bool climb(Path path, uint8_t seed) {
                   data_window_dma ? "to the engines" : "polled", " where the host's count says otherwise", crlf);
         }
         if (!ok) {
-            const bool two = path != Path::engines && frame_cycles(c, false) >= Host::write_ahead_min_frame_cycles;
-            print(serial, "    ", path_name(path), two ? " (two frames in flight)" : "", ":", crlf);
+            print(serial, "    ", path_name(path), ":", crlf);
             sl::print_outcome(e, o);
             if (path == Path::polled) {
-                if (o.status == brio::spi_overrun) {
-                    ++polled_cut_short;
-                } else {
-                    polled_failed_otherwise = true;
-                }
+                ++polled_not_exact;
             }
         }
         all = all && ok;
@@ -669,8 +651,7 @@ bool climb(Path path, uint8_t seed) {
 }
 
 void tp_ladders() {
-    print(serial, "  the polled loop keeps two frames in flight from a frame of ",
-          Host::write_ahead_min_frame_cycles, " cycles (8-bit: /8 and slower); an asynchronous byte read rides "
+    print(serial, "  the polled loop keeps one frame in flight at every rate; an asynchronous byte read rides "
           "the engines from ", Host::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true), " frames at /2, ",
           Host::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true), " at /4, ",
           Host::async_min_frames(SpiClock::div8, SpiDataSize::bits8, true), " at /8, polled inside start() "
@@ -682,40 +663,26 @@ void tp_ladders() {
             (void)pass_end(s);
             return;
         }
-        const uint16_t over0 = Host::overruns();
         misrouted = 0;
         const bool polled = climb(Path::polled, 0x21);
         const bool short8 = climb(Path::short8, 0x35);
         const bool engines = climb(Path::engines, 0x43);
         const bool ping = sl::command(spilink::Op::ping);
-        const uint16_t overruns = static_cast<uint16_t>(Host::overruns() - over0);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    the host's overruns over the pass: ", overruns,
-              "; polled rungs cut short by a detected overrun: ", polled_cut_short, crlf);
-        if (s.period_us == 0u) {
-            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 8 frames byte-exact both ways at "
-                                         "every code, two in flight from /8",
-                          polled);
-        } else {
-            // Under pressure the polled loop runs inside the arbiter's
-            // dispatch, which every dispatch above the arbiter holds off for
-            // its whole length - a length the host's hold-off, the image's
-            // longest handler or masked window, does not count. A preemption
-            // that outlasts a frame ends the transaction spi_overrun: the
-            // service's promise is that it detects it every time and never
-            // hands back a run with a hole, and that is what is judged; the
-            // count of rungs cut short is printed beside it. The engines,
-            // judged below, carry no such limit.
-            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: byte-exact, or cut short only by "
-                                         "a detected overrun when a dispatch above the arbiter outlasts a "
-                                         "frame - never a run with a hole",
-                          polled || !polled_failed_otherwise);
-        }
-        // The short request's two frames: one frame in flight wherever it
-        // runs polled (/4 and /2 are under the write-ahead threshold), so
-        // no preemption can make it lose one - judged strictly in every
-        // pass, and its way at every rung the host's count's.
+        print(serial, "    polled rungs not exact over the pass: ", polled_not_exact, " (the bound: 0)", crlf);
+        // The polled loop runs inside the arbiter's dispatch, which every
+        // dispatch above the arbiter holds off for its whole length. It keeps
+        // one frame in flight, so the clock waits for the read and a
+        // preemption longer than a frame is a gap on the bus: zero rungs may
+        // lose a frame, in the control and under pressure alike.
+        bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 8 frames byte-exact both ways at every "
+                                     "code, one frame in flight, a preemption longer than a frame a gap on the bus "
+                                     "and no frame lost",
+                      polled);
+        // The short request's two frames, the same loop wherever they run
+        // polled: judged strictly in every pass, and its way at every rung
+        // the host's count's.
         bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST: 2 byte frames byte-exact at every code, "
                                      "on the engines where the host's count says so and polled inside start() "
                                      "under it, every rung the way the count says",

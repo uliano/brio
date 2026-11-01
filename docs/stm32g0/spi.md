@@ -258,13 +258,12 @@ clocked nothing, the select raised and the FIFOs drained), `prime()`,
 `packed_min_frames` (6, the byte phase from which the polled receive
 packs two frames an access), and the short request's: `costs` (the
 placement's `SpiHostCosts`), `async_read_budget_cycles` and
-`async_write_budget_cycles` (E - F), `async_min_frames(code, size,
+`async_write_budget_cycles` (E - F) and `async_min_frames(code, size,
 read)` (the frames from which an asynchronous request rides the
-engines) and `polled_engines_from(code, size, read)` (from which a
-polled one does) - their arithmetic at namespace level,
-`spi_frame_cycles()`, `spi_polled_frame_cost()`, `spi_async_budget()`,
-`spi_async_min_frames()`, `spi_polled_engines_from()` ("The short
-request" under Bench findings). `Placement` is util/placement.hpp's tag,
+engines) - their arithmetic at namespace level, `spi_frame_cycles()`,
+`spi_polled_frame_cost()`, `spi_async_budget()`,
+`spi_async_min_frames()` ("The short request" under Bench findings).
+`Placement` is util/placement.hpp's tag,
 `InFlash` by default: under `InRam` the polled transaction runs as one
 instance in SRAM, `placed_in_ram` says so, and the polled loop's figures
 follow it ("The host's placement" below).
@@ -451,8 +450,10 @@ brio::post<Arb>(Bus::Request{
 ```
 
 On this engineless host every request says `polled`: an asynchronous
-one would be refused (`spi_rejected`, `has_dma` false), and no vector is
-bound - the host arms no interrupt of the block.
+one would be refused (`spi_rejected`, `has_dma` false). **A polled request
+needs no interrupt vector, on any host**: it runs an explicit loop at every
+length, on a host with engines too, and arms no interrupt of the block or
+of a channel.
 
 **The asynchronous way: the DMA engines.** Name both engine slots and
 bind the channels' vectors, and a request that leaves `polled` false
@@ -496,7 +497,7 @@ using Display = brio::SpiHost<1, bus_pins, brio::NoDmaEngine, brio::NoDmaEngine,
 ```
 
 Every request that runs polled calls its transaction there - 1644 bytes
-of SRAM on an engineless host, 1696 on an engined one, a tenth off the
+of SRAM on an engineless host and on an engined one, a tenth off the
 receive loop at PCLK/2 ("The host's placement" below).
 
 **A client that answers.** Load the first two answers before the host's
@@ -818,9 +819,11 @@ read and one for a write, and `bench_stm32` letter `e` measures each as
 ONE difference: 64 frames at PCLK/16 on the engined host asynchronous
 and polled through the same call, the least busy of the first's eight
 runs less the second's wall above the wire, so the ruler's own cycles
-cancel - **556 and 558 cycles for a read, 556 and 560 for a write**
-(two runs; the host's figures 550 and 555), and from `bench_stm32_ram`
-579 and 569, 559 and 544 (580 and 560). The turns are the same letter's
+cancel - **530 and 531 cycles for a read, 512 and 514 for a write**
+(three runs of one image; the host's figures 550 and 555, between the
+530 and 575 and the 512 and 560 the difference has read in images that
+place the code differently), and from `bench_stm32_ram` 516 and 502 (580
+and 560). The turns are the same letter's
 polled lines on the engineless host at PCLK/2, the one code where the
 loop and not the wire is the bound, from the difference of 256 and 16
 frames: **25.5 cycles a frame read in byte frames, 43.0 in half-words,
@@ -843,14 +846,10 @@ asynchronous path and nothing on a polled one. Letter `s` finds the
 split itself at three shapes (byte frames read at PCLK/4 and written at
 PCLK/2, half-words read at PCLK/2): one frame under the count completes
 inside `start()` with no completion on a channel, the count rides the
-engines with one block and one completion. THE SAME FIGURES DECIDE
-WHERE A POLLED REQUEST RIDES THE ENGINES: the thread spins on their
-completion as it would in the loop, so they buy it no core time, only
-the wall time the loop's turn loses to the wire - at PCLK/2 alone - and
-a polled phase goes to the engines from the count at which that loss
-reaches E - F (`polled_engines_from()`): a read of byte frames from 55
-frames at PCLK/2, of half-words from 50, a write from 555; never from
-PCLK/4 down. The rule's approximations, each small against the order of
+engines with one block and one completion. A request with `polled` set
+takes no part in this rule: it runs the loop at every length, and a long
+read that wants the wire at PCLK/2, where the loop's turn is longer than
+the frame, asks asynchronously. The rule's approximations, each small against the order of
 magnitude it needs: a receive phase under `packed_min_frames` turns
 frame by frame, slower than the packed turn the figure is; a command
 block chained from the interrupt costs less than one `start()`; and the
@@ -863,15 +862,15 @@ every long block ride the engines.
 
 **The host's placement** ([platform.md](platform.md), "Code in SRAM"):
 `SpiHost<..., InRam>` runs the polled transaction as ONE flattened
-instance in SRAM - 1644 bytes on the engineless host (both widths, every
-shape), 1696 on an engined one - behind the `start()` that stays in the
-flash, a call through the linker's long-branch veneer. The engines'
-path takes no placement (once a block), nor does `SpiClient` (its runs
+instance in SRAM - 1644 bytes, both widths and every shape, on an
+engineless host and an engined one alike - behind the `start()` that
+stays in the flash, a call through the linker's long-branch veneer. The
+engines' path takes no placement (once a block), nor does `SpiClient` (its runs
 are inline in their caller, which the program places). Measured by
 `bench_stm32` and `bench_stm32_ram` (the tables above): the receive
-loop a tenth faster at PCLK/2 (6862 against 6193 in byte frames, 11309
-against 10032 in half-words) and nothing from PCLK/4 down, where the
-wire is the bound; a polled request 8 to 32 cycles; and the short
+loop a tenth faster at PCLK/2 (6862 against 6199 in byte frames, 11309
+against 10038 in half-words) and nothing from PCLK/4 down, where the
+wire is the bound; a polled request 1 to 25 cycles; and the short
 request's turns with it, so its counts are the placement's
 (`spi_costs_in_ram`).
 

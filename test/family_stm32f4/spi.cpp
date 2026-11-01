@@ -378,11 +378,6 @@ void audio_pll_smoke() {
 
 using Bus = SpiHost<1, spi1_pins>;
 using WriteOnlyBus = SpiHost<1, spi1_write_only>;
-/// An image that declares a longer hold-off than the bench's: the
-/// threshold follows it, and nothing else of the host changes.
-using SlowServiceBus = SpiHost<1, spi1_pins, NoDmaEngine, NoDmaEngine, 300>;
-static_assert(Bus::hold_off == spi_default_hold_off_cycles && Bus::write_ahead_min_frame_cycles == 236u);
-static_assert(SlowServiceBus::hold_off == 300u && SlowServiceBus::write_ahead_min_frame_cycles == 423u);
 using Peer = SpiClient<1, spi1_pins>;
 /// A client with no NSS pad (a software select): its runs end on their
 /// count or their budget, the pad's look compiled out.
@@ -413,7 +408,6 @@ void engined_smoke() {
     r.len = 0;
     (void)EnginedBus::start(r);   // a command alone, on its own block when it repays one
     (void)EnginedBus::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true);
-    (void)EnginedBus::polled_engines_from(SpiClock::div2, SpiDataSize::bits16, false);
     (void)EnginedBus::dma_isr();
     (void)EnginedBus::status();
     (void)EnginedBus::recover();
@@ -463,7 +457,6 @@ void host_smoke() {
     req.polled = false;
     (void)Bus::start(req);   // refused: spi_rejected, nothing on the wire
     static_assert(!Bus::has_dma);
-    (void)Bus::overruns();
     (void)Bus::dma_isr();
     (void)Bus::status();
     (void)Bus::recover();
@@ -473,15 +466,6 @@ void host_smoke() {
 
     (void)WriteOnlyBus::init(sys_clock);
     WriteOnlyBus::release();
-
-    (void)SlowServiceBus::init(sys_clock);
-    (void)SlowServiceBus::two_in_flight(SpiClock::div16, SpiDataSize::bits8);
-    typename SlowServiceBus::Request slow{};
-    slow.tx = Borrowed<const uint8_t, Lease::reply>{out};
-    slow.len = 4;
-    slow.polled = true;
-    (void)SlowServiceBus::start(slow);
-    SlowServiceBus::release();
 }
 
 void client_smoke() {

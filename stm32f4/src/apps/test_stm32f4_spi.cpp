@@ -46,8 +46,8 @@
 //   i  multi-byte auto-increment, and a register written then read back
 //   j  THE KERNEL: SpiBus over the engined SpiHost, asynchronous and
 //      polled requests interleaved, the rejection, the sleep votes
-//   k  the same transaction through the two DMA engines, polled and
-//      asynchronous
+//   k  the same transaction on the engined host: polled (the loop, the
+//      engines untouched) and asynchronous (through the two DMA engines)
 //   l  the SCK pad's slew class against ES0206 2.12.4's table
 //   m  the bidirectional line: the gyroscope moved to its own three-wire
 //      interface and read back over MOSI alone, then the display's turn
@@ -116,9 +116,9 @@
 //      peer's ss_pulse (NSS a hardware input) ends spi_stalled, ERRIE's
 //      vector on the same MODF; a client answering on TXEIE alone; ERRIE
 //      on an unread client's OVR
-//   h  THE HOLD-OFF DECLARED HONESTLY: a 375-cycle TIM7 handler every 5 us
-//      beside the polled receive loop at PCLK1/8 - overruns on the
-//      default's two in flight, none on a host declaring 400 cycles
+//   h  A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: a TIM7 handler
+//      holding the core longer than a frame every 5 us, beside the polled
+//      receive loop at PCLK1/8 - every window exact, the time it costs bound
 //   s  THE SHORT ASYNCHRONOUS REQUEST against the peer: one frame under
 //      the engined host's own count completes inside start(), the count
 //      rides the streams with one completion, both exact; a command phase
@@ -1982,6 +1982,15 @@ uint32_t frame_permille(Ext e) {
 
 bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
+/// The polled loop's frame in permille of the wire's `wire` cycles: from
+/// -1 % (wire_ok's floor) to the wire plus the turn. The turn on this APB1
+/// instance is at most 68 cycles (bench_stm32f4 letter e's spi.frame lines,
+/// the worst row), and one SysTick run of 76 cycles may land in the longer
+/// window's 32 extra frames, 3 cycles a frame: 71 cycles at most.
+bool polled_wire_ok(uint32_t permille, uint32_t wire) {
+    return permille >= 990u && permille <= (wire + 71u) * 1000u / wire;
+}
+
 }  // namespace ext
 
 void tu_wide() {
@@ -2007,38 +2016,37 @@ void tu_wide() {
                   "frame), likewise - this end's read-back to PCLK1/4, every frame heard at /2",
                   path_ok[1]);
 
-    // THE WIRE'S TIME: the engines at every rate, the polled loop where it
-    // keeps two frames in flight (a frame at least write_ahead_min_frame_cycles
-    // long, "The host above the wire"), one in flight printed.
+    // THE WIRE'S TIME: the engines at every rate. The polled loop keeps one
+    // frame in flight, so its frame is the wire's plus at most its turn; its
+    // bound below is that arithmetic. PCLK1/2 is printed: the read there
+    // fails on these wires, whichever way it runs.
     static constexpr SpiClock timed[] = {SpiClock::div8, SpiClock::div4, SpiClock::div2};
     bool engines_wire = true;
     bool polled_wire = true;
     for (const SpiClock c : timed) {
         const uint32_t frame_cycles =
             16u * ext::division(c) * (SysClock::hz / SysClock::pclk1_hz);
-        const bool polled_two = frame_cycles >= Host::write_ahead_min_frame_cycles;
         for (uint8_t p = 0; p < 2u; ++p) {
             ext::Ext e{};
             e.path = static_cast<ext::Path>(p);
             e.wide = true;
             e.rate = c;
             const uint32_t pm = ext::frame_permille(e);
-            const bool judged = e.path == ext::Path::engines ||
-                                (e.path == ext::Path::polled && polled_two);
+            const bool judged = e.path == ext::Path::engines || c != SpiClock::div2;
             print(serial, "  ", ext::path_name(e.path), " at PCLK1/", ext::division(c),
                   ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods",
-                  judged ? "" : " (printed: one frame in flight)", crlf);
+                  judged ? "" : " (printed)", crlf);
             if (e.path == ext::Path::engines) {
                 engines_wire = engines_wire && ext::wire_ok(pm);
             } else if (judged) {
-                polled_wire = polled_wire && ext::wire_ok(pm);
+                polled_wire = polled_wire && ext::polled_wire_ok(pm, frame_cycles);
             }
         }
     }
     bench.verdict("THE STREAMS' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the window "
                   "is its sixteen SCK periods, -1 % to +3 %, at PCLK1/8, /4 and /2",
                   engines_wire);
-    bench.verdict("...and so do the polled loop's where it keeps two frames in flight",
+    bench.verdict("...and the polled loop's frame is the wire's plus at most its turn, at PCLK1/8 and /4",
                   polled_wire);
 
     // The peer's own 16-bit RUN (spare_polled_pump): the other end's
@@ -2978,36 +2986,47 @@ void tg_stall_irqs() {
 }
 
 // =============================================================================
-// h - THE HOLD-OFF DECLARED HONESTLY, against the peer
+// h - A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS, against the peer
 // =============================================================================
 //
-// SpiHost's polled receive loop keeps two frames in flight from the frame
-// length its image's hold-off allows (`spi_write_ahead_min_frame_cycles`):
-// 236 cycles at the default 150, so on SPI2 (HCLK = 4 x PCLK1) 8-bit
-// frames go two in flight from PCLK1/8 - 256 cycles a frame. Two in flight
-// overrun the receive buffer when frame k is read more than a frame time
-// after its RXNE (26.3.13). This letter binds a TIM7 update handler that
-// holds the core for 350 cycles of its own (a DWT spin; with the entry and
-// the exit about 375) every 5 us - a handler the default does not declare
-// - and runs the polled loop at PCLK1/8 against the peer twice: under the
-// default, and on a host declaring 400 cycles, whose threshold (548) keeps
-// that rate one frame in flight. The handler holds the loop off for
-// whatever is left of it when RXNE rises.
+// SpiHost's polled receive loop keeps one frame in flight at every rate: it
+// writes frame k + 1 only after reading frame k, so the clock waits for the
+// read and nothing can overrun (26.3.13). This letter binds a TIM7 update
+// handler that holds the core for 350 cycles of its own (a DWT spin) every
+// 5 us, longer than a frame, and runs the polled loop at PCLK1/8 (256 cycles
+// a frame) against the peer. The verdict: ten windows of ten exact both ways,
+// status spi_ok, OVR never standing, the peer's count right, and the window
+// longer than without the handler by what the arithmetic below allows.
 //
-// THE BOUND. A frame's RXNE rises every 256 cycles or more; the handler
-// covers 375 of every 900. An RXNE landing in its first 375 - 256 = 119
-// cycles is read later than a frame after it: a chance of about 119 / 900
-// = 0.13 a frame, so a 64-frame window survives the default with odds near
-// 0.87^64 = 1.3e-4 - ten windows all surviving is beyond any count this
-// suite will run. The declared host cannot overrun at all: one frame in
-// flight writes frame k + 1 only after reading frame k.
+// THE BOUND, in core cycles at 180 MHz. The handler's period is P = 900 (5 us;
+// TIM7 counts the crystal's 90 MHz). One run holds the core for
+//   hold_min = 350 + 12 + 12                           = 374   (the spin, the
+//              exception's entry and exit, Cortex-M4 TRM 3.9.1)
+//   hold_max = 374 + 9 (a spin turn's overshoot) + 12 (the five instructions
+//              around the spin) + 16 (the store to TIM7 over the APB) + 18
+//              (three flash misses of the ART, 6 cycles each)
+//                                                      = 429
+// A run longer than the frame always stalls the loop: the frame in flight ends
+// at most W = 256 after the run starts, so the bus idles for at least
+// hold_min - W = 118 where the same frame would have turned at once. A run can
+// add at most its whole length, when it lands on the turn. So over a window of
+// T cycles without the handler (10 windows measured, T_min and T_max), the
+// runs that start inside it number at least floor(T_min / P), and
+//   lower = floor(T_min / P) x (hold_min - W)
+//   upper = (T_max + hold_max + tick) x P / (P - hold_max) - T_min
+// the second from T' <= T_max + (T' / P + 1) x hold_max + tick, with tick = 76
+// the one SysTick run the window can meet (28 of body, entry and exit, flash).
+// Both are worst cases of the phase; neither is a figure chosen by eye.
 
 constexpr uint32_t hog_cycles = 350;
+constexpr uint32_t hog_period = 900;
+constexpr uint32_t hog_hold_min = hog_cycles + 12u + 12u;
+constexpr uint32_t hog_hold_max = hog_hold_min + 9u + 12u + 16u + 18u;
+constexpr uint32_t hog_frame = 256;
+constexpr uint32_t hog_tick = 76;
+static_assert(hog_hold_min > hog_frame && hog_hold_max < hog_period);
 volatile bool hog_armed = false;   ///< this series binds the handler at all
 volatile uint32_t hog_count = 0;
-volatile bool honest_live = false;
-using HonestHost = SpiHost<2, link_pins, NoDmaEngine, NoDmaEngine, 400>;
-static_assert(HonestHost::write_ahead_min_frame_cycles == 548u);
 
 constexpr uint16_t hold_n = 64;
 uint8_t hold_tx[hold_n];
@@ -3017,15 +3036,15 @@ struct HoldRun {
     bool accepted = false;
     bool completed = false;
     uint8_t status = 0;
-    uint32_t us = 0;
+    uint32_t cycles = 0;
+    bool overrun = false;
     bool reported = false;
     spilink::Report r{};
     uint16_t mism = 0;
 };
 
-/// One 64-frame window on the polled loop of host H at PCLK1/8, the peer
-/// exchanging on its DMA serve.
-template <typename H>
+/// One 64-frame window on the polled loop at PCLK1/8, the peer exchanging on
+/// its DMA serve.
 HoldRun hold_window(uint8_t seed) {
     HoldRun o{};
     spilink::Params a{};
@@ -3045,14 +3064,10 @@ HoldRun hold_window(uint8_t seed) {
         hold_rx[i] = 0xEE;
     }
     settle();
-    honest_live = std::is_same_v<H, HonestHost>;
-    if (honest_live) {
-        (void)HonestHost::init(clock, peer_link_config<HonestHost>());
-    }
-    H::prime(SpiMode::mode0, SpiClock::div8);
+    Host::prime(SpiMode::mode0, SpiClock::div8);
     CsPin::clear();
     link_hold();
-    typename H::Request r{};
+    Host::Request r{};
     r.cs = {};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(hold_tx));
     r.rx = lend<Lease::reply>(hold_rx);
@@ -3061,22 +3076,17 @@ HoldRun hold_window(uint8_t seed) {
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
     r.polled = true;
-    host_done = false;
     // The timer runs for the window alone, so the command channel around
     // it is not what it lands in.
     Tim<7>::enable(hog_armed);
     const uint32_t t0 = CycleCounter::now();
-    bool done = H::start(r);
-    const uint32_t m0 = Ticker::millis();
-    while (!done && !host_done && Ticker::millis() - m0 < 50u) {
-    }
-    o.us = (CycleCounter::now() - t0) / cycles_per_us;
+    o.completed = Host::start(r);
+    o.cycles = CycleCounter::now() - t0;
     Tim<7>::enable(false);
-    o.completed = done || host_done;
-    o.status = H::status();
+    o.overrun = S::overrun();
+    o.status = Host::status();
     link_hold();
     CsPin::set();
-    honest_live = false;
     (void)link_command_mode();
     o.reported = peer_report(o.r);
     o.mism = sel::mismatches(hold_rx, hold_n, a.seed_b);
@@ -3085,34 +3095,42 @@ HoldRun hold_window(uint8_t seed) {
 
 struct HoldTally {
     uint8_t exact = 0;
+    uint8_t not_ok = 0;
     uint8_t overrun = 0;
-    uint32_t us_sum = 0;
-    uint16_t overruns_counted = 0;
+    uint32_t cycles_min = UINT32_MAX;
+    uint32_t cycles_max = 0;
+    uint32_t runs = 0;
 };
 
-template <typename H>
 HoldTally hold_series(bool hog, uint8_t rounds) {
     HoldTally t{};
-    const uint16_t before = H::overruns();
     hog_count = 0;
     for (uint8_t k = 0; k < rounds; ++k) {
         hog_armed = hog;
-        const HoldRun o = hold_window<H>(static_cast<uint8_t>(0x21u + 13u * k));
+        const HoldRun o = hold_window(static_cast<uint8_t>(0x21u + 13u * k));
         hog_armed = false;
-        if (o.completed && o.status == spi_ok && o.mism == 0u && o.reported &&
-            o.r.count == hold_n && o.r.mism == 0u) {
+        if (o.completed && o.status == spi_ok && o.mism == 0u && o.reported && o.r.count == hold_n &&
+            o.r.mism == 0u) {
             ++t.exact;
         }
-        if (o.status == spi_overrun) {
+        if (o.status != spi_ok) {
+            ++t.not_ok;
+        }
+        if (o.overrun) {
             ++t.overrun;
         }
-        t.us_sum += o.us;
+        if (o.cycles < t.cycles_min) {
+            t.cycles_min = o.cycles;
+        }
+        if (o.cycles > t.cycles_max) {
+            t.cycles_max = o.cycles;
+        }
     }
-    t.overruns_counted = static_cast<uint16_t>(H::overruns() - before);
+    t.runs = hog_count;
     return t;
 }
 
-void th_hold_off() {
+void th_handler_gap() {
     if (!need_peer()) {
         return;
     }
@@ -3121,34 +3139,32 @@ void th_hold_off() {
     (void)TimPeriodicTick<Tim<7>>::setup(0, 449);   // 90 MHz / 450 = 200 kHz
     Tim<7>::enable(false);
     Nvic::enable(Tim<7>::irq());
-    print(serial, "  the polled loop at PCLK1/8 (256 cycles a frame); threshold for two in flight: ",
-          Host::write_ahead_min_frame_cycles, " cycles at the default hold-off ", Host::hold_off,
-          ", ", HonestHost::write_ahead_min_frame_cycles, " at the declared ",
-          HonestHost::hold_off, crlf);
     constexpr uint8_t rounds = 10;
-    const HoldTally quiet = hold_series<Host>(false, rounds);
-    const HoldTally dflt = hold_series<Host>(true, rounds);
-    const uint32_t hogs = hog_count;
-    const HoldTally honest = hold_series<HonestHost>(true, rounds);
+    const HoldTally quiet = hold_series(false, rounds);
+    const HoldTally held = hold_series(true, rounds);
     Nvic::disable(Tim<7>::irq());
     Tim<7>::release();
-    print(serial, "  no handler, the default:   ", quiet.exact, " of ", rounds, " exact, ",
-          quiet.overruns_counted, " overruns, ", quiet.us_sum / rounds, " us a window", crlf);
-    print(serial, "  the 375-cycle handler, the default (two in flight): ", dflt.exact, " of ",
-          rounds, " exact, ", dflt.overrun, " ended spi_overrun, overruns() counted ",
-          dflt.overruns_counted, " (", hogs, " handler runs)", crlf);
-    print(serial, "  the same handler, 400 declared (one in flight): ", honest.exact, " of ",
-          rounds, " exact, ", honest.overruns_counted, " overruns, ", honest.us_sum / rounds,
-          " us a window", crlf);
-    bench.verdict("the control: with no handler bound, the default's two in flight carry ten "
-                  "64-frame windows exact both ways",
-                  quiet.exact == rounds && quiet.overruns_counted == 0u);
-    bench.verdict("a handler LONGER THAN THE DEFAULT DECLARES overruns the polled loop's two in "
-                  "flight (spi_overrun, counted by overruns())",
-                  dflt.overrun != 0u && dflt.overruns_counted == dflt.overrun);
-    bench.verdict("THE SAME HANDLER DECLARED (hold_off 400): one frame in flight at that rate, "
-                  "ten windows exact both ways and no overrun",
-                  honest.exact == rounds && honest.overruns_counted == 0u);
+    const uint32_t lower = (quiet.cycles_min / hog_period) * (hog_hold_min - hog_frame);
+    const uint32_t upper = static_cast<uint32_t>((static_cast<uint64_t>(quiet.cycles_max) + hog_hold_max + hog_tick) *
+                                                 hog_period / (hog_period - hog_hold_max)) -
+                           quiet.cycles_min;
+    const uint32_t longer_min = held.cycles_min > quiet.cycles_max ? held.cycles_min - quiet.cycles_max : 0u;
+    const uint32_t longer_max = held.cycles_max > quiet.cycles_min ? held.cycles_max - quiet.cycles_min : 0u;
+    print(serial, "  the polled loop at PCLK1/8 (256 cycles a frame), 64 frames:", crlf);
+    print(serial, "  no handler: ", quiet.exact, " of ", rounds, " exact, a window ", quiet.cycles_min, "..",
+          quiet.cycles_max, " cycles, OVR ", quiet.overrun, crlf);
+    print(serial, "  the handler every 900 cycles, ", held.runs, " runs: ", held.exact, " of ", rounds,
+          " exact, ", held.not_ok, " not spi_ok, OVR ", held.overrun, ", a window ", held.cycles_min, "..",
+          held.cycles_max, " cycles", crlf);
+    print(serial, "  longer by ", longer_min, "..", longer_max, " cycles; the arithmetic allows ", lower, "..", upper,
+          crlf);
+    bench.verdict("the control: with no handler bound, ten 64-frame windows exact both ways",
+                  quiet.exact == rounds && quiet.overrun == 0u);
+    bench.verdict("A HANDLER LONGER THAN A FRAME, every 5 us, IS A GAP ON THE BUS: ten of ten windows exact both "
+                  "ways, status spi_ok, the peer's count right, OVR never standing",
+                  held.exact == rounds && held.not_ok == 0u && held.overrun == 0u);
+    bench.verdict("the window is longer than without the handler by what the arithmetic allows, and the handler ran",
+                  longer_min >= lower && longer_max <= upper && held.runs >= rounds * (quiet.cycles_min / hog_period));
     (void)link_command_mode();
     bench.verdict("the command channel is back", command(Op::ping));
 }
@@ -3282,8 +3298,7 @@ void ts_short() {
         SpiClock rate;
         uint16_t edge;
     };
-    // PCLK1/4 and /8: one frame in flight at the first, two at the second
-    // (the write-ahead threshold), each a count of its own. Not /2: the
+    // PCLK1/4 and /8, each a count of its own. Not /2: the
     // streams' 22.5 MHz rung slips on this desk's wires whatever the
     // length (letter p's DMA climb), which is the wire's verdict and not
     // the split's.
@@ -3384,8 +3399,8 @@ extern "C" void EXTI15_10_IRQHandler() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
-/// Letter h's handler the default hold-off does not declare: hog_cycles of
-/// its own, timed on the DWT, every 5 us while its window runs.
+/// Letter h's handler, longer than a frame: hog_cycles of its own, timed on
+/// the DWT, every 5 us while its window runs.
 extern "C" void TIM7_IRQHandler() {
     brio::Tim<7>::clear_flags(brio::Tim<7>::update_flag);
     const uint32_t t0 = brio::CycleCounter::now();
@@ -3437,8 +3452,8 @@ int main() {
                  tf_select);
     bench.letter('g', "THE STALL a second chip makes, and the TXE and error interrupts",
                  tg_stall_irqs);
-    bench.letter('h', "THE HOLD-OFF DECLARED HONESTLY: a long handler beside the polled loop",
-                 th_hold_off);
+    bench.letter('h', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: longer than a frame, every 5 us",
+                 th_handler_gap);
     bench.letter('s', "THE SHORT ASYNCHRONOUS REQUEST against the peer: the split at the "
                       "host's count, a command block chained",
                  ts_short);
@@ -4276,11 +4291,10 @@ void tk_engines() {
     r.clock = gyro_rate;
     r.polled = true;
     const bool sync = DmaHost::start(r);
-    print(serial, "  a five-byte read through the engines (polled): ", hex(got[0]), " ",
+    print(serial, "  a five-byte read polled on the engined host: ", hex(got[0]), " ",
           hex(got[1]), " ", hex(got[2]), " ", hex(got[3]), " ", hex(got[4]), ", status ",
           DmaHost::status(), crlf);
-    bench.verdict("a polled request completes inside start() with the engines carrying the data "
-                  "phase",
+    bench.verdict("a polled request completes inside start() in the loop, the engines untouched",
                   sync && DmaHost::status() == spi_ok);
     bench.verdict("... and the block is byte-exact against the control registers' reset values",
                   same(gyro_ctrl_reset, got, 5));
@@ -4329,9 +4343,12 @@ void tk_engines() {
         b.len = 64;
         b.mode = gyro_mode;
         b.clock = c;
-        b.polled = true;
+        b.polled = false;
         const uint32_t t0 = cycle_stamp();
-        (void)DmaHost::start(b);
+        const bool inside = DmaHost::start(b);
+        uint32_t wait_spins = 8'000'000u;
+        while (!inside && GyroCs::read_out() == false && wait_spins-- != 0u) {
+        }
         const uint32_t took = cycles_since(t0);
         const uint32_t stated = spi_sck_hz(DmaHost::reference_hz(), c);
         const uint32_t ns_per_frame = (took * 1000u) / (65u * cycles_per_us);

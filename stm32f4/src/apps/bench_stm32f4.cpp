@@ -168,16 +168,24 @@
 //               22.5, 11.25 and 5.625 MHz (/2, /4, /8 and /16): wall
 //               against the wire's time, the loop's own cost per frame
 //               being what is above 1.00. THE WIRE is SCK / 8 bytes a
-//               second. The line after each says the worst run's wall,
-//               the worst status and the host's overrun count: a frame
-//               lost to a handler shows there and never in the best.
+//               second. The line after each says the worst run's wall
+//               and the worst status.
 //        spi.poll.rx, spi.poll16.rx
-//               the same requests with rx set too (the receive shape:
-//               one frame in flight below the host's write-ahead
-//               threshold, two above it), the same line after; then each
-//               shape's frame at every code from the two lengths (the
+//               the same requests with rx set too (the receive shape, one
+//               frame in flight at every rate), the same line after; then
+//               each shape's frame at every code from the two lengths (the
 //               fixed part cancels): the transmit-only turn at /2 and the
 //               receive loop's dead bus, what the short-request rule takes.
+//        spi.frame
+//               THE RECEIVE LOOP'S FRAME AGAINST THE WIRE, the table the
+//               driver's document quotes: /4 to /256, 8 and 16 bits, modes
+//               0 and 1, on SPI1 (MISO floating) and on SPI2 (APB1, the
+//               wires to the desk partner, SCK and MOSI at medium; PB12 is
+//               not driven, so the partner's select stays high and it is
+//               not selected). 16 and 256 frames, the best of five runs,
+//               each with interrupts masked (no handler in the figure, and
+//               a polled request needs no vector), MEASURED FIRST AND PRINTED
+//               AFTER: no console line beside a run.
 //        refused
 //               an asynchronous request on the same host: start() answers
 //               at once, spi_rejected, the select never lowered (printed,
@@ -191,17 +199,19 @@
 //               wire's cycles: the price of a DCS command.
 //        spi.req.e, spi.poll.e, spi.poll.rx.e
 //               the same short requests, and 256 frames written and read
-//               polled at /2 and /4, over letter d's ENGINED host: where
-//               the host's polled rule sends a phase to the engines by its
-//               shape (irq 1 = the engines' completion, 0 = the loop).
+//               polled at /2 and /4, over letter d's ENGINED host: a polled
+//               request runs the same loops there, no completion (irq 0).
 //        spi.async, spi.async.rx
 //               THE SHORT REQUEST'S BUDGET on the engined host: 64 frames
 //               of 8 bits at /16, written and read, asynchronous on the
-//               engines and polled (spi.e.poll64, .rx) through the same
-//               call, so E - F is the least busy of the first's runs less
-//               the second's wall above the wire, the ruler's own cycles
-//               cancelling: printed for a read and a write beside the
-//               host's constants, with the frame counts those give.
+//               engines and polled (spi.e.poll16 and spi.e.poll64, .rx)
+//               through the same call, so E - F is the least busy of the
+//               first's runs less F, the polled wall's fixed part - the
+//               two polled lengths extrapolated to no frames, the frames'
+//               own time and the receive loop's dead bus falling out, the
+//               ruler's own cycles cancelling: printed for a read and a
+//               write beside the host's constants, with the frame counts
+//               those give.
 //
 //   i  THE I2C HOST ABOVE THE WIRE (the STM32F429I-DISC1 and the
 //      Nucleo-F446RE; declined by name elsewhere). On the DISC1: I2C3 on
@@ -361,6 +371,11 @@ using FastSpi = SpiHost<1, spi1_pins, SpiTx, SpiRx>;
 /// letter e's host: the same instance and pads with no engine, so every
 /// request runs polled and an asynchronous one is refused.
 using PollSpi = SpiHost<1, spi1_pins>;
+/// letter e's frame table on APB1: SPI2 on the wires to the desk partner.
+constexpr SpiPins spi2_pins{.sck = {'B', 13, PinFunction::af5},
+                            .miso = {'B', 14, PinFunction::af5},
+                            .mosi = {'B', 15, PinFunction::af5}};
+using PollSpi2 = SpiHost<2, spi2_pins>;
 using ReqCs = Pin<'C', 0>;   ///< letter e's select
 using ReqDc = Pin<'C', 1>;   ///< letter e's D/C
 #endif
@@ -1145,6 +1160,98 @@ SpiRun spi_best_of(const typename Host::Request& r, uint8_t runs) {
     }
     return out;
 }
+
+// ---- spi.frame: the receive loop's frame against the wire -----------------------------
+
+constexpr uint8_t frame_codes = 7;   ///< /4 .. /256
+/// [instance][width][mode][code][length]: the best wall of 16 and 256 frames.
+uint32_t frame_walls[2][2][2][frame_codes][2];
+uint8_t frame_bad[2];
+
+/// The least wall of `frames` read at this code, width and mode: the first
+/// of the six runs discarded (it applies the rate), each with interrupts
+/// masked.
+template <typename Host>
+uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames, uint8_t& bad) {
+    typename Host::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_out));
+    r.rx = lend<Lease::reply>(const_cast<uint8_t*>(spi_in));
+    r.len = frames;
+    r.clock = c;
+    r.mode = m;
+    r.bits = bits;
+    r.polled = true;
+    uint32_t best = UINT32_MAX;
+    for (uint8_t run = 0; run < 6u; ++run) {
+        uint32_t w = 0;
+        {
+            InterruptGuard guard;
+            const uint32_t t0 = Ruler::now();
+            (void)Host::start(r);
+            w = Ruler::now() - t0;
+        }
+        if (Host::status() != spi_ok && bad != 255u) {
+            ++bad;
+        }
+        if (run != 0u && w < best) {
+            best = w;
+        }
+    }
+    return best;
+}
+
+template <typename Host>
+void frame_host(uint8_t inst) {
+    const SpiDataSize widths[2] = {SpiDataSize::bits8, SpiDataSize::bits16};
+    const SpiMode modes[2] = {SpiMode::mode0, SpiMode::mode1};
+    const uint16_t counts[2] = {16u, 256u};
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                for (uint8_t li = 0; li < 2u; ++li) {
+                    frame_walls[inst][wi][mi][ci][li] = frame_best<Host>(
+                        static_cast<SpiClock>(ci + 1u), widths[wi], modes[mi], counts[li], frame_bad[inst]);
+                }
+            }
+        }
+    }
+}
+
+/// Measured first, printed after: no console line beside a run.
+void frame_table() {
+    frame_bad[0] = 0;
+    frame_bad[1] = 0;
+    (void)console_drain();
+    (void)PollSpi::init(clock);
+    frame_host<PollSpi>(0);
+    const uint32_t ratio1 = Ruler::hz() / PollSpi::reference_hz();
+    PollSpi::release();
+    (void)PollSpi2::init(clock, {.sck_speed = PinSpeed::medium, .mosi_speed = PinSpeed::medium});
+    frame_host<PollSpi2>(1);
+    const uint32_t ratio2 = Ruler::hz() / PollSpi2::reference_hz();
+    PollSpi2::release();
+    print(serial, "  spi.frame: HCLK/PCLK SPI1 ", ratio1, " SPI2 ", ratio2, "; bad status SPI1 ", frame_bad[0],
+          " SPI2 ", frame_bad[1], crlf);
+    for (uint8_t inst = 0; inst < 2u; ++inst) {
+        const uint32_t ratio = inst == 0u ? ratio1 : ratio2;
+        for (uint8_t wi = 0; wi < 2u; ++wi) {
+            for (uint8_t mi = 0; mi < 2u; ++mi) {
+                for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                    const uint32_t wire = (wi == 0u ? 8u : 16u) * (4u << ci) * ratio;
+                    const uint32_t fix = frame_walls[inst][wi][mi][ci][0];
+                    const uint32_t per = (frame_walls[inst][wi][mi][ci][1] - fix) * 100u / 240u;
+                    const int32_t over = static_cast<int32_t>(per) - static_cast<int32_t>(wire * 100u);
+                    const uint32_t abs_over = over < 0 ? static_cast<uint32_t>(-over) : static_cast<uint32_t>(over);
+                    print(serial, "  spi.frame spi", inst + 1u, " bits", wi == 0u ? 8u : 16u, " mode", mi, " div",
+                          static_cast<uint32_t>(4u << ci), " wire ", wire, " frame ", per / 100u, '.',
+                          per % 100u < 10u ? "0" : "", per % 100u, " over ", over < 0 ? "-" : "", abs_over / 100u,
+                          '.', abs_over % 100u < 10u ? "0" : "", abs_over % 100u, " wall16 ", fix, crlf);
+                    (void)console_drain();
+                }
+            }
+        }
+    }
+}
 #endif
 
 void te_spi() {
@@ -1153,6 +1260,7 @@ void te_spi() {
     for (uint16_t i = 0; i < sizeof(spi_out); ++i) {
         spi_out[i] = static_cast<uint8_t>(i);
     }
+    frame_table();
     (void)PollSpi::init(clock);
     const SpiClock rates[4] = {SpiClock::div2, SpiClock::div4, SpiClock::div8, SpiClock::div16};
     const SpiDataSize widths[2] = {SpiDataSize::bits8, SpiDataSize::bits16};
@@ -1184,8 +1292,7 @@ void te_spi() {
                            written.best, Ruler::hz(), wire);
                 print(serial, "  SCK ", PollSpi::sck_hz(rate), " Hz, ", frames, " frames written: wall - wire = ",
                       static_cast<int32_t>(written.best.wall - wire_cycles), " cycles, worst wall ",
-                      written.worst_wall, ", status ", written.worst_status, written.ovr ? ", OVR SEEN" : "",
-                      ", the host counted ", PollSpi::overruns(), crlf);
+                      written.worst_wall, ", status ", written.worst_status, written.ovr ? ", OVR SEEN" : "", crlf);
                 // spi.poll.rx: the RECEIVE shape, rx set.
                 r.rx = lend<Lease::reply>(const_cast<uint8_t*>(spi_in));
                 const SpiRun polled = spi_best_of<PollSpi>(r, 6);
@@ -1193,10 +1300,8 @@ void te_spi() {
                 bench_line(serial, bits == SpiDataSize::bits16 ? "spi.poll16.rx" : "spi.poll.rx", bytes,
                            polled.best, Ruler::hz(), wire);
                 print(serial, "  SCK ", PollSpi::sck_hz(rate), " Hz, ", frames, " frames read: wall - wire = ",
-                      static_cast<int32_t>(polled.best.wall - wire_cycles), " cycles, ",
-                      PollSpi::two_in_flight(rate, bits) ? "two" : "one", " in flight, worst wall ",
-                      polled.worst_wall, ", status ", polled.worst_status, polled.ovr ? ", OVR SEEN" : "",
-                      ", the host counted ", PollSpi::overruns(), crlf);
+                      static_cast<int32_t>(polled.best.wall - wire_cycles), " cycles, worst wall ",
+                      polled.worst_wall, ", status ", polled.worst_status, polled.ovr ? ", OVR SEEN" : "", crlf);
             }
         }
     }
@@ -1261,11 +1366,9 @@ void te_spi() {
     }
     PollSpi::release();
 
-    // The same shapes over the ENGINED host, where its polled rule decides:
-    // spi.req.e, the three short polled requests at /16 (the loop), and
-    // spi.poll.e, 256 frames polled at /2 and /4 - a read to the engines
-    // where the loop's one frame in flight loses more to the wire over the
-    // phase than they cost, a write where its turn does.
+    // The same shapes over the ENGINED host: spi.req.e, the three short
+    // polled requests at /16, and spi.poll.e, 256 frames polled at /2 and /4
+    // - the same loops whatever the length, the engines untouched (irq 0).
     Dma<2>::init();
     (void)FastSpi::init(clock);
     for (const uint16_t len : lens) {
@@ -1309,14 +1412,17 @@ void te_spi() {
             bench_line(serial, with_rx ? "spi.poll.rx.e" : "spi.poll.e", 256u, polled.best, Ruler::hz(), wire);
             print(serial, "  over the engined host, 256 frames ", with_rx ? "read" : "written", " polled at SCK ",
                   FastSpi::sck_hz(rate), " Hz: wall - wire = ", static_cast<int32_t>(polled.best.wall - wire_cycles),
-                  " cycles, irq ", polled.best.irq, " (one = the engines' completion, none = the loop)", crlf);
+                  " cycles, irq ", polled.best.irq, " (the loop, no completion)", crlf);
         }
     }
 
     // The short request's budget, E - F: the same 64-frame request at /16
-    // asynchronous (on the engines: past the host's count there) and
-    // polled (the loop: two in flight, nothing lost to the wire), through
-    // the same call.
+    // asynchronous (on the engines: past the host's count there) and polled
+    // through the same call. F is the polled wall's fixed part: the wall of
+    // 16 and of 64 frames extrapolated to no frames, (4 x w16 - w64) / 3, so
+    // the frames' time and the receive loop's dead bus fall out. The wire's
+    // half bit after the last sampling edge stays in it, as it stays in a
+    // polled request's wall.
     uint32_t over[2] = {};
     for (const bool with_rx : {false, true}) {
         FastSpi::Request r{};
@@ -1339,11 +1445,15 @@ void te_spi() {
         r.polled = true;
         const SpiRun polled = spi_best_of<FastSpi>(r, 9);
         bench_line(serial, with_rx ? "spi.e.poll64.rx" : "spi.e.poll64", 64u, polled.best, Ruler::hz(), wire);
-        const uint32_t rest = polled.best.wall > wire_cycles ? polled.best.wall - wire_cycles : 0u;
-        print(serial, "  the same polled: wall - wire = ", rest, " cycles, irq ", polled.best.irq, crlf);
-        over[with_rx ? 1u : 0u] = async.least_busy > rest ? async.least_busy - rest : 0u;
+        r.len = 16;
+        const SpiRun shorter = spi_best_of<FastSpi>(r, 9);
+        bench_line(serial, with_rx ? "spi.e.poll16.rx" : "spi.e.poll16", 16u, shorter.best, Ruler::hz(), wire);
+        const uint32_t fixed = (4u * shorter.best.wall - polled.best.wall) / 3u;
+        print(serial, "  the same polled: wall - wire = ", static_cast<int32_t>(polled.best.wall - wire_cycles),
+              " cycles, F = ", fixed, " cycles, irq ", polled.best.irq, crlf);
+        over[with_rx ? 1u : 0u] = async.least_busy > fixed ? async.least_busy - fixed : 0u;
     }
-    print(serial, "  E - F (the engines' least busy less the polled rest): read ", over[1], " (the host's ",
+    print(serial, "  E - F (the engines' least busy less F): read ", over[1], " (the host's ",
           FastSpi::async_read_budget_cycles, "), written ", over[0], " (the host's ",
           FastSpi::async_write_budget_cycles, ")", crlf);
     print(serial, "  an asynchronous request rides the engines from, SCK /2../256 on this APB2 instance, "
@@ -1359,12 +1469,7 @@ void te_spi() {
     for (uint8_t c = 0; c < 8u; ++c) {
         print(serial, ' ', FastSpi::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits16, true));
     }
-    print(serial, crlf, "  a polled phase rides them from: 8-bit read at /2 ",
-          FastSpi::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, true), ", /4 ",
-          FastSpi::polled_engines_from(SpiClock::div4, SpiDataSize::bits8, true), ", /8 ",
-          FastSpi::polled_engines_from(SpiClock::div8, SpiDataSize::bits8, true), ", /16 ",
-          FastSpi::polled_engines_from(SpiClock::div16, SpiDataSize::bits8, true), "; 8-bit write at /2 ",
-          FastSpi::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, false), " (0 = never)", crlf);
+    print(serial, crlf);
     FastSpi::release();
     ReqCs::release();
     ReqDc::release();

@@ -1372,11 +1372,7 @@ void te_host() {
     for (uint8_t c = 0; c < 8u; ++c) {
         print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits16, true));
     }
-    print(serial, crlf, "  a polled phase rides them from, at PCLK/2: 8-bit read ",
-          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, true), ", written ",
-          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits8, false), ", 16-bit read ",
-          SpiHw::polled_engines_from(SpiClock::div2, SpiDataSize::bits16, true),
-          " (0 = never; from PCLK/4 down never)", crlf);
+    print(serial, crlf);
     bench.verdict("ran", true);
 }
 

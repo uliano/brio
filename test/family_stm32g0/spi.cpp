@@ -341,7 +341,6 @@ void spi_tasks() {
     (void)EngineHost::start(e);   // a command alone, on its own block when it repays one
     static_assert(EngineHost::has_dma);
     (void)EngineHost::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true);
-    (void)EngineHost::polled_engines_from(SpiClock::div2, SpiDataSize::bits16, true);
     (void)EngineHost::dma_isr();
     (void)EngineHost::recover();
     EngineHost::release();
