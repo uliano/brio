@@ -2718,8 +2718,9 @@ Cost cost_of(uint8_t tx_len, uint8_t rx_len) {
 }
 
 /// The longest event vector entry over the shapes letter x printed: the
-/// figure the CH32X035 SPI host's default hold-off is drawn from
-/// (brio/ch32x035/spi.hpp, spi_default_hold_off_cycles).
+/// family's longest handler with every driver in the flash
+/// (docs/ch32x035/platform.md), a hold of main context beside any polled
+/// loop.
 uint32_t longest_entry = 0;
 
 void print_cost(const char* name, const Cost& c, uint32_t wire) {

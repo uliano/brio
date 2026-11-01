@@ -39,7 +39,8 @@
 //      the enable protection MEASURED field by field, HSCR's "not
 //      readable" read, ODEN, the select an SSOE host drives, the transmit
 //      CRC against a bitwise reference, and every way a request runs - the
-//      polled loops, the engines polled and asynchronous, a command phase on
+//      polled loops, a polled request on the engined host, the engines
+//      asynchronous, a command phase on
 //      a block of its own, an asynchronous request too short for the
 //      engines completing inside start() - to completion with nothing on
 //      MISO
@@ -51,24 +52,23 @@
 //      polled loops' frames and fixed cost - IN BOTH PLACEMENTS, the
 //      suite's hosts in SRAM and their flash twins, each judged against
 //      the constants the driver states for its placement, THE SHORT
-//      REQUEST'S EDGE measured where those constants put it, the hold-off
-//      this image's handlers measure, and the receive loop with two frames
-//      in flight under the console's interrupts
+//      REQUEST'S EDGE measured where those constants put it, what this
+//      image's handlers measure, and THE RECEIVE LOOP'S FRAME TABLE
+//      (spi.frame): every code, 8 and 16 bits, modes 0 and 1, in both
+//      placements, measured first and printed after
 //   c  the refusals: the chapter's, the high-speed read off /2 at run
 //      time, a ceiling under HCLK/256, an asynchronous request on a host
 //      with no engines (nothing on the wire), and the client
 //      configurations this die does not serve
 //   f  THE FAULT EXITS, wireless: spi_stalled from a polled request over a
-//      block held in reset, spi_dma_fault from the polled engines over a
-//      receive channel a timer's held request leaves dead, the asynchronous
-//      engines over it answered by the caller's bound and recover(); and the
-//      block's own transmit request let go four ways - release()'s reset
-//      pulse leaving the next owner of channel 3 nothing
-//   e  A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT, wireless: OVR's own
-//      clear measured against 16.2.7; a host declaring 40 cycles keeps two in
-//      flight from /16; under a tick dragged past two frames its receive ends
-//      spi_overrun within a bound the budget never reaches, and with the drag
-//      off every run ends spi_ok
+//      block held in reset, a polled request on the engined host over a
+//      receive channel a timer's held request leaves dead (its loop, spi_ok,
+//      no channel touched), the asynchronous engines over it answered by the
+//      caller's bound and recover(); and the block's own transmit request let
+//      go four ways - release()'s reset pulse leaving the next owner of
+//      channel 3 nothing
+//   e  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
+//      what raises the flag, which reads clear it, flush_rx()
 //   n  (y) THE PEER: the command channel, ident (the CH32V006, kind 0x06),
 //      ten pings
 //   o  (y) the matrix: this host in the four modes and both bit orders
@@ -95,6 +95,10 @@
 //   v  (y) THE CLIENT FROM ITS VECTOR: letter r's bursts served by spi1's
 //      vector (RXNEIE, TXEIE, SpiClient::isr()) in every admitted
 //      combination, judged both ways, the entries and the body printed
+//   h  (y) A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: the tick's
+//      handler dragged past a frame, ten windows of 128 frames at /64 exact
+//      both ways, spi_ok, OVR never standing, the window longer by what the
+//      arithmetic allows
 //   m  (y) MODF from a second chip: a host whose NSS is a hardware input,
 //      demoted four times by the peer's ss_pulse on PA4, and the clearing
 //      sequence; and ODEN - SCK on a wire with no pull-up, NSS on the
@@ -105,9 +109,9 @@
 //      engined frame at /2 twenty times with the completion polled in SRAM
 //      and twenty with the core waiting off the bus
 //   d  (by name) THE WITNESS, wireless, printing a table and judging nothing:
-//      with two frames in flight, which of RXNE and TXE a poll from SRAM sees
-//      first at each frame's end, and how far apart, in the four modes, both
-//      widths, /8 to /256
+//      on the resource, with a frame waiting behind the one shifting, which of
+//      RXNE and TXE a poll from SRAM sees first at each frame's end, and how
+//      far apart, in the four modes, both widths, /8 to /256
 //   x  (by name) the slip statistics: each mode ten times
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
@@ -120,7 +124,7 @@
 // letters and test_x035_spi-2 the two-board ones (`y`) and the slip
 // statistics.
 // build: boards = x035f8
-// build: groups = abcdefs,nopkqrvmwx
+// build: groups = abcdefs,nopkqrvmwxh
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -166,9 +170,8 @@ using S = Spi<1>;
 // its loop verdicts are the wire's. Their FLASH TWINS - the default a
 // program gets, the same instance and engines - are letter b's other
 // column, so that every cost the driver states is measured both ways.
-using Host = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
-using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>,
-                        spi_default_hold_off_cycles, InRam>;
+using Host = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
+using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, InRam>;
 using FlashHost = SpiHost<1>;
 using FlashDmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 using Client = SpiClient<1>;
@@ -186,11 +189,11 @@ volatile bool host_done = false;
 volatile uint32_t spi_isr_entries = 0;
 volatile uint32_t dma_isr_entries = 0;
 
-/// The image's own hold-off, measured: the longest body each handler ran,
-/// stamped on the STK at its first and last statement.
+/// The image's own handlers, measured: the longest body each ran, stamped on
+/// the STK at its first and last statement.
 volatile uint32_t console_body_max = 0;
 volatile uint32_t tick_body_max = 0;
-/// Letter e's drag: empty turns the tick's handler spends after its stamps,
+/// Letter h's drag: empty turns the tick's handler spends after its stamps,
 /// so tick_body_max stays the handler's own.
 volatile uint32_t tick_drag = 0;
 
@@ -641,6 +644,11 @@ uint16_t exchange_bytes(const Exchange& e) {
     return b < max_exchange ? b : max_exchange;
 }
 
+/// Letter h's witnesses of the last polled window: its cycles around the
+/// request and its select, and OVR read right after it.
+uint32_t window_cycles = 0;
+bool window_ovr = false;
+
 bool do_exchange(const Exchange& e) {
     spilink::Params a{};
     a.cfg = e.cfg;
@@ -689,7 +697,10 @@ bool do_exchange(const Exchange& e) {
         if (e.host_lsb) {
             (void)Host::bit_order(true);
         }
+        const uint32_t t0 = cycles_now();
         (void)link_xfer(xtx, xrx, n, e.rate, e.host_mode, bits);
+        window_cycles = cycles_now() - t0;
+        window_ovr = (S::status() & spi_ovr) != 0u;
     }
     (void)link_command_mode();
     return true;
@@ -962,10 +973,11 @@ void ta_block() {
     dma_ready();
     const uint8_t dma = dma_xfer(CsPin::ref(), nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div4,
                                  SpiDataSize::bits8, false);
-    static_assert(80u >= DmaHost::dma_min_frames_polled, "a polled read of 80 frames rides the engines");
+    uint32_t e0 = dma_isr_entries;
     const uint8_t dma_polled = dma_xfer(CsPin::ref(), cmd_buf, 1, tx_buf, rx_buf, 80, SpiClock::div2,
                                         SpiDataSize::bits8, true);
-    uint32_t e0 = dma_isr_entries;
+    const uint32_t dma_polled_entries = dma_isr_entries - e0;
+    e0 = dma_isr_entries;
     const uint8_t chained = dma_xfer(CsPin::ref(), tx_buf, 32, tx_buf, rx_buf, 16, SpiClock::div4,
                                      SpiDataSize::bits8, false);
     const uint32_t chained_entries = dma_isr_entries - e0;
@@ -980,16 +992,18 @@ void ta_block() {
     const bool at_engines = async_went_to_engines(edge, at_status);
     DmaHost::release();
     host_ready();
-    print(serial, "  wireless completions: polled=", polled, " written=", written, " dma=", dma, " dma polled=",
-          dma_polled, " command block then data block=", chained, " (", chained_entries,
+    print(serial, "  wireless completions: polled=", polled, " written=", written, " dma=", dma, " engined host polled=",
+          dma_polled, " (", dma_polled_entries, " channel interrupts) command block then data block=", chained, " (",
+          chained_entries,
           " channel interrupts) command block alone=", cmd_only, " (", cmd_only_entries, ")", crlf);
     print(serial, "  the short request's edge at /4 (8-bit, read): ", edge, " frames; ", edge - 1u,
           " asynchronous frames completed inside start() ", under_inside ? "yes" : "NO", " (status ", under_status,
           "), ", edge, " went to the engines ", at_engines ? "yes" : "NO", " (status ", at_status,
           "); the select released ", CsPin::read_out() ? "yes" : "NO", crlf);
-    bench.verdict("the two polled loops and the engines, polled and asynchronous, each run a transaction to "
-                  "completion with MISO floating, the select released",
-                  polled == spi_ok && written == spi_ok && dma == spi_ok && dma_polled == spi_ok && CsPin::read_out());
+    bench.verdict("the two polled loops, a polled request on the engined host (no channel interrupt) and the engines "
+                  "asynchronous each run a transaction to completion with MISO floating, the select released",
+                  polled == spi_ok && written == spi_ok && dma == spi_ok && dma_polled == spi_ok &&
+                      dma_polled_entries == 0u && CsPin::read_out());
     bench.verdict("A COMMAND PHASE ON A BLOCK OF ITS OWN: chained to its data block from the vector (two channel "
                   "interrupts) and alone (one), each spi_ok",
                   chained == spi_ok && cmd_only == spi_ok && chained_entries == 2u && cmd_only_entries == 1u);
@@ -1091,8 +1105,8 @@ PathCosts measure_costs() {
     (void)frame_x1000<D>(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8, 256, 32, &c.engine_fixed);
     // THE ENGINED HOST'S POLLED LINES through the same call the engines'
     // fixed cost was taken through (dma_xfer<D>, so the call's own cycles
-    // stand on both sides and cancel), under dma_min_frames_polled - the
-    // loops: 24 frames and 8, the frame the difference over 16, the fixed
+    // stand on both sides and cancel), the loops: 24 frames and 8, the
+    // frame the difference over 16, the fixed
     // part the 8-frame line less its frames, the best of five each.
     auto polled_same = [](uint16_t n, SpiClock rate, bool read) {
         uint32_t least = 0xFFFFFFFFu;
@@ -1104,7 +1118,6 @@ PathCosts measure_costs() {
         }
         return least;
     };
-    static_assert(24u < D::dma_min_frames_polled, "the lines run the loops");
     for (uint8_t k = 0; k < 3u; ++k) {
         const EdgeShape sh = edge_shapes[k];
         const uint32_t p8 = polled_same(8, sh.rate, sh.read);
@@ -1122,7 +1135,7 @@ PathCosts measure_costs() {
         // arithmetic's count to five over it.
         c.edge_meas[k] = 0;
         const uint16_t from = c.edge_calc[k] > 5u ? static_cast<uint16_t>(c.edge_calc[k] - 5u) : uint16_t{1};
-        for (uint16_t n = from; n < c.edge_calc[k] + 6u && n < D::dma_min_frames_polled && c.edge_meas[k] == 0u; ++n) {
+        for (uint16_t n = from; n < c.edge_calc[k] + 6u && c.edge_meas[k] == 0u; ++n) {
             if (polled_same(n, sh.rate, sh.read) >= c.engine_fixed) {
                 c.edge_meas[k] = n;
             }
@@ -1208,6 +1221,98 @@ bool edges_match(const PathCosts& c) {
         }
     }
     return true;
+}
+
+// ---- spi.frame: the receive loop's frame against the wire --------------------
+//
+// THE TABLE THE DRIVER'S DOCUMENT QUOTES: every code /2 to /256, 8 and 16 bits,
+// modes 0 and 1, the select null, MISO floating. Two lengths, 256 frames and 64
+// or, at the slow codes, what stays under 40 000 cycles and a quarter of it; the
+// frame their difference over the frames between them; the best of five runs,
+// each with interrupts masked (no handler in the figure, and a polled request
+// needs no vector) from a tick's edge, so the ruler sees no restart under the
+// mask; MEASURED FIRST AND PRINTED AFTER: no console line beside a run.
+
+constexpr uint8_t frame_codes = 8;   ///< /2 .. /256
+/// [width][mode][code]: the frame in hundredths of a cycle.
+uint32_t frame_x100[2][2][frame_codes];
+uint8_t frame_bad = 0;
+
+/// The longer length of a row.
+constexpr uint16_t frame_long(uint32_t wire) {
+    const uint32_t n = 40'000u / (wire + 64u);
+    return static_cast<uint16_t>(n > 256u ? 256u : n);
+}
+
+/// The least wall of `frames` read at this code, width and mode, of five runs;
+/// the first run, which applies the rate, discarded.
+template <typename H>
+uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames) {
+    typename H::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.len = frames;
+    r.clock = c;
+    r.mode = m;
+    r.bits = bits;
+    r.polled = true;
+    uint32_t best = 0xFFFFFFFFu;
+    for (uint8_t run = 0; run < 6u; ++run) {
+        const uint32_t tick = Ticker::millis();
+        while (Ticker::millis() == tick) {
+        }
+        uint32_t wall = 0;
+        {
+            InterruptGuard guard;
+            const uint32_t t0 = cycles_now();
+            (void)H::start(r);
+            wall = cycles_now() - t0;
+        }
+        if (H::status() != spi_ok && frame_bad != 255u) {
+            ++frame_bad;
+        }
+        if (run != 0u && wall < best) {
+            best = wall;
+        }
+    }
+    return best;
+}
+
+/// The table of one host: measured first, printed after.
+template <typename H>
+void frame_table(const char* name) {
+    frame_bad = 0;
+    console_drain();
+    host_ready<H>();
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        const SpiDataSize bits = wi == 0u ? SpiDataSize::bits8 : SpiDataSize::bits16;
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            const SpiMode mode = mi == 0u ? SpiMode::mode0 : SpiMode::mode1;
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                const SpiClock c = static_cast<SpiClock>(ci);
+                const uint16_t big = frame_long(spi_frame_cycles(c, bits));
+                const uint16_t small = big / 4u;
+                const uint32_t w_small = frame_best<H>(c, bits, mode, small);
+                const uint32_t w_big = frame_best<H>(c, bits, mode, big);
+                frame_x100[wi][mi][ci] = (w_big - w_small) * 100u / (big - small);
+            }
+        }
+    }
+    print(serial, "  spi.frame ", name, ": bad status ", frame_bad, crlf);
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        const SpiDataSize bits = wi == 0u ? SpiDataSize::bits8 : SpiDataSize::bits16;
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                const uint32_t wire = spi_frame_cycles(static_cast<SpiClock>(ci), bits);
+                const uint32_t per = frame_x100[wi][mi][ci];
+                const uint32_t over = per > wire * 100u ? per - wire * 100u : 0u;
+                print(serial, "  spi.frame ", name, " bits", wi == 0u ? 8u : 16u, " mode", mi, " div", 2u << ci, " wire ",
+                      wire, " frame ", per / 100u, '.', per % 100u < 10u ? "0" : "", per % 100u, " over ", over / 100u,
+                      '.', over % 100u < 10u ? "0" : "", over % 100u, crlf);
+                console_drain();
+            }
+        }
+    }
 }
 
 void tb_ladder() {
@@ -1306,7 +1411,7 @@ void tb_ladder() {
     print_x10(flash.rd[1]);
     print(serial, " ");
     print_x10(flash.rd[2]);
-    print(serial, "; /64, two in flight (the wire 512): ");
+    print(serial, "; /64 (the wire 512): ");
     print_x10(ram.rd[4]);
     print(serial, " | ");
     print_x10(flash.rd[4]);
@@ -1371,9 +1476,6 @@ void tb_ladder() {
         edge(flash, k);
     }
     print(serial, "(read /4, read /2, write /2)", crlf);
-    bench.verdict("the receive loop keeps two frames in flight from /64 and runs there at the wire (3 %), "
-                  "in both placements",
-                  ram.rd[4] <= 5274u && flash.rd[4] <= 5274u);
     bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is at the wire (3 %) at /2, /4, /8 and /16",
                   ram.wr[0] <= 165u && ram.wr[1] <= 330u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
     // From the flash at /2 the loop's turn fetched behind the wait states
@@ -1400,30 +1502,13 @@ void tb_ladder() {
           " /4 ", flash4 / 10u, ".", flash4 % 10u, "; from SRAM /2 ", sram2 / 10u, ".", sram2 % 10u, " /4 ",
           sram4 / 10u, ".", sram4 % 10u, " cycles", crlf);
 
-    // THE HOLD-OFF THIS IMAGE MEASURES: the longest body of the console's
-    // and the tick's handlers so far, stamped on the STK.
+    // THIS IMAGE'S HANDLERS: the longest body of the console's and the tick's
+    // so far, stamped on the STK.
     print(serial, "  this image's handlers, the longest body: console ", console_body_max, " cycles, tick ",
-          tick_body_max, " (the host's default hold-off ", spi_default_hold_off_cycles, ")", crlf);
-    bench.verdict("the image's longest handler body is under the host's default hold-off",
-                  console_body_max < spi_default_hold_off_cycles && tick_body_max < spi_default_hold_off_cycles);
+          tick_body_max, crlf);
 
-    // THE RECEIVE LOOP WITH TWO FRAMES IN FLIGHT under the console's
-    // interrupts: a line printed and NOT drained, then a polled receive of
-    // 256 frames at the fastest code the default keeps two in flight at.
-    const SpiClock two_from = Host::write_ahead_from(SpiDataSize::bits8);
-    print(serial, "  two frames in flight from /", asked_divisor(two_from), ": 256 frames polled under a console "
-                  "line in flight ...",
-          crlf);
-    const uint32_t t0 = cycles_now();
-    const uint8_t st = host_xfer({}, nullptr, 0, tx_buf, rx_buf, 256, SpiMode::mode0, two_from, SpiDataSize::bits8,
-                                 true);
-    const uint32_t took = cycles_now() - t0;
-    const uint32_t wire = 256u * 8u * asked_divisor(two_from);
-    console_drain();
-    print(serial, "  ... status ", st, ", ", took, " cycles against the wire's ", wire, crlf);
-    bench.verdict("the receive loop keeps two in flight with the console's handler live: spi_ok, and within 3 % of "
-                  "the wire",
-                  st == spi_ok && took <= wire + wire / 33u + 2000u);
+    frame_table<Host>("sram");
+    frame_table<FlashHost>("flash");
     host_ready();
 }
 
@@ -1623,17 +1708,20 @@ void tf_faults() {
                   "request is spi_ok",
                   st_stall == spi_stalled && stall_cycles < 480'000u && rec1 && st_after1 == spi_ok);
 
-    // 2. spi_dma_fault: a polled request of 64 on the engines (past
-    // dma_min_frames_polled) over the dead receive channel 2. The hold
-    // proved first by a next owner (one stray item, the channel then dead).
+    // 2. A POLLED REQUEST OVER A DEAD CHANNEL: 64 frames on the engined host
+    // with the receive channel 2 dead: the loop, which touches no channel,
+    // ends spi_ok with no channel interrupt. The hold proved first by a next
+    // owner (one stray item, the channel then dead).
     const uint16_t control2 = next_owner_moves<2>();
     hold_compare_request<DeadRx>(dead_rx_ch);
     const uint16_t held2 = next_owner_moves<2>();
     dma_ready<FlashDmaHost>();
     t0 = cycles_now();
-    const uint8_t st_fault = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
-                                                    SpiDataSize::bits8, true);
-    const uint32_t fault_cycles = cycles_now() - t0;
+    const uint32_t polled_e0 = dma_isr_entries;
+    const uint8_t st_dead_polled = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
+                                                          SpiDataSize::bits8, true);
+    const uint32_t dead_polled_cycles = cycles_now() - t0;
+    const uint32_t dead_polled_entries = dma_isr_entries - polled_e0;
     // 3. THE ASYNCHRONOUS ENGINES over the same dead channel: no completion
     // edge ever comes; the caller's bound (dma_xfer's spin) and recover().
     const uint8_t st_async = dma_xfer<FlashDmaHost>({}, nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div16,
@@ -1646,16 +1734,17 @@ void tf_faults() {
                                                          SpiDataSize::bits8, false);
     FlashDmaHost::release();
     print(serial, "  next owner of channel 2, nothing raised ", control2, ", after TIM1's held request ", held2,
-          " (of 4); over the dead channel: the polled engines ", st_fault, " (spi_dma_fault ", spi_dma_fault,
-          ") after ", fault_cycles, " cycles, the asynchronous engines ", st_async, " (no answer ", no_answer,
+          " (of 4); over the dead channel: a polled request ", st_dead_polled, " after ", dead_polled_cycles,
+          " cycles, ", dead_polled_entries, " channel interrupts, the asynchronous engines ", st_async, " (no answer ",
+          no_answer,
           "); TIM1 reset and recover() ", rec2 ? 1 : 0, ": polled ", st_live_polled, ", asynchronous ",
           st_live_async, crlf);
     bench.verdict("with nothing raised the next owner of channel 2 moves nothing; after TIM1's held request "
                   "it takes one stray item - the dead channel staged",
                   control2 == 0u && held2 == 1u);
-    bench.verdict("A POLLED REQUEST ON THE ENGINES OVER THE DEAD CHANNEL ends spi_dma_fault (spin_dma's bound) "
-                  "and returns",
-                  st_fault == spi_dma_fault);
+    bench.verdict("A POLLED REQUEST ON THE ENGINED HOST OVER THE DEAD CHANNEL runs its loop: spi_ok, no channel "
+                  "interrupt, a polled request depending on no channel and no vector",
+                  st_dead_polled == spi_ok && dead_polled_entries == 0u);
     bench.verdict("the asynchronous engines over it never claim a completion: the caller's bound answers it, "
                   "and once TIM1 is reset and recover() has run both paths complete spi_ok",
                   st_async == no_answer && rec2 && st_live_polled == spi_ok && st_live_async == spi_ok);
@@ -1776,8 +1865,8 @@ void ts_bus_share() {
 // d - does RXNE say TXE? the witness (wireless, by name, no verdict)
 // ===========================================================================
 //
-// With two frames in flight frame k shifts while frame k + 1 waits in the
-// transmit buffer. At frame k's end two flags rise: RXNE, at "the last sample
+// On the resource, frame k shifting while frame k + 1 waits in the transmit
+// buffer. At frame k's end two flags rise: RXNE, at "the last sample
 // clock edge of the data word", and TXE, "when the data has reached the shift
 // register" (16.2.2). The chapter does not order them. This letter asks the
 // silicon: the host's own transmit side, nothing on the wire but its own
@@ -1800,7 +1889,8 @@ struct WitnessRun {
     uint16_t next_load[5] = {};   ///< the other flag at the 1st..4th load after, [4] later
 };
 
-/// One run of `count` frames (`count` >= 3), two in flight, into `w`.
+/// One run of `count` frames (`count` >= 3), each written behind the one
+/// shifting, into `w`.
 [[gnu::noinline, gnu::flatten, gnu::section(".fast_text")]] void witness_run(uint16_t count, WitnessRun& w) {
     SpiRegs& regs = S::regs();
     constexpr uint32_t bound = 200'000u;   // far past a 4096-cycle frame at any turn
@@ -1875,7 +1965,7 @@ struct WitnessRun {
     regs.DATAR = 0xFFFFu;
     for (uint32_t i = 200'000u; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
     }
-    regs.DATAR = 0xFFFFu;   // two in flight: both flags low until frame 0's end
+    regs.DATAR = 0xFFFFu;   // one behind the other: both flags low until frame 0's end
     const uint32_t t0 = stamp();
     uint32_t turns = 0;
     uint32_t i = 200'000u;
@@ -1900,7 +1990,7 @@ void td_witness() {
     const SpiClock rates[6] = {SpiClock::div8,  SpiClock::div16,  SpiClock::div32,
                                SpiClock::div64, SpiClock::div128, SpiClock::div256};
     host_ready();
-    print(serial, "  each line ", runs, " runs of ", frames_a_run, " frames, two in flight, interrupts masked: ",
+    print(serial, "  each line ", runs, " runs of ", frames_a_run, " frames, one behind the other, interrupts masked: ",
           runs * (frames_a_run - 2u), " frame ends a line, filed by what the first load to show a flag showed", crlf);
     uint32_t rxne_total = 0;
     uint32_t ends_total = 0;
@@ -1954,62 +2044,17 @@ void td_witness() {
 }
 
 // ===========================================================================
-// e - a frame lost to a hold-off declared too short (wireless)
+// e - OVR and its clear, on the resource (wireless)
 // ===========================================================================
 //
-// First the flag itself, because the host's loop is written from what it does
-// and 16.2.7 says otherwise: "Reading the data register and then reading the
-// status register will eliminate this bit". Two frames clocked with nothing
-// read, the first left in the buffer, the second lost; then the ways a program
-// goes at the flag, judged at /32 (MISO is not read as data). The flag falls
-// within a load of the read that clears it, not at it - two compressed loads
-// back to back, 2.2 cycles apart, read it still up - so every judged load
-// here comes a microsecond after the read before it.
-//
-// A host declaring a hold-off of 40 cycles keeps two frames in flight from /16
-// (40 + 57 of spi_read_latency_cycles against a 128-cycle frame). At /32 a
-// frame is 256 cycles, and the undragged image's longest hold-off is under it:
-// the tick's body of some 70 cycles (letter b), the 37 of the entry and the
-// 36 of the exit, and some 20 of the way back to the read, some 165 in all.
-// That is the control: nothing can be lost, every run ends spi_ok.
-//
-// Then the tick's handler is dragged past two frames: 100 empty turns, some
-// 2230 cycles of hold-off (measured first, the longest gap a main-context loop
-// sees over three ticks; the verdict asks it past 512). A handler landing r
-// cycles before frame k's end with frame k + 1 behind it loses frame k + 1 when
-// it holds the loop off longer than r + 256; r is under a frame, so such a
-// hold-off loses a frame at every tick that lands with two in flight, which is
-// all of the loop's time but the turn from the read of frame k to the write of
-// frame k + 2. Sixteen receives of 256 frames (65 536 cycles of wire, ticks
-// 48 000 apart, so at least one tick in each), spaced so the tick walks across
-// the frame: 143 of 160 runs lost a frame in ten letters, and at that rate
-// fewer than four of sixteen is under one letter in ten million.
-//
-// Every run must END, spi_overrun or spi_ok, never spi_stalled, within a bound
-// the budget cannot meet. After a loss the loop has one frame out, 256 cycles
-// and its own turn, some 106 from the flash (a run that lost a frame early at
-// /16: 234 a frame against the wire's 128), 120 allowed: 256 x 376 = 96 256.
-// Three ticks fit in that at 2300 each, 6900, and 2000 for the request's fixed
-// cost: 105 156. A stall would spend the budget, (256 + 2) x 256 = 66 048 poll
-// turns of at least 7 cycles, 460 000 cycles. No run may leave OVR or RXNE
-// standing, which the next transaction would inherit.
-
-using ShortHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 40u>;
-static_assert(ShortHost::write_ahead_from(SpiDataSize::bits8) == SpiClock::div16,
-              "a hold-off of 40: two frames in flight from /16");
-
-/// One receive of `n` byte frames at `rate` on the short host, the select null.
-uint32_t short_receive(uint16_t n, SpiClock rate) {
-    ShortHost::Request r{};
-    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
-    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
-    r.len = n;
-    r.clock = rate;
-    r.polled = true;
-    const uint32_t t0 = cycles_now();
-    (void)ShortHost::start(r);
-    return cycles_now() - t0;
-}
+// What the resource's two sequences rest on, because 16.2.7 says otherwise:
+// "Reading the data register and then reading the status register will
+// eliminate this bit". Two frames clocked with nothing read, the first left in
+// the buffer, the second lost; then the ways a program goes at the flag, judged
+// at /32 (MISO is not read as data). The flag falls within a load of the read
+// that clears it, not at it - two compressed loads back to back, 2.2 cycles
+// apart, read it still up - so every judged load here comes a microsecond after
+// the read before it.
 
 /// Two frames at /32 with nothing read: frame 0 in the buffer, frame 1 lost
 /// under OVR. The frames take 512 cycles and the delay 15 us, 720 cycles.
@@ -2023,12 +2068,8 @@ void two_frames_unread() {
 }
 
 void te_overrun() {
-    constexpr uint16_t frames = 256;
-    constexpr uint32_t wire = frames * 256u;
-    constexpr uint32_t bound = frames * (256u + 120u) + 3u * 2300u + 2000u;   // the arithmetic above
-    constexpr uint8_t runs = 16;
-    (void)ShortHost::init(clock);
-    ShortHost::prime(SpiMode::mode0, SpiClock::div32, SpiDataSize::bits8);
+    host_ready();
+    Host::prime(SpiMode::mode0, SpiClock::div32, SpiDataSize::bits8);
     SpiRegs& regs = S::regs();
 
     // Past a DATAR read, the load that judges it.
@@ -2072,90 +2113,147 @@ void te_overrun() {
                       (wrote_zero & spi_ovr) != 0u && (spe_toggled & spi_ovr) != 0u && (read_empty & spi_ovr) == 0u);
     bench.verdict("flush_rx() leaves neither flag after a frame unread and a frame lost",
                   (flushed & (spi_ovr | spi_rxne)) == 0u);
-
-    fill_pattern(tx_buf, 512, 0x3C);
-    console_drain();
-
-    // The frame the two-in-flight turn sustains from the flash, undragged:
-    // the best of three, since a tick can lose a frame at /16 under this
-    // host's declared hold-off (a frame of 128 against some 165).
-    uint32_t big16 = 0xFFFFFFFFu;
-    uint32_t big32 = 0xFFFFFFFFu;
-    for (uint8_t k = 0; k < 3u; ++k) {
-        const uint32_t b16 = short_receive(frames, SpiClock::div16);
-        const uint32_t b32 = short_receive(frames, SpiClock::div32);
-        big16 = b16 < big16 ? b16 : big16;
-        big32 = b32 < big32 ? b32 : big32;
-    }
-    const uint32_t small16 = short_receive(32, SpiClock::div16);
-    const uint32_t small32 = short_receive(32, SpiClock::div32);
-    const uint32_t f16_x10 = big16 > small16 ? (big16 - small16) * 10u / (frames - 32u) : 0u;
-    const uint32_t f32_x10 = big32 > small32 ? (big32 - small32) * 10u / (frames - 32u) : 0u;
-    print(serial, "  the two-in-flight frame from the flash, x10 cycles: /16 ", f16_x10, " (the wire 1280), /32 ", f32_x10,
-          " (the wire 2560)", crlf);
-
-    uint8_t control_ok = 0;
-    console_drain();
-    for (uint8_t run = 0; run < runs; ++run) {
-        (void)short_receive(frames, SpiClock::div32);
-        control_ok = static_cast<uint8_t>(control_ok + (ShortHost::status() == spi_ok ? 1u : 0u));
-    }
-    print(serial, "  the tick undragged: ", control_ok, " of ", runs, " runs spi_ok", crlf);
-    bench.verdict("THE CONTROL: under the image's own handlers, shorter than a frame, a host declaring 40 cycles loses "
-                  "nothing at /32: every run spi_ok",
-                  control_ok == runs);
-
-    console_drain();
-    tick_drag = 100;
-    uint32_t held = 0;
-    {
-        const uint32_t from = cycles_now();
-        uint32_t last = from;
-        for (;;) {
-            const uint32_t now = cycles_now();
-            held = now - last > held ? now - last : held;
-            last = now;
-            if (now - from > 150'000u) {
-                break;
-            }
-        }
-    }
-    uint8_t ended = 0;
-    uint8_t overran = 0;
-    uint8_t stalled_runs = 0;
-    uint8_t standing = 0;
-    uint32_t longest = 0;
-    for (uint8_t run = 0; run < runs; ++run) {
-        // The frames, 256 cycles, and the tick, 48 000, keep a fixed phase
-        // from one run to the next (measured: 7 to 14 losses of 16 from image
-        // to image with no spacing). A different spacing before each run walks
-        // the tick's landing across the frame.
-        for (uint32_t k = 11u * run; k != 0u; --k) {
-            __asm__ volatile("");
-        }
-        const uint32_t took = short_receive(frames, SpiClock::div32);
-        const uint8_t st = ShortHost::status();
-        longest = took > longest ? took : longest;
-        if ((st == spi_overrun || st == spi_ok) && took <= bound) {
-            ++ended;
-        }
-        overran = static_cast<uint8_t>(overran + (st == spi_overrun ? 1u : 0u));
-        stalled_runs = static_cast<uint8_t>(stalled_runs + (st == spi_stalled ? 1u : 0u));
-        standing = static_cast<uint8_t>(standing + ((S::status() & (spi_ovr | spi_rxne)) != 0u ? 1u : 0u));
-    }
-    tick_drag = 0;
-    const uint32_t after_took = short_receive(frames, SpiClock::div32);
-    const uint8_t after = ShortHost::status();
-    print(serial, "  the dragged tick holds main context off up to ", held, " cycles; ", frames, " frames at /32 under it, ",
-          runs, " runs: ", ended, " ended in their bound of ", bound, ", ", overran, " spi_overrun, ", stalled_runs,
-          " spi_stalled, the longest ", longest, " cycles against the wire's ", wire, "; OVR or RXNE left standing after ",
-          standing, crlf);
-    print(serial, "  the drag off, the next request: status ", after, " in ", after_took, " cycles", crlf);
-    bench.verdict("A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT IS SEEN: under a handler past two frames every run "
-                  "ends within its bound, none spi_stalled, at least four of sixteen spi_overrun",
-                  held > 512u && ended == runs && stalled_runs == 0u && overran >= 4u);
-    bench.verdict("and neither flag stands after a run, the next request spi_ok", standing == 0u && after == spi_ok);
     host_ready();
+}
+
+// ===========================================================================
+// h - a handler longer than a frame beside the polled loop
+// ===========================================================================
+//
+// THE RECEIVE LOOP KEEPS ONE FRAME IN FLIGHT and this host owns the clock, so
+// the clock waits for the read: a handler that outlasts a frame is a gap on the
+// bus, and no frame can be lost to it. The witness is a second chip: ten windows
+// of 128 frames at /64 against the peer (mode 3, the one it answers in), what
+// each end read judged byte for byte, under the tick's handler dragged by an
+// empty loop past four frames.
+//
+// THE WINDOW IS LONGER THAN THE TICK: 128 frames of 512 cycles are 65 536 cycles
+// of wire and the ticks stand P = 48 000 apart, so every window takes a tick.
+//
+// THE BOUND on what the handler adds, derived, in cycles. H_min..H_max is the
+// dragged handler's hold and H0 the undragged one's, each the gap a main-context
+// loop of ruler reads sees, the shortest such gap R being that loop's own turn.
+// A landing costs the window at least H - W - C, the handler having used up to
+// a frame W = 512 and the loop's turn C the loop would have waited anyway, and
+// at most H + C, the loop's way back to its read. Q_min..Q_max is the undragged
+// window, which already holds undragged ticks:
+//
+//   lower = floor(Q_min / P) x (H_min - R - W - C) - ceil(Q_max / P) x H0
+//   upper = ceil((Q_max + 2 x H_max) / P) x (H_max + C)
+//
+// C = 44 is the worst row of letter b's spi.frame table over the wire.
+
+constexpr uint16_t hold_frames = 128;
+constexpr uint32_t hold_wire_frame = 512;
+constexpr uint32_t hold_turn = 44;
+constexpr uint32_t tick_period = 48'000u;
+constexpr uint32_t hold_drag = 100;
+constexpr uint8_t hold_rounds = 10;
+
+struct HoldGaps {
+    uint32_t own_turn = 0xFFFFFFFFu;   ///< R, the loop's own turn
+    uint32_t least = 0xFFFFFFFFu;      ///< the shortest gap over `over` cycles
+    uint32_t most = 0;                 ///< the longest gap
+};
+
+/// The gaps a main-context loop of ruler reads sees over three ticks.
+HoldGaps hold_gaps(uint32_t over) {
+    HoldGaps g{};
+    const uint32_t from = cycles_now();
+    uint32_t last = from;
+    for (;;) {
+        const uint32_t now = cycles_now();
+        const uint32_t gap = now - last;
+        last = now;
+        g.own_turn = gap < g.own_turn ? gap : g.own_turn;
+        g.most = gap > g.most ? gap : g.most;
+        if (gap > over && gap < g.least) {
+            g.least = gap;
+        }
+        if (now - from > 150'000u) {
+            return g;
+        }
+    }
+}
+
+struct HoldTally {
+    uint8_t exact = 0;
+    uint8_t not_ok = 0;
+    uint8_t overrun = 0;
+    uint32_t cycles_min = 0xFFFFFFFFu;
+    uint32_t cycles_max = 0;
+};
+
+HoldTally hold_series(uint32_t drag) {
+    HoldTally t{};
+    for (uint8_t k = 0; k < hold_rounds; ++k) {
+        Exchange e{};
+        e.rate = SpiClock::div64;
+        e.count = hold_frames;
+        e.seed_a = static_cast<uint8_t>(0x21u + 13u * k);
+        e.seed_b = static_cast<uint8_t>(e.seed_a ^ 0x6Cu);
+        Verify v{};
+        spilink::Report r{};
+        console_drain();
+        tick_drag = drag;
+        const bool exact = exchange_exact(e, v, r);
+        tick_drag = 0;
+        const uint8_t st = Host::status();
+        if (exact) {
+            ++t.exact;
+        } else {
+            dump_exchange(e, v, r);
+        }
+        if (st != spi_ok) {
+            ++t.not_ok;
+        }
+        if (window_ovr) {
+            ++t.overrun;
+        }
+        t.cycles_min = window_cycles < t.cycles_min ? window_cycles : t.cycles_min;
+        t.cycles_max = window_cycles > t.cycles_max ? window_cycles : t.cycles_max;
+    }
+    return t;
+}
+
+void th_handler_gap() {
+    if (!need_peer()) {
+        return;
+    }
+    console_drain();
+    const HoldGaps plain = hold_gaps(0xFFFFFFFFu);
+    tick_drag = hold_drag;
+    const HoldGaps dragged = hold_gaps(hold_wire_frame);
+    tick_drag = 0;
+    const HoldTally quiet = hold_series(0);
+    const HoldTally held = hold_series(hold_drag);
+    const uint32_t cost_min = dragged.least - dragged.own_turn - hold_wire_frame - hold_turn;
+    const uint32_t floor_landings = quiet.cycles_min / tick_period;
+    const uint32_t ceil_landings = (quiet.cycles_max + tick_period - 1u) / tick_period;
+    const uint32_t floor_part = floor_landings * cost_min;
+    const uint32_t quiet_part = ceil_landings * plain.most;
+    const uint32_t lower = floor_part > quiet_part ? floor_part - quiet_part : 0u;
+    const uint32_t upper = (quiet.cycles_max + 2u * dragged.most + tick_period - 1u) / tick_period *
+                           (dragged.most + hold_turn);
+    const uint32_t longer_min = held.cycles_min > quiet.cycles_max ? held.cycles_min - quiet.cycles_max : 0u;
+    const uint32_t longer_max = held.cycles_max > quiet.cycles_min ? held.cycles_max - quiet.cycles_min : 0u;
+    print(serial, "  the polled loop at /64, ", hold_frames, " frames; the tick holds main context off ", plain.most,
+          " cycles, dragged ", dragged.least, "..", dragged.most, " (a read's turn ", dragged.own_turn, ")", crlf);
+    print(serial, "  undragged: ", quiet.exact, " of ", hold_rounds, " exact, a window ", quiet.cycles_min, "..",
+          quiet.cycles_max, " cycles, OVR ", quiet.overrun, crlf);
+    print(serial, "  dragged: ", held.exact, " of ", hold_rounds, " exact, ", held.not_ok, " not spi_ok, OVR ",
+          held.overrun, ", a window ", held.cycles_min, "..", held.cycles_max, " cycles", crlf);
+    print(serial, "  longer by ", longer_min, "..", longer_max, " cycles; the arithmetic allows ", lower, "..", upper,
+          crlf);
+    bench.verdict("the control: ten windows of 128 frames exact both ways under the undragged tick",
+                  quiet.exact == hold_rounds && quiet.overrun == 0u);
+    bench.verdict("A HANDLER LONGER THAN A FRAME IS A GAP ON THE BUS: ten of ten windows exact both ways, status "
+                  "spi_ok, the peer's count right, OVR never standing",
+                  dragged.least > 2u * hold_wire_frame && held.exact == hold_rounds && held.not_ok == 0u &&
+                      held.overrun == 0u);
+    bench.verdict("the window is longer than without the drag by what the arithmetic allows",
+                  longer_min >= lower && longer_max <= upper);
+    bench.verdict("the command channel is back", command(Op::ping));
 }
 
 // ===========================================================================
@@ -3668,11 +3766,10 @@ int main() {
     bench.letter('c', "the refusals", tc_refusals);
     bench.letter('s', "the /2 frame and the core's share of the bus: twenty runs polled in SRAM and waited "
                       "off the bus (by name)", ts_bus_share, false);
-    bench.letter('d', "THE WITNESS: which of RXNE and TXE comes first, two frames in flight, a table (by name)",
+    bench.letter('d', "THE WITNESS: which of RXNE and TXE comes first, a frame behind the one shifting, a table (by name)",
                  td_witness, false);
-    bench.letter('e', "A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT: spi_overrun within its bound, the control beside it",
-                 te_overrun);
-    bench.letter('f', "THE FAULT EXITS: spi_stalled over a block in reset, spi_dma_fault over a dead channel, "
+    bench.letter('e', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, flush_rx()", te_overrun);
+    bench.letter('f', "THE FAULT EXITS: spi_stalled over a block in reset, a polled request over a dead channel, "
                       "recover(), release()'s pulse", tf_faults);
     bench.second_letter('n', "THE PEER: the command channel, ident, ten pings", tn_peer_link);
     bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC, the frame kept",
@@ -3686,6 +3783,8 @@ int main() {
     bench.second_letter('r', "THE ROLES INVERT: this chip as the client in every mode and order", tr_peer_client);
     bench.second_letter('v', "THIS CHIP AS THE CLIENT FROM ITS VECTOR under the peer's host_burst",
                         tv_client_vectors);
+    bench.second_letter('h', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: ten windows exact under a dragged tick",
+                        th_handler_gap);
     bench.second_letter('m', "MODF from a second chip, and ODEN's NSS on its pull-up", tm_peer_modf);
     bench.second_letter('w', "THE WAVEFORMS: this chip as the analyser of both chips' SCK and data edges", tw_waveforms);
     bench.letter('x', "slip statistics against the peer: each mode ten times (no verdict)", tx_peer_slips, false);

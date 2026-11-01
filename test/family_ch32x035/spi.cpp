@@ -91,7 +91,6 @@ void host_verbs(uint8_t* buf) {
     (void)H::reference_hz();
     (void)H::open_drain();
     (void)H::high_speed_read();
-    (void)H::write_ahead_from(SpiDataSize::bits16);
     H::prime(SpiMode::mode2, SpiClock::div8, SpiDataSize::bits16);
     (void)H::bit_order(true);
     (void)H::lsb_first();
@@ -164,27 +163,23 @@ template <SpiPins pins>
 struct Hosts<pins, true> {
     using Host = SpiHost<1, pins>;
     using Host8 = SpiHost<1, pins, DmaTxEngine<3>, DmaRxEngine<2>>;
-    using Host16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600>;
+    using Host16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
     // Both placements (util/placement.hpp): the default above, and a plain
     // and an engined host whose per-frame paths run from SRAM.
-    using RamHost = SpiHost<1, pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
-    using RamHost16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
+    using RamHost = SpiHost<1, pins, NoDmaEngine, NoDmaEngine, InRam>;
+    using RamHost16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, InRam>;
     static_assert(!Host::has_engines && Host8::has_engines && Host16::has_engines);
     // has_dma is the contract's name for it (docs/design/spi-bus.md): an
     // engineless host refuses every asynchronous request.
     static_assert(!Host::has_dma && !RamHost::has_dma && Host8::has_dma && RamHost16::has_dma);
     static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
-    // The costs follow the placement, and so do the thresholds drawn from
-    // them; the hold-off and the write-ahead do not.
-    static_assert(RamHost::polled_read_turn_cycles < Host::polled_read_turn_cycles &&
-                  RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
+    // The costs follow the placement, and so do the counts drawn from them.
+    static_assert(RamHost::polled_read_turn_cycles < Host::polled_read_turn_cycles);
     static_assert(Host8::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
                       spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) &&
                   RamHost16::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
                       spi_async_min_frames(spi_costs_in_ram, SpiClock::div4, SpiDataSize::bits8, true));
     static_assert(std::is_trivially_copyable_v<typename Host::Request> && sizeof(typename Host::Request) == 40u);
-    static_assert(Host::write_ahead_from(SpiDataSize::bits8) ==
-                  spi_write_ahead_from(SpiDataSize::bits8, spi_default_hold_off_cycles));
 
     using PlainBus = SpiBus<Host, P, 4>;
     using TimedBus = SpiBus<Host16, P, 2, BusPassThrough, 50>;
@@ -202,7 +197,7 @@ struct Hosts<pins, true> {
         Loop::step();
         TimedLoop::init_all();
         TimedLoop::step();
-        post<PlainBus>(TransferDone{spi_overrun});
+        post<PlainBus>(TransferDone{spi_stalled});
         post<TimedBus>(TransferDone{spi_dma_fault});
     }
     static void dma_irq() {

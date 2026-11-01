@@ -512,8 +512,9 @@ the same vector:
   controller's own 6 cycles an item from SRAM against 11.5 from the
   flash, [dma.md](dma.md)). The longest entry over every shape is 333
   cycles, the suite's stamps and owner switch included - the family's
-  longest handler with every driver in the flash, which the SPI host's
-  default hold-off is drawn from ([spi.md](spi.md)).
+  longest handler with every driver in the flash ([platform.md](platform.md)
+  places it among the handlers), a hold of main context beside any polled
+  loop.
 - **The pump in SRAM, two ways, and only if the program wants the core**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
   for a plain host, flattened, a leaf): 140 to 141 cycles an entry over

@@ -8,8 +8,7 @@
 #include "ch32x035/spi.hpp"
 
 struct InTightlyCoupled {};
-using Host = brio::SpiHost<1, brio::spi1_default_pins, brio::NoDmaEngine, brio::NoDmaEngine,
-                           brio::spi_default_hold_off_cycles, InTightlyCoupled>;
+using Host = brio::SpiHost<1, brio::spi1_default_pins, brio::NoDmaEngine, brio::NoDmaEngine, InTightlyCoupled>;
 void f() {
     constexpr brio::Clock<brio::ClockSource::internal, 48'000'000> clock;
     (void)Host::init(clock);

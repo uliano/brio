@@ -532,8 +532,7 @@ flattened; under `InFlash` it is inline where it is called, as if there
 were no trampoline:
 
 ```cpp
-using Bus = brio::SpiHost<1, brio::spi1_default_pins, brio::NoDmaEngine, brio::NoDmaEngine,
-                          brio::spi_default_hold_off_cycles, brio::InRam>;
+using Bus = brio::SpiHost<1, brio::spi1_default_pins, brio::NoDmaEngine, brio::NoDmaEngine, brio::InRam>;
 using Link = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>, 3, brio::UartOptions{},
                         brio::InRam>;
 ```
@@ -598,16 +597,13 @@ from the flash and 0 to 25 from SRAM (`bench_ch32` letters e and u,
 
 **What it costs.** The bytes in the last column, of the part's SRAM -
 the load image stays in the flash beside them. On the CH32V003's 2 KB
-the loops are 820 bytes a host type (the receive loop's two shapes and
-the transmit-only loop, each at both widths, counted in the family
-fixture's object for that part) and the restart 208 - half the part's
-SRAM for the two - which is why nothing is placed by default. A placed
+the loops are 468 bytes a host type (the receive loop and the
+transmit-only loop, each at both widths, counted in the family fixture's
+object for that part) and the restart 208 - a third of the part's SRAM
+for the two - which is why nothing is placed by default. A placed
 function exists only from the crt's copy on, and the crt enters
 `main()` with interrupts masked, so no vector reaches SRAM the copy has
-not written. THE HOLD-OFF the SPI host draws its write-ahead from is a
-fact of the image: its default counts handlers in the flash, and a
-program that places its handlers may state a shorter one
-([spi.md](spi.md)).
+not written.
 
 ## Not covered yet
 

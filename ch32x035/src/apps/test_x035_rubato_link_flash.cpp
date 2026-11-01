@@ -8,8 +8,8 @@
 // test_x035_rubato_link itself is the default, the path in SRAM. A
 // program that chose either placement runs its polled SPI loop inside the
 // arbiter's dispatch from wherever that dispatch landed, so the two images
-// are judged by the same verdicts and their printed figures - the rungs
-// cut short, Pressure's landings, the rates - set side by side.
+// are judged by the same verdicts and their printed figures - Pressure's
+// landings, the rates - set side by side.
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200

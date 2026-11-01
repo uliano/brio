@@ -785,11 +785,7 @@ suite measured:
   letter `b`, three runs of an image built with `CH32X035_HPE=OFF` whose
   vectors were not aligned to four; no image of the current alignment
   has been built so and run). Its handler bodies took 148 cycles (the
-  console) and 69 (the tick), under the SPI host's default hold-off of
-  380 cycles: the longest wait behind another handler or a masked section
-  the host's polled receive loop allows for when it writes ahead, sending
-  the next frame before it has read the last, two frames in flight
-  ([spi.md](spi.md), "The hold-off"). The SRAM
+  console) and 69 (the tick). The SRAM
   transmit-only loop read 17.0 cycles a frame at /2 against the wire's 16.
   The SPI host's cost constants are those of the default image, so the
   letter's two cost verdicts fail in an image built without the
@@ -1469,7 +1465,7 @@ suite with the path in the flash and in SRAM, nothing else moved:
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
 | the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 16.0 | 740 a host type, both loops |
-| the SPI receive loop's one-frame turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 or 26.0, 40.0 or 42.0 (two values, by the address modulo four) | (with the transmit-only loop's) |
+| the SPI receive loop's turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 or 26.0, 40.0 or 42.0 (two values, by the address modulo four) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
 | the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (207 at most); 79, 94 with the vector placed | 968 for one plain host |
@@ -1487,7 +1483,7 @@ entry 36, exit 34, a body of 26 between them), are outside them.
 From the flash, code with taken branches costs what its address modulo
 four makes it, the fetch's word: the same instructions at every offset
 tried took one of two costs, by the offset's second bit and by nothing
-else - 47.9 or 68.0 cycles a frame for the SPI receive loop's one-frame
+else - 47.9 or 68.0 cycles a frame for the SPI receive loop's
 turn at /4, through 8 bytes, and 68 or 72 for a body of four taken forward
 branches, through 32 - where
 straight-line code and three-instruction loops did not move and SRAM
@@ -1513,11 +1509,7 @@ masked, so no vector reaches SRAM the copy has not written. A driver's
 prologue (the default) the vector passes the address of the closure -
 the object holding the body's captured variables - in one instruction
 and calls; in an image built without it the vector saves the
-caller-saved registers in software around the call. The SPI host's
-hold-off, from which it decides how far to write ahead
-([spi.md](spi.md), "The hold-off"), is a fact of the image: its default
-is the one safe with every driver in the flash, and a program that
-places its handlers states its own.
+caller-saved registers in software around the call.
 
 ## Not covered yet
 

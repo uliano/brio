@@ -27,21 +27,14 @@ using HostDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3>, DmaRxEngine<2>>;
 using HostDma16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 constexpr SpiPins write_only{.sck = {'C', 5}, .mosi = {'C', 6}};
 using HostNoMiso = SpiHost<1, write_only>;
-// The hold-off an image declares (the class comment): a longer one moves
-// the receive loop's two frames in flight to a slower code, the default
-// keeping /64 and /32.
-using HostSlowHandlers = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 600>;
 using Client = SpiClient<1>;
 // Both placements (util/placement.hpp): the default above, and a plain and
 // an engined host whose polled loops run from SRAM.
-using RamHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
-using RamHost16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
+using RamHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
+using RamHost16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, InRam>;
 static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
-// The loops' cost follows the placement, and so do the thresholds drawn
-// from it; the hold-off and the write-ahead do not.
-static_assert(RamHost::polled_gap_cycles < Host::polled_gap_cycles &&
-              RamHost::dma_min_frames_polled > Host::dma_min_frames_polled &&
-              RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
+// The loops' cost follows the placement, and so do the counts drawn from it.
+static_assert(RamHost::polled_gap_cycles < Host::polled_gap_cycles);
 // The short asynchronous request: one count per code, width and kind, the
 // same at every placement's code from /128 on (a frame of 1024 cycles and
 // more repays E - F by itself).
@@ -49,11 +42,6 @@ static_assert(HostDma::async_min_frames(SpiClock::div128, SpiDataSize::bits8, tr
               RamHost16::async_min_frames(SpiClock::div128, SpiDataSize::bits8, false) == 1u);
 static_assert(HostDma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true) >
               HostDma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true));
-
-static_assert(Host::write_ahead_from(SpiDataSize::bits8) == SpiClock::div64 &&
-              Host::write_ahead_from(SpiDataSize::bits16) == SpiClock::div32);
-static_assert(HostSlowHandlers::write_ahead_from(SpiDataSize::bits8) == SpiClock::div128 &&
-              HostSlowHandlers::write_ahead_from(SpiDataSize::bits16) == SpiClock::div64);
 
 static_assert(!Host::has_engines && HostDma::has_engines && HostDma16::has_engines);
 static_assert(!Host::has_dma && HostDma::has_dma && HostDma16::has_dma && !RamHost::has_dma && RamHost16::has_dma);
@@ -122,7 +110,6 @@ void all_hosts() {
     host_verbs<HostDma>(buf);
     host_verbs<HostDma16>(buf);
     host_verbs<HostNoMiso>(buf);
-    host_verbs<HostSlowHandlers>(buf);
     host_verbs<RamHost>(buf);
     host_verbs<RamHost16>(buf);
 }

@@ -3,8 +3,8 @@
 // cost, the runtime's copy and fill against the core's floor, a print
 // through the console transport against the wire, the tick's floor, the
 // DMA - copy, fill, a timer-paced block and the SPI's engines - and the
-// SPI host above the wire (its polled loops, the hold-off its receive
-// loop's write-ahead rests on, a request's fixed cost), one line per
+// SPI host above the wire (its polled loops, the receive loop's frame at
+// every rate, a request's fixed cost), one line per
 // operation and size, in util/bench.hpp's grammar
 // (docs/design/benchmark.md).
 //
@@ -204,8 +204,7 @@
 //                      above it the loop's own.
 //        spi.poll.rx   the same with an IN buffer (the upper half of the
 //                      work buffer): the receive shape of the loop, which
-//                      must read every frame back and is the one the
-//                      arithmetic of the host's threshold bears on;
+//                      reads every frame back with one frame in flight;
 //                      spi.poll16.rx in 16-bit frames.
 //        ram.spi.poll  THE POLLED LOOPS FROM SRAM (V006 only: the 16 KB
 //                      part's image has no room): the same polled lines
@@ -220,19 +219,17 @@
 //                      select and the D/C line scripted on PC3 and PC4,
 //                      the best of 8; the note line gives wall less the
 //                      wire's cycles.
-//        spi.held      THE HOLD-OFF AN IMAGE DECLARES (SpiHost's last
-//                      parameter) against the one it has: the default
-//                      host (320 cycles, the polled receive loop's two
-//                      frames in flight from HCLK/64) and one declaring
-//                      100 (from HCLK/32), a polled receive of 1024 8-bit
-//                      frames (512 on the CH32V003, half its work buffer)
-//                      at HCLK/32 - a frame of 256 cycles, shorter than
-//                      the console's handler with its stamps and the
-//                      prologue - eight runs each with a console line in
-//                      flight: the overruns (a frame lost, seen and
-//                      counted) and the statuses counted. The declared-
-//                      short host is the one that may lose frames, the
-//                      honest one none.
+//        spi.frame     THE RECEIVE LOOP'S FRAME AGAINST THE WIRE, the table
+//                      the driver's document quotes: every code /2 to /256,
+//                      8 and 16 bits, modes 0 and 1, from the flash and, on
+//                      the CH32V006, from SRAM. Two lengths, 256 frames and
+//                      64 where the longer stays under 40 000 cycles and
+//                      fewer at the slow codes, the frame their difference
+//                      over the frames between them; the best of five runs,
+//                      each with interrupts masked (no handler in the figure,
+//                      and a polled request needs no vector) from a tick's
+//                      edge, so the ruler sees no restart; MEASURED FIRST AND
+//                      PRINTED AFTER: no console line beside a run.
 //      The vendor's own loop (the EVT's 2Lines_FullDuplex example, the
 //      Host side) is NOT in this app: it is a scratch program of the
 //      round, counted in its listing beside this host's.
@@ -1041,16 +1038,13 @@ void ts_spi_dma() {
 }
 
 // ---------------------------------------------------------------------------
-// e - the SPI host above the wire: the polled loops, the hold-off, a request
+// e - the SPI host above the wire: the polled loops, the frame table, a request
 // ---------------------------------------------------------------------------
 using SpiPoll = SpiHost<1>;   // no engines: the polled loops alone
-/// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
-/// shorter than this image's console handler with its stamps, about 300.
-using SpiShort = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 100>;
 /// The polled loops placed in SRAM (util/placement.hpp's InRam, `ram.`
 /// lines), beside SpiPoll's flash: carried where the image has room - the
 /// 16 KB part's letter-e image would overflow its flash.
-using SpiRam = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
+using SpiRam = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
 constexpr bool ram_twin_carried = device::flash_bytes > 16u * 1024u;
 using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 using DcPin = Pin<'C', 4>;    // the D/C line: a pad no jumper and no other letter uses
@@ -1147,51 +1141,85 @@ void request_line(uint16_t len) {
           " cycles above the wire's ", wire_cycles, crlf);
 }
 
-/// A line the console carries while a run is on the wire: it fits the
-/// transport's ring whole, so print() returns at once and the USART's
-/// interrupts land in the run that follows.
-constexpr Filler<60> live_line = make_filler<60>();
+// ---- spi.frame: the receive loop's frame against the wire --------------------
 
-/// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
-/// polled receive of 1024 8-bit frames (512 on the CH32V003: the upper half
-/// of its 1024-byte work buffer is all the in buffer there is) at HCLK/32 -
-/// a frame of 256 cycles, between the two hosts' thresholds - eight runs
-/// under the console's interrupts on each host: the host declaring 100
-/// keeps two frames in flight there and the honest default one.
-template <typename H>
-void held_line(const char* name) {
-    constexpr uint16_t frames = ram_bytes / 2u < 1024u ? static_cast<uint16_t>(ram_bytes / 2u) : 1024u;
-    uint8_t overran = 0;
-    uint8_t other = 0;
-    for (uint8_t run = 0; run < 8u; ++run) {
-        typename H::Request r{};
-        r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
-        r.rx = Borrowed<uint8_t, Lease::reply>{ram + ram_bytes / 2u};
-        r.len = frames;
-        r.clock = SpiClock::div32;
-        r.bits = SpiDataSize::bits8;
-        r.polled = true;
-        console_drain();
-        print(serial, live_line.text);
-        (void)H::start(r);
-        if (H::status() == spi_overrun) {
-            ++overran;
-        } else if (H::status() != spi_ok) {
-            ++other;
-        }
-    }
-    console_drain();
-    print(serial, "  spi.held ", name, " (two in flight from HCLK/", 2u << static_cast<uint8_t>(H::write_ahead_from(SpiDataSize::bits8)),
-          ") polled receive of ", frames, " frames at HCLK/32 8-bit: ", overran, " with a frame lost and counted (spi_overrun), ",
-          other, " other statuses not spi_ok, in 8 runs under the console's interrupts", crlf);
+constexpr uint8_t frame_codes = 8;   ///< /2 .. /256
+/// [width][mode][code]: the frame in hundredths of a cycle.
+uint32_t frame_x100[2][2][frame_codes];
+uint8_t frame_bad = 0;
+
+/// The longer length of a row: 256 frames, or what stays under 40 000 cycles
+/// with room for the turn. A tick's period is 48 000 cycles: the run starts
+/// on the tick's edge, so the ruler sees no restart under the mask.
+constexpr uint16_t frame_long(uint32_t wire) {
+    const uint32_t n = 40'000u / (wire + 64u);
+    return static_cast<uint16_t>(n > 256u ? 256u : n);
 }
 
-void held_lines() {
-    (void)SpiPoll::init(clock);
-    held_line<SpiPoll>("hold-off 320 (the default)");
-    (void)SpiShort::init(clock);
-    held_line<SpiShort>("hold-off 100 (declared short)");
-    (void)SpiPoll::init(clock);
+/// The least wall of `frames` read at this code, width and mode, of five
+/// runs, each with interrupts masked; the first run, which applies the rate,
+/// discarded.
+template <typename H>
+uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames) {
+    typename H::Request r = poll_request<H>(frames, c, bits, true, true);
+    r.mode = m;
+    uint32_t best = 0xFFFF'FFFFu;
+    for (uint8_t run = 0; run < 6u; ++run) {
+        const uint32_t tick = Ticker::millis();
+        while (Ticker::millis() == tick) {
+        }
+        uint32_t wall = 0;
+        {
+            typename Plat::CriticalSection guard;
+            const uint32_t t0 = Ruler::now();
+            (void)H::start(r);
+            wall = Ruler::now() - t0;
+        }
+        if (H::status() != spi_ok && frame_bad != 255u) {
+            ++frame_bad;
+        }
+        if (run != 0u && wall < best) {
+            best = wall;
+        }
+    }
+    return best;
+}
+
+/// The table of one host: measured first, printed after.
+template <typename H>
+void frame_table(const char* name) {
+    frame_bad = 0;
+    console_drain();
+    (void)H::init(clock);
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        const SpiDataSize bits = wi == 0u ? SpiDataSize::bits8 : SpiDataSize::bits16;
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            const SpiMode mode = mi == 0u ? SpiMode::mode0 : SpiMode::mode1;
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                const SpiClock c = static_cast<SpiClock>(ci);
+                const uint16_t big = frame_long(spi_frame_cycles(c, bits));
+                const uint16_t small = big / 4u;
+                const uint32_t w_small = frame_best<H>(c, bits, mode, small);
+                const uint32_t w_big = frame_best<H>(c, bits, mode, big);
+                frame_x100[wi][mi][ci] = (w_big - w_small) * 100u / (big - small);
+            }
+        }
+    }
+    print(serial, "  spi.frame ", name, ": bad status ", frame_bad, crlf);
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        const SpiDataSize bits = wi == 0u ? SpiDataSize::bits8 : SpiDataSize::bits16;
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                const uint32_t wire = spi_frame_cycles(static_cast<SpiClock>(ci), bits);
+                const uint32_t per = frame_x100[wi][mi][ci];
+                const uint32_t over = per > wire * 100u ? per - wire * 100u : 0u;
+                print(serial, "  spi.frame ", name, " bits", wi == 0u ? 8u : 16u, " mode", mi, " div", 2u << ci, " wire ",
+                      wire, " frame ", per / 100u, '.', per % 100u < 10u ? "0" : "", per % 100u, " over ", over / 100u,
+                      '.', over % 100u < 10u ? "0" : "", over % 100u, crlf);
+                console_drain();
+            }
+        }
+    }
 }
 
 void te_spi_host() {
@@ -1228,7 +1256,11 @@ void te_spi_host() {
     request_line(0);
     request_line(2);
     request_line(15);
-    held_lines();
+    frame_table<SpiPoll>("flash");
+    if constexpr (ram_twin_carried) {
+        frame_table<SpiRam>("sram");
+        (void)SpiPoll::init(clock);
+    }
     bench.verdict("ran", true);
 }
 
