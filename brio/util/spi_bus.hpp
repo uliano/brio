@@ -14,6 +14,10 @@
  *     using Bus = brio::SpiBus<Host, P>;
  *     brio::post<Bus>(Host::Request{..., .reply = brio::reply_to<MyAo, brio::SpiDone>()});
  *
+ * (A designated initializer follows its own host's declaration: the
+ * fields are the same on every stratum for an 8-bit request, their order
+ * is not, so a program written for several strata assigns them by name.)
+ *
  * Everything about arbitration, the pending FIFO, replies, who owns the
  * request's buffers until when and the engine contract is documented
  * once, in bus_master.hpp; the SPI engine descriptor and its two ways to
@@ -28,9 +32,9 @@
  * SPI has no wire-level failure the engine can detect (no acknowledge,
  * no arbitration): what a host can report is its own (a frame it lost,
  * a wait it gave up on, a DMA block it could not finish), so the codes
- * below the arbiter's are the host's, and the two every host can answer
- * are spelled here once (spi_overrun, spi_stalled) while the engines'
- * spi_dma_fault stays with the host that has engines.
+ * past the arbiter's are the host's: two are spelled here once (spi_overrun,
+ * spi_stalled), spi_dma_fault with each host that defines it, and each
+ * host's header says which it answers.
  */
 
 #pragma once
@@ -59,28 +63,29 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 
 // ---- the host's own codes, in the range bus_master.hpp leaves to engines ----
 //
-// bus_engine_status + 0 is `spi_dma_fault`, defined by every host that
-// has DMA engine slots and by none that has not: a block the engines
-// could not finish (a transfer error, a block that never completed).
-// The two below are every host's, one spelling and one value on every
-// family, so a client written over the vocabulary alone (a panel driver
-// over any family's host) can tell a lost frame from a dead block
-// without naming a family.
+// bus_engine_status + 0 is `spi_dma_fault`, defined by every stratum whose
+// host has DMA engine slots and by none that has not: a block the engines
+// could not finish (a transfer error, a block that never completed), and
+// on the PL022 hosts also a polled wait that ran out. The two below have
+// one spelling and one value on every family.
 
 /// The host lost a frame: the receive side was overrun - a frame landed
 /// while the previous one still stood unread (one register deep on the
 /// F1 lineage's blocks, a FIFO's depth elsewhere), which with frames
 /// written ahead means the handler, or the polled loop under a long
-/// handler, came later than the receive side could hold. Every frame
-/// went out; one that came back is missing, so the transaction ends
-/// with this code instead of handing back a run with a hole in it.
+/// handler, came later than the receive side could hold. On the STM32F4
+/// and the CH32V203 and CH32V303 the transaction stops at the lost frame,
+/// so later frames never go out. On the CH32V00x and the CH32X035 it
+/// clocks to its end and leaves a hole in the in buffer, under the status.
 inline constexpr uint8_t spi_overrun = bus_engine_status + 1u;
 /// A polled wait ran out: a flag the loop waited for never rose within
 /// the transaction's one spin budget - a block whose clock does not run
 /// (a gate closed, the enable down, a mode fault that demoted it). The
 /// select is released and the receive side drained; what else the host
 /// does to the block (a reset and a reconfiguration, or nothing but
-/// the arbiter's recover() as the way back) is the family's.
+/// the arbiter's recover() as the way back) is the family's. The PL022
+/// hosts never answer it: there a polled wait that ran out answers
+/// spi_dma_fault, with or without engines.
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
 /// The arbiter under SPI's name. `pending_depth` is how many requests

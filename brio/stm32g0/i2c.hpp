@@ -2695,7 +2695,7 @@ private:
     /// request enables they need (start() writes them with the rest). A
     /// half shorter than its direction's floor for the Request's engine
     /// (engine_floor_tx, engine_floor_rx), or with no buffer, is the
-    /// pump's: one load and one compare a half.
+    /// pump's: a load, a compare and a null test a half.
     [[gnu::always_inline]] static uint32_t launch_dma(I2cEngine e) {
         uint32_t en = 0;
         if constexpr (has_dma) {

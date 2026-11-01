@@ -17,12 +17,13 @@
  *    status verbs, the error clearing sequences, the CRC, the interrupt
  *    body that reads the raised-and-enabled sources. It decides nothing.
  *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles, Placement>`
- *    is the engine util/spi_bus.hpp's SpiBus drives: the Request is the
- *    same struct on every stratum, field for field (a chip select, a D/C
+ *    is the engine util/spi_bus.hpp's SpiBus drives: the Request has the
+ *    same fields on every stratum (a chip select, a D/C
  *    line, a command phase, a data phase with optional out and in, the
  *    per-request mode, rate and frame size, the polled or asynchronous
- *    way to run it), so an application that fills it by name runs here
- *    unchanged.
+ *    way to run it), so an application that assigns them by name runs here
+ *    unchanged; their order is this host's own, and a designated
+ *    initializer follows it.
  *  - `SpiClient<n, pins>` is the other end of the wire: the polled runs a
  *    client's transaction is served by (answer, exchange, receive) and
  *    the per-frame verbs that are their degenerate case.
@@ -30,8 +31,10 @@
  * The smallest use, a command and a block of pixels to a display, is
  * written out at SpiHost below: `using Bus = brio::SpiHost<1, pins,
  * DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>` on the column the
- * QFN20 bonds with the instance's two DMA channels, `SpiBus<Bus, P, 4>`
- * as the arbiter in the program's Tenuto, `Bus::init(clock, 8'000'000)`
+ * QFN20 bonds with the instance's two DMA channels, `SpiBus<Bus, P, 4,
+ * BusPassThrough, ticks_from_ms<P>(20)>` as the arbiter in the program's
+ * Tenuto, the per-bus timeout what answers a channel that never completes,
+ * `Bus::init(clock, 8'000'000)`
  * after the clock task with a ceiling for the bus, the two channels'
  * vectors bound to dma_isr() with BRIO_CH32_VECTOR, then a Request
  * posted with its chip select and its buffers lent until the reply.
@@ -838,8 +841,9 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
 /**
  * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles, Placement>
  *
- * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. The bus
- * active object asserts the request's own chip select around the
+ * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its start(),
+ * called by the bus active object or by a program that owns the bus,
+ * asserts the request's own chip select around the
  * transaction, a command phase goes out with D/C low and a data phase
  * with it high, the data phase has an optional out buffer (null = 0xFF
  * dummies) and an optional in buffer (null = the frames read back are
@@ -849,7 +853,8 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
  *
  *   using Bus = brio::SpiHost<1, brio::spi1_default_pins,     // PA5 SCK, PA7 MOSI, PA6 MISO
  *                             brio::DmaTxEngine<3, uint8_t>, brio::DmaRxEngine<2, uint8_t>>;
- *   using Spi = brio::SpiBus<Bus, P, 4>;          // the arbiter, in the Tenuto
+ *   using Spi = brio::SpiBus<Bus, P, 4, brio::BusPassThrough,
+ *                            brio::ticks_from_ms<P>(20)>;   // the arbiter, in the Tenuto
  *   using Cs = brio::Pin<'A', 4>;
  *   Bus::init(clock, 8'000'000);                  // after the clock task; a ceiling for the bus
  *   Cs::output(true);
@@ -881,7 +886,9 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
  *
  *  - POLLED (`polled` true): the loops below inside start(), and a phase
  *    with an in buffer of `dma_min_frames_polled` frames or more on the
- *    engines inside start() too, start() waiting on their completion.
+ *    engines inside start() too, start() waiting on their completion -
+ *    which is dma_isr() in the vector, so an engined host's two vectors
+ *    stay bound for such a read as well, interrupts enabled.
  *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected
  *    in status(), before it touches the block, the select or the D/C, so

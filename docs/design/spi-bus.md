@@ -12,13 +12,19 @@ reference form of the bus active-object pattern;
 embedded programmer who has driven an SPI device from a loop and now
 has two devices on one bus and two components that want them.
 
-The smallest use: one `SpiHost<n, ...>` of the family, one
-`SpiBus<Host, P>` in Tenuto's list, and a client that posts
-`Host::Request{...}` with its buffers and a `reply_to<Client,
-SpiDone>()` capsule, then handles `SpiDone` in its own dispatch. The
-prerequisite that decides correctness: **the request's buffers are
-lent until `SpiDone` arrives**; the client must not touch them before,
-and must not reuse them for another request before.
+The smallest use: one `SpiHost<n, ...>` of the family, called `Bus`
+here, one `SpiBus<Bus, P>` in the list of active objects given to the
+kernel (`Tenuto`; `P` is the family's platform type), and a client that
+posts `Bus::Request{...}` with its buffers and a reply channel, the
+capsule `reply_to<Client, SpiDone>()`, then handles `SpiDone` in its own
+dispatch. A request not marked `polled` is asynchronous: it rides the
+host's DMA engines, so the host needs engines bound and the program's
+DMA vectors bound to `dma_isr()`. A host with no engines, always the
+AVR's and the SAM C21's, refuses it with `spi_rejected` and nothing on
+the wire, and there every request sets `polled = true`. So two things
+decide correctness: that choice, and **the request's buffers are lent
+until `SpiDone` arrives**; the client must not touch them before, and
+must not reuse them for another request before.
 
 ## The stack
 
@@ -52,32 +58,38 @@ the engine's functions `init`, `start`, `rebase`, `recover`, `release`,
 an asynchronous request at all, "Two ways to run a request" below), on
 a host with engines the one interrupt body the application's DMA vector
 glue calls, `dma_isr`, and the vocabulary `SpiMode`, `SpiDone` and the
-`spi_*` status codes. An 8-bit request is spelled identically on every
-row, and each engine is measured against a real client on the wire
-(transactions queued from one dispatch, a rejection when the queue is
-full, both sleep votes, and, where a host can leave a transaction open,
-the per-bus timeout with `recover()`) on the platforms marked
-supported; the CH32V00x's against the CH32X035's client ([the CH32V00x
-page](../ch32v00x/README.md)).
+`spi_*` status codes. An 8-bit request whose fields are assigned by name
+reads the same on every row but for the rate's type (the SAM C21's
+`baud`); the fields' order differs from stratum to stratum, so a
+designated initializer follows its own host's declaration. Each engine
+is measured against a real client on the wire (transactions queued from
+one dispatch, a rejection when the queue is full, both answers to the
+power manager's sleep vote, and, where a host can leave a transaction
+open, the per-bus timeout with `recover()`) on the platforms [the target
+table](../../README.md) marks supported; the CH32V00x's against the
+CH32X035's client ([the CH32V00x page](../ch32v00x/README.md)). The rows
+use E, F and the write-ahead threshold, all defined under "Two ways to
+run a request".
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrxt | `SpiHost<n, route>` (`avrxt/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves and `clock_for(hz)` the chooser (`spi_clock_for(clk_per_hz, hz)` is the same arithmetic with the clock stated); polled only: the AVR DA, DB and EA have no DMA controller, so `has_dma` is false and every request not marked polled is refused (`spi_rejected`, nothing on the wire), the host arming no interrupt and keeping no state past `start()`; `status()` is `spi_rejected` after a refusal and `spi_ok` otherwise; `prime(mode, clock)` as on the other two |
+| avrxt | `SpiHost<n, route>` (`avrxt/spi.hpp`) | the rate is a `SpiClock` division enum, with `ceiling_clock()` the optional SCK ceiling a rebase re-resolves and `clock_for(hz)` the chooser (`spi_clock_for(clk_per_hz, hz)` is the same arithmetic with the clock stated); polled only: the AVR DA, DB and EA have no DMA controller, so `has_dma` is false and every request not marked polled is refused (`spi_rejected`, nothing on the wire), the host arming no interrupt and keeping no transaction's state past `start()`; `status()` is `spi_rejected` after a refusal and `spi_ok` otherwise; `prime(mode, clock)` for a caller framing the select by hand |
 | samc21 | `SpiHost<n, pads, generator, Placement>` (`samc21/spi.hpp`) | the rate is a `uint8_t baud` divisor (the SERCOM's own register), so the ceiling is `ceiling_baud()` and the chooser `baud_for(hz)`; polled only: no engine slot (the family's DMA serves its Uart's transmitter alone, erratum 1.10.4, [the SAM C21 DMAC page](../samc21/dmac.md)), so `has_dma` is false and every request not marked polled is refused (`spi_rejected`), the host arming no interrupt and leaving its NVIC line disabled; `status()` = `spi_ok`, `spi_stalled` when a polled wait ran out, or `spi_rejected`; the placement moves the one polled transaction; `prime(mode, baud)` for a caller framing the select by hand; `reference_hz()` = the stated GCLK rate |
-| stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in frames; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; two optional DMA engine slots, `has_dma` whether they are bound: an asynchronous request rides them (`dma_isr()` the one interrupt body, the block's own interrupts never armed and its NVIC line left alone), a command phase worth a block of its own chained to its data block from the vector, and one shorter than the engines' fixed cost runs polled inside `start()` (`async_min_frames()`, its figures measured both placements: a byte read from 22 frames at PCLK/2 and 5 at PCLK/16), refused (`spi_rejected`) on a host with none; `prime(mode, clock, bits)` as the SAM's `prime(mode, baud)`; `status()` = `spi_ok`, `spi_rejected`, `spi_dma_fault` or `spi_stalled` (no `spi_overrun`: the FIFO is never filled past what it holds); `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK; the polled transaction placed by the last parameter, `InFlash` or `InRam` ([the STM32G0 SPI page](../stm32g0/spi.md)) |
-| stm32f4 | `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` (`stm32f4/spi.hpp`) | the F1 lineage's block, so `bits` is 8 or 16 as on the CH32V00x; the `SpiClock` enum runs div2..div256 off the instance's own APB clock (`reference_hz()` is PCLK1 or PCLK2, never SYSCLK) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok`, `spi_rejected`, `spi_dma_fault`, `spi_overrun` (the polled loop's two frames in flight under a hold-off declared too short) or `spi_stalled`; the engine slots take a (controller, stream, channel) cell of the request mapping, checked per part class and refused on a class whose manual was not read, `has_dma` whether they are bound: an asynchronous request rides them (`dma_isr()` the one interrupt body), a command phase worth a block of its own chained to its data block, and one shorter than the engines' fixed cost runs polled inside `start()` (`async_min_frames()`, from the bus the instance sits on: a byte read from 8 frames at SCK 45 MHz on APB2, from 4 at 22.5 MHz on APB1), refused on a host with none; and two functions no other stratum has, `sck_speed()` beside `errata_apb_ceiling_hz()`/`within_errata_ceiling()`, because ES0206 2.12.4 makes the SCK pad's slew class decide whether the last received bit is captured ([the STM32F4 SPI page](../stm32f4/spi.md)) |
-| ch32v00x | `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles, Placement>` (`ch32v00x/spi.hpp`) | the G0's surface on the F1's peripheral: `bits` is 8 or 16 (the two widths this SPI has), the `SpiClock` enum runs div2..div256 with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines), `spi_dma_fault`, `spi_overrun` (the polled receive loop, two frames in flight, lost one to the one-deep receive buffer: a hold-off declared too short) or `spi_stalled`; the engine slots are fixed to DMA channels 3 (TX) and 2 (RX), because on this family the channel is the request, `has_dma` whether they are bound; `reference_hz()` = HCLK, there being no APB prescaler. The host the contract below describes: no per-frame interrupt, `dma_isr()` the one interrupt body; a short asynchronous request polled inside `start()` by two counts kept per code with no multiply (the CH32V003 has none), its E - F measured as one difference (475 cycles from the flash); a command phase worth a block of its own chained to its data block from the vector; the polled receive loop two frames in flight above the write-ahead threshold, its write waiting for TXE (RXNE does not say TXE in modes 1 and 3, measured) ([the CH32V00x SPI page](../ch32v00x/spi.md)) |
-| ch32vx03 | `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` (`ch32vx03/spi.hpp`) | the CH32V00x's surface with a second and, on the CH32V303RC and VC, a third instance, and so a second reference: `reference_hz()` is the instance's own bus (PCLK2 for SPI1, PCLK1 for SPI2 and SPI3) and never the system clock, so one `SpiClock` code is two frequencies on one chip; `bits` 8 or 16, `ceiling_clock()`/`clock_for(hz)` and `SpiRateOf<pclk, hz>`, the compile-time chooser that refuses a ceiling the bus cannot make where the run-time one only reports it; `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `busy()` for the power model, `status()` = `spi_ok`, `spi_dma_fault`, `spi_overrun`, `spi_stalled` or `spi_rejected`; asynchronous is DMA - `has_dma`, the refusal on an engineless host, the short request run polled from `async_min_frames(code, bits, read)`, its costs measured per core on SPI1 (E - F 250 and 255 cycles on the V4B, 347 and 372 on the V4F) and folded with the instance's bus share, a command phase on a block of its own chained from the receive channel's vector, and a polled read below the write-ahead threshold on the engines from `dma_min_frames_polled`; the engine slots are fixed per instance (SPI1 on DMA1's channels 3 and 2, SPI2 on its 5 and 4, SPI3 on DMA2's 2 and 1), because on this family the channel is the request; `pad_speed()`, the slew class of the pads the task drives, a correctness parameter on a bus of wires, measured in the two modes that sample on the falling edge; and the resource's high-speed read at BR /2 alone, measured to turn a one-bit-late read at 36 MHz into an exact one ([the CH32V203 and CH32V303 SPI page](../ch32vx03/spi.md)) |
-| ch32x035 | `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles, Placement>` (`ch32x035/spi.hpp`) | the CH32V00x's surface on this series' copy of the block: `bits` 8 or 16, the `SpiClock` enum div2..div256 off HCLK (every bus of the series runs at it) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad<arrangement>()`, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines), `spi_dma_fault`, `spi_overrun` or `spi_stalled`; the engine slots fixed to DMA channels 3 and 2, `has_dma` whether they are bound; `init()` takes a `Config` (the ceiling, `open_drain` for CTLR2.ODEN, the one pad class this GPIO offers, it having no speed field, and `high_speed_read` for HSRXEN, applied at /2 alone, the bit turning every other code into HCLK/(BR+2), measured). The host the contract below describes: no per-frame interrupt, `dma_isr()` the one interrupt body; an asynchronous request on the engines, a command phase worth a block of its own chained to its data block from the vector, and short of the engines' fixed cost run polled inside `start()` (`async_min_frames()`, its figures measured both placements); the polled receive loop keeps two frames in flight above the write-ahead threshold ([the CH32X035 SPI page](../ch32x035/spi.md)) |
-| rp2040 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`rp2040/spi.hpp`), the family's alias of the IP stratum's engine (`pl022/spi.hpp`) | the PL022: `bits` 8 or 16 in the Request (the resource takes 4..16), the rate a `SpiClock` pair (an even prescaler and a serial clock rate, `SpiClocks::div2..div256` the named ones) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `loopback(on)` kept through re-application, the engine slots on any two channels told the instance's requests, `has_dma` whether they are bound, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines) or `spi_dma_fault`; `reference_hz()` = clk_peri. The host the contract below describes: no per-frame interrupt, `dma_isr()` its one interrupt body; an asynchronous request on the engines, a command phase worth a block of its own chained to its data block from the vector, and short of the engines' fixed cost run polled inside `start()` (`async_min_frames()`, from the traits' measured `Pl022Costs`, a frame scaled by clk_sys over clk_peri: a byte read from 7 frames at 62.5 and 31.25 MHz); the polled loop keeps eight frames in flight through the FIFOs, and a polled read whose loop turn outlasts the wire's frame rides the engines inside `start()` (`polled_dma_min_frames()`) |
-| rp2350 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`rp2350/spi.hpp`) | the same PL022 and the same driver: the resource, the host engine and the client live in the IP stratum (`pl022/spi.hpp`) and this family writes only a traits type, so every word of the row above holds here. What is this chip's: the pads march in groups of four and the instance is a bit of the pad number, and unlike its UART this chapter gained no second function column, so a pin set is four plain pad numbers; `reference_hz()` is clk_peri again, 75 Mbit/s at the top of a 150 MHz one for a host and 12.5 for a client; and the pads come up isolated, so every configuring function drops the latch as it writes, and a host's receive pad is handed over with a pull-up, since an answer line nothing drives must read as the idle a bus expects, which on this silicon a pull-down would not give; and the short request's figures are one set per architecture (`Rp2350Pl022::costs`: E - F 215 and 225 on both, a byte read on the engines from 9 frames at 75 MHz) ([the RP2350 SPI page](../rp2350/spi.md), [the PL022 page](../pl022/README.md)) |
+| stm32g0 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`stm32g0/spi.hpp`) | a frame size in the Request (`bits`, 4 to 16, eight by default) with `cmd_len`/`len` counted in frames; the `SpiClock` enum with `ceiling_clock()` and the chooser `clock_for(hz)`; two optional DMA engine slots, `has_dma` whether they are bound: an asynchronous request rides them (`dma_isr()` the one interrupt body, the block's own interrupts never armed and its NVIC line left alone), a command phase worth a block of its own chained to its data block from the vector, and one shorter than the engines' fixed cost runs polled inside `start()` (`async_min_frames()`, its figures measured in both placements: a byte read rides the engines from 22 frames at PCLK/2 and from 5 at PCLK/16), refused (`spi_rejected`) on a host with none; `prime(mode, clock, bits)` as the SAM's `prime(mode, baud)`; `status()` = `spi_ok`, `spi_rejected`, `spi_dma_fault` or `spi_stalled` (no `spi_overrun`: the FIFO is never filled past what it holds); `bit_order()`/`lsb_first()` on the task; `claim_nss_pad()` for a hardware NSS; `reference_hz()` = PCLK; the polled transaction placed by the last parameter, `InFlash` or `InRam` ([the STM32G0 SPI page](../stm32g0/spi.md)) |
+| stm32f4 | `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` (`stm32f4/spi.hpp`) | the F1 lineage's block, so `bits` is 8 or 16 as on the CH32V00x; the `SpiClock` enum runs div2..div256 off the instance's own APB clock (`reference_hz()` is PCLK1 or PCLK2, never SYSCLK) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok`, `spi_rejected`, `spi_dma_fault`, `spi_overrun` (the polled loop's two frames in flight under a hold-off declared too short) or `spi_stalled`; the engine slots take a (controller, stream, channel) cell of the request mapping, checked per part class and refused on a class whose manual was not read, `has_dma` whether they are bound: an asynchronous request rides them (`dma_isr()` the one interrupt body), a command phase worth a block of its own chained to its data block, and one shorter than the engines' fixed cost runs polled inside `start()` (`async_min_frames()`, from the bus the instance sits on: a byte read rides the engines from 8 frames at SCK 45 MHz on APB2, from 4 at 22.5 MHz on APB1), refused on a host with none; and `sck_speed()`, which the STM32G0 has too, beside `errata_apb_ceiling_hz()`/`within_errata_ceiling()`, which only this stratum has, because ES0206 2.12.4 makes the SCK pad's slew class decide whether the last received bit is captured ([the STM32F4 SPI page](../stm32f4/spi.md)) |
+| ch32v00x | `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles, Placement>` (`ch32v00x/spi.hpp`) | the G0's surface on the F1's peripheral: `bits` is 8 or 16 (the two widths this SPI has), the `SpiClock` enum runs div2..div256 with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines), `spi_dma_fault`, `spi_overrun` (the polled receive loop, two frames in flight, lost one to the one-deep receive buffer: a hold-off declared too short) or `spi_stalled`; the engine slots are fixed to DMA channels 3 (TX) and 2 (RX), because on this family the channel is the request, `has_dma` whether they are bound; `reference_hz()` = HCLK, there being no APB prescaler. As the contract below describes: no per-frame interrupt, `dma_isr()` the one interrupt body; a short asynchronous request polled inside `start()` by two counts kept per code with no multiply (the CH32V003 has none), its E - F measured as one difference (475 cycles from the flash); a command phase worth a block of its own chained to its data block from the vector; the polled receive loop two frames in flight at the write-ahead threshold's rate and slower, its write waiting for TXE (RXNE does not say TXE in modes 1 and 3, measured) ([the CH32V00x SPI page](../ch32v00x/spi.md)) |
+| ch32vx03 | `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` (`ch32vx03/spi.hpp`) | the CH32V00x's surface with a second and, on the CH32V303RC and VC, a third instance, and so a second reference: `reference_hz()` is the instance's own bus (PCLK2 for SPI1, PCLK1 for SPI2 and SPI3) and never the system clock, so one `SpiClock` code is two frequencies on one chip; `bits` 8 or 16, `ceiling_clock()`/`clock_for(hz)` and `SpiRateOf<pclk, hz>`, the compile-time chooser that refuses a ceiling the bus cannot make where the run-time one only reports it; `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad()`, `busy()` for the power model, `status()` = `spi_ok`, `spi_dma_fault`, `spi_overrun`, `spi_stalled` or `spi_rejected`; asynchronous is DMA - `has_dma`, the refusal on an engineless host, the short request run polled from `async_min_frames(code, bits, read)`, its costs measured per core on SPI1 (E - F 250 and 255 cycles on the V4B, 347 and 372 on the V4F) and folded with the instance's bus share, a command phase on a block of its own chained from the receive channel's vector, and a polled read at rates faster than the write-ahead threshold on the engines from `dma_min_frames_polled` frames; the engine slots are fixed per instance (SPI1 on DMA1's channels 3 and 2, SPI2 on its 5 and 4, SPI3 on DMA2's 2 and 1), because on this family the channel is the request; `pad_speed()`, the slew class of the pads the task drives, a correctness parameter on a bus of wires, measured in the two modes that sample on the falling edge; and the resource's high-speed read at BR /2 alone, measured to turn a one-bit-late read at 36 MHz into an exact one ([the CH32V203 and CH32V303 SPI page](../ch32vx03/spi.md)) |
+| ch32x035 | `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles, Placement>` (`ch32x035/spi.hpp`) | the CH32V00x's surface on this series' copy of the block: `bits` 8 or 16, the `SpiClock` enum div2..div256 off HCLK (every bus of the series runs at it) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `bit_order()`/`lsb_first()`, `claim_nss_pad<arrangement>()`, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines), `spi_dma_fault`, `spi_overrun` or `spi_stalled`; the engine slots fixed to DMA channels 3 and 2, `has_dma` whether they are bound; `init()` takes a `Config` (the ceiling, `open_drain` for CTLR2.ODEN, the one pad class this GPIO offers, it having no speed field, and `high_speed_read` for HSRXEN, applied at /2 alone, the bit turning every other code into HCLK/(BR+2), measured). As the contract below describes: no per-frame interrupt, `dma_isr()` the one interrupt body; an asynchronous request on the engines, a command phase worth a block of its own chained to its data block from the vector, and short of the engines' fixed cost run polled inside `start()` (`async_min_frames()`, its figures measured in both placements); the polled receive loop keeps two frames in flight at the write-ahead threshold's rate and slower ([the CH32X035 SPI page](../ch32x035/spi.md)) |
+| rp2040 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`rp2040/spi.hpp`), the family's alias of the IP stratum's engine (`pl022/spi.hpp`) | the PL022: `bits` 8 or 16 in the Request (the resource takes 4..16), the rate a `SpiClock` pair (an even prescaler and a serial clock rate, `SpiClocks::div2..div256` the named ones) with `ceiling_clock()` and `clock_for(hz)`, `prime(mode, clock, bits)`, `loopback(on)` kept through re-application, the engine slots on any two channels told the instance's requests, `has_dma` whether they are bound, `status()` = `spi_ok`, `spi_rejected` (an asynchronous request on a host with no engines) or `spi_dma_fault` (a polled wait that ran out included: this host never answers `spi_stalled`); `reference_hz()` = clk_peri. As the contract below describes: no per-frame interrupt, `dma_isr()` its one interrupt body; an asynchronous request on the engines, a command phase worth a block of its own chained to its data block from the vector, and short of the engines' fixed cost run polled inside `start()` (`async_min_frames()`, from the traits' measured `Pl022Costs`, a frame scaled by clk_sys over clk_peri: a byte read rides the engines from 7 frames at 62.5 and 31.25 MHz); the polled loop keeps eight frames in flight through the FIFOs, and a polled read whose loop turn outlasts the wire's frame rides the engines inside `start()` (`polled_dma_min_frames()`) |
+| rp2350 | `SpiHost<n, pins, TxEngine, RxEngine, Placement>` (`rp2350/spi.hpp`) | the same PL022 and the same driver: the resource, the host engine and the client live in the IP stratum (`pl022/spi.hpp`) and this family writes only a traits type, so the row above's contract and verbs hold here, its figures apart (each family's `Pl022Costs`). What is this chip's: the pads repeat in groups of four and the instance is a bit of the pad number, and unlike its UART this chapter has one function column, so a pin set is four plain pad numbers; `reference_hz()` is clk_peri again, 75 Mbit/s at the top of a 150 MHz one for a host and 12.5 for a client; and the pads come up isolated, so every configuring function drops the latch as it writes, and a host's receive pad is handed over with a pull-up, since an answer line nothing drives must read as the idle a bus expects, which on this silicon a pull-down would not give; and the short request's figures are one set per architecture (`Rp2350Pl022::costs`: E - F 215 and 225 on both, a byte read on the engines from 9 frames at 75 MHz) ([the RP2350 SPI page](../rp2350/spi.md), [the PL022 page](../pl022/README.md)) |
 | host | `SimSpiHost<n, trace_depth, dma>` (`host/sim_spi_host.hpp`), at the request and not at the register block | no silicon under it: the two phases in one select window, the select active low, the D/C flipping between them, a null `tx` clocking 0xFF and a select line with nothing on it reading it back, a `cs_setup_us` counted and never spent, and no wire at all (no rate, no mode, no bit). Devices are attached to a select pin (`attach`/`detach`) and held type-erased, so a panel's framing adapter and a stub share one bus; a byte-level trace ring and a per-pin stamp are what a test asserts a D/C choreography and a select edge against. Both completion styles are selectable (`completion()`): `immediate` answers every request inside `start()`, `deferred` holds an asynchronous one (`start()` false, `finish()` performing it and returning the status the application's DMA glue would post), which is how an asynchronous transfer is staged with no interrupt anywhere. The asynchronous way's two rules are there too: `dma` false (`has_dma`) refuses every asynchronous request, `spi_rejected` and the wire untouched, and `short_frames()` is the short request's threshold, a count the test sets where a family's host derives one. `test_dcs_link` runs the arbiter over it in both styles, which is what proves it satisfies this contract and not only its shape, and `test_sim_spi_host` the refusal and the short request at the engine and through the arbiter. Beside it, `SpiBus` is host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`), and the IP stratum's own driver against a PL022 made of RAM (`test_pl022`, `host/sim_pl022.hpp`), the realization with no family behind it that proves the driver knows no chip |
 
 One of those differences is one thing spelled two ways and is
 recorded as such: the rate's unit, an enum on most strata and a
 divisor on the SAM C21, with the ceiling and the chooser named for it
-(`ceiling_baud`/`baud_for` against `ceiling_clock`/`clock_for`). It
-is an open decision, since a ceiling in hertz would serve them all.
+(`ceiling_baud`/`baud_for` against `ceiling_clock`/`clock_for`).
+Whether one function with a ceiling in hertz should replace both
+spellings is not decided.
 
 The client side is deliberately not one surface. `SpiClient` on each
 stratum is the application's protocol over that silicon's own client
@@ -87,8 +99,8 @@ peers of the bench converge on one algorithm, answers kept queued
 ahead of what the host has clocked, whose only per-silicon parameter
 is how many must be queued ahead: one on the AVR, two on the SAM for
 its three-SCK-cycle rule, two on the G0 for its FIFO, one on the
-CH32V00x and the CH32X035, eight on both PL022s (the depth of their
-FIFOs) and one on the STM32F4; the PL022 client also takes one frame
+CH32V00x, the CH32V203 and CH32V303 and the CH32X035, eight on both
+PL022s (the depth of their FIFOs) and one on the STM32F4; the PL022 client also takes one frame
 per select window in modes 0 and 2 ([the RP2040 SPI
 page](../rp2040/spi.md)). That integer is the one thing a portable
 client would need, and each `SpiClient` publishes it as
@@ -99,8 +111,8 @@ register with a two-deep buffer, a SERCOM with a pad matrix, an SPI
 with a FIFO and a frame size, one with no FIFO at all and a DMA
 channel per direction, a PL022 with two eight-deep FIFOs and a request
 any channel takes, and an F1-lineage block with no FIFO whose SCK pad
-is a correctness parameter. That is what makes the descriptor's
-survival worth recording. And where two families carry the same
+is a correctness parameter. That one descriptor serves them all is the
+point worth recording. And where two families carry the same
 block, the descriptor stops being a claim: the PL022's driver is one
 file both of them alias ([the PL022 page](../pl022/README.md)).
 
@@ -114,7 +126,8 @@ request's slot in its own queue (`Lease::hold`,
 [kernel.md, "Payloads"](kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)
 and [kernel.md, "Queues"](kernel.md#5-queues-kernelevent_queuehpp))
 and keeps the slot's number in a small pending FIFO, one byte per
-waiting request, in the loop's context only with no critical section;
+waiting request, touched from main context only and so with no
+critical section;
 the request on the wire is held the same way until its requester has
 been answered. When the FIFO is full the request is answered at once
 with `SpiDone{spi_rejected}`, counted, and not held: never silent,
@@ -135,14 +148,14 @@ where a request the FIFO has no room for is answered from. The slots
 are not reserved by event type: the second `pending_depth` is what
 keeps a burst of excess requests from crowding out a completion (an
 untimed bus would wedge) or a vote (the power manager would wait for
-ever), the headroom a copied FIFO gave when waiting requests lived
-outside the queue. A held request costs no copy and no time, however
+ever). A held request costs no copy and no time, however
 long its transfer lasts.
 
 The request event (two spans, a select, the bus's settings and the
-reply capsule) exceeds the 8-byte envelope guideline: a recorded,
-legal deviation, because the request is the arbitration token and the
-queues are per object, so nobody else pays. Its size is paid per copy,
+reply capsule) exceeds the size of about 8 bytes the kernel recommends
+for an event ([kernel.md, "Events"](kernel.md#3-events-value-semantics-per-ao-variant)):
+legal, because the request is the arbitration token and the queues are
+per object, so nobody else pays. Its size is paid per copy,
 and the arbiter makes none of its own: every request is built once, by
 `post()` in a slot of the bus active object's queue (the kernel's copy,
 under the producers' mask), and lent from that slot to `start()` for
@@ -151,7 +164,7 @@ event being dispatched when the bus is idle, its held slot when the
 request waited. A polled request completes inside `start()` and is
 copied nowhere else: the engine reads every field through the
 reference. An asynchronous one outlives the call, so the engine copies
-what its tenure needs (the two pins, the three buffers, the two
+what its tenure (the request's time on the bus) needs (the two pins, the three buffers, the two
 lengths, the width and the completion style, laid out contiguously at
 the head of the `Request` so the copy is a run of word stores) and
 never the rate, the mode, the setup time or the reply, which are spent
@@ -181,7 +194,8 @@ between segments, scatter-gather style) is the known successor, to be
 built when a real device breaks two phases (QSPI-style dummy cycles,
 three-phase protocols). Splitting the descriptor into per-shape
 request types would not even save queue RAM while any display client
-shares the bus: a queue slot pays the largest variant alternative.
+shares the bus: every slot of a queue is as large as the largest event
+it accepts.
 
 Two phases in one chip-select window, covering every device class in
 sight:
@@ -205,12 +219,12 @@ delta-sigma ADC frames of 24-bit groups) are already just `tx`/`rx`
 spans, with no display pattern involved. Buffer ownership travels with
 the request, and the `cmd`, `tx` and `rx` fields name it: they are
 `Lease::reply` loans, so **the client must not touch the buffers until
-its `SpiDone` arrives**. Run-to-completion makes this free of races:
+its `SpiDone` arrives**. That rule is what keeps this free of races:
 the client's handler and the engine's interrupt never write the same
 buffer at the same time, and the completion event is the one boundary.
 
-Word semantics live above the wire, under the "drivers move bytes"
-pillar: `util/wire.hpp` provides `constexpr` big-endian load and store
+Word semantics live above the wire, since a driver moves frames and
+knows nothing of what they mean: `util/wire.hpp` provides `constexpr` big-endian load and store
 for 16, 24 and 32-bit words and the sign-extending `load_be24_signed`
 for ADC channel data; the client formats and parses its byte spans at
 the edges. A device demanding chip-select-per-word framing would be
@@ -224,7 +238,8 @@ descriptor carries `SpiClock clock` and `SpiMode mode` (defaults div16
 and mode 0), and at each `start()` the engine folds them, with the
 frame size where the block has one, into the control word the block
 takes, compares it with the word in force and writes only on a
-change, with whatever disable the chapter asks around that write:
+change, with whatever disable the chip's reference manual asks around
+that write:
 nothing on the unchanged path, nothing per frame. `SpiHost<n>::init()`
 takes the clock tag and an optional SCK ceiling for the whole bus, with
 no per-transaction rate and no mode; a request that asks for more than
@@ -242,25 +257,33 @@ inside `start()`, and the arbiter replies with whatever the engine's
 `polled` flag: like the clock, the client knows its transaction.
 
 - **Polled** (`polled = true`). `start()` runs the whole transaction in
-  a loop and returns done. Global interrupts stay enabled (the block's
-  own interrupts are never armed); what waits is that one dispatch,
-  bounded by one spin budget per transaction and chosen by the client.
-  The loop's shape is the request's buffers': a phase with no receive
+  a loop and returns done. The block's own interrupts are never armed
+  and global interrupts stay enabled, but for the AVR's, masked around
+  the burst's last DATA store and the flag clear behind it. The wait is
+  bounded by a spin budget, but for the AVR's, which has none because
+  with SSD set a transfer written always completes. The caller's dispatch
+  waits through all of it, and under the cooperative kernel (`Tenuto`)
+  that holds up every other active object too: only interrupt handlers
+  run until `start()` returns. The client chooses this knowing it.
+  The loop's shape follows the request's buffers: a phase with no receive
   buffer (every command phase, a display's pixels) paces on the
   transmit flag, never reads the answers and clears the receive side at
-  its tail, wire-bound from the family's second-fastest rate; a phase
+  its tail, at the wire's pace at the family's second-fastest rate and
+  slower on every family measured but the AVR and the RP2040
+  ([benchmark.md](benchmark.md), letter e); a phase
   with one keeps as many frames in flight as the receive side can hold
-  under any handler of the image, the next frame fetched inside the
-  wire's time. On a one-deep receive register that is two frames only
-  above a rate threshold each family computes in its header from named
+  under any handler of the image, so the next frame is written before
+  the one shifting ends. On a one-deep receive register that is two
+  frames only at a threshold rate and slower, the threshold computed by
+  each family in its header from named
   inputs: the hold-off (the longest time in core cycles the image keeps
   the loop from its read, which is the longer of its longest handler,
   since no interrupt nests over another, and its longest masked
   window), the core's exception entry and exit, and the loop's own way
-  back to its read; below the threshold, one frame, the bus idle for the
-  turnaround. An overrun the declared hold-off did not foresee ends the
-  transaction with `spi_overrun`, tested in a status read made after
-  the data read: a status copy taken before it misses the overrun the
+  back to its read; at faster rates, one frame, the bus idle for the
+  turnaround. An overrun the declared hold-off did not foresee answers
+  `spi_overrun` (what the transaction does next is per host, below),
+  tested in a status read made after the data read: a status copy taken before it misses the overrun the
   frame in flight behind it raises (measured on the CH32V203C8T6, the
   CH32V303VCT6, the STM32F446RE and the CH32V006K8U6). On the
   CH32X035F8U6 the data read itself clears a flag the status load before
@@ -269,19 +292,29 @@ inside `start()`, and the arbiter replies with whatever the engine's
   side to be empty: in the modes with CPHA = 1, frame k's receive flag
   stands before frame k + 1 has left the transmit buffer (measured on
   the CH32V006K8U6); on the CH32X035F8U6 the receive flag leads in every
-  mode by less than a status load, the wait never turns, and it stands
-  because the manual does not order the two flags. The hold-off is a fact of the image and not of the
-  family, so the host takes it as its last template parameter,
+  mode by less than a status load, the wait never spins, and the code
+  keeps it because the manual does not order the two flags. The hold-off
+  is a fact of the image and not of the
+  family, so the host takes it as a template parameter,
   `hold_off_cycles`, declared by the application or its board file,
   defaulting to the longest the family's own images measure and refused
   at zero. A host with DMA engines may ride them inside `start()` where
   that is cheaper (a long read, the loop's dead bus a frame outweighing
-  the engines' fixed cost), `start()` waiting on their completion. The
+  the engines' fixed cost), `start()` waiting on their completion, which
+  is `dma_isr()` in the DMA vector. So on such a host a `polled` request
+  can need that vector too: bound, with interrupts enabled. Left
+  unbound, the completion interrupt lands in the startup code's default
+  handler, a spin that never returns, since binding the engines enabled
+  the line. Only a host with no engines needs no vector. That wait has a
+  budget of its own, long enough that a dead channel holds the dispatch
+  195 ms on a 64-frame request (measured on the CH32X035 at 48 MHz). The
   polled path reads the lent request in place and copies nothing; a
-  request of a few bytes costs the host a few hundred cycles above the
-  wire on every family, measured by letter e of each family's benchmark
-  suite ([benchmark.md](benchmark.md)) and stated in each family's SPI
-  document beside the vendor's own loop on the same board.
+  request of three frames at /16 costs the host 223 to 539 cycles above
+  the wire on the families letter e of [benchmark.md](benchmark.md)
+  measures, whose table sets the vendor's own loop beside it on the
+  boards where it was run. The CH32X035 has no benchmark suite: its
+  figure is `test_x035_spi` letter b's, 1096 to 1116 cycles in all from
+  the flash against the wire's 384, the suite's own call inside it.
 - **Asynchronous** (`polled = false`), and **asynchronous is DMA**. The
   data rides the host's DMA engines: `start()` arms them and returns
   false, and the engines' completion interrupt, `dma_isr()` returning
@@ -299,7 +332,9 @@ inside `start()`, and the arbiter replies with whatever the engine's
   - **A short request runs polled.** Where the engines' fixed cost
     exceeds the polled transfer at the request's rate, `start()` runs
     it polled and returns true - the synchronous completion the arbiter
-    already handles. The threshold is derived per family from its
+    already handles. So `polled = false` does not promise that `start()`
+    does not spin: a short request holds the dispatch for its whole time
+    on the wire, as a polled one does. The threshold is derived per family from its
     measured costs and never guessed: E, the engines' fixed cost to the
     core (the arming, the one interrupt, the completion), against a
     polled transaction's fixed part F and a frame's cost at the code
@@ -308,15 +343,16 @@ inside `start()`, and the arbiter replies with whatever the engine's
     request rides the engines from the smallest frame count N with F +
     N x frame >= E. The host computes the frame's cost when the rate is
     applied (configure once, operate minimally), so a request pays a
-    multiply and a compare; the arithmetic and the figures are the
+    multiply for each phase and a compare (the CH32V00x a compare alone,
+    on two counts kept per code); the arithmetic and the figures are the
     family header's and its SPI document's. On the CH32X035 at 48 MHz,
     for instance, a read of byte frames rides the engines from 14 frames
     at 24 MHz and 12 MHz, 5 at 3 MHz and 1 from 375 kHz down (the default
     placement of its loops).
 
   A family may add one exception, stated in its header: a request its
-  engines cannot carry at all (a beat off its boundary) runs polled
-  whichever way it asked, since a refusal would make the answer depend
+  engines cannot carry at all (a 16-bit frame's buffer at an odd address,
+  where the channel moves half-words) runs polled whichever way it asked, since a refusal would make the answer depend
   on where a buffer happens to sit.
 
 Why asynchronous is DMA and not a per-frame interrupt: measured on the
@@ -334,10 +370,20 @@ into a lost frame. The I2C hosts and the UARTs keep their interrupt
 engines: a byte at 400 kHz is about a thousand cycles of a 48 MHz
 core, several times their handlers.
 
+The rule counts core cycles and not time awake, where I2C's lets time
+awake decide on some chips ([i2c-bus.md](i2c-bus.md), "Which engine moves
+a half"). On a chip whose
+Sleep stops the DMA (the CH32V003, the CH32V203 and CH32V303, the
+CH32X035) the kernel's idle does not sleep while a channel works
+(`qingke/platform.hpp`), so the engines keep the core awake for the
+wire's time. A polled transfer keeps it spinning that long too, so time
+awake does not tell SPI's two ways apart, where an I2C pump lets the
+core sleep between bytes.
+
 On a synchronous completion the arbiter replies immediately, and
 whenever a transfer ends it keeps draining the pending FIFO through
-any further synchronous requests (`begin_waiting`, each answered and
-released in turn), going or staying `busy` only when a transfer
+any further synchronous requests (each answered and released in
+turn), going or staying `busy` only when a transfer
 actually stays in flight. Both ways interleave freely on one bus. A
 request of zero total length completes on the spot, wire untouched;
 the reply still arrives, so nothing hangs silently.
@@ -346,25 +392,28 @@ A synchronous completion is not a success by definition. On an engine
 with DMA slots a polled request may still move its bulk over the
 engines, and `start()` waits on their completion with a bounded budget;
 a block that never completes (a channel the silicon stopped, a clock
-that stopped, the DMA vector left unbound) ends the request inside
+that stopped) ends the request inside
 `start()` with `spi_dma_fault` in `status()`, chip select raised, and
 that code is what the requester's `SpiDone` carries, the same code the
 asynchronous way reports through `TransferDone`. Beside it a host may
-answer two codes of its own, spelled once in `util/spi_bus.hpp` with
-one value on every family (the range `util/bus_master.hpp` leaves to
-engines: `spi_dma_fault` first, then these two). `spi_overrun` is a
-frame lost to the receive side: a frame landed while the previous one
-still stood unread, so every frame went out and one that came back is
-missing, and the transaction ends there rather than hand back a run
-with a hole in it. `spi_stalled` is a polled wait that ran out of the
-transaction's one spin budget (a flag that never rose, a block whose
-clock does not run), with the select released and the receive side
-drained. `spi_dma_fault` is defined by the host that has engines,
-because only a host with engines can answer it; the two others are
-every host's, so a client written over the vocabulary alone tells a
-lost frame from a dead block without naming a family. Which of them
-a host can answer is in its row above and in its document. The
-completion policy (`util/bus_master.hpp`) judges asynchronous
+answer two codes spelled once in `util/spi_bus.hpp` with one value on
+every family (the range `util/bus_master.hpp` leaves to engines:
+`spi_dma_fault` first, then these two).
+
+`spi_overrun` is a frame lost to the receive side: a frame landed while
+the previous one stood unread. On the STM32F4 and the CH32V203 and
+CH32V303 the transaction stops at the lost frame, so later frames never
+go out. On the CH32V00x and the CH32X035 it clocks to its end and leaves
+a hole in the in buffer, under the status.
+
+`spi_stalled` is a polled wait that ran out of its spin budget (a flag
+that never rose, a block whose clock does not run), with the select
+released and the receive side drained. The PL022 hosts never answer it:
+there a polled wait that ran out answers `spi_dma_fault`, with or
+without engines.
+
+Which of the codes a host can answer is in its row above and in its
+document. The completion policy (`util/bus_master.hpp`) judges asynchronous
 completions only: a retry of a failure reported inside `start()` would
 run inside the same dispatch, compounding the waiting the polled
 client bounded on purpose, so the failure reaches that requester as it
@@ -392,7 +441,7 @@ Found with the MCP3550 on the analyzer, both general:
   the first SCK edge, spun in `start()`. Most devices need nothing
   beyond the 1.5 us or so the code path takes; the MCP3550 waking from
   shutdown needs a few microseconds or it drops the frame. Bounded by
-  a byte, in the loop's context, chosen by the client that knows its
+  a byte, spent in main context, chosen by the client that knows its
   device.
 
 ## Transaction economics
@@ -421,9 +470,9 @@ host clocks itself, but a dead engine whose completion never posts: a
 DMA channel that stopped running, a completion interrupt that simply
 never fired, a host demoted mid-transfer by a second device on its
 select. A host that runs every request polled (the AVR's, the SAM
-C21's) never leaves one open, so the timeout never arms over it. A
-wedged transaction then comes back `spi_timeout` on the arbiter's
-clock, `SpiHost::recover()` having silenced the stale completion, put a
+C21's) never leaves one open, so the timeout never arms over it. On a
+host that can, a wedged transaction comes back `spi_timeout` on the
+arbiter's clock, `SpiHost::recover()` having silenced the stale completion, put a
 demoted block back to a host (CH32V203) or run the disable procedure
 and the RCC reset (STM32G0), and closed the select window so the device
 sees the transaction end. Staged and measured on silicon: on the

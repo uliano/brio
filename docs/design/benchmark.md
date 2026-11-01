@@ -343,8 +343,8 @@ overrun flag read after every one; `spi.poll` a polled write of 256
 frames (no receive buffer: the display's pixel path), `spi.poll.rx`
 the same with one (the shape that keeps as many frames in flight as
 the receive side holds under any handler of the image: a FIFO's depth,
-two on a two-level buffer, and on a one-deep register two only above
-the family's computed rate threshold), the asynchronous column the
+two on a two-level buffer, and on a one-deep register two only at the
+family's computed threshold rate and slower), the asynchronous column the
 host's count (the fewest byte frames a read must have to ride the
 engines, a shorter one running polled inside `start()`; a family with no
 DMA refuses an asynchronous request), `spi.req` a polled request of one command byte and two of
@@ -362,7 +362,7 @@ library was read). The rates named are SCK.
 | SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.32, 1.01 (42 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | refused: no DMA slot (erratum 1.10.4) | 539 | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
 | STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.12, 1.01 (1.05 at /4 in an image placing the loop elsewhere) | 18 frames (5 at /16) | 414 with the loop in the flash, 382 in SRAM, the stopwatch's ~62 inside | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
 | STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.44 (one in flight below the 236-cycle threshold), 1.00 (two) | 5 frames (2 at /16) | 250 | HAL 2.97, 1.30 |
-| CH32V006K8U6 (48 MHz; 12 and 3 MHz) | 1.03, 1.00 | 1.87 (one in flight), 1.21 (one in flight below /64; the wire's from /64 with two) | 9 frames (4 at /16) | 371 | not run on this board |
+| CH32V006K8U6 (48 MHz; 12 and 3 MHz) | 1.03, 1.00 | 1.87 (one in flight), 1.21 (one in flight at /32 and faster; the wire's at /64 and slower, with two) | 9 frames (4 at /16) | 371 | not run on this board |
 | CH32V203C8T6 (144 MHz; 36 and 9 MHz) | 1.02, 1.00 | 1.62 (one in flight), 1.09 | 5 frames (2 at /16) | 256 | the EVT's 2Lines loop 1.23, 1.00, and it loses a frame in every run at /4 on 8-bit frames |
 | CH32V303VCT6 (144 MHz; 36 and 9 MHz; the V4F, ilp32f) | 1.02, 1.00 | 1.37, 1.14 | 9 frames (3 at /16) | 223 | not run on this board |
 | RP2040 (125 MHz; 31.25 and 7.8125 MHz) | 1.28, 1.00 in mode 3 (1.28, 1.19 in mode 0: the loop's 40 cycles a frame, then the block's gap) | 1.34, 1.00 in mode 3 (42 cycles a frame received and stored) | 7 frames in mode 0 (4 at /8) | 401 | pico-sdk ([the RP2040 SPI page](../rp2040/spi.md)) |
@@ -382,10 +382,10 @@ What the rows say:
 - The polled read is bounded by the receive side: where the block has
   a FIFO or a two-level buffer it reads at the wire too; on the
   one-deep F1 lineage (the STM32F4, the CH32V203, the CH32V303, the
-  CH32V006) it keeps one frame in flight below the family's threshold
-  and pays the turnaround every frame, 1.37 to 1.87 at /4, because two
+  CH32V006) it keeps one frame in flight at rates faster than the
+  family's threshold and pays the turnaround every frame, 1.37 to 1.87 at /4, because two
   in flight lose a frame to any handler longer than the frame time,
-  measured on every family that tried it; above the threshold it is
+  measured on every family that tried it; at the threshold and slower it is
   the wire's. A loop that refills on TXE whenever it can (the EVT's
   shape) falls behind the wire cumulatively at /4 and loses frames
   with nothing live but the tick.

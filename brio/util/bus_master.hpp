@@ -118,9 +118,10 @@
  * template argument's, and the arbiter is again the only honest home:
  * it is the one object that knows a completion is owed, and it lives in
  * a kernel that has TimeEvents. The engine is interrupt-driven and owns
- * no clock, and the silicon's own time-outs (where they exist at all)
- * police the host's own clock hold and not a wire a client wedged:
- * measured, and the reason this layer carries a timeout at all. With
+ * no clock, and the silicon's own time-outs, where they exist at all, fall
+ * short of it: none sees a data line held low, and only the SAM C21's bound
+ * a client's clock stretch: measured, and the reason this layer carries a
+ * timeout at all. With
  * timeout_ticks != 0 every transfer that goes asynchronous arms a
  * one-shot TimeEvent (per wire transfer, so a retry arms it afresh); if
  * it matures first, the engine is declared dead:

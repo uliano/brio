@@ -5,8 +5,8 @@
  * talk to a device on an SPI bus - a display, a flash chip, a converter,
  * several of them sharing the four wires - or to answer on such a bus as
  * a client; the same registers become an I2S audio interface when
- * I2SMOD is set. Three types, in the two layers every brio bus driver
- * has (docs/design/spi-bus.md):
+ * I2SMOD is set. Three types, in the layers every brio bus driver has
+ * (docs/design/spi-bus.md):
  *
  *   Spi<n>        the resource: one instance by number - where its
  *                 registers are, its APB clock and reset, its NVIC line,

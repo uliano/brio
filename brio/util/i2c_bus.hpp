@@ -52,9 +52,9 @@ inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< protocol v
 /// The tenure never answered inside the arbiter's per-bus timeout: the
 /// engine was recover()ed, and the wire is now the application's to
 /// judge (unstick(), re-probe: the recovery ladder). The arbiter's code,
-/// not the engine's: see bus_master.hpp on why a client-wedged wire has
-/// no silicon timeout on any engine here (measured; the reasoning is in
-/// docs/design/i2c-bus.md, "The per-bus timeout").
+/// not the engine's: no silicon time-out here sees a held SDA, and only
+/// the SAM C21's, armed, bound a client's hold of SCL (measured; the
+/// reasoning is in docs/design/i2c-bus.md, "The per-bus timeout").
 inline constexpr uint8_t i2c_timeout = bus_timeout;
 
 /// The 7-bit addresses a Request may name: 0x08 to 0x77, the range the
