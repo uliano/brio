@@ -8,8 +8,7 @@
  * from SRAM. The smallest use names the tag in the driver's alias, here
  * the CH32V00x's SPI host with its polled loops in SRAM:
  *
- *     using SpiRam = brio::SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine,
- *                                  spi_default_hold_off_cycles, InRam>;
+ *     using SpiRam = brio::SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
  *
  * Nothing else changes for the caller: the driver's verbs, their
  * contexts and their waits are the same under either tag, and nothing

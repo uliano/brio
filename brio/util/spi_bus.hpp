@@ -22,19 +22,20 @@
  * request's buffers until when and the engine contract is documented
  * once, in bus_master.hpp; the SPI engine descriptor and its two ways to
  * run a request live in each target's SpiHost and in
- * docs/design/spi-bus.md: polled, the transaction done inside start(), or
- * asynchronous, which is DMA - the host's engines carry it and their
+ * docs/design/spi-bus.md. Polled is an explicit loop at any length: no
+ * DMA and no interrupt vector, and start() returns when it is done.
+ * Asynchronous is DMA: the host's engines carry the request and their
  * completion is the TransferDone, a host with no engines refuses it
  * (spi_rejected at once, nothing on the wire; the host type's `has_dma`
  * says so at compile time), and a request too short to repay the engines'
- * fixed cost runs polled inside start().
+ * fixed cost runs the same loop inside start().
  *
  * SPI has no wire-level failure the engine can detect (no acknowledge,
- * no arbitration): what a host can report is its own (a frame it lost,
- * a wait it gave up on, a DMA block it could not finish), so the codes
- * past the arbiter's are the host's: two are spelled here once (spi_overrun,
- * spi_stalled), spi_dma_fault with each host that defines it, and each
- * host's header says which it answers.
+ * no arbitration): what a host can report is its own (a wait it gave up
+ * on, a DMA block it could not finish), so the codes past the arbiter's
+ * are the host's: spi_stalled is spelled here once, spi_dma_fault with
+ * each host that defines it, and each host's header says which it
+ * answers.
  */
 
 #pragma once
@@ -64,28 +65,23 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 // ---- the host's own codes, in the range bus_master.hpp leaves to engines ----
 //
 // bus_engine_status + 0 is `spi_dma_fault`, defined by every stratum whose
-// host has DMA engine slots and by none that has not: a block the engines
-// could not finish (a transfer error, a block that never completed), and
-// on the PL022 hosts also a polled wait that ran out. The two below have
-// one spelling and one value on every family.
+// host has DMA engine slots and by none that has not: the engines reported
+// a block they could not finish. Only the engines answer it, so only an
+// asynchronous request that rode them can carry it; a block that simply
+// never completes is the arbiter's spi_timeout, on a bus with a timeout.
+// The code below has one spelling and one value on every family, distinct
+// from that one.
 
-/// The host lost a frame: the receive side was overrun - a frame landed
-/// while the previous one still stood unread (one register deep on the
-/// F1 lineage's blocks, a FIFO's depth elsewhere), which with frames
-/// written ahead means the handler, or the polled loop under a long
-/// handler, came later than the receive side could hold. On the STM32F4
-/// and the CH32V203 and CH32V303 the transaction stops at the lost frame,
-/// so later frames never go out. On the CH32V00x and the CH32X035 it
-/// clocks to its end and leaves a hole in the in buffer, under the status.
-inline constexpr uint8_t spi_overrun = bus_engine_status + 1u;
 /// A polled wait ran out: a flag the loop waited for never rose within
 /// the transaction's one spin budget - a block whose clock does not run
-/// (a gate closed, the enable down, a mode fault that demoted it). The
-/// select is released and the receive side drained; what else the host
-/// does to the block (a reset and a reconfiguration, or nothing but
-/// the arbiter's recover() as the way back) is the family's. The PL022
-/// hosts never answer it: there a polled wait that ran out answers
-/// spi_dma_fault, with or without engines.
+/// (a gate closed, the enable down, a mode fault that demoted it). Every
+/// host whose loop has such a budget answers it, whether the request
+/// asked for the loop or was short enough to run it; the AVR's has none,
+/// a transfer written there always completing. The select is released
+/// and the receive side drained; what else the host does to the block (a
+/// reset and a reconfiguration, or nothing) is the family's. On the
+/// PL022 hosts it does nothing else: the way back is recover(), the
+/// program's to call with the bus idle.
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
 /// The arbiter under SPI's name. `pending_depth` is how many requests

@@ -738,7 +738,11 @@ beside them:
 
 The V4F's E is the longer by its DMA vector, a naked trampoline over a
 handler that saves the f-registers ([platform.md](platform.md)); its
-loops are the quicker by a few cycles. On SPI1 the counts are, for a byte
+loops are the quicker by a few cycles. The transmit-only turn moves with
+where the image places the loop, 16.0, 17.0 and 18.1 cycles on three images
+of the V4F's one source, so the letter allows a turn 3 cycles from its
+constant (2 of that placement and 1 of the reading's own rounding and ruler),
+which fails a constant 4 or more cycles out. On SPI1 the counts are, for a byte
 read at /2, /4, /16 and /256, 8, 6, 2 and 1 frames on the CH32V203 and 12,
 10, 3 and 1 on the CH32V303, and for a byte write at /2, 17 and 22 (pinned
 by the header's static_asserts). Letter g walks the edge itself at a read

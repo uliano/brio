@@ -665,8 +665,8 @@ character its polled loop has not fetched yet. What it established:
   bus and never a lost frame: 32 frames a window byte-exact at both ends
   at every BAUD from 119 (200 kHz) to 11 (2 MHz), under every pressure
   as in the control, BUFOVF read clear at every reply in every pass of
-  the ten runs, no `spi_stalled`. This host has no
-  `spi_overrun` and needs none. The polled loop at 3 and 4 MHz is
+  the ten runs, no `spi_stalled`. This host loses no
+  frame, for that reason. The polled loop at 3 and 4 MHz is
   printed, wrong in every pass as the AVR client's ceiling makes it
   ([spi.md](spi.md)'s peer ladder).
 - **A polled window masks nothing.** The loop runs with interrupts

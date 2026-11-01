@@ -1057,23 +1057,21 @@ verbs of a `Ring` ([ring.md](ring.md)); the guard covers each verb, not
 a run a producer fills between `write_span()` and `publish()`, so a
 transmit ring two objects write is corrupted inside a run, and the one
 owner is the rule there. A polled loop a service runs inside its own
-dispatch (the bus arbiter's loop with two frames in flight) is held off
-by every dispatch above the service for that dispatch's whole length,
-which the service's hold-off figure, the image's longest handler or
-masked window, does not count: under Rubato the hold-off is the
-longest dispatch above the service, and a preemption that outlasts a
-frame ends the transaction with the status the service detects
-(`spi_overrun` on the STM32F4, on the CH32V203 and CH32V303 and on the
-CH32X035, measured: the service never hands back a run with a hole, the
-requester sees the status);
-where the
-write-ahead is a receive FIFO that holds every frame in flight (the
-STM32G0's SPI and the PL022 of the RP2040 and the RP2350, measured), or a write-ahead of two against a two-level
-receive buffer (the SAM C21's SERCOM, measured), the same hold-off is a
-gap on the bus and no frame is lost, and the polled window masks
-nothing: the SAM C21's preempting object entered at most 1.15 of its
-periods apart across polled windows at 2 to 4 MHz (one run, [its
-platform page](../samc21/platform.md)); the DMA engines carry no such
+dispatch (the bus arbiter's SPI loop) is held off by every dispatch above
+the service for that dispatch's whole length. On SPI that is a gap on the
+bus and no frame is lost, because a master owns the clock and the loop
+keeps no more frames in flight than the receive side holds: one on a
+one-deep register, two against a two-level buffer, a FIFO's worth on a
+FIFO ([spi-bus.md](spi-bus.md), "Two ways to run a request"). Measured
+under Rubato, the windows byte-exact at both ends under every pressure as
+in the control: no polled rung of 1008 lost in 18 runs on the STM32F446RE,
+of 1512 on each of the CH32V203C8T6 and the CH32V303VCT6, of 2016 in each
+placement of the CH32X035F8U6's scheduler; the host's overrun flag read
+clear at every reply on the STM32G0B1RE, the RP2040, the RP2350 and the SAM
+C21. The polled window masks nothing:
+the SAM C21's preempting object entered at most 1.15 of its periods apart
+across polled windows at 2 to 4 MHz (one run, [its platform
+page](../samc21/platform.md)); the DMA engines carry no such
 limit. For a UART that is one direct writer per
 instance, in one of two forms, independent and never stacked on one
 instance: a bookable transport object (a `Request` with a run lent

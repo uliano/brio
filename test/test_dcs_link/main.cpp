@@ -728,8 +728,8 @@ TEST_CASE("a verb answers with the engine's status, and on a bus made of RAM it 
     // verb is `start() && status() == spi_ok`, and this world has no
     // wire to fail on and no engine to wedge - a refusal is the only
     // false it can produce (the case above). What the pair buys is the
-    // engine's own code on the silicon, where a polled request over DMA
-    // engines can come back spi_dma_fault inside start().
+    // engine's own code on the silicon, where a polled request whose
+    // block does not clock comes back spi_stalled inside start().
     REQUIRE(link.command(Dcs::nop, {}));
     CHECK(link.status() == spi_ok);
     CHECK(Host::status() == spi_ok);

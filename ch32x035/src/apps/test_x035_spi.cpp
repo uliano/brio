@@ -79,8 +79,9 @@
 //      two-way reversal, the receive CRC over the foreign frames, and which
 //      frame the buffer keeps when one is lost
 //   p  (y) THE LADDER against the peer, /256 to /2 on the polled host and
-//      on the engines, both of the peer's serves, /2 = 24 MHz with and
-//      without the high-speed read, and the high-speed read's own ladder
+//      on the engines, both of the peer's serves, /2 = 24 MHz judged with
+//      the high-speed read as the driver's default has it and printed
+//      without, and the high-speed read's own ladder
 //   k  (y) THE CLIENT'S RUNS: the peer's answer, exchange and receive runs
 //      (its driver's SpiClient runs), 8- and 16-bit frames, under the
 //      polled host - a gap after every frame, the control - and back to
@@ -2519,6 +2520,12 @@ void tp_peer_rates() {
             e.rate = static_cast<SpiClock>(code);
             e.count = serves[s].polled_host ? 8 : 32;
             e.engines = !serves[s].polled_host;
+            // The engines against the peer's DMA serve are judged as a
+            // program gets them: HSRXEN at /2, the driver's default (the
+            // polled host's init() leaves it on as well). Without it a
+            // client's answer at /2 has no margin (datasheet table 3-19),
+            // so the bit's absence is the print below and never a verdict.
+            e.high_speed = !serves[s].polled_host && !serves[s].polled_peer && e.rate == SpiClock::div2;
             e.spare = serves[s].polled_peer ? spilink::spare_polled_pump : 0;
             e.seed_a = static_cast<uint8_t>(0x21 + code);
             e.seed_b = static_cast<uint8_t>(0x84 + code);
@@ -2535,7 +2542,8 @@ void tp_peer_rates() {
         }
         print(serial, crlf);
     }
-    // /2 = 24 MHz with the high-speed read, both host paths, the peer's DMA.
+    // /2 = 24 MHz on the engines with the high-speed read, the peer's DMA, and
+    // the same window without it: printed, no verdict, what the bit buys.
     Exchange hs{};
     hs.rate = SpiClock::div2;
     hs.count = 32;
@@ -2582,7 +2590,8 @@ void tp_peer_rates() {
     // CH32V006's exchange run from its flash, letter k), judged to /8.
     const auto held_to_div8 = [](uint8_t broke) { return broke == 8u || broke < 2u; };
     bench.verdict("BOTH HOST PATHS, the polled loop and the engines, are exact against the peer's DMA serve at every "
-                  "code to /2 = 24 MHz (table 3-19's ceiling for both roles)",
+                  "code to /2 = 24 MHz (table 3-19's ceiling for both roles), the high-speed read as the driver's "
+                  "default has it",
                   exact_to[0] == 8u && exact_to[1] == 8u);
     bench.verdict("and against the peer's polled run to /8 = 6 MHz, the run's own ceiling printed above",
                   held_to_div8(exact_to[2]) && held_to_div8(exact_to[3]));

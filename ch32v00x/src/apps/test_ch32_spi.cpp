@@ -1488,9 +1488,9 @@ bool within(uint32_t got, uint32_t want, uint32_t pct) {
 }
 
 /// The engined host's figures against the constants it states for its
-/// placement: E - F for a read and a write within 15 % (some 70 cycles,
-/// two or three frames at /4: E itself moved by 60 cycles from image to
-/// image, 986 to 1059 through the same call), the loops' turns at /2
+/// placement: E - F for a read and a write within 15 % (some 70 cycles on
+/// the CH32V006, two or three frames at /4: E itself moved by 60 cycles from
+/// image to image, 986 to 1059 through the same call), the loops' turns at /2
 /// within 10 % and the receive loop's dead bus at /4 within 2 cycles from
 /// the flash, where the host aligns the loops, and within 5 in SRAM, where
 /// the loop's instance sits where the image puts it (8 and 16 cycles

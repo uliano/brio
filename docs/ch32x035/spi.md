@@ -377,7 +377,7 @@ OVR's clear, the fault exits - runs with the far board's client
 deselected: 39 verdicts, three runs green, letters `a`, `b`, `e` and `f` ten
 each. `y` on the second against the CH32V006 running `spi_peer` on its
 crystal, commanded in band through spi_link: 44 verdicts, three runs green,
-its handler letter `h` fifteen. Letter `d`, run by
+its handler letter `h` fifteen, its ladder letter `p` forty. Letter `d`, run by
 its own key on the first image and not in `z`, prints a table and judges nothing: the witness of
 what the silicon does at a frame's end, above.
 
@@ -422,9 +422,12 @@ what the silicon does at a frame's end, above.
   two-way reversal. And two of the
   client's frames clocked with nothing read leave OVR up and the first frame
   in the buffer, the third read next exact, 8 of 8 (the frame a loss keeps).
-- **The ladder against the peer** (letter p): the polled host and the
-  engines exact at every code to /2 = 24 MHz against the peer's DMA
-  serve, /2 with the high-speed read and without; the peer's polled run is
+- **The ladder against the peer** (letter p, 43 runs): the polled host and
+  the engines exact at every code to /2 = 24 MHz against the peer's DMA
+  serve, /2 with the high-speed read as the driver's default has it, in
+  every run; the same window on the engines with the bit off, printed and
+  not judged, read one frame wrong at this end in 3 of the 43, the client's
+  own hearing exact in all of them. The peer's polled run is
   its own ceiling, exact to /8 behind both the polled host and the
   engines' back-to-back frames. HSRXEN's /3, /5 and /6 (16, 9.6 and 8
   MHz) exact on the engines.

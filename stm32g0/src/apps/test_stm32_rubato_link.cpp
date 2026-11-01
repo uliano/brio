@@ -31,8 +31,8 @@
 //   receive shapes keep no more frames in flight than the RXFIFO holds -
 //   three byte frames, two half-words, four packed - so a dispatch above
 //   the arbiter that holds the polled loop off for any length leaves a GAP
-//   ON THE BUS and never a lost frame; the host has no spi_overrun, its
-//   one failure spi_stalled, a wait budget counted in poll turns that a
+//   ON THE BUS and never a lost frame; the host's one polled failure is
+//   spi_stalled, a wait budget counted in poll turns that a
 //   preemption does not spend (spi.hpp, "The host task"). MOSI goes out
 //   at `high`, one class below the driver's default (docs/stm32g0/spi.md,
 //   "The peer link": the very-high class slips the rising-edge modes at

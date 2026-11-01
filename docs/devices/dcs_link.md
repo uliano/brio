@@ -198,7 +198,8 @@ Four rules the realization keeps, each of which a suite checks:
   ([../design/spi-bus.md](../design/spi-bus.md)), so `start()` answers
   `true` for it - a request the engine refuses without moving a byte
   included - and the status carries the engine's code: a polled transfer
-  over DMA engines can come back `spi_dma_fault` from inside `start()`.
+  whose block does not clock comes back `spi_stalled` from inside
+  `start()`.
   A `false` from `start()` is the asynchronous answer, which no host in
   the tree gives for a polled request. Only the link's own refusals
   (`valid()` false, a span over 65535 bytes) run no transaction and

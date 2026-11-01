@@ -476,8 +476,8 @@ write; the receive loop 54.0 cycles a frame at HCLK/4 (22 of dead bus)
 and 30.0 at HCLK/2, the transmit-only loop 24.0 at HCLK/2. From SRAM,
 E - F 389 to 457 and 417 to 450, the dead bus 8 or 16 by the layout
 (above), the turns 28 to 29 and 16. The host's constants
-(`spi_costs_in_flash` {475, 480, 22, 30, 24}, `spi_costs_in_ram` {415,
-430, 12, 29, 16}) give, from the flash, a read of byte frames on the
+(`spi_costs_ch32v006_in_flash` {475, 480, 22, 30, 24}, `spi_costs_in_ram`
+{415, 430, 12, 29, 16}) give, from the flash, a read of byte frames on the
 engines from 13, 9, 6, 4 and 2 frames at HCLK/2 to /32 and from one at
 /64, a write from 20, 15, 8, 4 and 2. The edge measured stands within a
 frame of the arithmetic on the same figures at every shape and run - 8 to
@@ -487,6 +487,17 @@ dead bus at HCLK/2 is 14 cycles where at HCLK/4 it is 22, the rule taking
 the larger (a request of 13 to 15 frames costs the core some 60 cycles
 more on the engines than polled - the rule asks for the order of magnitude,
 and gets it).
+
+The CH32V003F4P6 has constants of its own, the same arithmetic on its own
+figures, which the build picks by part: the same letter there, ten runs
+identical, E 855 through the call, E - F 293 for a read and 283 for a write,
+the receive loop 54.0 cycles a frame at HCLK/4 (22 of dead bus) and 38.0 at
+HCLK/2, the transmit-only loop 20.0 at HCLK/2. `spi_costs_ch32v003_in_flash`
+{295, 285, 22, 38, 20} gives a read of byte frames on the engines from 8, 6, 4,
+2 and 2 frames at HCLK/2 to /32 and a write from 15, 9, 5, 3 and 2, either from
+one at /64, and the edge the letter measures at its three shapes is the host's
+count, 6, 8 and 15. A CH32V003 with its loops in SRAM takes the CH32V006's
+SRAM set: no image measures that placement on this part.
 
 NO MULTIPLY ON THE PATH. The CH32V003's core has no multiplier (a
 multiply there is a call into libgcc), so the host keeps no frame cost
@@ -840,12 +851,9 @@ are the CH32V006's (below, "Not covered yet").
   never ended); the polled write 1.04 of the wire at 256 frames of
   HCLK/4; the receive loop's frame over the wire, `spi.frame` from the
   flash, 22 cycles in 8-bit frames and 14 in 16-bit ones, the same at every
-  code and in modes 0 and 1. Its short-request figures, letter g through the
-  same call: E 855, E - F 293 for a read and 283 for a write, the receive loop
-  54.0 cycles a byte at HCLK/4 and 38.0 at HCLK/2, the transmit-only loop 20.0
-  at HCLK/2 - against constants that are the CH32V006's, so the letter's
-  constants verdict fails there, its edge verdict holding (below, "Not covered
-  yet"). And letter c's receive frame 534.0 at HCLK/64 and 1045.9 at HCLK/128.
+  code and in modes 0 and 1. Its short-request figures are in "The short
+  request" above. And letter c's receive frame 534.0 at HCLK/64 and 1045.9 at
+  HCLK/128.
 
 ### This part as the desk's instrument: `spi_peer`
 
@@ -941,12 +949,10 @@ Implemented but not bench-verified, each with what would measure it:
   bit is 1 after a window of zeros, would measure it.
 - The suite's letters against a peer on the CH32V003F4P6: its seventeen group
   images link (`brio fit`), the letters that need no peer ran; a CH32V003
-  wired to the CH32X035 as the CH32V006 is would run the others. Its short
-  request's constants are the CH32V006's, measured apart: E - F 293 and 283
-  against the constants' 475 and 480 (bench findings), which put a read at
-  HCLK/4 on the engines from 9 frames where 6 repay them there. A part's own
-  constants would need a place in the host, and a request those few frames from
-  the edge costs some tens of cycles either way.
+  wired to the CH32X035 as the CH32V006 is would run the others.
+- The CH32V003F4P6's short-request figures with the host's loops in SRAM: it
+  takes the CH32V006's set, unmeasured here; letter g's second placement built
+  for this part, in an image of its own, would measure it.
 - The host's read of an answering client at HCLK/2: wrong whenever MISO
   toggles (bench findings, letter s), the timing budget
   of table 3-19 not closing at 24 MHz, so the engines' exchanges at /2

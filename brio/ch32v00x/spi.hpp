@@ -678,7 +678,15 @@ struct SpiHostCosts {
 /// image puts the loop's instance, 8 or 16 cycles at /4 in two layouts, and
 /// the constant is between them (docs/ch32v00x/spi.md, "The short
 /// request").
-inline constexpr SpiHostCosts spi_costs_in_flash{475u, 480u, 22u, 30u, 24u};
+inline constexpr SpiHostCosts spi_costs_ch32v006_in_flash{475u, 480u, 22u, 30u, 24u};
+/// Measured on the CH32V003F4P6 at 48 MHz (test_ch32_spi letter g on its
+/// engined host, bench_ch32 letter e for the frame): the same code on
+/// another core costs another E and another F. No image measures this part
+/// with its loops in SRAM, so the SRAM set below is the CH32V006's on both.
+inline constexpr SpiHostCosts spi_costs_ch32v003_in_flash{295u, 285u, 22u, 38u, 20u};
+/// The part's set, the one the host reads.
+inline constexpr SpiHostCosts spi_costs_in_flash =
+    device::part == Ch32Part::v003 ? spi_costs_ch32v003_in_flash : spi_costs_ch32v006_in_flash;
 inline constexpr SpiHostCosts spi_costs_in_ram{415u, 430u, 12u, 29u, 16u};
 
 /// What a polled frame costs the core at a code and width, read or
@@ -2202,32 +2210,50 @@ static_assert(spi_frame_cycles(SpiClock::div2, SpiDataSize::bits8) == 16u);
 static_assert(spi_frame_cycles(SpiClock::div16, SpiDataSize::bits8) == 128u);
 static_assert(spi_frame_cycles(SpiClock::div256, SpiDataSize::bits16) == 4096u);
 
-// The short asynchronous request (the arithmetic above SpiHostCosts): from
-// the flash, E - F = 475 cycles for a read and 480 for a write; a byte
-// frame read costs 38 at /2 (the wire and the dead bus), 54 at /4, 86 at
+// The short asynchronous request (the arithmetic above SpiHostCosts): on the
+// CH32V006, from the flash, E - F = 475 cycles for a read and 480 for a write;
+// a byte frame read costs 38 at /2 (the wire and the dead bus), 54 at /4, 86 at
 // /8, 150 at /16, 278 at /32, 534 at /64; written, 24 at /2 (the loop's
 // turn) and the wire at /4 and slower. So a read rides the engines from 13,
 // 9, 6, 4 and 2 frames at /2 to /32 and from one at /64, a write from 20, 15,
 // 8, 4 and 2. From SRAM, 415 and 430 over a dead bus of 12: a read from 15, 10,
 // 6, 3, 2.
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 13u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 9u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 6u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 4u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div32, SpiDataSize::bits8, true) == 2u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div64, SpiDataSize::bits8, true) == 1u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 20u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, false) == 15u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, false) == 8u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, false) == 4u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div32, SpiDataSize::bits8, false) == 2u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div64, SpiDataSize::bits8, false) == 1u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits16, true) == 9u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 13u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 9u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 6u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 4u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div32, SpiDataSize::bits8, true) == 2u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div64, SpiDataSize::bits8, true) == 1u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 20u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div4, SpiDataSize::bits8, false) == 15u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div8, SpiDataSize::bits8, false) == 8u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div16, SpiDataSize::bits8, false) == 4u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div32, SpiDataSize::bits8, false) == 2u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div64, SpiDataSize::bits8, false) == 1u);
+static_assert(spi_async_min_frames(spi_costs_ch32v006_in_flash, SpiClock::div2, SpiDataSize::bits16, true) == 9u);
 static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize::bits8, true) == 15u);
 static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div4, SpiDataSize::bits8, true) == 10u);
+// On the CH32V003, from the flash, E - F = 295 and 285; a byte frame read costs
+// 38 at /2, 54 at /4, 86 at /8, 150 at /16, 278 at /32; written, 20 at /2 and
+// the wire at /4 and slower. So a read rides the engines from 8, 6, 4, 2 and 2
+// frames, a write from 15, 9, 5, 3 and 2, and either from one at /64.
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 8u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 6u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 4u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 2u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div32, SpiDataSize::bits8, true) == 2u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div64, SpiDataSize::bits8, true) == 1u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 15u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div4, SpiDataSize::bits8, false) == 9u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div8, SpiDataSize::bits8, false) == 5u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div16, SpiDataSize::bits8, false) == 3u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div32, SpiDataSize::bits8, false) == 2u);
+static_assert(spi_async_min_frames(spi_costs_ch32v003_in_flash, SpiClock::div64, SpiDataSize::bits8, false) == 1u);
 // The table the host reads when a code is applied holds the same counts.
-static_assert(spi_async_counts(spi_costs_in_flash).n[1u * 4u + 1u] == 9u &&
-              spi_async_counts(spi_costs_in_flash).n[0u * 4u + 2u] == 15u &&
+static_assert(spi_async_counts(spi_costs_ch32v006_in_flash).n[1u * 4u + 1u] == 9u &&
+              spi_async_counts(spi_costs_ch32v006_in_flash).n[0u * 4u + 2u] == 15u &&
+              spi_async_counts(spi_costs_ch32v003_in_flash).n[1u * 4u + 1u] == 6u &&
+              spi_async_counts(spi_costs_ch32v003_in_flash).n[0u * 4u + 2u] == 9u &&
               spi_async_counts(spi_costs_in_ram).n[7u * 4u + 3u] == 1u);
 
 // The answering client's modes: CPOL = 1 (16.2.3), on both parts.

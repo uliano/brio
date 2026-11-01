@@ -3609,6 +3609,30 @@ bool within_pct(uint32_t got, uint32_t want, uint32_t pct) {
     return got + tol >= want && got <= want + tol;
 }
 
+/// THE BOUND ON A LOOP'S TURN, derived, in whole cycles. A turn at /2 is read
+/// as the difference of two polled walls over line_long - line_short = 8
+/// frames, each the best of five on a ruler exact to a cycle: a cycle's error
+/// in either wall is 2 / 8 = 0.25 cycle a frame, and with the rounding to a
+/// whole cycle (0.5) a reading stands at most 0.75 from the loop's own figure:
+/// 1 cycle. And the same loop reads differently by where the image places it:
+/// the V4F's transmit-only turn, one source, read 16.0, 17.0 and 18.1 on three
+/// images, so a constant taken from one image stands up to 2 cycles (rounded)
+/// from a reading on another, with no fault in the code. The allowance is
+/// their sum, 2 + 1 = 3 cycles.
+/// What it still catches: a turn 4 or more cycles from its constant, more than
+/// a fifth of the V4F's 18 and a quarter of the V4B's 16 (the two cores' read
+/// turns, 29 and 34, are 5 apart and the constants' swap fails here too). What
+/// it lets through is of a size with what the verdict's other terms admit: a
+/// turn 3 cycles off moves a request at the edge by 3 x 22 frames = 66 cycles
+/// at most (the V4F's write count at /2, the largest), where E - F's 15 %
+/// admits 394 x 15 % = 59.
+constexpr uint32_t turn_bound_cycles = 3u;
+constexpr bool turn_holds(uint32_t got, uint32_t want) {
+    return got + turn_bound_cycles >= want && got <= want + turn_bound_cycles;
+}
+static_assert(turn_holds(16u, 18u) && turn_holds(18u, 16u), "the three images of one source agree");
+static_assert(!turn_holds(22u, 18u) && !turn_holds(14u, 18u), "four cycles is a constant that no longer describes the loop");
+
 void tg_two_ways() {
     third_pad_idle();
     // ---- THE REFUSAL: an asynchronous request on the engineless host ----
@@ -3737,11 +3761,11 @@ void tg_two_ways() {
           Dma1::polled_read_turn_cycles, " and ", Dma1::polled_write_turn_cycles, crlf);
     const uint32_t gap = c.line_frame[0] > 320u ? (c.line_frame[0] - 320u + 5u) / 10u : 0u;
     bench.verdict("THE CONSTANTS ARE THIS CORE'S: E - F for a read and a write within 15 % of the measured, the "
-                  "turns at /2 within 10 %, the dead bus at /4 within 3 cycles",
+                  "turns at /2 within 3 cycles (the bound's arithmetic above tg_two_ways), the dead bus at /4 within 3 cycles",
                   within_pct(c.over_read, Dma1::async_read_budget_cycles, 15u) &&
                       within_pct(c.over_written, Dma1::async_write_budget_cycles, 15u) &&
-                      within_pct((c.line_frame[1] + 5u) / 10u, Dma1::polled_read_turn_cycles, 10u) &&
-                      within_pct((c.line_frame[2] + 5u) / 10u, Dma1::polled_write_turn_cycles, 10u) &&
+                      turn_holds((c.line_frame[1] + 5u) / 10u, Dma1::polled_read_turn_cycles) &&
+                      turn_holds((c.line_frame[2] + 5u) / 10u, Dma1::polled_write_turn_cycles) &&
                       gap + 3u >= Dma1::polled_gap_cycles && gap <= Dma1::polled_gap_cycles + 3u);
     bool edges = true;
     for (uint8_t k = 0; k < 3u; ++k) {

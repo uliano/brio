@@ -1556,10 +1556,10 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // the budget a transaction is given (its own length at the slowest
 // rate, many times over), the select is raised and the FIFOs drained.
 // It cannot happen on a host whose clock runs, and a report beats a
-// frame of garbage returned in silence. No spi_overrun here: the
+// frame of garbage returned in silence. No frame is lost here: the
 // polled loops keep no more frames in flight than the receive FIFO
 // holds, and the engines' receive channel outranks their transmit one
-// (the class comment), so a frame is never lost to one.
+// (the class comment).
 
 /*
  * THE SHORT ASYNCHRONOUS REQUEST, and the arithmetic behind it.
@@ -1615,8 +1615,8 @@ struct SpiHostCosts {
 /// letter e; docs/stm32g0/spi.md, "The short request"). E runs start() and
 /// the completion's vector from the flash under either placement; F and the
 /// turns are the placement's.
-inline constexpr SpiHostCosts spi_costs_in_flash{550u, 555u, 26u, 43u, 17u, 32u};
-inline constexpr SpiHostCosts spi_costs_in_ram{580u, 560u, 23u, 38u, 16u, 32u};
+inline constexpr SpiHostCosts spi_costs_in_flash{530u, 515u, 26u, 43u, 17u, 32u};
+inline constexpr SpiHostCosts spi_costs_in_ram{520u, 505u, 23u, 38u, 16u, 32u};
 
 /// A frame's PCLK cycles at a code and size: bits x 2^(code + 1). PCLK is
 /// HCLK on this family (every Clock task pins PPRE at 1, the file header
@@ -1647,17 +1647,20 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
     return static_cast<uint16_t>(n > 1u ? n : 1u);
 }
 // The counts those figures give from the flash, 8-bit frames (docs/
-// stm32g0/spi.md, "The short request"): a read rides the engines from 22
-// frames at PCLK/2, 18 at /4, 9 at /8, 5 at /16 and 1 from /128 down; a
-// write from 33, 18, 9 and 5; a 16-bit read from 13 at /2.
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 22u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 18u);
+// stm32g0/spi.md, "The short request"): a read rides the engines from 21
+// frames at PCLK/2, 17 at /4, 9 at /8, 5 at /16 and 1 from /128 down; a
+// write from 31, 17, 9 and 5; a 16-bit read from 13 at /2.
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 21u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 17u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 9u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 5u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div128, SpiDataSize::bits8, true) == 1u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 33u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, false) == 31u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, false) == 17u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, false) == 5u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits16, true) == 13u);
+static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize::bits8, true) == 23u);
+static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize::bits8, false) == 32u);
 
 /**
  * SpiHost<n, pins, TxEngine, RxEngine, Placement>

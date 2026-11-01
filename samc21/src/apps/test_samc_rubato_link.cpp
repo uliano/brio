@@ -46,7 +46,7 @@
 //   loop off for any length lets frames k and k + 1 complete and SCK
 //   stop - a GAP ON THE BUS, never a lost frame - so the verdict under
 //   pressure is STRICT, the host's BUFOVF read at every reply and judged
-//   never set. The host has no spi_overrun;
+//   never set. The host loses no frame;
 //   its one failure is spi_stalled, a polled budget counted in loop turns
 //   (200000 + 6000 a frame) that a preemption does not spend, so a stall
 //   under pressure is a finding. Characters are 8 or 9 bits (CTRLB.CHSIZE,

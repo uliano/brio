@@ -819,11 +819,13 @@ read and one for a write, and `bench_stm32` letter `e` measures each as
 ONE difference: 64 frames at PCLK/16 on the engined host asynchronous
 and polled through the same call, the least busy of the first's eight
 runs less the second's wall above the wire, so the ruler's own cycles
-cancel - **530 and 531 cycles for a read, 512 and 514 for a write**
-(three runs of one image; the host's figures 550 and 555, between the
-530 and 575 and the 512 and 560 the difference has read in images that
-place the code differently), and from `bench_stm32_ram` 516 and 502 (580
-and 560). The turns are the same letter's
+cancel - **529 to 535 cycles for a read, 512 to 517 for a write** (six
+runs over two images), and from `bench_stm32_ram` 513 to 523 and 499 to 512
+(six runs over two images that differ by one constant, so the move is where
+the linker puts the code). The host states 530 and 515 from the flash, 520
+and 505 from SRAM; a read that drifts some 45 cycles by placement moves the
+count at PCLK/2 by two frames and costs a request at the edge those cycles,
+nothing else. The turns are the same letter's
 polled lines on the engineless host at PCLK/2, the one code where the
 loop and not the wire is the bound, from the difference of 256 and 16
 frames: **25.5 cycles a frame read in byte frames, 43.0 in half-words,
@@ -834,10 +836,10 @@ pinned by the header's `static_assert`s:
 
 | an asynchronous request rides the engines from | /2 | /4 | /8 | /16 | /32 | /64 | /128 and below |
 |---|---|---|---|---|---|---|---|
-| 8-bit frames read (`InFlash`) | 22 | 18 | 9 | 5 | 3 | 2 | 1 |
-| 8-bit frames written | 33 | 18 | 9 | 5 | 3 | 2 | 1 |
+| 8-bit frames read (`InFlash`) | 21 | 17 | 9 | 5 | 3 | 2 | 1 |
+| 8-bit frames written | 31 | 17 | 9 | 5 | 3 | 2 | 1 |
 | 16-bit frames read | 13 | 9 | 5 | 3 | 2 | 1 | 1 |
-| 8-bit frames read (`InRam`) | 26 | 19 | 10 | 5 | 3 | 2 | 1 |
+| 8-bit frames read (`InRam`) | 23 | 17 | 9 | 5 | 3 | 2 | 1 |
 
 `async_min_frames()` answers for a code and a size: the host computes
 the two frame costs where the configuration changes and never per

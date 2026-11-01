@@ -653,8 +653,7 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   DMA engines (32) all byte-exact at both ends at every code from
   PCLK/256 to PCLK/8, under every pressure as in the control, and the
   host's OVR flag read clear at every one of the replies (the receive
-  shapes never let it rise). This host has no `spi_overrun` and needs
-  none.
+  shapes never let it rise). This host loses no frame.
 - **PCLK/4 = 16 MHz is this fitting's, not the service's.** The same
   rungs at PCLK/4 slip in up to one window in ten of a run, with TIM14
   silent as well as under it and on the DMA engines too, which no
