@@ -1351,10 +1351,10 @@ The images: with the path in SRAM 36740 bytes of the 62 KB (58 %) and
 **What the silicon does.** At 48 MHz the code flash answers behind two
 wait states (RM 20.3.1), and a taken branch is a fetch the core waits
 for. The SPI suite's bare transmit loop - a loop of the suite's own, not
-the host's - takes 20.8 cycles a frame at /2 from the flash and 16.7
+the host's - takes 20.0 cycles a frame at /2 from the flash and 16.0
 from SRAM, the wire's 16 (measured, [spi.md](spi.md), "The fetch"); the
 host's own transmit-only loop, a function of seven instructions a frame,
-takes 24.0 from the flash and 15.9 from SRAM ("What it buys, measured").
+takes 24.0 from the flash and 16.0 from SRAM ("What it buys, measured").
 The vector table holds absolute addresses (mtvec's MODE1, RM 7.5.3.2),
 so a handler placed in SRAM is entered from its vector directly, and a
 call between SRAM and the flash is an `auipc` and a `jalr`, which reach
@@ -1468,8 +1468,8 @@ suite with the path in the flash and in SRAM, nothing else moved:
 
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
-| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 16.0 to 16.9 | 740 a host type, both loops |
-| the SPI receive loop's one-frame turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 to 25.6, 39.3 to 40.0 (by the image's layout) | (with the transmit-only loop's) |
+| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 16.0 | 740 a host type, both loops |
+| the SPI receive loop's one-frame turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 or 26.0, 40.0 or 42.0 (two values, by the address modulo four) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
 | the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (207 at most); 79, 94 with the vector placed | 968 for one plain host |

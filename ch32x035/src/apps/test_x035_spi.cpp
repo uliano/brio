@@ -1185,7 +1185,9 @@ bool within(uint32_t got, uint32_t want, uint32_t pct) {
 /// The engined host's figures against the constants it states for its
 /// placement: E - F for a read and a write within 15 % (about two frames
 /// at /4), the loops' turns at /2 within 10 % and the receive loop's dead
-/// bus at /4 within 2 cycles.
+/// bus at /4 within 2 cycles under the constant and 3 over it: from SRAM the
+/// turn's two values lie 2 apart by the image's layout, and the figure is
+/// rounded.
 template <typename D>
 bool costs_match(const PathCosts& c) {
     const uint32_t gap = c.line_frame[0] > 320u ? (c.line_frame[0] - 320u + 5u) / 10u : 0u;
@@ -1193,7 +1195,7 @@ bool costs_match(const PathCosts& c) {
            within(c.over_written, D::async_write_budget_cycles, 15u) &&
            within((c.line_frame[1] + 5u) / 10u, D::polled_read_turn_cycles, 10u) &&
            within((c.line_frame[2] + 5u) / 10u, D::polled_write_turn_cycles, 10u) &&
-           gap + 2u >= D::polled_gap_cycles && gap <= D::polled_gap_cycles + 2u;
+           gap + 2u >= D::polled_gap_cycles && gap <= D::polled_gap_cycles + 3u;
 }
 
 /// The measured edges within one frame of the arithmetic on the same
@@ -1212,25 +1214,32 @@ void tb_ladder() {
     dma_ready();
     fill_pattern(tx_buf, 512, 0x3C);
     console_drain();
-    // THE LADDER: a frame inside a 256- and a 32-frame block, every code.
+    // THE LADDER: a frame inside a 256- and a 32-frame block, every code,
+    // measured with the console quiet and printed after: a 256-frame block at
+    // /2 lasts about what a console character does at 115200, so a line going
+    // out beside it lengthens that rung (docs/ch32x035/spi.md, "The host above
+    // the wire").
+    uint32_t ladder[8];
+    for (uint8_t code = 0; code < 8u; ++code) {
+        const SpiClock rate = static_cast<SpiClock>(code);
+        const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
+        ladder[code] = permille_of(f, 8, asked_divisor(rate));
+    }
+    const uint32_t w16_div4 = permille_of(frame_x1000(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits16, 128, 16),
+                                          16, 4);
+    const uint32_t w16_div16 =
+        permille_of(frame_x1000(SpiClock::div16, SpiMode::mode3, SpiDataSize::bits16, 128, 16), 16, 16);
     uint8_t exact = 0;
     print(serial, "  a frame inside an engined block, in thousandths of its SCK periods at the rate asked "
                   "(8 bits):",
           crlf, "   ");
     for (uint8_t code = 0; code < 8u; ++code) {
-        const SpiClock rate = static_cast<SpiClock>(code);
-        const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
-        const uint32_t pm = permille_of(f, 8, asked_divisor(rate));
-        print(serial, " /", asked_divisor(rate), " ", pm);
-        if (wire_ok(pm)) {
+        print(serial, " /", asked_divisor(static_cast<SpiClock>(code)), " ", ladder[code]);
+        if (wire_ok(ladder[code])) {
             ++exact;
         }
     }
     print(serial, crlf);
-    const uint32_t w16_div4 = permille_of(frame_x1000(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits16, 128, 16),
-                                          16, 4);
-    const uint32_t w16_div16 =
-        permille_of(frame_x1000(SpiClock::div16, SpiMode::mode3, SpiDataSize::bits16, 128, 16), 16, 16);
     print(serial, "  16-bit frames: /4 ", w16_div4, ", /16 (mode 3) ", w16_div16, crlf);
     bench.verdict("THE ENGINES RUN AT THE RATE ASKED at every BR code, /2 to /256: a frame inside a block takes "
                   "its SCK periods at HCLK over the divisor, -1 % to +3 %",
@@ -1247,6 +1256,7 @@ void tb_ladder() {
     uint8_t plus_two = 0;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock rate = static_cast<SpiClock>(code);
+        console_drain();
         DmaHost::prime(SpiMode::mode0, rate);
         S::high_speed_read_raw(true);
         const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
@@ -1268,6 +1278,7 @@ void tb_ladder() {
                   powers + plus_two >= 1u);
     bench.verdict("and at /2, where both readings agree, the frame is its 16 cycles with the bit set",
                   [] {
+                      console_drain();
                       DmaHost::prime(SpiMode::mode0, SpiClock::div2);
                       S::high_speed_read_raw(true);
                       const uint32_t f = frame_x1000(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
@@ -1277,6 +1288,7 @@ void tb_ladder() {
 
     // THE HOST'S COSTS, both placements: the suite's hosts in SRAM, then
     // their flash twins - the same measurement, the constants each states.
+    console_drain();
     const PathCosts ram = measure_costs<Host, DmaHost>();
     const PathCosts flash = measure_costs<FlashHost, FlashDmaHost>();
     print(serial, "  THE HOST'S COSTS, SRAM | flash (cycles; x.y a frame):", crlf);
@@ -1362,14 +1374,8 @@ void tb_ladder() {
     bench.verdict("the receive loop keeps two frames in flight from /64 and runs there at the wire (3 %), "
                   "in both placements",
                   ram.rd[4] <= 5274u && flash.rd[4] <= 5274u);
-    // In SRAM the loop's turn at /2 moves with the image's layout alone -
-    // 16.0 and 16.8 cycles a frame for the same instructions at the same
-    // address modulo four (docs/ch32x035/spi.md, "The host above the
-    // wire") - so the bound there is the constant the host states, 17, and
-    // 10 %; the wire's from /4.
-    bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is within 10 % of the wire at /2, 5 % at /4 and at the wire "
-                  "(3 %) from /8",
-                  ram.wr[0] <= 176u && ram.wr[1] <= 336u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
+    bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is at the wire (3 %) at /2, /4, /8 and /16",
+                  ram.wr[0] <= 165u && ram.wr[1] <= 330u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
     // From the flash at /2 the loop's turn fetched behind the wait states
     // is the bound - 24.0 cycles a frame with its function on a word, 28.0
     // half a word off (the host aligns it): the fetch's figure, judged as
@@ -1378,13 +1384,14 @@ void tb_ladder() {
                   flash.wr[1] <= 336u && flash.wr[3] <= 659u && flash.wr[2] <= 1319u);
     bench.verdict("SRAM shortens the receive loop's frame at /2", ram.rd[0] < flash.rd[0]);
     bench.verdict("THE CONSTANTS FOLLOW THE PLACEMENT: the engined host's E - F for a read and a write within 15 % "
-                  "of the ones it states, the loops' turns within 10 %, the dead bus within 2 cycles",
+                  "of the ones it states, the loops' turns within 10 %, the dead bus within 3 cycles",
                   costs_match<DmaHost>(ram) && costs_match<FlashDmaHost>(flash));
     bench.verdict("THE SHORT REQUEST'S EDGE is the arithmetic's: the fewest frames a polled transaction spends the "
                   "engines' measured fixed cost on is within one frame of ceil((E - F) / frame) on the same figures, "
                   "read at /4 and /2 and written at /2, in both placements",
                   edges_match(ram) && edges_match(flash));
     host_ready();
+    console_drain();
     const uint32_t flash2 = loop_frame_x10(tx_loop_copy<0>, SpiClock::div2);
     const uint32_t sram2 = loop_frame_x10(tx_loop_sram, SpiClock::div2);
     const uint32_t flash4 = loop_frame_x10(tx_loop_copy<0>, SpiClock::div4);

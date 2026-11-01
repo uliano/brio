@@ -145,8 +145,8 @@
  *    (docs/ch32x035/spi.md, "The host above the wire").
  *  - Interrupts: TXE, RXNE and the three errors under ERRIE on ONE vector
  *    (table 7-1, entry 33). Declined by the host: a per-frame interrupt
- *    costs more than the frame at every rate this core can serve one at
- *    (225 to 268 cycles of handler against 32 a byte at /4, measured), so
+ *    costs more than the frame at /16 and faster (some 225 to 268 cycles
+ *    of handler against 128 a byte at /16), so
  *    the asynchronous way is the engines' and the vector is the
  *    client's (SpiClient::isr()).
  *
@@ -714,8 +714,8 @@ constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
  * longer than that sum. No interrupt nests on this core (kernel.md section
  * 1, "The model in one page", the platform's promise), so the first term is the longer of the
  * image's longest handler and its longest masked window: the hold-off, a
- * fact of the image and not of the family, which is why it is the host's
- * last template parameter. Its default is the longest this family's own
+ * fact of the image and not of the family, which is why it is a template
+ * parameter of the host. Its default is the longest this family's own
  * images measure (docs/ch32x035/spi.md, "The host above the wire"). The
  * second and third terms are the hardware prologue's entry (37 cycles,
  * measured, docs/ch32x035/platform.md) and the loop's return to its read,
@@ -727,8 +727,8 @@ constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
 /// pump, 333 cycles of body at most (test_x035_i2c letter x, its stamps
 /// and its owner switch included, docs/ch32x035/i2c.md), and the 36 of its
 /// exit, rounded up. The USART's engined completion measures 293 at most
-/// from the flash (docs/ch32x035/usart.md), the console's handler 151, the
-/// tick's 67 (test_x035_spi letter b, stamps included). The hold-off is a
+/// from the flash (docs/ch32x035/usart.md), the console's handler 156, the
+/// tick's 69 (test_x035_spi letter b, stamps included). The hold-off is a
 /// fact of the image, not of one driver: a program that places its
 /// handlers in SRAM shortens them, and states its own hold-off as this
 /// host's template parameter. The write-ahead codes are the same for any
@@ -1066,8 +1066,8 @@ public:
     static constexpr uint32_t polled_write_turn_cycles = costs.write_turn;
     /// A polled request with an in buffer rides the engines once the
     /// receive loop's dead bus would cost more than their extra fixed cost.
-    /// The transmit-only loop never does: it runs within 5 % of the wire
-    /// from /2.
+    /// The transmit-only loop never does: it runs at the wire from SRAM, and
+    /// from the flash at /4 and slower, 24 cycles a frame against 16 at /2.
     static constexpr uint16_t dma_min_frames_polled =
         static_cast<uint16_t>((async_read_budget_cycles + polled_gap_cycles - 1u) / polled_gap_cycles);
     static_assert(dma_min_frames_polled == (placed_in_ram ? 72u : 41u),

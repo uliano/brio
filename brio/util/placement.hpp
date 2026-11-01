@@ -21,9 +21,8 @@
  *
  * Why a choice. A core that fetches from a flash behind wait states runs
  * a loop or a handler slower than from SRAM (the CH32X035's two wait
- * states at 48 MHz: an SPI frame's handler a third shorter, a USART's
- * block restart under half - docs/ch32x035/platform.md, "A handler in
- * SRAM"), and SRAM is what the program's data needs too. So no driver
+ * states at 48 MHz: a USART's block restart under half -
+ * docs/ch32x035/platform.md, "A handler in SRAM"), and SRAM is what the program's data needs too. So no driver
  * places anything by itself: a program spends RAM on exactly the paths it
  * names, and a driver it leaves alone costs no byte of SRAM - only the
  * rendezvous its critical loops would have met and the handler timing it
@@ -50,11 +49,10 @@
  *
  * Why the flash one is inline. Out of line it is a call from the vector
  * and a return, and in a flash behind wait states each taken branch is a
- * fetch the core waits for: measured on the CH32X035 behind the SPI
- * pump's vector, 300.5 cycles a frame with the flash instance out of line
+ * fetch the core waits for: measured on the CH32X035 behind a per-frame
+ * SPI vector, 300.5 cycles a frame with the flash instance out of line
  * against 268.5 inline, in one image whose vectors were not aligned to
- * four (docs/ch32x035/spi.md gives the current image's inline figure,
- * 256.5).
+ * four.
  *
  * Why `.fast_text.brio` and `noclone`. The instance is a template's, so
  * GCC emits it in a COMDAT group, and refuses one section name for a

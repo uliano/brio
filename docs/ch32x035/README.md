@@ -384,7 +384,7 @@ debug port; the numbers are each document's bench findings.
   output-data store ([pin.md](pin.md)).
 - **The flash fetch bounds the core's hot paths, and SRAM lifts it.**
   Code runs from a flash with two wait states at 48 MHz: the SPI's bare
-  transmit loop takes 20.8 cycles a frame from it and 16.7, the wire at
+  transmit loop takes 20.0 cycles a frame from it and 16.0, the wire at
   /2, from SRAM; the driver's own loop 24.0 a frame at /2 and 16.0 from
   SRAM; the USART transmit engine's DMA body 285 to 288 cycles from the
   flash and 129 to 132 from SRAM; and a handler's body two fifths to a
