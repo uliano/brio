@@ -134,12 +134,15 @@
  *    as the faster place. Offered, the program's choice,
  *    for the paths that run once a FRAME: the host's last template
  *    parameter is a placement (util/placement.hpp), `InFlash` by default,
- *    and under `InRam` the two polled loops run from SRAM
- *    (`.fast_text.brio`, copied with .data by the crt) - the
- *    transmit-only loop at the wire at /2. The cost constants follow the
- *    placement, each measured both ways. The paths that run once a
+ *    and under `InRam` the transmit-only loop and the receive loop's
+ *    one-frame turn run from SRAM (`.fast_text.brio`, copied with .data by
+ *    the crt) - the transmit-only loop at the wire at /2. The cost constants
+ *    follow the placement, each measured both ways. The paths that run once a
  *    transaction (start(), the engines' launch) stay in the flash under
- *    either (docs/ch32x035/spi.md, "The host above the wire").
+ *    either, and so does the two-frame turn, whose frame is too long for
+ *    SRAM to buy anything: some 106 cycles from the flash against a frame of
+ *    128 or more, the threshold of any image with a tick in it
+ *    (docs/ch32x035/spi.md, "The host above the wire").
  *  - Interrupts: TXE, RXNE and the three errors under ERRIE on ONE vector
  *    (table 7-1, entry 33). Declined by the host: a per-frame interrupt
  *    costs more than the frame at every rate this core can serve one at
@@ -168,8 +171,11 @@
  * The disable procedure: clearing SPE while a frame shifts cuts it on the
  * wire. `Spi::disable()` waits TXE and then not BSY, each bounded, before
  * it drops the bit. MODF is cleared by a STATR access followed by a CTLR1
- * write, OVR by a DATAR read followed by a STATR read (16.2.7) - two
- * sequences the resource keeps.
+ * write (16.2.7). OVR, which 16.2.7 says falls to a DATAR read followed by a
+ * STATR read, falls here at a DATAR read after a STATR load that showed it,
+ * the buffer full or empty; a load after the read alone, a zero written to
+ * the bit (16.3.3 calls it RW0) and SPE clearing do not clear it (measured,
+ * test_x035_spi letter e). The resource keeps both sequences.
  *
  * The pads are a column (afio.hpp, SPI1_RM[1:0]): four columns, of which
  * the QFN20 bonds the first alone (PA4 NSS, PA5 SCK, PA6 MISO, PA7 MOSI).
@@ -537,9 +543,12 @@ struct Spi {
     static bool busy() { return (regs().STATR & spi_bsy) != 0u; }
     static uint16_t status() { return regs().STATR; }
 
-    /// Throw away what the receive buffer holds and the OVR it may have
-    /// raised: 16.2.7's sequence, DATAR then STATR.
+    /// Throw away what the receive buffer holds and the OVR it raised:
+    /// STATR, DATAR, STATR. 16.2.7's sequence is the last two, which alone
+    /// leave OVR standing on this die: the flag falls at a DATAR read after a
+    /// load that showed it (test_x035_spi letter e).
     static void flush_rx() {
+        (void)regs().STATR;
         (void)regs().DATAR;
         (void)regs().STATR;
     }
@@ -547,7 +556,7 @@ struct Spi {
     // ---- errors (16.2.7) --------------------------------------------------
 
     static bool overrun() { return (regs().STATR & spi_ovr) != 0u; }
-    /// DATAR then STATR, in that order.
+    /// A load that shows the flag, then a DATAR read (flush_rx()).
     static void clear_overrun() { flush_rx(); }
     static bool mode_fault() { return (regs().STATR & spi_modf) != 0u; }
     /// "First perform a read or write operation to R16_SPI1_STATR, and then
@@ -800,8 +809,8 @@ struct SpiHostCosts {
 /// from the flash under either placement; the frames are the placement's,
 /// and in SRAM they move with where the image puts the loops
 /// (docs/ch32x035/spi.md, "The host above the wire").
-inline constexpr SpiHostCosts spi_costs_in_flash{660u, 705u, 20u, 52u, 24u};
-inline constexpr SpiHostCosts spi_costs_in_ram{590u, 580u, 10u, 27u, 16u};
+inline constexpr SpiHostCosts spi_costs_in_flash{655u, 720u, 16u, 48u, 24u};
+inline constexpr SpiHostCosts spi_costs_in_ram{570u, 590u, 8u, 24u, 16u};
 
 /// What a polled frame costs the core at a code and width, read or
 /// written (the arithmetic above).
@@ -891,12 +900,16 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, SpiClock c, SpiDa
  * before the shifter needs it, so the clock never pauses and an interrupt
  * only pauses the stream - the answers left to overrun the receive buffer,
  * harmless to the transmit side (16.2.7), and cleared at the tail by the
- * DATAR-then-STATR read after TXE and then BSY say the last frame is out.
+ * DATAR read after the STATR load in which TXE and then BSY say the last
+ * frame is out, one STATR load behind it for 16.2.7's own order.
  * A phase with an in buffer runs the receive loop: one frame in flight
  * below the write-ahead threshold (write k, wait RXNE, read k and write
  * k + 1 in the next instruction), two above it (the phase primed with two,
- * frame k + 2 written as k is read). Both loops are specialized by frame
- * width and spend one bounded budget for the whole transaction.
+ * frame k + 2 written as k is read once a STATR load after the read says
+ * TXE, the same load reading OVR: a frame lost under a hold-off declared
+ * too short ends the transaction spi_overrun, every frame still clocked).
+ * Both loops are specialized by frame width and spend one bounded budget
+ * for the whole transaction.
  *
  * The engine slots: `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`,
  * both or neither (ch32x035/dma.hpp), on the two channels RM 9.2.3 wires
@@ -1057,7 +1070,7 @@ public:
     /// from /2.
     static constexpr uint16_t dma_min_frames_polled =
         static_cast<uint16_t>((async_read_budget_cycles + polled_gap_cycles - 1u) / polled_gap_cycles);
-    static_assert(dma_min_frames_polled == (placed_in_ram ? 59u : 33u),
+    static_assert(dma_min_frames_polled == (placed_in_ram ? 72u : 41u),
                   "the threshold the measured costs give (docs/ch32x035/spi.md)");
     /// The frames from which an asynchronous request of one phase rides the
     /// engines at this placement, a code and a width (`read`: with an in
@@ -1263,9 +1276,10 @@ public:
         if (ok && r.len != 0u) {
             if (r.rx.get() == nullptr) {
                 ok = poll_write_phase(r.bits, r.tx.get(), r.len, budget);
+            } else if (r.len > 1u && spi_write_ahead_safe(code, r.bits, hold_off_cycles)) {
+                ok = poll_duplex_two_phase(r.bits, r.tx.get(), r.rx.get(), r.len, budget);
             } else {
-                ok = poll_duplex_phase(r.bits, r.tx.get(), r.rx.get(), r.len, budget,
-                                       spi_write_ahead_safe(code, r.bits, hold_off_cycles));
+                ok = poll_duplex_phase(r.bits, r.tx.get(), r.rx.get(), r.len, budget);
             }
         }
         r.cs.set();
@@ -1433,9 +1447,8 @@ private:
     /// placement (the file header): the trampoline's instance for that
     /// specialization's lambda, the loop flattened into it. Aligned to the
     /// FETCH'S WORD: from the flash a loop's cost is a function of its
-    /// address modulo four - the same instructions take 52.0 or 72.0
-    /// cycles a frame at /4 as the function starts on a word or half a word
-    /// into one, and no other bit of the address moves it (measured,
+    /// address modulo four, and no other bit of the address moves it - the
+    /// same instructions moved half a word take a different cost (measured,
     /// docs/ch32x035/spi.md, "The fetch") - and -Os aligns a function to two
     /// bytes only, so without the attribute the image's layout picks the
     /// cost. Two bytes of padding at most, and the cost constants below are
@@ -1449,13 +1462,25 @@ private:
                                            : poll_write_at<uint8_t, false>(out, count, budget);
     }
     [[gnu::aligned(4)]] static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in,
-                                                      uint16_t count, uint32_t& budget, bool two) {
+                                                      uint16_t count, uint32_t& budget) {
         if (out == nullptr) {
-            return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t, true>(out, in, count, budget, two)
-                                               : poll_duplex_at<uint8_t, true>(out, in, count, budget, two);
+            return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t, true>(out, in, count, budget)
+                                               : poll_duplex_at<uint8_t, true>(out, in, count, budget);
         }
-        return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t, false>(out, in, count, budget, two)
-                                           : poll_duplex_at<uint8_t, false>(out, in, count, budget, two);
+        return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t, false>(out, in, count, budget)
+                                           : poll_duplex_at<uint8_t, false>(out, in, count, budget);
+    }
+    /// The receive loop with two frames in flight, a function of its own so
+    /// that the one-frame turn, which runs at /2 and /4 where each cycle
+    /// shows, carries nothing of it. `count` >= 2.
+    [[gnu::aligned(4)]] static bool poll_duplex_two_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in,
+                                                          uint16_t count, uint32_t& budget) {
+        if (out == nullptr) {
+            return spi_frame_is_halfword(bits) ? poll_duplex_two_at<uint16_t, true>(out, in, count, budget)
+                                               : poll_duplex_two_at<uint8_t, true>(out, in, count, budget);
+        }
+        return spi_frame_is_halfword(bits) ? poll_duplex_two_at<uint16_t, false>(out, in, count, budget)
+                                           : poll_duplex_two_at<uint8_t, false>(out, in, count, budget);
     }
     template <typename T, bool dummy>
     [[gnu::always_inline]] static bool poll_write_at(const uint8_t* p, uint16_t count, uint32_t& budget) {
@@ -1463,9 +1488,14 @@ private:
     }
     template <typename T, bool dummy>
     [[gnu::always_inline]] static bool poll_duplex_at(const uint8_t* p, uint8_t* in, uint16_t count,
-                                                      uint32_t& budget, bool two) {
-        return Hot<Placement>::run(
-            [p, in, count, &budget, two] { return poll_duplex<T, dummy>(p, in, count, budget, two); });
+                                                      uint32_t& budget) {
+        return Hot<Placement>::run([p, in, count, &budget] { return poll_duplex<T, dummy>(p, in, count, budget); });
+    }
+    /// In the flash under either placement (the file header).
+    template <typename T, bool dummy>
+    [[gnu::always_inline]] static bool poll_duplex_two_at(const uint8_t* p, uint8_t* in, uint16_t count,
+                                                          uint32_t& budget) {
+        return Hot<InFlash>::run([p, in, count, &budget] { return poll_duplex_two<T, dummy>(p, in, count, budget); });
     }
 
     /// The frame a phase sends: the next one of `p`, or with no out buffer
@@ -1483,7 +1513,8 @@ private:
     /// The transmit-only loop (16.2.2): a frame written whenever TXE says
     /// the buffer is free, the answers left to overrun the receive buffer
     /// (16.2.7), the tail waiting TXE then not BSY and clearing RXNE and
-    /// OVR with the DATAR-then-STATR read. Specialized on the out buffer's
+    /// OVR with a DATAR read after that wait's last load, and a STATR load
+    /// behind it for 16.2.7's own order. Specialized on the out buffer's
     /// presence, so the stride is a constant and the dummy an immediate:
     /// the loop is one poll (a load, a test, a branch not taken), the
     /// frame's load, the store, the step and ONE taken branch. From the
@@ -1541,14 +1572,14 @@ private:
         return true;
     }
 
-    /// The receive loop. One frame in flight below the threshold: frame 0
-    /// written; then for each frame the next one's load, the wait on RXNE,
-    /// the DATAR read and the DATAR write back to back, the store. With
-    /// `two`, frame 1 follows frame 0 into the buffer on TXE and every read
-    /// of frame k is followed by the write of frame k + 2. `count` >= 1.
+    /// The receive loop with one frame in flight, below the threshold: frame
+    /// 0 written; then for each frame the next one's load, the wait on RXNE,
+    /// the DATAR read and the DATAR write back to back, the store. The
+    /// buffer is empty by construction (the only frame out is the one just
+    /// read), so this turn tests nothing but RXNE; the one frame out cannot
+    /// overrun. `count` >= 1.
     template <typename T, bool dummy>
-    [[gnu::always_inline]] static bool poll_duplex(const uint8_t* p, uint8_t* in, uint16_t count, uint32_t& budget,
-                                                   bool two) {
+    [[gnu::always_inline]] static bool poll_duplex(const uint8_t* p, uint8_t* in, uint16_t count, uint32_t& budget) {
         constexpr uint32_t step = dummy ? 0u : sizeof(T);
         SpiRegs& regs = S::regs();
         uint32_t spins = budget;
@@ -1557,19 +1588,7 @@ private:
         regs.DATAR = static_cast<uint16_t>(frame_at<T, dummy>(p));   // the shifter is idle: frame 0 moves at once
         p += step;
         --to_write;
-        if (two && to_write != 0u) {
-            while ((regs.STATR & spi_txe) == 0u) {
-                if (--spins == 0u) {
-                    budget = 0;
-                    return false;
-                }
-            }
-            regs.DATAR = static_cast<uint16_t>(frame_at<T, dummy>(p));
-            p += step;
-            --to_write;
-        }
-        // The frames with one still to write after them, then the tail that
-        // only reads: no test of the write count inside the steady loop.
+        // The frames with one still to write after them, then the last one.
         while (to_write != 0u) {
             const uint32_t next = frame_at<T, dummy>(p);
             // The load belongs INSIDE the wire time: the compiler would sink
@@ -1599,6 +1618,109 @@ private:
             store_frame<T>(in, regs.DATAR);
             in += sizeof(T);
             --to_read;
+        }
+        budget = spins;
+        return true;
+    }
+
+    /// The read of one turn with two frames in flight, its overrun included:
+    /// `polled` is the STATR load that showed RXNE. Answers the STATR load it
+    /// makes after the DATAR read.
+    ///
+    /// OVR takes both loads. Measured on this die (test_x035_spi letter e),
+    /// against 16.2.7's "reading the data register and then reading the status
+    /// register": the flag falls at a DATAR read after a STATR load that
+    /// showed it, and a load after the read alone clears nothing. So a frame
+    /// k + 1 that completed before the poll's load is in `polled`, the read
+    /// having cleared the flag; and one that completed between that load and
+    /// the read is in the next load alone, the flag standing, and the DATAR
+    /// read below is what clears it. That read takes nothing: frame k has
+    /// been read, frame k + 1 is gone and frame k + 2 is not yet written. The
+    /// buffer kept frame k and lost frame k + 1 (16.2.7 does not say which,
+    /// measured against a foreign client: test_x035_spi letter o), so that
+    /// frame's slot is skipped for the phase still to end, its bytes left as
+    /// they were, the status spi_overrun.
+    template <typename T>
+    [[gnu::always_inline]] static uint16_t take_of_two(SpiRegs& regs, uint16_t polled, uint8_t*& in, uint32_t& to_read) {
+        store_frame<T>(in, regs.DATAR);
+        const uint16_t after = regs.STATR;
+        in += sizeof(T);
+        --to_read;
+        if (((polled | after) & spi_ovr) != 0u) {
+            (void)regs.DATAR;
+            status_ = spi_overrun;
+            if (to_read != 0u) {
+                in += sizeof(T);
+                --to_read;
+            }
+        }
+        return after;
+    }
+
+    /// The receive loop with two frames in flight, above the threshold:
+    /// frame 1 follows frame 0 into the buffer on TXE, and every read of
+    /// frame k is followed by the write of frame k + 2, on TXE too. After a
+    /// loss one frame is out, frame k + 2 written only then, so a phase loses
+    /// one frame at most and the turns that remain cannot overrun.
+    ///
+    /// The chapter does not order RXNE and TXE at a frame's end (16.2.2), and
+    /// a write made with the buffer still full replaces the frame in it.
+    /// Measured on this die (test_x035_spi letter d), RXNE leads TXE by less
+    /// than a load's 2.2 cycles in every mode and width, so the load
+    /// take_of_two() makes after the DATAR read already has TXE up and the
+    /// wait below does not turn: it adds no load, a test and a branch a frame,
+    /// and it stands on the chapter's silence, not on a measured need
+    /// (docs/ch32x035/spi.md). `count` >= 2.
+    template <typename T, bool dummy>
+    [[gnu::always_inline]] static bool poll_duplex_two(const uint8_t* p, uint8_t* in, uint16_t count, uint32_t& budget) {
+        constexpr uint32_t step = dummy ? 0u : sizeof(T);
+        SpiRegs& regs = S::regs();
+        uint32_t spins = budget;
+        uint32_t to_write = static_cast<uint32_t>(count) - 2u;
+        uint32_t to_read = count;
+        regs.DATAR = static_cast<uint16_t>(frame_at<T, dummy>(p));   // the shifter is idle: frame 0 moves at once
+        p += step;
+        while ((regs.STATR & spi_txe) == 0u) {
+            if (--spins == 0u) {
+                budget = 0;
+                return false;
+            }
+        }
+        regs.DATAR = static_cast<uint16_t>(frame_at<T, dummy>(p));   // frame 1, behind frame 0
+        p += step;
+        while (to_write != 0u) {
+            const uint32_t next = frame_at<T, dummy>(p);
+            __asm__ volatile("" : : "r"(next));   // the load inside the wire time, as in poll_duplex()
+            uint16_t st = regs.STATR;
+            while ((st & spi_rxne) == 0u) {
+                if (--spins == 0u) {
+                    budget = 0;
+                    return false;
+                }
+                st = regs.STATR;
+            }
+            st = take_of_two<T>(regs, st, in, to_read);
+            while ((st & spi_txe) == 0u) {
+                if (--spins == 0u) {
+                    budget = 0;
+                    return false;
+                }
+                st = regs.STATR;
+            }
+            regs.DATAR = static_cast<uint16_t>(next);
+            p += step;
+            --to_write;
+        }
+        while (to_read != 0u) {
+            uint16_t st = regs.STATR;
+            while ((st & spi_rxne) == 0u) {
+                if (--spins == 0u) {
+                    budget = 0;
+                    return false;
+                }
+                st = regs.STATR;
+            }
+            (void)take_of_two<T>(regs, st, in, to_read);
         }
         budget = spins;
         return true;
@@ -2369,16 +2491,16 @@ static_assert(spi_write_ahead_from(SpiDataSize::bits8, 600u) == SpiClock::div128
 static_assert(spi_write_ahead_from(SpiDataSize::bits16, 600u) == SpiClock::div64);
 
 // The short asynchronous request (the arithmetic above SpiHostCosts): from
-// the flash, E - F = 660 cycles for a read and 705 for a write; a byte
-// frame read costs 52 at /2 and /4 (the loop's turn; the wire and the dead
-// bus at /4), 84 at /8, 148 at /16, 276 at /32, 532 at /64; written, 24 at
+// the flash, E - F = 655 cycles for a read and 720 for a write; a byte
+// frame read costs 48 at /2 and /4 (the loop's turn; the wire and the dead
+// bus at /4), 80 at /8, 144 at /16, 272 at /32, 528 at /64; written, 24 at
 // /2 (the loop's turn) and the wire from /4. So a read rides the engines
-// from 13, 13, 8, 5, 3 and 2 frames at /2 to /64 and from one at /128, a
-// write from 30, 23, 12, 6, 3 and 2; a polled read from 660 / 20, 33
+// from 14, 14, 9, 5, 3 and 2 frames at /2 to /64 and from one at /128, a
+// write from 30, 23, 12, 6, 3 and 2; a polled read from 655 / 16, 41
 // frames (dma_min_frames_polled).
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 13u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 13u);
-static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 8u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div2, SpiDataSize::bits8, true) == 14u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) == 14u);
+static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div8, SpiDataSize::bits8, true) == 9u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div16, SpiDataSize::bits8, true) == 5u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div32, SpiDataSize::bits8, true) == 3u);
 static_assert(spi_async_min_frames(spi_costs_in_flash, SpiClock::div64, SpiDataSize::bits8, true) == 2u);

@@ -1468,8 +1468,8 @@ suite with the path in the flash and in SRAM, nothing else moved:
 
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
-| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 15.9 to 16.8 | 998 a host type, both loops |
-| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0, aligned likewise | 26.6 to 30.6, 41.5 to 47.0 (by the image's layout) | (with the transmit-only loop's) |
+| the SPI host's transmit-only loop, a frame at /2 (the wire 16) | the driver (`InRam`) | 24.0, its function aligned to a word | 16.0 to 16.9 | 740 a host type, both loops |
+| the SPI receive loop's one-frame turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 to 25.6, 39.3 to 40.0 (by the image's layout) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
 | the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (207 at most); 79, 94 with the vector placed | 968 for one plain host |
@@ -1486,9 +1486,10 @@ entry 36, exit 34, a body of 26 between them), are outside them.
 
 From the flash, code with taken branches costs what its address modulo
 four makes it, the fetch's word: the same instructions at every offset
-through 32 bytes took one of two costs, by the offset's second bit and
-by nothing else - 52.0 or 72.0 cycles a frame for the SPI receive loop
-at /4, 68 or 72 for a body of four taken forward branches - where
+tried took one of two costs, by the offset's second bit and by nothing
+else - 47.9 or 68.0 cycles a frame for the SPI receive loop's one-frame
+turn at /4, through 8 bytes, and 68 or 72 for a body of four taken forward
+branches, through 32 - where
 straight-line code and three-instruction loops did not move and SRAM
 moved by a cycle at most (a scratch sweep, [spi.md](spi.md), "The
 fetch"). From SRAM the SPI loops' frame still moved by up to four cycles

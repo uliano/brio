@@ -31,10 +31,10 @@
 //   (spi.hpp, the write-ahead threshold): a byte frame from /64 (512
 //   cycles at HCLK = 48 MHz) and a 16-bit one from /32 (512). A request
 //   runs one of the host's two ways (docs/design/spi-bus.md): POLLED, the
-//   loops inside start() (and a read of dma_min_frames_polled = 33 frames
+//   loops inside start() (and a read of dma_min_frames_polled = 41 frames
 //   or more on the engines inside it), or ASYNCHRONOUS, which is DMA - on
 //   the engines from the count async_min_frames() derives for its code
-//   and width (a byte read from 1 frame at /256, 5 at /16, 13 at /2), run
+//   and width (a byte read from 1 frame at /256, 5 at /16, 14 at /2), run
 //   polled inside start() below it, and polled too whatever its length
 //   for 16-bit frames at an odd address (RM 9.3.6: a wide access ignores
 //   the low address bit). So the POLLED LOOP is a window of 8 frames in
@@ -44,12 +44,10 @@
 //   dispatch: a dispatch above the arbiter holds it off for its whole
 //   length, which the hold-off does not count, and where two frames are in
 //   flight and that outlasts a frame the one-deep receive buffer loses one
-//   (16.2.7). THIS HOST'S POLLED RECEIVE LOOP DOES NOT READ OVR (spi.hpp,
-//   poll_duplex(): RXNE alone): it waits for the frame the overrun took
-//   until the transaction's budget of poll turns runs out, and the
-//   transaction ends spi_stalled with the receive buffer flushed - never
-//   spi_ok over a run with a hole, because the loop cannot count the
-//   frames it asked for without the one that never came.
+//   (16.2.7). THE LOOP READS OVR (spi.hpp, take_of_two()): the lost frame's
+//   slot is skipped, the phase runs on to its last frame with one frame in
+//   flight, and the transaction ends spi_overrun - never spi_ok over a run
+//   with a hole.
 //   THE ANSWER MODE. The CH32V006's client answers with CPOL = 1 only
 //   (its RM 16.2.3; measured, docs/ch32v00x/spi.md: in modes 0 and 1 a
 //   window whose first answer bit is 1, the host's MOSI low at the select's
@@ -165,10 +163,9 @@
 //      judges both host paths in byte frames. In the control every rung is
 //      byte-exact on every path. Under pressure the engines and the short
 //      request are (where it runs polled, one frame is in flight), and the
-//      polled loop is byte-exact or cut short by a detected failure -
-//      spi_stalled, this loop's (above) - at a rung where two frames are in
-//      flight: never a run with a hole handed back spi_ok, never a failure
-//      where one frame is.
+//      polled loop is byte-exact or ends spi_overrun (above) at a rung
+//      where two frames are in flight: never a run with a hole handed back
+//      spi_ok, never a failure where one frame is.
 //   w  the arbiter under pressure: the Client above it (20 requests of 6
 //      frames, two outstanding, on the engines), Minor below it (10 POLLED
 //      requests of 8 frames, one outstanding: under dma_min_frames_polled,
@@ -713,9 +710,9 @@ bool two_in_flight(SpiClock c, bool wide) {
     return static_cast<uint8_t>(c) >= static_cast<uint8_t>(from);
 }
 
-/// One pass's polled outcome: the rungs cut short by a detected failure (a
-/// bit a rung, bit k for rungs[k]), per polled path, and the cycles the
-/// longest of those windows took; and whether any polled failure was
+/// One pass's polled outcome: the rungs that ended spi_overrun (a bit a
+/// rung, bit k for rungs[k]), per polled path, and the cycles the longest of
+/// those windows took; and whether any polled failure was
 /// something else - another status, a wrong run handed back spi_ok, or a
 /// failure where one frame is in flight.
 uint8_t cut_short[2] = {};
@@ -749,7 +746,7 @@ bool climb(Path path, uint8_t seed) {
                   ", a frame ", frame_cycles(c, e.wide), " cycles; the window took ", o.cycles, "):", crlf);
             sl::print_outcome(e, o);
             if (path_polled(path)) {
-                if (o.status == spi_stalled && two) {
+                if (o.status == spi_overrun && two) {
                     cut_short[path == Path::polled16 ? 0u : 1u] |= static_cast<uint8_t>(1u << k);
                     if (o.cycles > cut_cycles_max) {
                         cut_cycles_max = o.cycles;
@@ -804,11 +801,11 @@ void tp_ladders() {
         const bool ping = sl::command(spilink::Op::ping);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    polled rungs cut short (spi_stalled): 16-bit");
+        print(serial, "    polled rungs that lost a frame (spi_overrun): 16-bit");
         print_rungs(cut_short[0]);
         print(serial, "; 8-bit");
         print_rungs(cut_short[1]);
-        print(serial, "; the longest cut window ", cut_cycles_max, " cycles", crlf);
+        print(serial, "; the longest such window ", cut_cycles_max, " cycles", crlf);
         if (s.period_us == 0u) {
             bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 8 16-bit and 8 8-bit frames "
                                          "byte-exact both ways at every code to /2",
@@ -819,15 +816,13 @@ void tp_ladders() {
             // its whole length - a length the host's hold-off does not
             // count. Where two frames are in flight and the preemption
             // outlasts a frame, the one-deep receive buffer loses one, and
-            // this loop, which watches RXNE alone, waits for it until its
-            // budget runs out: the transaction ends spi_stalled. That it is
-            // detected every time and never handed back spi_ok with a hole
-            // is what is judged, the rungs cut short printed beside it. One
-            // frame in flight cannot overrun: a preemption there is a gap on
-            // the bus.
-            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: byte-exact, or cut short only by "
-                                         "a detected failure (spi_stalled) where two frames are in flight and a "
-                                         "dispatch above the arbiter outlasts a frame - never a run with a hole",
+            // the transaction ends spi_overrun. That it is detected every
+            // time and never handed back spi_ok with a hole is what is
+            // judged, the rungs printed beside it. One frame in flight cannot
+            // overrun: a preemption there is a gap on the bus.
+            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: byte-exact, or spi_overrun only "
+                                         "where two frames are in flight and a dispatch above the arbiter outlasts "
+                                         "a frame - never a run with a hole",
                           (polled16 && polled8) || !polled_failed_otherwise);
         }
         bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST: 5 frames byte-exact at every code to /2, on "

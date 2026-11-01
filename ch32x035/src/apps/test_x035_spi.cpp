@@ -22,7 +22,7 @@
 //
 // The suite has TWO SETS:
 //
-//  - `z`, THE SINGLE-BOARD LETTERS (a, b, c), runnable with the far board
+//  - `z`, THE SINGLE-BOARD LETTERS (a, b, c, e, f), runnable with the far board
 //    dark - on its console, or on its spi_peer, whose dark listener drives
 //    nothing and is selected by nothing: PA4 is this end's GPIO select,
 //    held HIGH through every one of them, and what goes out on SCK and
@@ -64,6 +64,11 @@
 //      engines over it answered by the caller's bound and recover(); and the
 //      block's own transmit request let go four ways - release()'s reset
 //      pulse leaving the next owner of channel 3 nothing
+//   e  A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT, wireless: OVR's own
+//      clear measured against 16.2.7; a host declaring 40 cycles keeps two in
+//      flight from /16; under a tick dragged past two frames its receive ends
+//      spi_overrun within a bound the budget never reaches, and with the drag
+//      off every run ends spi_ok
 //   n  (y) THE PEER: the command channel, ident (the CH32V006, kind 0x06),
 //      ten pings
 //   o  (y) the matrix: this host in the four modes and both bit orders
@@ -71,7 +76,8 @@
 //      hears judged in all four, what this host reads where that client
 //      answers (modes 2 and 3, CPOL = 1; in modes 0 and 1 it listens
 //      alone), a bit-order mismatch as an exact
-//      two-way reversal, and the receive CRC over the foreign frames
+//      two-way reversal, the receive CRC over the foreign frames, and which
+//      frame the buffer keeps when one is lost
 //   p  (y) THE LADDER against the peer, /256 to /2 on the polled host and
 //      on the engines, both of the peer's serves, /2 = 24 MHz with and
 //      without the high-speed read, and the high-speed read's own ladder
@@ -98,6 +104,10 @@
 //   s  (by name) the /2 frame and the core's share of the bus: letter b's
 //      engined frame at /2 twenty times with the completion polled in SRAM
 //      and twenty with the core waiting off the bus
+//   d  (by name) THE WITNESS, wireless, printing a table and judging nothing:
+//      with two frames in flight, which of RXNE and TXE a poll from SRAM sees
+//      first at each frame's end, and how far apart, in the four modes, both
+//      widths, /8 to /256
 //   x  (by name) the slip statistics: each mode ten times
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
@@ -110,7 +120,7 @@
 // letters and test_x035_spi-2 the two-board ones (`y`) and the slip
 // statistics.
 // build: boards = x035f8
-// build: groups = abcfs,nopkqrvmwx
+// build: groups = abcdefs,nopkqrvmwx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -180,6 +190,9 @@ volatile uint32_t dma_isr_entries = 0;
 /// stamped on the STK at its first and last statement.
 volatile uint32_t console_body_max = 0;
 volatile uint32_t tick_body_max = 0;
+/// Letter e's drag: empty turns the tick's handler spends after its stamps,
+/// so tick_body_max stays the handler's own.
+volatile uint32_t tick_drag = 0;
 
 // Word-aligned: a 16-bit request on the engines needs half-word boundaries.
 alignas(4) uint8_t tx_buf[512];
@@ -941,7 +954,7 @@ void ta_block() {
     // under the edge async_min_frames() puts at /4, run polled inside
     // start(), against one at the edge, which goes to the engines.
     host_ready();
-    fill_pattern(tx_buf, 64, 0x21);
+    fill_pattern(tx_buf, 80, 0x21);
     const uint8_t polled = host_xfer(CsPin::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode3,
                                      SpiClock::div2, SpiDataSize::bits16, true);
     const uint8_t written = host_xfer(CsPin::ref(), cmd_buf, 2, tx_buf, nullptr, 16, SpiMode::mode0,
@@ -949,8 +962,8 @@ void ta_block() {
     dma_ready();
     const uint8_t dma = dma_xfer(CsPin::ref(), nullptr, 0, tx_buf, rx_buf, 64, SpiClock::div4,
                                  SpiDataSize::bits8, false);
-    static_assert(64u >= DmaHost::dma_min_frames_polled, "a polled read of 64 frames rides the engines");
-    const uint8_t dma_polled = dma_xfer(CsPin::ref(), cmd_buf, 1, tx_buf, rx_buf, 64, SpiClock::div2,
+    static_assert(80u >= DmaHost::dma_min_frames_polled, "a polled read of 80 frames rides the engines");
+    const uint8_t dma_polled = dma_xfer(CsPin::ref(), cmd_buf, 1, tx_buf, rx_buf, 80, SpiClock::div2,
                                         SpiDataSize::bits8, true);
     uint32_t e0 = dma_isr_entries;
     const uint8_t chained = dma_xfer(CsPin::ref(), tx_buf, 32, tx_buf, rx_buf, 16, SpiClock::div4,
@@ -1753,6 +1766,392 @@ void ts_bus_share() {
 }
 
 // ===========================================================================
+// d - does RXNE say TXE? the witness (wireless, by name, no verdict)
+// ===========================================================================
+//
+// With two frames in flight frame k shifts while frame k + 1 waits in the
+// transmit buffer. At frame k's end two flags rise: RXNE, at "the last sample
+// clock edge of the data word", and TXE, "when the data has reached the shift
+// register" (16.2.2). The chapter does not order them. This letter asks the
+// silicon: the host's own transmit side, nothing on the wire but its own
+// clock - the select high, MISO floating and never read as data - so no
+// client is needed. Each turn polls STATR from SRAM until one load shows
+// either flag and files the frame under what that load showed - RXNE alone,
+// TXE alone, both - and with one alone reads STATR four times more back to
+// back, the first of them to show the other flag being how far apart the two
+// rose, in loads. Then the DATAR read and the next write. Interrupts are
+// masked over a run: a handler landing in the poll would file the frame under
+// "both" and say nothing about the block. What a line can resolve is the
+// load's and the poll's period, printed under the table.
+
+struct WitnessRun {
+    uint16_t rxne_alone = 0;   ///< a load showed RXNE with TXE low
+    uint16_t together = 0;     ///< the first load showing either showed both
+    uint16_t txe_alone = 0;    ///< a load showed TXE with RXNE low
+    uint16_t lost = 0;         ///< OVR after the DATAR read
+    uint16_t stuck = 0;        ///< a flag never came within the turn's bound
+    uint16_t next_load[5] = {};   ///< the other flag at the 1st..4th load after, [4] later
+};
+
+/// One run of `count` frames (`count` >= 3), two in flight, into `w`.
+[[gnu::noinline, gnu::flatten, gnu::section(".fast_text")]] void witness_run(uint16_t count, WitnessRun& w) {
+    SpiRegs& regs = S::regs();
+    constexpr uint32_t bound = 200'000u;   // far past a 4096-cycle frame at any turn
+    constexpr uint32_t both = spi_rxne | spi_txe;
+    regs.DATAR = 0xFFFFu;
+    for (uint32_t i = bound; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
+    }
+    regs.DATAR = 0xFFFFu;
+    for (uint32_t to_write = count - 2u; to_write != 0u; --to_write) {
+        uint32_t st;
+        uint32_t i = bound;
+        do {
+            st = regs.STATR;
+        } while ((st & both) == 0u && --i != 0u);
+        // Back to back, kept and judged afterwards: nothing between the
+        // loads but the core's own fetch and bus.
+        const uint32_t s1 = regs.STATR;
+        const uint32_t s2 = regs.STATR;
+        const uint32_t s3 = regs.STATR;
+        const uint32_t s4 = regs.STATR;
+        if (i == 0u) {
+            ++w.stuck;
+            return;
+        }
+        const uint32_t seen = st & both;
+        if (seen == both) {
+            ++w.together;
+        } else {
+            const uint32_t want = seen ^ both;
+            if (seen == spi_rxne) {
+                ++w.rxne_alone;
+            } else {
+                ++w.txe_alone;
+            }
+            const uint8_t at = (s1 & want) != 0u ? 0u : (s2 & want) != 0u ? 1u : (s3 & want) != 0u ? 2u : (s4 & want) != 0u ? 3u : 4u;
+            ++w.next_load[at];
+            for (i = bound; (regs.STATR & want) == 0u && i != 0u; --i) {
+            }
+        }
+        (void)regs.DATAR;
+        if ((regs.STATR & spi_ovr) != 0u) {
+            ++w.lost;
+        }
+        regs.DATAR = 0xFFFFu;
+    }
+    // The two frames still in flight: bounded, their answers thrown away.
+    for (uint8_t left = 2; left != 0u; --left) {
+        for (uint32_t i = bound; (regs.STATR & spi_rxne) == 0u && i != 0u; --i) {
+        }
+        (void)regs.DATAR;
+        (void)regs.STATR;
+    }
+}
+
+/// The periods a line resolves: one of witness_run()'s back-to-back loads
+/// and one turn of its poll, x10, with TXE and RXNE both low in a frame at
+/// /256 for the poll and any state for the loads.
+[[gnu::noinline, gnu::section(".fast_text")]] uint32_t witness_load_x10() {
+    SpiRegs& regs = S::regs();
+    const uint32_t t0 = stamp();
+    for (uint8_t k = 0; k < 4u; ++k) {
+        (void)regs.STATR; (void)regs.STATR; (void)regs.STATR; (void)regs.STATR;
+        (void)regs.STATR; (void)regs.STATR; (void)regs.STATR; (void)regs.STATR;
+        (void)regs.STATR; (void)regs.STATR; (void)regs.STATR; (void)regs.STATR;
+        (void)regs.STATR; (void)regs.STATR; (void)regs.STATR; (void)regs.STATR;
+    }
+    return stamp_span(t0, stamp()) * 10u / 64u;
+}
+[[gnu::noinline, gnu::section(".fast_text")]] uint32_t witness_poll_x10() {
+    SpiRegs& regs = S::regs();
+    constexpr uint32_t both = spi_rxne | spi_txe;
+    regs.DATAR = 0xFFFFu;
+    for (uint32_t i = 200'000u; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
+    }
+    regs.DATAR = 0xFFFFu;   // two in flight: both flags low until frame 0's end
+    const uint32_t t0 = stamp();
+    uint32_t turns = 0;
+    uint32_t i = 200'000u;
+    uint32_t st;
+    do {
+        st = regs.STATR;
+        ++turns;
+    } while ((st & both) == 0u && --i != 0u);
+    const uint32_t took = stamp_span(t0, stamp());
+    for (uint8_t left = 2; left != 0u; --left) {
+        for (uint32_t j = 200'000u; (regs.STATR & spi_rxne) == 0u && j != 0u; --j) {
+        }
+        (void)regs.DATAR;
+        (void)regs.STATR;
+    }
+    return took * 10u / turns;
+}
+
+void td_witness() {
+    constexpr uint16_t frames_a_run = 32;
+    constexpr uint8_t runs = 4;
+    const SpiClock rates[6] = {SpiClock::div8,  SpiClock::div16,  SpiClock::div32,
+                               SpiClock::div64, SpiClock::div128, SpiClock::div256};
+    host_ready();
+    print(serial, "  each line ", runs, " runs of ", frames_a_run, " frames, two in flight, interrupts masked: ",
+          runs * (frames_a_run - 2u), " frame ends a line, filed by what the first load to show a flag showed", crlf);
+    uint32_t rxne_total = 0;
+    uint32_t ends_total = 0;
+    uint16_t spread[5] = {};
+    for (uint8_t wide = 0; wide < 2u; ++wide) {
+        const SpiDataSize bits = wide != 0u ? SpiDataSize::bits16 : SpiDataSize::bits8;
+        for (uint8_t m = 0; m < 4u; ++m) {
+            for (const SpiClock rate : rates) {
+                WitnessRun w{};
+                Host::prime(static_cast<SpiMode>(m), rate, bits);
+                console_drain();
+                for (uint8_t r = 0; r < runs; ++r) {
+                    InterruptGuard guard;
+                    witness_run(frames_a_run, w);
+                }
+                print(serial, "  mode ", m, wide != 0u ? " 16-bit /" : "  8-bit /", asked_divisor(rate),
+                      ": RXNE alone ", w.rxne_alone, ", both ", w.together, ", TXE alone ", w.txe_alone,
+                      "; the other flag at the next load ", w.next_load[0], ", 2nd ", w.next_load[1], ", 3rd ",
+                      w.next_load[2], ", 4th ", w.next_load[3], ", later ", w.next_load[4]);
+                if (w.lost != 0u || w.stuck != 0u) {
+                    print(serial, ", LOST ", w.lost, ", stuck ", w.stuck);
+                }
+                print(serial, crlf);
+                if (w.lost == 0u && w.stuck == 0u) {
+                    rxne_total += w.rxne_alone;
+                    ends_total += static_cast<uint32_t>(w.rxne_alone) + w.together + w.txe_alone;
+                    for (uint8_t k = 0; k < 5u; ++k) {
+                        spread[k] = static_cast<uint16_t>(spread[k] + w.next_load[k]);
+                    }
+                }
+            }
+        }
+    }
+    uint32_t load_x10 = 0;
+    {
+        InterruptGuard guard;
+        load_x10 = witness_load_x10();
+    }
+    Host::prime(SpiMode::mode0, SpiClock::div256, SpiDataSize::bits8);
+    uint32_t poll_x10 = 0;
+    {
+        InterruptGuard guard;
+        poll_x10 = witness_poll_x10();
+    }
+    print(serial, "  over the lines with nothing lost: RXNE with TXE low at ", rxne_total, " of ", ends_total,
+          " frame ends; the other flag at the next load ", spread[0], ", 2nd ", spread[1], ", 3rd ", spread[2],
+          ", 4th ", spread[3], ", later ", spread[4], crlf);
+    print(serial, "  a back-to-back load ", load_x10 / 10u, ".", load_x10 % 10u, " cycles, a turn of the poll ",
+          poll_x10 / 10u, ".", poll_x10 % 10u, crlf);
+    host_ready();
+}
+
+// ===========================================================================
+// e - a frame lost to a hold-off declared too short (wireless)
+// ===========================================================================
+//
+// First the flag itself, because the host's loop is written from what it does
+// and 16.2.7 says otherwise: "Reading the data register and then reading the
+// status register will eliminate this bit". Two frames clocked with nothing
+// read, the first left in the buffer, the second lost; then the ways a program
+// goes at the flag, judged at /32 (MISO is not read as data). The flag falls
+// within a load of the read that clears it, not at it - two compressed loads
+// back to back, 2.2 cycles apart, read it still up - so every judged load
+// here comes a microsecond after the read before it.
+//
+// A host declaring a hold-off of 40 cycles keeps two frames in flight from /16
+// (40 + 57 of spi_read_latency_cycles against a 128-cycle frame). At /32 a
+// frame is 256 cycles, and the undragged image's longest hold-off is under it:
+// the tick's body of some 70 cycles (letter b), the 37 of the entry and the
+// 36 of the exit, and some 20 of the way back to the read, some 165 in all.
+// That is the control: nothing can be lost, every run ends spi_ok.
+//
+// Then the tick's handler is dragged past two frames: 100 empty turns, some
+// 2230 cycles of hold-off (measured first, the longest gap a main-context loop
+// sees over three ticks; the verdict asks it past 512). A handler landing r
+// cycles before frame k's end with frame k + 1 behind it loses frame k + 1 when
+// it holds the loop off longer than r + 256; r is under a frame, so such a
+// hold-off loses a frame at every tick that lands with two in flight, which is
+// all of the loop's time but the turn from the read of frame k to the write of
+// frame k + 2. Sixteen receives of 256 frames (65 536 cycles of wire, ticks
+// 48 000 apart, so at least one tick in each), spaced so the tick walks across
+// the frame: 143 of 160 runs lost a frame in ten letters, and at that rate
+// fewer than four of sixteen is under one letter in ten million.
+//
+// Every run must END, spi_overrun or spi_ok, never spi_stalled, within a bound
+// the budget cannot meet. After a loss the loop has one frame out, 256 cycles
+// and its own turn, some 106 from the flash (a run that lost a frame early at
+// /16: 234 a frame against the wire's 128), 120 allowed: 256 x 376 = 96 256.
+// Three ticks fit in that at 2300 each, 6900, and 2000 for the request's fixed
+// cost: 105 156. A stall would spend the budget, (256 + 2) x 256 = 66 048 poll
+// turns of at least 7 cycles, 460 000 cycles. No run may leave OVR or RXNE
+// standing, which the next transaction would inherit.
+
+using ShortHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 40u>;
+static_assert(ShortHost::write_ahead_from(SpiDataSize::bits8) == SpiClock::div16,
+              "a hold-off of 40: two frames in flight from /16");
+
+/// One receive of `n` byte frames at `rate` on the short host, the select null.
+uint32_t short_receive(uint16_t n, SpiClock rate) {
+    ShortHost::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.len = n;
+    r.clock = rate;
+    r.polled = true;
+    const uint32_t t0 = cycles_now();
+    (void)ShortHost::start(r);
+    return cycles_now() - t0;
+}
+
+/// Two frames at /32 with nothing read: frame 0 in the buffer, frame 1 lost
+/// under OVR. The frames take 512 cycles and the delay 15 us, 720 cycles.
+void two_frames_unread() {
+    SpiRegs& regs = S::regs();
+    regs.DATAR = 0x11u;
+    for (uint32_t i = 2000u; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
+    }
+    regs.DATAR = 0x22u;
+    (void)delay_us(clock, 15);
+}
+
+void te_overrun() {
+    constexpr uint16_t frames = 256;
+    constexpr uint32_t wire = frames * 256u;
+    constexpr uint32_t bound = frames * (256u + 120u) + 3u * 2300u + 2000u;   // the arithmetic above
+    constexpr uint8_t runs = 16;
+    (void)ShortHost::init(clock);
+    ShortHost::prime(SpiMode::mode0, SpiClock::div32, SpiDataSize::bits8);
+    SpiRegs& regs = S::regs();
+
+    // Past a DATAR read, the load that judges it.
+    auto settled = [&regs] {
+        (void)delay_us(clock, 1);
+        return static_cast<uint16_t>(regs.STATR);
+    };
+    // A load that shows it, then a read.
+    S::flush_rx();
+    two_frames_unread();
+    const uint16_t raised = regs.STATR;
+    (void)regs.DATAR;
+    const uint16_t shown_then_read = settled();
+    // 16.2.7's order, and everything else the chapter offers for the flag;
+    // then a read, that load having shown it, the buffer empty.
+    two_frames_unread();
+    (void)regs.DATAR;
+    const uint16_t read_first = settled();
+    const uint16_t read_first_again = regs.STATR;
+    regs.STATR = static_cast<uint16_t>(~spi_ovr);
+    const uint16_t wrote_zero = regs.STATR;
+    regs.CTLR1 = static_cast<uint16_t>(regs.CTLR1 & ~spi_spe);
+    regs.CTLR1 = static_cast<uint16_t>(regs.CTLR1 | spi_spe);
+    const uint16_t spe_toggled = regs.STATR;
+    (void)regs.DATAR;
+    const uint16_t read_empty = settled();
+    two_frames_unread();
+    S::flush_rx();
+    const uint16_t flushed = settled();
+    print(serial, "  two frames unread at /32: STATR ", hex(raised), "; a read after that load, STATR ",
+          hex(shown_then_read), crlf, "  with no load first, DATAR then STATR ", hex(read_first), " ",
+          hex(read_first_again), ", a zero written to OVR ", hex(wrote_zero), ", SPE down and up ", hex(spe_toggled),
+          ", a read of the empty buffer after those loads ", hex(read_empty), crlf, "  flush_rx() ", hex(flushed), crlf);
+    bench.verdict("OVR RISES on a frame completed with one standing unread, and a read after a load that showed it "
+                  "clears it",
+                  (raised & (spi_ovr | spi_rxne)) == (spi_ovr | spi_rxne) &&
+                      (shown_then_read & (spi_ovr | spi_rxne)) == 0u);
+    bench.verdict("16.2.7'S ORDER DOES NOT CLEAR IT ON THIS DIE: DATAR then STATR leaves it standing with RXNE down, and "
+                  "so do a zero written to it and SPE down and up; a read after those loads clears it, the buffer empty",
+                  (read_first & spi_ovr) != 0u && (read_first & spi_rxne) == 0u && (read_first_again & spi_ovr) != 0u &&
+                      (wrote_zero & spi_ovr) != 0u && (spe_toggled & spi_ovr) != 0u && (read_empty & spi_ovr) == 0u);
+    bench.verdict("flush_rx() leaves neither flag after a frame unread and a frame lost",
+                  (flushed & (spi_ovr | spi_rxne)) == 0u);
+
+    fill_pattern(tx_buf, 512, 0x3C);
+    console_drain();
+
+    // The frame the two-in-flight turn sustains from the flash, undragged:
+    // the best of three, since a tick can lose a frame at /16 under this
+    // host's declared hold-off (a frame of 128 against some 165).
+    uint32_t big16 = 0xFFFFFFFFu;
+    uint32_t big32 = 0xFFFFFFFFu;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        const uint32_t b16 = short_receive(frames, SpiClock::div16);
+        const uint32_t b32 = short_receive(frames, SpiClock::div32);
+        big16 = b16 < big16 ? b16 : big16;
+        big32 = b32 < big32 ? b32 : big32;
+    }
+    const uint32_t small16 = short_receive(32, SpiClock::div16);
+    const uint32_t small32 = short_receive(32, SpiClock::div32);
+    const uint32_t f16_x10 = big16 > small16 ? (big16 - small16) * 10u / (frames - 32u) : 0u;
+    const uint32_t f32_x10 = big32 > small32 ? (big32 - small32) * 10u / (frames - 32u) : 0u;
+    print(serial, "  the two-in-flight frame from the flash, x10 cycles: /16 ", f16_x10, " (the wire 1280), /32 ", f32_x10,
+          " (the wire 2560)", crlf);
+
+    uint8_t control_ok = 0;
+    console_drain();
+    for (uint8_t run = 0; run < runs; ++run) {
+        (void)short_receive(frames, SpiClock::div32);
+        control_ok = static_cast<uint8_t>(control_ok + (ShortHost::status() == spi_ok ? 1u : 0u));
+    }
+    print(serial, "  the tick undragged: ", control_ok, " of ", runs, " runs spi_ok", crlf);
+    bench.verdict("THE CONTROL: under the image's own handlers, shorter than a frame, a host declaring 40 cycles loses "
+                  "nothing at /32: every run spi_ok",
+                  control_ok == runs);
+
+    console_drain();
+    tick_drag = 100;
+    uint32_t held = 0;
+    {
+        const uint32_t from = cycles_now();
+        uint32_t last = from;
+        for (;;) {
+            const uint32_t now = cycles_now();
+            held = now - last > held ? now - last : held;
+            last = now;
+            if (now - from > 150'000u) {
+                break;
+            }
+        }
+    }
+    uint8_t ended = 0;
+    uint8_t overran = 0;
+    uint8_t stalled_runs = 0;
+    uint8_t standing = 0;
+    uint32_t longest = 0;
+    for (uint8_t run = 0; run < runs; ++run) {
+        // The frames, 256 cycles, and the tick, 48 000, keep a fixed phase
+        // from one run to the next (measured: 7 to 14 losses of 16 from image
+        // to image with no spacing). A different spacing before each run walks
+        // the tick's landing across the frame.
+        for (uint32_t k = 11u * run; k != 0u; --k) {
+            __asm__ volatile("");
+        }
+        const uint32_t took = short_receive(frames, SpiClock::div32);
+        const uint8_t st = ShortHost::status();
+        longest = took > longest ? took : longest;
+        if ((st == spi_overrun || st == spi_ok) && took <= bound) {
+            ++ended;
+        }
+        overran = static_cast<uint8_t>(overran + (st == spi_overrun ? 1u : 0u));
+        stalled_runs = static_cast<uint8_t>(stalled_runs + (st == spi_stalled ? 1u : 0u));
+        standing = static_cast<uint8_t>(standing + ((S::status() & (spi_ovr | spi_rxne)) != 0u ? 1u : 0u));
+    }
+    tick_drag = 0;
+    const uint32_t after_took = short_receive(frames, SpiClock::div32);
+    const uint8_t after = ShortHost::status();
+    print(serial, "  the dragged tick holds main context off up to ", held, " cycles; ", frames, " frames at /32 under it, ",
+          runs, " runs: ", ended, " ended in their bound of ", bound, ", ", overran, " spi_overrun, ", stalled_runs,
+          " spi_stalled, the longest ", longest, " cycles against the wire's ", wire, "; OVR or RXNE left standing after ",
+          standing, crlf);
+    print(serial, "  the drag off, the next request: status ", after, " in ", after_took, " cycles", crlf);
+    bench.verdict("A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT IS SEEN: under a handler past two frames every run "
+                  "ends within its bound, none spi_stalled, at least four of sixteen spi_overrun",
+                  held > 512u && ended == runs && stalled_runs == 0u && overran >= 4u);
+    bench.verdict("and neither flag stands after a run, the next request spi_ok", standing == 0u && after == spi_ok);
+    host_ready();
+}
+
+// ===========================================================================
 // n - the peer's command channel
 // ===========================================================================
 
@@ -1930,6 +2329,61 @@ void to_peer_matrix() {
     bench.verdict("THE RECEIVE CRC IS THE ARITHMETIC over a foreign chip's frames: RXCRCR is the bitwise CRC of "
                   "the peer's stream, TXCRCR of this end's",
                   crc_ok);
+
+    // WHICH FRAME THE BUFFER KEEPS when one is lost, which 16.2.7 does not
+    // say and the host's two-in-flight loop relies on: two of the peer's
+    // frames clocked with nothing read, the first read after both are in, the
+    // rest of the exchange by hand. Frame 0 in the buffer, frame 1 gone; frame
+    // 2 comes as the next frame read. The wait is 120 us against a frame's
+    // 43 at /256; the peer's stream differs frame to frame in all eight seeds.
+    uint8_t kept_first = 0;
+    for (uint8_t k = 0; k < 8u; ++k) {
+        spilink::Params lp{};
+        lp.cfg = spilink::Cfg{.apply = 1, .mode = 3, .dord = 0, .regime = spilink::regime_buffer_wait};
+        lp.count = 8;
+        lp.ms = 400;
+        lp.seed_a = static_cast<uint8_t>(0x44u + k);
+        lp.seed_b = static_cast<uint8_t>(0x9Au + 3u * k);
+        lp.pattern = spilink::pattern_prbs;
+        if (!peer_act(Op::exchange, lp)) {
+            continue;
+        }
+        settle();
+        Host::prime(SpiMode::mode3, link_clock);
+        (void)delay_us(clock, 20);
+        CsPin::clear();
+        link_hold();
+        SpiRegs& regs = S::regs();
+        S::flush_rx();
+        spilink::Stream out(lp.pattern, lp.seed_a);
+        regs.DATAR = out.next();
+        for (uint32_t i = 200'000u; (regs.STATR & spi_txe) == 0u && i != 0u; --i) {
+        }
+        regs.DATAR = out.next();
+        (void)delay_us(clock, 120);
+        const uint16_t st = regs.STATR;
+        const uint8_t first = static_cast<uint8_t>(regs.DATAR);
+        uint8_t third = 0;
+        bool frames = true;
+        for (uint8_t f = 2; f < 8u; ++f) {
+            uint8_t g = 0;
+            frames = frame_by_hand(out.next(), g, false) && frames;
+            third = f == 2u ? g : third;
+            (void)delay_us(clock, spilink::gap_us);
+        }
+        frames = wait_not_busy() && frames;
+        link_hold();
+        CsPin::set();
+        if (frames && (st & spi_ovr) != 0u && first == spilink::pattern_value(lp.pattern, lp.seed_b, 0) &&
+            third == spilink::pattern_value(lp.pattern, lp.seed_b, 2)) {
+            ++kept_first;
+        }
+        (void)link_command_mode();
+    }
+    print(serial, "  two frames unread, OVR up: the buffer held the first in ", kept_first, " of 8", crlf);
+    bench.verdict("A LOST FRAME IS THE LATER ONE: OVR up, the buffer keeps the frame that stood unread, and the frame "
+                  "after the lost one reads exact",
+                  kept_first == 8u);
     bench.verdict("and the command channel still works after all of that", command(Op::ping));
 }
 
@@ -3113,6 +3567,9 @@ BRIO_CH32_VECTOR(systick_handler) {
     if (d > tick_body_max) {
         tick_body_max = d;
     }
+    for (uint32_t k = tick_drag; k != 0u; --k) {
+        __asm__ volatile("");
+    }
 }
 
 BRIO_CH32_VECTOR(usart2_handler) {
@@ -3204,10 +3661,15 @@ int main() {
     bench.letter('c', "the refusals", tc_refusals);
     bench.letter('s', "the /2 frame and the core's share of the bus: twenty runs polled in SRAM and waited "
                       "off the bus (by name)", ts_bus_share, false);
+    bench.letter('d', "THE WITNESS: which of RXNE and TXE comes first, two frames in flight, a table (by name)",
+                 td_witness, false);
+    bench.letter('e', "A FRAME LOST TO A HOLD-OFF DECLARED TOO SHORT: spi_overrun within its bound, the control beside it",
+                 te_overrun);
     bench.letter('f', "THE FAULT EXITS: spi_stalled over a block in reset, spi_dma_fault over a dead channel, "
                       "recover(), release()'s pulse", tf_faults);
     bench.second_letter('n', "THE PEER: the command channel, ident, ten pings", tn_peer_link);
-    bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC", to_peer_matrix);
+    bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC, the frame kept",
+                        to_peer_matrix);
     bench.second_letter('p', "THE LADDER against the peer, both host paths, both serves, /2 with the high-speed read",
                         tp_peer_rates);
     bench.second_letter('k', "THE CLIENT'S RUNS: the peer's answer, exchange and receive, both widths, gapped and "
