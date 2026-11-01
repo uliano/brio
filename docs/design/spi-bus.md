@@ -463,7 +463,7 @@ has run. So:
 |---|---|---|
 | `spi_rejected` | nothing: the request never reached the wire | the client: a full FIFO clears, so it may post again; on a host with no engines it never clears |
 | `spi_stalled` | select released, receive side drained. The STM32F4 also resets and reconfigures the peripheral. Every other host with a budget (the STM32G0, the SAM C21, the CH32V00x, the CH32V203 and CH32V303, the CH32X035, the PL022) leaves the peripheral as it is | on the STM32F4 nobody: the next request starts on a clean peripheral. Elsewhere the program: `recover()` is the way back, and until it runs a request starts on the peripheral that stalled |
-| `spi_dma_fault` | select released, both channels put away. The CH32 families and the PL022 drain the receive side; the STM32F4 and the STM32G0 do not, so a frame may stand there. No host resets the peripheral | the program: `recover()` before the next request where a frame may stand. No letter on any family provokes a transfer error, so this path is read in the code and not measured |
+| `spi_dma_fault` | select released, both channels put away, the receive side drained; a frame still on the wire can land behind the drain. No host resets the peripheral | the program: `recover()` with the bus idle before the next request. No letter on any family provokes a transfer error, so this path is read in the code and not measured |
 | `spi_timeout` | the arbiter has called `recover()`: the stale completion silenced, the select raised, the peripheral reset | nobody for the engine; the wire and the device stay the application's to judge |
 
 A request queued behind a stall starts in the same dispatch, before the

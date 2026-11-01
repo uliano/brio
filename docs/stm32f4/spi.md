@@ -362,9 +362,9 @@ arithmetic behind them is at namespace level: `spi_frame_hclk_cycles()`,
 `spi_ok`; `spi_rejected`, an asynchronous request on a host with no engines,
 nothing on the wire and nothing to do but change the program; `spi_stalled`, the
 peripheral already reset and reconfigured, so the next request needs nothing of the
-program; `spi_dma_fault`, the requests dropped, both streams put away and the select
-released, but the peripheral not reset and the receive buffer not read, so a frame may
-stand there and a program calls `recover()` with the bus idle before the next request
+program; `spi_dma_fault`, the requests dropped, both streams put away, the receive buffer read and
+the select released, but the peripheral not reset and a frame still on the wire can land
+behind that read, so a program calls `recover()` with the bus idle before the next request
 (no letter provokes one: "Not covered yet"). The arbiter calls `recover()` itself on
 `spi_timeout` and on nothing else.
 
@@ -432,9 +432,8 @@ predictable branch, inline through the family's own `PinRef::set()` and
 calls, four a transaction). The setup time is tested before any call. **The receive buffer is not
 flushed per request**: the receive loop and the receive stream read every
 frame they clock and the transmit-only loop clears what stands at its tail, so
-nothing stands in it when a transaction ends well. A stall and `recover()`
-flush it themselves, `init()` once; `spi_dma_fault` is the one end that does
-not ("Types and verbs").
+nothing stands in it when a transaction ends well. A stall, `spi_dma_fault` and
+`recover()` flush it themselves, `init()` once ("Types and verbs").
 
 **Two polled shapes, by the request's fields.** A request with `polled`
 set runs one of them at every length and on every host, and never the
@@ -1387,8 +1386,8 @@ Implemented, not bench-verified (each with what would measure it):
   CPHA = 1 figures extrapolate from one mode each; the same lines over the other two
   would measure them.
 - `spi_dma_fault`: no letter makes a stream report a transfer error, so the path
-  (requests dropped, streams put away, select released, the receive buffer left
-  unread) is read in the code. A stream pointed at an unmapped address would provoke it.
+  (requests dropped, streams put away, the receive buffer read, select released)
+  is read in the code. A stream pointed at an unmapped address would provoke it.
 - `SpiHost` on the STM32F429I-DISC1: that half of the suite compiles over the host as
   it runs a request here and was not run with these loops, so nothing above states the
   polled loop's cost against the two soldered devices on SPI5 (letter b's ladder, and

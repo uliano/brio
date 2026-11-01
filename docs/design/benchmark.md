@@ -285,13 +285,13 @@ named are SCK.
 |---|---|---|---|---|---|---|
 | STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.06 at 8 MHz, 1.27 at 32 MHz; 16-bit frames 1.03, 1 | 1117 to 1133 cycles |
 | STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles | 1.00 | 1.03 at 22.5 MHz; 16-bit frames 1.02, 1 | 625 to 675 cycles = 3.5 to 3.8 us (601 to 700 across layouts of the same code, [its SPI page](../stm32f4/spi.md)) |
-| CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 943 cycles (946 in 16-bit frames), at 32 and 256 frames |
-| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 539 cycles: 339 the launch |
-| CH32V303VCT6 | 6.28 (6 cycles an item) | 6.25 | 298 cycles | 1.00 | 1.07 at 36 MHz; 16-bit frames 1.04, 1 | 595 cycles: 390 the launch |
+| CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 934 cycles at 32 and 256 frames (937 in 16-bit frames at 256) |
+| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 245 cycles | 1.00 | 1.06 at 36 MHz; 16-bit frames 1.03, 1 | 522 cycles: 327 the launch |
+| CH32V303VCT6 | 6.28 (6 cycles an item) | 6.25 | 298 cycles | 1.00 | 1.07 at 36 MHz; 16-bit frames 1.04, 1 | 573 to 586 cycles: 374 to 387 the launch |
 | CH32X035F8U6 (48 MHz HSI, 2 WS) | 6.56 (6 cycles an item from SRAM, 11.6 from the flash) | 6.48 | ~890 cycles (the instrument inside, the core held awake by the console's ring) | 1.00 (1024 bytes paced by a USART's transmitter at 1 Mbaud: the stratum has no timer driver) | - (not measured in this grammar: the host's costs are in [the CH32X035 SPI page](../ch32x035/spi.md)) | - |
-| RP2040 | 1.38 (the bus's rate; the completion's interrupt in the wall) | 1.63 | ~460 cycles to the completion's interrupt (the instrument inside) | 1.04 | 1.29 at 31.25 MHz (38 cycles a byte: the block's mode-0 gap); 16-bit frames 1.15, 1 | 954 cycles = 7.6 us |
-| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles | 1.00 | 1.30 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.15, 1 | 534 cycles over the nominal wire, 48 of them the gap = 3.6 us |
-| RP2350, Hazard3 | 1.04 | 1.29 | 47 cycles | 1.00 | 1.29 at 75 MHz; 16-bit frames 1.14, 1 | 492 cycles over the nominal wire = 3.3 us |
+| RP2040 | 1.38 (the bus's rate; the completion's interrupt in the wall) | 1.63 | ~460 cycles to the completion's interrupt (the instrument inside) | 1.04 | 1.29 at 31.25 MHz (38 cycles a byte: the block's mode-0 gap); 16-bit frames 1.15, 1 | 947 cycles = 7.6 us (1225 in one run of three) |
+| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 49 cycles | 1.00 | 1.30 at 75 MHz (19 cycles a byte: the mode-0 gap); 16-bit frames 1.15, 1 | 520 cycles over the nominal wire, 48 of them the gap = 3.5 us |
+| RP2350, Hazard3 | 1.04 | 1.29 | 47 cycles | 1.00 | 1.29 at 75 MHz; 16-bit frames 1.14, 1 | 490 cycles over the nominal wire = 3.3 us |
 
 What the rows say:
 

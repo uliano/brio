@@ -256,9 +256,9 @@ engines, `dma_isr()` posts `TransferDone`), `dma_isr()` (the channels'
 interrupt body; the host arms no interrupt of the block and binds no
 vector of its own), `status()` (`spi_ok`; `spi_rejected`, an
 asynchronous request on a host with no engines; `spi_dma_fault`, both channels
-put away and the select raised, nothing drained and the peripheral not reset, so
-frames may stand in the RXFIFO and a program calls `recover()` with the bus idle
-before the next request; or `spi_stalled` when a polled wait ran out of its budget,
+put away, the RXFIFO drained and the select raised, the peripheral not reset, so
+a frame still on the wire can land behind the drain and a program calls `recover()`
+with the bus idle before the next request; or `spi_stalled` when a polled wait ran out of its budget,
 no frame back within it, the select raised and the RXFIFO drained, the peripheral
 left as it is with whatever its TXFIFO holds, `recover()` the way back and the program's to
 call: the arbiter calls it on `spi_timeout` alone), `prime()`,

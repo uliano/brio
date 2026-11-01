@@ -1307,9 +1307,9 @@ static_assert((spi_costs.engines_over_read + 512u - 1u) / 512u ==
  * THE RECEIVE BUFFER IS NOT FLUSHED PER REQUEST. The receive loop and the
  * receive stream read every frame they clock and the transmit-only loop
  * clears what stands at its tail, so nothing stands in the buffer when a
- * transaction ends well; a stall and recover() flush it themselves, init()
- * does once, and a spi_dma_fault does not, so a frame may stand there until
- * the program's recover().
+ * transaction ends well; a stall, a spi_dma_fault and recover() flush it
+ * themselves, init() does once. After a spi_dma_fault a frame still on the
+ * wire can land behind that flush, so the program's recover() is the way back.
  *
  * THE ENGINE SLOTS, both or neither (a block is full duplex and its
  * completion is the RECEIVE block's), on cells the request mapping really
@@ -2212,6 +2212,7 @@ private:
             s.status = st;
             (void)TxEngine::abandon();
             arm_rx_engine();
+            S::flush_rx();   // a frame the stopped stream never took
         } else if (TxEngine::busy()) {
             // The receive block completing is proof the transmit one did:
             // every frame that came back was clocked out first.

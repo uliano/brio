@@ -1797,10 +1797,10 @@ static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize
  * "while any data is present in the TXFIFO"), and every path here leaves
  * it empty - the receive loops by count, the transmit-only loop by draining
  * on FRLVL at its tail, the engines by their block - so a fresh transaction
- * finds the RXFIFO empty. A polled wait that ran out and recover() drain it
- * (35.5.9's step 4, Spi::flush_rx()), init() after the enable, once; a
- * spi_dma_fault does not, so frames may stand there until the program's
- * recover().
+ * finds the RXFIFO empty. A polled wait that ran out, a spi_dma_fault and
+ * recover() drain it (35.5.9's step 4, Spi::flush_rx()), init() after the
+ * enable, once. After a spi_dma_fault a frame still on the wire can land behind
+ * that drain, so the program's recover() is the way back.
  *
  * THE PER-REQUEST CHIP-SELECT DELAY:
  * cs_setup_us is spent spinning in start() (main context, bounded by the
@@ -2879,6 +2879,7 @@ private:
             status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
+            S::flush_rx();   // what the stopped channel never took
         } else {
             // THE RECEIVE BLOCK COMPLETING IS PROOF THE TRANSMIT ONE DID:
             // every frame that came back was clocked out first. The
