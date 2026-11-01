@@ -20,8 +20,8 @@
  *    configuration under the rules the chapter states, the data and
  *    status verbs, the sequences that clear each flag, and the ISR body
  *    that reads the raised-and-enabled sources. It decides nothing.
- *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the
- *    engine util/spi_bus.hpp's SpiBus drives, the layer that moves one
+ *  - `SpiHost<n, pins, TxEngine, RxEngine>` is the engine
+ *    util/spi_bus.hpp's SpiBus drives, the layer that moves one
  *    transaction's frames, polled or on two DMA channels. Its Request
  *    carries the fields docs/design/spi-bus.md lists as every family's
  *    ("Realizations": a chip select, D/C, a command phase, a data phase
@@ -75,8 +75,8 @@
  *
  * Who calls what, and from where. init() runs in main(), after the
  * clock task's init(): every rate it works out - the instance's bus, a
- * ceiling's code, the chip-select setup's busy-wait, the write-ahead
- * codes - is the clock type's and not the hardware's, so a host
+ * ceiling's code, the chip-select setup's busy-wait - is the clock
+ * type's and not the hardware's, so a host
  * initialized at the 8 MHz reset clock under a 144 MHz type clocks
  * SPI1's requests eighteen times and SPI2's and SPI3's nine times
  * slower than sck_hz() reports (derived from the arithmetic, not
@@ -88,12 +88,12 @@
  * each) and discard their answer. start() is the arbiter's, from its
  * dispatch in main context, or the program's for a polled request on a
  * bus no arbiter owns. A request runs one of two ways
- * (docs/design/spi-bus.md, "Two ways to run a request"). Polled, it
- * completes inside start(), spinning with global interrupts enabled under
- * one spin budget for the transaction (polled_budget(): a budget that
- * runs out ends spi_stalled), and a long receive on the engines inside
- * start() waits for the receive channel's vector under a budget of its
- * own (spin_dma(): spi_dma_fault when it runs out). Asynchronous, it
+ * (docs/design/spi-bus.md, "Two ways to run a request"). Polled, it runs
+ * an explicit loop whatever its length and whatever engines the host
+ * names, and completes inside start(), spinning under one spin budget for
+ * the transaction (polled_budget(): a budget that runs out ends
+ * spi_stalled); it depends on no interrupt vector, so it runs with global
+ * interrupts masked as it does with them enabled. Asynchronous, it
  * rides the DMA engines: start() launches them and returns, and the
  * receive channel's vector ends it; a request too short to repay the
  * engines' fixed cost runs polled instead and completes inside start()
@@ -1050,78 +1050,16 @@ private:
 // The host engine
 // =============================================================================
 
-/// A block the engines could not finish: a transfer error on either DMA
-/// channel, a polled block that never completed - the engines' own
-/// status code, in the range util/bus_master.hpp leaves to engines.
+/// A block the engines could not finish, a transfer error on either DMA
+/// channel: the engines' own status code, in the range util/bus_master.hpp
+/// leaves to engines.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
-// The three other codes this host answers are the vocabulary's
-// (util/spi_bus.hpp). spi_overrun: a frame lost to the one-deep receive
-// buffer - OVR stood (20.2.7) while the polled receive loop had two frames
-// in flight; the threshold below is written so that it does not happen, and
-// when it does the transaction says so instead of handing back a run with a
-// hole in it. spi_stalled: a polled frame's flag never came within the
-// transaction's one spin budget - a clock that stopped, a block that is
+// The two other codes this host answers are the vocabulary's
+// (util/spi_bus.hpp). spi_stalled: a polled frame's flag never came within
+// the transaction's one spin budget - a clock that stopped, a block that is
 // dead; the select is released and the receive side flushed. spi_rejected:
 // an asynchronous request on a host with no engines bound, refused before
 // anything reaches the wire.
-
-/**
- * THE WRITE-AHEAD THRESHOLD of the polled receive loop. With two frames in
- * flight (20.2.2's "data needs to be filled into the data register to
- * maintain a complete data flow") the receive buffer holds frame k while
- * frame k + 1 shifts, and loses k + 1 if k is not read before it completes
- * (20.2.7's overrun) - so the loop puts a second frame of a RECEIVE in
- * flight only where ONE FRAME TIME exceeds the longest the read can be
- * late. The loop runs in the caller's context with global interrupts
- * enabled, and an interrupt that lands as RXNE rises makes the read late by
- * the sum of:
- *
- *  (a) the hold-off: the longest the image keeps the loop from running,
- *      which on a platform where no interrupt nests (the kernel's promise,
- *      docs/design/kernel.md section 1) is the longer of the image's
- *      longest HANDLER and its longest masked window, the hardware
- *      prologue's entry and exit included. Counted in the release
- *      listings: bench_vx03's console handler with its two stamps, 122
- *      instructions behind the hardware prologue and epilogue (16 + 25
- *      cycles, docs/ch32vx03/platform.md), about 200 cycles; the kernel's
- *      post() of a 40-byte Request under the producers' mask - the copy by
- *      the runtime's memcpy between csrrci and csrsi - about 130;
- *      test_vx03_spi's console handler, 63 instructions, about 120. The
- *      first, rounded, is the DEFAULT of the host's `hold_off_cycles`
- *      parameter, and only a default: the figure is a fact of the IMAGE,
- *      not of the family, so an image whose handlers or masked windows are
- *      longer declares its own (and one that knows its own are shorter may
- *      declare that), and an spi_overrun in a reply is the witness of a
- *      figure declared too short;
- *  (b) the loop's own way back to its read when the handler returns,
- *      counted in the release listing (poll_duplex, two frames in flight):
- *      from the budget's decrement a returning handler can land on, its
- *      test, the RXNE poll's STATR load, the copy's zero-extension, the
- *      RXNE and OVR tests and their branches, then the DATAR load - ten
- *      instructions, two of them APB loads, about 15 cycles.
- *
- * Under the default, on the BR ladder the first frame longer than the sum
- * is 256 cycles - SPI1's /32 for 8-bit frames and /16 for 16-bit ones at
- * any HCLK, one code lower on SPI2 and SPI3 above 72 MHz of HCLK, whose bus
- * runs at half; measured (bench_vx03's letter e): under a live console two
- * frames in flight lose one at every frame of 128 cycles and never at 256
- * or above; a hold-off of 300 moves 8-bit frames on SPI1 one code slower,
- * to /64. A WRITE needs no threshold: it never reads the answers (the class
- * comment).
- */
-/// The hold-off of the images counted above: the default of SpiHost's
-/// `hold_off_cycles`.
-inline constexpr uint32_t spi_default_hold_off_cycles = 200;
-/// The polled receive loop's way back to its DATAR read, (b) above. Any
-/// figure from 0 to 55 gives the same write-ahead codes under the default
-/// hold-off (the static_asserts at the end of this file).
-inline constexpr uint32_t spi_read_latency_cycles = 15;
-
-/// The frame, in HCLK cycles, that a read can come after RXNE at the latest
-/// under a hold-off: a longer one keeps two in flight.
-constexpr uint32_t spi_write_ahead_min_frame_cycles(uint32_t hold_off_cycles) {
-    return hold_off_cycles + spi_read_latency_cycles;
-}
 
 /// A frame of `bits` bits at BR `code` in HCLK cycles, on a bus whose rate
 /// is HCLK over `hclk_over_pclk` (1 on PB2; 2 on PB1 above 72 MHz of
@@ -1136,22 +1074,6 @@ template <uint8_t instance>
 constexpr uint32_t spi_hclk_over_pclk(uint32_t hclk) {
     const uint32_t pclk = spi_bus_hz_at<instance>(hclk);
     return pclk != 0u ? hclk / pclk : 1u;
-}
-
-/// The smallest BR code at which a frame of `bits` bits lasts longer
-/// than the threshold under a hold-off on that bus; 8 when no code does.
-/// The hold-off is a template argument because it is the host's, fixed
-/// for the binding: the threshold is a constant of the loop rebase()
-/// runs, not one more argument to it.
-template <uint32_t hold_off_cycles>
-constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
-    for (uint8_t code = 0; code < 8u; ++code) {
-        if (spi_frame_cycles(code, bits, hclk_over_pclk) >
-            spi_write_ahead_min_frame_cycles(hold_off_cycles)) {
-            return code;
-        }
-    }
-    return 8;
 }
 
 /*
@@ -1177,10 +1099,10 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
  * polled line's fixed part, both timed through the same call of the suite,
  * so that the caller's own cycles cancel (test_vx03_spi letter g, on SPI1,
  * which also finds the edge itself). The dead bus is a frame's cost beyond
- * the wire with one frame in flight, so the read's count is drawn as if the
- * loop kept one in flight at every code; above the write-ahead threshold it
- * keeps two and runs at the wire, which moves the count by at most one
- * frame there, where W dwarfs the dead bus. The figures are SPI1's, whose
+ * the wire, and it stands at every rate in both CPHA modes: this silicon
+ * raises RXNE with BSY's fall at the frame's end, not half a bit before it
+ * (bench_vx03 letter e's spi.rxne), so the turn never hides inside the wire's
+ * time. The figures are SPI1's, whose
  * register accesses go to PB2 at HCLK; a PB1 instance's loop turns are a
  * few cycles longer, which can move its count by a frame - the rule asks
  * for the order of magnitude, not the cycle. They are a core's: the V4F's
@@ -1201,21 +1123,21 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
 struct SpiHostCosts {
     uint32_t engines_over_read;      ///< E - F for a read (the receive loop's F)
     uint32_t engines_over_written;   ///< E - F for a write (the transmit-only loop's F)
-    uint32_t polled_gap;             ///< the receive loop's dead bus a frame, one in flight, at /4
+    uint32_t polled_gap;             ///< the receive loop's dead bus a frame, at /4
     uint32_t read_turn;              ///< the receive loop's shortest frame, at /2
     uint32_t write_turn;             ///< the transmit-only loop's shortest frame, at /2
 };
 /// Measured on SPI1 at 144 MHz (test_vx03_spi letter g, its engined host,
-/// four runs a part, every figure within three cycles run to run): the
-/// V4B's on the CH32V203C8T6 - E 597 cycles, E - F 250 read and 255
+/// F the polled wall of 4 and 12 frames extrapolated to no frames): the
+/// V4B's on the CH32V203C8T6 - E 580 to 584 cycles, E - F 277 to 281 read and 261 to 265
 /// written, the receive loop's frame 51 at /4 and 29 at /2, the
-/// transmit-only loop's 16.3 at /2 - and the V4F's on the CH32V303VCT6 -
-/// E 657 to 660, E - F 345 to 348 read and 367 to 379 written, 43.2 at /4,
-/// 33.5 at /2, 15.3 to 16.2. The V4F's E is the longer by its DMA vector,
-/// a naked trampoline over a handler that saves the f-registers
-/// (docs/ch32vx03/platform.md); its loops are quicker by a few cycles.
-inline constexpr SpiHostCosts spi_costs_v4b{250u, 255u, 19u, 29u, 16u};
-inline constexpr SpiHostCosts spi_costs_v4f{347u, 372u, 11u, 34u, 16u};
+/// transmit-only loop's 16 at /2 - and the V4F's on the CH32V303VCT6 -
+/// E 646 to 656, E - F 388 to 398 read and 390 to 400 written, 43 at /4, 34 at /2, 18. The
+/// V4F's E is the longer by its DMA vector, a naked trampoline over a
+/// handler that saves the f-registers (docs/ch32vx03/platform.md); its
+/// loops are quicker by a few cycles.
+inline constexpr SpiHostCosts spi_costs_v4b{277u, 261u, 19u, 29u, 16u};
+inline constexpr SpiHostCosts spi_costs_v4f{392u, 394u, 11u, 34u, 18u};
 /// This part's core: the CH32V303's V4F, every CH32V203's V4B.
 inline constexpr SpiHostCosts spi_host_costs =
     device::device_class == DeviceClass::v30x_d8 ? spi_costs_v4f : spi_costs_v4b;
@@ -1246,7 +1168,7 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
 }
 
 /**
- * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
+ * SpiHost<n, pins, TxEngine, RxEngine>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request
  * carries the fields every family's host shares (docs/design/spi-bus.md,
@@ -1282,8 +1204,8 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * THE REQUEST IS LENT FOR THE CALL (util/bus_master.hpp): a request that
  * completes inside start() is read where it lies, nothing copied; one that
  * goes to the engines has the fields its tenure needs - the pins, the out
- * and in buffers, the data length, the width, the way - copied into the
- * engine's own Tenure in word stores, and the reply stays the arbiter's.
+ * and in buffers, the data length, the width - copied into the engine's
+ * own Tenure in word stores, and the reply stays the arbiter's.
  * The Request is laid out so that nothing in it is padding: the two
  * PinRefs, the three buffers and the reply first (seven words), then the
  * lengths and the four settings in two words.
@@ -1291,11 +1213,11 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * TWO WAYS TO RUN A REQUEST (docs/design/spi-bus.md, "Two ways to run a
  * request"):
  *
- *  - POLLED (`polled` true): the loops below inside start(), the caller
- *    spinning for the whole transaction; and a receive of
- *    `dma_min_frames_polled` frames or more below the write-ahead
- *    threshold - where the loop leaves the bus dead between frames - on
- *    the engines inside start() too, start() waiting on their completion.
+ *  - POLLED (`polled` true): the loops below inside start(), at every
+ *    length and on every host, the caller spinning for the whole
+ *    transaction and the engines never touched, so a polled request
+ *    depends on no interrupt vector. A long read that wants the wire's
+ *    rate asks asynchronously.
  *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected
  *    in status(), before it touches the block, the select or the D/C, so
@@ -1312,24 +1234,29 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * The host arms no interrupt of the SPI block: the instance's vector is not
  * its own, and init() leaves the instance's PFIC line disabled.
  *
- * THE POLLED LOOPS are two, from 20.2.2. THE WRITE (no in buffer, and
- * every command phase): a frame written whenever TXE says the buffer is
- * free - a frame time ahead of the shifter's need, so the clock never
+ * ONE TRANSMIT BUFFER, ONE SHIFTER, ONE RECEIVE BUFFER (20.2.2, no FIFO),
+ * and the polled loops are two. THE WRITE (no in buffer, and every command
+ * phase) USES THE WRITE-AHEAD: a frame written whenever TXE says the buffer
+ * is free - a frame time ahead of the shifter's need, so the clock never
  * pauses - and the answers left to overrun the receive buffer, which 20.2.7
  * makes harmless for the transmit side; the tail waits TXE (the last frame
  * into the shifter) and then not BSY (out of it), and the DATAR-then-STATR
  * read clears RXNE and OVR. Wire-bound at every rate, no hazard. THE
- * RECEIVE: below the write-ahead threshold one frame in flight, the next
- * frame's load pinned inside the wire time and the DATAR read and the next
- * write in adjacent instructions, so the bus idles for a handful of cycles
- * a frame; above it 20.2.2's sequence - frame 0 written; for each next
- * frame TXE awaited and the frame written, then RXNE awaited and the one
- * before read; the last read - which cannot fall a frame behind (the next
- * write waits for the previous read) and runs at the wire's rate, OVR
- * watched beside RXNE so a lost frame ends the loop with spi_overrun at
- * once. The width and the buffers are locals of the loop, a null out
- * buffer a zero-stride pointer at 0xFF; one spin budget bounds the whole
- * transaction.
+ * RECEIVE DECLINES IT and keeps ONE frame in flight at every rate: a second
+ * frame queued behind the one shifting overruns the receive buffer if
+ * anything holds the loop from reading frame k longer than one frame time
+ * after its RXNE (20.2.7), and every handler and every preemption can. With
+ * one in flight the clock waits for the read, so this host, which owns the
+ * clock, cannot lose a frame: a handler or a preemption is a gap on the
+ * bus. The next frame's load is pinned inside the wire time and the DATAR
+ * read and the next write sit in adjacent instructions. What it costs is
+ * the turn between two frames, at every rate from /2 to /256, in both
+ * widths and both CPHA modes (bench_vx03 letter e's spi.frame lines, HCLK
+ * cycles a frame over the wire at 144 MHz): 10 to 22 on SPI1 and 20 to 30 on SPI2 on the CH32V203C8T6, 11 to 21 and
+ * 20 to 32 on the CH32V303VCT6.
+ * A read that wants the wire's own rate asks asynchronously. The width and
+ * the buffers are locals of the loop, a null out buffer a zero-stride pointer
+ * at 0xFF; one spin budget bounds the whole transaction.
  *
  * THE ENGINE SLOTS: both or neither (a block is full duplex and its
  * completion is the RECEIVE block's), on the two channels table 11-5 wires
@@ -1356,37 +1283,18 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * NO FLUSH AT START: the chapter gives no way for a frame to stand in the
  * receive buffer at the start of a transaction but a tenure that ended
  * without reading what it clocked, which here is a fault path - the
- * engines abandoned, a polled frame that never came, an overrun - and
+ * engines abandoned, a polled frame that never came - and
  * every fault path drains the buffer and clears OVR (20.2.7's sequence)
  * before the next start(). The normal paths read every frame by count.
  *
  * IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE on this family, so a
  * host with engines holds the program awake while a block is in flight;
  * `busy()` is what a sleep site asks.
- *
- * THE HOLD-OFF IS THE IMAGE'S: `hold_off_cycles` is the longest, in core
- * cycles at the clock the host runs at, that this image keeps the polled
- * receive loop from its read: the longer of its longest handler (no
- * interrupt nests over another) and its longest masked window. With the
- * loop's own way back to the DATAR read it is the write-ahead threshold
- * (the arithmetic above the class, rebase() turning it into a code per
- * width); its default, spi_default_hold_off_cycles, is the longest handler
- * counted in this family's own bench and suite images. An image measures
- * its own handlers with util/bench.hpp's IsrMeter, a stamp pair at each
- * vector's first and last statement - `isr` over `irq` is a handler's
- * body, the hardware prologue's entry and exit (docs/ch32vx03/platform.md)
- * on top; bench_vx03 meters the tick (letter t), the console (p) and the
- * DMA's vectors (d) that way - and an spi_overrun in a reply says the
- * figure it declared was too short.
  */
 template <uint8_t n, SpiPins pins = spi_default_pins<n>, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine, uint32_t hold_off_cycles = spi_default_hold_off_cycles>
+          typename RxEngine = NoDmaEngine>
 class SpiHost {
     using S = Spi<n>;
-
-    static_assert(hold_off_cycles > 0u,
-                  "brio SpiHost: a hold-off of zero cycles is no image's - an image with no "
-                  "handler of its own still has the tick's, and every critical section is one");
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -1441,13 +1349,6 @@ public:
     static constexpr uint32_t polled_gap_cycles = costs.polled_gap;
     static constexpr uint32_t polled_read_turn_cycles = costs.read_turn;
     static constexpr uint32_t polled_write_turn_cycles = costs.write_turn;
-    /// A POLLED receive rides the engines once the receive loop's dead bus,
-    /// one frame in flight below the write-ahead threshold, would cost more
-    /// than their extra fixed cost. Above the threshold the loop keeps two
-    /// in flight and runs at the wire, and the transmit-only loop always
-    /// does: neither ever does.
-    static constexpr uint16_t dma_min_frames_polled =
-        static_cast<uint16_t>((async_read_budget_cycles + polled_gap_cycles - 1u) / polled_gap_cycles);
 
     /// The frames from which an asynchronous request of one phase rides the
     /// engines at a code and a width (`read`: with an in buffer), on a bus
@@ -1547,7 +1448,6 @@ public:
         status_ = spi_ok;
         in_cmd_ = false;
         dma_active_ = false;
-        dma_done_ = false;
         if constexpr (has_engines) {
             arm_engines();
         }
@@ -1572,9 +1472,9 @@ public:
 
     /// The bus clock changed (DynamicClock fan-out). A Request's `clock`
     /// is a DIVISION of it and scales by itself; what is recomputed is
-    /// the ceiling, the cs_setup timing, the write-ahead codes and the
-    /// short request's frame costs - the frame's length in core cycles
-    /// follows the bus's share of HCLK. THE BUS MUST BE IDLE.
+    /// the ceiling, the cs_setup timing and the short request's frame costs
+    /// - the frame's length in core cycles follows the bus's share of HCLK.
+    /// THE BUS MUST BE IDLE.
     static void rebase(uint32_t hz) {
         hclk_hz_ = hz;
         pclk_hz_ = spi_bus_hz_at<n>(hz);
@@ -1583,8 +1483,6 @@ public:
         floor_code_ = ceiling_ ? static_cast<uint8_t>(*ceiling_) : uint8_t{0};
         cs_rate_ = delay_rate(hz);
         ratio_ = pclk_hz_ != 0u ? hz / pclk_hz_ : 1u;
-        ahead_code8_ = spi_write_ahead_code<hold_off_cycles>(8, ratio_);
-        ahead_code16_ = spi_write_ahead_code<hold_off_cycles>(16, ratio_);
         costs_for(static_cast<uint8_t>(applied_.clock), applied_.bits);
     }
 
@@ -1601,17 +1499,6 @@ public:
     /// PCLK1 for SPI2 - and the HCLK it was derived from.
     static uint32_t reference_hz() { return pclk_hz_; }
     static uint32_t hclk_hz() { return hclk_hz_; }
-
-    /// The slowest code at which a polled receive of that width runs with
-    /// two frames in flight on this instance at the clock in force (the
-    /// class comment); nullopt when no code is long enough.
-    static std::optional<SpiClock> write_ahead_from(SpiDataSize bits) {
-        const uint8_t code = spi_frame_is_halfword(bits) ? ahead_code16_ : ahead_code8_;
-        if (code > 7u) {
-            return {};
-        }
-        return static_cast<SpiClock>(code);
-    }
 
     /**
      * THE SLEW CLASS OF THE PADS THIS HOST DRIVES (SCK and MOSI; an
@@ -1667,10 +1554,10 @@ public:
     ///
     /// The arbiter's call, from its dispatch, or the program's for a
     /// polled request on a bus no arbiter owns. A request that runs
-    /// polled spins here for the whole transaction, global interrupts
-    /// enabled, under one spin budget (spi_stalled when it runs out;
-    /// spi_dma_fault when the engines' completion never comes); the
-    /// chip-select setup time is a busy wait here too. The buffers stay
+    /// polled spins here for the whole transaction under one spin budget
+    /// (spi_stalled when it runs out), depending on no vector and masking
+    /// nothing; the chip-select setup time is a busy wait here too. The
+    /// buffers stay
     /// the engine's until the reply, or until the return for a polled
     /// request called directly. The answer is the completion style, never
     /// a verdict: status() carries how the transaction ended.
@@ -1688,8 +1575,7 @@ public:
         if ((static_cast<uint32_t>(r.cmd_len) + r.len) == 0u) {
             return true;
         }
-        const uint8_t code = clamp_code(r.clock);
-        apply(ctlr1_for(r.mode, code, r.bits));
+        apply(ctlr1_for(r.mode, clamp_code(r.clock), r.bits));
         const bool wide = spi_frame_is_halfword(r.bits);
         if (r.cmd_len != 0u) {
             r.dc.clear();
@@ -1708,10 +1594,7 @@ public:
         }
 
         // Polled: asked, or an asynchronous request too short for the
-        // engines (async_min_frames()) or one they cannot carry. Two
-        // frames in flight on the data phase's receive only above the
-        // threshold; a write and the command phase always.
-        const bool ahead = code >= (wide ? ahead_code16_ : ahead_code8_);
+        // engines (async_min_frames()) or one they cannot carry.
         uint32_t budget = polled_budget(static_cast<uint32_t>(r.cmd_len) + r.len);
         uint8_t st = spi_ok;
         if (r.cmd_len != 0u) {
@@ -1719,20 +1602,8 @@ public:
             r.dc.set();
         }
         if (st == spi_ok && r.len != 0u) {
-            if constexpr (has_engines) {
-                if (!ahead && r.rx.get() != nullptr && r.len >= dma_min_frames_polled &&
-                    beats_serve(wide, r.tx.get(), r.rx.get())) {
-                    keep(r, wide);
-                    in_cmd_ = false;
-                    launch_dma(r.tx.get(), r.rx.get(), r.len);
-                    spin_dma();
-                    r.cs.set();
-                    return true;
-                }
-            }
-            st = r.rx.get() == nullptr
-                     ? poll_write_phase(r.tx.get(), r.len, wide, budget)
-                     : poll_duplex_phase(r.tx.get(), r.rx.get(), r.len, wide, ahead, budget);
+            st = r.rx.get() == nullptr ? poll_write_phase(r.tx.get(), r.len, wide, budget)
+                                       : poll_duplex_phase(r.tx.get(), r.rx.get(), r.len, wide, budget);
         }
         if (st != spi_ok) {
             status_ = st;
@@ -1756,12 +1627,14 @@ public:
             const uint8_t rx = RxEngine::service();
             if (rx != 0u && dma_active_) {
                 if ((rx & RxEngine::flag_error) != 0u) {
-                    return finish_dma(spi_dma_fault);
+                    finish_dma(spi_dma_fault);
+                    return true;
                 }
                 if (in_cmd_) {
                     return next_block();
                 }
-                return finish_dma(spi_ok);
+                finish_dma(spi_ok);
+                return true;
             }
         }
         return false;
@@ -1774,7 +1647,8 @@ public:
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
             if (tx != 0u && dma_active_) {
-                return finish_dma(spi_dma_fault);
+                finish_dma(spi_dma_fault);
+                return true;
             }
         }
         return false;
@@ -1809,7 +1683,6 @@ public:
         Pfic::disable(S::irq);
         in_cmd_ = false;
         dma_active_ = false;
-        dma_done_ = false;
         const bool ok = S::disable();
         S::reset();
         (void)S::remap(pins.remap);
@@ -1881,8 +1754,7 @@ private:
         const uint8_t* tx;
         uint8_t* rx;
         uint16_t len;
-        bool wide;     ///< 16-bit frames
-        bool polled;   ///< start() waits on the completion (spin_dma())
+        bool wide;   ///< 16-bit frames
     };
 
     [[gnu::always_inline]] static void keep(const Request& r, bool wide) {
@@ -1892,7 +1764,6 @@ private:
         t_.rx = r.rx.get();
         t_.len = r.len;
         t_.wide = wide;
-        t_.polled = r.polled;
     }
 
     /// The engines bind DATAR once: the transmit side armed for its ERROR
@@ -1997,7 +1868,6 @@ private:
      * then stalled, its transmit block moving into nothing (measured).
      */
     [[gnu::noinline]] static void launch_dma(const uint8_t* tx, uint8_t* rx, uint16_t count) {
-        dma_done_ = false;
         dma_active_ = true;
         if constexpr (engines_take_halfwords) {
             if (t_.wide) {
@@ -2035,7 +1905,8 @@ private:
         in_cmd_ = false;
         t_.dc.set();
         if (t_.len == 0u) {
-            return finish_dma(spi_ok);
+            finish_dma(spi_ok);
+            return true;
         }
         if constexpr (has_engines) {
             S::dma_requests(false, false);
@@ -2051,9 +1922,9 @@ private:
     /// both channels are stopped - the receive one too, whose EN a
     /// completed block leaves set and whose bus-master count would
     /// otherwise keep the core awake (ch32vx03/bus_activity.hpp). A fault
-    /// leaves the receive buffer drained. True when the vector's caller
-    /// should post completion: an asynchronous tenure, its select released.
-    static bool finish_dma(uint8_t st) {
+    /// leaves the receive buffer drained. The select is released; the
+    /// vector's caller posts completion.
+    static void finish_dma(uint8_t st) {
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             if (st != spi_ok) {
@@ -2068,30 +1939,7 @@ private:
         }
         in_cmd_ = false;
         dma_active_ = false;
-        dma_done_ = true;
-        if (!t_.polled) {
-            t_.cs.set();
-            return true;
-        }
-        return false;
-    }
-
-    /// The polled request's wait on the DMA completion - bounded (the
-    /// slowest frame is 256 x 16 bus cycles; the budget scales).
-    static void spin_dma() {
-        if constexpr (has_engines) {
-            uint32_t spins = 200'000u + 6'000u * static_cast<uint32_t>(t_.len);
-            while (!dma_done_ && spins-- != 0u) {
-            }
-            if (!dma_done_) {
-                S::dma_requests(false, false);
-                (void)TxEngine::abandon();
-                RxEngine::stop();
-                S::flush_rx();
-                dma_active_ = false;
-                status_ = spi_dma_fault;
-            }
-        }
+        t_.cs.set();
     }
 
     /// A slower rate is a LARGER code, so the ceiling is a floor on it.
@@ -2181,14 +2029,8 @@ private:
     static uint8_t poll_write_phase(const uint8_t* tx, uint16_t frames, bool wide, uint32_t& budget) {
         return wide ? poll_write<true>(tx, frames, budget) : poll_write<false>(tx, frames, budget);
     }
-    static uint8_t poll_duplex_phase(const uint8_t* tx, uint8_t* rx, uint16_t frames, bool wide,
-                                     bool ahead, uint32_t& budget) {
-        if (wide) {
-            return ahead ? poll_duplex<true, true>(tx, rx, frames, budget)
-                         : poll_duplex<true, false>(tx, rx, frames, budget);
-        }
-        return ahead ? poll_duplex<false, true>(tx, rx, frames, budget)
-                     : poll_duplex<false, false>(tx, rx, frames, budget);
+    static uint8_t poll_duplex_phase(const uint8_t* tx, uint8_t* rx, uint16_t frames, bool wide, uint32_t& budget) {
+        return wide ? poll_duplex<true>(tx, rx, frames, budget) : poll_duplex<false>(tx, rx, frames, budget);
     }
 
     /// The out buffer walked at the frame's width, or a zero-stride stand
@@ -2245,26 +2087,18 @@ private:
     }
 
     /**
-     * THE RECEIVE LOOP. Below the threshold (`ahead` false) one frame in
-     * flight: frame 0 written; then for each frame the next one's load,
-     * the wait on RXNE, the DATAR read and the DATAR write back to back,
-     * the store of the frame read - the load pinned inside the wire time
-     * by an empty asm, because the compiler would sink it past the poll,
-     * onto the bus's dead time (a WORD, so the barrier zero-extends
-     * nothing). Above it two: frame 0 written; for each next frame TXE
-     * awaited and the frame written, then RXNE awaited and the previous
-     * frame read; the last frame read - OVR watched beside RXNE AND beside
-     * TXE, a lost frame being the one hazard of the shape and spi_overrun
-     * its name. Beside TXE too because a STATR read after a DATAR read is
-     * 20.2.7's clearing sequence: the loop spends its wait on TXE, so the
-     * first STATR read after an interrupt that let a frame overrun is the
-     * TXE poll's, and a poll that tested TXE alone cleared the flag
-     * unseen - measured on the CH32V203C8T6 (bench_vx03's spi.held): the
-     * frame lost, no overrun reported, and the transaction spinning out
-     * its whole budget for the frame that never came, to end
-     * spi_stalled. `frames` >= 1.
+     * THE RECEIVE LOOP, one frame in flight at every rate: frame 0 written;
+     * then for each frame the next one's load, the wait on RXNE, the DATAR
+     * read and the DATAR write back to back, the store of the frame read;
+     * the last frame read. Nothing is queued behind the frame shifting, so
+     * the next frame moves only after this one was read, a handler or a
+     * preemption is a gap on the bus and OVR cannot rise (20.2.7: it needs a
+     * frame completed over an unread one). The load is pinned inside the
+     * wire time by an empty asm, because the compiler would sink it past the
+     * poll, onto the bus's dead time (a WORD, so the barrier zero-extends
+     * nothing). `frames` >= 1.
      */
-    template <bool wide, bool ahead>
+    template <bool wide>
     static uint8_t poll_duplex(const uint8_t* tx, uint8_t* rx, uint16_t frames, uint32_t& budget) {
         SpiRegs& regs = S::regs();
         constexpr uint32_t width = wide ? 2u : 1u;
@@ -2272,49 +2106,25 @@ private:
         const uint32_t step = tx != nullptr ? width : 0u;
         uint32_t spins = budget;
         uint32_t left = frames;
-        uint8_t st = spi_ok;
         regs.DATAR = static_cast<uint16_t>(load_frame<wide>(src));   // the shifter is idle: it moves at once
-        if constexpr (ahead) {
-            while (--left != 0u) {
-                src += step;
-                uint16_t s;
-                while (((s = regs.STATR) & (spi_txe | spi_ovr)) == 0u) {
-                    if (--spins == 0u) { st = spi_stalled; goto out; }
-                }
-                if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
-                regs.DATAR = static_cast<uint16_t>(load_frame<wide>(src));
-                while (((s = regs.STATR) & (spi_rxne | spi_ovr)) == 0u) {
-                    if (--spins == 0u) { st = spi_stalled; goto out; }
-                }
-                if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
-                store_into<wide>(rx, regs.DATAR);
-                rx += width;
+        while (--left != 0u) {
+            src += step;
+            const uint32_t next = load_frame<wide>(src);
+            __asm__ volatile("" : : "r"(next));
+            while ((regs.STATR & spi_rxne) == 0u) {
+                if (--spins == 0u) { budget = 0; return spi_stalled; }
             }
-        } else {
-            while (--left != 0u) {
-                src += step;
-                const uint32_t next = load_frame<wide>(src);
-                __asm__ volatile("" : : "r"(next));
-                while ((regs.STATR & spi_rxne) == 0u) {
-                    if (--spins == 0u) { st = spi_stalled; goto out; }
-                }
-                const uint16_t got = regs.DATAR;
-                regs.DATAR = static_cast<uint16_t>(next);
-                store_into<wide>(rx, got);
-                rx += width;
-            }
+            const uint16_t got = regs.DATAR;
+            regs.DATAR = static_cast<uint16_t>(next);
+            store_into<wide>(rx, got);
+            rx += width;
         }
-        {
-            uint16_t s;
-            while (((s = regs.STATR) & (spi_rxne | spi_ovr)) == 0u) {
-                if (--spins == 0u) { st = spi_stalled; goto out; }
-            }
-            if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
-            store_into<wide>(rx, regs.DATAR);
+        while ((regs.STATR & spi_rxne) == 0u) {
+            if (--spins == 0u) { budget = 0; return spi_stalled; }
         }
-    out:
+        store_into<wide>(rx, regs.DATAR);
         budget = spins;
-        return st;
+        return spi_ok;
     }
 
     static inline Tenure t_{};
@@ -2323,7 +2133,6 @@ private:
     /// below.
     static inline volatile bool in_cmd_ = false;
     static inline volatile uint8_t status_ = spi_ok;
-    static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
     /// A polled frame's cost at the code, width and bus share in force,
     /// read and written (costs_for()): what start() folds an asynchronous
@@ -2340,8 +2149,6 @@ private:
     static inline uint16_t ctlr1_ = 0;   ///< CTLR1 as applied, SPE clear
     static inline uint16_t base_ = 0;    ///< ctlr1_ outside the request's bits
     static inline uint8_t floor_code_ = 0;
-    static inline uint8_t ahead_code8_ = 8;
-    static inline uint8_t ahead_code16_ = 8;
     static inline uint32_t hclk_hz_ = 0;
     static inline uint32_t pclk_hz_ = 0;
     /// HCLK over the instance's bus: 1 on PB2, 1 or 2 on PB1.
@@ -3346,31 +3153,23 @@ static_assert(!spi_frame_is_halfword(SpiDataSize::bits8) &&
               spi_frame_is_halfword(SpiDataSize::bits16));
 static_assert(spi_frame_mask(SpiDataSize::bits8) == 0xFFu && spi_data_bits(SpiDataSize::bits16) == 16);
 
-// The write-ahead threshold: under the default hold-off a frame of 256
-// cycles is the first long enough - SPI1's /32 (code 4) for 8-bit frames
-// and /16 (code 3) for 16-bit ones, one code lower on a bus at half HCLK;
-// a hold-off of 300 moves both of SPI1's one code slower.
-static_assert(spi_frame_cycles(4, 8, 1) == 256u && spi_frame_cycles(3, 16, 1) == 256u);
-static_assert(spi_write_ahead_code<spi_default_hold_off_cycles>(8, 1) == 4u &&
-              spi_write_ahead_code<spi_default_hold_off_cycles>(16, 1) == 3u &&
-              spi_write_ahead_code<spi_default_hold_off_cycles>(8, 2) == 3u);
-static_assert(spi_write_ahead_code<300>(8, 1) == 5u && spi_write_ahead_code<300>(16, 1) == 4u);
-static_assert(spi_default_hold_off_cycles + 55u < spi_frame_cycles(4, 8, 1) &&
-              spi_default_hold_off_cycles + 55u < spi_frame_cycles(3, 8, 2));
+// A frame's HCLK cycles: bits x the division x HCLK over the bus.
+static_assert(spi_frame_cycles(4, 8, 1) == 256u && spi_frame_cycles(3, 16, 1) == 256u &&
+              spi_frame_cycles(3, 8, 2) == 256u);
 
 // The short asynchronous request: the frames from which a byte read rides
 // the engines on SPI1 (bus share 1) at /2, /4, /16 and /256, and a byte
-// write at /2, on each core - and the polled read's own count.
+// write at /2, on each core.
 static_assert(spi_async_min_frames(spi_costs_v4b, 0, 8, 1, true) == 8u &&
-              spi_async_min_frames(spi_costs_v4b, 1, 8, 1, true) == 5u &&
+              spi_async_min_frames(spi_costs_v4b, 1, 8, 1, true) == 6u &&
               spi_async_min_frames(spi_costs_v4b, 3, 8, 1, true) == 2u &&
               spi_async_min_frames(spi_costs_v4b, 7, 8, 1, true) == 1u &&
-              spi_async_min_frames(spi_costs_v4b, 0, 8, 1, false) == 16u);
-static_assert(spi_async_min_frames(spi_costs_v4f, 0, 8, 1, true) == 11u &&
-              spi_async_min_frames(spi_costs_v4f, 1, 8, 1, true) == 9u &&
+              spi_async_min_frames(spi_costs_v4b, 0, 8, 1, false) == 17u);
+static_assert(spi_async_min_frames(spi_costs_v4f, 0, 8, 1, true) == 12u &&
+              spi_async_min_frames(spi_costs_v4f, 1, 8, 1, true) == 10u &&
               spi_async_min_frames(spi_costs_v4f, 3, 8, 1, true) == 3u &&
               spi_async_min_frames(spi_costs_v4f, 7, 8, 1, true) == 1u &&
-              spi_async_min_frames(spi_costs_v4f, 0, 8, 1, false) == 24u);
+              spi_async_min_frames(spi_costs_v4f, 0, 8, 1, false) == 22u);
 
 // The four modes.
 static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));

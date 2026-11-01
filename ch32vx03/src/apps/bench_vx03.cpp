@@ -209,44 +209,48 @@
 //                       (it must not drive them); the note line: wall less the
 //                       wire's cycles = the fixed cost of the round, the
 //                       best of 4.
-//        spi.ahead      THE OVERRUN ORACLE for the write-ahead's threshold:
-//                       the vendor's own two-frames-in-flight loop (the
-//                       EVT's 2Lines_FullDuplex shape - the transmit
-//                       buffer kept full on TXE, the receive buffer drained
-//                       on RXNE) run on the RESOURCE at every BR code and
-//                       both widths, 1024 frames a run, eight runs a point,
-//                       each run under a console print in flight (the
-//                       USART's interrupts, some 200 cycles a trip in this
-//                       image with the stamps) and the tick: the runs whose
-//                       OVR stood afterwards, or that came up a frame
-//                       short, are counted. A frame shorter than the
-//                       longest handler is where a second frame in flight
-//                       loses one; this measures where that is on this
-//                       image.
+//        spi.frame      THE RECEIVE LOOP'S FRAME AGAINST THE WIRE, the table
+//                       the driver's document quotes: /2 to /256, 8 and 16
+//                       bits, modes 0 and 1, on SPI1 (PB2 = HCLK) and on SPI2
+//                       (PB1 = HCLK / 2) where the part has it, SCK and MOSI
+//                       at the medium slew class, MISO not judged. The wall
+//                       of 16 and of 256 frames, the frame their difference
+//                       over 240, the least of five runs, the whole table
+//                       MEASURED FIRST WITH INTERRUPTS MASKED AND PRINTED
+//                       AFTER: no handler in the figure, a polled request
+//                       needing no vector. The ruler is the STK's position
+//                       with its restart off for the table, because a wall at
+//                       the slow codes outlasts the tick's period; the tick
+//                       is put back after it.
+//        spi.rxne       WHERE RXNE RISES against the frame's end, on the
+//                       resource in the same masked window: one frame at
+//                       /256 on SPI1, modes 0 and 1, STATR polled from the
+//                       write, the distance to RXNE and to BSY falling.
+//        spi.ahead      WHAT THE TRANSMIT BUFFER'S WRITE-AHEAD DOES TO A
+//                       RECEIVE, the silicon on the RESOURCE, no host: the
+//                       vendor's two-frames-in-flight loop (the EVT's
+//                       2Lines_FullDuplex shape - the transmit buffer kept
+//                       full on TXE, the receive buffer drained on RXNE) at
+//                       every BR code and both widths, 1024 frames a run,
+//                       eight runs a point, each run under a console print
+//                       in flight (the USART's interrupts, some 200 cycles a
+//                       trip in this image with the stamps) and the tick:
+//                       the runs whose OVR stood afterwards, or that came up
+//                       a frame short, are counted. The host's receive loop
+//                       declines the write-ahead; this is the figure it
+//                       declines it on.
 //        spi.live       the HOST under the same load: both shapes of the
 //                       polled loop, every code and width, 1024 frames a
 //                       run, eight runs: the overruns and the statuses
-//                       other than spi_ok counted - what the host's own
-//                       threshold makes of it (a write tolerates the
-//                       overrun and finishes; a receive must never see
-//                       one).
-//        spi.held       THE HOLD-OFF AN IMAGE DECLARES (SpiHost's last
-//                       parameter) against the one it has: the default
-//                       host (200 cycles, two frames of a receive in
-//                       flight from /32) and one declaring 100 (from /16),
-//                       a polled receive of 1024 8-bit frames at /16 - a
-//                       frame of 128 cycles, shorter than the console's
-//                       handler - eight runs each under the same load:
-//                       the overruns and the statuses counted. The
-//                       declared-short host is the one that must lose
-//                       frames, the honest one none.
+//                       other than spi_ok counted (a write leaves the answers
+//                       unread and finishes; a receive must never see one).
 //        spi2.ahead,    THE SAME ORACLE AND THE SAME HOST ON SPI2, a PB1
 //        spi2.live      instance (72 MHz at 144 of HCLK): SCK PB13 and MOSI
 //                       PB15 driven - on the CH32V203C8T6 board the desk
 //                       pair's SPI wires, the far board dark on its console;
 //                       on the CH32V303VCT6's the jumpers to SPI3's default
-//                       column - MISO floating: where the write-ahead
-//                       threshold moves one code with the bus's share.
+//                       column - MISO floating: a frame in core cycles follows
+//                       the bus's share.
 //
 //   i  THE I2C HOST ABOVE THE WIRE against a second chip (the 32 KB tier's
 //      images leave it out, as they leave u): I2C1 the host on PB6/PB7,
@@ -1239,9 +1243,6 @@ void td_dma() {
 // e - the SPI host above the wire
 // ---------------------------------------------------------------------------
 using SpiPlain = SpiHost<1, spi_pins>;   // no engines: the polled loops alone
-/// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
-/// shorter than this image's console handler with its stamps, about 200.
-using SpiShort = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, 100>;
 
 /// Letter e's counters: SPI1's two DMA vectors, which a polled request
 /// never enters (each run starts on a fresh tick and ends inside it;
@@ -1415,12 +1416,11 @@ bool ahead_loop_overran(uint16_t frames) {
     return ovr || j < frames;
 }
 
-/// spi.ahead: the overrun oracle. Every BR code, both widths, 1024 frames
-/// a run, eight runs under a console print in flight: how many runs lost
-/// a frame to a handler longer than one. On SPI1 (PB2, the core's rate)
-/// and on SPI2 (PB1, half of it above 72 MHz of HCLK): the frame in core
-/// cycles is what the threshold weighs, and the bus's share is what moves
-/// it one code.
+/// spi.ahead: the write-ahead on the resource. Every BR code, both widths,
+/// 1024 frames a run, eight runs under a console print in flight: how many
+/// runs lost a frame to a handler longer than one. On SPI1 (PB2, the core's
+/// rate) and on SPI2 (PB1, half of it above 72 MHz of HCLK): the frame in
+/// core cycles is what a handler is weighed against.
 template <uint8_t n, typename H>
 void spi_ahead_report(const char* name) {
     constexpr uint16_t frames = 1024;
@@ -1505,16 +1505,12 @@ constexpr uint8_t second_spi = device::spi_count >= 2u ? 2u : 1u;
 using Spi2Plain = SpiHost<second_spi, spi_pins_for(second_spi, 0)>;
 
 template <bool on = (device::spi_count >= 2u)>
-void spi2_threshold_report() {
+void spi2_report() {
     if constexpr (on) {
         const bool up = Spi2Plain::init(clock);
-        const auto ahead8 = Spi2Plain::write_ahead_from(SpiDataSize::bits8);
-        const auto ahead16 = Spi2Plain::write_ahead_from(SpiDataSize::bits16);
         constexpr uint8_t m = on ? 2u : 1u;
         print(serial, "  SpiHost<2> with no engines on PB1 (", Spi<m>::bus_hz(clock) / 1'000'000u, " MHz): ",
-              up ? "up" : "REFUSED", "; a receive runs two frames ahead from /",
-              ahead8 ? spi_division(*ahead8) : 0u, " in 8-bit frames and from /",
-              ahead16 ? spi_division(*ahead16) : 0u, " in 16-bit ones", crlf);
+              up ? "up" : "REFUSED", crlf);
         console_drain();
         spi_ahead_report<m, Spi2Plain>("spi2.ahead");
         spi_live_report<m, Spi2Plain>("spi2.live");
@@ -1522,56 +1518,150 @@ void spi2_threshold_report() {
     }
 }
 
-/// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
-/// polled receive of 1024 8-bit frames at /16 - a frame of 128 cycles,
-/// between the two hosts' thresholds - eight runs under the console's
-/// interrupts on each host: the host declaring 100 keeps two frames in
-/// flight there and the honest default one.
-template <typename H>
-void spi_held_line(const char* name) {
-    constexpr uint16_t frames = 1024;
-    uint8_t overran = 0;
-    uint8_t faulted = 0;
-    uint8_t lost = 0;   // of those, spi_overrun: a frame lost to the receive buffer
-    uint8_t hung = 0;
-    for (uint8_t run = 0; run < 8u; ++run) {
-        typename H::Request r{};
-        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
-        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(buffer_b));
-        r.len = frames;
-        r.mode = SpiMode::mode0;
-        r.clock = SpiClock::div16;
-        r.bits = SpiDataSize::bits8;
-        r.polled = true;
-        console_drain();
-        print(serial, live_line.text);
-        if (!H::start(r)) {
-            ++hung;
-            (void)H::recover();
+// ---- spi.frame: the receive loop's frame against the wire ---------------------------
+
+constexpr uint8_t frame_codes = 8;   ///< /2 .. /256
+/// [instance][width][mode][code][length]: the least wall of 16 and 256 frames.
+uint32_t frame_walls[2][2][2][frame_codes][2];
+uint8_t frame_bad[2];
+
+/// The least wall of `frames` read at this code, width and mode, the first
+/// of the six runs discarded (it applies the rate). Called with interrupts
+/// masked and the STK's restart off: one load of its position is the ruler.
+template <typename Host>
+uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames, uint8_t& bad) {
+    typename Host::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(buffer_b));
+    r.len = frames;
+    r.clock = c;
+    r.mode = m;
+    r.bits = bits;
+    r.polled = true;
+    uint32_t best = UINT32_MAX;
+    for (uint8_t run = 0; run < 6u; ++run) {
+        const uint32_t t0 = stk()->CNTL;
+        (void)Host::start(r);
+        const uint32_t w = stk()->CNTL - t0;
+        if (Host::status() != spi_ok && bad != 255u) {
+            ++bad;
         }
-        if (Spi<1>::overrun()) {
-            ++overran;
-            Spi<1>::clear_overrun();
-        }
-        if (H::status() != spi_ok) {
-            ++faulted;
-            lost = static_cast<uint8_t>(lost + (H::status() == spi_overrun ? 1u : 0u));
+        if (run != 0u && w < best) {
+            best = w;
         }
     }
-    console_drain();
-    const auto ahead = H::write_ahead_from(SpiDataSize::bits8);
-    print(serial, "  spi.held ", name, " (two in flight from /", ahead ? spi_division(*ahead) : 0u, ") ",
-          "polled receive /16 8-bit: ", overran, " overruns, ", faulted,
-          " statuses not spi_ok (", lost, " spi_overrun), ", hung,
-          " never completed, in 8 runs under the console's interrupts", crlf);
+    return best;
 }
 
-void spi_held_report() {
-    (void)SpiPlain::init(clock);
-    spi_held_line<SpiPlain>("hold-off 200 (the default)");
-    (void)SpiShort::init(clock);
-    spi_held_line<SpiShort>("hold-off 100 (declared short)");
-    (void)SpiPlain::init(clock);
+template <typename Host>
+void frame_host(uint8_t inst) {
+    const SpiDataSize widths[2] = {SpiDataSize::bits8, SpiDataSize::bits16};
+    const SpiMode modes[2] = {SpiMode::mode0, SpiMode::mode1};
+    const uint16_t counts[2] = {16u, 256u};
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                for (uint8_t li = 0; li < 2u; ++li) {
+                    frame_walls[inst][wi][mi][ci][li] =
+                        frame_best<Host>(static_cast<SpiClock>(ci), widths[wi], modes[mi], counts[li], frame_bad[inst]);
+                }
+            }
+        }
+    }
+}
+
+/// One instance's rows, HCLK over its bus `ratio`.
+void frame_print(uint8_t inst, uint32_t ratio) {
+    for (uint8_t wi = 0; wi < 2u; ++wi) {
+        for (uint8_t mi = 0; mi < 2u; ++mi) {
+            for (uint8_t ci = 0; ci < frame_codes; ++ci) {
+                const uint32_t wire = (wi == 0u ? 8u : 16u) * (2u << ci) * ratio;
+                const uint32_t fix = frame_walls[inst][wi][mi][ci][0];
+                const uint32_t per = (frame_walls[inst][wi][mi][ci][1] - fix) * 100u / 240u;
+                const int32_t over = static_cast<int32_t>(per) - static_cast<int32_t>(wire * 100u);
+                const uint32_t abs_over = over < 0 ? static_cast<uint32_t>(-over) : static_cast<uint32_t>(over);
+                print(serial, "  spi.frame spi", inst + 1u, " bits", wi == 0u ? 8u : 16u, " mode", mi, " div",
+                      static_cast<uint32_t>(2u << ci), " wire ", wire, " frame ", per / 100u, '.',
+                      per % 100u < 10u ? "0" : "", per % 100u, " over ", over < 0 ? "-" : "", abs_over / 100u, '.',
+                      abs_over % 100u < 10u ? "0" : "", abs_over % 100u, " wall16 ", fix, crlf);
+                console_drain();
+            }
+        }
+    }
+}
+
+/// Where RXNE rises against the frame's end, on the resource, at /256 where
+/// a half bit is 128 cycles on SPI1: one frame written, STATR polled, the
+/// write's distance to RXNE, and to BSY falling having been seen up.
+struct RxneEdge {
+    uint32_t rxne = 0;
+    uint32_t bsy_down = 0;
+};
+RxneEdge rxne_edge[2];
+
+RxneEdge rxne_probe(SpiMode m) {
+    SpiPlain::prime(m, SpiClock::div256);
+    auto& regs = Spi<1>::regs();
+    RxneEdge e{};
+    bool bsy_seen = false;
+    const uint32_t t0 = stk()->CNTL;
+    regs.DATAR = 0xFFu;
+    for (uint32_t spins = 0; spins < 2000u && e.bsy_down == 0u; ++spins) {
+        const uint16_t st = regs.STATR;
+        const uint32_t now = stk()->CNTL - t0;
+        if (e.rxne == 0u && (st & spi_rxne) != 0u) {
+            e.rxne = now;
+        }
+        if ((st & spi_bsy) != 0u) {
+            bsy_seen = true;
+        } else if (bsy_seen) {
+            e.bsy_down = now;
+        }
+    }
+    (void)regs.DATAR;
+    return e;
+}
+
+/// Measured first, printed after: no console line beside a run, nothing
+/// but the block's own polls in the wall. The STK runs on past its compare
+/// meanwhile, and the tick's period starts again when the mask lifts.
+template <bool two = (device::spi_count >= 2u)>
+void frame_table() {
+    frame_bad[0] = 0;
+    frame_bad[1] = 0;
+    console_drain();
+    {
+        InterruptGuard guard;
+        stk()->CTLR = stk()->CTLR & ~stk_stre;
+        (void)SpiPlain::init(clock);
+        SpiPlain::pad_speed(PinSpeed::medium);
+        frame_host<SpiPlain>(0);
+        rxne_edge[0] = rxne_probe(SpiMode::mode0);
+        rxne_edge[1] = rxne_probe(SpiMode::mode1);
+        SpiPlain::pad_speed(PinSpeed::fast);
+        SpiPlain::release();
+        if constexpr (two) {
+            (void)Spi2Plain::init(clock);
+            Spi2Plain::pad_speed(PinSpeed::medium);
+            frame_host<Spi2Plain>(1);
+            Spi2Plain::pad_speed(PinSpeed::fast);
+            Spi2Plain::release();
+        }
+        Ticker::rebase(SysClock::hz);
+        stk()->CTLR = stk()->CTLR | stk_stre;
+    }
+    print(serial, "  spi.frame: HCLK/bus SPI1 ", Ruler::hz() / Spi<1>::bus_hz(clock), " SPI", second_spi, " ",
+          Ruler::hz() / Spi<second_spi>::bus_hz(clock), "; statuses not spi_ok SPI1 ", frame_bad[0], " SPI", second_spi,
+          " ", frame_bad[1], crlf);
+    console_drain();
+    for (uint8_t mi = 0; mi < 2u; ++mi) {
+        print(serial, "  spi.rxne mode", mi, " /256 8-bit, wire 2048: write to RXNE ", rxne_edge[mi].rxne,
+              ", to BSY down ", rxne_edge[mi].bsy_down, crlf);
+    }
+    frame_print(0, Ruler::hz() / Spi<1>::bus_hz(clock));
+    if constexpr (two) {
+        frame_print(1, Ruler::hz() / Spi<second_spi>::bus_hz(clock));
+    }
 }
 
 void te_spi() {
@@ -1579,20 +1669,16 @@ void te_spi() {
     for (uint32_t k = 0; k < 4096u; ++k) {
         buffer_a[k] = static_cast<uint8_t>(k * 7u + 3u);
     }
+    frame_table();
     const bool up = SpiPlain::init(clock);
-    const auto ahead8 = SpiPlain::write_ahead_from(SpiDataSize::bits8);
-    const auto ahead16 = SpiPlain::write_ahead_from(SpiDataSize::bits16);
-    print(serial, "  SpiHost<1> with no engines: ", up ? "up" : "REFUSED",
-          "; a receive runs two frames ahead from /", ahead8 ? spi_division(*ahead8) : 0u,
-          " in 8-bit frames and from /", ahead16 ? spi_division(*ahead16) : 0u, " in 16-bit ones", crlf);
+    print(serial, "  SpiHost<1> with no engines: ", up ? "up" : "REFUSED", crlf);
     spi_plain_report();
     console_drain();
     spi_req_report();
     console_drain();
     spi_ahead_report<1, SpiPlain>("spi.ahead");
     spi_live_report<1, SpiPlain>("spi.live");
-    spi_held_report();
-    spi2_threshold_report();
+    spi2_report();
     spi_up = false;   // letter d brings its own host up again
     bench.verdict("ran", true);
 }

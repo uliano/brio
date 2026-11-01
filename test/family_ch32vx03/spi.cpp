@@ -146,7 +146,6 @@ using Host2Dma = SpiHost<second_spi, spi_default_pins<second_spi>,
 /// An image that declares its own hold-off (the class comment): the
 /// write-ahead codes rebase() derives move with it, the header's
 /// static_asserts pinning both the default's and a longer one's.
-using Host1SlowHandlers = SpiHost<1, spi_default_pins<1>, NoDmaEngine, NoDmaEngine, 300>;
 
 static_assert(!Host1::has_engines && Host1Dma::has_engines);
 // Asynchronous is DMA (docs/design/spi-bus.md): the engineless host refuses
@@ -160,7 +159,6 @@ static_assert(spi_hclk_over_pclk<1>(144'000'000UL) == 1u &&
 static_assert(Host1Dma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true, 1) >=
                   Host1Dma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true, 1) &&
               Host1Dma::async_min_frames(SpiClock::div256, SpiDataSize::bits8, true, 1) == 1u);
-static_assert(Host1Dma::dma_min_frames_polled > 1u);
 static_assert(Client1::frames_ahead == 1, "one buffer, no FIFO (figure 20-1)");
 static_assert(Client1::has_nss_pad == pad_bonded(spi_default_pins<1>.nss));
 static_assert(Host1::number == 1 && Host2::number == second_spi);
@@ -317,16 +315,6 @@ void hosts()
     (void)Host1Dma::recover();
     Host1Dma::release();
 
-    (void)Host1SlowHandlers::init(clock);
-    Host1SlowHandlers::rebase(SysClock::hz);
-    (void)Host1SlowHandlers::write_ahead_from(SpiDataSize::bits8);
-    Host1SlowHandlers::Request slow{};
-    slow.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
-    slow.rx = lend<Lease::reply>(in_buf);
-    slow.len = 8;
-    slow.polled = true;
-    (void)Host1SlowHandlers::start(slow);
-    Host1SlowHandlers::release();
 
     (void)Host2::init(clock);
     Host2::release();

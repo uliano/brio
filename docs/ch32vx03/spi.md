@@ -8,8 +8,8 @@ served one event at a time by the kernel,
 client another host clocks, or, on the CH32V303RC and VC, an I2S audio
 link. `Spi<n>` is the resource, a monostate (a class with only static
 members, never instantiated: one block, one set of state) with one verb
-per register fact. `SpiHost<n, pins, TxEngine, RxEngine,
-hold_off_cycles>` is the host engine, the driver layer that moves one
+per register fact. `SpiHost<n, pins, TxEngine, RxEngine>` is the host
+engine, the driver layer that moves one
 transaction's frames - polled, or on two DMA channels - for the bus arbiter of
 [util/spi_bus.hpp](../../brio/util/spi_bus.hpp), `SpiBus`: an active
 object that owns the bus, runs the requests posted to it one at a time
@@ -41,8 +41,8 @@ r.polled  = true;
 
 Line by line: `Bus` names the host engine over SPI2 with every other
 template argument at its default - the instance's one column
-(`spi_default_pins<2>`: NSS PB12, SCK PB13, MISO PB14, MOSI PB15), no
-DMA engines, and the default hold-off (below); SPI2 is a part fact, and
+(`spi_default_pins<2>`: NSS PB12, SCK PB13, MISO PB14, MOSI PB15) and no
+DMA engines; SPI2 is a part fact, and
 on a CH32V203 below the CH32V203C8, which has SPI1 alone, the line does
 not compile. `Bus::init(clock)` takes the clock task's tag object
 (`constexpr SysClock clock;`, [clock.md](clock.md)) and no SCK ceiling,
@@ -68,12 +68,12 @@ and keeps what comes back in `id`; `r.mode` and `r.clock` are the device's mode 
 the rate a division of the instance's own bus (SPI2 sits on PB1, so
 `div16` is 4.5 MHz of SCK under a 144 MHz clock, where PB1
 runs at 72 MHz); and `r.polled = true` makes `start()` run the whole
-transaction before it returns, spinning with global interrupts enabled
-under one spin budget for the transaction. `start()` then answers true,
-and `Bus::status()` says how it ended: `spi_ok`, `spi_stalled` when a
-flag never came within the budget (a bus whose clock does not run), or
-`spi_overrun` when a frame was lost. These lines run in `main()` after
-`SysClock::init()`.
+transaction in an explicit loop before it returns, spinning under one
+spin budget for the transaction, global interrupts as the caller left
+them, depending on no interrupt vector. `start()` then answers true,
+and `Bus::status()` says how it ended: `spi_ok`, or `spi_stalled` when a
+flag never came within the budget (a bus whose clock does not run). These
+lines run in `main()` after `SysClock::init()`.
 
 A request runs one of two ways ([design/spi-bus.md, "Two ways to run a
 request"](../design/spi-bus.md)): POLLED, as above, or ASYNCHRONOUS
@@ -133,32 +133,27 @@ What decides correctness even there:
 - **The clock task first.** `init()` takes its rates from the clock
   type, not from the hardware: the instance's bus rate
   (`reference_hz()`), against which `sck_hz()` and a ceiling's code are
-  worked out, the busy-wait of a request's `cs_setup_us`, and the
-  write-ahead codes ("The host engine" below). The rate on the wire is
-  the real bus over the request's division, so a host initialized while
-  the chip still runs at its 8 MHz HSI reset rate, under a 144 MHz
-  type, clocks SPI1's requests eighteen times and SPI2's and
-  SPI3's nine times slower than `sck_hz()` reports, and its chip-select
-  setup waits eighteen times as long; and on SPI2 and SPI3 the
-  write-ahead codes assume a bus at half of HCLK where the reset
-  clock's PB1 runs at all of it, so a receive may keep two frames in
-  flight at a frame half as long in core cycles as the threshold
-  assumed (derived from the arithmetic, not measured). Nothing refuses
-  that order: `init()` answers false only for the ceiling, the column
-  and the boot configuration.
+  worked out, and the busy-wait of a request's `cs_setup_us`. The rate on
+  the wire is the real bus over the request's division, so a host
+  initialized while the chip still runs at its 8 MHz HSI reset rate,
+  under a 144 MHz type, clocks SPI1's requests eighteen times and SPI2's
+  and SPI3's nine times slower than `sck_hz()` reports, and its
+  chip-select setup waits eighteen times as long (derived from the
+  arithmetic, not measured). Nothing refuses that order: `init()` answers
+  false only for the ceiling, the column and the boot configuration.
 - **The select pin made an output first.** The engine only stores to
   the request's `cs` (one BSHR or BCR store) and configures nothing, so
   the program drives the pin high and makes it an output
   (`brio::Pin<'B', 12>::output(true)`, [pin.md](pin.md)) before the
   first request - a line neither block writes. A select left as the
   reset leaves it, a floating input, drives nothing.
-- **The two channels' vectors bound by the program**, on a host with
-  engines: a block completes on the receive channel's interrupt, a
-  polled request's included (a long read below the write-ahead
-  threshold rides the engines inside `start()`, whose wait ends on that
-  vector), and a vector left unbound runs the crt's weak
+- **The two channels' vectors bound by the program**, for an asynchronous
+  request on a host with engines: a block completes on the receive
+  channel's interrupt, and a vector left unbound runs the crt's weak
   `default_handler`, a spin loop, at the first block's end, with no fault
-  and no message. The instance's own vector is not the host's: it arms
+  and no message. A polled request needs no vector, on any host: it runs
+  the loop whatever its length, with interrupts masked as with them
+  enabled. The instance's own vector is not the host's: it arms
   no interrupt of the SPI block. On the CH32V303's images, built with the
   F extension and the hardware prologue on (the core saving the
   caller-saved integer registers at interrupt entry; the project's
@@ -275,21 +270,35 @@ register. That single fact shapes both roles:
   one (measured: see the dummy byte below).
 - **A client that never drains keeps one frame** and raises the overrun
   for every frame after it (measured).
-- **A host may keep two frames in flight, and the receive buffer is the
-  price.** 20.2.2: "if the TXE flag bit is set, data needs to be filled
-  into the data register to maintain a complete data flow" - one frame in
-  the shifter, the next in the transmit buffer, the clock never pausing.
-  But the receive buffer is one deep too: frame k stands in it while
-  k + 1 shifts, and if k is not read before k + 1 completes, 20.2.7's
-  overrun discards one. So a host that reads its answers may run two
-  frames ahead only where one frame time exceeds the longest the read can
-  be late, and a host that does not read them (a display's pixel path,
-  every command phase) may run two ahead at every rate and let the
-  receive side overrun - the transmit side goes on regardless (measured:
-  the frames sent, judged by the CRC unit, are all there). Measured on
-  the CH32V203C8T6 under a live console at 115200 (bench_vx03's letter
-  e, the overrun oracle): two frames in flight lose one in every run at
-  every frame of 128 core cycles or less, and in none at 256 or more.
+- **RXNE rises at the frame's end, in every mode** (measured: `bench_vx03`'s
+  letter e, `spi.rxne`, one frame at /256 on SPI1, the write to RXNE
+  2060 cycles on the CH32V203C8T6 and 2056 to 2082 on the CH32V303VCT6
+  against 2048 of wire, BSY falling in the same poll in modes 0 and 1).
+  20.2.2 says RXNE is set when the last sampling edge arrives, which in
+  mode 0 is half a bit, 128 cycles here, before the frame's end; on this
+  silicon nothing shows that half bit.
+- **The transmit buffer's write-ahead: used by the transmit-only loop,
+  declined by the receive loop.** 20.2.2: "if the TXE flag bit is set, data
+  needs to be filled into the data register to maintain a complete data
+  flow" - one frame in the shifter, the next in the transmit buffer, the
+  clock never pausing. A host that does not read its answers (a display's
+  pixel path, every command phase) writes ahead at every rate and lets the
+  receive side overrun; the transmit side goes on regardless (measured:
+  the frames sent, judged by the CRC unit, are all there). But the receive
+  buffer is one deep too: with a second frame queued behind the one
+  shifting, frame k stands in it while k + 1 shifts, and if k is not read
+  before k + 1 completes, 20.2.7's overrun discards one. Measured on the
+  resource under a live console at 115200 (`bench_vx03`'s letter e,
+  `spi.ahead`, the vendor's loop): a frame lost at every frame
+  of 32, 64 or 128 core cycles in seven or eight runs of eight, in none at
+  256 or more - and no bound on an
+  image's handlers, or on the dispatches above a preempted one, can be
+  enforced here. So the host's receive loop keeps one frame in flight at
+  every rate: the clock waits for the read, and a handler or a preemption
+  is a gap on the bus. The price is the turn between two frames, at most
+  22 cycles a frame on SPI1 and 32 on SPI2 at 144 MHz
+  ("Bench findings"); a read that wants the wire's own rate asks
+  asynchronously, and the engines keep it.
 - **A DMA-fed transmit with CRCEN set is followed by the CRC frame on the
   wire** (measured, bench_vx03's letter d): the receive block's
   completion lands with BSY still up and RXNE rises once more after it -
@@ -595,7 +604,7 @@ enables and requests shared with the SPI face (`dma_requests`,
 
 ### The host engine
 
-`SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the engine
+`SpiHost<n, pins, TxEngine, RxEngine>` is the engine
 [util/spi_bus.hpp](../../brio/util/spi_bus.hpp)'s `SpiBus` drives, and
 its `Request` carries the fields every family's host shares
 ([design/spi-bus.md, "Realizations"](../design/spi-bus.md#realizations)),
@@ -610,21 +619,17 @@ in two, 40 bytes - and it is lent for the call: a request that completes
 inside `start()` is read where it lies and nothing of it is copied; one
 that goes to the engines has what its tenure (the transaction's time on
 the bus, from `start()` to its completion) needs - the pins, the out and
-in buffers, the data length, the width, the way - stored into the
+in buffers, the data length, the width - stored into the
 engine's own Tenure in word stores, and the reply stays the arbiter's.
 
 **The two ways** ([design/spi-bus.md, "Two ways to run a
 request"](../design/spi-bus.md)):
 
-- **Polled** (`polled = true`): the loops below inside `start()`, the
-  caller spinning for the whole transaction under one spin budget; and a
-  read of `dma_min_frames_polled` frames or more below the write-ahead
-  threshold - where the receive loop leaves the bus dead between frames
-  - on the engines inside `start()` too, `start()` waiting on their
-  completion (14 frames on the CH32V203, 32 on the CH32V303: the
-  engines' extra fixed cost over the loop's dead bus a frame). Above the
-  threshold the loop keeps two frames in flight and runs at the wire, and
-  the transmit-only loop always does: neither ever rides the engines.
+- **Polled** (`polled = true`): the loops below inside `start()`, at every
+  length and on every host, the caller spinning for the whole transaction
+  under one spin budget and the engines never touched. A polled request
+  needs no vector and runs with interrupts masked as it does with them
+  enabled. A long read that wants the wire's rate asks asynchronously.
 - **Asynchronous** (`polled = false`) **is DMA**. On a host with no
   engines bound the request is refused: `start()` answers true at once
   with `spi_rejected` in `status()`, before it touches the block, the
@@ -643,52 +648,17 @@ request"](../design/spi-bus.md)):
   depend on where a buffer happens to sit.
 
 The polled loops tell two shapes apart by the in buffer. A write (no in
-buffer, and every command phase) keeps two frames in flight at every
-rate: the loop writes on TXE and never reads the answers - the tail
-waits TXE and then not BSY, and the DATAR-then-STATR read clears RXNE
-and OVR. A receive (an in buffer) keeps one frame in flight below the
-write-ahead threshold and two above it: the loop below it pins the next
+buffer, and every command phase) writes ahead at every rate: the loop
+writes on TXE and never reads the answers - the tail waits TXE and then
+not BSY, and the DATAR-then-STATR read clears RXNE and OVR. A receive (an
+in buffer) keeps one frame in flight at every rate: the loop pins the next
 frame's load inside the wire time and puts the DATAR read and the next
-write in adjacent instructions, the loop above it is 20.2.2's sequence
-(TXE then the next frame, RXNE then the previous one) with OVR watched
-beside both, so a lost frame ends it at once. An overrun on a receive
-ends the transaction with `spi_overrun`, a polled flag that never comes
-within the transaction's one spin budget ends it with `spi_stalled`, and
+write in adjacent instructions, so nothing is queued behind the frame
+shifting and OVR cannot rise. A polled flag that never comes within the
+transaction's one spin budget ends the transaction with `spi_stalled`, and
 an asynchronous request on a host with no engines is answered
 `spi_rejected` - the codes every host spells from `util/spi_bus.hpp`
 beside the engines' own `spi_dma_fault` (design/spi-bus.md).
-
-The threshold is `spi_write_ahead_min_frame_cycles(hold_off)`, the sum
-of two inputs: the hold-off - the longest, in core cycles at the clock
-the host runs at, that the image keeps the receive loop from its read,
-which on a platform where no interrupt nests is the longer of the
-image's longest handler and its longest masked window, the hardware
-prologue's entry and exit included - and the loop's own way back to the
-DATAR read when the handler returns (`spi_read_latency_cycles`, 15:
-ten instructions from the budget's decrement a returning handler lands
-on, two of them APB loads, counted in the release listing). The
-hold-off is a fact of the image and not of the family, so it is the
-host's template parameter `hold_off_cycles`, declared by the application
-or its board file; its default, 200, is the longest counted in this
-family's own images (bench_vx03's console handler with its stamps, 151
-instructions behind the hardware prologue and epilogue, about 200
-cycles; the kernel's `post()` of a Request under the producers' mask, 47
-instructions and the runtime's memcpy, about 130), and a hold-off of
-zero does not compile - an image with no handler of its own still has
-the tick's. `spi_write_ahead_code<hold_off>(bits, hclk_over_pclk)` turns
-the sum into the slowest BR code whose frame is longer, per width and
-per bus share, and `rebase()` keeps both codes; `write_ahead_from(bits)`
-reports them. Under the default, at any HCLK a frame of 256 cycles is
-the first above the sum: SPI1's /32 for 8-bit frames and /16 for
-16-bit ones, one code lower on SPI2 and SPI3 above 72 MHz of HCLK; a
-declared 300 moves SPI1's to /64 and /32 (both pinned at compile time).
-The oracle below agrees with the default. An image measures its own
-hold-off with util/bench.hpp's `IsrMeter` in each of its vectors -
-`bench_vx03` meters the tick (letter t), the console (p) and the DMA's
-vectors (d), `isr` over `irq` a handler's body, the hardware prologue's
-entry and exit ([platform.md](platform.md)) on top - and its longest
-masked window in its listing; an `spi_overrun` in a reply is the
-witness of a figure declared too short.
 
 `apply()` compares one word: the request's mode, rate code and width are
 folded into CTLR1's own bits over the applied base (CPHA and CPOL are
@@ -706,10 +676,10 @@ Beside it: `has_dma` (= `has_engines`), the short request's
 `constexpr` form with the bus share as a fourth argument, the constants
 it is drawn from (`costs`, `async_read_budget_cycles`,
 `async_write_budget_cycles`, `polled_gap_cycles`,
-`polled_read_turn_cycles`, `polled_write_turn_cycles`) and
-`dma_min_frames_polled`; `init(clock, max_sck_hz)` with an optional
+`polled_read_turn_cycles`, `polled_write_turn_cycles`);
+`init(clock, max_sck_hz)` with an optional
 bus-wide SCK ceiling, `rebase()` for a dynamic clock's fan-out (the
-ceiling, the write-ahead codes and the frame costs follow the new bus),
+ceiling and the frame costs follow the new bus),
 `clock_for()` / `sck_hz()` / `reference_hz()`, `prime()` (mode and rate
 now, moving no data - a CPOL flip is an edge, so prime before the select
 falls), `bit_order()` (a property of the wire and so a bus-level verb),
@@ -742,50 +712,42 @@ as frames written, its data phase as frames read or written. Only E - F
 enters, one for a read and one for a write, and `test_vx03_spi` letter g
 measures it as one: an asynchronous block of 256 and of 32 byte frames
 at /4 (E, the 32-frame block less its frames) and polled lines of 12 and
-of 4 frames (a frame, and F, the 4-frame line less its frames), all
-through the same call of the suite, so that the call's own cycles
-cancel. The host keeps the two frame costs for the code, the width and
+of 4 frames (a frame, and F, the two lines extrapolated to no frames, the
+dead bus falling out with the frames), all through the same call of the
+suite, so that the call's own cycles cancel. The dead bus stands at every
+rate in both CPHA modes, RXNE rising at the frame's end ("No FIFO" above).
+The host keeps the two frame costs for the code, the width and
 the bus share in force - computed where CTLR1 is written and where the
 clock changes, never per request - and folds a request from them with
 two multiplies and a compare, on the asynchronous path alone (about
 fifteen instructions in the release listing, the alignment test
 included).
 
-The figures are a core's, measured on SPI1 (PB2, HCLK) at 144 MHz, ten
+The figures are a core's, measured on SPI1 (PB2, HCLK) at 144 MHz, fifteen
 runs a part, the constants in [spi.hpp](../../brio/ch32vx03/spi.hpp)
 beside them:
 
 | figure | CH32V203C8T6 (V4B) | CH32V303VCT6 (V4F) |
 |---|---|---|
-| E, the engines' fixed cost | 597 | 655 |
-| E - F, a read | 253 (constant 250) | 343 to 349 (347) |
-| E - F, a write | 259 (255) | 360 to 367 (372) |
-| the receive loop's frame at /4, the dead bus | 51.0, 19 (19) | 42.7 to 43.2, 11 (11) |
-| the receive loop's frame at /2 | 29.0 (29) | 34.0 (34) |
-| the transmit-only loop's frame at /2 | 16.3 (16) | 14.7 to 15.5 (16) |
+| E, the engines' fixed cost | 580 to 584 | 646 to 656 |
+| E - F, a read | 277 to 281 (constant 277) | 388 to 398 (392) |
+| E - F, a write | 261 to 265 (261) | 390 to 400 (394) |
+| the receive loop's frame at /4, the dead bus | 51.0, 19 (19) | 43.0, 11 (11) |
+| the receive loop's frame at /2 | 29.0 (29) | 33.6 to 34.0 (34) |
+| the transmit-only loop's frame at /2 | 16.0 (16) | 17.8 to 18.1 (18) |
 
-The V203's figures repeated to the cycle in all ten runs. The V4F's E
-is the longer by its DMA vector, a naked trampoline over a handler that
-saves the f-registers ([platform.md](platform.md)); its loops are the
-quicker by a few cycles. On SPI1 the counts are, for a byte read at /2,
-/4, /16 and /256, 8, 5, 2 and 1 frames on the CH32V203 and 11, 9, 3 and
-1 on the CH32V303, and for a byte write at /2, 16 and 24 (pinned by the
-header's static_asserts). Letter g walks the edge itself at a read at /4
-and /2 and a write at /2 - the fewest frames whose polled line costs E -
-and finds it within one frame of the arithmetic on the run's own figures
-and of the host's count in every run: equal to both on the CH32V303
-(the write's arithmetic once 25 against 24), and on the CH32V203 the /2
-read and write one frame over the host's count (9 against 8, the
-formula's W + dead bus overstating the loop's turn at /2 by six cycles;
-17 against 16). On SPI2, a PB1 instance, the same letter prints the
-figures unjudged: E 550 and 589 to 593, E - F 250 and 267 on the
-CH32V203 and 343 to 352 on the CH32V303, a read frame at /4 of 94 and 84
-cycles against a 64-cycle wire, the edges within one frame of the host's
-count on the CH32V203, and on the CH32V303 the host's count up to three
-frames above the edge at the /2 read (9 against 6 and 7: the loop's turn
-there 58 cycles against the 43 the SPI1 figures fold) - a request a
-little longer than it need be runs polled, the order of magnitude the
-rule asks for.
+The V4F's E is the longer by its DMA vector, a naked trampoline over a
+handler that saves the f-registers ([platform.md](platform.md)); its
+loops are the quicker by a few cycles. On SPI1 the counts are, for a byte
+read at /2, /4, /16 and /256, 8, 6, 2 and 1 frames on the CH32V203 and 12,
+10, 3 and 1 on the CH32V303, and for a byte write at /2, 17 and 22 (pinned
+by the header's static_asserts). Letter g walks the edge itself at a read
+at /4 and /2 and a write at /2 - the fewest frames whose polled line costs
+E - and finds it within one frame of the arithmetic on the run's own
+figures and within two of the host's count in every run: on the CH32V203 equal to both, 6 at the /4 read and 17 at the write, but for the /2 read, 10 against the host's 8, the formula's W + dead bus overstating the loop's turn at /2 by six cycles; on the CH32V303 10 at the /4 read and 12 at the /2 read, equal to both, and 23 or 24 at the write, against the arithmetic's 22 or 23 and the host's 22.
+On SPI2, a PB1 instance, the same letter prints the figures unjudged:
+E 532 to 537 and 577 to 583, E - F 279 to 284 for a read and 248 to 253 for a write on the CH32V203, 360 to 366 and 338 to 350 on the CH32V303, a read frame at /4 of 94 and 86 cycles against a 64-cycle wire, the edges within one frame of the host's count on the CH32V203, and on the CH32V303 the host's count up to three frames above the edge at the /2 read (10 against 7: the loop's turn there 58 cycles against the 34 the SPI1 figures fold) - a request a little longer than it need be runs polled, the order
+of magnitude the rule asks for.
 
 ### The client
 
@@ -953,11 +915,10 @@ other's `spi_peer` - in the one after it.
   of twenty runs): the clock does not pause between frames while the
   engine refills (20.2.2), and each bus divides as the clock tree says.
   The polled path is never faster than its wire at the rate asked - SPI1
-  on its second column, 64 frames: 1235 to 1255 cycles at /2 against the
-  wire's 1024, 2230 to 2244 at /4 against 2048, 131250 to 131272 at /256
-  against 131072 - nor is letter c's polled ladder on the
-  strap, one frame in flight at the top codes (30 cycles a frame at /2
-  against 16, 52 at /4 against 32, 2049 at /256 against 2048).
+  on its second column, 64 frames: 1220 cycles at /2 against the wire's
+  1024, 2247 at /4 against 2048, 131266 at /256 against 131072 - nor is letter c's polled ladder on the
+  strap, one frame in flight at every code (30 cycles a frame at /2
+  against 16, 52 at /4 against 32, 2065 at /256 against 2048).
 - **THE HOST ABOVE THE WIRE**, `bench_vx03`'s letter e on SPI1 with no
   engines, MISO floating, each line the best of 4 from a fresh tick (the
   wire's cycles a frame: 32 and 128 for 8-bit frames at /4 and /16, 64
@@ -970,26 +931,48 @@ other's `spi_peer` - in the one after it.
   and at /4 in 8-bit frames LOSES A FRAME IN TWO RUNS OF FOUR with
   nothing live but the tick: a loop that refills on TXE whenever it can
   falls behind a 32-cycle frame (its turn is 39) and the receive side
-  overruns, where 20.2.2's sequence - the next write after the previous
-  read - cannot fall behind and runs at 34. A POLLED RECEIVE, one frame
-  in flight below the threshold, is 51 and 139 cycles a frame in 8-bit
-  frames (x 1.59 and 1.09), 79 in 16-bit ones at /4 (x 1.23), and at /16
-  in 16-bit frames - two in flight - 256 (x 1.00). No line takes an
-  interrupt. A POLLED REQUEST OF THREE BYTES - a command and two data,
-  the D/C scripted, the select and the D/C on two pads - costs 256
-  cycles above its wire time at /16 (the stopwatch's 28 inside), one
-  byte 196, sixteen 250: the price of a DCS command. Of the four pin
+  overruns. A POLLED RECEIVE, one frame in flight at every rate, is
+  42 and 138 cycles a frame in 8-bit frames at /4 and /16 (x 1.31 and 1.08), 84 and 276 in 16-bit ones (x 1.31 and 1.08). No line takes an
+  interrupt. What the turn costs at every rate is the letter's `spi.frame`
+  table, HCLK cycles a frame over the wire from 256 less 16 frames, the
+  least of five runs with interrupts masked, SCK and MOSI at the medium
+  class, on both parts:
+
+  | over the wire, 144 MHz | /2 | /4 | /8 | /16 | /32 | /64 | /128 | /256 |
+  |---|---|---|---|---|---|---|---|---|
+  | CH32V203C8T6, SPI1, 8-bit, mode 0 | 14 | 10 | 14 | 10 | 14 | 10 | 14 | 10 |
+  | CH32V203C8T6, SPI1, 8-bit, mode 1 | 14 | 22 | 14 | 22 | 14 | 22 | 14 | 22 |
+  | CH32V203C8T6, SPI1, 16-bit, both modes | 16 | 20 | 16 | 20 | 16 | 20 | 16 | 20 |
+  | CH32V203C8T6, SPI2, 8-bit, both modes | 20 | 30 | 22 | 20 | 30 | 22 | 20 | 30 |
+  | CH32V203C8T6, SPI2, 16-bit, both modes | 24 | 30 | 28 | 24 | 30 | 28 | 24 | 30 |
+  | CH32V303VCT6, SPI1, 8-bit, both modes | 18 | 11 | 18 | 17 | 15 | 20 | 21 | 14 |
+  | CH32V303VCT6, SPI1, 16-bit, both modes | 17 | 15 | 14 | 21 | 17 | 18 | 20 | 15 |
+  | CH32V303VCT6, SPI2, 8-bit, mode 0 | 26 | 20 | 28 | 20 | 28 | 20 | 28 | 20 |
+  | CH32V303VCT6, SPI2, 8-bit, mode 1 | 26 | 32 | 28 | 32 | 28 | 32 | 28 | 32 |
+  | CH32V303VCT6, SPI2, 16-bit, both modes | 28 | 24 | 28 | 24 | 28 | 24 | 28 | 24 |
+
+  The wire's frame is the bits x the division x HCLK over the bus: 32
+  cycles at /4 on SPI1 in 8-bit frames, four times that on SPI2 in 16-bit
+  ones. RXNE rises at the frame's end ("No FIFO" above), so the turn shows
+  at every rate and in both modes, no half bit hiding it. The figures step
+  by a few cycles from code to code in no order of the rate, the same to a
+  tenth of a cycle in the letter's three runs: the frame's length against
+  the five instructions of the poll decides where in a poll RXNE lands,
+  which is a reading of the pattern and has not been bisected. Placement
+  moves them too: on the CH32V203C8T6 the same loop on SPI1 at /4 in 8-bit
+  frames reads 10 cycles here and 19 in `test_vx03_spi`'s image (letter g). A POLLED REQUEST OF THREE BYTES - a
+  command and two data, the D/C scripted, the select and the D/C on two
+  pads - costs 240 cycles above its wire time at /16 (the stopwatch's 28
+  inside), one byte 182, sixteen 232: the price of a DCS command. Of the four pin
   edges each is one BSHR or BCR store inline through `PinRef::set/clear`
   (pin.hpp forces the two verbs inline; as calls they cost the 3-byte
   request 25 cycles more, measured). On the CH32V303VCT6 - the V4F, the
   image built under ilp32f, the same letter on the evaluation board's
   SPI1 pads with MISO undriven - the shapes land where the
   CH32V203C8T6's do: the polled write of 256 frames at 32, 128, 64 and
-  256 cycles a frame; the polled receive at 43 and 145 cycles a frame in
-  8-bit frames (x 1.34 and 1.13), 79 at /4 in 16-bit ones (x 1.23) and
-  256 at /16 (x 1.00); the polled request of three bytes 223 cycles above
-  its wire time at /16, one byte 178, sixteen 224; every line ended with
-  status 0 and no overrun standing.
+  256 cycles a frame; the polled receive at 43 and 145 cycles a frame in 8-bit frames (x 1.34 and 1.13), 79 and 277 in 16-bit ones (x 1.23 and 1.08); the polled request of three
+  bytes 211 to 214 cycles above its wire time at /16, one byte 164 to 174, sixteen
+  214 to 218; every line ended with status 0 and no overrun standing.
 - **THE BEAT IS THE FRAME, on the strap** (letter c): sixteen 16-bit
   frames over half-word aligned buffers ride both engines as half-words -
   byte-exact through the loop, ONE channel interrupt for the transaction
@@ -1012,11 +995,11 @@ other's `spi_peer` - in the one after it.
   framing it; on the engined host an asynchronous byte read at /4 one
   frame under `async_min_frames()` completed inside `start()` with no
   interrupt and one at it on the engines with one; 64 16-bit frames from
-  an odd address run polled inside `start()`; a polled read at /4 on the
-  engines inside `start()` from `dma_min_frames_polled` frames and in the
-  loop one frame under it, and in the loop at /64, where two frames are
-  in flight. The costs the short request is drawn from are "The short
-  request" above.
+  an odd address run polled inside `start()`; a polled read of 256 frames
+  at /4 and at /64 in the loop on the engined host, no channel interrupt,
+  and the same read at /4 with global interrupts masked, `spi_ok`: a polled
+  request needs no vector. The costs the short request is drawn from are
+  "The short request" above.
 - **A POLLED WAIT THAT RUNS OUT ends `spi_stalled`** (letter f, both
   parts): a polled write of 16 frames started with SPI1's gate closed
   under the engine - every STATR load reading zero, so TXE never comes -
@@ -1037,45 +1020,19 @@ other's `spi_peer` - in the one after it.
   enable are what it exercises; the host engine arms no interrupt of the
   block (the class comment), this being the shape of a transmit-only
   stream with no reader, for a program that drives the resource itself.
-- **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
-  two-in-flight shape run on the resource at every code and width, 1024
-  frames a run, eight runs a point under a console print in flight,
-  loses a frame in every run at 32, 64 and 128 cycles a frame and in
-  none at 256 and above (five of eight at 16, where a run is too short
-  to meet an interrupt); the host under the same load, both shapes of
-  the polled loop, every code and width, finishes every run with no
-  overrun and `spi_ok` - a write tolerating what the oracle counts, a
-  receive never put in its way. On the CH32V303VCT6 the same boundary:
-  five to eight runs of eight lost a frame at 16 to 128 cycles a frame,
-  none at 256 and above, and the host's sixty-four points finished
-  every run `spi_ok` with no overrun. ON A PB1 INSTANCE THE BOUNDARY
-  MOVES ONE CODE (`spi2.ahead`, `spi2.live`, SPI2 at 72 MHz of bus under
-  144 of HCLK, both parts): the oracle lost a frame in five to eight runs
-  of eight at 32, 64 and 128 cycles a frame - /2, /4 and /8 in 8-bit
-  frames, /2 and /4 in 16-bit ones - and in none at 256 and above, /16 and
-  /8; the host, its `write_ahead_from()` reporting /16 and /8, finished its
-  sixty-four points `spi_ok` with no overrun - the threshold's arithmetic
-  per bus share measured where it differs from SPI1's.
-- **A HOLD-OFF DECLARED TOO SHORT LOSES FRAMES, the honest one none**
-  (`bench_vx03`'s letter e, `spi.held`, MISO floating, 144 MHz): the
-  default host (200 cycles, two frames of a receive in flight from /32)
-  and one declaring 100 (from /16), a receive of 1024 8-bit frames at
-  /16 - 128 cycles a frame - polled, eight runs each with a console line
-  in flight, on the CH32V203C8T6 and the CH32V303VCT6 alike: the honest
-  host `spi_ok` in 8 of 8, the declared-short one `spi_overrun` in 5 to
-  8 runs of 8 over the passes on both parts - the console's handler,
-  about 200 cycles, outlasting the frame the second one in flight left
-  it: the witness the class comment promises.
-- **THE TWO-IN-FLIGHT POLLED LOOP WATCHES OVR BESIDE TXE TOO**: in its
-  first form it tested OVR on the RXNE poll alone, and `spi.held` found
-  the declared-short host's lost frames reported as `spi_stalled` (4 and
-  5 runs of 8 in two passes, none as `spi_overrun`), each after the
-  transaction's whole spin budget. The loop waits on TXE, so the first
-  STATR read after an interrupt that let a frame overrun is the TXE
-  poll's - and a STATR read after a DATAR read is 20.2.7's clearing
-  sequence, so the flag fell unseen and the loop waited for the frame
-  that never came. With OVR tested on every STATR read of the loop: 8
-  of 8 `spi_overrun`, at once.
+- **THE WRITE-AHEAD ON THE RESOURCE, AND THE HOST UNDER THE SAME LOAD**:
+  the vendor's write-ahead loop run on the resource at every code and
+  width, 1024 frames a run, eight runs a point under a console print in
+  flight, loses a frame in seven or eight runs of eight at 32, 64 and 128
+  cycles a frame on both parts (four to seven at 16, where a run is too
+  short to meet every interrupt) and in none at 256 and above; the host
+  under the same load, both shapes of the polled loop, every code and
+  width, finishes all sixty-four points with no overrun standing and
+  `spi_ok`. ON A PB1 INSTANCE THE RESOURCE'S BOUNDARY MOVES ONE CODE
+  (`spi2.ahead`, `spi2.live`, SPI2 at 72 MHz of bus under 144 of HCLK, both
+  parts): five to eight runs of eight at 32, 64 and 128 cycles a frame - /2,
+  /4 and /8 in 8-bit frames, /2 and /4 in 16-bit ones - and none at 256 and
+  above; the host's sixty-four points finish the same way.
 - **THE ENGINED TRANSACTION'S FIXED COST**, `bench_vx03`'s letter d, an
   asynchronous write on SPI1 with MISO floating at 144 MHz: 539 cycles
   above the frames' own wire time at /4, 533 at /16, ONE interrupt (the
@@ -1228,7 +1185,8 @@ valid 25 ns after its edge and the host's 5 ns of setup inside the half
 period), the far POLLED run from /16 for 8-bit frames and /8 for 16-bit
 ones (two of its turns inside a frame). Ten runs of letters d, j, k, l
 and m each way, every verdict green in all twenty; ten runs of n and o
-each way, green; `y` whole at 38 verdicts, green each way.
+each way, green; `y` whole at 42 verdicts, letter q's four among them, green
+each way.
 
 - **THE LADDER, both ways, both host shapes**: the polled request and
   the engines (an asynchronous request, 64 frames repaying them at every
@@ -1250,20 +1208,27 @@ each way, green; `y` whole at 38 verdicts, green each way.
   COST OF EACH HOST SHAPE beside the wire's (cycles a frame, 8-bit, the
   wire 8 x division x 2; from the `start()` call to the completion, the
   engines' fixed cost spread over the 64 frames): the polled request
-  4099 at /256 (the wire's 4096), 259 at /16 (256), 153 on the
-  CH32V203C8T6 and 158 on the CH32V303VCT6 at /8 (128, one frame in
-  flight below the write-ahead threshold), 97 and 86 to 87 at /4 (64);
-  the engines 264 to 265 at /16, 136 at /8 and 72 at /4 on both - the
-  polled request at the wire from /16 down, the engines within their
+  4128 on the CH32V203C8T6 and 4118 on the CH32V303VCT6 at /256 (the wire's 4096), 278 at /16 (256), 152 and 158 at /8 (128), 96 and 86 at /4 (64); the engines 263 to 264 at /16, 135 to 136 at /8 and 71 to 72 at
+  /4 -
+  the polled request at the wire plus its turn, the engines within their
   fixed cost of it at every code.
+- **A HANDLER LONGER THAN A FRAME IS A GAP ON THE BUS** (letter q, both
+  ways, fifteen runs each): TIM3's vector holding the core for some 340 to 380
+  cycles every 720 (5 us) beside the polled receive loop at /8 of PB1, 128
+  cycles a frame, 64 frames against the far client's DMA serve: ten windows
+  of ten exact both ways, `spi_ok`, the peer's count right, OVR never
+  standing. The window lengthens from 9770 to 15368 to 15502 cycles on the
+  CH32V203C8T6 and from 10131 to 10136 to 15370 to 15514 on the CH32V303VCT6, by what the
+  letter's arithmetic allows (2665 to 11800 and 2870 to 12212 cycles, the handler's
+  length counted in its listing).
 - **The extended exchange against a foreign unit**: 16-bit frames exact
   both ways on every shape and both far serves (report_extended); the CRC
   at both widths - CRC-8 (0x07) TCRCR 0x62 and RCRCR 0x5B, CRC-16
   (0x8005) 0x5FB6 and 0x2B13, each what a bitwise loop computes over what
   went and what came, the CRC frame read the far unit's own, CRCERR down
   at both ends, and a polynomial mismatch (0x07 here, 0x31 there) raising
-  CRCERR at BOTH ends; and this end's WRITE shape - two frames in flight,
-  no in buffer - heard exact by a far client that only listens, polled
+  CRCERR at BOTH ends; and this end's WRITE shape - no in buffer, the
+  transmit-only loop writing ahead - heard exact by a far client that only listens, polled
   and engined, both widths, to /2: the transmit path holds at 36 MHz
   where the answer path does not.
 - **THE ROLES INVERT**: each chip's `SpiClient::exchange()` run under the
@@ -1335,10 +1300,9 @@ each way, green; `y` whole at 38 verdicts, green each way.
 - **`rebase()` UNDER A DYNAMICCLOCK** (letter o): the pair's host a user
   of a DynamicClock of 144, 96 and 48 MHz on the HSI's PLL, a ceiling of
   6 MHz declared at init(), each switch's fan-out leaving the engine's
-  bus at 72, 48 and 48 MHz, the ceiling at /16, /8 and /8 (4.5, 6 and
-  6 MHz), and the write-ahead codes at /16 and /8, /16 and /8, /32 and
-  /16 for 8- and 16-bit frames - each what the new bus and its share of
-  HCLK make it; and at every rate a request at /2 ran clamped to the
+  bus at 72, 48 and 48 MHz and the ceiling at /16, /8 and /8 (4.5, 6 and
+  6 MHz) - each what the new bus makes it; and at every rate a request at
+  /2 ran clamped to the
   ceiling, 32 frames exact both ways against the far client in 8404 to
   8431, 5009 to 5190 and 2804 to 2894 cycles (the two parts together)
   against floors of 6144, 4096 and 2048 - no bit shorter than HCLK over
@@ -1390,25 +1354,6 @@ Driver gaps:
   what no verb offers is the receive side's judgement - CRCERR after a
   block whose far end sent its CRC. Born with the first device that
   checks one over a block.
-- **The polled loop with two frames in flight under the preemptive
-  kernel**: it runs inside the arbiter's dispatch, which every dispatch
-  above the arbiter holds off for its whole length, and
-  `hold_off_cycles` counts the image's longest handler or masked window,
-  not a dispatch. Measured under Rubato on both parts against the other's
-  `spi_peer`, with an object preempting every 97 to 389 us
-  (`test_vx03_rubato_link`, letter `p`, [platform.md](platform.md)): a
-  preemption of 3000 cycles cuts short rungs whose frame is 2048
-  cycles or shorter, one of 300 cycles rungs whose frame is 512 cycles or
-  shorter (in 19 of 60 such passes over the two images), every time with
-  `spi_overrun` and never a run handed back with a hole; the
-  engines and the short asynchronous request are exact at every rung.
-  That is the limit
-  [../design/kernel.md](../design/kernel.md)'s "Rubato" section states
-  for every polled service under the preemptive kernel; a hold-off
-  figure that counts the longest dispatch above the arbiter, or a
-  polled path refused under a preemptive platform, is a decision not
-  taken, born with the first preemptive program that sizes its rate by
-  the hold-off.
 - **The arbiter's round trip in the engines' fixed cost**: E counts the
   host's work and the receive channel's interrupt up to the completion's
   flag, not the arbiter's post of `TransferDone` and its dispatch, which
@@ -1439,14 +1384,11 @@ Driver gaps:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **SPI3's own write-ahead codes**: the same PB1 share as SPI2's, which
-  `bench_vx03`'s letter e measures; SPI3's pads on the CH32V303VCT6's
-  board are the evaluation board's jumpers and the pair's link, and the
-  oracle run on SPI3 would close it by name. The preemptive link suite
-  measures the safe side on SPI3: two frames in flight from
-  256-cycle frames (8-bit at /16, 16-bit at /8) through the polled loop,
-  no overrun in its control passes ([platform.md](platform.md)); the loss
-  on the other side of the threshold is measured on SPI1 and SPI2 alone.
+- **The receive loop's frame in modes 2 and 3, and on SPI3**: the letter's
+  table measures modes 0 and 1 on SPI1 and SPI2; modes 2 and 3 as more rows
+  of the same table would measure them. SPI3 sits on PB1 as SPI2 does, and
+  its row wants the evaluation board's jumpers free; the pair's ladder reads
+  86 cycles a frame at /4 on it, in mode 0 and 8-bit frames.
 - **A command phase on a block of its own on SPI2 and SPI3**: the chain
   from the command block to the data block in the receive channel's
   vector is measured on SPI1 (letters c and g); the same code serves

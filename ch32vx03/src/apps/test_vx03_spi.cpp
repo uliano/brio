@@ -4,7 +4,7 @@
 // spi_bus.hpp's arbiter with not one line changed. Letters a, b, c, e, f
 // and g are both series' single-board letters; h and i are the CH32V303's third
 // instance against its second, registered on the part that has SPI3 and
-// compiled out of every other image; d, j, k, l and m are THE PAIR's,
+// compiled out of every other image; d, j, k, l, m, n, o and q are THE PAIR's,
 // against the desk partner. The I2S face is test_vx03_i2s's.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -19,7 +19,7 @@
 //    runnable with the far board dark - on its console, or on its
 //    spi_peer, whose dark listener drives nothing and is selected by
 //    nothing: the pair's select is never driven low by them.
-//  - `y`, THE PAIR'S LETTERS (d, j, k, l, m), against the far board
+//  - `y`, THE PAIR'S LETTERS (d, j, k, l, m, n, o, q), against the far board
 //    running `spi_peer`, commanded IN BAND over the bus under test through
 //    avrxt/src/apps/spi_link.hpp, included by relative path: one source of
 //    truth for the wire format on every architecture. They FAIL loudly
@@ -94,8 +94,8 @@
 //      host polled; on the engined host the short asynchronous request's
 //      edge (one frame under it inside start(), one at it on the engines),
 //      a command phase on a block of its own, a 16-bit request from an odd
-//      address run polled, a long polled read riding the engines below
-//      the write-ahead threshold and the loop above it; then THE COSTS the
+//      address run polled, a long polled read in the loop on the engined
+//      host with no channel interrupt, and under a mask; then THE COSTS the
 //      short-request rule is made of - E - F for a read and a write, the
 //      receive loop's dead bus and both loops' turns - each through one
 //      call, against the constants this core states, and the edge itself
@@ -150,13 +150,17 @@
 //   n  RECOVER(): an engined write the far chip's select demotes mid-way,
 //      answered spi_timeout by a timed arbiter and put back by recover()
 //   o  REBASE(): the engine at three rates of a DynamicClock
+//   q  A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: a TIM3 handler
+//      holding the core longer than a frame every 5 us, beside the polled
+//      receive loop at /8 of PB1 - every window exact, the time it costs
+//      bound by the section's arithmetic
 //   x  (by name) THE SLIP STATISTICS: each mode four times at /256, /64
 //      and /8, on both far serves, behind the polled host and the engines,
 //      and with the far client listening only - no verdict
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abef,cg
-// build: groups.v203c8 = abcefg,djklmnox
+// build: groups.v203c8 = abcefg,djklmnoqx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -958,8 +962,8 @@ void tc_loop() {
                                      SpiDataSize::bits8, true);
         const uint32_t cycles = cycles_now() - t0;
         const bool ok = st == spi_ok && same(tx_buf, rx_buf, chunk);
-        // A polled read keeps one frame in flight at the top codes and is
-        // slower than its wire there; no code may be faster than it.
+        // A polled read keeps one frame in flight and is slower than its
+        // wire by the turn; no code may be faster than it.
         const uint64_t wire = 8ULL * chunk * spi_division(rate) * SysClock::hz / SysClock::pclk2_hz;
         if (cycles >= wire) {
             ++never_early;
@@ -2224,6 +2228,31 @@ void pair_done() {
 
 // ---- one exchange, commanded and then clocked ------------------------------
 
+// ---- letter q's handler, armed around one polled window ----------------------
+
+/// TIM3's update, HCLK at prescaler 0: its vector holds the core for
+/// hog_cycles every hog_period while a window of letter q runs (the section's
+/// arithmetic at the letter). Its DMA requests stay off.
+using HogTim = Tim<3>;
+static_assert(HogTim::clock_hz(SysClock{}) == SysClock::hz, "TIM3 counts HCLK at this clock");
+constexpr uint32_t hog_period = 720;   ///< 5 us at 144 MHz
+constexpr uint32_t hog_cycles = 300;
+volatile bool hog_armed = false;       ///< letter q arms it; every other letter leaves the timer alone
+volatile uint32_t hog_count = 0;
+bool hog_overrun = false;              ///< OVR read right after the window
+
+/// The timer on for the window alone, so the command channel around it is
+/// not what it lands in; OVR read where the window ends, this end's direct
+/// witness that no frame was lost.
+void hog_window(bool open) {
+    if (hog_armed) {
+        HogTim::enable(open);
+        if (!open) {
+            hog_overrun = PairS::overrun();
+        }
+    }
+}
+
 /// How this end clocks the exchange: the polled request, or the DMA engines
 /// (an asynchronous request on the engined host, every exchange here long
 /// enough to repay them).
@@ -2328,9 +2357,11 @@ uint8_t clock_out(const Exchange& e, uint16_t n, uint32_t& cycles) {
     r.mode = e.host_mode;
     r.bits = bits;
     r.polled = true;
+    hog_window(true);
     const uint32_t t0 = cycles_now();
     (void)PairHost::start(r);
     cycles = cycles_now() - t0;
+    hog_window(false);
     st = PairHost::status();
     link_hold();
     PairNss::set();
@@ -2992,7 +3023,7 @@ void tk_extended() {
             Exchange e{};
             e.spare = static_cast<uint8_t>(spilink::spare_receive_only | ((k & 1u) != 0u ? spilink::spare_wide : 0u));
             e.count = 64;
-            e.read = false;   // a WRITE: no in buffer, two frames in flight at every code
+            e.read = false;   // a WRITE: no in buffer, the transmit-only loop writing ahead at every code
             e.rate = k < 2u ? SpiClock::div16 : (k < 4u ? SpiClock::div4 : SpiClock::div2);
             e.shape = (k & 2u) != 0u ? Shape::engines : Shape::polled;
             e.seed_a = static_cast<uint8_t>(0x61u + k);
@@ -3008,7 +3039,7 @@ void tk_extended() {
             }
         }
         bench.verdict("THE WRITE SHAPE IS WITNESSED: a client that only listens (receive-only, MISO dark) hears this "
-                      "end's two-in-flight writes exact, polled and engined, both widths, to /2",
+                      "end's writes exact, polled and engined, both widths, to /2",
                       ok == runs);
     }
     (void)link_command_mode();
@@ -3514,14 +3545,13 @@ struct ShortCosts {
     uint16_t edge_calc[3] = {}, edge_host[3] = {}, edge_meas[3] = {};
 };
 
-/// The polled lines stay under the length from which a polled read rides
-/// the engines, so they time the loops.
+/// The polled lines' two lengths: the frame their difference, F the wall
+/// extrapolated to no frames, the dead bus falling out with the frames.
 constexpr uint16_t line_short = 4;
 constexpr uint16_t line_long = 12;
 
 template <typename H>
 ShortCosts measure_short_costs() {
-    static_assert(line_long < H::dma_min_frames_polled, "letter g's polled lines run the loops");
     ShortCosts c{};
     auto best = [](uint16_t n, SpiClock rate, bool read, bool polled) {
         uint32_t least = 0xFFFF'FFFFUL;
@@ -3550,12 +3580,8 @@ ShortCosts measure_short_costs() {
                              ? static_cast<uint16_t>((over * 10u + c.line_frame[k] - 1u) / c.line_frame[k])
                              : uint16_t{0};
         c.edge_host[k] = H::async_min_frames(sh.rate, SpiDataSize::bits8, sh.read);
-        // A polled READ rides the engines from dma_min_frames_polled frames at
-        // these codes (one frame in flight), so its walk stops there; a
-        // write's never does.
         const uint16_t from = c.edge_calc[k] > 4u ? static_cast<uint16_t>(c.edge_calc[k] - 4u) : uint16_t{1};
-        const uint16_t stop = sh.read ? H::dma_min_frames_polled : uint16_t{0xFFFFu};
-        for (uint16_t n = from; n < c.edge_calc[k] + 6u && n < stop && c.edge_meas[k] == 0u; ++n) {
+        for (uint16_t n = from; n < c.edge_calc[k] + 6u && c.edge_meas[k] == 0u; ++n) {
             if (best(n, sh.rate, sh.read, true) >= c.engine_fixed) {
                 c.edge_meas[k] = n;
             }
@@ -3678,28 +3704,28 @@ void tg_two_ways() {
                   "whichever way they asked: spi_ok, no interrupt",
                   !odd_went && odd_st == spi_ok && odd_entries == 0u);
 
-    // A POLLED read rides the engines inside start() from
-    // dma_min_frames_polled frames below the write-ahead threshold (/4: one
-    // frame in flight), and never above it (/64: two in flight, the loop at
-    // the wire).
-    const uint16_t pn = Dma1::dma_min_frames_polled;
+    // A POLLED read runs the loop on the engined host at any length, the
+    // engines untouched: 256 frames at /4, past any count of theirs, and at
+    // /64, no channel interrupt. So it depends on no vector: the same read
+    // with global interrupts masked completes inside start(), spi_ok.
+    fill_pattern(tx_buf, 256, 0x93);
     spi1_dma_entries = 0;
-    const uint8_t p_below = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, static_cast<uint16_t>(pn - 1u), SpiClock::div4,
-                                          SpiDataSize::bits8, true);
-    const uint32_t e_below = spi1_dma_entries;
-    spi1_dma_entries = 0;
-    const uint8_t p_at = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, pn, SpiClock::div4, SpiDataSize::bits8, true);
-    const uint32_t e_at = spi1_dma_entries;
-    spi1_dma_entries = 0;
-    const uint8_t p_slow = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, pn, SpiClock::div64, SpiDataSize::bits8, true);
-    const uint32_t e_slow = spi1_dma_entries;
-    print(serial, "  polled reads at /4 of ", pn - 1u, " and ", pn, " frames: ", e_below, " and ", e_at,
-          " channel interrupts; of ", pn, " at /64 (two in flight): ", e_slow, crlf);
-    bench.verdict("A LONG POLLED READ below the write-ahead threshold rides the engines inside start() from "
-                  "dma_min_frames_polled frames, and runs the loop under it and above the threshold - every one "
-                  "spi_ok",
-                  p_below == spi_ok && e_below == 0u && p_at == spi_ok && e_at == 1u && p_slow == spi_ok &&
-                      e_slow == 0u);
+    const uint8_t p_long = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, 256, SpiClock::div4, SpiDataSize::bits8, true);
+    const uint8_t p_slow = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, 256, SpiClock::div64, SpiDataSize::bits8, true);
+    const uint32_t e_polled = spi1_dma_entries;
+    uint8_t p_masked = no_answer;
+    {
+        InterruptGuard masked;
+        p_masked = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, 256, SpiClock::div4, SpiDataSize::bits8, true);
+    }
+    print(serial, "  polled reads of 256 frames on the engined host at /4 and /64: status ", p_long, " and ", p_slow, ", ",
+          e_polled, " channel interrupts; at /4 under a mask: status ", p_masked, crlf);
+    bench.verdict("A LONG POLLED READ runs the loop whatever its length, the engines untouched: spi_ok at /4 and /64, "
+                  "no channel interrupt",
+                  p_long == spi_ok && p_slow == spi_ok && e_polled == 0u);
+    bench.verdict("... and it depends on no interrupt vector: the same read with global interrupts masked completes "
+                  "inside start(), spi_ok",
+                  p_masked == spi_ok);
 
     // ---- THE COSTS the rule is made of, against the constants ----
     console_drain();
@@ -3903,15 +3929,10 @@ void to_rebase() {
         while (want_code < 7u && bus / (2UL << want_code) > rebase_ceiling) {
             ++want_code;
         }
-        const uint8_t ratio = static_cast<uint8_t>(hz / bus);
         const auto ceiling = PairHost::ceiling_clock();
-        const auto ahead8 = PairHost::write_ahead_from(SpiDataSize::bits8);
-        const auto ahead16 = PairHost::write_ahead_from(SpiDataSize::bits16);
         const bool book = switched && PairHost::reference_hz() == bus && PairHost::hclk_hz() == hz && ceiling &&
                           static_cast<uint8_t>(*ceiling) == want_code &&
-                          PairHost::sck_hz(SpiClock::div2) == bus / (2UL << want_code) && ahead8 && ahead16 &&
-                          static_cast<uint8_t>(*ahead8) == spi_write_ahead_code<spi_default_hold_off_cycles>(8, ratio) &&
-                          static_cast<uint8_t>(*ahead16) == spi_write_ahead_code<spi_default_hold_off_cycles>(16, ratio);
+                          PairHost::sck_hz(SpiClock::div2) == bus / (2UL << want_code);
         books = books && book;
         const uint32_t engine_bus = PairHost::reference_hz();
         const uint32_t div2_hz = PairHost::sck_hz(SpiClock::div2);
@@ -3930,15 +3951,14 @@ void to_rebase() {
         print(serial, "  ", hz / 1'000'000u, " MHz (bus ", bus / 1'000'000u, "): the engine's bus ",
               engine_bus / 1'000'000u, " MHz, the ceiling /", ceiling ? spi_division(*ceiling) : 0u,
               " (code ", want_code, " asked), /2 runs at ", div2_hz / 1000u,
-              " kHz, two in flight from /", ahead8 ? spi_division(*ahead8) : 0u, " and /",
-              ahead16 ? spi_division(*ahead16) : 0u, "; 32 frames at /2: ", o.cycles, " cycles (", floor_cycles,
+              " kHz; 32 frames at /2: ", o.cycles, " cycles (", floor_cycles,
               " at least), ", exact(e, o) ? "exact both ways" : "NOT EXACT", crlf);
     }
     console_drain();
     (void)Dyn::set_index(0);
     (void)link_command_mode();
     bench.verdict("REBASE() FOLLOWS THE CLOCK: at 144, 96 and 48 MHz the engine's bus rate, the declared ceiling's "
-                  "code, the rate /2 really runs at and both write-ahead codes are what the new bus makes them",
+                  "code and the rate /2 really runs at are what the new bus makes them",
                   books);
     bench.verdict("... and at each rate a request at /2 runs clamped to the ceiling - never faster than it on the "
                   "core's counter - exact both ways against the far client",
@@ -4004,6 +4024,133 @@ void tx_slips() {
 }
 
 /// The pair's letters, the second set, registered where the part links.
+// ===========================================================================
+// q - a handler beside the polled loop is a gap on the bus, against the peer (y)
+// ===========================================================================
+//
+// SpiHost's polled receive loop keeps one frame in flight at every rate: it
+// writes frame k + 1 only after reading frame k, so the clock waits for the
+// read and nothing can overrun (20.2.7). TIM3's vector holds the core for
+// hog_cycles of its own, an STK spin, every 5 us, longer than a frame, and the
+// polled loop runs at /8 of PB1 (W = 128 HCLK cycles a frame, a half bit of 8)
+// against the peer's DMA serve. The verdict: ten windows of ten exact both
+// ways, status spi_ok, OVR never standing, the peer's count right, and the
+// window longer than without the handler by what the arithmetic below allows.
+//
+// THE BOUND, in core cycles at 144 MHz. The handler's period is P = 720. One
+// run holds the core for
+//   hold_min = 300 + 16 + 25                           = 341   (the spin, the
+//              hardware prologue's entry and exit, docs/ch32vx03/platform.md)
+//   hold_max = 341 + 10 (the STATR load over PB1 the interrupt waits out) + 14
+//              (the five instructions before the spin, the TIM3 store over PB1
+//              among them) + 9 (a spin turn's overshoot, four instructions) + 5
+//              (the three after it)                    = 379
+// counted in tim3_handler's body in the release listing, the same on the V4B
+// and the V4F, a leaf saving no f-register on either.
+// A run longer than a frame always stalls the loop. RXNE rises half a bit before
+// a frame's end (the CPHA = 0 sampling edge), and the loop's write of the next
+// frame may stand just before the run: that frame ends at most W + H = 136
+// after the run starts, H the half bit, so the bus idles for at least
+// hold_min - 136 where the frame after it would have turned at once. A run can
+// add at most its whole length, when it lands on the turn. So over a window of T
+// cycles without the handler (ten windows measured, T_min and T_max), the runs
+// that start inside it number at least floor(T_min / P), and
+//   lower = floor(T_min / P) x (hold_min - 136)
+//   upper = (T_max + hold_max + tick) x P / (P - hold_max) - T_min
+// the second from T' <= T_max + (T' / P + 1) x hold_max + tick, with tick the
+// one STK run the window can meet (hog_tick, counted beside hog_hold_max). Both
+// are worst cases of the phase; neither is a figure chosen by eye.
+constexpr uint32_t hog_hold_min = hog_cycles + 16u + 25u;
+constexpr uint32_t hog_hold_max = hog_hold_min + 10u + 14u + 9u + 5u;
+/// The STK's handler: the entry and exit, twelve instructions and a store to the
+/// STK, the interrupted load.
+constexpr uint32_t hog_tick = 16u + 25u + 16u + 10u;
+constexpr uint32_t hog_frame_end = 136;   ///< W + the half bit
+static_assert(hog_hold_min > hog_frame_end && hog_hold_max < hog_period);
+
+struct HogTally {
+    uint8_t exact = 0;
+    uint8_t not_ok = 0;
+    uint8_t overrun = 0;
+    uint32_t cycles_min = 0xFFFF'FFFFUL;
+    uint32_t cycles_max = 0;
+    uint32_t runs = 0;
+};
+
+HogTally hog_series(bool hog, uint8_t rounds) {
+    HogTally t{};
+    hog_count = 0;
+    console_drain();
+    for (uint8_t k = 0; k < rounds; ++k) {
+        Exchange e{};
+        e.rate = SpiClock::div8;
+        e.count = 64;
+        e.seed_a = static_cast<uint8_t>(0x21u + 13u * k);
+        e.seed_b = static_cast<uint8_t>(0x84u + 13u * k);
+        hog_armed = hog;
+        hog_overrun = false;
+        const Outcome o = run_exchange(e);
+        hog_armed = false;
+        if (exact(e, o)) {
+            ++t.exact;
+        }
+        if (o.status != spi_ok) {
+            ++t.not_ok;
+        }
+        if (hog_overrun) {
+            ++t.overrun;
+        }
+        if (o.cycles < t.cycles_min) {
+            t.cycles_min = o.cycles;
+        }
+        if (o.cycles > t.cycles_max) {
+            t.cycles_max = o.cycles;
+        }
+    }
+    t.runs = hog_count;
+    return t;
+}
+
+void tq_handler_gap() {
+    if (!need_peer()) {
+        return;
+    }
+    HogTim::init();
+    (void)HogTim::configure(TimConfig{.prescaler = 0, .period = hog_period - 1u});
+    HogTim::clear_flags(HogTim::update_flag);
+    HogTim::interrupts(HogTim::update_interrupt, true);
+    Pfic::enable(HogTim::irq());
+    constexpr uint8_t rounds = 10;
+    const HogTally quiet = hog_series(false, rounds);
+    const HogTally held = hog_series(true, rounds);
+    Pfic::disable(HogTim::irq());
+    HogTim::interrupts(HogTim::update_interrupt, false);
+    HogTim::release();
+    const uint32_t lower = (quiet.cycles_min / hog_period) * (hog_hold_min - hog_frame_end);
+    const uint32_t upper = static_cast<uint32_t>((static_cast<uint64_t>(quiet.cycles_max) + hog_hold_max + hog_tick) *
+                                                 hog_period / (hog_period - hog_hold_max)) -
+                           quiet.cycles_min;
+    const uint32_t longer_min = held.cycles_min > quiet.cycles_max ? held.cycles_min - quiet.cycles_max : 0u;
+    const uint32_t longer_max = held.cycles_max > quiet.cycles_min ? held.cycles_max - quiet.cycles_min : 0u;
+    print(serial, "  the polled loop at /8 of PB1 (128 cycles a frame), 64 frames:", crlf);
+    print(serial, "  no handler: ", quiet.exact, " of ", rounds, " exact, a window ", quiet.cycles_min, "..",
+          quiet.cycles_max, " cycles", crlf);
+    print(serial, "  the handler every ", hog_period, " cycles, ", held.runs, " runs: ", held.exact, " of ", rounds,
+          " exact, ", held.not_ok, " not spi_ok, OVR ", held.overrun, ", a window ", held.cycles_min, "..",
+          held.cycles_max, " cycles", crlf);
+    print(serial, "  longer by ", longer_min, "..", longer_max, " cycles; the arithmetic allows ", lower, "..", upper,
+          crlf);
+    bench.verdict("the control: with no handler bound, ten 64-frame windows exact both ways", quiet.exact == rounds);
+    bench.verdict("A HANDLER LONGER THAN A FRAME, every 5 us, IS A GAP ON THE BUS: ten of ten windows exact both ways, "
+                  "status spi_ok, the peer's count right, OVR never standing",
+                  held.exact == rounds && held.not_ok == 0u && held.overrun == 0u);
+    bench.verdict("the window is longer than without the handler by what the arithmetic allows, and the handler ran",
+                  longer_min >= lower && longer_max <= upper && held.runs >= rounds * (quiet.cycles_min / hog_period));
+    (void)link_command_mode();
+    bench.verdict("the command channel is back", command(Op::ping));
+    pair_done();
+}
+
 template <bool on = has_pair>
 void register_pair_letters() {
     if constexpr (on) {
@@ -4021,6 +4168,8 @@ void register_pair_letters() {
                             tn_recover);
         bench.second_letter('o', "REBASE(): the engine at three rates of a DynamicClock against the far client",
                             to_rebase);
+        bench.second_letter('q', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: longer than a frame, every 5 us",
+                            tq_handler_gap);
         bench.letter('x', "the slip statistics against the peer: each mode, both far serves (no verdict)", tx_slips,
                      false);
     }
@@ -4053,6 +4202,23 @@ void banner() {
 
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
+
+/// Letter q's handler, longer than a frame: hog_cycles of its own, an STK
+/// spin (the restart folded in), bound leaf: it calls nothing and touches no
+/// f-register.
+BRIO_CH32_LEAF_VECTOR(tim3_handler) {
+    HogTim::clear_flags(HogTim::update_flag);
+    const uint32_t period = SysClock::hz / brio::Ticker::ticks_per_second;
+    const uint32_t t0 = brio::stk()->CNTL;
+    for (;;) {
+        const uint32_t t = brio::stk()->CNTL;
+        const uint32_t d = t >= t0 ? t - t0 : t + period - t0;
+        if (d >= hog_cycles) {
+            break;
+        }
+    }
+    hog_count = hog_count + 1u;
+}
 
 BRIO_CH32_LEAF_VECTOR(spi1_handler) {
     spi1_isr_entries = spi1_isr_entries + 1u;

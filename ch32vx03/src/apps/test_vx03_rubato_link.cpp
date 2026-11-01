@@ -33,29 +33,23 @@
 //   the peer's is its hardware NSS input. SCK and MOSI at the medium slew
 //   class, the pair's pad class (test_vx03_spi's pair_pad_class, its
 //   reason beside it). NO FIFO (20.2.2): one buffer each way, so the
-//   polled receive loop writes ahead - two frames in flight - only where a
-//   frame outlasts the image's hold-off and the loop's way back to the
-//   read, 200 + 15 cycles (spi.hpp, THE WRITE-AHEAD THRESHOLD): on SPI2 and
-//   SPI3, whose PB1 runs at half of HCLK, a byte frame from /16 (256
-//   cycles) and a 16-bit one from /8 (256). A request runs one of the
-//   host's two ways (docs/design/spi-bus.md): POLLED, the loops inside
-//   start() (and a read of dma_min_frames_polled frames or more below the
-//   threshold on the engines inside it: 14 on the CH32V203, 32 on the
-//   CH32V303), or ASYNCHRONOUS, which is DMA - on the engines from the
+//   polled receive loop keeps one frame in flight at every rate, the clock
+//   waiting for the read. A request runs one of the host's two ways
+//   (docs/design/spi-bus.md): POLLED, the loops inside start(), at any
+//   length, or ASYNCHRONOUS, which is DMA - on the engines from the
 //   count async_min_frames() derives for its code and width on this bus,
 //   run polled inside start() below it, and polled too whatever its length
 //   for 16-bit frames at an odd address (11.3.6: the controller would round
 //   it down). So the POLLED LOOP is a 16-bit window from an odd address or
 //   a byte window of eight frames, the ENGINES a window of 32 byte frames,
 //   and an asynchronous window of ONE byte frame crosses the edge on the
-//   ladder: on the engines from /256 down to /16 on the CH32V203 and to /32
-//   on the CH32V303, polled inside start() below. The
+//   ladder: on the engines from /256 down to /32 on both parts, polled
+//   inside start() below. The
 //   polled loop runs inside the arbiter's dispatch: a dispatch above the
-//   arbiter holds it off for its whole length, which the hold-off does not
-//   count, and where two frames are in flight and the hold-off outlasts a
-//   frame the one-deep receive buffer loses one - OVR (20.2.7), which the
-//   loop watches beside RXNE and ends the transaction on with spi_overrun,
-//   never handing back a run with a hole in it.
+//   arbiter holds it off for its whole length, and a 3000-cycle preemption
+//   outlasts a byte frame at /128 and faster, a 16-bit one at /64 and faster.
+//   The clock waits for the read, so that is a gap on the bus and the bound
+//   on lost frames is ZERO in every pass.
 //   THE UART. The pair's link port (vx03_link_dut.hpp): USART3 on PB10/PB11
 //   on the CH32V203C8, UART4 on its second column, PB0/PB1, on the
 //   CH32V303VC, both engines on the port's slots (RM 11.2.3: USART3 on
@@ -135,12 +129,8 @@
 //      and the host's 5 ns of setup, 30 ns against /4's 27.8 ns half period
 //      - test_vx03_spi's pair section), so /4 and /2 are printed with their
 //      counts; the way each short window took is judged at every rung. In
-//      the control every judged rung is byte-exact on every path. Under
-//      pressure the engines and the short request are (where it runs
-//      polled, one frame is in flight), and the polled loop is byte-exact
-//      or cut short by a detected overrun (spi_overrun) at a rung where two
-//      frames are in flight - never a run with a hole, never an overrun
-//      where one frame is.
+//      every pass, the control and each pressure alike, every judged rung is
+//      byte-exact on every path.
 //   w  the arbiter under pressure: the Client above it (20 asynchronous
 //      requests of 6 frames on the engines, two outstanding), Minor below
 //      it (10 POLLED requests of 8 frames, one outstanding, on the polled
@@ -152,9 +142,8 @@
 //      body's LinkTraits): at the command rate /256 a single byte frame is
 //      8192 cycles and repays the engines, so no asynchronous request would
 //      run polled there; at /8 a byte read repays them from two frames on
-//      the CH32V203 and three on the CH32V303, one frame is in flight on a
-//      receive (the threshold is /16) and a preemption of Minor's loop is a
-//      gap on the bus, and /8 is the fastest code whose read-back the two
+//      the CH32V203 and three on the CH32V303, a preemption of Minor's loop
+//      is a gap on the bus, and /8 is the fastest code whose read-back the two
 //      datasheets' timing covers. Every reply to its requester in its
 //      order, every one spi_ok, nothing rejected, the per-bus timeout never
 //      firing, the peer counting every frame exact.
@@ -346,9 +335,9 @@ constexpr const char* pressure_name = "TIM2";
 constexpr const char* peer_name = v303 ? "the CH32V203C8T6" : "the CH32V303VCT6";
 
 /// Letter w's rate and Pressure's length on this host (the file header):
-/// /8, one frame in flight, and an asynchronous request of one frame, under
-/// the engines' count at /8, so that it runs polled inside start(); Minor's
-/// polled requests the default eight frames, under dma_min_frames_polled.
+/// /8, and an asynchronous request of one frame, under the engines' count at
+/// /8, so that it runs polled inside start(); Minor's polled requests the
+/// default eight frames.
 struct LinkTraits {
     static constexpr SpiClock w_rate = SpiClock::div8;
     static constexpr uint8_t w_press_len = 1;
@@ -394,8 +383,7 @@ uint32_t division(SpiClock c) { return spi_division(c); }
 /// since the reply before - the window's own, the windows being one at a
 /// time - latched for the data window (the shared body's sl::xrx is its
 /// receive buffer, and no other window's): which way a short asynchronous
-/// request went (letter p). The host reports a lost frame itself, as the
-/// transaction's status (spi_overrun).
+/// request went (letter p).
 void client_replied() {
     const uint32_t now = dma_completions;
     if (Client::rx == sl::xrx) {
@@ -634,34 +622,17 @@ uint16_t path_frames(Path p) {
 constexpr bool rides_engines(SpiClock c, uint16_t n) {
     return n >= Host::async_min_frames(c, SpiDataSize::bits8, true, bus_share);
 }
-static_assert(8u < Host::dma_min_frames_polled && rides_engines(SpiClock::div2, 32u),
-              "letter p's polled windows of eight frames take the polled loop, its 32-frame ones the engines");
+static_assert(rides_engines(SpiClock::div2, 32u), "letter p's 32-frame asynchronous windows ride the engines");
 static_assert(rides_engines(SpiClock::div256, 1u) && rides_engines(SpiClock::div32, 1u) &&
                   !rides_engines(SpiClock::div8, 1u) && !rides_engines(SpiClock::div2, 1u),
-              "letter p's one-frame asynchronous window crosses the edge: the engines to /32 at least (/16 on the "
-              "CH32V203), polled from /8");
+              "letter p's one-frame asynchronous window crosses the edge: the engines to /32, polled from /8");
 
 /// The short request's rungs routed otherwise than the host's count says.
 uint8_t misrouted = 0;
 
-/// A frame's core cycles at code `c`: bits x the division, HCLK = 2 x PCLK1.
-uint32_t frame_cycles(SpiClock c, bool wide) {
-    return (wide ? 16u : 8u) * division(c) * (SysClock::hz / SysClock::pclk1_hz);
-}
-
-/// Does the host keep two frames in flight on a receive at this code and
-/// width (spi.hpp's threshold, write_ahead_from())?
-bool two_in_flight(SpiClock c, bool wide) {
-    const std::optional<SpiClock> from = Host::write_ahead_from(wide ? SpiDataSize::bits16 : SpiDataSize::bits8);
-    return from && static_cast<uint8_t>(c) >= static_cast<uint8_t>(*from);
-}
-
-/// One pass's polled outcome: the rungs cut short by a detected overrun
-/// (a bit a rung, bit k for rungs[k]), per polled path; and whether any
-/// polled failure was something else - another status, a wrong run handed
-/// back spi_ok, or an overrun where one frame is in flight.
-uint8_t cut_short[2] = {};
-bool polled_failed_otherwise = false;
+/// One pass's polled rungs that were not exact, the judged ones: lost frames,
+/// whose bound is zero.
+uint8_t polled_not_exact = 0;
 uint8_t top_exact[2] = {};
 uint8_t top_total[2] = {};
 
@@ -696,16 +667,10 @@ bool climb(Path path, uint8_t seed) {
             continue;
         }
         if (!ok) {
-            const bool two = two_in_flight(c, e.wide);
-            print(serial, "    ", path_name(path), two ? " (two frames in flight" : " (one frame in flight",
-                  ", a frame ", frame_cycles(c, e.wide), " cycles):", crlf);
+            print(serial, "    ", path_name(path), ":", crlf);
             sl::print_outcome(e, o);
             if (path_polled(path)) {
-                if (o.status == brio::spi_overrun && two) {
-                    cut_short[path == Path::polled16 ? 0u : 1u] |= static_cast<uint8_t>(1u << k);
-                } else {
-                    polled_failed_otherwise = true;
-                }
+                ++polled_not_exact;
             }
         }
         all = all && ok;
@@ -713,29 +678,13 @@ bool climb(Path path, uint8_t seed) {
     return all;
 }
 
-/// The rungs a bit set names, as "/128 /64".
-void print_rungs(uint8_t bits) {
-    if (bits == 0u) {
-        print(serial, " none");
-        return;
-    }
-    for (uint8_t k = 0; k < rung_count; ++k) {
-        if ((bits & (1u << k)) != 0u) {
-            print(serial, " /", division(rungs[k]));
-        }
-    }
-}
-
 void tp_ladders() {
-    print(serial, "  two frames in flight on a receive from ", bus_clock_name, "/",
-          division(*Host::write_ahead_from(SpiDataSize::bits8)), " (8-bit) and /",
-          division(*Host::write_ahead_from(SpiDataSize::bits16)),
-          " (16-bit); a frame at /256 is 4096 cycles (8-bit) and 8192 (16-bit), at /16 256 and 512; "
+    print(serial, "  the polled loop keeps one frame in flight at every rate of ", bus_clock_name,
+          "; a frame at /256 is 4096 cycles (8-bit) and 8192 (16-bit), at /16 256 and 512; "
           "an asynchronous byte read on the engines from ",
           Host::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true), " frames at /2, ",
           Host::async_min_frames(SpiClock::div8, SpiDataSize::bits8, true), " at /8, ",
-          Host::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true), " at /16; a polled read from ",
-          Host::dma_min_frames_polled, " below the threshold; /4 and /2 printed, not judged",
+          Host::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true), " at /16; /4 and /2 printed, not judged",
           crlf);
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
@@ -744,8 +693,7 @@ void tp_ladders() {
             (void)pass_end(s);
             return;
         }
-        cut_short[0] = cut_short[1] = 0;
-        polled_failed_otherwise = false;
+        polled_not_exact = 0;
         misrouted = 0;
         top_exact[0] = top_exact[1] = 0;
         top_total[0] = top_total[1] = 0;
@@ -756,32 +704,17 @@ void tp_ladders() {
         const bool ping = sl::command(spilink::Op::ping);
         const PassStats st = pass_end(s);
         print_pass(s, st);
-        print(serial, "    polled rungs cut short by a detected overrun: 16-bit");
-        print_rungs(cut_short[0]);
-        print(serial, "; 8-bit");
-        print_rungs(cut_short[1]);
-        print(serial, "; /4 exact on ", top_exact[0], " of ", top_total[0], " paths, /2 on ", top_exact[1], " of ",
-              top_total[1], crlf);
-        if (s.period_us == 0u) {
-            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 8 16-bit and 8 8-bit frames "
-                                         "byte-exact both ways at every code to /8",
-                          polled16 && polled8);
-        } else {
-            // Under pressure the polled loop runs inside the arbiter's
-            // dispatch, which every dispatch above the arbiter holds off for
-            // its whole length - a length the host's hold-off does not
-            // count. Where two frames are in flight and the preemption
-            // outlasts a frame, the one-deep receive buffer loses one and
-            // the transaction ends spi_overrun: the service's promise is that
-            // it detects it every time and never hands back a run with a
-            // hole, and that is what is judged, the rungs cut short printed
-            // beside it. One frame in flight cannot overrun: a preemption
-            // there is a gap on the bus.
-            bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: byte-exact, or cut short only by "
-                                         "a detected overrun where two frames are in flight and a dispatch above "
-                                         "the arbiter outlasts a frame - never a run with a hole",
-                          (polled16 && polled8) || !polled_failed_otherwise);
-        }
+        print(serial, "    polled rungs not exact over the pass: ", polled_not_exact, " (the bound: 0); /4 exact on ",
+              top_exact[0], " of ", top_total[0], " paths, /2 on ", top_exact[1], " of ", top_total[1], crlf);
+        // The polled loop runs inside the arbiter's dispatch, which every
+        // dispatch above the arbiter holds off for its whole length. It keeps
+        // one frame in flight, so the clock waits for the read and a
+        // preemption longer than a frame is a gap on the bus: no rung may
+        // lose a frame, in the control and under pressure alike.
+        bench.verdict(pass_label(s), "THE POLLED LOOP through the arbiter: 8 16-bit and 8 8-bit frames byte-exact both "
+                                     "ways at every code to /8, a preemption longer than a frame a gap on the bus and "
+                                     "no frame lost",
+                      polled16 && polled8);
         bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST: 1 frame byte-exact at every code to /8, on "
                                      "the engines or completed inside start() at every code as the host's count "
                                      "says",
@@ -796,14 +729,9 @@ void tp_ladders() {
 // w - the arbiter under pressure
 // =============================================================================
 
-static_assert(rides_engines(w::rate, w::client_len) && !rides_engines(w::rate, w::press_len) &&
-                  w::minor_len < Host::dma_min_frames_polled,
+static_assert(rides_engines(w::rate, w::client_len) && !rides_engines(w::rate, w::press_len),
               "letter w: the Client's requests ride the engines, Pressure's asynchronous ones run polled inside "
-              "start(), Minor's polled ones the polled loop (the file header)");
-static_assert(static_cast<uint8_t>(w::rate) < spi_write_ahead_code<spi_default_hold_off_cycles>(8, bus_share) &&
-                  static_cast<uint8_t>(link_clock) >= spi_write_ahead_code<spi_default_hold_off_cycles>(8, bus_share),
-              "letter w: at its rate a byte frame is alone in flight, at the command rate two are (the file "
-              "header)");
+              "start() (the file header)");
 
 void tw_arbiter() {
     for (uint8_t p = 0; p < pass_count; ++p) {

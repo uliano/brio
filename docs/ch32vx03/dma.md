@@ -496,9 +496,8 @@ once every 256 turns - or with 64 empty instructions between pad reads -
 kept every frame, and so did the core polling the SRAM word alone. So a
 program that waits on a DMA block waits on SRAM (a completion flag, a
 count it reads rarely) or on the core's own instructions, and reads a
-peripheral register only now and then; the SPI host's polled engined
-path waits on its completion flag in SRAM, and the spi_peer's serve
-reads its select pad once every 256 turns ([spi.md](spi.md)). The
+peripheral register only now and then; the spi_peer's serve reads its
+select pad once every 256 turns ([spi.md](spi.md)). The
 CH32V203C8T6's DMA1 under the same loop was not measured apart: its
 peer serve carried the change before its ladder ran.
 

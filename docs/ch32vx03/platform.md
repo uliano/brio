@@ -1005,31 +1005,19 @@ the numbered lines, the window client, the UART legs) is the link
 suites' shared body, `avrxt/src/apps/rubato_link.hpp`. What it
 established:
 
-- **The polled SPI loop's limit is this host's too, and it is always
-  detected.** The loop runs inside the arbiter's dispatch, so a dispatch
-  above the arbiter holds it off for its whole length, which the host's
-  `hold_off_cycles` does not count; with one buffer each way, a receive
-  keeps two frames in flight from a frame of 256 cycles (/16 for byte
-  frames, /8 for 16-bit ones on these PB1 instances), and a hold-off
-  longer than a frame there loses one to OVR. The suite's polled windows
-  are 8 16-bit frames from an odd address and 8 byte frames, both under
-  the length from which a polled read rides the engines. With TIM2
-  silent every rung from /256 to /8 is byte-exact on both, on the short
-  asynchronous request (one byte frame) and on the engines (32 frames),
-  in all ten control passes of each image. Under pressure the engines
-  and the short request stay exact at every rung of every pass - the
-  short request on the engines down to /16 on the CH32V203C8T6 and /32
-  on the CH32V303VCT6 and polled inside `start()` below, every rung the
-  way the host's count says - and the polled loop is cut short with
-  `spi_overrun` - 78 rungs over the CH32V203C8T6's 60 pressure passes,
-  82 over the CH32V303VCT6's - only where two frames are in flight and a
-  frame is shorter than the preemption, never handing back a run with a
-  hole: under a 3000-cycle spin and the scheduler's trip around it, at
-  frames of 2048 cycles and under (byte frames /128 to /16, 16-bit /64
-  to /8), never at 4096 or more (byte frames /256, 16-bit /128 and
-  /256); under a 300-cycle spin at frames of 512 cycles and under (byte
-  frames /32 and /16, 16-bit /16 and /8), in 19 of the 60 such passes
-  over the two images.
+- **A preemption of the polled SPI loop is a gap on the bus.** The loop
+  runs inside the arbiter's dispatch, so a dispatch above the arbiter holds
+  it off for its whole length, a 3000-cycle spin and the scheduler's trip
+  around it outlasting a byte frame at /128 and faster and a 16-bit one at
+  /64 and faster. With one buffer each way
+  a receive keeps one frame in flight at every rate, so the clock waits
+  for the read, and the bound on lost frames is zero in every pass. The
+  suite's polled windows are 8 16-bit frames from an odd address and 8
+  byte frames, the short asynchronous request one byte frame and the
+  engines 32 frames: every rung from /256 to /8 byte-exact on all of them,
+  in the control and under pressure alike, over 126 passes of each
+  image - the short request on the engines down to /32 and polled inside
+  `start()` below, every rung the way the host's count says.
 - **/4 = 18 MHz exact, /2 not, both printed.** Letter `p` judges to /8,
   where the two datasheets' timing still holds the client's answer
   ([spi.md](spi.md), the pair's section), and prints the two codes
@@ -1045,9 +1033,9 @@ established:
   the preempting object asynchronous with one frame, under the engines'
   count at /8 and so run polled inside `start()` - answered every one
   `spi_ok`, to its requester, in its order, with no timeout and no
-  rejection and the peer counting every frame exact, in 5536 to 7999 us
-  a window (ten runs on each image); at /8 one frame is in flight on a
-  receive, so a preemption of the polled loop is a gap on the bus.
+  rejection and the peer counting every frame exact, in 5539 to 8004 us
+  a window (ten runs on each image); a preemption of the polled loop is a
+  gap on the bus.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the
   ring and lent to the borrower: 200 a leg, none lost, out of order or
