@@ -555,7 +555,8 @@ desk partner's peer (the last group below).
   loop-back, the half-word engines on channels 4 and 5, the core asleep
   in the idle path between the start and the completion, the best of
   four: 16 8-bit frames at 31.25 MHz take **1399 cycles, 709 of them
-  busy** in both runs - the DMA line's handler 191 of those with the meter's
+  busy** in three runs of four (1585 and 895 in the fourth, a warm
+  figure from the flash no XIP count has split) - the DMA line's handler 191 of those with the meter's
   stamps, its wait for the end of the last frame one read of SSPSR at this
   rate - and the transaction's **fixed cost, the wall less its frames' nominal
   wire, is 887 cycles (7.1 us), of which 96 the block's mode-0 gap**: 791, 749
@@ -590,10 +591,10 @@ desk partner's peer (the last group below).
   with it InRam, against 821 and 834 warm**; the 41 are the caller's
   (the ruler's reads, the call site, the veneer). Warm the two read the
   same but for the veneer, 13 cycles a request here and 18 in `spi.req`'s line. The engined block cold
-  (letter d after letter c, 16 frames at 31.25 MHz, warm 1459 to 1737) splits the
-  same way: 33954 to 34050 cycles from the flash, 18040 with the host InRam, 23086
-  with the vectors placed, 10776 to 10868 with both - the host's code some 16000 of
-  the difference, the vectors' some 11000, the caller's the rest. THE
+  (letter d after letter c, 16 frames at 31.25 MHz, warm 1399 to 1585) splits the
+  same way: 32588 cycles from the flash, 17884 with the host InRam, 21820
+  with the vectors placed, 10620 with both - the host's code some 14700 of
+  the difference, the vectors' some 10800, the caller's the rest. THE
   SRAM IT COSTS under InRam: `start()` 824 bytes without engines and 1572
   with them, the engines' launch folded in, the DMA line's body 684. Every
   call across the boundary goes through

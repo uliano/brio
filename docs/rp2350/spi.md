@@ -638,12 +638,32 @@ the same.
   whatever its size, and its fixed cost, the wall less its frames' own time,
   is **525 / 473 cycles at 16 frames (3.5 / 3.2 us), of which 48 the block's
   gap**, the same at 256 frames and at both rates. From the flash the same
-  instructions read `start()` at 209 to 547 / 174 to 283 cycles, the handler
-  at 421 to 629 / 215 to 382 and the fixed cost at 1310 to 1537 / 670 to 914
-  for 16 frames:
-  the difference is the fetch from the flash through the XIP cache, which this
-  image's layout pays on every transaction (the cache's own item below); which
-  lines miss is not established. THE FRAMES' OWN TIME IS NOT THE NOMINAL
+  instructions read `start()` at 318 to 534 / 174 cycles, the handler at
+  487 to 657 / 215 to 382 and the fixed cost at 1218 to 1617 / 572 to 739
+  for 16 frames (eight / four runs), and THE DIFFERENCE IS THIS IMAGE'S
+  LAYOUT, NOT THE REQUEST'S CODE. Counted with the XIP cache's two counters
+  (`Xip::accesses()` less `Xip::hits()`) read around `start()` and around
+  the completion by an instrument outside the bench app, which runs from
+  SRAM and leaves every byte of the image's code where it is: the request
+  alone, repeated, misses no line on either half (146 / 133 accesses in
+  `start()`, 103 / 134 in the completion with its vector), where letter d's
+  own loop - `spi_transaction()`'s six requests, the caller's wait, the
+  sleep - misses 101 to 117 / 50 to 94 lines every six requests. In this
+  image the completion's lines in the DMA line's vector (the receive
+  engine's check and the finish, 0x7d4 to 0x80c / 0x76e to 0x796 into
+  `isr_irq10`) fall in seven / six sets of the cache that two more lines
+  of that loop occupy - the bench's sleep (`BenchIdle::idle()`) and the
+  caller's wait loop on the Cortex-M33, the console's `tx_idle()` and the
+  best-of-five loop on Hazard3: three lines a set where a set holds two.
+  The cache does not evict the least recently used line (4.4.1 names no
+  replacement policy; measured, three lines of one set touched in the
+  order A, B, A, C, the line A - the more recent of the two C found - is
+  gone 112 to 145 times in 256), so each request refetches some of them at
+  66 to 82 cycles a line. Which code shares a set is decided by the link,
+  so any image may meet such a conflict on any path, and a path in SRAM
+  cannot: the same transaction behind a vector placed in SRAM reads 763 /
+  719 cycles warm ([platform.md](platform.md), "A handler in SRAM", the V
+  column). THE FRAMES' OWN TIME IS NOT THE NOMINAL
   WIRE'S: in mode 0 the PL022 raises its frame signal between two frames
   of a continuous transfer (12.3.4.10, and 12.3.4.12 for mode 2), and the
   gap is 1.5 SCK periods - measured 19 cycles a byte at 75 MHz where the
@@ -665,7 +685,9 @@ the same.
   byte engines, or from a misaligned buffer, is refused, and named polled it runs at the
   loop's 35 cycles a frame, the core held for it. The core spinning on a
   flag in RAM or on a register behind the APB bridge while the engines
-  run changes a 256-byte block by under a hundredth.
+  run changes a 256-byte block by under a hundredth from SRAM (5341
+  asleep against 5313 / 5289 against 5274); from the flash the sleeping
+  Cortex-M33 pays the set conflict above, 5909 to 6124 against 5294.
 - **THE FIRST TRANSACTION PAYS THE XIP CACHE ITS FILL, AND WHERE THE
   HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE.** A line of 8 bytes costs
   66 to 82 cycles at the boot's XIP setting (EBh at CLKDIV 3,
@@ -695,9 +717,11 @@ the same.
   so a call across goes through a stub the linker inserts (`ldr.w pc,
   [pc]` and a word), a request 6 to 10 cycles dearer in `spi.req`; on Hazard3
   `auipc` and `jalr` reach, and the request reads 8 to 9 cycles dearer. The
-  engined block cold (letter d after letter c, 16 frames) from the flash 13452 /
-  10371 cycles, with the host InRam 3978 / 4022, with the vectors placed 8765 /
-  7188, with both 1718 / 2619, against 743 to 812 warm.
+  engined block cold (letter d after letter c, 16 frames) from the flash 13506
+  to 13556 / 9680 cycles, with the host InRam 3946 / 3871 to 3920, with the
+  vectors placed 8275 / 6604, with both 1687 / 2513, against 719 to 785
+  warm where no set is shared three ways (1474 to 1873 / 828 to 995 warm
+  from the flash in this image, letter d's item above).
 - **THE VENDOR'S LIBRARY DOING THE SAME TRANSFER ON THE SAME BOARD** is
   the oracle for both numbers: the pico-sdk 2.3.1's `hardware_spi` and
   `hardware_dma`, built by its own CMake with its own crt, SPI0 on the
@@ -709,14 +733,16 @@ the same.
   76.00 at 18.75 MHz, on both halves** - so the frame gap is the block's
   and the engines run at the wire. Its warm 16-frame transfer, completed
   by the same interrupt, takes **405 / 452 cycles against this driver's
-  781 / 729 with its code in SRAM** (1652 to 1793 / 926 from the flash in
-  this image, the misses of the item above): its transfer is two `dma_channel_configure()` calls and
+  781 / 729 with its code in SRAM** (1474 to 1873 / 828 to 995 from the flash in
+  this image, the set conflict of letter d's item): its transfer is two `dma_channel_configure()` calls and
   one store, inlined, where this one carries the arbiter's Request
   through `start()`. And its first transfer after `spi_init()`,
   completed by its interrupt, pays the same price per line - 14 to 24
   misses, 1158 to 1996 cycles - because it touches six to seven times
-  fewer lines; this host's first transaction after `init()` pays 11315 /
-  8527.
+  fewer lines; this host's first transaction after `init()` pays 3033 to
+  10790 / 2518 to 13315 cycles over six runs, what the letters before it
+  left in the cache deciding, and 13506 / 9680 with every line invalidated
+  first.
 - **A POLLED WAIT THAT RUNS OUT** (`test_rp2350_spi` letter g, both
   halves): the block's enable taken down under a polled write of nine frames
   at clk_peri / 2 with three frames left standing in the receive FIFO, so

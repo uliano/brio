@@ -565,8 +565,8 @@ polled loop on the same board is the figure beside them).
 - THE HOT PATH'S PLACE IS THE PROGRAM'S, BY A TAG. On a chip that
   executes in place out of a flash behind a cache, a cold transaction
   pays the cache its fill of the host's code - on the RP2350's Cortex-M33
-  some 4250 cycles more than the warm figure for a three-byte request,
-  69 lines of 8 bytes. A section attribute takes a string literal and this file knows
+  some 4540 cycles more than the warm figure for a three-byte request,
+  71 lines of 8 bytes. A section attribute takes a string literal and this file knows
   no family, so it places nothing by itself: `Pl022Host`'s last template
   parameter is util/placement.hpp's tag, and two paths run through its
   `Hot<P>` - `start()` (the polled loops and the engines' launch folded in)
@@ -591,7 +591,10 @@ polled loop on the same board is the figure beside them).
   ([../rp2040/platform.md](../rp2040/platform.md) and
   [../rp2350/platform.md](../rp2350/platform.md), "A handler in SRAM",
   have the numbers: on these cores the placement buys the cold path and
-  costs the warm one its call).
+  costs the warm one its call, and a warm path left in the flash pays
+  whatever cache sets the link makes it share -
+  [../rp2350/spi.md](../rp2350/spi.md), letter d's item, counts one such
+  case).
 
 ## What stays per family
 
