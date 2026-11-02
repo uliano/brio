@@ -29,12 +29,23 @@
 // a clock that runs fast. Every other letter runs at the standard rate f
 // times.
 //
+// THE ENGINED HOST (letters p, q and s): the same SERCOM with a
+// DmaTxEngine on channel 1, the two host types taking SERCOM3 in turn
+// (switch_to(), the vectors following `mode`). p proves the engine named
+// by the Request - a write from one byte on the engine, what it cannot
+// carry on the pump, the refusal on the host with no engine, the NACKs, a
+// transfer error; q re-runs c, d and o with every tenure naming
+// I2cEngine::dma; s, not in `z`, writes for ten minutes beside the
+// console moved onto its own transmit engine (channel 0), every console
+// line numbered and carrying its CRC for the host to judge.
+//
 // Letters that need the peer say so and FAIL LOUDLY rather than
 // hanging. Nothing here wears flash.
 
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
+#include "samc21/dmac.hpp"
 #include "samc21/freqm.hpp"
 #include "samc21/i2c.hpp"
 #include "samc21/nvic.hpp"
@@ -50,6 +61,7 @@
 #include "kernel/time.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/power.hpp"
+#include "util/crc.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -79,6 +91,10 @@ constexpr UartPads console_pads{
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 TestBench<Serial> bench;
+/// Letter s's console: the same SERCOM and pads with its transmitter on
+/// channel 0, so that the I2C write's channel runs beside a console's.
+using SerialDma = Uart<5, console_pads, 64, 256, DmaTxEngine<0>>;
+constexpr SerialDma serial_dma;
 
 // ---------------------------------------------------------------------------
 // The bus: SERCOM3 on the desk's I2C node
@@ -105,6 +121,14 @@ using I2cHw = I2cHost<3, bus_pads, core_gen>;
 using Raw = I2cm<3>;
 using Client = I2cClient<3, bus_pads, core_gen>;
 
+/// THE ENGINED HOST on the same SERCOM: the write half rides the DMA on
+/// channel 1 when a Request names I2cEngine::dma (letters p, q and s). The
+/// two host types take SERCOM3 in turn - `mode` says which one the vector
+/// serves, and switching releases the other (the engined one gives its
+/// channel back).
+using I2cDma = I2cHost<3, bus_pads, core_gen, DmaTxEngine<1>>;
+using DmaCh = DmaChannel<1>;
+
 /// The bus's rise time: 1.5k to 5 V on a breadboard node, whose rise the
 /// AVR128DA48's TCB meters measure at 166 ns (test_avr_twi letter b). It
 /// is the wire's figure and not a margin: 33.6.2.4.1's formula SUBTRACTS
@@ -127,6 +151,19 @@ volatile uint32_t isr_completions = 0;
 bool bus_ao_live = false;
 bool timed_ao_live = false;   ///< letter l's TIMED arbiter takes the completions
 
+/// Which host owns SERCOM3: the pump-only I2cHw, or I2cDma - every helper
+/// below (tenure(), engine_up(), host_start()) and the two vectors follow
+/// it. Under `engined`, every tenure the helpers start names `link_engine`.
+enum class Mode : uint8_t { pump, engined };
+volatile Mode mode = Mode::pump;
+I2cEngine link_engine = I2cEngine::interrupt;
+/// The vectors' entries, for the letters that count them (p): SERCOM3's
+/// and the DMAC's.
+volatile uint32_t sercom3_entries = 0;
+volatile uint32_t dmac_entries = 0;
+/// Letter s's console on its transmit engine owns SERCOM5 and channel 0.
+volatile bool soak_console = false;
+
 // ---------------------------------------------------------------------------
 // Synchronous tenures for the bare letters
 // ---------------------------------------------------------------------------
@@ -136,10 +173,35 @@ bool timed_ao_live = false;   ///< letter l's TIMED arbiter takes the completion
 /// asynchronous (design/i2c-bus.md) - this wrapper is the suite's.
 bool engine_up();   // fwd: tenure()'s deadline path re-inits the engine
 
+/// The live host's start(), status() and release(): one Request shape
+/// (I2cHw's), carried over field by field to the engined host with the
+/// engine `link_engine` names.
+bool host_start(const I2cHw::Request& r) {
+    if (mode == Mode::engined) {
+        return I2cDma::start({.addr = r.addr,
+                              .tx = r.tx,
+                              .tx_len = r.tx_len,
+                              .rx = r.rx,
+                              .rx_len = r.rx_len,
+                              .reply = r.reply,
+                              .speed = r.speed,
+                              .engine = link_engine});
+    }
+    return I2cHw::start(r);
+}
+uint8_t host_status() { return mode == Mode::engined ? I2cDma::status() : I2cHw::status(); }
+void host_release() {
+    if (mode == Mode::engined) {
+        I2cDma::release();
+    } else {
+        I2cHw::release();
+    }
+}
+
 uint8_t tenure(const I2cHw::Request& r, uint16_t deadline_ms = 300) {
     xfer_done = false;
-    if (I2cHw::start(r)) {
-        return I2cHw::status();   // the degenerate synchronous failure
+    if (host_start(r)) {
+        return host_status();   // the degenerate synchronous failure
     }
     const uint32_t t0 = Ticker::millis();
     while (!xfer_done) {
@@ -148,7 +210,7 @@ uint8_t tenure(const I2cHw::Request& r, uint16_t deadline_ms = 300) {
             // bus, usually): abandoning it without recovery would hand
             // every later letter a wedged engine. Release and re-init -
             // the deadline is the suite's own, so the cleanup is too.
-            I2cHw::release();
+            host_release();
             (void)engine_up();
             return 0xEE;   // the suite's own "it did not finish" marker
         }
@@ -293,7 +355,17 @@ bool peer_report(twilink::Report& r) {
 /// Every letter but `a` runs over the engine; bringing it up is cheap
 /// (a reset and a configure), so each letter starts from a known state.
 /// Generator 0 = the CPU clock, so the default core claim serves.
-bool engine_up() { return I2cHw::init(clock, bus_rise_ns); }
+bool engine_up() {
+    return mode == Mode::engined ? I2cDma::init(clock, bus_rise_ns) : I2cHw::init(clock, bus_rise_ns);
+}
+
+/// Hand SERCOM3 to the other host: the live one released (the engined one
+/// gives channel 1 back), the vector switched, the new one brought up.
+bool switch_to(Mode m) {
+    host_release();
+    mode = m;
+    return engine_up();
+}
 
 bool ensure_link() {
     link_quiet = true;
@@ -628,11 +700,11 @@ void td_nacks() {
                        .rx_len = 0,
                        .reply = {},
                        .speed = I2cSpeed::standard_100k};
-    const bool sync_prefix = I2cHw::start(bad);
-    const uint8_t st_prefix = I2cHw::status();
+    const bool sync_prefix = host_start(bad);
+    const uint8_t st_prefix = host_status();
     bad.addr = 0x00;
-    const bool sync_call = I2cHw::start(bad);
-    const uint8_t st_call = I2cHw::status();
+    const bool sync_call = host_start(bad);
+    const uint8_t st_call = host_status();
     const uint8_t own = write_tenure(twilink::dut_addr, txbuf, 2);
     settle_ms(300);
     twilink::Report gr{};
@@ -2345,29 +2417,67 @@ RaceRun race_once(uint8_t t2_addr, uint32_t lag_cycles) {
     if (!peer_act(Op::arb, a)) return x;
     uint8_t w[2] = {0xA1, 0xA2};
     for (uint8_t i = 0; i < 2; ++i) txbuf[i] = w[i];
+    // T2 is built here, before T1, and started on the live host's own
+    // type: between T1's end and T2's START stand the lag and start()
+    // alone, the same in either mode. (Built after T1, or carried over
+    // from one Request type to the other, it put some hundred cycles of
+    // flash fetches into lag 0 and the collision window below it.)
+    txbuf[2] = w[0];
+    const I2cHw::Request t2 = {.addr = t2_addr,
+                               .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf + 2)),
+                               .tx_len = 1,
+                               .rx = {},
+                               .rx_len = 0,
+                               .reply = {},
+                               .speed = I2cSpeed::standard_100k,
+                               .engine = I2cEngine::interrupt};
+    const I2cDma::Request t2_dma = {.addr = t2_addr,
+                                    .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf + 2)),
+                                    .tx_len = 1,
+                                    .rx = {},
+                                    .rx_len = 0,
+                                    .reply = {},
+                                    .speed = I2cSpeed::standard_100k,
+                                    .engine = link_engine};
+    const bool engined_now = mode == Mode::engined;
     xfer_done = false;
-    if (I2cHw::start({.addr = twilink::low_addr,
-                      .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
-                      .tx_len = 2,
-                      .rx = {},
-                      .rx_len = 0,
-                      .reply = {},
-                      .speed = I2cSpeed::standard_100k})) {
-        x.t1 = I2cHw::status();
+    if (host_start({.addr = twilink::low_addr,
+                    .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                    .tx_len = 2,
+                    .rx = {},
+                    .rx_len = 0,
+                    .reply = {},
+                    .speed = I2cSpeed::standard_100k})) {
+        x.t1 = host_status();
         return x;
     }
     const uint32_t t0 = Ticker::millis();
     while (!xfer_done && Ticker::millis() - t0 < 100u) {
     }
     if (!xfer_done) {
-        I2cHw::release();
+        host_release();
         (void)engine_up();
         return x;
     }
     x.t1 = xfer_status;
     if (lag_cycles != 0u) wait_cycles(lag_cycles);
     const uint32_t t2_at = us_now();
-    x.t2 = write_tenure(t2_addr, w, 1, I2cSpeed::standard_100k, 100);
+    xfer_done = false;
+    const bool sync = engined_now ? I2cDma::start(t2_dma) : I2cHw::start(t2);
+    if (sync) {
+        x.t2 = host_status();
+    } else {
+        const uint32_t t2_ms = Ticker::millis();
+        while (!xfer_done && Ticker::millis() - t2_ms < 100u) {
+        }
+        if (xfer_done) {
+            x.t2 = xfer_status;
+        } else {
+            host_release();
+            (void)engine_up();
+            x.t2 = 0xEE;
+        }
+    }
     x.t2_us = us_now() - t2_at;
     settle_ms(race_peer_ms + 10u);   // the peer's action over, its command client back
     x.rep = peer_report(x.r);
@@ -2483,6 +2593,582 @@ void to_two_hosts() {
                   command(Op::ping));
 }
 
+// ===========================================================================
+// p - THE ENGINE NAMED: a write on the transmit engine, from one byte
+// ===========================================================================
+//
+// The engined host (I2cDma, channel 1) against the peer's counted serve at
+// dut_addr: the serve ends on the STOP of the tenure that reaches its
+// count, and its report holds the bytes received, their 16-bit sum, the
+// first one and the address hits - so every write is judged byte for byte
+// at the far end. WHAT RAN is read three ways beside it: channel 1's slot,
+// marked before the tenure (a block the engine starts overwrites its count
+// and source; a pumped tenure leaves the mark), the SERCOM3 and DMAC
+// vectors' entries (an engined write is two SERCOM entries and one DMAC
+// entry whatever its length, a pumped one an entry a byte and one more,
+// samc21/i2c.hpp's class comment), and the engine's abandonments. The
+// console runs on its interrupt here, so every DMAC entry is channel 1's.
+
+uint8_t bigbuf[256];
+
+/// One tenure's record: its status and what the vectors and the channel
+/// saw of it.
+struct EngineRun {
+    uint8_t st = 0xEE;
+    uint32_t sercom = 0;   ///< SERCOM3 entries during the tenure
+    uint32_t dmac = 0;     ///< DMAC entries during it
+    uint16_t btcnt = 0;    ///< channel 1's slot after it: the block's count
+    uint32_t src = 0;      ///< and the block's source end
+    uint32_t faults = 0;   ///< the engine's abandonments during it
+};
+
+constexpr uint16_t slot_mark = 0xBEEF;
+
+/// The tenure, with the slot marked first (the channel is idle between
+/// tenures: its slot is read again only at the next enable).
+EngineRun engine_run(const I2cHw::Request& r, uint16_t ms = 300) {
+    EngineRun x{};
+    DmaCh::slot().DMAC_BTCNT = slot_mark;
+    DmaCh::slot().DMAC_SRCADDR = 0u;
+    const uint32_t f0 = DmaTxEngine<1>::faults();
+    sercom3_entries = 0;
+    dmac_entries = 0;
+    x.st = tenure(r, ms);
+    x.sercom = sercom3_entries;
+    x.dmac = dmac_entries;
+    x.btcnt = DmaCh::slot().DMAC_BTCNT;
+    x.src = DmaCh::slot().DMAC_SRCADDR;
+    x.faults = DmaTxEngine<1>::faults() - f0;
+    return x;
+}
+
+I2cHw::Request wreq(uint8_t addr, const uint8_t* p, uint8_t n, I2cSpeed s = I2cSpeed::standard_100k) {
+    return {.addr = addr,
+            .tx = lend<Lease::reply>(p),
+            .tx_len = n,
+            .rx = {},
+            .rx_len = 0,
+            .reply = {},
+            .speed = s};
+}
+
+/// The peer's client at dut_addr until `count` data bytes have moved (its
+/// counting stream from 0 for a read), or `ms`, NACKing from `nack_at` on.
+bool serve_count(uint16_t count, uint16_t ms = 600, uint8_t nack_at = 0) {
+    twilink::Params a{};
+    a.count = count;
+    a.ms = ms;
+    a.addr = twilink::dut_addr;
+    a.nack_at = nack_at;
+    a.pattern = twilink::pattern_counting;
+    return peer_act(Op::serve, a);
+}
+
+uint16_t sum16(const uint8_t* p, uint16_t n) {
+    uint16_t s = 0;
+    for (uint16_t i = 0; i < n; ++i) s = static_cast<uint16_t>(s + p[i]);
+    return s;
+}
+
+/// The peer received exactly these bytes in one address match (count,
+/// sum, first) - read after the serve ended on its count.
+bool peer_took(const uint8_t* p, uint16_t n, uint16_t hits = 1) {
+    settle_ms(5);
+    twilink::Report r{};
+    if (!peer_report(r)) return false;
+    return r.count == n && r.sum == sum16(p, n) && r.first == p[0] && r.addr_hits == hits;
+}
+
+void fill(uint8_t* p, uint16_t n, uint8_t seed) {
+    for (uint16_t i = 0; i < n; ++i) p[i] = static_cast<uint8_t>(seed + i * 13u);
+}
+
+void print_run(const char* what, const EngineRun& x) {
+    print(serial, "  ", what, ": status ", hex(x.st), ", SERCOM3 entries ", x.sercom,
+          ", DMAC entries ", x.dmac, ", slot count ", x.btcnt, ", abandoned ", x.faults, crlf);
+}
+
+/// An engined write of n bytes is two SERCOM3 entries and one DMAC entry,
+/// the block's count n from bigbuf, nothing abandoned.
+bool engined(const EngineRun& x, uint16_t n, const uint8_t* src) {
+    return x.st == i2c_ok && x.sercom == 2u && x.dmac == 1u && x.btcnt == n &&
+           x.src == reinterpret_cast<uint32_t>(src) + n && x.faults == 0u;
+}
+/// A pumped tenure of e SERCOM3 entries touched no channel.
+bool pumped(const EngineRun& x, uint32_t e) {
+    return x.st == i2c_ok && x.sercom == e && x.dmac == 0u && x.btcnt == slot_mark &&
+           x.faults == 0u;
+}
+
+void tp_engine() {
+    if (!switch_to(Mode::engined)) {
+        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        (void)switch_to(Mode::pump);
+        return;
+    }
+    link_engine = I2cEngine::interrupt;   // the command channel on the pump
+    if (!need_peer()) {
+        (void)switch_to(Mode::pump);
+        return;
+    }
+    print(serial, "  channel 1 held by owner ", Dmac::owner(1), " (SERCOM3 + 1), ", Dmac::held(),
+          " channel(s) held", crlf);
+
+    // 1. dma at ONE byte, then 2, 16 and the longest, 254, at 100 kHz, and
+    // 254 at 400 kHz and 1 MHz.
+    struct Len {
+        uint8_t n;
+        I2cSpeed s;
+    };
+    constexpr Len lens[] = {{1, I2cSpeed::standard_100k}, {2, I2cSpeed::standard_100k},
+                            {16, I2cSpeed::standard_100k}, {254, I2cSpeed::standard_100k},
+                            {254, I2cSpeed::fast_400k}, {254, I2cSpeed::fast_plus_1m}};
+    bool one_ok = false, all_ok = true;
+    for (const Len& l : lens) {
+        fill(bigbuf, l.n, static_cast<uint8_t>(0xA5 + l.n));
+        if (!serve_count(l.n)) {
+            all_ok = false;
+            continue;
+        }
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, l.n, l.s));
+        link_engine = I2cEngine::interrupt;
+        const bool took = peer_took(bigbuf, l.n);
+        print_run("dma write", x);
+        print(serial, "    n=", l.n, " at ", i2c_speed_hz(l.s) / 1000u, " kHz, the peer took them: ",
+              took ? "yes" : "NO", crlf);
+        const bool ok = engined(x, l.n, bigbuf) && took;
+        if (l.n == 1u) one_ok = ok;
+        all_ok = all_ok && ok;
+    }
+    bench.verdict("I2cEngine::dma at ONE byte: the write rides the transmit engine (the "
+                  "block's count 1, one DMAC entry, two SERCOM entries) and the peer took it exact",
+                  one_ok);
+    bench.verdict("and at 2, 16 and 254 bytes, 254 at 400 kHz and 1 MHz too: three entries "
+                  "whatever the length, every byte exact at the peer",
+                  all_ok);
+
+    // 2. I2cEngine::interrupt at a long length on the engined host touches
+    // no channel.
+    fill(bigbuf, 200, 0x31);
+    bool irq_ok = false;
+    if (serve_count(200)) {
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, 200));
+        const bool took = peer_took(bigbuf, 200);
+        print_run("interrupt write of 200", x);
+        irq_ok = pumped(x, 201u) && took;
+    }
+    bench.verdict("I2cEngine::interrupt at 200 bytes on the engined host touches no channel: "
+                  "the slot keeps its mark, no DMAC entry, an entry a byte and one more, exact",
+                  irq_ok);
+
+    // 3. What the engine cannot carry, under dma, completes on the pump: a
+    // write of 255 (LEN is eight bits), a read, and a write-then-read whose
+    // write half rides the engine and whose read half is the pump's.
+    link_engine = I2cEngine::dma;
+    fill(bigbuf, 255, 0x77);
+    bool w255 = false;
+    if (serve_count(255)) {
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, 255));
+        link_engine = I2cEngine::interrupt;
+        const bool took = peer_took(bigbuf, 255);
+        print_run("dma write of 255", x);
+        w255 = pumped(x, 256u) && took;
+    }
+    link_engine = I2cEngine::interrupt;
+    bool rd = false;
+    if (serve_count(16)) {
+        for (uint8_t i = 0; i < 16u; ++i) rxbuf[i] = 0xEE;
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run({.addr = twilink::dut_addr,
+                                        .tx = {},
+                                        .tx_len = 0,
+                                        .rx = lend<Lease::reply>(static_cast<uint8_t*>(rxbuf)),
+                                        .rx_len = 16,
+                                        .reply = {},
+                                        .speed = I2cSpeed::standard_100k});
+        link_engine = I2cEngine::interrupt;
+        bool exact = true;
+        for (uint8_t i = 0; i < 16u; ++i) exact = exact && rxbuf[i] == i;
+        print_run("dma read of 16", x);
+        rd = x.st == i2c_ok && x.dmac == 0u && x.btcnt == slot_mark && exact;
+    }
+    bool wr = false;
+    if (serve_count(10)) {
+        fill(bigbuf, 2, 0x5C);
+        for (uint8_t i = 0; i < 8u; ++i) rxbuf[i] = 0xEE;
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run({.addr = twilink::dut_addr,
+                                        .tx = lend<Lease::reply>(static_cast<const uint8_t*>(bigbuf)),
+                                        .tx_len = 2,
+                                        .rx = lend<Lease::reply>(static_cast<uint8_t*>(rxbuf)),
+                                        .rx_len = 8,
+                                        .reply = {},
+                                        .speed = I2cSpeed::standard_100k});
+        link_engine = I2cEngine::interrupt;
+        bool exact = true;
+        for (uint8_t i = 0; i < 8u; ++i) exact = exact && rxbuf[i] == i;
+        settle_ms(5);
+        twilink::Report r{};
+        const bool rep = peer_report(r);
+        print_run("dma write of 2, repeated START, read of 8", x);
+        // Two hits (the write's address, the repeated START's), ten bytes
+        // moved, the sum the two written ones'.
+        wr = x.st == i2c_ok && x.btcnt == 2u && x.dmac == 1u && x.faults == 0u && exact && rep &&
+             r.count == 10u && r.sum == sum16(bigbuf, 2) && r.addr_hits == 2u;
+    }
+    bench.verdict("a write of 255 under I2cEngine::dma completes on the pump, exact - LEN is "
+                  "eight bits and the engined write needs w + 1 (33.10.9)",
+                  w255);
+    bench.verdict("a read under I2cEngine::dma completes on the pump, exact, no channel touched",
+                  rd);
+    bench.verdict("a write-then-read under I2cEngine::dma: the write half on the engine, the "
+                  "repeated START and the read on the pump, both exact",
+                  wr);
+
+    // 4. dma on a host with NO engine: i2c_rejected inside start(), nothing
+    // on the wire - the peer, serving at dut_addr, matches only the write
+    // that follows - and that next request exact.
+    bool refused = false;
+    if (switch_to(Mode::pump) && serve_count(2)) {
+        fill(bigbuf, 2, 0x42);
+        I2cHw::Request r = wreq(twilink::dut_addr, bigbuf, 2);
+        r.engine = I2cEngine::dma;
+        const bool sync = I2cHw::start(r);
+        const uint8_t st = I2cHw::status();
+        const uint8_t next = tenure(wreq(twilink::dut_addr, bigbuf, 2));
+        const bool took = peer_took(bigbuf, 2);
+        print(serial, "  the engineless host asked for dma: ", sync ? "refused at start()" : "STARTED",
+              " ", hex(st), "; the next write ", hex(next), crlf);
+        refused = !I2cHw::has_dma && sync && st == i2c_rejected && next == i2c_ok && took;
+    }
+    bench.verdict("I2cEngine::dma on the host with no engine: i2c_rejected inside start(), "
+                  "nothing on the wire (the peer matched only the next write), the next exact",
+                  refused);
+    if (!switch_to(Mode::engined)) {
+        bench.verdict("the engined host comes back", false);
+        (void)switch_to(Mode::pump);
+        return;
+    }
+
+    // 5. The NACKs under dma. The address: LEN's LENERR before the block
+    // starts. A data byte mid-block: the block abandoned (counted), the
+    // channel reset for the next one. The LAST byte: the block over, the
+    // final MB's LENERR - nothing abandoned. A one-byte write's only byte.
+    twilink::Params d{};
+    d.count = 8;
+    d.ms = 400;
+    d.addr = twilink::dut_addr;
+    d.flags = twilink::flag_deaf;
+    EngineRun na{};
+    if (peer_act(Op::serve, d)) {
+        fill(bigbuf, 4, 1);
+        link_engine = I2cEngine::dma;
+        na = engine_run(wreq(twilink::dut_addr, bigbuf, 4));
+        link_engine = I2cEngine::interrupt;
+        settle_ms(450);
+    }
+    print_run("dma write to a deaf address", na);
+    bench.verdict("an address NACK under dma is i2c_nack_addr, the block never started (the "
+                  "slot keeps its mark), nothing abandoned",
+                  na.st == i2c_nack_addr && na.btcnt == slot_mark && na.faults == 0u &&
+                      na.dmac == 0u);
+
+    struct NackCase {
+        uint8_t len;
+        uint8_t at;
+        uint32_t abandoned;
+        const char* name;
+    };
+    constexpr NackCase cases[] = {{16, 3, 1, "the 3rd of 16 (mid-block)"},
+                                  {6, 6, 0, "the last of 6"},
+                                  {1, 1, 0, "the only one"}};
+    bool nacks_ok = true;
+    for (const NackCase& c : cases) {
+        fill(bigbuf, c.len, static_cast<uint8_t>(0x10 + c.len));
+        if (!serve_count(c.at, 600, c.at)) {
+            nacks_ok = false;
+            continue;
+        }
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, c.len));
+        link_engine = I2cEngine::interrupt;
+        settle_ms(5);
+        twilink::Report r{};
+        const bool rep = peer_report(r);
+        print_run(c.name, x);
+        // An abandoned block's channel is reset, its slot cleared with it
+        // (dmac.hpp's take()): the count reads 0 there and the write's
+        // length where the block completed.
+        const bool ok = x.st == i2c_nack_data && x.btcnt == (c.abandoned != 0u ? 0u : c.len) &&
+                        x.faults == c.abandoned &&
+                        rep && (r.flags & twilink::report_nacked) != 0u && r.count == c.at &&
+                        r.sum == sum16(bigbuf, c.at);
+        nacks_ok = nacks_ok && ok;
+    }
+    fill(bigbuf, 4, 0x61);
+    bool after = false;
+    if (serve_count(4)) {
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, 4));
+        link_engine = I2cEngine::interrupt;
+        after = engined(x, 4, bigbuf) && peer_took(bigbuf, 4);
+    }
+    bench.verdict("a data NACK under dma is i2c_nack_data: mid-block the block is abandoned "
+                  "(counted once), on the last byte and on a one-byte write nothing is; the "
+                  "peer received exactly up to its NACK",
+                  nacks_ok);
+    bench.verdict("and the next engined write after them is exact on the engine", after);
+
+    // 6. A bus error on the DMA's own source: a run crossing the end of
+    // SRAM (32 KB from 0x20000000 on this part) - eight readable bytes, then
+    // the fault. TERR ends the tenure i2c_dma_fault with the STOP sent, the
+    // block abandoned; the next write is exact on the engine.
+    const auto* edge = reinterpret_cast<const uint8_t*>(0x20008000u - 8u);
+    EngineRun tf{};
+    twilink::Report fr{};
+    bool frep = false;
+    if (serve_count(8, 400)) {
+        link_engine = I2cEngine::dma;
+        tf = engine_run(wreq(twilink::dut_addr, edge, 16));
+        link_engine = I2cEngine::interrupt;
+        settle_ms(450);
+        frep = peer_report(fr);
+    }
+    print_run("dma write across the end of SRAM", tf);
+    print(serial, "    the peer took ", fr.count, " bytes, flags ", hex(fr.flags), crlf);
+    fill(bigbuf, 6, 0x23);
+    bool after_fault = false;
+    if (serve_count(6)) {
+        link_engine = I2cEngine::dma;
+        const EngineRun x = engine_run(wreq(twilink::dut_addr, bigbuf, 6));
+        link_engine = I2cEngine::interrupt;
+        after_fault = engined(x, 6, bigbuf) && peer_took(bigbuf, 6);
+    }
+    bench.verdict("a transfer error on the engine's source ends the write i2c_dma_fault, the "
+                  "block abandoned and the STOP sent after the readable bytes",
+                  tf.st == i2c_dma_fault && tf.faults == 1u && frep && fr.count == 8u);
+    bench.verdict("and the next engined write is exact on the engine", after_fault);
+
+    (void)switch_to(Mode::pump);
+    bench.verdict("the channel is given back with the engined host: none held after release()",
+                  Dmac::held() == 0u);
+}
+
+// ===========================================================================
+// q - THE PROTOCOL UNDER I2cEngine::dma: letters c, d and o again
+// ===========================================================================
+//
+// The same three letters, their verdicts unchanged, on the engined host
+// with every tenure naming I2cEngine::dma - the command channel's writes
+// included: every write of 1 to 254 bytes rides the engine, the reads, the
+// probes and the repeated STARTs' read halves the pump. c's shapes, d's
+// address and data NACKs and reserved addresses, and o's parked START and
+// live collisions (its T2 a one-byte engined write, lost in its address).
+
+void tq_under_dma() {
+    if (!switch_to(Mode::engined)) {
+        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        (void)switch_to(Mode::pump);
+        return;
+    }
+    link_engine = I2cEngine::dma;
+    const uint32_t f0 = DmaTxEngine<1>::faults();
+    print(serial, "  -- c under dma", crlf);
+    tc_shapes();
+    print(serial, "  -- d under dma", crlf);
+    td_nacks();
+    print(serial, "  -- o under dma", crlf);
+    to_two_hosts();
+    const uint32_t abandoned = DmaTxEngine<1>::faults() - f0;
+    link_engine = I2cEngine::interrupt;
+    print(serial, "  blocks abandoned across the three: ", abandoned,
+          " (d's data NACK at the 3rd of 6 is one)", crlf);
+    (void)switch_to(Mode::pump);
+    bench.verdict("one block abandoned in all three letters, d's mid-block data NACK",
+                  abandoned == 1u);
+}
+
+// ===========================================================================
+// s - THE SOAK: engined writes beside the console on its own engine, ten
+//     minutes (not in z)
+// ===========================================================================
+//
+// The image's two channels both running: the console's transmitter on
+// channel 0 (SerialDma) printing one numbered line per write, and the I2C
+// write on channel 1, at 400 kHz and 1 MHz in turn. A batch is one counted
+// serve, 16 writes of pseudo-random length 1..254 named I2cEngine::dma, and
+// the peer's report; every eighth batch is instead a NACKing serve and one
+// write the peer refuses mid-block - a channel abandoned beside the
+// console's running one (docs/samc21/dmac.md, "The rule's two
+// exceptions"). Every class of fault is counted: a status other than the
+// expected one, a tenure that never completed, a report that does not
+// match (count, sum, first, hits), a block abandoned other than the NACK's,
+// the console's blocks abandoned, the channel left enabled after a tenure.
+// THE HOST JUDGES THE CONSOLE: every line is "S <seq> <batch> <len> <st>
+// *<crc>", seq counting from 0 with no gap and crc the CRC-16 of the line
+// before the '*' - a line lost, duplicated or broken shows there.
+
+uint32_t soak_rng = 0x1234567u;
+uint32_t soak_next() {
+    soak_rng ^= soak_rng << 13;
+    soak_rng ^= soak_rng >> 17;
+    soak_rng ^= soak_rng << 5;
+    return soak_rng;
+}
+
+struct SoakTally {
+    uint32_t writes = 0, bytes = 0, batches = 0, nack_batches = 0;
+    uint32_t bad_status = 0, hangs = 0, bad_report = 0, link_fail = 0;
+    uint32_t left_enabled = 0, lines = 0;
+    uint32_t overlap = 0;   ///< writes started with the console's channel enabled
+};
+
+uint32_t soak_seq = 0;
+
+/// One numbered line on the engined console, its CRC beside it.
+void soak_line(uint32_t batch, uint8_t len, uint8_t st) {
+    char buf[64];
+    uint8_t n = 0;
+    auto put = [&](char c) {
+        if (n < sizeof buf) buf[n++] = c;
+    };
+    auto num = [&](uint32_t v) {
+        char d[10];
+        uint8_t k = 0;
+        do {
+            d[k++] = static_cast<char>('0' + v % 10u);
+            v /= 10u;
+        } while (v != 0u);
+        while (k != 0u) put(d[--k]);
+    };
+    put('S');
+    put(' ');
+    num(soak_seq);
+    put(' ');
+    num(batch);
+    put(' ');
+    num(len);
+    put(' ');
+    num(st);
+    const uint16_t crc = crc16(reinterpret_cast<const uint8_t*>(buf), n);
+    buf[n] = 0;
+    print(serial_dma, buf, " *", hex(crc), crlf);
+    soak_seq = soak_seq + 1u;
+}
+
+void ts_soak() {
+    if (!switch_to(Mode::engined)) {
+        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        (void)switch_to(Mode::pump);
+        return;
+    }
+    if (!need_peer()) {
+        (void)switch_to(Mode::pump);
+        return;
+    }
+    print(serial, "  the console moves to its transmit engine for ten minutes: S lines follow", crlf);
+    for (uint32_t k = 0; k < 2'000'000u && !Serial::tx_idle(); ++k) {
+    }
+    Serial::release();
+    soak_console = true;
+    const bool console_up = SerialDma::init(clock, 115200);
+    link_engine = I2cEngine::dma;
+    const uint32_t f1 = DmaTxEngine<1>::faults();
+    const uint32_t f0 = DmaTxEngine<0>::faults();
+    soak_seq = 0;
+    SoakTally t{};
+    uint32_t expected_abandons = 0;
+    const uint32_t t0 = Ticker::millis();
+    while (console_up && Ticker::millis() - t0 < 600'000u) {
+        const bool nack_batch = (t.batches % 8u) == 7u;
+        const I2cSpeed sp = (t.batches & 1u) != 0u ? I2cSpeed::fast_plus_1m : I2cSpeed::fast_400k;
+        uint8_t lens[16];
+        uint16_t total = 0;
+        const uint8_t writes = nack_batch ? 1u : 16u;
+        for (uint8_t i = 0; i < writes; ++i) {
+            lens[i] = static_cast<uint8_t>(1u + soak_next() % 254u);
+            if (nack_batch && lens[i] < 8u) lens[i] = 8u;
+            total = static_cast<uint16_t>(total + lens[i]);
+        }
+        const uint8_t nack_at =
+            nack_batch ? static_cast<uint8_t>(2u + soak_next() % (lens[0] - 3u)) : 0u;
+        twilink::Params a{};
+        a.count = nack_batch ? nack_at : total;
+        a.ms = 1500;
+        a.addr = twilink::dut_addr;
+        a.nack_at = nack_at;
+        a.flags = twilink::flag_stop_interrupt;
+        if (!peer_act(Op::serve, a)) {
+            t.link_fail = t.link_fail + 1u;
+            settle_ms(1600);
+            continue;
+        }
+        uint16_t sum = 0;
+        uint8_t first = 0;
+        uint16_t sent = 0;
+        for (uint8_t i = 0; i < writes; ++i) {
+            for (uint16_t b = 0; b < lens[i]; ++b) {
+                bigbuf[b] = static_cast<uint8_t>(soak_next());
+            }
+            if (i == 0u) first = bigbuf[0];
+            const uint16_t counted = nack_batch ? nack_at : lens[i];
+            for (uint16_t b = 0; b < counted; ++b) sum = static_cast<uint16_t>(sum + bigbuf[b]);
+            sent = static_cast<uint16_t>(sent + counted);
+            if (DmaTxEngine<0>::running()) t.overlap = t.overlap + 1u;
+            const uint8_t st = tenure(wreq(twilink::dut_addr, bigbuf, lens[i], sp), 100);
+            soak_line(t.batches, lens[i], st);
+            t.lines = t.lines + 1u;
+            if (st == 0xEE) t.hangs = t.hangs + 1u;
+            if (st != (nack_batch ? i2c_nack_data : i2c_ok)) t.bad_status = t.bad_status + 1u;
+            if (DmaTxEngine<1>::running()) t.left_enabled = t.left_enabled + 1u;
+            t.writes = t.writes + 1u;
+            t.bytes = t.bytes + lens[i];
+        }
+        if (nack_batch) {
+            expected_abandons = expected_abandons + 1u;
+            t.nack_batches = t.nack_batches + 1u;
+        }
+        settle_ms(3);
+        twilink::Report r{};
+        if (!peer_report(r)) {
+            t.link_fail = t.link_fail + 1u;
+        } else if (r.count != sent || r.sum != sum || r.first != first ||
+                   r.addr_hits != writes || r.stops != writes ||
+                   ((r.flags & twilink::report_nacked) != 0u) != nack_batch) {
+            t.bad_report = t.bad_report + 1u;
+        }
+        t.batches = t.batches + 1u;
+    }
+    const uint32_t i2c_abandons = DmaTxEngine<1>::faults() - f1;
+    const uint32_t console_abandons = DmaTxEngine<0>::faults() - f0;
+    print(serial_dma, "S END ", soak_seq, crlf);
+    for (uint32_t k = 0; k < 2'000'000u && !SerialDma::tx_idle(); ++k) {
+    }
+    SerialDma::release();
+    soak_console = false;
+    (void)Serial::init(clock, 115200);
+    link_engine = I2cEngine::interrupt;
+    (void)switch_to(Mode::pump);
+    print(serial, crlf, "  soak: ", t.batches, " batches (", t.nack_batches, " NACKing), ", t.writes,
+          " engined writes, ", t.bytes, " bytes, ", t.lines, " console lines; the console's channel "
+          "enabled at ", t.overlap, " of the writes' start()", crlf);
+    print(serial, "  faults: status ", t.bad_status, ", hangs ", t.hangs, ", reports ", t.bad_report,
+          ", link ", t.link_fail, ", left enabled ", t.left_enabled, "; I2C blocks abandoned ",
+          i2c_abandons, " (NACKs ", expected_abandons, "), console blocks abandoned ",
+          console_abandons, crlf);
+    bench.verdict("the console came up on its transmit engine", console_up);
+    bench.verdict("ten minutes of engined writes beside the console's engine: every status the "
+                  "expected one, no hang, every report exact, no link failure, no channel left "
+                  "enabled",
+                  t.writes != 0u && t.bad_status == 0u && t.hangs == 0u && t.bad_report == 0u &&
+                      t.link_fail == 0u && t.left_enabled == 0u);
+    bench.verdict("only the NACKs' blocks abandoned, and none of the console's (its lines are "
+                  "the host's to judge)",
+                  i2c_abandons == expected_abandons && console_abandons == 0u);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -2499,6 +3185,14 @@ extern "C" void SERCOM3_Handler() {
         client_wakes = static_cast<uint8_t>(client_wakes + 1u);
         return;
     }
+    sercom3_entries = sercom3_entries + 1u;
+    if (mode == Mode::engined) {
+        if (I2cDma::isr()) {
+            xfer_status = I2cDma::status();
+            xfer_done = true;
+        }
+        return;
+    }
     if (I2cHw::isr()) {
         if (timed_ao_live) {
             brio::post<tl::TimedBus>(brio::TransferDone{I2cHw::status()});
@@ -2512,7 +3206,26 @@ extern "C" void SERCOM3_Handler() {
     }
 }
 
-extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+/// Every owner of a channel in the one vector: the engined I2C host's
+/// write (channel 1) and, in letter s, the console's (channel 0).
+extern "C" void DMAC_Handler() {
+    dmac_entries = dmac_entries + 1u;
+    if (soak_console) {
+        (void)SerialDma::dma_isr();
+    }
+    if (I2cDma::dma_isr()) {
+        xfer_status = I2cDma::status();
+        xfer_done = true;
+    }
+}
+
+extern "C" void SERCOM5_Handler() {
+    if (soak_console) {
+        (void)SerialDma::isr();
+    } else {
+        (void)Serial::isr();
+    }
+}
 
 extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 
@@ -2564,6 +3277,13 @@ int main() {
                  tn_wake);
     bench.letter('o', "TWO LIVE HOSTS: a START parked behind a real tenure, the race (peer)",
                  to_two_hosts);
+    bench.letter('p', "THE ENGINE NAMED: writes on the transmit engine from one byte, what it "
+                      "cannot carry, the refusal, the NACKs, a transfer error (peer)",
+                 tp_engine);
+    bench.letter('q', "THE PROTOCOL UNDER I2cEngine::dma: letters c, d and o again (peer)",
+                 tq_under_dma);
+    bench.letter('s', "THE SOAK: engined writes beside the console's engine, ten minutes (peer)",
+                 ts_soak, false);
 
     bench.menu();
     bench.prompt();

@@ -1444,6 +1444,16 @@ public:
     static constexpr TwiRoute pin_route = route;
     static constexpr bool available = twi_route_exists(n, route);
 
+    /// This host has no DMA (the AVR DA, DB and EA have no DMA controller),
+    /// so every tenure runs on its interrupt. A portable program asks
+    /// `I2cHw::has_dma` before it names util/i2c_bus.hpp's I2cEngine::dma,
+    /// and one that requires the DMA writes `static_assert(I2cHw::has_dma)`.
+    /// The Request below carries no `engine` field: the AVR packs a struct
+    /// with no padding, so the field would make every Request a byte longer
+    /// (docs/avrxt/twi.md, "Not covered yet"), and a Request that names it
+    /// does not compile here.
+    static constexpr bool has_dma = false;
+
     /// One bus tenure, posted to the arbiter. The speed is the tenure's
     /// own and defaults to Sm: a request that names none runs at 100 kHz
     /// whatever init() programmed (start() reprograms MBAUD when it

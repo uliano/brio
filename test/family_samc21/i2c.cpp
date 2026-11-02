@@ -8,6 +8,7 @@
 // package, which the bench pair PA22/PA23 (SERCOM3, J-board fact) also
 // is. The board's own pads are an app-level fact and not compiled here.
 #include "samc21/clock.hpp"
+#include "samc21/dmac.hpp"
 #include "samc21/i2c.hpp"
 #include "samc21/platform.hpp"
 #include "kernel/time.hpp"
@@ -157,3 +158,51 @@ void timed_bus_surface() {
     (void)TimedI2cBus::stale_events();
     (void)Host::recover();
 }
+
+// ---- the engine field and the transmit engine -------------------------------
+// An engineless host takes the field and refuses I2cEngine::dma in start()
+// (i2c_rejected); an engined one carries the write half on a DmaTxEngine.
+static_assert(!Host::has_dma);
+
+using DmaHost = I2cHost<0, pads, 0, DmaTxEngine<1>>;
+static_assert(DmaHost::has_dma && DmaHost::has_engines);
+static_assert(DmaHost::dma_write_max == 254u);
+// The field sits in the padding after speed: both hosts' Requests are the
+// size the field-less layout had.
+struct RequestWithoutEngine {
+    uint8_t addr;
+    Borrowed<const uint8_t, Lease::reply> tx;
+    uint8_t tx_len;
+    Borrowed<uint8_t, Lease::reply> rx;
+    uint8_t rx_len;
+    ReplyTo<I2cDone> reply;
+    I2cSpeed speed;
+};
+static_assert(sizeof(Host::Request) == sizeof(RequestWithoutEngine));
+static_assert(sizeof(DmaHost::Request) == sizeof(RequestWithoutEngine));
+// An all-zero request is the default engine.
+static_assert(static_cast<uint8_t>(I2cEngine::interrupt) == 0u);
+
+bool bring_up_dma_host() {
+    constexpr SysClock clock{};
+    return DmaHost::init(clock, 300u);
+}
+
+bool one_engined_write(uint8_t addr, const uint8_t* cmd, uint8_t n) {
+    DmaHost::Request r{
+        .addr = addr,
+        .tx = lend<Lease::reply>(cmd),
+        .tx_len = n,
+        .rx = {},
+        .rx_len = 0,
+        .reply = {},
+        .speed = I2cSpeed::fast_400k,
+        .engine = I2cEngine::dma,
+    };
+    return DmaHost::start(r);
+}
+
+bool dma_host_isr_body() { return DmaHost::isr(); }
+bool dma_host_dma_isr_body() { return DmaHost::dma_isr(); }
+bool dma_host_recover() { return DmaHost::recover(); }
+void dma_host_release() { DmaHost::release(); }

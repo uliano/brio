@@ -206,8 +206,10 @@
 //      with one counting stream - and the letter waits the deadline out
 //      before the next command. THE PEER IS A POLLED CLIENT: it stretches
 //      every byte by its own turnaround, so wall minus wire holds the
-//      peer's share beside the host's. The host is the byte pump (it has
-//      no DMA slot). SERCOM3_Handler is bound metered or plain per run (a
+//      peer's share beside the host's. The host is the byte pump, then
+//      the same SERCOM with the transmit engine on channel 0 for the
+//      writes named I2cEngine::dma (DMAC_Handler bound to it then).
+//      SERCOM3_Handler is bound metered or plain per run (a
 //      flag): every op is the BEST of 8 by wall, metered (the thread idles
 //      masked between the vector's edges) and
 //      plain (`.bare`: the thread spins on the completion edge and no
@@ -220,6 +222,11 @@
 //        i2c.probe       the address alone, ACKed (n=0);
 //        i2c.probe.nack  to 0x77, nobody's: i2c_nack_addr;
 //        i2c.read.nack   a one-byte READ to 0x77: i2c_nack_addr too;
+//        i2c.write.dma   the engined host, I2cEngine::dma: n = 1, 2, 16,
+//                        254 on the engine, 255 on the pump (LEN is eight
+//                        bits, samc21/i2c.hpp);
+//        i2c.wr.dma      one byte written on the engine, a repeated START,
+//                        n - 1 = 1, 2, 16 read on the pump;
 //        i2c.write.nackdata  after the speeds, the peer told to NACK the
 //                        3rd byte it receives: a 16-byte write at 100 kHz
 //                        is i2c_nack_data.
@@ -1319,9 +1326,14 @@ constexpr I2cPads bus_pads{
     .sda_pin = {'A', 22, PinFunction::c},
     .scl_pin = {'A', 23, PinFunction::c},
 };
-/// The host: every tenure on its byte pump (samc21/i2c.hpp has no DMA
-/// slot).
+/// The host with no engine: every tenure on its byte pump.
 using Pump = I2cHost<3, bus_pads>;
+/// The same SERCOM with the transmit engine on channel 0: a write named
+/// I2cEngine::dma rides the DMA, a read stays on the pump (samc21/i2c.hpp).
+/// The two take SERCOM3 in turn (`dma_live`), as letters e and u take
+/// channel 0 in turn.
+using Dma = I2cHost<3, bus_pads, 0, DmaTxEngine<0>>;
+volatile bool dma_live = false;
 
 /// The bus's rise time, measured on this node by the AVR128DA48's
 /// TCB meters (test_avr_twi letter b: the SCL period over the register's
@@ -1345,6 +1357,21 @@ uint8_t (&i2c_rx)[256] = ee::spi_rx;
 template <typename H>
 [[gnu::always_inline]] inline void serve_vector() {
     if (H::isr()) {
+        done = true;
+    }
+}
+/// The engined host's SERCOM body, called from the vector rather than
+/// flattened into it: the pump's body stays the vector's alone, as in a
+/// program that binds one host (flattened beside it, the second body
+/// measured 26 cycles more on each pumped byte, one image against another -
+/// docs/samc21/i2c.md says how far an image's layout alone moves a
+/// figure). The call is in the engined write's figures: two of its three
+/// entries pass through it.
+[[gnu::noinline]] void serve_dma_sercom() { serve_vector<Dma>(); }
+/// The engined host's DMAC body: the block's end re-arms the last byte's
+/// MB, a transfer error ends the tenure.
+[[gnu::always_inline]] inline void serve_dma_vector() {
+    if (Dma::dma_isr()) {
         done = true;
     }
 }
@@ -1519,7 +1546,7 @@ BenchSample best_tenure(const typename H::Request& r, uint8_t expect, bool spin,
 
 template <typename H>
 bool op(const char* name, const char* bare, I2cSpeed s, uint8_t addr, uint8_t tx, uint8_t rx,
-        bool probe, uint8_t expect) {
+        bool probe, uint8_t expect, I2cEngine engine = I2cEngine::interrupt) {
     typename H::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(i2c_tx));
@@ -1527,6 +1554,7 @@ bool op(const char* name, const char* bare, I2cSpeed s, uint8_t addr, uint8_t tx
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_rx));
     r.rx_len = rx;
     r.speed = s;
+    r.engine = engine;
     const uint32_t wire = rises(tx, rx, probe) * period<H>(s);
     const uint32_t n = probe ? 0u : static_cast<uint32_t>(tx) + rx;
     const uint32_t wire_bps =
@@ -1582,6 +1610,26 @@ bool ops(I2cSpeed s) {
     return all;
 }
 
+/// The engined host's writes at one speed: I2cEngine::dma for n = 1, 2, 16,
+/// 254 (the longest the engine carries), the write-then-read with its write
+/// half on the engine, and n = 255 under dma (the pump's, LEN being eight
+/// bits).
+constexpr uint8_t dma_lengths[] = {1u, 2u, 16u, 254u};
+bool dma_ops(I2cSpeed s) {
+    bool all = true;
+    for (const uint8_t n : dma_lengths) {
+        all = op<Dma>("i2c.write.dma", "i2c.write.dma.bare", s, peer_addr, n, 0, false, i2c_ok,
+                      I2cEngine::dma) && all;
+    }
+    all = op<Dma>("i2c.write.dma", "i2c.write.dma.bare", s, peer_addr, 255, 0, false, i2c_ok,
+                  I2cEngine::dma) && all;
+    for (const uint8_t n : wr_lengths) {
+        all = op<Dma>("i2c.wr.dma", "i2c.wr.dma.bare", s, peer_addr, 1, n, false, i2c_ok,
+                      I2cEngine::dma) && all;
+    }
+    return all;
+}
+
 }  // namespace di
 
 void ti_i2c() {
@@ -1609,6 +1657,17 @@ void ti_i2c() {
               " cycles (", SysClock::hz / period<Pump>(sp.speed), " Hz) with the node's ", rise_ns,
               " ns rise; the peer is twi_peer serving 0x2C", crlf);
         all = ops(sp.speed) && all;
+        // The engined host for the same speed, inside the same serve.
+        Pump::release();
+        dma_live = true;
+        if (!Dma::init(clock, rise_ns)) {
+            print(serial, "  the engined I2C host did not come up", crlf);
+            all = false;
+        } else {
+            all = dma_ops(sp.speed) && all;
+        }
+        Dma::release();
+        dma_live = false;
         print(serial, "  (", Ticker::millis() - t0, " ms with the peer serving)", crlf);
         while (Ticker::millis() - t0 < 15100u) {
         }
@@ -1654,11 +1713,13 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
     (void)Serial::isr();
     sercom_meter.leave();
 }
-// Letter u's transmit engine and letter e's engined SPI host take the
-// DMAC's vector in turn, each live alone.
+// Letter u's transmit engine, letter e's engined SPI host and letter i's
+// engined I2C host take the DMAC's vector in turn, each live alone.
 extern "C" BENCH_PLACEMENT void DMAC_Handler() {
     dmac_meter.enter();
-    if (ee::spi_dma_live) {
+    if (di::dma_live) {
+        di::serve_dma_vector();
+    } else if (ee::spi_dma_live) {
         if (ee::SpiDma::dma_isr()) {
             ee::spi_dma_done = true;
         }
@@ -1686,7 +1747,11 @@ extern "C" BENCH_PLACEMENT void SERCOM3_Handler() {
     if (di::metered) {
         sercom3_meter.enter();
     }
-    di::serve_vector<di::Pump>();
+    if (di::dma_live) {
+        di::serve_dma_sercom();
+    } else {
+        di::serve_vector<di::Pump>();
+    }
     if (di::metered) {
         sercom3_meter.leave();
     }

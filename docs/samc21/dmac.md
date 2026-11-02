@@ -7,9 +7,10 @@ chip's DMA controller can be trusted. The driver offers two engines,
 run of bytes between memory and one peripheral's DATA register, one
 byte per request of the peripheral, with no interrupt per byte. A
 program never calls them: it names them in a transport's template
-arguments - `samc21/sercom.hpp`'s `Uart` ([sercom.md](sercom.md)) and
-`samc21/spi.hpp`'s `SpiHost` ([spi.md](spi.md)) - and binds the DMAC's
-one interrupt vector to those transports. The prerequisite that decides
+arguments - `samc21/sercom.hpp`'s `Uart` ([sercom.md](sercom.md)),
+`samc21/spi.hpp`'s `SpiHost` ([spi.md](spi.md)) and `samc21/i2c.hpp`'s
+`I2cHost`, the transmit engine alone ([i2c.md](i2c.md)) - and binds the
+DMAC's one interrupt vector to those transports. The prerequisite that decides
 correctness is a budget: AT MOST TWO CHANNELS IN AN IMAGE, because this
 silicon corrupts its transfers when three run at once (erratum 1.10.4,
 "The rule" below).
@@ -203,8 +204,8 @@ Sentence 2 is the absence of a suspend verb anywhere in the stratum, a
 receive engine that comes only with its transmit engine (so its owner
 knows no other channel runs when it lets the receive channel go:
 `neg/uart_receive_engine_alone.cpp`), a `release()` that waits for the
-transmit block in flight to end, and two paths that can still break it,
-stated in "The rule's two exceptions" below.
+transmit block in flight to end, and the paths that can still break it,
+each a recovery or an early end, stated in "The rule's exceptions" below.
 
 ## What the rule rests on
 
@@ -218,9 +219,9 @@ stated in "The rule's two exceptions" below.
 | one TX channel + a memory copy or a timer-paced loop | the control shapes | 13.6 M requests | 0 | < 2.2e-7 per request |
 
 The measurements of shapes this driver does not build - Uart TX + SPI
-RX-only, Uart TX + I2C TX, a copy or a loop beside a channel - stand as
-the evidence for sentence 1; the driver offers the first four rows' first
-three shapes and the console alone (sercom.md, spi.md).
+RX-only, a copy or a loop beside a channel - stand as the evidence for
+sentence 1; the driver offers the first three rows' shapes, Uart TX + I2C
+TX and the console alone (sercom.md, spi.md, i2c.md).
 
 The shapes the rule refuses:
 
@@ -249,11 +250,13 @@ either end, blocks abandoned, console lines lost or broken):
 | the SPI pair, the console on its interrupt | SPI TX on 0, RX on 1 | 600 s | 15,790 windows of 16 frames both ways at 2 MHz with the client, 63,160 reads of 1024 at 12 MHz on the loop-back, every byte checked (letter p) | 0 |
 | the Uart pair | Uart TX on 0, RX on 1 | 600 s | 59,999,732 bytes at 1 Mbaud on a loop through the pad, every byte checked, beside the console on its interrupt (`test_samc_uart` letter 2) | 0 |
 | a console alone | Uart TX on 0 | 600 s | 87,863 marked lines read whole by the host (letter 2) | 0 |
+| the I2C host's writes beside the console's | I2C TX on 1, console TX on 0 | 600 s | 135,131 writes of 1..254 bytes at 400 kHz and 1 MHz exact at an AVR64EA48 client, 1195 of them NACKed mid-block and abandoned, 135,131 console lines read whole by the host (`test_samc_i2c` letter s) | 0 |
 
-## The rule's two exceptions
+## The rule's exceptions
 
-Two paths of the driver can still disable a channel mid-block beside a
-running one, each a recovery from something that already went wrong:
+Four paths of the driver can still disable a channel mid-block beside a
+running one, each a recovery from something that already went wrong or a
+block the wire ended early:
 
 - **`SpiHost::recover()` with a request on the engines**, the timed
   arbiter's verb on a request that never answered: its channels are put
@@ -277,6 +280,16 @@ running one, each a recovery from something that already went wrong:
   a channel that lost its trigger, with no beat in flight. It disables
   that channel beside another transport's running one; it runs only after
   such a loss, the loss above being its one known cause.
+- **An I2C write the wire ended before its block did**: a data NACK, a
+  lost arbitration or a bus error while the I2C host's transmit block
+  still has beats (and its timed arbiter's `recover()` on a write that
+  never answered). The SERCOM raises no transmit request after the end,
+  so the channel waits enabled with no beat in flight, and the host
+  abandons it - the act of the Uart's dead-block repair. Measured beside
+  the console's transmit channel running (`test_samc_i2c` letter s): 1195
+  such abandonments, the console's channel enabled at 93 % of the writes'
+  starts, no console block lost, stalled or repeated and every line read
+  whole by the host (below 2.6e-3 a disable at 95 %).
 - **A `release()` whose transmit block outlives its bound** (the block's
   wire time): the channel disabled anyway, the transmitter having
   stopped. A transfer error ends a block on the silicon's own disable,
@@ -323,8 +336,9 @@ running one, each a recovery from something that already went wrong:
   last take, through `observe()`), `complete()` (what the block's end
   left untaken), `abandon()`.
 - **`DmaCompletion`** - what a block's end does, chosen at `arm()`:
-  `interrupt` (TCMPL armed: the Uart's engines) or `silent` (TERR alone:
-  the SPI host's, which ends a request on the SERCOM's TXC).
+  `interrupt` (TCMPL armed: the Uart's engines, and the I2C host's,
+  whose block's end re-arms the MB its write ends on) or `silent` (TERR
+  alone: the SPI host's, which ends a request on the SERCOM's TXC).
 
 ## How to use it
 
@@ -361,7 +375,10 @@ extern "C" void SERCOM1_Handler() {
 ```
 
 An SPI host that reads on the engines takes both channels; the console
-beside it stays on its interrupt (spi.md, "How to use"). Transports that
+beside it stays on its interrupt (spi.md, "How to use"). An I2C host's
+writes on the transmit engine beside the console's take the same two
+channels the display's pixels take above, its DMAC body beside the
+console's in the one vector (i2c.md, "How to use", the second block). Transports that
 take one channel in turn, each releasing before the next one's `init()`:
 
 ```cpp
@@ -456,8 +473,9 @@ Driver gaps:
   without its transmit engine (the refusals above; a Uart receive channel
   alone beside another owner measured no descriptor fault in 30 minutes,
   and is not offered so that no owner disables a running receive channel
-  beside another's), an I2C data phase (born with the I2C round of this
-  stratum), a converter or timer stream (and so no `util/block_stream.hpp`
+  beside another's), an I2C read phase on the receive engine (not
+  measured beside another channel, so not offered: a read runs on the I2C
+  host's interrupt), a converter or timer stream (and so no `util/block_stream.hpp`
   realization on this family), a memory-to-memory copy, an
   event-triggered channel.
 - **The CRC engine and linked descriptors** - declined with the rest; the

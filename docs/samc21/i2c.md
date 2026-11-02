@@ -5,11 +5,12 @@ host reading and writing devices (a sensor, an EEPROM, a DAC) through
 the bus arbiter, or this chip answering another host as a client.
 `samc21/i2c.hpp` is the SERCOM's I2C mode in four parts: `I2cm<n>` and
 `I2cs<n>`, the host and the client resources, one function per register
-fact of one SERCOM instance; `I2cHost<n, pads, generator>`, the transfer
-engine `util/i2c_bus.hpp` drives, a task (in brio, a driver layer with
-state of its own, served from its peripheral's interrupt) whose Request
-every target's I2cHost carries field for field; and `I2cClient<n, pads,
-generator>`, the client role. The arbiter, `I2cBus`
+fact of one SERCOM instance; `I2cHost<n, pads, generator, TxEngine>`, the
+transfer engine `util/i2c_bus.hpp` drives, a task (in brio, a driver layer
+with state of its own, served from its peripheral's interrupt) whose
+Request every target's I2cHost carries field for field, with an optional
+DMA transmit engine for the writes; and `I2cClient<n, pads, generator>`,
+the client role. The arbiter, `I2cBus`
 ([design/i2c-bus.md](../design/i2c-bus.md) is the model), is an active
 object (a component of a brio program with its own event queue, served
 one event at a time by the kernel,
@@ -56,7 +57,11 @@ engine's status to the arbiter; and an active object (AO) fills a
 into, both lent with `lend<Lease::reply>(...)`, the reply channel, the
 speed - posts it to `I2c` and receives `I2cDone` with `i2c_ok` or the
 wire's answer (an address nobody acknowledged is `i2c_nack_addr`, the
-probe result an address scanner reads).
+probe result an address scanner reads). The Request's last field,
+`engine`, is left out here and so takes its default,
+`I2cEngine::interrupt`: every byte on the SERCOM's interrupt. A host given
+a transmit engine runs a write that names `I2cEngine::dma` on the DMA
+("How to use", the second block).
 
 What decides correctness even there. `init()` comes after the clock
 task's: the three speeds' register pairs are computed from the rate the
@@ -68,13 +73,19 @@ included, did not complete; a faster speed the core cannot make is not
 an error at init but a request answered `i2c_rejected` without moving a
 byte, and so is a request whose address lies outside 0x08..0x77 - the
 general call and the 10-bit prefixes among them, which every host
-refuses ([../design/i2c-bus.md](../design/i2c-bus.md)). The pads are handed to the SERCOM with input enable and no pull,
+refuses ([../design/i2c-bus.md](../design/i2c-bus.md)) - and one that
+names `I2cEngine::dma` on a host with no engine. The pads are handed to the SERCOM with input enable and no pull,
 so the bus's pull-up resistors are the board's, and which pins may carry
 I2C at all is the data sheet's per-package table, which no header symbol
 encodes: the code cannot check the pins named. Every tenure that moves
 the wire runs on the interrupt, one per byte, so the SERCOM's vector
 must be bound to `isr()` as above; an unbound vector is a weak alias of
-the crt's silent spin, where the program stops at the first byte. The
+the crt's silent spin, where the program stops at the first byte. A write
+that names `I2cEngine::dma` on an engined host runs on a DMA channel
+instead, and then the DMAC's vector must be bound to `dma_isr()` too, and
+the channel counts against the image's budget of two
+([dmac.md](dmac.md), "The rule": a claim on a channel another transport
+holds panics at `init()`). The
 request's buffers are lent: the client leaves them untouched and in
 scope from the post until its `I2cDone` arrives, whatever the status,
 and nothing checks it. And the wire decides the core rate this engine
@@ -89,7 +100,8 @@ the silicon does (two register sets, SYSOP, the bus state machine, the
 clock hold, the automatic length and smart mode as this silicon runs
 them, the offer the engine takes or declines, the SMBus time-outs, the
 errata as code); the types and verbs; how to use; the host's cost,
-measured; the bench findings beyond the headline; and what is not
+measured, and which engine to name by it; the bench findings beyond the
+headline, the write on the transmit engine among them; and what is not
 covered.
 
 ## Documents of record
@@ -98,11 +110,12 @@ SAM C20/C21 data sheet DS60001479M ch. 33 (over
 the shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/i2c.hpp` over `Sercom<n>`'s instance facts (sercom.md owns the
 address ladder; `i2cm_regs()`/`i2cs_regs()` and `gclk_slow_id()` sit
-beside the SPI view). Family fixture `test/family_samc21/i2c.cpp` +
-seven negatives (the per-bus timeout adds an
-eighth at the util level: an engine without `recover()` refused);
+beside the SPI view); the transmit engine is `samc21/dmac.hpp`'s
+`DmaTxEngine` ([dmac.md](dmac.md)). Family fixture
+`test/family_samc21/i2c.cpp` + eight negatives (the per-bus timeout adds a
+ninth at the util level: an engine without `recover()` refused);
 bench suite `test_samc_i2c`, bench letter `bench_samc` i
-(15 letters - a letter is one command key of a suite's console and the
+(18 letters - a letter is one command key of a suite's console and the
 group of verdicts it runs - two-board: the peer board runs `twi_peer` on an AVR64EA48,
 an AVR DA/DB or a second SAM C21, one `twi_link.hpp` wire format between them -
 commanded in band over the bus under test), and `test_samc_rubato_i2c`
@@ -217,7 +230,8 @@ the time-out statuses auto-clear on the next tenure's ADDR write
 
 **The automatic length, as this silicon runs it** (ADDR.LEN + LENEN,
 33.10.9, 33.6.4.1.2; every point traced flag by flag against the peer at
-100 kHz; the host does not use it, the table below):
+100 kHz; the host uses it for the write on the transmit engine alone, the
+table below):
 
 - A WRITE under LEN = n raises MB after the address and after every data
   byte but the n-th, each with the clock held for the next DATA; after
@@ -258,13 +272,46 @@ ACK back first.
 |---|---|---|
 | MB / SB, one interrupt a byte with the clock held | 33.6.2.4, 33.10.6 | THE PUMP, every tenure. One STATUS snapshot a handler, the SYSOP wait inline (one load when the last operation synchronized long ago) |
 | smart mode | 33.6.3.2 | USED, always: a pumped read byte is one DATA load, no command and no SYSOP wait |
-| the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | NOT BUILT: the I2C host has no engine slot yet; the DMAC's budget of two channels (erratum 1.10.4, [dmac.md](dmac.md)) admits a write-only data phase beside a console's transmitter, measured, born with the I2C round of this stratum |
-| ADDR.LEN + LENEN | 33.10.9 | DECLINED: its use would be to close a DMA phase; the pump closes a read by smart mode and a write by its last MB, every byte software's anyway. The resource keeps the verb (`I2cm::start_address_len`), its behaviour measured above |
+| the transmit DMA request | 33.6.4.1.2, table 33-2 | USED, for a write that names `I2cEngine::dma` on a host given a `DmaTxEngine`: the block starts at the address's MB, three interrupts a write whatever its length (below the table) |
+| the receive DMA request | 33.6.4.1.2, table 33-2 | DECLINED: a read runs on the pump. Of the shapes the DMAC's two-channel budget rests on ([dmac.md](dmac.md), "What the rule rests on"), the I2C one is a write-only channel beside a console's; an I2C receive phase was not measured there |
+| ADDR.LEN + LENEN | 33.10.9 | USED, by the engined write alone, with LEN = n + 1: LEN keeps the channel from feeding DATA past a NACK, and the extra one leaves the MB the write ends on. So the engine carries 1 to 254 bytes; a write of 255 runs on the pump. The pump closes a read by smart mode and a write by its last MB |
 | quick command (QCEN) | 33.6.3.4 | DECLINED for the probe: an empty request costs one MB either way. On the wire (letter m) it changes a READ alone: SB after the address's acknowledge, nine SCL rises, where a plain read clocks the byte in first (seventeen); a write raises MB at the acknowledge either way |
 | SCLSM = 1 | 33.6.2.4.5 | DECLINED: the engine's decisions are taken before the acknowledge (SCLSM = 0), and erratum 1.17.13 refuses it beside QCEN |
 | High-speed mode | 33.6.2.4.6 | REFUSED: errata 1.17.7 and 1.17.9 |
 | the SMBus time-outs | 33.6.3.1 | the caller's, over `configuration()` (the finding above); the engine answers a time-out's ERROR with `i2c_bus_error` |
 | INACTOUT | 33.6.2.3 | USED: 205 us, the BUSY state's escape |
+
+**The write on the transmit engine, as this host runs it.** A write of n
+bytes (1 to 254) that names `I2cEngine::dma` writes ADDR with LENEN and
+LEN = n + 1, MB and ERROR armed. The address's MB is the one proof the
+client acknowledged it, so the block starts there: the channel is enabled
+on the standing transmit request, which fires its first beat, and MB is
+disarmed while the block runs (every beat raises and clears it, and an
+armed MB is an interrupt a byte, measured). The block's end (TCMPL, in the
+DMAC's vector) re-arms MB, and the MB after byte n - LEN not yet reached,
+the clock held - is where the host sends its STOP or its repeated START.
+Three interrupts a write: the address's MB, the block's TCMPL, the last
+byte's MB. What ends a write early:
+
+- a NACK of the address or of a data byte is LENERR with ERROR, the STOP
+  already sent by the silicon (33.6.4.1.2), answered `i2c_nack_addr`
+  before the block started and `i2c_nack_data` after;
+- a NACK, a lost arbitration or a bus error while the block still has
+  beats leaves the channel enabled, with no trigger to come: the host
+  abandons it in the SERCOM's vector (`TxEngine::abandon()`, the channel
+  reset and counted in `TxEngine::faults()`) - a channel disabled
+  mid-block with no beat in flight, [dmac.md](dmac.md)'s "The rule's
+  exceptions" - and a block already over is completed, uncounted, its
+  TCMPL taken there so no later write reads it as its own;
+- a transfer error on the channel (TERR: the channel disabled by the
+  silicon with its count written back, 25.6.2.8) is abandoned in the
+  DMAC's vector and the STOP sent, the tenure ended `i2c_dma_fault`
+  (`samc21/i2c.hpp`, the first engine-defined code after
+  `util/i2c_bus.hpp`'s four).
+
+The engine's launch refuses nothing: the channel is claimed at `init()`,
+the host checks the count before it writes ADDR, and a block is started
+only on an idle channel, every tenure that started one ending it.
 
 **The SMBus time-outs bound a client's hold of SCL, as 33.6.3.1 reads -
 when they are armed, on a slow clock weighed to 32 kHz.** Under LOWTOUTEN
@@ -342,24 +389,37 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   specification floor), the Fm+ 1:2 split per the chapter's note,
   rounding that never lands above the request, and
   `i2c_scl_hz()` as the readback. Pinned by static_asserts.
-- **`I2cHost<n, pads, generator>`** - the engine
+- **`I2cHost<n, pads, generator, TxEngine>`** - the engine
   `util/i2c_bus.hpp` (= BusMaster) drives: the I2cHost Request every
   target shares, field for field ({addr, tx, tx_len, rx, rx_len,
-  ReplyTo<I2cDone>, speed}; one tenure = write, read, or write-then-read
-  on a repeated START; the empty request is the address probe),
+  ReplyTo<I2cDone>, speed, engine}; one tenure = write, read, or
+  write-then-read on a repeated START; the empty request is the address
+  probe; `engine` sits in the padding after `speed`, so the Request is no
+  larger for it, a static_assert in the header holding it there),
   asynchronous whenever the wire moves, smart mode always on, the i2c_*
   status vocabulary on the wire (nack_addr for any address nobody
   acknowledged, nack_data for a refused written byte, arb_lost,
   bus_error), per-speed register pairs cached with `speed_ok()` and the
   refused-not-slowed rule (a speed the core cannot make, and an address
   outside 0x08..0x77, are answered `i2c_rejected` inside `start()`, the
-  synchronous completion, delivered through the arbiter). Every tenure rides the byte pump, one
-  interrupt a byte; there is no DMA phase (Not covered yet). `configuration(speed)` is the resource
+  synchronous completion, delivered through the arbiter, and so is
+  `I2cEngine::dma` on a host with no engine). `I2cEngine::interrupt`, the
+  default, rides the byte pump, one interrupt a byte. `TxEngine` is
+  `NoDmaEngine` by default, or a `DmaTxEngine<ch>` of `samc21/dmac.hpp`
+  (a receive engine there does not compile: the slot is the transmit
+  engine's, `neg/i2c_engine_slot_receive_engine.cpp`, and there is no
+  second slot, `neg/i2c_engine_slot_absent.cpp`): then `has_engines` and
+  `has_dma` are true, `init()` arms the channel, and a write of 1 to
+  `dma_write_max` (254) bytes naming `I2cEngine::dma` rides it, the rest
+  of that Request - its read half, a write of 255 - on the pump;
+  `dma_isr()` is the DMAC vector's body, and `i2c_dma_fault` the status
+  of a write the channel's bus error ended. `configuration(speed)` is the resource
   configuration the engine runs, what a caller that reconfigures the
   resource behind it starts from. `unstick()` - nine open-drain pulses
   and a Stop by hand, which leaves a healthy wire untouched (SDA read
   first; zero pulses is the answer and the action) - and `recover()`,
-  the init() tail re-run from the cached configuration: what a timed I2cBus calls on a tenure that never answered,
+  the init() tail re-run from the cached configuration, an engined
+  write's block abandoned first: what a timed I2cBus calls on a tenure that never answered,
   and the only way out of a START parked behind a phantom hold on this
   silicon (the release does not fire it - letter g). recover() fixes the peripheral;
   unstick() fixes the wire; neither replaces the other. No placement
@@ -388,6 +448,56 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
     // wire's own answer (i2c_nack_addr is the address-scanner's probe
     // result).
 
+A write on the transmit engine, beside a console whose transmitter runs
+on the image's other channel - an excerpt: it assumes the console's pads
+`console_pads` ([sercom.md](sercom.md)), the bus's `my_pads`, the platform
+`P`, an active object `Me` that takes `I2cDone`, and a buffer `run` of 32
+bytes that `Me` leaves untouched until the reply:
+
+```cpp
+#include "samc21/dmac.hpp"
+#include "samc21/i2c.hpp"
+#include "samc21/sercom.hpp"
+
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<0>>;
+using I2cHw = brio::I2cHost<3, my_pads, 0, brio::DmaTxEngine<1>>;
+using I2c = brio::I2cBus<I2cHw, P>;
+static_assert(I2cHw::has_dma);               // this program needs the engine
+
+extern "C" void SERCOM3_Handler() {
+    if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+}
+extern "C" void DMAC_Handler() {             // every owner of a channel
+    (void)Serial::dma_isr();                 // the console's blocks
+    if (I2cHw::dma_isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+}
+
+// in a handler of Me: a display's 32-byte command run, on the engine
+brio::post<I2c>(I2cHw::Request{.addr = 0x3C,
+                               .tx = brio::lend<brio::Lease::reply>(
+                                   static_cast<const uint8_t*>(run)),
+                               .tx_len = 32,
+                               .rx = {},
+                               .rx_len = 0,
+                               .reply = brio::reply_to<Me, brio::I2cDone>(),
+                               .speed = brio::I2cSpeed::fast_400k,
+                               .engine = brio::I2cEngine::dma});
+```
+
+`DmaTxEngine<1>` puts the I2C host's writes on DMA channel 1 and the
+console's transmitter is on channel 0: the image's two channels
+([dmac.md](dmac.md), "The rule"), each claimed at its transport's `init()`.
+Both vectors are the program's. The SERCOM's still ends every tenure, and
+the DMAC's serves both owners, the cast discarding the console's answer
+(its receive edge, which a transport with no receive engine never raises);
+`dma_isr()` answers true only when a transfer error ended the write. The
+request names `I2cEngine::dma`: its 32 bytes go out on the channel, with
+three interrupts in all instead of thirty-three. A read in the same
+Request would still run on the pump, and a write of 255 bytes too.
+`I2cEngine::dma` costs the core fewer cycles from four bytes up, and it
+does not hold the clock low between the bytes ("Which engine, by the
+cycles", below).
+
 ## The host's cost, measured (bench_samc letter i)
 
 SERCOM3 on PA22/PA23 at 48 MHz against an AVR64EA48 running
@@ -406,30 +516,101 @@ edges and every entry stamped (56 cycles an entry inside `isr`):
 
 | tenure | wire | plain | metered: wall (irq, isr, busy) |
 |---|---|---|---|
-| 1-byte write, 400 kHz | 2299 | 3142 | 3612 (2, 531, 1446) |
-| 1 + 1 register read, 400 kHz | 4598 | 5944 | 6415 (4, 933, 2304) |
-| 16-byte write, 400 kHz | 18634 | 24270 | 24823 (18, 3376, 8055) |
-| 16-byte read, 400 kHz | 18634 | 23449 | 26037 (17, 2795, 6918) |
-| 255-byte read, 400 kHz | 278905 | 349971 (x 1.25) | 388644 (263, 40837, 100492) |
-| 255-byte write, 400 kHz | 278905 | 362506 (x 1.30) | 363530 (263, 48309, 107947) |
-| 255-byte read, 100 kHz | 1108705 | 1136956 (x 1.02) | 1168892 (279, 41477, 105564) |
-| 255-byte read, Fm+ | 112945 | 194360 (x 1.72) | 207234 (260, 40717, 99788) |
+| 1-byte write, 400 kHz | 2299 | 3253 | 3656 (2, 568, 1473) |
+| 1 + 1 register read, 400 kHz | 4598 | 6010 | 6589 (3, 948, 2075) |
+| 16-byte write, 400 kHz | 18634 | 24610 | 27087 (18, 3672, 8129) |
+| 16-byte read, 400 kHz | 18634 | 23476 | 26047 (17, 3072, 7242) |
+| 255-byte read, 400 kHz | 278905 | 350852 (x 1.26) | 388758 (263, 45205, 103572) |
+| 255-byte write, 400 kHz | 278905 | 363356 (x 1.30) | 401685 (264, 52736, 111531) |
+| 255-byte read, 100 kHz | 1108705 | 1141071 (x 1.03) | 1169076 (280, 45953, 108273) |
+| 255-byte read, Fm+ | 112945 | 194523 (x 1.72) | 232605 (260, 45065, 102291) |
 
 What the rows say:
 
-- THE PUMP'S BYTE: 183 cycles an entry for a written byte and 156 for
+- THE PUMP'S BYTE: 200 cycles an entry for a written byte and 172 for
   a read one at 400 kHz (isr over entries, stamps included): one STATUS
   snapshot, the SYSOP wait (a call to the resource's bounded wait), and
   on a read the DATA load alone - smart mode. A short tenure carries the
-  START through `start()` (266 to 282 cycles), two interrupt entries
+  START through `start()` (264 to 292 cycles), two interrupt entries
   and exits behind two flash wait states, and the completion edge.
+- THE SAME CODE COSTS WHAT ITS PLACE IN THE FLASH COSTS: the pump's
+  `settle()` is the same instructions, byte for byte, in three images
+  of this letter whose code lies at other addresses, and its written
+  byte measured 187, 192 and 204 cycles an entry at 1 MHz, its read byte
+  156, 169 and 175 - the two wait states behind the NVMCTRL cache (the
+  file header of `bench_samc`). The figures on this page are the last
+  image's.
 - IN SRAM (`bench_samc_ram`, the vector in `.fast_text`): the pump's
-  entry costs 112 cycles for a written byte and 97 for a read one at
-  100 kHz (31311 over 280 entries, 27045 over 279), against 175 and 149
+  entry costs 118 cycles for a written byte and 104 for a read one at
+  100 kHz (33108 over 280 entries, 29136 over 279), against 191 and 164
   from the flash behind two wait states in the same letter. At Fm+ the
   polled peer's turnaround, not the host, paces a long tenure (x 1.72
   above). The written byte's SYSOP wait stays a call, through a veneer
   back into the flash; the host takes no placement.
+
+### Which engine, by the cycles (bench_samc letter i)
+
+The same letter runs the host given a transmit engine on channel 0
+(`i2c.write.dma`, `i2c.wr.dma`) against the same peer, inside the same
+serve, the console on its interrupt. The SERCOM vector serves either host
+by a flag and calls the engined one's body out of line, so that the pump's
+body stays the vector's alone, as in a program that binds one host
+(flattened beside it, the second body measured 26 cycles more on every
+pumped byte, one image against another; the cost section's last points
+say how far an image's layout alone moves a figure). Letter r's instrument costs are taken out: 56 cycles of stamps an
+entry inside `isr`, one ruler read (65) inside `start()`. The figures are
+the same at 100 kHz, 400 kHz and 1 MHz, to the cycle:
+
+| write of n bytes | `start()` | vector bodies (entries) | core cycles |
+|---|---|---|---|
+| `interrupt`, n = 1 | 199 | 456 (2) | 655 |
+| `interrupt`, each byte more | - | 148 (1) | + 148 |
+| `dma`, n = 1 .. 254 | 271 | 789 (3: two SERCOM, one DMAC) | 1060 |
+| `dma`, n = 255 | as `interrupt` | as `interrupt` | the pump's |
+
+So E, the engine's cost to the core of a write, is 1060 cycles whatever
+its length; F, the pump's beyond its bytes, is 655 - 148 = 507; and b,
+the pump's cost of a byte, is 148. The engine costs the core fewer cycles
+from the smallest n where E <= F + n x b ([the I2C bus design
+page](../design/i2c-bus.md)): 1060 <= 507 + 4 x 148 = 1099, so **from
+four bytes**, by 39 cycles there and by 148 more a byte after; at three
+bytes the pump is 109 cycles cheaper. The crossing was four in another
+image of this letter too, its code at other addresses (E 1034 against F
+511 and b 136). A Request's read half has no such choice (it always runs on the
+pump), so a write-then-read pays the difference on its write half alone:
+a register read of one written byte and one read costs 1412 cycles with
+`dma`, 979 with `interrupt`. The
+hardware's own entry and exit, which no stamp sees, falls on every entry,
+and the pump has n + 1 of them to the engine's three, which moves the
+crossing toward the engine, never away.
+
+**The wire is the larger difference.** A pumped written byte holds SCL
+low from its MB until the vector writes DATA (MB holds the clock,
+33.10.6), and the engine writes DATA a few cycles after the request. The
+same peer, 255 bytes on the pump and 254 on the engine, walls in cycles
+against each tenure's own wire; the last column is the pump's time above
+its wire less the engine's, over 255 bytes:
+
+| SCL | `interrupt`, 255 bytes: wall (wire) | `dma`, 254 bytes: wall (wire) | the pump's hold a byte |
+|---|---|---|---|
+| 100 kHz | 1182205 (1108705, x 1.07) | 1110970 (1104376, x 1.01) | 262 cycles |
+| 400 kHz | 401685 (278905, x 1.44) | 323781 (277816, x 1.17) | 301 cycles |
+| 1 MHz | 246002 (112945, x 2.18) | 167976 (112504, x 1.49) | 304 cycles |
+
+What stays above the wire on the engine is the polled peer's own stretch
+(the cost section above). At 1 MHz the pump turns a 255-byte write into
+5.1 ms of bus where the engine takes 3.5 ms.
+
+**The core sleeps while the channel works.** The platform's idle is a
+WFI in whatever sleep mode PM.SLEEPCFG holds ([platform.md](platform.md)),
+and in IDLE the CPU stops while the AHB and APB clocks stay with the
+peripherals that request them (19.6.3.3.1), the DMAC among them: a channel
+runs in any sleep mode, standby only with its RUNSTDBY set (25.6.7). So an
+engined write costs no sleep in IDLE, and wakes the core three times where
+the pump wakes it n + 1 times. A STANDBY entered with a block in flight is
+outside what this stratum has run ([dmac.md](dmac.md), "Not covered yet").
+
+None of this is read by the code: the program names its engine.
 
 ## Bench findings (beyond the headline)
 
@@ -540,6 +721,65 @@ What the rows say:
   and T2 completes. Swept every two cycles across the crossover the
   letter finds by itself: 17 to 19 collisions of 81 attempts each way,
   in every one of fifteen runs, none wedged.
+
+### The write on the transmit engine (letters p, q and s)
+
+The engined host (`DmaTxEngine<1>`) on SERCOM3 against the AVR64EA48's
+`twi_peer`, whose counted serve reports the bytes it received, their
+16-bit sum, the first one and the address matches - every write judged at
+the far end. What ran is read beside it: channel 1's slot, marked before
+the tenure (a block the engine starts overwrites its count and source, a
+pumped tenure leaves the mark), the SERCOM3 and DMAC vectors' entries, and
+the engine's abandonments.
+
+- **`dma` from one byte** (letter p): a write of 1 byte rides the engine -
+  the block's count 1, two SERCOM entries and one DMAC entry - and the
+  peer took it exact; so did 2, 16 and 254 bytes at 100 kHz and 254 at
+  400 kHz and 1 MHz, three entries whatever the length.
+- **`interrupt` touches no channel**: 200 bytes named `interrupt` on the
+  engined host left the slot's mark, no DMAC entry, 201 SERCOM entries,
+  exact.
+- **What the engine cannot carry completes on the pump**, named `dma`: a
+  write of 255 (the mark kept, 256 entries), a read of 16 (no channel, the
+  peer's counting stream exact), and a write of 2 with a repeated START
+  and a read of 8 - the write on the engine, the read on the pump, both
+  exact and the peer's two address matches.
+- **`dma` on the host with no engine**: `start()` answers true with
+  `i2c_rejected`, and the peer, serving at the address, matched only the
+  write that followed, exact.
+- **The NACKs under `dma`**: a deaf address is `i2c_nack_addr` with the
+  block never started; a NACK of the 3rd byte of 16 is `i2c_nack_data`
+  with the block abandoned once (the channel reset, its slot cleared); of
+  the last of 6 and of a one-byte write's only byte, `i2c_nack_data` with
+  the block completed and nothing abandoned - the peer received exactly up
+  to its NACK each time, and the next engined write was exact.
+- **A transfer error**: a run whose source crosses the end of SRAM (eight
+  readable bytes below 0x20008000, then the fault) ends `i2c_dma_fault`
+  with the block abandoned, the peer having taken the eight bytes and the
+  STOP; the next engined write is exact.
+- **The protocol letters under `dma`** (letter q): c's shapes, d's
+  address and data NACKs and reserved addresses, and o's parked START and
+  live collisions re-run with every tenure naming `I2cEngine::dma`, their
+  verdicts unchanged; one block abandoned across the three (d's NACK of
+  the 3rd of 6). o's collisions are lost in T2's address, a one-byte
+  engined write: `i2c_arb_lost` here when aiming above the peer's
+  address, the peer's ARBLOST when aiming below, at lags about 32 cycles
+  earlier than the pump's (the crossing at 160 cycles against 192, in 15
+  runs of 16) - the engined `start()` takes that much longer before its
+  ADDR store.
+- **Ten minutes beside the console's engine** (letter s, not in `z`): the
+  console on channel 0 printing one numbered line a write, the I2C writes
+  on channel 1 at 400 kHz and 1 MHz in turn, 1 to 254 bytes each named
+  `dma`, every eighth batch a write the peer NACKs mid-block: 135,131
+  writes, 17,219,298 bytes, 1195 of them NACKed mid-block, each abandoned
+  beside the console's running channel; the console's channel enabled at
+  93 % of the writes' starts. Every status the expected one, no tenure
+  unfinished, every peer report exact (count, sum, first, matches,
+  STOPs), no channel left enabled, only the NACKs' blocks abandoned and
+  none of the console's, and the host read all 135,131 lines whole (a
+  sequence with no gap and a CRC on each). At 95 %: below 2.3e-5 faults
+  a write, and below 2.6e-3 lost triggers a mid-block abandonment beside
+  the console's channel.
 
 ### The stack under the preemptive kernel (`test_samc_rubato_i2c`)
 
@@ -667,12 +907,13 @@ pads.
 
 Driver gaps (not built), each with its reason:
 
-- **The DMA phases, on the host or the client, and the host's use of
-  ADDR.LEN**: not built - a write-only data phase on the transmit engine
-  is born with the I2C round of this stratum (its measurement beside a
-  console's transmitter is [dmac.md](dmac.md)'s, "What the rule rests
-  on"), and a read phase is declined there; the pump closes a read by
-  smart mode.
+- **A read phase on the DMA, on the host or the client**: declined. Of
+  the shapes the image's two-channel budget rests on ([dmac.md](dmac.md),
+  "What the rule rests on"), the I2C one is a write-only channel beside a
+  console's; a receive phase was not measured beside another channel, and
+  the pump closes a read by smart mode.
+- **The client on the DMA**: not built - `I2cClient`'s protocol is the
+  application's, and no util service serves a client in blocks.
 - **The 4-wire PINOUT** (CTRLA.PINOUT, an external transceiver's
   shape): no user and no transceiver on the bench.
 - **This chip as the bus's target, served from an active object, under
@@ -693,6 +934,12 @@ Driver gaps (not built), each with its reason:
   a broadcast is a feature of its own, born with its first user.
 
 Implemented but not bench-verified:
+
+- **The engined write in SRAM** (the vectors in `.fast_text`,
+  `bench_samc_ram`): its figures were taken from the flash only; that
+  image's letter i would measure them.
+- **The engined write on any die but one ATSAMC21J18A at revision F**:
+  every bound of letter s is that die's, as dmac.md's are.
 
 - **The client's general call** (`general_call`, ADDR.GENCEN): written and
   read back, and taken on the wire no longer - every brio host refuses

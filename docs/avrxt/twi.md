@@ -398,6 +398,17 @@ the measured reason below), and `i2c_nack_addr` answers any address
 nobody acknowledged - a write's, a read's, the repeated START's -
 `i2c_nack_data` a written byte refused.
 
+**The engine of a request.** On a family with DMA a Request names the
+mechanism that moves its data in an `engine` field (`I2cEngine` of
+`util/i2c_bus.hpp`: `interrupt`, the default, or `dma`). This TWI has no
+DMA request and the AVR DA, DB and EA no DMA controller, so every tenure
+here runs on the host interrupt, and `I2cHost::has_dma` is false - the
+question a portable program asks before it names `I2cEngine::dma`, or
+asserts with `static_assert(I2cHw::has_dma)` when it requires the DMA.
+This host's `Request` has no `engine` field ("Not covered yet" says why),
+so a Request that names one does not compile here
+(`neg/twi_request_names_engine.cpp`).
+
 **`I2cClient<n, route, on_dual_pins>`** is the other end: the whole
 address-match space as options, the four cases as verbs - `respond`
 (ACK or NACK the address packet), `receive` (S1), `transmit` (S2),
@@ -1081,6 +1092,29 @@ implement):
 - **A client-side AO.** The client task is a polled/ISR surface; the
   kernel-level usage type (an AO that owns an address and answers
   register reads) is not built.
+- **The Request's `engine` field.** Not carried: the AVR lays a struct
+  out with no padding, so a field of its own would make every Request -
+  and every queue slot holding one - a byte longer, and the speed's byte
+  cannot share it. A bit-field pair (`speed : 2`, `engine : 1`) keeps the
+  size, but avr-g++ 16.2 refuses a braced list converted to a
+  `const Request&` - `start({...})`, `run_request({...})` - whenever a
+  bit-field of a scoped enumeration narrower than its type gets a value
+  there, from the list or from its default member initializer; and with
+  no initializer, every Request that leaves the field out warns under
+  -Wextra's missing-field-initializers, an error under the projects'
+  -Werror. Four lines reproduce it on gcc 16.2, for the AVR, the
+  Cortex-M and the host alike:
+
+  ```cpp
+  enum class E : unsigned char { a, b, c };
+  struct R { int x; E e : 2 = E::a; };
+  void g(const R&);
+  void k() { g({1}); }   // error: invalid initialization of reference
+  ```
+
+  So the field waits on a choice: the byte paid on this family, or the
+  compiler fixed. Until then a request naming `I2cEngine::dma` fails to
+  compile here instead of being refused at run time.
 
 **Implemented but not bench-verified**:
 

@@ -211,6 +211,9 @@ void use_28() {
 
 using T0 = Twi<0>;
 using Host0 = I2cHost<0>;
+// No DMA on this family: a portable program asks has_dma before it names
+// I2cEngine::dma.
+static_assert(!Host0::has_dma);
 using Client0 = I2cClient<0>;
 using DualClient0 = I2cClient<0, TwiRoute::def, true>;
 

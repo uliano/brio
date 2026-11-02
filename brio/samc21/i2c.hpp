@@ -14,10 +14,14 @@
  *     I2cHw::init(clock, measured_rise_ns);      // in main(), after the clock task
  *
  * then an active object posts a Request ({addr, tx, tx_len, rx, rx_len,
- * reply, speed}, the buffers as lend<Lease::reply>(...)) to I2c and gets
- * an I2cDone back with i2c_ok or the wire's answer (i2c_rejected for a
- * speed the core cannot make or an address outside 0x08..0x77,
- * i2c_bus_error, a NACK code).
+ * reply, speed, engine}, the buffers as lend<Lease::reply>(...)) to I2c
+ * and gets an I2cDone back with i2c_ok or the wire's answer
+ * (i2c_rejected for a speed the core cannot make, an address outside
+ * 0x08..0x77 or the DMA asked of a host with no engine, i2c_bus_error, a
+ * NACK code). `engine` is left at its default, I2cEngine::interrupt, the
+ * byte pump; a host given a transmit engine (the fourth template argument,
+ * a DmaTxEngine of samc21/dmac.hpp) carries a write named I2cEngine::dma
+ * on the DMA (the I2cHost class comment).
  *
  * The words. An active object (AO) is a brio component with its own
  * event queue, served one event at a time by the kernel; `P` is the
@@ -51,17 +55,20 @@
  * disable/enable pair and the forcing to IDLE a change of speed costs,
  * the SYSOP wait before its ADDR store): every tenure that moves the
  * wire runs on the byte pump (the engine's interrupt-driven byte
- * loop), and start() returns false, meaning "still running, the
+ * loop) or, for a write named I2cEngine::dma on an engined host, on the
+ * transmit engine, and start() returns false, meaning "still running, the
  * completion comes on the interrupt"; it returns true - "already over" -
- * only for a speed the core cannot produce or an address outside
- * 0x08..0x77 (i2c_rejected) or a SYSOP
- * that never settled (i2c_bus_error), with nothing moved, and the
+ * only for a speed the core cannot produce, an address outside
+ * 0x08..0x77 or the DMA asked of a host with no engine (i2c_rejected) or
+ * a SYSOP that never settled (i2c_bus_error), with nothing moved, and the
  * arbiter then replies with that status. isr() is the interrupt body: the
  * program's handler for the instance's vector calls it and nothing else
  * does, and it answers true on the completion edge, when the handler
  * posts TransferDone{status()}; a vector left unbound is the crt's weak
  * spin (the start-up code's default handler, a silent loop the program's
  * own definition replaces), where the program stops at the first byte.
+ * dma_isr() is the DMAC vector's body on an engined host, bound beside
+ * every other owner of the image's channels.
  * The Request's two buffers are lent from the moment the Request is
  * posted until the I2cDone the arbiter replies with: untouched and in scope until then, which nothing checks.
  * recover() is the timed arbiter's, from its dispatch; unstick() is the
@@ -83,7 +90,7 @@
  *              matching in its three modes, the general call, the
  *              stretch-and-command surface.
  *
- *  I2cHost<n, pads, generator>
+ *  I2cHost<n, pads, generator, TxEngine>
  *              the task util/i2c_bus.hpp (= util/bus_master.hpp) drives:
  *              the transfer engine. A Request is one bus tenure - write,
  *              read, or write-then-read joined by a repeated START - the
@@ -167,6 +174,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <optional>
@@ -514,6 +522,12 @@ public:
     static constexpr uint8_t gclk_slow_id() { return Base::gclk_slow_id(); }
     static constexpr uint32_t apb_mask() { return Base::apb_mask(); }
     static constexpr IRQn_Type irq() { return Base::irq(); }
+    /// DATA, the register a transmit engine writes, and the instance's
+    /// transmit trigger: the host's "write data needed for transmit"
+    /// request, set when data is needed and cleared when DATA is written
+    /// (33.6.4.1.2, table 33-2).
+    static volatile void* data_address() { return &regs().SERCOM_DATA; }
+    static constexpr uint8_t dma_tx_trigger() { return Base::dma_tx_trigger(); }
 
     static void bus_clock(bool on) { Base::bus_clock(on); }
     static bool core_clock(uint8_t generator) { return Base::core_clock(generator); }
@@ -937,15 +951,16 @@ public:
 // =============================================================================
 
 /*
- * I2cHost<n, pads, generator>
+ * I2cHost<n, pads, generator, TxEngine>
  *
  * The transfer engine, driven by util/bus_master.hpp: a Request is one
  * bus tenure - write, read, or write-then-read joined by a repeated START
  * (the register-access idiom) - and the empty request is an address
  * probe. Asynchronous whenever the wire moves: start() returns false and
  * a TransferDone{status()} follows from the ISR, which is the engine
- * contract every target's I2cHost keeps; the two failures that move
- * nothing (a speed the core cannot produce, a SYSOP that never settled)
+ * contract every target's I2cHost keeps; the failures that move nothing
+ * (a speed the core cannot produce, an address outside the range, the
+ * DMA asked of a host with no engine, a SYSOP that never settled)
  * complete inside start() (start()'s comment).
  *
  * WHAT THIS SERCOM OFFERS, AND WHAT THE ENGINE TAKES (33.6.2.4, 33.6.3.2,
@@ -959,25 +974,86 @@ public:
  *    is closed the other way round: the STOP command with its NACK first,
  *    while SB still holds the clock, then DATA read - "reading the last
  *    data byte after the stop condition has been sent" (33.10.10).
+ *    The DMA requires smart mode too (33.6.4.1).
  *
  *  - THE BYTE PUMP, one interrupt per byte (MB after a byte went out, SB
- *    after one came in), is the engine.
+ *    after one came in): what I2cEngine::interrupt runs, and every half
+ *    the transmit engine does not carry.
  *
- *  - THE TWO DMA REQUESTS and the AUTOMATIC LENGTH (ADDR.LEN + LENEN) are
- *    declined: this stratum drives the DMAC for one user alone, the
- *    Uart's transmitter (erratum 1.10.4, docs/samc21/dmac.md), and the
- *    length counter's one use here was to close an engined phase - the
- *    pump closes a read by smart mode and a write by its last MB.
- *    (What LEN does on this silicon was measured, docs/samc21/i2c.md.)
+ *  - THE TRANSMIT REQUEST and the AUTOMATIC LENGTH (ADDR.LEN + LENEN): the
+ *    engined write, on the one DMA engine slot, TxEngine (samc21/dmac.hpp's
+ *    DmaTxEngine<ch>, or NoDmaEngine, the default, for none). 33.6.4.1.2
+ *    asks LENEN with the address for the DMA, and LEN is what protects the
+ *    channel from a NACK: without it the controller keeps feeding DATA past
+ *    a client's NACK and the host transmits it (measured). So an engined
+ *    write of w bytes writes ADDR with LEN = w + 1. With LEN = w the host
+ *    sends the STOP after the last byte and no flag rises at all (measured:
+ *    no MB after the last byte, none after the automatic STOP), which
+ *    leaves nothing to end the tenure on and no place for a repeated
+ *    START; with w + 1 the MB after byte w stands with the clock held, its
+ *    acknowledge read, for the host's STOP or repeated START. A NACK before
+ *    that is STATUS.LENERR with INTFLAG.ERROR and the STOP already sent by
+ *    the silicon (33.6.4.1.2). The block starts at the ADDRESS's MB, not
+ *    before: that MB is the one proof the address was acknowledged, and the
+ *    transmit request standing then fires the first beat on the channel's
+ *    enable. MB is disarmed while the block runs - every beat raises and
+ *    clears it, and an armed MB is an interrupt per byte (measured) - and
+ *    re-armed by the block's completion. THREE INTERRUPTS A WRITE, WHATEVER
+ *    ITS LENGTH: the address's MB, the block's TCMPL, the last byte's MB.
+ *
+ *  - THE RECEIVE REQUEST is declined: a read always runs on the pump. Of
+ *    the shapes the image's two-channel DMA budget rests on
+ *    (docs/samc21/dmac.md, "What the rule rests on"), the I2C one is a
+ *    write-only channel beside a console's; an I2C receive phase was not
+ *    measured there, and is not offered.
  *  - QUICK COMMAND (QCEN) is not used: the empty probe is the same
  *    tenure with no data and costs one MB either way.
+ *
+ * THE PROGRAM NAMES THE ENGINE of every Request (Request::engine,
+ * util/i2c_bus.hpp), and start() reads it with one compare:
+ *
+ *   I2cEngine::interrupt  the default: both halves on the pump, at any
+ *                         length;
+ *   I2cEngine::dma        the write half on the transmit engine, from one
+ *                         byte to 254; the read half, a write of 255 bytes
+ *                         and a write with no buffer stay on the pump, and
+ *                         the request completes. 255 is the silicon's: LEN
+ *                         is eight bits (33.10.9), and the w + 1 the write
+ *                         needs for its completion edge does not fit. On a
+ *                         host with no engine, the request is refused,
+ *                         i2c_rejected, nothing armed and nothing on the
+ *                         wire.
+ *
+ * The engine's launch refuses nothing: the host checks the count (1 to
+ * 254) before it writes ADDR, the channel was claimed at init(), and a
+ * block is started only on an idle channel - every tenure that started
+ * one ends it, completed at its TCMPL or abandoned (below). Which to name
+ * is the program's judgement, and docs/samc21/i2c.md gives the
+ * arithmetic.
+ *
+ * A WRITE ENDED BY THE WIRE MID-BLOCK - a data NACK, a lost arbitration,
+ * a bus error - leaves the channel enabled with beats it will never be
+ * asked for: the host abandons it (TxEngine::abandon(): disabled, reset,
+ * counted in TxEngine::faults()) in the SERCOM's vector. That is a
+ * channel disabled mid-block with no beat in flight, beside whatever
+ * other channel runs: docs/samc21/dmac.md, "The rule's exceptions",
+ * says what that rests on. A block that ended before the wire did is
+ * completed instead, uncounted.
  *
  * Status vocabulary (util/i2c_bus.hpp): i2c_nack_addr when an address
  * byte went unacknowledged (a write's, a read's, the repeated START's),
  * i2c_nack_data for a written data byte, i2c_arb_lost when another host
- * won the wire, i2c_bus_error for a protocol violation. After
- * arbitration is lost the silicon has already released the bus and a
- * Stop is NOT ours to send (33.6.2.4.2 case 1).
+ * won the wire, i2c_bus_error for a protocol violation, and i2c_dma_fault
+ * (below) when the channel took a bus error mid-write (the block
+ * abandoned, the host's STOP sent). After arbitration is lost the silicon
+ * has already released the bus and a Stop is NOT ours to send
+ * (33.6.2.4.2 case 1); under LEN a NACK's STOP is the silicon's too.
+ *
+ * THE DMAC'S VECTOR IS THE PROGRAM'S TOO on an engined host: dma_isr()
+ * is bound in DMAC_Handler beside every other owner of a channel (the
+ * engine arms TCMPL and TERR and opens the DMAC's NVIC line at init()).
+ * A DMAC_Handler left undefined is the crt's silent spin, where the
+ * program stops at the first engined write's block end.
  *
  * NO PLACEMENT PARAMETER (util/placement.hpp): the event entry is inline
  * in the vector that binds it, and a program that wants it out of the
@@ -992,8 +1068,20 @@ public:
  *   extern "C" void SERCOM3_Handler() {
  *       if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
  *   }
+ *   // an engined host binds the DMAC's vector as well, beside the other
+ *   // owners of the image's channels (the console's, here):
+ *   extern "C" void DMAC_Handler() {
+ *       (void)Serial::dma_isr();
+ *       if (I2cHw::dma_isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
+ *   }
  */
-template <uint8_t n, I2cPads pads, uint8_t generator = 0>
+
+/// A DMA transfer error ended an engined write: an engine-defined code of
+/// the bus_master contract (bus_engine_status), after util/i2c_bus.hpp's
+/// four.
+inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
+
+template <uint8_t n, I2cPads pads, uint8_t generator = 0, typename TxEngine = NoDmaEngine>
 class I2cHost {
     using S = I2cm<n>;
 
@@ -1001,6 +1089,13 @@ class I2cHost {
                   "an I2C host needs its two pins stated: SDA is PAD[0] and SCL is "
                   "PAD[1] by the chapter (33.4), and only table 6-7's pins carry I2C "
                   "at all - which no header symbol encodes, so state what you wired");
+    static_assert(sizeof(TxEngine) > 0,
+                  "the engine slot must name a complete type: samc21/dmac.hpp's "
+                  "DmaTxEngine, or NoDmaEngine (the default)");
+    static_assert(!TxEngine::present ||
+                      requires(const uint8_t* p, uint16_t c) { TxEngine::start_run(p, c); },
+                  "the I2C host's one engine slot takes a transmit engine (DmaTxEngine): "
+                  "a read runs on the interrupt (the class comment)");
 
     using SdaPin = Pin<pads.sda_pin.port, pads.sda_pin.pin>;
     using SclPin = Pin<pads.scl_pin.port, pads.scl_pin.pin>;
@@ -1011,6 +1106,17 @@ public:
     using Resource = S;
     static constexpr I2cPads pin_pads = pads;
     static constexpr uint8_t core_generator = generator;
+    /// A transmit engine is bound: a write may ride the DMA.
+    static constexpr bool has_engines = TxEngine::present;
+    /// Can this host take a Request naming I2cEngine::dma? False refuses it,
+    /// i2c_rejected from start(); a program that requires the DMA writes
+    /// `static_assert(I2cHw::has_dma)`.
+    static constexpr bool has_dma = has_engines;
+    /// The longest write the transmit engine carries: ADDR.LEN is eight bits
+    /// (33.10.9) and an engined write of w bytes needs LEN = w + 1 (the class
+    /// comment).
+    static constexpr uint8_t dma_write_max = 254;
+
     struct Request {
         /// The 7-bit client address, unshifted: 0x08 to 0x77
         /// (util/i2c_bus.hpp, i2c_address_in_range), any other
@@ -1026,8 +1132,17 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         I2cSpeed speed = I2cSpeed::standard_100k;
+        /// Which mechanism moves the data (util/i2c_bus.hpp's I2cEngine):
+        /// `interrupt`, the default, or `dma` for the write half on the
+        /// transmit engine (the class comment). It sits in the padding
+        /// after `speed`, so the Request is the size it was without it.
+        I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(offsetof(Request, engine) / alignof(Request) ==
+                      offsetof(Request, speed) / alignof(Request),
+                  "the engine field sits in the padding after speed: the Request "
+                  "must not grow for it");
 
     /// Bring the instance up as a bus host.
     ///
@@ -1054,6 +1169,13 @@ public:
     /// rebase()); one this core cannot produce is marked unreachable -
     /// speed_ok() tells, and a Request naming it completes on the spot
     /// with i2c_rejected rather than running at a rate nobody asked for.
+    ///
+    /// On an engined host the transmit engine is armed last, on this
+    /// instance's DATA and its transmit trigger, its block's end an
+    /// interrupt: the channel claimed for owner n + 1 - a PANIC when
+    /// another transport holds it (docs/samc21/dmac.md, "The rule") -, the
+    /// DMAC brought up if this is its first holder and its NVIC line opened.
+    /// False when the channel would not reset within its bounded wait.
     template <typename Clock>
     static bool init(Clock clock, uint32_t rise_ns = 300u, uint32_t core_hz = 0u) {
         static_assert(clock_follows<Clock, I2cHost>(),
@@ -1089,6 +1211,12 @@ public:
             return false;
         }
         phase_ = Phase::idle;
+        if constexpr (has_engines) {
+            if (!TxEngine::arm(owner, S::data_address(), S::dma_tx_trigger(),
+                               TxEngine::Completion::interrupt)) {
+                return false;
+            }
+        }
         S::enable_interrupt(I2cmFlag::all, false);
         S::enable_interrupt(I2cmFlag::error, true);
         Nvic::enable(S::irq());
@@ -1151,11 +1279,11 @@ public:
     /// Begin one bus tenure (called by I2cBus from main context). Returns
     /// false whenever the wire moves - the tenure runs on the ISR and a
     /// TransferDone{status()} follows - and true for the failures that
-    /// move nothing: a request whose speed cannot be programmed, or whose
-    /// address is outside 0x08..0x77 (i2c_address_in_range), answered
-    /// i2c_rejected through status(), and a SYSOP that never settled
-    /// (i2c_bus_error, below). That is the I2cHost contract
-    /// (docs/design/i2c-bus.md).
+    /// move nothing: a request whose speed cannot be programmed, whose
+    /// address is outside 0x08..0x77 (i2c_address_in_range), or that names
+    /// I2cEngine::dma on a host with no engine, answered i2c_rejected
+    /// through status(), and a SYSOP that never settled (i2c_bus_error,
+    /// below). That is the I2cHost contract (docs/design/i2c-bus.md).
     ///
     /// A tenure against a BUSY bus is the silicon's to hold: writing ADDR
     /// while another host owns the wire parks the START until the bus
@@ -1163,22 +1291,28 @@ public:
     static bool start(const Request& r) {
         // What the engine reads, field by field - the reply capsule is
         // the arbiter's, and a copy of the whole Request is a memcpy call
-        // of 25 bytes on this core.
+        // on this core.
         addr_ = r.addr;
         tx_ = r.tx.get();
         tx_len_ = r.tx_len;
         rx_ = r.rx.get();
         rx_len_ = r.rx_len;
-        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr) ||
+            (!has_engines && r.engine == I2cEngine::dma)) {
             // The core in force cannot produce this speed (a slowed
-            // core drops the fast end of the vocabulary), or the
-            // address is one no Request may name: refuse the request on
-            // the spot rather than run at a rate nobody asked for or
-            // put a reserved address on the wire. i2c_rejected is the
-            // refused-without-moving word the vocabulary already has.
+            // core drops the fast end of the vocabulary), the address
+            // is one no Request may name, or the DMA is asked of a host
+            // with no engine: refuse the request on the spot rather than
+            // run at a rate nobody asked for, put a reserved address on
+            // the wire, or run another engine than the one named.
+            // i2c_rejected is the refused-without-moving word the
+            // vocabulary already has.
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;
+        }
+        if constexpr (has_engines) {
+            dma_ = r.engine == I2cEngine::dma;
         }
         apply(r.speed);
         status_ = i2c_ok;
@@ -1236,6 +1370,40 @@ public:
             return false;
         }
         return settle(p, ph);
+    }
+
+    /// DMAC interrupt body, on an engined host - call it from DMAC_Handler()
+    /// beside the other owners of the image's channels, and from nowhere
+    /// else. Returns true when the tenure just completed: the edge on which
+    /// the glue posts TransferDone{status()}. False, and free, on a host with
+    /// no engine.
+    ///
+    /// The transmit block's end (TCMPL) re-arms MB for the last byte's edge
+    /// and returns false: the tenure ends in the SERCOM's vector. A transfer
+    /// error (TERR, the channel disabled by the silicon, 25.6.2.8) abandons
+    /// the block, sends the STOP and ends the tenure with i2c_dma_fault. The
+    /// cost to another owner's completion: INTSTATUS's one load and a branch
+    /// (DmaChannel::take_interrupt()).
+    [[gnu::always_inline]] static bool dma_isr() {
+        if constexpr (has_engines) {
+            const uint8_t flags = TxEngine::take_interrupt();
+            if (flags == 0u) {
+                return false;
+            }
+            if (phase_ != Phase::dma_write) {
+                // A flag the tenure no longer waits for (its block already
+                // completed or abandoned by the SERCOM's vector): taken above
+                // and dropped.
+                return false;
+            }
+            if ((flags & TxEngine::flag_error) != 0u) [[unlikely]] {
+                return dma_fault();
+            }
+            (void)TxEngine::complete();
+            phase_ = Phase::dma_tail;
+            S::enable_interrupt(I2cmFlag::mb, true);
+        }
+        return false;
     }
 
     /// The classic bus unstick: nine SCL pulses and a Stop, by hand,
@@ -1302,7 +1470,9 @@ public:
     }
 
     /// Put the ENGINE back where start() is legal: the init() tail re-run
-    /// from the cached configuration. Clocks and pads are untouched - a SERCOM software reset
+    /// from the cached configuration, and an engined write's block in
+    /// flight abandoned first (TxEngine::abandon(), counted; the channel
+    /// stays claimed and armed). Clocks and pads are untouched - a SERCOM software reset
     /// reaches neither GCLK routing nor PORT - and the baud table stands,
     /// so no Clock is needed.
     ///
@@ -1311,13 +1481,17 @@ public:
     /// fire on this silicon when the hold releases (measured), so a
     /// re-init is the ONLY way out of a park. THE WIRE IS NOT ITS JOB: a
     /// client still holding SDA makes the next tenure report - a bus
-    /// error, another timeout - and unstick() is the wire's verb.
+    /// error, another timeout - and unstick() is the wire's verb. Main
+    /// context. A block abandoned here is a channel disabled mid-block
+    /// beside whatever other channel runs (the class comment).
     ///
     /// Returns false when a synchronization never settled (the bounded
     /// waits' honesty: a false engine is refusing, not hanging).
     static bool recover() {
         Nvic::disable(S::irq());
+        const Phase ph = phase_;
         phase_ = Phase::idle;
+        end_block(ph);
         bool ok = S::reset();
         ok = configure_applied(I2cSpeed::standard_100k) && ok;
         ok = S::force_idle() && ok;
@@ -1327,7 +1501,26 @@ public:
         return ok;
     }
 
+    /// Hand the pins back, then the peripheral: on an engined host the
+    /// channel's claim first, so another transport may take it. A block in
+    /// flight ends first (docs/samc21/dmac.md, "The rule": another owner's
+    /// channel may be running), the wait on the channel itself and bounded
+    /// by the block's time on the wire, nine SCL periods a byte; a block
+    /// that outlives the bound is disabled anyway. Main context, between
+    /// tenures: a tenure in flight is cut where it stands.
     static void release() {
+        if constexpr (has_engines) {
+            // The SCL period in force (33.6.2.4.1), the rise charged as 64
+            // cycles - above the 48 a 1000 ns rise costs at 48 MHz - and a
+            // spin of the loop taking several cycles more than one.
+            const I2cBaud b = table_[static_cast<uint8_t>(applied_)];
+            const uint32_t period =
+                10u + b.baud + (b.baudlow != 0u ? b.baudlow : b.baud) + 64u;
+            uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * 9u * period;
+            while (TxEngine::running() && spins-- != 0u) {
+            }
+            TxEngine::release(owner);
+        }
         Nvic::disable(S::irq());
         S::release();
         SdaPin::release();
@@ -1336,12 +1529,19 @@ public:
     }
 
 private:
-    /// What the tenure in flight is waiting for (the class comment).
+    /// What the tenure in flight is waiting for (the class comment): the
+    /// pump's two phases and the engined write's three moments.
     enum class Phase : uint8_t {
         idle,
         writing,     ///< pump: MB after the address or a byte
         reading,     ///< pump: SB after a byte (MB only for a NACK or a loss)
+        dma_addr,    ///< engined write: the address's MB starts the block
+        dma_write,   ///< engined write: the block runs, MB disarmed
+        dma_tail,    ///< engined write: block done, MB armed for the last byte's edge
     };
+
+    /// The SERCOM's owner number in the DMA budget's claims (dmac.hpp).
+    static constexpr uint8_t owner = static_cast<uint8_t>(n + 1u);
 
     /// ~5 us at 48 MHz: a 100 kHz half bit, timed by a counted spin
     /// because this is a recovery path that must not depend on any
@@ -1352,9 +1552,9 @@ private:
     }
 
     /// Everything isr()'s inline body does not take: the last byte of a
-    /// read, the end of a write phase, a NACK, a loss, an error, and a
-    /// flag with no tenure. Once a
-    /// tenure, so one call.
+    /// read, the end of a write phase, the engined write's block start, a
+    /// NACK, a loss, an error, and a flag with no tenure. Once a tenure,
+    /// so one call.
     [[gnu::noinline]] static bool settle(uint8_t p, Phase ph) {
         if (ph == Phase::idle) {
             // A flag with no tenure owning it: SWEEP IT, or the level
@@ -1379,18 +1579,38 @@ private:
             }
             return finish(i2c_ok);
         }
+        // One STATUS snapshot a decision: one crossing, one truth. An
+        // engined host takes it here, for the question below; an engineless
+        // one in the branch that needs it, as the pump always has.
+        uint16_t st = 0;
+        if constexpr (has_engines) {
+            st = S::status();
+            // An engined write the client NACKed before LEN: the silicon
+            // has already sent the STOP (33.6.4.1.2), and pos_ says which
+            // byte - 0 before the block started (its address), the write's
+            // length after. MB may stand beside the ERROR (one wire fault
+            // raises both, measured), so it is asked before either flag.
+            if ((st & I2cmStatus::len_error) != 0u) {
+                end_block(ph);
+                return finish(pos_ == 0u ? i2c_nack_addr : i2c_nack_data);
+            }
+        }
         // MB: a byte (or an address) went out - or failed to.
         if ((p & I2cmFlag::mb) != 0u) {
-            const uint16_t st = S::status();   // one snapshot: one crossing, one truth
+            if constexpr (!has_engines) {
+                st = S::status();
+            }
             if ((st & I2cmStatus::arb_lost) != 0u) {
                 // The bus is no longer ours and a Stop is not ours to
                 // send (33.6.2.4.2 case 1). BUSERR beside it is the
                 // protocol-violation flavour of the same loss.
+                end_block(ph);
                 return finish((st & I2cmStatus::bus_error) != 0u ? i2c_bus_error : i2c_arb_lost);
             }
             if ((st & SERCOM_I2CM_STATUS_RXNACK_Msk) != 0u) {
                 // A NACK: at pos_ == 0 nothing of the phase moved,
                 // so the unacknowledged byte was its ADDRESS.
+                end_block(ph);
                 (void)S::stop();
                 return finish(pos_ == 0u ? i2c_nack_addr : i2c_nack_data);
             }
@@ -1401,12 +1621,31 @@ private:
                     pos_ = static_cast<uint8_t>(pos + 1u);
                     return false;
                 }
+            } else if constexpr (has_engines) {
+                if (ph == Phase::dma_addr) {
+                    // The address was acknowledged: the block starts now,
+                    // its first beat fired by the transmit request this MB
+                    // stands beside, and MB is disarmed until the block's
+                    // completion (the class comment). begin_write() checked
+                    // the count.
+                    S::enable_interrupt(I2cmFlag::mb, false);
+                    phase_ = Phase::dma_write;
+                    pos_ = tx_len_;
+                    TxEngine::start_run(tx_, tx_len_);
+                    return false;
+                }
+                if (ph != Phase::dma_tail) {
+                    end_block(ph);
+                    (void)S::stop();         // an MB no phase expects
+                    return finish(i2c_bus_error);
+                }
             } else {
                 (void)S::stop();             // an MB no phase expects
                 return finish(i2c_bus_error);
             }
-            // The write phase is complete (its last byte acknowledged): a
-            // repeated START into the read phase, or the STOP.
+            // The write phase is complete (the pump's last byte, or the
+            // block's, acknowledged): a repeated START into the read phase,
+            // or the STOP.
             if (rx_len_ != 0u) {
                 if (!begin_read()) {
                     (void)S::stop();
@@ -1419,13 +1658,61 @@ private:
         }
         // ERROR alone: a lost bus, a bus error or a time-out seen from the
         // sidelines.
-        const uint16_t st = S::status();
+        if constexpr (!has_engines) {
+            st = S::status();
+        }
+        end_block(ph);
         return finish((st & I2cmStatus::arb_lost) != 0u ? i2c_arb_lost : i2c_bus_error);
     }
 
-    /// The write phase: the address with W, then the pump.
+    /// An engined write's block when the tenure ends early (a NACK, a loss,
+    /// an error, recover()): a channel still enabled has beats nobody will
+    /// ask for, and is abandoned (counted, the class comment); a block that
+    /// already ended is completed, its TCMPL taken here so that no later
+    /// tenure reads it as its own. Nothing outside the block's phase, and
+    /// nothing at all on an engineless host.
+    [[gnu::always_inline]] static void end_block(Phase ph) {
+        if constexpr (has_engines) {
+            if (ph == Phase::dma_write) {
+                if (TxEngine::running()) {
+                    (void)TxEngine::abandon();
+                } else {
+                    (void)TxEngine::take_interrupt();
+                    (void)TxEngine::complete();
+                }
+            }
+        } else {
+            (void)ph;
+        }
+    }
+
+    /// TERR on the transmit channel: the silicon disabled it with the count
+    /// written back (25.6.2.8), the host holds the clock at an MB with no
+    /// DATA coming. The block is abandoned (the channel reset for the next
+    /// one), the STOP sent, the tenure ended i2c_dma_fault. Cold: a bus
+    /// error on the DMA's own source.
+    [[gnu::noinline, gnu::cold]] static bool dma_fault() {
+        if constexpr (has_engines) {
+            (void)TxEngine::abandon();
+        }
+        (void)S::stop();
+        return finish(i2c_dma_fault);
+    }
+
+    /// The write phase: the address with W, then the pump - or, under
+    /// I2cEngine::dma, a write of 1 to dma_write_max bytes from a buffer:
+    /// the address with LEN = w + 1 (the class comment), the block started
+    /// at its MB.
     [[gnu::always_inline]] static bool begin_write() {
         pos_ = 0;
+        if constexpr (has_engines) {
+            if (dma_ && tx_ != nullptr &&
+                static_cast<uint8_t>(tx_len_ - 1u) < dma_write_max) {
+                phase_ = Phase::dma_addr;
+                S::enable_interrupt(I2cmFlag::mb | I2cmFlag::error, true);
+                return S::start_address_len(addr_, false, static_cast<uint8_t>(tx_len_ + 1u));
+            }
+        }
         phase_ = Phase::writing;
         S::enable_interrupt(I2cmFlag::mb | I2cmFlag::error, true);
         return S::start_address(addr_, false);
@@ -1491,6 +1778,8 @@ private:
     static inline uint8_t tx_len_ = 0;
     static inline uint8_t rx_len_ = 0;
     static inline uint8_t pos_ = 0;
+    /// The tenure in flight named I2cEngine::dma (an engined host only).
+    static inline bool dma_ = false;
     // Written by the vectors, read by the thread (status(), idle()): volatile,
     // or a caller that polls and then reads may be handed a value cached from
     // before the tenure.
