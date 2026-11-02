@@ -265,8 +265,9 @@
 //      letter moves the core there, the console and the tick with it, and
 //      back at its end, every cycle it prints a 120 MHz one. Through the
 //      engineless host (the pump) and the host with DMA1 channels 6 and 7
-//      (the engines), ISR-style, the thread idling until the completion,
-//      each line the best of 8 at 100 and 400 kHz (DUTY 2):
+//      (the engines, every request naming I2cEngine::dma), ISR-style, the
+//      thread idling until the completion, each line the best of 8 at 100
+//      and 400 kHz (DUTY 2):
 //        i2c.write      1, 2, 16 and 255 bytes (and 3, last)
 //        i2c.read       1, 2, 16 and 255 bytes, checked against the pattern
 //        i2c.wr         one byte written, a repeated START, 1, 2 and 16 read
@@ -284,6 +285,9 @@
 //      line after each says wall minus that wire - THE FIXED COST - and
 //      what start() took on a quiet bus. Then, per speed:
 //        per byte       the pump's handler cycles and entries per byte
+//        a half         the core's handler cycles for a written and a read
+//                       half: the pump's fixed F and per-byte b, the
+//                       engines' E, and the length from which E <= F + b n
 //        i2c.stop       start() called the moment a write, a read and a
 //                       register read completed, as an arbiter's dispatch
 //                       calls the next tenure: the last STOP's drain
@@ -292,7 +296,8 @@
 //                       from the start() call with STAR1 as it found it -
 //                       where the fixed cost goes
 //      and the longest single entry of each host vector, watched in a
-//      pass of its own. FIRST, at the letter's rate, THE PRICE OF EACH
+//      pass of its own - the event vector's for each operation, and whose
+//      it is. FIRST, at the letter's rate, THE PRICE OF EACH
 //      CLASS OF INSTRUCTION the pump's path is made of, a loop of 1024
 //      turns the best of four: a load and a store of SRAM, of PB2 and of
 //      PB1, a load of the STK's count, an add and a multiply on an SRAM
@@ -2231,6 +2236,11 @@ struct I2cLetter {
         r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_in));
         r.rx_len = rx;
         r.speed = speed;
+        // The engined host's rows ask for its engines by name, every half
+        // at every length; the plain host's take its event vector.
+        if constexpr (Host::has_dma) {
+            r.engine = I2cEngine::dma;
+        }
         return r;
     }
 
@@ -2317,10 +2327,14 @@ struct I2cLetter {
         return c2 > c1 ? (t2 - t1 + (c2 - c1) / 2u) / (c2 - c1) : 0u;
     }
 
+    /// Each operation's best sample, per host: the pump's [0] and the
+    /// engines' [1], for the guidance line below the two passes.
+    static inline BenchSample rows_of[2][sizeof(i2c_ops) / sizeof(i2c_ops[0])] = {};
+
     template <typename Host>
     static void ops(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
         take<Host>(engines);
-        BenchSample rows[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = {};
+        BenchSample (&rows)[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = rows_of[engines ? 1 : 0];
         uint8_t row = 0;
         uint8_t mismatched = 0;
         for (const I2cOp& op : i2c_ops) {
@@ -2378,6 +2392,55 @@ struct I2cLetter {
         }
     }
 
+    /// THE CORE'S CYCLES PER HALF, ON EACH ENGINE: the pump's per-byte b
+    /// (the 255 row less the 16, over 239) and its fixed part F (the 16
+    /// row less 16 b), the engines' E (their 16 row, which no byte count
+    /// moves), each the handlers' cycles alone. The shortest halves are
+    /// read off their own rows, the model F + b x n not holding there (the
+    /// entry that clears ADDR loads two written bytes, and a read of two is
+    /// one BTF entry for both): the length printed is the first measured
+    /// row at which the engines cost no more than the pump, or past the
+    /// rows the first n with E <= F + b x n. start() is the same on both
+    /// and is left out.
+    static void guidance() {
+        const BenchSample(&p)[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = rows_of[0];
+        const BenchSample(&e)[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = rows_of[1];
+        struct Half {
+            const char* what;
+            uint8_t r16;
+            uint8_t r255;
+            uint8_t shortest[3];   ///< rows of n = 1, 2, 3 (0xFF: none)
+        };
+        const Half halves[] = {{"written", i2c_row_w16, i2c_row_w255, {0, 1, 13}},
+                               {"read", i2c_row_r16, i2c_row_r255, {4, 5, 0xFF}}};
+        for (const Half& h : halves) {
+            const uint32_t b = (p[h.r255].isr - p[h.r16].isr) / 239u;
+            const int32_t f = static_cast<int32_t>(p[h.r16].isr) - static_cast<int32_t>(16u * b);
+            const int32_t big_e = static_cast<int32_t>(e[h.r16].isr);
+            uint32_t from = 0;
+            uint32_t n = 1;
+            print(serial, "  the core's cycles a ", h.what, " half: pump F ", f, " + b ", b,
+                  " x n, engines E ", big_e, "; measured, pump against engines:");
+            for (const uint8_t row : h.shortest) {
+                if (row == 0xFFu) {
+                    break;
+                }
+                print(serial, " n=", n, " ", p[row].isr, "/", e[row].isr);
+                if (from == 0u && e[row].isr <= p[row].isr) {
+                    from = n;
+                }
+                ++n;
+            }
+            if (from == 0u) {
+                from = n;
+                while (from < 255u && f + static_cast<int32_t>(b * from) < big_e) {
+                    ++from;
+                }
+            }
+            print(serial, " - dma the cheaper from n = ", from, crlf);
+        }
+    }
+
     /// One tenure traced: the host's and the target's entries in order,
     /// each with its time from the start() call and STAR1 as found.
     static void trace(const char* what, uint8_t tx, uint8_t rx, I2cSpeed speed) {
@@ -2407,11 +2470,30 @@ struct I2cLetter {
     template <typename Host>
     static void watch(I2cSpeed speed, bool engines) {
         take<Host>(engines);
+        // Each operation's longest event entry, watched from zero, the
+        // letter's maximum kept: which entry the longest is.
+        asm volatile("" ::: "memory");
+        const uint32_t kept = i2c_ev_max;
+        uint32_t longest = 0;
+        const I2cOp* whose = &i2c_ops[0];
         i2c_watching = true;
+        print(serial, "  each operation's longest event entry ", engines ? "on the engines:" : "on the pump:");
         for (const I2cOp& op : i2c_ops) {
+            i2c_ev_max = 0;
+            asm volatile("" ::: "memory");   // the handlers store it
             (void)once<Host>(request<Host>(op.addr, op.tx, op.rx, speed));
+            asm volatile("" ::: "memory");
+            print(serial, " ", op.tx, "+", op.rx, " ", i2c_ev_max);
+            if (i2c_ev_max > longest) {
+                longest = i2c_ev_max;
+                whose = &op;
+            }
         }
         i2c_watching = false;
+        i2c_ev_max = kept > longest ? kept : longest;
+        print(serial, crlf, "  the longest: ", longest, " cycles, in ", whose->name, " ", whose->tx, "+",
+              whose->rx, crlf);
+        console_drain();
     }
 
     static void stop_drain(I2cSpeed speed) {
@@ -2588,6 +2670,7 @@ struct I2cLetter {
             console_drain();
             ops<Pump>("", speed, t, false);
             ops<Engined>(".dma", speed, t, true);
+            guidance();
             stop_drain(speed);
             watch<Pump>(speed, false);
             watch<Engined>(speed, true);

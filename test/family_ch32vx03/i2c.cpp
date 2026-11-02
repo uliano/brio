@@ -200,6 +200,10 @@ using DmaHost = I2cHost<1, i2c_default_pins<1>, DmaTxEngine<1, I2c<1>::dma_tx_ch
 using SecondHost = I2cHost<second_i2c, i2c_default_pins<second_i2c>>;
 
 static_assert(!Host::has_engines && DmaHost::has_engines);
+static_assert(!Host::has_dma && DmaHost::has_dma);
+// A Request that names nothing takes the event vector.
+static_assert(Host::Request{}.engine == I2cEngine::interrupt);
+static_assert(DmaHost::Request{}.engine == I2cEngine::interrupt);
 static_assert(Host::pin_pads.scl == Pad{'B', 6});
 
 uint8_t out_bytes[8];
@@ -225,6 +229,8 @@ void host_engine() {
     r.rx_len = 4;
     r.speed = I2cSpeed::fast_400k;
     (void)Host::start(r);
+    r.engine = I2cEngine::dma;   // no engines bound: answered i2c_rejected at run time
+    (void)Host::start(r);
     (void)Host::status();
     (void)Host::isr();
     (void)Host::error_isr();
@@ -241,7 +247,16 @@ void host_engine() {
                                           .rx = {},
                                           .rx_len = 0,
                                           .reply = {},
-                                          .speed = I2cSpeed::standard_100k});
+                                          .speed = I2cSpeed::standard_100k,
+                                          .engine = I2cEngine::dma});
+    (void)DmaHost::start(DmaHost::Request{.addr = 0x2C,
+                                          .tx = {},
+                                          .tx_len = 0,
+                                          .rx = lend<Lease::reply>(static_cast<uint8_t*>(in_bytes)),
+                                          .rx_len = 1,
+                                          .reply = {},
+                                          .speed = I2cSpeed::fast_400k,
+                                          .engine = I2cEngine::dma});
     (void)DmaHost::isr();
     (void)DmaHost::dma_isr();
     DmaHost::release();

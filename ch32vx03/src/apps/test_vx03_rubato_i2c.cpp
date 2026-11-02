@@ -31,12 +31,14 @@
 //   (receive): on this family the channel is the request (table 11-5).
 //   Its engine (the driver's class comment, docs/ch32vx03/i2c.md): the F1
 //   event machine with RTR, two vectors (events, errors), the four receive
-//   procedures by count; the first two written bytes taken in the entry
-//   that clears ADDR (EVT8_1: the data register and the shifter, TxE
-//   polled sixteen STAR1 reads); a write phase of three bytes or more on
-//   the transmit engine, its end BTF with the channel's count at zero; a
-//   read phase of two or more on the receive engine under CTLR2.LAST, the
-//   one-byte read on the pump; the repeated START requested on the last
+//   procedures by count; each Request names its engine (this suite's
+//   table, I2cTraits): under `interrupt` the first two written bytes taken
+//   in the entry that clears ADDR (EVT8_1: the data register and the
+//   shifter, TxE polled sixteen STAR1 reads), then one entry a byte; under
+//   `dma` a write half on the transmit engine, its end BTF with the
+//   channel's count at zero, and a read half on the receive engine, under
+//   CTLR2.LAST from two bytes, its NACK and STOP the event vector's at one;
+//   the repeated START requested on the last
 //   written byte's TxE; a refused last byte closed with a void write; the
 //   event vector off between tenures, the error vector on. start() runs in
 //   the arbiter's dispatch and WAITS there, bounded, in delay_us(1) turns:
@@ -119,8 +121,8 @@
 //   n  the command channel through the arbiter at 100 kHz: a ping, ident
 //      (the sanity byte and the stratum's kind, 0x05), ten pings, every
 //      tenure i2c_ok.
-//   o  the tenure shapes at 400 kHz on both of the host's paths (I2cTraits
-//      below names each shape's), one counted serve a pass: every status
+//   o  the tenure shapes at 400 kHz on both of the host's engines
+//      (I2cTraits below names each shape's), one counted serve a pass: every status
 //      i2c_ok, every read byte-exact, the peer's count, sum and address
 //      matches exact.
 //   p  100 and 400 kHz: a read of 16, a 1+4 and a write of 16 byte-exact,
@@ -134,7 +136,7 @@
 //      each refusing window the probe refused at the address (this peer),
 //      and after the deadline the next tenure i2c_ok.
 //   w  three requesters of three priorities at 400 kHz: the Client's
-//      write-then-reads of 1+6 (the read half on the receive engine),
+//      write-then-reads of 1+6 (both halves on the engines),
 //      Minor's writes of two (the pump: both bytes in the ADDR entry),
 //      Pressure's probes: in order, i2c_ok, nothing rejected, no timeout,
 //      the peer's tallies exact.
@@ -154,6 +156,7 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <iterator>
 #include <variant>
 
@@ -250,7 +253,16 @@ TestBench<Serial> bench;
 using H = I2c<1>;
 using TxEngine = DmaTxEngine<1, 6>;
 using RxEngine = DmaRxEngine<1, 7>;
-using Host = I2cHost<1, i2c_default_pins<1>, TxEngine, RxEngine>;
+using EngineHost = I2cHost<1, i2c_default_pins<1>, TxEngine, RxEngine>;
+/// The engined host with the engine each tenure asks for NAMED BY THE
+/// SUITE: the shared body forms its Requests without the field, so every
+/// one of them reaches start() here and leaves with the engine this
+/// suite's table gives its shape (engine_for(), below I2cTraits) - the
+/// Request's fields copied and a bit's load, inside start()'s cycles as
+/// letter x counts them. Every other verb is the host's own.
+struct Host : EngineHost {
+    static bool start(const Request& r);
+};
 using TxChannel = DmaChannel<1, 6>;
 using RxChannel = DmaChannel<1, 7>;
 using SclPin = Pin<'B', 6>;
@@ -269,39 +281,44 @@ struct Shape {
     uint8_t tx_len;
     uint8_t rx_len;
     const char* path;
+    I2cEngine engine;
 };
 struct I2cTraits {
-    /// Letter o's table, each shape with the path this host takes: a write
-    /// phase of three bytes or more on the transmit engine and of one or two
-    /// in the entry that clears ADDR (the driver's dma_min_write, 3, a
-    /// private constant: EVT8_1 takes two bytes with no interrupt for
-    /// either), a read phase of two or more on the receive engine under
-    /// LAST and of one on the pump. The 3+2 is the one shape whose write
-    /// half rides the engine with a read half behind it: the transmit
-    /// block's completion arms the buffer vector for the TxE that requests
-    /// the repeated START. Ends on a plain write (the shared body's counted
-    /// serve).
+    /// Letter o's table, each shape with the engine its Request names and
+    /// the path that takes: under `interrupt` the event vector (the pump) -
+    /// the first two written bytes in the entry that clears ADDR (EVT8_1:
+    /// the data register and the shifter), then one entry a byte, the
+    /// receive procedures by count; under `dma` every half on its engine at
+    /// any length - a read of one with its NACK and STOP the event
+    /// vector's, a read of two or more under LAST, a write half's end BTF
+    /// with the channel's count at zero, or, a read half behind it, the TxE
+    /// the transmit block's completion arms for the repeated START. Each
+    /// engine takes the shortest halves and a long one. Ends on a plain
+    /// write (the shared body's counted serve).
     static constexpr Shape shapes[] = {
-        {0, 0, "the probe: SB and ADDR, two event entries"},
-        {0, 1, "pump: ACK down before the address, STOP after ADDR's clear, the byte at RxNE"},
-        {0, 2, "engines: the receive channel under LAST"},
-        {0, 3, "engines"},
-        {0, 8, "engines"},
-        {0, 32, "engines"},
-        {1, 1, "pump both halves: the byte and the repeated START in the ADDR entry"},
-        {1, 2, "pump write (the ADDR entry), engine read"},
-        {2, 8, "pump write (both bytes in the ADDR entry), engine read"},
-        {3, 2, "engines both halves: the block's end arms TxE for the repeated START"},
-        {1, 0, "pump: the byte in the ADDR entry, BTF the end"},
-        {2, 0, "pump: both bytes in the ADDR entry, BTF the end"},
-        {3, 0, "engines: the transmit channel, BTF with its count at zero"},
-        {8, 0, "engines"},
-        {32, 0, "engines"},
+        {0, 0, "the probe: SB and ADDR, two event entries", I2cEngine::interrupt},
+        {0, 1, "engines: ACK down before the address, STOP after ADDR's clear, the byte the channel's",
+         I2cEngine::dma},
+        {0, 2, "engines: the receive channel under LAST", I2cEngine::dma},
+        {0, 3, "pump: RxNE, then BTF twice", I2cEngine::interrupt},
+        {0, 8, "engines", I2cEngine::dma},
+        {0, 32, "pump", I2cEngine::interrupt},
+        {1, 1, "engines both halves: the block's end arms TxE for the repeated START", I2cEngine::dma},
+        {1, 2, "pump both halves: the byte and the repeated START in the ADDR entry, POS's read",
+         I2cEngine::interrupt},
+        {2, 8, "engines both halves", I2cEngine::dma},
+        {3, 2, "pump both halves", I2cEngine::interrupt},
+        {1, 0, "engines: the transmit channel, BTF with its count at zero", I2cEngine::dma},
+        {2, 0, "pump: both bytes in the ADDR entry, BTF the end", I2cEngine::interrupt},
+        {3, 0, "engines", I2cEngine::dma},
+        {8, 0, "pump", I2cEngine::interrupt},
+        {32, 0, "engines", I2cEngine::dma},
     };
-    static_assert(Host::has_engines, "the table names engine paths");
-    /// Minor's writes of two: the pump, both bytes taken in the entry that
-    /// clears ADDR, so that letter w puts one requester on each path (the
-    /// Client's read halves on the receive engine).
+    static_assert(Host::has_dma, "the table names engine paths");
+    /// Minor's writes of two: the pump (the table's 2+0 names it), both
+    /// bytes taken in the entry that clears ADDR, so that letter w puts one
+    /// requester on each path (the Client's 1+6 on the engines,
+    /// engine_for()'s default).
     static constexpr uint8_t w_minor_len = 2;
     /// The peer's holds inside the stretched tenures (its run_serve): one at
     /// the address match and one before each byte it takes or gives, a
@@ -336,6 +353,50 @@ struct I2cTraits {
     /// low at rest is that board unpowered (or a line held).
     static bool bring_up() { return SclPin::read() && SdaPin::read(); }
 };
+
+/// THE ENGINE EACH TENURE NAMES: the table's, for a shape it lists, and
+/// `dma` for every other - the command channel, letters p, q, w's Client,
+/// h and x. One bit per shape of up to 32 + 32 bytes, folded from the
+/// table at compile time, so start() pays a load and a test for it.
+constexpr uint8_t engine_span = 33;
+constexpr auto pump_bits = [] {
+    std::array<uint8_t, (engine_span * engine_span + 7u) / 8u> bits{};
+    for (const Shape& sh : I2cTraits::shapes) {
+        if (sh.engine == I2cEngine::interrupt) {
+            const uint16_t k = static_cast<uint16_t>(sh.tx_len * engine_span + sh.rx_len);
+            bits[k / 8u] = static_cast<uint8_t>(bits[k / 8u] | (1u << (k % 8u)));
+        }
+    }
+    return bits;
+}();
+constexpr I2cEngine engine_for(uint8_t tx_len, uint8_t rx_len) {
+    if (tx_len >= engine_span || rx_len >= engine_span) {
+        return I2cEngine::dma;
+    }
+    const uint16_t k = static_cast<uint16_t>(tx_len * engine_span + rx_len);
+    return (pump_bits[k / 8u] & (1u << (k % 8u))) != 0u ? I2cEngine::interrupt : I2cEngine::dma;
+}
+static_assert([] {
+    for (const Shape& sh : I2cTraits::shapes) {
+        if (engine_for(sh.tx_len, sh.rx_len) != sh.engine) {
+            return false;
+        }
+    }
+    return true;
+}(), "every shape of the table names its engine once: no two shapes share a length pair");
+
+bool Host::start(const Request& r) {
+    // Field by field, not `Request named = r`: that copy is a call to the
+    // runtime's memcpy, which letter x would count inside start().
+    return EngineHost::start(Request{.addr = r.addr,
+                                     .tx = r.tx,
+                                     .tx_len = r.tx_len,
+                                     .rx = r.rx,
+                                     .rx_len = r.rx_len,
+                                     .reply = r.reply,
+                                     .speed = r.speed,
+                                     .engine = engine_for(r.tx_len, r.rx_len)});
+}
 
 // THE TARGET-FREE HALF IS SHARED, NOT COPIED: every family's I2C suite
 // compiles the same body around its own host.
