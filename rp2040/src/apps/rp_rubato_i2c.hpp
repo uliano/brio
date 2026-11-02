@@ -23,9 +23,12 @@
 //
 //   SysClock, clock, P, core_hz, cycles_per_us, Ruler
 //   Serial, serial, bench    the console (UART0 on GP0/GP1) and its TestBench
-//   Host, TxEngine, RxEngine the link's I2cHost with its two engines (the
+//   LinkHost, TxEngine, RxEngine
+//                            the link's I2cHost with its two engines (the
 //                            transmit engine of uint16_t command words, the
-//                            receive engine of bytes, both on DMA_IRQ_0)
+//                            receive engine of bytes, both on DMA_IRQ_0);
+//                            this file names it `Host` with the engine
+//                            rule below
 //   SdaPin, SclPin           the link's two pads as Pin types
 //   peer_kind, pressure_name, peer_name   (rubato_i2c.hpp's)
 //   core1_pass               whether letters c and e (o and x with every
@@ -53,10 +56,14 @@
 // start() pushes every entry the FIFO has room for and only then unmasks the
 // sources; the pump refills at half the transmit FIFO (TX_EMPTY) and takes
 // the bytes at half the receive one (RX_FULL); every tenure ends on its own
-// STOP_DET. A read phase of three bytes or more rides the engines - the
-// first command and the last the pump's, the middle block poured by the
-// transmit engine, every byte collected by the receive engine - and a write
-// phase stays on the pump (a byte buffer cannot carry the entries' flags).
+// STOP_DET. A Request names its engine (Request::engine), and the shared
+// body builds every Request naming none, so this file names it in start()
+// (EngineByLength below): `dma` when either half carries two bytes or more,
+// `interrupt` otherwise. Under `dma` a read phase rides the engines - every
+// byte collected by the receive engine, and from three bytes the middle
+// block of commands poured by the transmit engine, the first command and
+// the last the pump's - and a write phase stays on the pump (its bytes land
+// replicated across the command register on a byte beat).
 // The probe is a ONE-BYTE READ: the block has no address-only frame
 // (dw_apb_i2c/i2c.hpp's header), so the peer gives it a byte and counts it.
 // The address and the speed go into the block under a disable/enable cycle,
@@ -108,6 +115,23 @@
 // The names the shared body asks, the two chips alike
 // =============================================================================
 
+/// THE ENGINE, NAMED BY THE SUITE. The host carries a half on the engine
+/// its Request names (Request::engine, util/i2c_bus.hpp) and the shared
+/// body builds every Request naming none, so this wrapper names it in
+/// start(): `dma` when either half carries two bytes or more, `interrupt`
+/// otherwise - the suite's own `if`, one copy of the Request and a compare
+/// added to start()'s cycles, which put letter o's shapes on every path the
+/// host has. Every other verb is the host's own.
+template <typename Base>
+struct EngineByLength : Base {
+    static bool start(const typename Base::Request& r) {
+        typename Base::Request q = r;
+        q.engine = (r.tx_len >= 2u || r.rx_len >= 2u) ? I2cEngine::dma : I2cEngine::interrupt;
+        return Base::start(q);
+    }
+};
+using Host = EngineByLength<LinkHost>;
+
 /// The stretch instrument, defined below: called at the end of Pressure's
 /// spin (I2cTraits::tick_spin_end()).
 void stretch_check();
@@ -132,25 +156,28 @@ struct Shape {
     const char* path;
 };
 struct I2cTraits {
-    /// Letter o's table, each shape with the path this host takes: a read
-    /// phase of three or more rides the engines, a shorter one and every
-    /// write phase the pump; the probe a one-byte read the peer serves
+    /// Letter o's table, each shape with the path this host takes under
+    /// EngineByLength: a read half of two bytes or more names `dma` and
+    /// rides the receive engine, from three with the transmit engine
+    /// pouring the middle commands; a write half stays on the pump under
+    /// either value (`dma` named from two bytes, the half the engines
+    /// cannot carry); the probe a one-byte read the peer serves
     /// (probe_bytes). The plain writes last, as the shared body asks.
     static constexpr Shape shapes[] = {
         {0, 0, "pump: the probe, one read entry carrying STOP, its byte served and dropped"},
         {0, 1, "pump: one read entry carrying STOP, the byte taken at STOP_DET"},
-        {0, 2, "pump: two read entries, the bytes at STOP_DET"},
+        {0, 2, "receive engine: the pump's two entries, both bytes collected"},
         {0, 3, "engines: the pump's first and last entries, the middle one poured, every byte collected"},
         {0, 8, "engines"},
         {0, 32, "engines: the commands poured through the 16-deep FIFO on its level request"},
         {1, 1, "pump both halves: the write entry, the read entry with RESTART and STOP"},
-        {1, 2, "pump both halves"},
+        {1, 2, "pump write, receive engine read"},
         {2, 8, "pump write, engine read (its first entry with RESTART)"},
         {1, 0, "pump: one entry carrying STOP"},
-        {2, 0, "pump"},
-        {3, 0, "pump"},
-        {8, 0, "pump: one fill"},
-        {32, 0, "pump: a fill of sixteen, then refills at TX_EMPTY, half the FIFO"},
+        {2, 0, "pump under dma: a half the engines cannot carry"},
+        {3, 0, "pump under dma"},
+        {8, 0, "pump under dma: one fill"},
+        {32, 0, "pump under dma: a fill of sixteen, then refills at TX_EMPTY, half the FIFO"},
     };
     static_assert(Host::has_engines, "the table names engine paths");
     /// The probe is a one-byte read the peer counts (the file header).

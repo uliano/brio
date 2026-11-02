@@ -147,7 +147,7 @@ TestBench<Serial, 16> bench;
 constexpr I2cPins link_pins{.scl = 37, .sda = 36};
 using TxEngine = DmaTxEngine<4, uint16_t>;
 using RxEngine = DmaRxEngine<5>;
-using Host = I2cHost<0, link_pins, TxEngine, RxEngine>;
+using LinkHost = I2cHost<0, link_pins, TxEngine, RxEngine>;
 using SdaPin = Pin<36>;
 using SclPin = Pin<37>;
 
@@ -172,13 +172,13 @@ bool rp_bring_up() {
         host_up = false;
         return false;
     }
-    host_up = Host::init(clock);
+    host_up = LinkHost::init(clock);
     return host_up;
 }
 
 void rp_letter_end() {
     if (host_up) {
-        Host::release();
+        LinkHost::release();
         host_up = false;
     }
 }

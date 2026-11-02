@@ -71,7 +71,9 @@ did not come up, and the example discards that answer; a speed the
 clock cannot produce is answered `i2c_rejected` at the request, and so
 is an address outside 0x08..0x77 - the general call and the 10-bit
 prefixes among them, which every host refuses
-([../design/i2c-bus.md](../design/i2c-bus.md)). The
+([../design/i2c-bus.md](../design/i2c-bus.md)) - and a request naming
+`I2cEngine::dma` on a host with no DMA engines bound, as this `Bus`
+is. The
 program binds `isr_i2c0` itself; left unbound, the line's first
 interrupt goes into the crt's default spin and the program stops there
 (no timeout can answer from inside a spinning handler). `reg` and `value` must
@@ -253,7 +255,14 @@ stratum adds:
   `I2cClient<n, pins>` - the public names, this chip's aliases of the
   three IP templates, with `NoDmaEngine` in both slots and `InFlash` by
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
-  "A handler in SRAM").
+  "A handler in SRAM"). The host's `Request` carries the engine it runs
+  on, `engine`, `I2cEngine::interrupt` by default or `I2cEngine::dma`,
+  and `has_dma` says whether engines are bound (the IP stratum's page,
+  "The engine a request names"). A write half stays on the interrupt
+  under `dma`: a byte beat from the request's buffer reaches
+  `IC_DATA_CMD` replicated across the word at the register's address
+  (2.1.5; the DMA's one transfer size for both sides, 12.6), its copy in
+  bit 8 a read command.
 
 The family header also holds the vocabulary check: every bit the IP file
 spells for itself, held by `static_assert` against the macro this chip's
@@ -286,11 +295,49 @@ The same source builds for both architectures; `isr_i2c0` is a
 vector-table slot on one half and a dispatch entry on the other.
 
 With the engines: `I2cHost<0, pins, DmaTxEngine<4, uint16_t>,
-DmaRxEngine<5>>` and `isr_dma_0` calling `Bus::dma_isr()` the same way.
+DmaRxEngine<5>>`, `isr_dma_0` calling `Bus::dma_isr()` the same way, and
+every request that should ride them naming them (an excerpt: the request
+above on that host, reading a block of 64 bytes into a buffer `block` of
+the program's, lent like `value`):
+
+```cpp
+r.rx = brio::lend<brio::Lease::reply>(block); r.rx_len = 64;   // a block worth the engines
+r.engine = brio::I2cEngine::dma;                               // the read half on the DMA channels
+```
+
 This chip has sixteen channels and four interrupt lines, and the line is
 the engine's third parameter, so a host whose engines ring on line 2 is
 `DmaTxEngine<6, uint16_t, 2>` and `DmaRxEngine<7, uint8_t, 2>` with
 `isr_dma_2` ([dma.md](dma.md)).
+
+The host never chooses. A request that names nothing runs on the host's
+interrupt, at any length, and touches no channel; one that names `dma`
+has its read half on the engines at any length - the receive engine
+collecting every byte, the transmit engine pouring the commands of a
+read of three bytes or more - while its write half, which the engines
+cannot carry, stays on the interrupt and the request completes. On a host
+with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
+costs core cycles, never correctness. The core cycles each costs,
+`bench_rp2350` letter i's `i2c.cost` lines (start() and the vectors, the
+least of five, the host and its vector in the flash, the same at the
+three speeds), at 150 MHz, Cortex-M33 / Hazard3:
+
+| read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
+|---|---|---|---|---|---|---|---|---|
+| `interrupt` | 375 / 346 | 385 / 360 | 403 / 379 | 493 / 474 | 622 / 578 | 748 / 711 | 2600 / 2359 | 9950 / 8916 |
+| `dma` | 390 / 349 | 390 / 353 | 604 / 578 | 540 / 474 | 543 / 478 | 543 / 478 | 629 / 549 | 629 / 549 |
+
+The pump costs F + b x n, F 132 / 162 cycles and b 38.5 / 34.3 a byte,
+in steps of eight (one entry for each half FIFO); the engines cost E,
+543 / 478, at any length. So `dma` costs the core fewer cycles from
+**nine bytes** on both halves (the pump's second entry); a read of one
+or two costs the same within fifteen cycles either way, and one of three
+to eight costs the engines a second entry (the transmit block's end). A
+write costs the same under either value. The energy side: under either
+value the core waits in its sleep instruction between entries, and the
+chip's SLEEP state asks in addition that the DMA have no outstanding
+transfer on any channel (6.5.2), which a `dma` read's channels hold for
+the read - not measured here.
 
 A program that means to call `unstick()` starts the ruler its half-bits
 are paced by, which on the Cortex-M33 half nothing else does:
@@ -456,18 +503,36 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,
   where the pump pours them by the FIFO.
+- THE ENGINES (letter g, every request naming its engine, fifteen runs
+  on each half - twelve alone, three in z - the same figures in each):
+  the shortest reads under `dma`, one byte and two, on the receive
+  engine, its run the length and every byte of it moved, the transmit
+  engine never claimed, one host entry and no DMA line entry; writes of
+  1 and 32 under `dma` (the half the engines cannot carry) complete on
+  the interrupt, no DMA line entry, the 32 in three host entries, the
+  peer's count and sum exact; `interrupt` at 64 bytes on the engined
+  host touches no channel - no DMA line entry, the receive run and its
+  channel's write address unchanged - in eight host entries; a 40-byte
+  read under `dma` with the transmit channel claimed by another owner
+  (the letter itself) completes exact, its commands the pump's in four
+  host entries, every byte the receive engine's; a write-then-read of
+  6 + 16 under `dma` whose third written byte the client refuses, the
+  read half already on the engines, is `i2c_nack_data` with two bytes
+  stored and the next engined read exact; and an engined read losing the
+  arbitration inside a window held by hand is `i2c_arb_lost` (letter k,
+  [../rp2040/i2c.md](../rp2040/i2c.md) for the race it closes).
 - THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
   `i2c_dma_fault` with no host interrupt, the peer having served 3 or 4
-  bytes by the abort (21 and 9 of 30 runs over the three images of the
-  pair), and the next engined read is clean.
+  bytes by the abort on the Cortex-M33 and 3 on the Hazard3, in fifteen
+  runs each, and the next engined read is clean.
 - **THE ENGINES' FIRST READ IS THE XIP CACHE'S FILL.** A 64-byte engined
-  read at 400 kHz takes 1485 to 1492 us (392 to 393 kHz) with two host
-  interrupts; letter g's first after a flash takes 1543 / 1530 us
+  read at 400 kHz takes 1483 to 1488 us (393 to 394 kHz) with two host
+  interrupts; letter g's first after a flash takes 1544 / 1529 us
   (Cortex-M33 / Hazard3), and the same read with every line of the cache
-  invalidated first, printed third, 1529 / 1518 - two passes on each
-  half; the RP2040's reading in a smaller size
+  invalidated first, printed third, 1532 to 1539 / 1521 to 1522 over
+  fifteen runs on each half; the RP2040's reading in a smaller size
   ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter judges the second.
 
 ### The stack under the preemptive kernel (`test_rp2350_rubato_i2c`)
@@ -482,9 +547,12 @@ highest object every 97, 193 or 389 us and its dispatch spins 300 or
 at every pass's opening, once the RP2040's rail reads up on the two
 pads, and given back at every letter's end. Every letter runs once with
 the alarm silent and six times under it. **209 verdicts in the key `z`,
-green in every run on each half - the key three times on the
-Cortex-M33 and on Hazard3, its vocabulary letter `q` ten more on each; the letters `x`
-and `s`, outside it, green in ten runs each on each half.** The pack,
+green in every run on Hazard3 and in every run but the first after a
+flash on the Cortex-M33** - the key three times on each half, its
+vocabulary letter `q` ten more on Hazard3 and forty-three more on the
+Cortex-M33; the letters `x` and `s`, outside it, green in three runs
+each on each half. The one verdict the Cortex-M33 fails there is the
+peer's and not the host's (below, "The probe after a refusal"). The pack,
 the command channel through the arbiter and the letters are the I2C
 suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`); what the two
 Raspberry Pi chips share over this block is
@@ -529,8 +597,24 @@ not seen on this chip: none in twelve pressed passes on the Cortex-M33
 before the host required its state machine idle at a STOP, none in 120
 on the two halves after.
 
+**The probe after a refusal races the peer.** Letter `q`'s control pass
+writes six bytes to a peer refusing the third, then probes it at once:
+the peer refuses by disabling its client once the second byte is taken,
+and enables it again once the block reports the disable done, after the
+host's STOP. On the Cortex-M33, in the first run after both boards are
+flashed - the peer's `twi_peer` cold in its XIP cache - that probe meets
+the client still disabled and is answered `i2c_nack_addr`: six runs of
+six, every later run clean (forty). The host's side of the race is
+its abort: a tenure on the interrupt touches no channel at its abort, so
+the probe follows sooner; the same image with the abort putting the
+engines away regardless passed the first run three times of three. The
+verdict judges the peer's recovery, and is not loosened here.
+
 **Every shape, and three requesters, under every pressure as in the
-control.** Letter `o` at 400 kHz, one serve counted to its end, every
+control.** Letter `o` at 400 kHz, one serve counted to its end - the
+suite naming `dma` for a request with a half of two bytes or more and
+`interrupt` otherwise, so the shapes take every path the host has
+(`rp2040/src/apps/rp_rubato_i2c.hpp`'s table names each) - every
 shape `i2c_ok` and byte-exact, the peer's count, sum and seventeen
 address matches exact; post to reply over ten runs, the control's and
 the worst under pressure, Cortex-M33 / Hazard3: the probe 71 to 78 and

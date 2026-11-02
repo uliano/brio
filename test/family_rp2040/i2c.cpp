@@ -28,6 +28,8 @@ using Host = I2cHost<0, host_pins>;
 using DmaHost = I2cHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
 using Client = I2cClient<1, client_pins>;
 static_assert(!Host::has_engines && DmaHost::has_engines);
+static_assert(!Host::has_dma && DmaHost::has_dma);
+static_assert(Host::Request{}.engine == I2cEngine::interrupt, "a Request naming nothing runs on the interrupt");
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(sizeof(Host::Request) == sizeof(DmaHost::Request));
 
@@ -116,6 +118,7 @@ void i2c_verbs() {
     d.addr = 0x42;
     d.rx = lend<Lease::reply>(buf);
     d.rx_len = 16;
+    d.engine = I2cEngine::dma;
     (void)DmaHost::start(d);
     (void)DmaHost::isr();
     (void)DmaHost::dma_isr();

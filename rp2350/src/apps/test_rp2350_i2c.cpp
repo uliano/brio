@@ -45,13 +45,17 @@
 //   d  the tenure shapes against the peer: write, read, write-then-read
 //      with the repeated START counted from the far end, the probe, reads
 //      across the peer's refills, a 200-byte write through the pump
-//   e  the vocabulary: nack_addr from a deaf client, 0x7A and the general
-//      call refused inside start() with nothing on the wire, nack_data at
-//      the first and at the third data byte, the client's stretch priced
-//      on a read and absent on a write
+//   e  the vocabulary: nack_addr from a deaf client, 0x7A, the general
+//      call and `dma` on the engineless host refused inside start() with
+//      nothing on the wire, nack_data at the first and at the third data
+//      byte, the client's stretch priced on a read and absent on a write
 //   f  THE THREE SPEEDS byte-exact both ways and MEASURED on the ruler
-//   g  THE DMA ENGINES (channels 4 and 5): a 64-byte read timed, a
-//      write-then-read, the short reads on the pump, the bursts
+//   g  THE DMA ENGINES (channels 4 and 5), every request naming its
+//      engine: a 64-byte read timed, a write-then-read, reads of one and
+//      two bytes on the receive engine, writes under `dma` on the pump,
+//      `interrupt` at 64 bytes touching no channel, the transmit channel
+//      held by another owner, the fault path, the bursts, and a data
+//      NACK with the read half's engines launched
 //   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
 //      rejection, both votes, and THE TIMED BUS - the peer holding SCL -
 //      answered by the arbiter's per-bus timeout
@@ -64,7 +68,8 @@
 //      answers carried by them, the unstick's hand-over through the HIGH
 //      half's SIO registers and back, and both pads left isolated again
 //      by release()
-//   k  ARBITRATION on the wire, both directions
+//   k  ARBITRATION on the wire, both directions, and an engined read
+//      losing it
 //   l  THE ROLES INVERT: this board's client written to and read from by
 //      the peer's host, and a general call commanded of that host refused
 //      there, nothing reaching this client
@@ -127,7 +132,9 @@ TestBench<Serial> bench;
 // I2C0 on the pair's wires: GP37 (SCL), GP36 (SDA).
 constexpr I2cPins link_pins{.scl = 37, .sda = 36};
 using Host = I2cHost<0, link_pins>;
-using DmaHost = I2cHost<0, link_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
+using DmaTx = DmaTxEngine<4, uint16_t>;
+using DmaRx = DmaRxEngine<5>;
+using DmaHost = I2cHost<0, link_pins, DmaTx, DmaRx>;
 using Client = I2cClient<0, link_pins>;
 using Raw = DwApbI2c<0>;
 using SdaPin = Pin<36>;

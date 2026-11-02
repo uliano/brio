@@ -483,7 +483,7 @@ TEST_CASE("recover puts the engine back where a start is legal; release puts it 
     CHECK_FALSE(Block::released());
 }
 
-TEST_CASE("the engines take the middle of a read phase, the pump its two ends") {
+TEST_CASE("under dma the engines take the middle of a read phase, the pump its two ends") {
     fresh();
     TxEngine::reset();
     RxEngine::reset();
@@ -498,6 +498,7 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     r.addr = 0x48;
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
     r.rx_len = 8;
+    r.engine = I2cEngine::dma;
     REQUIRE_FALSE(Streamed::start(r));
 
     // The pump wrote the FIRST read command; then the engines took over:
@@ -528,6 +529,7 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     CHECK_FALSE(Streamed::dma_isr());
     CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::rx);
     CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    CHECK_FALSE(TxEngine::busy());
 
     // The STOP is the tenure's end, as on the pump: the requests off.
     peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
@@ -539,31 +541,230 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     Streamed::release();
 }
 
-TEST_CASE("a short read stays on the pump, and a bus error ends the tenure") {
+TEST_CASE("under dma a read of one or two bytes rides the receive engine alone") {
     fresh();
     TxEngine::reset();
     RxEngine::reset();
     constexpr Clock clock;
     REQUIRE(Streamed::init(clock));
 
-    // Two bytes are the first entry and the last: nothing for an engine
-    // to pour.
-    uint8_t in[2]{};
+    // One byte: the one entry carries STOP, the receive engine takes the
+    // byte, the transmit engine is not claimed (nothing between the first
+    // command and the last).
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}}) {
+        uint8_t in[2]{};
+        Streamed::Request r{};
+        r.addr = 0x48;
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+        r.rx_len = n;
+        r.engine = I2cEngine::dma;
+        const uint32_t rx_blocks = RxEngine::blocks;
+        REQUIRE_FALSE(Streamed::start(r));
+        CHECK(RxEngine::blocks == rx_blocks + 1u);
+        CHECK(RxEngine::length == n);
+        CHECK(TxEngine::blocks == 0u);
+        CHECK_FALSE(TxEngine::busy());
+        CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+        CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::rx);
+        CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
+        // The STOP ends it, every byte the engine's.
+        peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+        CHECK(Streamed::isr());
+        CHECK(Streamed::status() == i2c_ok);
+        CHECK(peer_regs().IC_DMA_CR == 0u);
+    }
+    Streamed::release();
+}
+
+TEST_CASE("interrupt, the default, touches no channel at any length; its abort neither") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+    uint8_t in[200]{};
     Streamed::Request r{};
     r.addr = 0x48;
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
-    r.rx_len = 2;
+    r.rx_len = 200;
     REQUIRE_FALSE(Streamed::start(r));
     CHECK(TxEngine::blocks == 0u);
     CHECK(RxEngine::blocks == 0u);
-    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::rx_full));
+    // A NACK on the address: the abort puts away no channel.
+    peer_regs().IC_TX_ABRT_SOURCE = 1u;   // ABRT_7B_ADDR_NOACK
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_abrt;
+    CHECK(Streamed::isr());
+    CHECK(Streamed::status() == i2c_nack_addr);
+    CHECK(TxEngine::faults == 0u);
+    CHECK(RxEngine::armed == 1u);   // not bound again
+    Streamed::release();
+}
 
-    // A long one, and a bus error on the transmit channel: the engines
-    // are put away, the block told to abort, and the tenure ends with
-    // the engine's own code.
+TEST_CASE("a write half under dma stays on the pump and completes; so does the probe") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+    uint8_t out[20]{};
+    for (uint8_t i = 0; i < 20u; ++i) {
+        out[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    Streamed::Request w{};
+    w.addr = 0x48;
+    w.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    w.tx_len = 20;
+    w.engine = I2cEngine::dma;
+    REQUIRE_FALSE(Streamed::start(w));
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(RxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::tx_empty));
+    peer_regs().IC_TXFLR = 8;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Streamed::isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x43, {.stop = true}));
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Streamed::isr());
+    CHECK(Streamed::status() == i2c_ok);
+
+    Streamed::Request probe{};
+    probe.addr = 0x48;
+    probe.engine = I2cEngine::dma;
+    REQUIRE_FALSE(Streamed::start(probe));
+    CHECK(RxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    peer_regs().IC_RXFLR = 1;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Streamed::isr());
+    CHECK(Streamed::status() == i2c_ok);
+    Streamed::release();
+}
+
+TEST_CASE("a long write then a read under dma: the read launched from the vector, RX_FULL never armed") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+    uint8_t out[20]{};
+    uint8_t in[12]{};
+    Streamed::Request r{};
+    r.addr = 0x48;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = 20;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 12;
+    r.engine = I2cEngine::dma;
+    REQUIRE_FALSE(Streamed::start(r));
+    // Sixteen written bytes fill the FIFO: no read entry yet, no engine,
+    // and RX_FULL is not armed for a read the receive engine will collect.
+    CHECK(RxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::tx_empty));
+    // Room for eight: the four written bytes left and the first read
+    // command go in, the engines take the rest, TX_EMPTY stands down.
+    peer_regs().IC_TXFLR = 8;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Streamed::isr());
+    CHECK(RxEngine::length == 12u);
+    CHECK(TxEngine::length == 10u);
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.restart = true}));
+    CHECK(peer_regs().IC_DMA_CR == (I2cDmaControl::tx | I2cDmaControl::rx));
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
+    TxEngine::next_flags = TxEngine::flag_complete;
+    CHECK_FALSE(Streamed::dma_isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Streamed::isr());
+    CHECK(Streamed::status() == i2c_ok);
+    Streamed::release();
+}
+
+TEST_CASE("a transmit channel another owner holds: the pump writes the commands, the receive engine collects") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+    TxEngine::held = true;
+    uint8_t in[40]{};
+    Streamed::Request r{};
+    r.addr = 0x48;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 40;
+    r.engine = I2cEngine::dma;
+    REQUIRE_FALSE(Streamed::start(r));
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(RxEngine::length == 40u);
+    CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::rx);
+    // Sixteen commands in, the room paces the rest (no RX_FULL under the
+    // receive engine).
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::tx_empty));
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry());
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Streamed::isr());   // sixteen more
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) != 0u);
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Streamed::isr());   // the last eight, the STOP among them
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) == 0u);
+    // An abort now leaves the held channel alone: not abandoned.
+    peer_regs().IC_TX_ABRT_SOURCE = I2cAbort::arb_lost;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_abrt;
+    CHECK(Streamed::isr());
+    CHECK(Streamed::status() == i2c_arb_lost);
+    CHECK(TxEngine::faults == 0u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    TxEngine::held = false;
+    Streamed::release();
+}
+
+TEST_CASE("dma on a host with no engines is refused at start(), nothing written") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    const uint32_t before = regs().IC_DATA_CMD;
+    uint8_t in[4]{};
+    Host::Request r{};
+    r.addr = 0x42;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 4;
+    r.engine = I2cEngine::dma;
+    CHECK(Host::start(r));
+    CHECK(Host::status() == i2c_rejected);
+    CHECK(Host::idle());
+    CHECK(regs().IC_DATA_CMD == before);
+    CHECK(regs().IC_INTR_MASK == 0u);
+    // And a value outside the enumeration on the engined host.
+    Streamed::Request bad{};
+    bad.addr = 0x42;
+    bad.engine = static_cast<I2cEngine>(2);
+    REQUIRE(Streamed::init(clock));
+    CHECK(Streamed::start(bad));
+    CHECK(Streamed::status() == i2c_rejected);
+    // The next request on the engineless host is served.
+    r.engine = I2cEngine::interrupt;
+    CHECK_FALSE(Host::start(r));
+    CHECK(regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    Streamed::release();
+}
+
+TEST_CASE("a bus error on the transmit channel ends an engined read with the engine's code") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
     Streamed::Request big{};
     big.addr = 0x48;
     big.rx_len = 8;   // no buffer: the bytes are read and thrown away
+    big.engine = I2cEngine::dma;
     REQUIRE_FALSE(Streamed::start(big));
     CHECK(RxEngine::discarded);
     TxEngine::next_flags = TxEngine::flag_error;

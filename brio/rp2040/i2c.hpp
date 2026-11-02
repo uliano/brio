@@ -258,8 +258,11 @@ using DwApbI2c = DwApbI2cBlock<Rp2040DwApbI2c, n>;
  * post is legal from an interrupt handler (kernel/post.hpp).
  *
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine<ch, uint16_t>
- * and DmaRxEngine<ch> on any two channels, both or neither; they serve a
- * read phase of three bytes or more, a write phase staying on the pump
+ * and DmaRxEngine<ch> on any two channels, both or neither; they serve
+ * the read phase of a Request that names `I2cEngine::dma`, at any length,
+ * a write phase staying on the interrupt under either value: a byte beat
+ * from the request's buffer lands replicated across IC_DATA_CMD on this
+ * chip (datasheet 2.1.4), its copy in bit 8 a read command
  * (docs/rp2040/i2c.md). With engines the program binds the DMA line's
  * vector to `Bus::dma_isr()` the same way, and `Dma::init()` runs
  * before `Bus::init()`. `Placement`, the last parameter, is

@@ -321,7 +321,12 @@ using DwApbI2c = DwApbI2cBlock<Rp2350DwApbI2c, n>;
  *
  * The two engine slots take rp2350/dma.hpp's DmaTxEngine<ch, uint16_t>
  * and DmaRxEngine<ch> on any two of the sixteen channels, both or
- * neither.
+ * neither; they serve the read phase of a Request that names
+ * `I2cEngine::dma`, at any length, a write phase staying on the
+ * interrupt under either value: a byte beat from the request's buffer
+ * lands replicated across IC_DATA_CMD at the register's address
+ * (datasheet 2.1.5), its copy in bit 8 a read command
+ * (docs/rp2350/i2c.md).
  */
 template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

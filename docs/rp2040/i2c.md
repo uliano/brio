@@ -64,7 +64,9 @@ reach the standard speed (under 2.7 MHz) or the block does not come up;
 a request for a speed the clock cannot reach is answered `i2c_rejected`
 and moves nothing on the wire, and so is one whose address lies outside
 0x08..0x77 - the general call and the 10-bit prefixes among them, which
-every host refuses ([../design/i2c-bus.md](../design/i2c-bus.md)). The vector is the program's to bind: the
+every host refuses ([../design/i2c-bus.md](../design/i2c-bus.md)) - and
+one that names `I2cEngine::dma` on a host with no DMA engines bound, as
+this `Bus` is. The vector is the program's to bind: the
 crt gives `isr_i2c0` a weak alias to `Default_Handler`'s spin, so an
 unbound vector parks the core there at the host's first interrupt. The
 pull-ups are the board's: the pads take the internal pull-up the
@@ -221,13 +223,16 @@ enable in this chip's IC_CON: the unstick is by hand.
   `dreq_tx` / `dreq_rx`, `irq()`.
 - `I2cHost<n, pins, TxEngine, RxEngine, Placement>`: the engine `I2cBus`
   (= `BusMaster`) drives. Its `Request` is the other strata's: `addr`,
-  `tx` / `tx_len`, `rx` / `rx_len`, `reply`, `speed`. `init(clock)`
+  `tx` / `tx_len`, `rx` / `rx_len`, `reply`, `speed`, and `engine`
+  (`I2cEngine::interrupt` by default, or `I2cEngine::dma`), which sits in
+  the padding after `speed`; `has_dma` says whether engines are bound.
+  `init(clock)`
   (clk_sys, the three speeds solved), `rebase(hz)`, `speed_ok`,
   `timing_of`, `scl_hz`, `reference_hz`, `idle` (the engine's phase),
   `start` (false when the wire moves; true for the refusals that
-  move nothing, i2c_rejected for an unreachable speed or an address
-  outside 0x08..0x77 and i2c_bus_error for a block that would not
-  disable to take the address), `isr()`, `dma_isr()`, `status()`, `unstick()` (the pulses
+  move nothing, i2c_rejected for an unreachable speed, an address
+  outside 0x08..0x77 or `dma` with no engines bound, and i2c_bus_error
+  for a block that would not disable to take the address), `isr()`, `dma_isr()`, `status()`, `unstick()` (the pulses
   it took, 0 for a healthy wire, 0xFF for one that stays low),
   `recover()` (the block reset and reconfigured), `release()`, and the
   two levels the pump runs at, `tx_level` and `rx_level` (half a FIFO
@@ -237,11 +242,16 @@ enable in this chip's IC_CON: the unstick is by hand.
   STOP_DET (or on the abort); the address and the speed go into the
   block only when they move. The engine slots take a
   `DmaTxEngine<ch, uint16_t>` and a `DmaRxEngine<ch>` on any two
-  channels, both or neither, and serve a READ phase of three bytes or
-  more: the plain read command poured from a fixed cell, the bytes
-  collected by a receive engine armed to report a bus error alone, the
-  first entry (RESTART) and the last (STOP) through the pump. A write
-  phase stays on the pump.
+  channels, both or neither, and serve the READ phase of a request that
+  names `dma`, at any length: the bytes collected by a receive engine
+  armed to report a bus error alone; from three bytes the plain read
+  command poured from a fixed cell between the first entry (RESTART) and
+  the last (STOP), both the pump's; a read of one or two bytes on the
+  receive engine alone. A write phase stays on the pump under either
+  value and completes: a byte beat from the request's buffer reaches
+  `IC_DATA_CMD` replicated across the word (2.1.4, and the DMA's one
+  transfer size for both sides, 2.5), its copy in bit 8 a read
+  command.
 - `Placement`, the last parameter: util/placement.hpp's tag, `InFlash`
   by default, `InRam` making `start()`, the vector's body and the DMA
   line's one flattened instance each in SRAM
@@ -281,8 +291,51 @@ extern "C" void isr_i2c0() {
 ```
 
 With the engines: `I2cHost<0, pins, DmaTxEngine<4, uint16_t>,
-DmaRxEngine<5>>` and `isr_dma_0` calling `Bus::dma_isr()` the same
-way. A client:
+DmaRxEngine<5>>`, `isr_dma_0` calling `Bus::dma_isr()` the same way, and
+every request that should ride them naming them (an excerpt: the request
+above on that host, reading a block of 64 bytes into a buffer `block` of
+the program's, lent like `value`):
+
+```cpp
+r.rx = brio::lend<brio::Lease::reply>(block); r.rx_len = 64;   // a block worth the engines
+r.engine = brio::I2cEngine::dma;                               // the read half on the DMA channels
+```
+
+The host never chooses. A request that names nothing runs on the host's
+interrupt, at any length, and touches no channel; one that names `dma`
+has its read half on the engines at any length - the receive engine
+collecting every byte, the transmit engine pouring the commands of a
+read of three bytes or more - while its write half, which the engines
+cannot carry, stays on the interrupt and the request completes. On a host
+with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
+costs core cycles, never correctness, so the choice is the program's by
+what it knows: the length, and what else the core must do meanwhile.
+The core cycles each costs, `bench_rp2040` letter i's `i2c.cost` lines
+(start() and the vectors, the least of five, the same at the three
+speeds within the XIP cache's spread), at 125 MHz:
+
+| read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
+|---|---|---|---|---|---|---|---|---|
+| `interrupt`, the host in SRAM | 693 | 711 | 736 | 861 | 1102 | 1277 | 4185 | 15 752 |
+| `dma`, the host in SRAM | 729 | 733 | 1116 | 1015 | 1023 | 1023 | 1218 | 1218 |
+| `interrupt`, from the flash | 657 | 675 | 700 | 825 | 1049 | 1224 | 4045 | 15 252 |
+| `dma`, from the flash | 692 | 696 | 1241 | 1235 | 1152 | 1245 | 1425 | 1425 |
+
+The pump costs F + b x n with F about 300 cycles and b about 60 a byte,
+in steps of eight (one entry for each half FIFO); the engines cost E,
+about 1020 cycles from SRAM, at any length. So `dma` costs the core
+fewer cycles from **nine bytes** with the host placed in SRAM (the
+pump's second entry), and from twelve to sixty-four from the flash,
+where the engined path's lines miss the XIP cache by turns; a read of
+one or two costs the same within forty cycles either way, and one of
+three to eight costs the engines a second entry (the transmit block's
+end). A write costs the same under either value. The energy side: under
+either value the core waits in its sleep instruction between entries,
+and the chip's SLEEP state asks in addition that the DMA have no
+outstanding transfer on any channel (2.11.2), which a `dma` read's
+channels hold for the read - not measured here.
+
+A client:
 
 ```cpp
 constexpr brio::I2cPins client_pins{.scl = 15, .sda = 14};
@@ -349,17 +402,35 @@ client finding below is measured from both sides. The cost figures are
   host's own 6 us low phase each overlaps - and leaves a write under the
   same client within 7 us of the plain one (the block holds SCL as a
   receiver only with its receive FIFO full).
-- THE ENGINES against the second chip: a 64-byte read at 400 kHz in
-  1487 to 1494 us (391 to 393 kHz) with two host interrupts - the second
-  engined read in a row; the first is the open item below -, a write-then-read,
-  the short reads on the pump, a deaf client on an engined read, and
-  eight 255-byte reads at 1 MHz byte-exact with TX_OVER never raised.
+- THE ENGINES against the second chip (letter g, every request naming
+  its engine): a 64-byte read under `dma` at 400 kHz in 1496 to 1508 us
+  (387 to 391 kHz) with two host interrupts - the second engined read
+  in a row; the first is the XIP cache's fill, below -, a
+  write-then-read of 2 + 32, a deaf client on an engined read, and eight
+  255-byte reads at 1 MHz byte-exact with TX_OVER never raised. THE
+  SHORTEST READS under `dma`, one byte and two: on the receive engine,
+  its run the length and every byte of it moved, the transmit engine
+  never claimed, one host entry, no DMA line entry. Writes of 1 and 32
+  under `dma` (the half the engines cannot carry) complete on the
+  interrupt, no DMA line entry, the 32 in three host entries, the peer's
+  count and sum exact. `interrupt` at 64 bytes on the engined host
+  touches no channel - no DMA line entry, the receive run and its
+  channel's write address unchanged - in eight host entries. A 40-byte
+  read under `dma` with the transmit channel claimed by another owner
+  (the letter itself) completes exact, its commands the pump's in four
+  host entries, every byte the receive engine's. A write-then-read of
+  6 + 16 under `dma` whose third written byte the client refuses - the
+  read half already on the engines - is `i2c_nack_data`, two bytes
+  stored, and the next engined read exact. Fifteen runs of the letter
+  (twelve alone, three in z), the same figures in each.
 - THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
-  `i2c_dma_fault` with no host interrupt, the peer having served 3 or 4
-  bytes by the abort (21 and 9 of 30 runs over the three images of the
-  pair), and the next engined read is clean.
+  `i2c_dma_fault` with no host interrupt, the peer having served 6 bytes
+  by the abort in fifteen runs out of fifteen - the bound's end, the
+  handler's path cold in the XIP cache (the letter's derivation: under
+  four byte times cold, and the entry under way and the next) - and the
+  next engined read is clean.
 - I2cBus OVER I2cHost: four queued tenures, the NACK in its place, the
   rejection of what a four-deep queue cannot hold, both votes, and THE
   TIMED BUS - the peer holding SCL 30 ms before the first byte of a read
@@ -378,7 +449,14 @@ client finding below is measured from both sides. The cost figures are
   `i2c_ok` on the window's own STOP before it had clocked a bit, until
   the engine required its transmit FIFO empty and its host state machine
   idle at the STOP (its own STOP follows its last entry; the IP stratum's
-  page, and below, the held wire under the preemptive kernel). A new address written
+  page, and below, the held wire under the preemptive kernel). And
+  without TX_ABRT standing at that read: an engined read of 16 aimed at
+  the higher address inside the window - its read half on the engines
+  from `start()` - ended `i2c_ok` in three runs of z out of three, its
+  START having lost the arbitration between the handler's read of the
+  pending sources and its read of `IC_STATUS`, the abort's flush leaving
+  the FIFO empty and the machine idle; with the raw TX_ABRT read after
+  `IC_STATUS`, `i2c_arb_lost` in every run. A new address written
   while another node holds the bus costs a disable of 94 us at 100 kHz.
 - THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
   with their STOP; two reads of six served one byte a read request, the
@@ -396,13 +474,13 @@ client finding below is measured from both sides. The cost figures are
   pull-up ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Ten runs
   of z, the same figures in each.
 - THE FIRST ENGINED READ IS THE XIP CACHE'S FILL. Letter g's first
-  64-byte read at 400 kHz after a boot takes 1632 us with ONE host
-  interrupt where the read right after it takes 1492 to 1500 us with two,
+  64-byte read at 400 kHz after a boot takes 1654 us with ONE host
+  interrupt where the read right after it takes 1496 to 1508 us with two,
   and the same read with every line of the XIP cache flushed first (the
-  letter's third, printed) takes 1637 to 1646 us with one - the first
-  read after a boot is the cold one, in each of five boots, and the
-  letter run again in the same boot reads its first read 1507 to 1513,
-  warm. The 140 us are the host's `start()`, its vector's
+  letter's third, printed) takes 1654 to 1664 us with one - the first
+  read after a boot is the cold one, and the letter run again in the
+  same boot reads its first read 1532 to 1545, warm. The 150 us are the
+  host's `start()`, its vector's
   and the DMA line's code fetched line by line out of the flash, and the
   late handler finding room for the STOP entry is why one entry stands
   for two. The placement is what takes it away: `bench_rp2040` letter i's
@@ -424,21 +502,21 @@ client finding below is measured from both sides. The cost figures are
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 6830 (x 1.11) | 1 | 157 | 709 | 700 |
-  | write of 255 | 729 200 (x 1.00) | 31 | 8960 | 14 924 | 696 |
-  | read of 16 | 49 637 (x 1.01) | 2 | 583 | 1604 | 847 |
-  | read of 255 | 729 338 (x 1.00) | 32 | 13 087 | 19 300 | 834 |
-  | register read, 1 + 1 | 13 023 (x 1.06) | 1 | 211 | 816 | 763 |
-  | read of 255 on the engines | 729 216 (x 1.00) | 3 | 571 | 2406 | 712 |
+  | write of 1 | 6857 (x 1.11) | 1 | 164 | 748 | 725 |
+  | write of 255 | 729 412 (x 1.00) | 31 | 8907 | 15 182 | 710 |
+  | read of 16 | 49 665 (x 1.01) | 2 | 590 | 1495 | 862 |
+  | read of 255 | 729 550 (x 1.00) | 32 | 13 064 | 19 604 | 848 |
+  | register read, 1 + 1 | 13 051 (x 1.06) | 1 | 219 | 858 | 787 |
+  | read of 255 under `dma` | 729 262 (x 1.00) | 3 | 810 | 3000 | 560 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
   read is one every eight bytes. The fixed cost is the same at the three
-  speeds (700, 700, 700 for a one-byte write) because the address and
+  speeds (727, 725, 727 for a one-byte write) because the address and
   the speed stay in the block between tenures: the cycle of disable,
   IC_TAR and enable, which a new address still pays (`i2c.write.readdr`),
-  costs 968 cycles more at 100 kHz, 186 at 400 kHz and 73 at 1 MHz - the
+  costs 953 cycles more at 100 kHz, 175 at 400 kHz and 62 at 1 MHz - the
   disable waits on the block's own shutdown, which follows the bus
-  timing. The longest host entry is 429 cycles, a 255-byte read's. Cold,
+  timing. The longest host entry is 428 cycles, a 255-byte read's. Cold,
   the same one-byte write's `start()` reads 12429 cycles and its entry
   6182 with both in the flash ([platform.md](platform.md), "A handler in
   SRAM").
@@ -450,13 +528,13 @@ client finding below is measured from both sides. The cost figures are
   brio's counts written over its own, so the SCL period measures the
   same (316.0 cycles at 400 kHz against letter i's 315.9). At 400 kHz,
   fixed cost, the SDK against brio's default image: a one-byte write 398
-  against 700, a 255-byte write 388 against 696, a 16-byte read 1053
-  against 847, a 255-byte read 16 442 (x 1.02) against 834 (x 1.00), a
-  register read of 1 + 1 66 against 763; a refused address 383 against
-  822. THE WRITE'S GAP, some 300 cycles (4.6 % of a one-byte write's
+  against 725, a 255-byte write 388 against 710, a 16-byte read 1053
+  against 862, a 255-byte read 16 442 (x 1.02) against 848 (x 1.00), a
+  register read of 1 + 1 66 against 787; a refused address 383 against
+  826. THE WRITE'S GAP, some 330 cycles (4.8 % of a one-byte write's
   wall), is what the SDK does not do: it takes no interrupt and no wake
   from the idle loop - and holds the core for the whole wire, busy 6528
-  cycles against 709. Its short reads' fixed cost is near zero because
+  cycles against 748. Its short reads' fixed cost is near zero because
   `i2c_read_blocking` returns at the last byte, before the NACK and the
   STOP are on the wire; its long read keeps one read command in flight,
   the bus held a loop turn every byte, where the pump pours them by the
@@ -474,8 +552,8 @@ every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 silent and six times under it, and letter `c` runs letter `o` again with
 every pressure fed by core 1's doorbell ([multicore.md](multicore.md)).
 **237 verdicts in the key `z`, green in every run - the key three
-times, its vocabulary letter `q` ten more; the letters `x`, `e` and `s`, outside it, green
-in ten runs each.** The pack, the command
+times, its vocabulary letter `q` ten more; the letters `x`, `e` and `s`,
+outside it, green in three runs each.** The pack, the command
 channel through the arbiter and the letters are the I2C suites' shared
 body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them);
 what the two Raspberry Pi chips share over this block - the paths, the
@@ -538,14 +616,17 @@ MST_ACTIVITY clear) and taken by the block, the bus free, by the time
 the handler read TFE, its START then going out for a tenure already
 answered; with the host state machine's idle required beside the FIFO's
 empty, it ended on its own STOP, `i2c_nack_addr`, in 78 pressed passes
-of 78. The test costs the one-STOP handler two cycles (the cost table
-above).
+of 78. The test costs the one-STOP handler two cycles, and the read of
+a standing abort beside it five more (the cost table above;
+[../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), STOP_DET).
 
 **Every shape, and three requesters, under every pressure as in the
 control.** Letter `o` at 400 kHz against one serve counted to its end:
-the probe, reads of 1 and 2 (the pump) and of 3, 8 and 32 (the engines),
-write-then-reads of 1+1 and 1+2 (the pump) and 2+8 (its read on the
-engines), writes of 1, 2, 3, 8 and 32 (the pump) - every one `i2c_ok`,
+the probe, reads of 1 (the pump), 2 (the receive engine) and 3, 8 and
+32 (both engines), write-then-reads of 1+1 (the pump), 1+2 and 2+8
+(their read on the engines), writes of 1, 2, 3, 8 and 32 (the pump) -
+the suite naming `dma` for a request with a half of two bytes or more,
+`interrupt` otherwise - every one `i2c_ok`,
 every read byte-exact, the peer's count, sum and seventeen address
 matches exact (a write-then-read is two). Post to reply over ten runs,
 the control's and the worst under pressure: the probe 102 to 148 and 115
@@ -577,10 +658,13 @@ Driver gaps, each with its reason:
   addresses with every reserved one
   ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
   feature of its own, born with its first user.
-- A write phase on the DMA engines: an entry is a command word with a
-  flag, which a byte buffer cannot carry; a halfword staging copy the
-  size of the request is declined until a program needs a bulk write
-  on the engines.
+- A write phase on the DMA engines: an entry is the request's byte with
+  the command bits above it clear, and this chip replicates a narrow
+  write across the word (2.1.4) with the DMA's one transfer size for
+  both sides (2.5), so a byte beat from the request's buffer lands with
+  its copy in bit 8, a read command. A halfword staging copy the size of
+  the request is declined until a program needs a bulk write on the
+  engines; until then `dma` leaves the write half on the interrupt.
 - The client on the DMA engines: the requests exist; a streaming
   client is born with a program that needs one.
 - The receive-side hold (`sda_rx_hold`) and a client's `ten_bit`: a

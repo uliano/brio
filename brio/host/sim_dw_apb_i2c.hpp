@@ -510,6 +510,7 @@ struct SimDwApbI2cEngine {
     static inline bool fixed = false;       ///< the last block poured one cell
     static inline bool discarded = false;   ///< the last block was thrown away
     static inline bool running = false;
+    static inline bool held = false;        ///< another owner holds the channel: claim() refuses
 
     static uint8_t service() {
         const uint8_t f = next_flags;
@@ -531,6 +532,19 @@ struct SimDwApbI2cEngine {
         return begin(len);
     }
     static bool start_fixed(const Elem* cell, uint32_t len) {
+        return claim() && launch_fixed(cell, len);
+    }
+    /// The claim a family's transmit engine takes before a launch: false
+    /// while a block runs or another owner holds the channel (`held`).
+    static bool claim() {
+        if (running || held) {
+            return false;
+        }
+        running = true;
+        return true;
+    }
+    static void unclaim() { running = false; }
+    static bool launch_fixed(const Elem* cell, uint32_t len) {
         (void)cell;
         fixed = true;
         discarded = false;
@@ -565,10 +579,16 @@ struct SimDwApbI2cEngine {
         fixed = false;
         discarded = false;
         running = false;
+        held = false;
     }
 
 private:
+    /// An empty run refused, as a family's engine refuses it.
     static bool begin(uint32_t len) {
+        if (len == 0u) {
+            running = false;
+            return false;
+        }
         length = len;
         running = true;
         blocks = blocks + 1u;

@@ -140,7 +140,7 @@ TestBench<Serial, 16> bench;
 constexpr I2cPins link_pins{.scl = 3, .sda = 2};
 using TxEngine = DmaTxEngine<4, uint16_t>;
 using RxEngine = DmaRxEngine<5>;
-using Host = I2cHost<1, link_pins, TxEngine, RxEngine>;
+using LinkHost = I2cHost<1, link_pins, TxEngine, RxEngine>;
 using SdaPin = Pin<2>;
 using SclPin = Pin<3>;
 

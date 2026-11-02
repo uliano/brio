@@ -35,6 +35,7 @@ static_assert(Block::fifo_depth == 16u);
 static_assert(Block::index == 1u);
 static_assert(Block::dreq_tx == SimDwApbI2cRequest::i2c1_tx && Block::dreq_rx == SimDwApbI2cRequest::i2c1_rx);
 static_assert(!Plain::has_engines && Engined::has_engines);
+static_assert(!Plain::has_dma && Engined::has_dma);
 static_assert(DwApbI2cChipClock<SimDwApbI2c, Clock>);
 static_assert(std::is_trivially_copyable_v<Plain::Request>);
 static_assert(sizeof(Plain::Request) == sizeof(Engined::Request));
@@ -132,6 +133,7 @@ void dw_apb_i2c_engine_verbs() {
     d.addr = 0x42;
     d.rx = lend<Lease::reply>(buf);
     d.rx_len = 16;
+    d.engine = I2cEngine::dma;
     (void)Engined::start(d);
     (void)Engined::isr();
     (void)Engined::dma_isr();

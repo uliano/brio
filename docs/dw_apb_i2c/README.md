@@ -282,7 +282,10 @@ words a bring-up leaves in the block and the order of the acts that make
 it, the entry a tenure ends with, the row of the timing table a speed
 uses - and what a bench cannot stage at all: a block that will not
 disable (answered `i2c_bus_error` instead of waited on), an abort of
-every reason, the engines' hand-over in the middle of a read phase, and a
+every reason, the engines' hand-over in the middle of a read phase, the
+path each value of a request's `engine` takes (a short read on the
+receive engine alone, a write that stays on the pump, `dma` refused on a
+host without engines, a transmit channel another owner holds), and a
 client that releases SDA on the n-th pulse of the unstick.
 
 What the fake does NOT model is the FIFOs: nothing moves an entry out of
@@ -351,8 +354,16 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   still to come (measured on the RP2040 under the preemptive kernel: a
   probe parked behind a client holding SDA ended `i2c_bus_error` on the
   hold's release, its entry still in `IC_TXFLR` at the vector's entry;
-  [../rp2040/i2c.md](../rp2040/i2c.md)). The test is one mask and one
-  compare more in the handler's STOP path.
+  [../rp2040/i2c.md](../rp2040/i2c.md)). And an abort leaves both at
+  rest too, flushing the FIFOs and idling the machine: a tenure whose
+  START waited for another node's STOP and lost the arbitration between
+  the handler's read of `IC_INTR_STAT` and its read of `IC_STATUS`
+  passed for its own STOP - an engined read inside a window held by hand
+  ended `i2c_ok` in three runs of three on the RP2040, its code cold -
+  so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and a standing
+  TX_ABRT leaves the tenure to the abort's own entry. The test is one
+  mask and one compare in the handler's STOP path, and one register read
+  more where it passes (5 to 8 cycles measured on both chips).
 - **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
   instead of overrunning, and an empty command FIFO with no STOP holds it
   too (the block's own rule), so a handler that comes late stretches the
@@ -386,20 +397,50 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **`IC_TAR` written while enabled** - not offered: the register
   description of the chips here takes a write only with `IC_ENABLE[0]`
   clear, so a new address is always the disable/enable cycle above.
+- **The engine a request names (`Request::engine`)** - the program's,
+  never the host's: `I2cEngine::interrupt`, the default and what a
+  Request that names nothing gets, runs the pump above at any length and
+  touches no channel; `I2cEngine::dma` puts the READ half on the engines
+  at any length - the receive engine collects every byte, and the
+  transmit engine pours the commands between the first and the last
+  when there are any (a read of three bytes or more). A read of one or
+  two bytes has none: the pump writes its one or two commands with the
+  rest of the tenure and the receive engine alone runs. The write half
+  and the probe stay on the pump under either value, and the request
+  completes: a write entry is the request's byte with the command bits
+  above it clear, and a byte beat from the request's buffer reaches the
+  register replicated across the word on the chips here, its copy in
+  bit 8 a read command (each family's document names its bus fabric's
+  section, and what the RP2350 offers against it - the gap below). `dma`
+  on a host with no engines bound (`has_dma` false) is answered
+  `i2c_rejected` inside `start()`, nothing on the wire, as an address
+  outside the range is. A wrong choice costs core cycles, never
+  correctness; each family's document gives the measured cost of both
+  and the length from which `dma` costs the core less.
 - **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
-  `IC_DMA_RDLR`)** - used for the read phase, watermarks at their reset
-  value (single transfers, the chapter's advice); BOTH ENGINES ARM AT THE
-  FAMILY'S NORMAL LEVEL, the rule's for a peripheral that waits
-  (docs/design/dma.md): a starved command channel leaves the transmit FIFO
-  empty and a starved receive channel leaves the receive FIFO full, and
-  the block holds SCL either way (`RX_FIFO_FULL_HLD_CTRL`, set by
-  `I2cConfig`'s default) - the bus slows, nothing is lost; the receive
-  engine is armed to report a bus error alone and the STOP ends its
-  tenure, so an
-  engined read is two interrupts - the transmit block's end, which hands
-  the pump the STOP entry, and the STOP; three when the block's end
-  finds no room for that entry and TX_EMPTY brings it - and the next
-  tenure takes the fast path. A write phase stays on the pump (the gap below).
+  `IC_DMA_RDLR`)** - used for the read phase under `dma`, watermarks at
+  their reset value (single transfers, the chapter's advice); BOTH
+  ENGINES ARM AT THE FAMILY'S NORMAL LEVEL, the rule's for a peripheral
+  that waits (docs/design/dma.md): a starved command channel leaves the
+  transmit FIFO empty and a starved receive channel leaves the receive
+  FIFO full, and the block holds SCL either way
+  (`RX_FIFO_FULL_HLD_CTRL`, set by `I2cConfig`'s default) - the bus
+  slows, nothing is lost; the receive engine is armed to report a bus
+  error alone and the STOP ends its tenure, so an engined read of three
+  bytes or more is two interrupts - the transmit block's end, which
+  hands the pump the STOP entry, and the STOP; three when the block's end
+  finds no room for that entry and TX_EMPTY brings it - and a shorter one
+  is one, the STOP. The transmit engine is CLAIMED when the read half
+  starts, its one launch step that can fail: a channel another owner
+  holds is not taken, the pump writes the commands on TX_EMPTY (about
+  one entry for each eight), the receive engine still collects, and the
+  request completes exact. The receive start and the transmit launch
+  cannot refuse what the host hands them (a buffer or the sink, one
+  byte or more; a halfword cell, one command or more), so neither result
+  is read. An abort under the engines stops them BEFORE the abort is
+  read away: the FIFOs stay flushed until `IC_CLR_TX_ABRT` is read, so a
+  command the transmit engine still pours meanwhile is dropped instead
+  of starting a tenure of its own.
 - **`IC_ENABLE.ABORT`** - used where an engine fails; a NACK or a lost
   arbitration is the block's own abort, read off `IC_TX_ABRT_SOURCE` once.
 - **`IC_ENABLE.TX_CMD_BLOCK`** - declined for tenures: entries written
@@ -490,9 +531,17 @@ family's own document.
 - 10-bit addressing on the host side: the resource has the mode and
   `IC_TAR` takes ten bits; the Request's `addr` is 7 bits on every
   stratum, and a 10-bit device is the first user.
-- A write phase on the DMA engines: an entry is a command word with a
-  flag, which a byte buffer cannot carry; a halfword staging copy the
-  size of the request is declined until a program needs a bulk write on
-  the engines.
+- A write phase on the DMA engines: an entry is the request's byte with
+  the command bits above it clear, and a byte beat from the request's
+  buffer lands replicated across the command register on both chips here
+  at the register's own address, a read command in bit 8. That is the
+  silicon on the RP2040; the RP2350 has an alias of every peripheral that
+  drives the unused byte lanes to zero instead (RP2350 2.1.5), through
+  which a byte beat would land as a plain write entry - never tried on
+  the I2C, which sits behind the bus interposer that serves its atomic
+  aliases (2.1.3), and not built: the transmit engine would be bound to
+  the alias, and the write's last byte, with its STOP, stays the pump's.
+  A halfword staging copy the size of the request, the RP2040's way, is
+  declined until a program needs a bulk write on the engines.
 - The client on the DMA engines: the requests exist; a streaming client
   is born with a program that needs one.

@@ -165,17 +165,25 @@
  * specification's) bound the split, and a clock too slow to meet them
  * makes the speed unreachable - answered i2c_rejected.
  *
- * The DMA engines serve the read phase: the read commands are one
- * constant halfword the transmit engine pours from a fixed cell (the
- * command register ignores the width of a write and replicates a byte
- * across the word, so a command is written as a halfword), the bytes
- * come back through the receive engine, and the first command (RESTART)
- * and the last (STOP) are the pump's - the last written on TX_EMPTY when
- * the engine's block left no room, because the request is a level the
- * DMA banks credits on while the FIFO is empty and spends in a burst
- * that can fill it. A write phase stays on the pump: its entries are the
- * request's bytes with a flag each, and a byte buffer cannot carry the
- * flag.
+ * The program names the engine of every request (the Request's `engine`,
+ * util/i2c_bus.hpp): the host's interrupt by default, or the DMA engines,
+ * and the host never chooses. The engines serve the read phase, at any
+ * length: the bytes come back through the receive engine, the read
+ * commands between the first and the last are one constant halfword the
+ * transmit engine pours from a fixed cell (the command register ignores
+ * the width of a write and replicates a byte across the word, so a
+ * command is written as a halfword), and the first command (RESTART) and
+ * the last (STOP) are the pump's - the last written on TX_EMPTY when the
+ * engine's block left no room, because the request is a level the DMA
+ * banks credits on while the FIFO is empty and spends in a burst that can
+ * fill it. A read of one or two bytes has no command between the first
+ * and the last, so the pump writes its commands and the receive engine
+ * alone runs. A write phase stays on the pump under either engine: its
+ * entries are the request's bytes, each of which must reach the register
+ * with the command bits above it clear, and a byte beat from the
+ * request's buffer arrives replicated across the word on the families
+ * here (the family's own document names the section), its copy in bit 8
+ * a read command.
  *
  * Where the host's hot path runs is the program's choice, by the host's
  * last template parameter, util/placement.hpp's tag: start(), isr() and
@@ -193,6 +201,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <concepts>
 #include <optional>
@@ -920,16 +929,36 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * leaves - is answered i2c_bus_error the same way.
  *
  * The engine slots: a transmit engine of uint16_t and a receive engine
- * of uint8_t on any two of the family's DMA channels, both or neither,
- * serving a READ phase of three bytes or more (the file header): the
- * transmit engine pours the plain read command from a fixed cell for the
- * middle entries, the receive engine collects every byte, the pump
- * writes the first entry (RESTART) and, once the block of commands is
- * in, the last (STOP). The receive engine is armed to report a bus error
- * alone (the family's Report::errors): its block ends with the last
- * byte, before that byte's NACK and the STOP, and the tenure ends on the
- * STOP like every other - two interrupts an engined read, the transmit
- * block's end and the STOP.
+ * of uint8_t on any two of the family's DMA channels, both or neither.
+ * THE PROGRAM NAMES THE ENGINE of every Request (Request::engine,
+ * util/i2c_bus.hpp's I2cEngine), and the host never chooses:
+ *
+ *   interrupt  the default: the pump above, the channels untouched, at
+ *              any length
+ *   dma        the READ half on the engines at any length (the file
+ *              header): the receive engine collects every byte; the
+ *              transmit engine pours the plain read command from a
+ *              fixed cell for the entries between the first and the
+ *              last, and the pump writes the first entry (RESTART) and,
+ *              once the block of commands is in, the last (STOP). A read
+ *              of one or two bytes has no such entry: the pump writes
+ *              both commands and the receive engine collects. The write
+ *              half and the probe stay on the pump - a half the engines
+ *              cannot carry, the file header says why - and the request
+ *              completes; it is not refused.
+ *
+ * `dma` on a host with no engines bound is answered i2c_rejected inside
+ * start(), nothing on the wire. A wrong choice costs core cycles, never
+ * correctness; the family's document gives the length from which `dma`
+ * costs the core less at each speed. The receive engine is armed to
+ * report a bus error alone (the family's Report::errors): its block ends
+ * with the last byte, before that byte's NACK and the STOP, and the
+ * tenure ends on the STOP like every other - two interrupts an engined
+ * read of three bytes or more, the transmit block's end and the STOP; one
+ * or two host entries (the STOP, and TX_EMPTY when the commands did not
+ * fit) for a shorter one. The transmit engine is claimed when the read
+ * half starts; a channel another owner holds is not taken, and the pump
+ * writes the commands instead (launch_dma()).
  */
 template <DwApbI2cChip Chip, uint8_t n, typename Chip::Pins pins,
           typename TxEngine = DwApbI2cAbsentEngine, typename RxEngine = DwApbI2cAbsentEngine,
@@ -967,6 +996,11 @@ public:
     using Resource = S;
     static constexpr typename Chip::Pins pin_set = pins;
     static constexpr bool has_engines = TxEngine::present;
+    /// The name util/i2c_bus.hpp's I2cEngine speaks of: are DMA engines
+    /// bound? A Request naming `I2cEngine::dma` on a host where this is
+    /// false is answered i2c_rejected by start(); a program that depends
+    /// on the engines may `static_assert(Bus::has_dma)` instead.
+    static constexpr bool has_dma = has_engines;
 
     struct Request {
         /// The 7-bit client address, unshifted: 0x08 to 0x77
@@ -983,8 +1017,19 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         I2cSpeed speed = I2cSpeed::standard_100k;
+        /// Which mechanism moves the read half (util/i2c_bus.hpp): the
+        /// host's interrupt by default; under `dma` the receive engine
+        /// collects every byte read, at any length, and the transmit
+        /// engine pours the read commands between the first and the last
+        /// when there is one. The write half and the probe stay on the
+        /// interrupt under either value (the class comment says why), and
+        /// the request completes. `dma` on a host with no engines bound is
+        /// answered i2c_rejected with nothing on the wire.
+        I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(sizeof(Request) == offsetof(Request, speed) + alignof(Request),
+                  "the engine field must stay in the padding after the speed");
 
     // ---- lifecycle ----------------------------------------------------------
 
@@ -1062,10 +1107,11 @@ public:
     /// whenever the wire moves: the tenure completes on the vector and
     /// a TransferDone{status()} follows. True for the refusals that
     /// move nothing, answered through status(): a speed the clock
-    /// cannot produce or an address outside 0x08..0x77
-    /// (i2c_address_in_range), both i2c_rejected, and a block that
-    /// would not disable to take the address (i2c_bus_error) - the
-    /// I2cHost contract (docs/design/i2c-bus.md).
+    /// cannot produce, an address outside 0x08..0x77
+    /// (i2c_address_in_range) or `engine = I2cEngine::dma` on a host
+    /// with no engines bound, all i2c_rejected, and a block that would
+    /// not disable to take the address (i2c_bus_error) - the I2cHost
+    /// contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         return Hot<Placement>::run([&r] { return start_body(r); });
     }
@@ -1104,8 +1150,14 @@ private:
         total_ = static_cast<uint16_t>(r.tx_len + want_);
         issued_ = 0;
         received_ = 0;
-        dma_active_ = false;
-        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
+        if constexpr (has_engines) {
+            dma_active_ = false;
+            poured_ = false;
+        }
+        // One compare refuses both an engine this host has not got (`dma`
+        // with no engines bound) and a value outside the enumeration.
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr) ||
+            static_cast<uint8_t>(r.engine) > engine_last) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;
@@ -1143,21 +1195,20 @@ private:
         // mask lets it through, and no handler can clear it under a fill
         // still pushing - which would start a tenure of its own with
         // the rest.
-        const bool more = fill();
-        uint32_t mask = I2cInterrupt::tx_abrt | I2cInterrupt::stop_det;
         tx_armed_ = false;
         rx_armed_ = false;
-        if (!dma_active_) {
-            // RX_FULL only while more than half a FIFO of bytes is owed:
-            // a tail of half a FIFO or less is the STOP's to take.
-            if (want_ > rx_level) {
-                mask |= I2cInterrupt::rx_full;
-                rx_armed_ = true;
-            }
-            if (wants_room(more)) {
-                mask |= I2cInterrupt::tx_empty;
-                tx_armed_ = true;
-            }
+        const bool more = fill();
+        uint32_t mask = I2cInterrupt::tx_abrt | I2cInterrupt::stop_det;
+        // RX_FULL only while more than half a FIFO of bytes is owed to the
+        // pump: a tail of half a FIFO or less is the STOP's to take, and a
+        // read the receive engine collects never raises it.
+        if (want_ > rx_level && !dma_serves()) {
+            mask |= I2cInterrupt::rx_full;
+            rx_armed_ = true;
+        }
+        if (wants_room(more)) {
+            mask |= I2cInterrupt::tx_empty;
+            tx_armed_ = true;
         }
         S::interrupts_only(mask);
         return false;
@@ -1175,20 +1226,32 @@ private:
             return false;
         }
         if ((up & I2cInterrupt::tx_abrt) != 0u) {
-            const uint32_t src = S::clear_abort();
             if constexpr (has_engines) {
-                put_engines_away();
+                // The channels stop BEFORE the abort is read away: the
+                // FIFOs stay flushed until IC_CLR_TX_ABRT is read (RP2040
+                // 4.3.17, IC_RAW_INTR_STAT's TX_ABRT note), so a command
+                // the transmit engine still pours meanwhile is dropped,
+                // where after the read it would start a tenure of its
+                // own. A tenure on the interrupt touched no channel, and
+                // leaves none touched here.
+                if (dma_active_) {
+                    put_engines_away();
+                }
             }
+            const uint32_t src = S::clear_abort();
             addressed_ = false;
             return finish(i2c_status_of_abort(src));
         }
         if constexpr (has_engines) {
             if (dma_active_) {
-                // Under the engines only the last command's room and the
-                // STOP reach here. The receive engine reports errors alone
-                // (armed quiet): its run ends with the last byte, a bit
-                // and a STOP before STOP_DET, so the STOP is the tenure's
-                // end here too.
+                // Under the engines only the commands' room and the STOP
+                // reach here: the last command's when the transmit engine
+                // poured the middle block, every command's after the
+                // first when it did not (a read of one or two bytes, or a
+                // transmit channel another owner held). The receive
+                // engine reports errors alone (armed quiet): its run ends
+                // with the last byte, a bit and a STOP before STOP_DET, so
+                // the STOP is the tenure's end here too.
                 if ((up & I2cInterrupt::tx_empty) != 0u) {
                     // THE MASK BEFORE THE PUSH. TX_EMPTY is a level the FIFO holds: an entry pushed
                     // into an empty FIFO takes it down, and the block, waiting with SCL held, takes
@@ -1213,6 +1276,7 @@ private:
                     if (issued_ >= total_entries() && own_stop()) {
                         S::dma_requests(false, false);
                         dma_active_ = false;
+                        poured_ = false;
                         received_ = read_len();
                         return finish(i2c_ok);
                     }
@@ -1267,8 +1331,9 @@ private:
                 addressed_ = false;
                 return finish(i2c_dma_fault);
             }
-            if ((tx & TxEngine::flag_complete) != 0u && dma_active_) {
+            if ((tx & TxEngine::flag_complete) != 0u && poured_) {
                 (void)TxEngine::complete();
+                poured_ = false;
                 S::dma_requests(false, true);
                 // The block of plain read commands is in the FIFO - up to
                 // its whole depth at once, since the request is a level
@@ -1407,23 +1472,34 @@ private:
     static uint8_t read_len() { return want_; }
     static uint16_t total_entries() { return total_; }
 
-    /// The engines serve a read phase of three entries or more: the
-    /// first and the last are the pump's, the middle block the engine's.
+    /// Whether the engines serve this tenure's read half: the program
+    /// named `dma` and there is a read half (the probe's one byte is not
+    /// one). Any length: the receive engine collects every byte, and the
+    /// transmit engine pours the commands between the first and the last
+    /// when there are any (launch_dma()). start() refused `dma` on a host
+    /// with no engines, so the field alone answers.
     static bool dma_serves() {
         if constexpr (has_engines) {
-            return read_len() >= 3u;
+            return req_.engine == I2cEngine::dma && req_.rx_len != 0u;
         } else {
             return false;
         }
     }
 
     /// Whether the transmit FIFO's room must raise its own interrupt:
-    /// while entries remain and fewer than half a receive FIFO of read
-    /// commands are out - beyond that, RX_FULL is certain to come while
-    /// commands still wait, and its handler refills.
+    /// while entries remain and, on the pump, fewer than half a receive
+    /// FIFO of read commands are out - beyond that, RX_FULL is certain to
+    /// come while commands still wait, and its handler refills. Under the
+    /// receive engine no RX_FULL comes, so the room alone paces the
+    /// commands still to write.
     static bool wants_room(bool more) {
         if (!more) {
             return false;
+        }
+        if constexpr (has_engines) {
+            if (dma_active_) {
+                return true;
+            }
         }
         const uint16_t reads = issued_ > req_.tx_len ? static_cast<uint16_t>(issued_ - req_.tx_len) : 0u;
         return static_cast<uint16_t>(reads - received_) < rx_level;
@@ -1449,9 +1525,24 @@ private:
     /// RP2040 4.3.17), and after its own STOP that machine is IDLE, so the
     /// STOP is this tenure's when both FIFO and machine are at rest - one
     /// read of IC_STATUS, both bits from the same sample.
+    ///
+    /// An abort leaves both at rest too: it flushes the FIFOs and idles
+    /// the machine. So a tenure whose START waited for another node's STOP
+    /// and then lost the arbitration, its abort raised between this
+    /// handler's read of IC_INTR_STAT and the read of IC_STATUS here, would
+    /// pass for its own STOP - measured on the RP2040 with the host's code
+    /// cold in the XIP cache: an engined read aimed at a higher address
+    /// than the other host's, inside a window held by hand, ended i2c_ok.
+    /// TX_ABRT stands until the handler reads it away, so IC_RAW_INTR_STAT
+    /// read AFTER IC_STATUS closes the race: an abort before the status
+    /// read shows there, and one after it found the FIFO or the machine
+    /// still busy. The next entry, the abort's, ends the tenure.
     static bool own_stop() {
         const uint32_t f = S::flags();
-        return (f & (I2cFlag::tx_empty | I2cFlag::host_active)) == I2cFlag::tx_empty;
+        if ((f & (I2cFlag::tx_empty | I2cFlag::host_active)) != I2cFlag::tx_empty) {
+            return false;
+        }
+        return (S::raw_pending() & I2cInterrupt::tx_abrt) == 0u;
     }
 
     static bool finish(uint8_t st) {
@@ -1496,11 +1587,14 @@ private:
                 --room;
                 if constexpr (has_engines) {
                     if (dma_serves()) {
-                        // The first read entry is in: the engines take the
-                        // middle block, dma_isr() the last entry.
+                        // The first read entry is in: the receive engine
+                        // takes every byte, and when the transmit engine
+                        // pours the middle block dma_isr() writes the
+                        // last entry. Otherwise the commands go on below.
                         issued_ = static_cast<uint16_t>(i);
-                        launch_dma();
-                        return false;
+                        if (launch_dma()) {
+                            return false;
+                        }
                     }
                 }
             }
@@ -1546,10 +1640,27 @@ private:
         }
     }
 
-    static void launch_dma() {
+    /// The read half onto the engines, with its first entry in the FIFO.
+    /// True when the transmit engine took the middle block (dma_isr()
+    /// writes the last entry), false when the pump writes the commands
+    /// after the first: a read of one or two bytes has no middle block,
+    /// and a transmit channel claimed by another owner is not taken.
+    ///
+    /// Neither launch can refuse what it is handed here, so neither
+    /// result is read. The receive start refuses a null run, an empty
+    /// one and a misaligned one: its run is the request's buffer or the
+    /// sink, one byte or more, of bytes. The transmit launch refuses the
+    /// same three and an unclaimed channel: its cell is a halfword
+    /// constant, its count want - 2 is one or more, and the claim is
+    /// taken first - the one step that can fail, and its failure costs
+    /// the pump a TX_EMPTY entry a half FIFO of commands, the request
+    /// completing exact.
+    static bool launch_dma() {
         if constexpr (has_engines) {
-            dma_active_ = true;
             const uint8_t want = read_len();
+            const bool poured = want > 2u && TxEngine::claim();
+            dma_active_ = true;
+            poured_ = poured;
             // The receive channel first: every byte of the phase,
             // including the one the pump's first entry brings back.
             if (req_.rx.get() != nullptr) {
@@ -1558,8 +1669,13 @@ private:
                 (void)RxEngine::start_discard(&rx_sink_, want);
             }
             S::dma_requests(false, true);
-            (void)TxEngine::start_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
-            S::dma_requests(true, true);
+            if (poured) {
+                (void)TxEngine::launch_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
+                S::dma_requests(true, true);
+            }
+            return poured;
+        } else {
+            return false;
         }
     }
 
@@ -1586,10 +1702,16 @@ private:
         }
     }
 
+    /// The tenure's channels stopped and bound again: the transmit
+    /// engine's block abandoned only when this tenure poured one (a
+    /// channel another owner claimed is left to it).
     static void put_engines_away() {
         if constexpr (has_engines) {
             S::dma_requests(false, false);
-            (void)TxEngine::abandon();
+            if (poured_) {
+                (void)TxEngine::abandon();
+                poured_ = false;
+            }
             RxEngine::stop();
             arm_rx_engine();
             dma_active_ = false;
@@ -1627,7 +1749,15 @@ private:
     static inline uint8_t received_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
     static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
+    /// The receive engine collects this tenure's read half.
     static inline volatile bool dma_active_ = false;
+    /// And the transmit engine's block of commands is this tenure's,
+    /// until its end is served (complete()) or it is abandoned.
+    static inline volatile bool poured_ = false;
+    /// The last I2cEngine value this host serves: `dma` with engines
+    /// bound, `interrupt` alone without them (start()'s one compare).
+    static constexpr uint8_t engine_last =
+        static_cast<uint8_t>(has_engines ? I2cEngine::dma : I2cEngine::interrupt);
     static inline uint8_t rx_sink_ = 0;
     static constexpr uint16_t read_cmd_ = i2c_read_entry({});
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;

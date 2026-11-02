@@ -17,6 +17,7 @@
 //   Host, DmaHost, Client, Raw   the link instance: the pump, the host on
 //                                DMA channels 4 and 5 (isr_dma_0), the
 //                                client, the resource
+//   DmaTx, DmaRx                 DmaHost's two engine types
 //   SdaPin, SclPin               the link's pads
 //   us_now()                     the microsecond ruler (the system timer)
 //   xip_empty()                  every line of the XIP cache dropped (the
@@ -56,6 +57,7 @@ constexpr uint8_t no_answer = 0xFE;
 enum class Owner : uint8_t { none, host, dma_host, client };
 volatile Owner owner = Owner::none;
 volatile uint32_t isr_entries = 0;
+volatile uint32_t dma_entries = 0;
 volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
 volatile bool bus_ao_live = false;
@@ -177,11 +179,14 @@ void host_ready() {
     owner = Owner::host;
 }
 
-/// One tenure through host H, waited out. The status, or no_answer for a
-/// tenure that never answered within `wait_us` (the engine recover()ed).
+/// One tenure through host H on the engine named, waited out. The status,
+/// or no_answer for a tenure that never answered within `wait_us` (the
+/// engine recover()ed). `dma_entries` counts the DMA line's entries over
+/// it, `isr_entries` the host vector's.
 template <typename H>
 uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
-               I2cSpeed speed = link_speed, uint32_t wait_us = 200'000u) {
+               I2cSpeed speed = link_speed, uint32_t wait_us = 200'000u,
+               I2cEngine engine = I2cEngine::interrupt) {
     typename H::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(tx);
@@ -189,8 +194,10 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     r.rx = lend<Lease::reply>(rx);
     r.rx_len = rx_len;
     r.speed = speed;
+    r.engine = engine;
     transfer_done = false;
     isr_entries = 0;
+    dma_entries = 0;
     if (H::start(r)) {
         return H::status();
     }
@@ -594,12 +601,19 @@ void te_vocabulary() {
         bad.addr = 0x00;
         const bool sync_call = Host::start(bad);
         const uint8_t st_call = Host::status();
+        // `dma` on this host, which has no engines bound, at the peer's
+        // own address: refused the same way, nothing on the wire.
+        bad.addr = twilink::dut_addr;
+        bad.engine = I2cEngine::dma;
+        const bool sync_dma = Host::start(bad);
+        const uint8_t st_dma = Host::status();
         const uint8_t own = tenure<Host>(twilink::dut_addr, gw, 2, nullptr, 0);
         outlast(g, g0);
         twilink::Report gr{};
         const bool grep = peer_report(gr);
         print(serial, "  0x7A: ", sync_prefix ? "refused at start()" : "STARTED", " ", st_prefix, "; 0x00: ",
-              sync_call ? "refused at start()" : "STARTED", " ", st_call, "; then dut_addr ", own,
+              sync_call ? "refused at start()" : "STARTED", " ", st_call, "; dma with no engines: ",
+              sync_dma ? "refused at start()" : "STARTED", " ", st_dma, "; then dut_addr ", own,
               "; the peer: received ", gr.aux0, ", tenures ", gr.addr_hits, ", last address ", hex(gr.last_addr),
               crlf);
         bench.verdict("0x7A and the general call answered i2c_rejected inside start(), nothing on the wire: the "
@@ -607,6 +621,10 @@ void te_vocabulary() {
                       sync_prefix && st_prefix == i2c_rejected && sync_call && st_call == i2c_rejected &&
                           own == i2c_ok && grep && gr.aux0 == 2u && gr.addr_hits == 1u &&
                           gr.last_addr == twilink::dut_addr);
+        bench.verdict("dma on a host with no engines bound is answered i2c_rejected inside start(), nothing on the "
+                      "wire (the peer's one tenure is the write after it), and that next request is exact",
+                      sync_dma && st_dma == i2c_rejected && own == i2c_ok && grep && gr.aux0 == 2u &&
+                          gr.addr_hits == 1u);
     }
 
     // The refusals: at the first data byte (IC_SLV_DATA_NACK_ONLY set before
@@ -796,8 +814,9 @@ void tg_dma() {
     for (uint8_t i = 0; i < 64u; ++i) {
         rx_buf[i] = 0xEE;
     }
+    constexpr I2cEngine dma = I2cEngine::dma;
     uint32_t t0 = us_now();
-    const uint8_t st0 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint8_t st0 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
     const uint32_t took0 = us_now() - t0;
     const uint32_t entries0 = isr_entries;
     const uint8_t m0 = pattern_mismatches(rx_buf, 64, a.seed, served);
@@ -808,7 +827,7 @@ void tg_dma() {
         rx_buf[i] = 0xEE;
     }
     t0 = us_now();
-    const uint8_t st = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint8_t st = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
     const uint32_t took = us_now() - t0;
     const uint32_t entries = isr_entries;
     const uint8_t m64 = pattern_mismatches(rx_buf, 64, a.seed, served);
@@ -825,7 +844,7 @@ void tg_dma() {
     }
     xip_empty();
     t0 = us_now();
-    const uint8_t stc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint8_t stc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u, dma);
     const uint32_t tookc = us_now() - t0;
     const uint32_t entriesc = isr_entries;
     const uint8_t mc = pattern_mismatches(rx_buf, 64, a.seed, served);
@@ -842,22 +861,70 @@ void tg_dma() {
     for (uint8_t i = 0; i < 32u; ++i) {
         rx_buf[i] = 0xEE;
     }
-    const uint8_t st2 = tenure<DmaHost>(twilink::dut_addr, w2, 2, rx_buf, 32, I2cSpeed::fast_400k);
+    const uint8_t st2 = tenure<DmaHost>(twilink::dut_addr, w2, 2, rx_buf, 32, I2cSpeed::fast_400k, 200'000u, dma);
     const uint8_t m32 = pattern_mismatches(rx_buf, 32, a.seed, served);
     served = static_cast<uint16_t>(served + 32u);
     bench.verdict("a write-then-read on an engined host: the write on the pump, the repeated START, 32 bytes "
                   "back on the engines, exact",
                   st2 == i2c_ok && m32 == 0u);
-    const uint8_t st3 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 2, I2cSpeed::fast_400k);
-    const uint8_t m2 = pattern_mismatches(rx_buf, 2, a.seed, served);
-    served = static_cast<uint16_t>(served + 2u);
-    const uint8_t st4 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k);
+    // THE SHORTEST READS ON THE ENGINES: one byte and two, `dma` named. A
+    // read of one or two has no command between the first and the last,
+    // so the pump writes both and the transmit engine is not claimed; the
+    // receive engine's run is the length and every byte of it moved
+    // (take() counts what its channel moved since the start).
+    bool short_ok = true;
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}}) {
+        for (uint8_t i = 0; i < n; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        const uint8_t sn = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, n, I2cSpeed::fast_400k, 200'000u, dma);
+        const uint32_t cap = DmaRx::capacity();
+        const uint32_t moved = DmaRx::take();
+        const bool tx_free = !DmaTx::busy();
+        const uint32_t lines = dma_entries;
+        const uint8_t mn = pattern_mismatches(rx_buf, n, a.seed, served);
+        served = static_cast<uint16_t>(served + n);
+        print(serial, "  a ", n, "-byte read under dma: status ", sn, ", the receive run ", cap, " (", moved,
+              " moved), the transmit engine ", tx_free ? "free" : "CLAIMED", ", ", lines, " DMA line entries, ",
+              isr_entries, " host entries, ", mn, " wrong", crlf);
+        short_ok = short_ok && sn == i2c_ok && mn == 0u && cap == n && moved == n && tx_free && lines == 0u;
+    }
+    bench.verdict("dma at the shortest read: one byte and two on the receive engine, its run the length and every "
+                  "byte of it moved, the transmit engine not claimed (no command between the first and the last), "
+                  "no DMA line entry, byte-exact",
+                  short_ok);
+    // A HALF THE ENGINES CANNOT CARRY, UNDER dma: a write. Its entries are
+    // the request's bytes, and a byte beat lands replicated across the
+    // command register (the chip's document): the write stays on the
+    // pump and completes - no DMA line entry, the receive engine's run
+    // untouched, the bytes counted by the peer at the letter's end.
+    const uint32_t cap_before = DmaRx::capacity();
+    uint8_t w1[1] = {0x5C};
+    const uint8_t sw1 = tenure<DmaHost>(twilink::dut_addr, w1, 1, nullptr, 0, I2cSpeed::fast_400k, 200'000u, dma);
+    const uint32_t lines_w1 = dma_entries;
+    fill_pattern(tx_buf, 32, 0x90);
+    const uint8_t sw32 = tenure<DmaHost>(twilink::dut_addr, tx_buf, 32, nullptr, 0, I2cSpeed::fast_400k, 200'000u, dma);
+    const uint32_t lines_w32 = dma_entries;
+    const uint32_t isr_w32 = isr_entries;
+    const uint16_t written_sum = static_cast<uint16_t>(0x01u + 0x02u + 0x5Cu + sum_of(tx_buf, 32));
+    print(serial, "  writes of 1 and 32 under dma: status ", sw1, " and ", sw32, ", DMA line entries ", lines_w1,
+          " and ", lines_w32, ", the 32-byte write's host entries ", isr_w32, crlf);
+    // The 32-byte write on the pump: sixteen entries at start(), refills of
+    // at least eight on TX_EMPTY (half the FIFO): two, then the STOP - three
+    // host entries, four for a refill that lands a byte late.
+    bench.verdict("a half the engines cannot carry, under dma, completes on the interrupt: writes of 1 and 32 "
+                  "bytes i2c_ok, no DMA line entry, the receive run untouched, the 32 in three or four host entries "
+                  "(the peer's count and sum judged at the end)",
+                  sw1 == i2c_ok && sw32 == i2c_ok && lines_w1 == 0u && lines_w32 == 0u &&
+                      DmaRx::capacity() == cap_before && isr_w32 >= 3u && isr_w32 <= 4u);
+    const uint8_t st4 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k, 200'000u, dma);
+    const uint32_t lines_probe = dma_entries;
     served = static_cast<uint16_t>(served + 1u);
-    const uint8_t st5 = tenure<DmaHost>(nobody, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k);
-    bench.verdict("a two-byte read and the probe stay on the pump of an engined host; a deaf client on an "
+    const uint8_t st5 = tenure<DmaHost>(nobody, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k, 200'000u, dma);
+    bench.verdict("the probe under dma stays on the pump (no read half: no DMA line entry); a deaf client on an "
                   "engined read is i2c_nack_addr with the engines put away",
-                  st3 == i2c_ok && m2 == 0u && st4 == i2c_ok && st5 == i2c_nack_addr);
-    const uint8_t st6 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k);
+                  st4 == i2c_ok && lines_probe == 0u && st5 == i2c_nack_addr);
+    const uint8_t st6 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k, 200'000u, dma);
     const uint8_t m16 = pattern_mismatches(rx_buf, 16, a.seed, served);
     served = static_cast<uint16_t>(served + 16u);
     bench.verdict("... and the next engined read after that is clean", st6 == i2c_ok && m16 == 0u);
@@ -875,12 +942,12 @@ void tg_dma() {
     // abort ends after the entry under way, the next already in the
     // shifter: one to six bytes served (3 or 4 measured).
     auto* const hole = reinterpret_cast<uint8_t*>(0x40100000u);
-    const uint8_t sf = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, hole, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint8_t sf = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, hole, 64, I2cSpeed::fast_400k, 20'000u, dma);
     const uint32_t fault_entries = isr_entries;
     for (uint8_t i = 0; i < 16u; ++i) {
         rx_buf[i] = 0xEE;
     }
-    const uint8_t sa = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k);
+    const uint8_t sa = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k, 200'000u, dma);
     uint16_t skipped = 0xFFFFu;
     for (uint16_t k = 0; k < 256u && skipped == 0xFFFFu; ++k) {
         if (pattern_mismatches(rx_buf, 16, a.seed, static_cast<uint16_t>(served + k)) == 0u) {
@@ -906,7 +973,7 @@ void tg_dma() {
         for (uint16_t i = 0; i < 255u; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint8_t s7 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 255, I2cSpeed::fast_plus_1m, 50'000u);
+        const uint8_t s7 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 255, I2cSpeed::fast_plus_1m, 50'000u, dma);
         over = over || (Raw::raw_pending() & I2cInterrupt::tx_over) != 0u;
         if (s7 == i2c_ok && pattern_mismatches(rx_buf, 255, a.seed, served) == 0u) {
             ++exact;
@@ -918,15 +985,108 @@ void tg_dma() {
     bench.verdict("the engine's bursts never overrun the sixteen-deep FIFO: eight 255-byte reads at 1 MHz "
                   "exact against the second chip, TX_OVER never raised",
                   exact == 8u && !over);
+    // AFTER THE FAULT PATH AND THE BURSTS, so that those run with the
+    // engined path's code as warm as their bounds assume.
+    // `interrupt`, THE DEFAULT, TOUCHES NO CHANNEL, at a length the engines
+    // would carry: no DMA line entry, the receive engine's run and its
+    // channel's write address as the last engined read left them. The host's
+    // vector takes the 64 bytes: each entry at most the FIFO's sixteen, so
+    // four at the least; RX_FULL at eight bytes, seven entries and the
+    // tail's at the STOP, so eight at the most - two spare.
+    for (uint8_t i = 0; i < 64u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint32_t cap_i0 = DmaRx::capacity();
+    const uint32_t wa_i0 = DmaChannel<DmaRx::channel>::write_addr();
+    const uint8_t sti = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u,
+                                        I2cEngine::interrupt);
+    const uint32_t lines_i = dma_entries;
+    const uint32_t isr_i = isr_entries;
+    const bool untouched = DmaRx::capacity() == cap_i0 && DmaChannel<DmaRx::channel>::write_addr() == wa_i0 &&
+                           !DmaTx::busy();
+    const uint8_t mi = pattern_mismatches(rx_buf, 64, a.seed, served);
+    served = static_cast<uint16_t>(served + 64u);
+    print(serial, "  a 64-byte read under interrupt on the engined host: status ", sti, ", ", isr_i,
+          " host entries, ", lines_i, " DMA line entries, the channels ", untouched ? "untouched" : "TOUCHED", ", ",
+          mi, " wrong", crlf);
+    bench.verdict("interrupt, the default, at 64 bytes touches no channel: no DMA line entry, the receive run and "
+                  "its channel's write address unchanged, four to ten host entries, byte-exact",
+                  sti == i2c_ok && mi == 0u && lines_i == 0u && untouched && isr_i >= 4u && isr_i <= 10u);
+    // THE TRANSMIT CHANNEL HELD BY ANOTHER OWNER (this letter takes its
+    // claim): the read's commands are the pump's - sixteen at start(), then
+    // refills of eight or more on TX_EMPTY, two or three, the last carrying
+    // STOP, then the STOP's own entry: three to four host entries, one spare
+    // - and every byte the receive engine's.
+    for (uint8_t i = 0; i < 40u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const bool held = DmaTx::claim();
+    const uint8_t sc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 40, I2cSpeed::fast_400k, 20'000u, dma);
+    const uint32_t cap_c = DmaRx::capacity();
+    const uint32_t moved_c = DmaRx::take();
+    const uint32_t lines_c = dma_entries;
+    const uint32_t isr_c = isr_entries;
+    const bool still_held = DmaTx::busy();
+    DmaTx::unclaim();
+    const uint8_t mc40 = pattern_mismatches(rx_buf, 40, a.seed, served);
+    served = static_cast<uint16_t>(served + 40u);
+    print(serial, "  a 40-byte read under dma with the transmit channel held: status ", sc, ", the receive run ",
+          cap_c, " (", moved_c, " moved), ", isr_c, " host entries, ", lines_c, " DMA line entries, ", mc40,
+          " wrong", crlf);
+    bench.verdict("a transmit channel another owner holds is not taken: a 40-byte read under dma completes "
+                  "byte-exact, its commands the pump's (three to five host entries), every byte on the receive "
+                  "engine, no DMA line entry, the holder's claim intact",
+                  held && sc == i2c_ok && mc40 == 0u && cap_c == 40u && moved_c == 40u && lines_c == 0u &&
+                      isr_c >= 3u && isr_c <= 5u && still_held);
     owner = Owner::none;
     DmaHost::release();
     host_ready();
     outlast(a, s0);
     twilink::Report r{};
     const bool rep = peer_report(r);
-    print(serial, "  the peer served ", r.aux1, " (low byte of ", served, ")", crlf);
+    print(serial, "  the peer served ", r.aux1, " (low byte of ", served, "), received ", r.aux0, " with sum ",
+          hex(r.sum), " (", hex(written_sum), ")", crlf);
     bench.verdict("the peer's tally agrees: every byte the engines read was served once",
                   rep && r.aux1 == static_cast<uint8_t>(served));
+    bench.verdict("... and every byte written under dma arrived once: 35 received (the 2 + 32's two, the 1 and "
+                  "the 32 of the writes), their sum exact",
+                  rep && r.aux0 == 35u && r.sum == written_sum);
+
+    // THE DATA NACK UNDER dma: a write-then-read of 6 + 16 whose third
+    // written byte the client refuses (its block disabled once the second
+    // is taken). start() wrote the six and the read's first command, and the
+    // engines took the read half before the first byte left: the abort ends
+    // the tenure with them launched, puts them away before the FIFOs come
+    // out of their flushed state, and the next engined read is exact.
+    twilink::Params nk = serve_params(300, 0x5A);
+    nk.nack_at = 3;
+    if (!peer_act(Op::serve, nk)) {
+        bench.verdict("the peer accepted the nack-at serve", false);
+        return;
+    }
+    const uint32_t n0 = us_now();
+    owner = Owner::none;
+    Host::release();
+    (void)DmaHost::init(clock);
+    owner = Owner::dma_host;
+    uint8_t w6[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+    const uint8_t snk = tenure<DmaHost>(twilink::dut_addr, w6, 6, rx_buf, 16, link_speed, 200'000u, dma);
+    for (uint8_t i = 0; i < 16u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t sn2 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed, 200'000u, dma);
+    const uint8_t mn2 = pattern_mismatches(rx_buf, 16, nk.seed, 0);
+    owner = Owner::none;
+    DmaHost::release();
+    host_ready();
+    outlast(nk, n0);
+    twilink::Report nr{};
+    const bool nrep = peer_report(nr);
+    print(serial, "  6 + 16 under dma, the third written byte refused: status ", snk, ", the peer stored ", nr.aux0,
+          ", served ", nr.aux1, "; the next engined read ", sn2, ", ", mn2, " wrong", crlf);
+    bench.verdict("THE DATA NACK UNDER dma: a write-then-read of 6 + 16, the read half on the engines, its third "
+                  "written byte refused - i2c_nack_data, two bytes stored, and the next engined read of 16 exact",
+                  snk == i2c_nack_data && sn2 == i2c_ok && mn2 == 0u && nrep && nr.aux0 == 2u && nr.aux1 == 16u);
 }
 
 // =============================================================================
@@ -1183,24 +1343,29 @@ void ti_unstick() {
 /// peer's own start() written inside it, this host's start() too - both
 /// held by the busy bus -, then the STOP that frees it: both STARTs leave
 /// on the one edge and the wired-AND decides.
-uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t len, uint32_t lead_us) {
-    Host::Request r{};
+template <typename H = Host>
+uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t len, uint8_t* rx, uint8_t rx_len, uint32_t lead_us,
+                   I2cEngine engine = I2cEngine::interrupt) {
+    typename H::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(tx);
     r.tx_len = len;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rx_len;
     r.speed = link_speed;
+    r.engine = engine;
     transfer_done = false;
     isr_entries = 0;
     inject_start();
     spin_us(lead_us);
-    const bool sync = Host::start(r);
+    const bool sync = H::start(r);
     spin_us(20);
     inject_stop();
     if (sync) {
-        return Host::status();
+        return H::status();
     }
     if (!wait_until([] { return transfer_done; }, 200'000u)) {
-        (void)Host::recover();
+        (void)H::recover();
         return no_answer;
     }
     return transfer_status;
@@ -1240,7 +1405,7 @@ void tk_arbitration() {
         // The window: 350 us, past the peer's 40 us of quiet and its 120 us
         // lead, with its start() - a disable, IC_TAR and an enable, 6 us at
         // 100 kHz - well inside.
-        const uint8_t st = arb_tenure(rd.dut_target, tx_buf, 5, 350);
+        const uint8_t st = arb_tenure(rd.dut_target, tx_buf, 5, nullptr, 0, 350);
         outlast(a, s0);
         twilink::Report r{};
         const bool rep = peer_report(r);
@@ -1265,6 +1430,42 @@ void tk_arbitration() {
     bench.verdict("arbitration decided in BOTH directions on the wire: two DW_apb_i2c hosts, their STARTs "
                   "released by one STOP",
                   as_expected == 2u);
+    // AND UNDER dma: the engined host's read of 16 aimed at the higher
+    // address, its read half on the engines from start(), loses at the
+    // first address bit; the abort puts the engines away, and the next
+    // engined read is exact.
+    {
+        twilink::Params a{};
+        a.ms = 600;
+        a.addr = twilink::dut_addr;
+        a.target = twilink::dut_addr;
+        a.count = 4;
+        a.seed = 0x40;
+        a.aux16 = 120;
+        if (!peer_act(Op::arb, a)) {
+            bench.verdict("the peer accepted the arbitration command", false);
+            return;
+        }
+        const uint32_t s0 = us_now();
+        owner = Owner::none;
+        Host::release();
+        (void)DmaHost::init(clock);
+        owner = Owner::dma_host;
+        const uint8_t st = arb_tenure<DmaHost>(twilink::command_addr, nullptr, 0, rx_buf, 16, 350, I2cEngine::dma);
+        owner = Owner::none;
+        DmaHost::release();
+        host_ready();
+        outlast(a, s0);
+        twilink::Report r{};
+        const bool rep = peer_report(r);
+        const bool peer_lost = rep && (r.flags & twilink::report_arblost) != 0u;
+        const bool peer_ran = rep && (r.flags & twilink::report_host_ran) != 0u;
+        print(serial, "  under dma, a read of 16 -> 0x6B against the peer -> 0x2C: this board ", st,
+              "; the peer: flags ", hex(r.flags), " status ", r.mstatus, crlf);
+        bench.verdict("an engined read (dma) aiming at the higher address loses the wired-AND: i2c_arb_lost, the "
+                      "peer's host keeping the bus",
+                      st == i2c_arb_lost && peer_ran && !peer_lost && r.mstatus == i2c_nack_addr);
+    }
     bench.verdict("the command channel is back after the races", command(Op::ping));
 }
 
@@ -1598,6 +1799,7 @@ void tm_client_edges() {
 }
 
 [[gnu::always_inline]] inline void pair_dma_isr() {
+    dma_entries = dma_entries + 1u;
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
         transfer_status = DmaHost::status();
         transfer_done = true;
