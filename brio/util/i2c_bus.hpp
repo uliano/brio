@@ -93,7 +93,11 @@ constexpr bool i2c_address_in_range(uint8_t addr) {
 ///   dma        the DMA channels bound to the host (its engines) carry
 ///              every half they can, at any length; a half they cannot
 ///              carry (the host's header names which) stays on the
-///              interrupt and the request completes, not refused
+///              interrupt and the request completes, not refused: the
+///              interrupt path is asynchronous too, so the fallback costs
+///              core cycles and changes nothing of the request's shape
+///              (an SPI host refuses instead, its fallback being a loop
+///              that would hold the arbiter's dispatch)
 ///
 /// The host never chooses: a wrong choice costs core cycles or a sleep,
 /// never correctness, and the length from which `dma` costs the core less

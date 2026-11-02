@@ -62,7 +62,13 @@
 //                            vector for the image's life. The body writes
 //                            a Request's addr, tx, tx_len, rx, rx_len,
 //                            reply and speed, and reads Host::status()
-//                            only through the arbiter
+//                            only through the arbiter. It never writes
+//                            `engine`, so every Request it builds asks
+//                            I2cEngine::interrupt; a suite that runs its
+//                            engines here names as Host a type whose
+//                            start() sets the field and then calls the
+//                            family host's (each such suite states its
+//                            rule)
 //   peer_kind                the far peer's twi_link kind byte (twi_link.hpp,
 //                            Ident::version's high byte), which letter n
 //                            judges

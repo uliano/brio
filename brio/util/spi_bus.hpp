@@ -26,11 +26,13 @@
  * arbiter's dispatch: no DMA and no interrupt vector, start() returning when
  * it is done; the poster does not wait, and its buffers stay lent until the
  * reply. A program reads the outcome in the reply, `SpiDone::status`.
- * Asynchronous is DMA: the host's engines carry the request and their
- * completion is the TransferDone, a host with no engines refuses it
- * (spi_rejected at once, nothing on the wire; the host type's `has_dma`
- * says so at compile time), and a request too short to repay the engines'
- * fixed cost runs the same loop inside start().
+ * Asynchronous is DMA: the host's engines carry the request at any length
+ * and their completion is the TransferDone; a host with no engines refuses
+ * it (spi_rejected at once, nothing on the wire; the host type's `has_dma`
+ * says so at compile time), and so does a host whose engines cannot carry
+ * that request. The host never picks the engine for the program. On either
+ * engine, when a request ends the wire has ended: the select rises, and
+ * start() or the engines' completion answers, after the last SCK edge.
  *
  * SPI has no wire-level failure the engine can detect (no acknowledge,
  * no arbitration): what a host can report is its own (a wait it gave up
@@ -58,17 +60,21 @@ using SpiDone = BusDone;
 ///  - `polled`: an explicit loop inside start(), at any length, in the
 ///    arbiter's dispatch: no DMA channel moves a frame and no interrupt vector
 ///    is needed.
-///  - `dma`: asynchronous, on the host's DMA engines, whose completion is the
-///    TransferDone. A host with no engines refuses it (spi_rejected at once,
-///    nothing on the wire), and a request too short to repay the engines' fixed
-///    cost runs the same loop inside start(), so `dma` does not promise that
-///    start() does not spin (docs/design/spi-bus.md, "Two ways to run a request").
+///  - `dma`: asynchronous, on the host's DMA engines at any length, whose
+///    completion is the TransferDone; start() returns false only when the
+///    engines have the request. A host with no engines refuses it, and so does
+///    a host whose engines cannot carry it (spi_rejected at once, nothing on the
+///    wire); a command phase before a data phase runs in the loop inside
+///    start(), the data phase on the engines (docs/design/spi-bus.md, "Two ways
+///    to run a request"). Which costs the core fewer cycles at a given length is
+///    each family's SPI document's guidance; the host reads none of it.
 enum class SpiEngine : uint8_t { dma = 0, polled = 1 };
 
 inline constexpr uint8_t spi_ok = bus_ok;
 /// The request never reached the wire: the arbiter's pending FIFO was full,
 /// or the host refused it - an asynchronous request on a host with no DMA
-/// engines (docs/design/spi-bus.md, "Two ways to run a request").
+/// engines, or one its engines cannot carry (docs/design/spi-bus.md, "Two
+/// ways to run a request").
 inline constexpr uint8_t spi_rejected = bus_rejected;
 /// The transaction never answered inside the arbiter's per-bus timeout:
 /// the arbiter itself has called the engine's recover() and the requester
@@ -95,16 +101,16 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 /// A polled wait ran out: a flag the loop waited for never rose within
 /// the transaction's one spin budget - a block whose clock does not run
 /// (a gate closed, the enable down, a mode fault that demoted it). Every
-/// host whose loop has such a budget answers it, whether the request
-/// asked for the loop or was short enough to run it; the AVR's has none,
+/// host whose loop has such a budget answers it, for a polled request and
+/// for the command loop of a request on the engines; the AVR's has none,
 /// a transfer written there always completing. The select is released,
 /// then the block reset and reconfigured, so the next request starts on a
 /// clean block and the program calls nothing; a reset cannot open a closed
-/// clock gate, and behind one the next request stalls too. The SAM C21 alone
-/// drains the receive side and leaves the block as it is: there the way back
-/// is recover(), the program's to call with the bus idle, the arbiter going
-/// on at once to the next waiting request (docs/design/spi-bus.md, "What
-/// follows each code").
+/// clock gate, and behind one the next request stalls too. Where the
+/// engines' completion waits for the wire's end (the STM32F4, the PL022), a
+/// wait that runs out ends the request with this code too, in the
+/// interrupt: the select released and the reset owed to the next start()
+/// (docs/design/spi-bus.md, "What follows each code").
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
 /// The arbiter under SPI's name. `pending_depth` is how many requests

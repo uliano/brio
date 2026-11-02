@@ -1252,10 +1252,11 @@ the CH32V303's each against the other's, the SAM C21's against the
 AVR64EA48's, the RP2040's and the RP2350's (both halves) each against
 the other's, and the CH32X035's against the CH32V006's,
 with an object preempting at prime periods: on every SPI stack the
-arbiter with three requesters of three priorities, the DMA engines
-with a short asynchronous request run polled inside `start()`, and on
-the SAM C21's, whose host has no engines and refuses an asynchronous
-request, every request polled; on every UART stack `LineReader`'s line loans to a borrower
+arbiter with three requesters of three priorities, the polled loop
+and the DMA engines each at the requests that name them, one-frame
+requests on the engines included, and on the SAM C21's, whose suite
+binds a host with no engines, which refuses an asynchronous request,
+every request polled; on every UART stack `LineReader`'s line loans to a borrower
 above it and the one-writer UART; all byte-exact (`test_stm32f4_rubato_link`, 230 verdicts, [the
 STM32F4 platform page](../stm32f4/platform.md); `test_stm32_rubato_link`,
 244, [the STM32G0 platform page](../stm32g0/platform.md);

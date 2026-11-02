@@ -44,10 +44,10 @@
 //   Serial, serial, bench    the console's Uart and its TwoKeyTestBench
 //   Host, CsPin              the link's SpiHost with its engines, and the
 //                            select, a GPIO. The body writes a Request's
-//                            cs, tx, rx, len, polled, cs_setup_us and
-//                            reply - every request polled on a host whose
-//                            Host::has_dma is false, which refuses an
-//                            asynchronous one -, and calls
+//                            cs, tx, rx, len, engine, cs_setup_us and
+//                            reply - SpiEngine::polled for every request
+//                            on a host whose Host::has_dma is false, which
+//                            refuses an asynchronous one -, and calls
 //                            Host::prime(mode, rate) where it frames a
 //                            select itself (cs_hold_us below);
 //                            it asks the bit order through Host::lsb_first()
@@ -74,15 +74,13 @@
 //
 //   w_client_len, w_minor_len, w_press_len   (uint8_t; 6, 8 and 3) the
 //                            frames of each of letter w's requests (at most
-//                            8 each), so that a family puts each requester
-//                            on the way its host runs it at w's rate: the
-//                            Client's and Pressure's requests are
-//                            asynchronous - on the DMA engines, or polled
-//                            inside start() where the host runs one too
-//                            short for them - and Minor's are polled
-//                            (docs/design/spi-bus.md, "Two ways to run a
-//                            request"); on a host without engines all
-//                            three are polled
+//                            8 each). The length decides no engine: the
+//                            Client's and Pressure's requests name
+//                            SpiEngine::dma and ride the engines at any
+//                            length, one frame included, and Minor's name
+//                            SpiEngine::polled (docs/design/spi-bus.md, "Two
+//                            ways to run a request"); on a host without
+//                            engines all three are polled
 //   w_rate                   (SpiClock; link_clock) letter w's rate, so
 //                            that a host whose command rate keeps two
 //                            frames in flight can run w where one is, and
@@ -361,9 +359,9 @@ constexpr uint8_t arb_done = 2;
 constexpr uint8_t arb_other = 3;
 volatile uint8_t arb_event = arb_none;
 /// The source of the TransferDone the arbiter dispatches: true the DMA
-/// engines' completion, false the SPI vector's (a host that still runs an
-/// asynchronous request on a per-frame interrupt). The suite's vectors
-/// write it before their post.
+/// engines' completion, false any other vector's (on a host whose engines
+/// end a request on the peripheral's own interrupt, as the SAM C21's do on
+/// TXC). The suite's vectors write it before their post.
 volatile bool done_from_dma = false;
 /// LineSink's dispatch is running (it never nests in itself).
 volatile uint8_t sink_depth = 0;

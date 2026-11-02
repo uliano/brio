@@ -111,14 +111,18 @@ A program can rank a channel above its serial receive ring (a copy
 that must not wait, a second ring it values more), and it says so on
 the UART, in one shape on every family that offers it:
 `UartOptions::rx_priority`, a value of the family's own `DmaPriority`
-(its levels the silicon's: four on the STM32-lineage and the SAM's
-controllers), defaulting to the family's highest. A UART with no
+(its levels the silicon's: four on the STM32-lineage controllers),
+defaulting to the family's highest. A UART with no
 receive engine refuses the option at compile time: there is no
 channel to rank. The knob is born where the level decides correctness.
 On the RP families the level is one bit, and nothing ranks above a
 ring at its top: the UART there takes no level, its receive engine
 arms at HIGH_PRIORITY, and the one thing a knob could do, take the
-ring down to normal, is the arrangement the RP2350 starves. Every
+ring down to normal, is the arrangement the RP2350 starves. On the SAM
+C21 the controller has four levels and still nothing to rank: a receive
+engine comes only with its transmit engine, and the pair is the image's
+whole budget of two channels ([the SAM C21 DMAC page](../samc21/dmac.md)),
+so the UART takes no level there either. Every
 other engine's level is its driver's, stated beside the call with the
 chapter's reason, and an engine armed by hand takes the rule's level
 for its direction by default.
@@ -186,13 +190,15 @@ Common: on the WCH strata, the STM32G0, the STM32F4, the SAM C21 and
 the two RP families every engine's level is the rule's (the defaults
 by direction, each driver's call naming its own), with
 `UartOptions::rx_priority` the knob where the level is more than one
-bit and a receive engine exists, and every transport whose block can
-raise a request resets it in `release()`.
+bit and something can be ranked above a receive engine (not on the SAM
+C21, whose receive engine and its transmit engine are the image's
+whole budget), and every transport whose block can raise a request
+resets it in `release()`.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrxt | none | the AVR DA, DB and EA have no DMA controller |
-| samc21 | one engine: the UART's transmit engine (`samc21/dmac.hpp`), at level 2 of four (CHCTRLB.LVL), the rule's next, with CTRL.LVLEN enabling that level alone | one channel, so the level ranks it against nothing and is the rule's for the day the controller admits a second user, the rest of it being declined by erratum 1.10.4; the STM32F4's answer at the peripheral (a disabled SERCOM withdraws its transmit request, one gated with ENABLE set holds it and hands the next channel bound to its trigger one stray beat) and none in the channel, which keeps no request across its own disable; the UART resets its SERCOM in `release()` before the gate, and the engine's `arm()` resets the block ([the SAM C21 DMAC page](../samc21/dmac.md)) |
+| samc21 | `DmaTxEngine<ch>` at level 2 and `DmaRxEngine<ch>` at level 3 of four (CHCTRLB.LVL), the rule's two, CTRL.LVLEN enabling those (`samc21/dmac.hpp`); the Uart takes the transmit engine or the pair, the SPI host the pair or the transmit engine alone | a budget of two channels an image, numbered 0 and 1, a claim that finds its channel held panicking, and no channel suspended or disabled mid-block beside a running one: the controller corrupts or starves the other channel otherwise (erratum 1.10.4 and the measurements beyond it), so a receive engine comes only with its transmit engine; its release answer is the one "The release contract" above gives, the UART resetting its SERCOM before the gate and the SPI host disabling it ([the SAM C21 DMAC page](../samc21/dmac.md)) |
 | stm32g0 | `DmaPriority` (`stm32g0/dma_engine.hpp`); the engines' defaults: receive and ping-pong source very_high, transmit and player high, copy low (`stm32g0/dma.hpp`) | the UART's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C host's two at high; the DMAMUX ranks nothing (priority, then number), and a memory-to-memory channel alternates with any other requester (RM0444 10.4.4), so it takes two copies to starve a ring, and behind a starved channel the receive FIFO can wedge, which the UART's vector cures with a kick (DMAR dropped and raised, [the STM32G0 USART page](../stm32g0/usart.md)); a released block measured to hold no request, but a DMA enable left set re-raises it when the clock returns, so every transport's `release()` resets its block ([the STM32G0 DMA page](../stm32g0/dma.md)) |
 | stm32f4 | `DmaPriority` (`stm32f4/dma_engine.hpp`); the engines' defaults: receive (both shapes) very_high, transmit high, copy low (`stm32f4/dma.hpp`) | the UART's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C and FMPI2C hosts' two at high; a DAC stream the program's to rank, its underrun disabling the transfers (RM0090 14.3.7); the arbiter ranks per port, and it takes three copies above a ring on its controller to starve it; a gated clock holds a raised request, a cleared enable withdraws it: the UART, the SPI host and client, the I2C host and client and the FMPI2C block reset in `release()`, the timers and the DAC already did, the ADC clears CR2 with the clock on (its reset line is every converter's), measured clean ([the STM32F4 DMA page](../stm32f4/dma.md)) |
 | ch32v00x | `DmaPriority` (`ch32v00x/dma_engine.hpp`); the engines' defaults: receive very_high, transmit high, copy low (`ch32v00x/dma.hpp`) | the UART's ring at `rx_priority`, its transmit at high; the SPI host's receive at very_high and transmit at high; the I2C host's two at high; the UART and the I2C host reset their blocks in `release()`: the held request is the CH32V203's measurement, applied here by reading, the pulse correct either way ([the CH32V00x DMA page](../ch32v00x/dma.md)) |

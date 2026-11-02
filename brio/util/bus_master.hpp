@@ -91,10 +91,10 @@
  *    TransferDone{status} to this object when it ends (the same pattern
  *    as the UART's RxActivity edge). True means the transaction ended
  *    synchronously inside start(): polled bulk transfers, degenerate
- *    empty requests, an asynchronous request the engine runs polled
- *    because it is too short for its DMA, and a request the engine
- *    refuses without moving a byte (an SPI host with no DMA engines
- *    refuses every asynchronous one, docs/design/spi-bus.md). The reply
+ *    empty requests, and a request the engine refuses without moving a
+ *    byte (an SPI host with no DMA engines refuses every asynchronous
+ *    one, and any SPI host one its engines cannot carry,
+ *    docs/design/spi-bus.md). The reply
  *    is then sent right away with whatever Bus::status() reports (bus_ok
  *    as a rule; bus_rejected for a refusal; the engine's own code when
  *    the synchronous path failed: a polled wait that ran out, a bus
@@ -275,8 +275,9 @@ enum class BusAction : uint8_t {
  * reports inside start() (Bus::status() after a synchronous return)
  * goes to the requester as it is: a retry there would run inside the
  * same dispatch, compounding the blocking a polled request's client
- * bounded on purpose, and the one synchronous refusal on I2C, a speed
- * the clock cannot produce, is a fact no retry changes. Whether to try
+ * bounded on purpose, and the synchronous refusals on I2C - a speed the
+ * clock cannot produce, an address outside the range, `dma` on a host
+ * with no engines - are facts no retry changes. Whether to try
  * again is that requester's decision, made with its reply in hand.
  */
 struct BusPassThrough {
