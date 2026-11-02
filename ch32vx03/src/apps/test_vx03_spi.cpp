@@ -2,9 +2,9 @@
 // CH32V203 and the CH32V303: ch32vx03/spi.hpp over RM ch. 20, every
 // instance, both roles, the DMA engines, the hardware CRC and util/
 // spi_bus.hpp's arbiter with not one line changed. Letters a, b, c, e, f,
-// g and v are both series' single-board letters; h and i are the CH32V303's third
+// g, s and v are both series' single-board letters; h and i are the CH32V303's third
 // instance against its second, registered on the part that has SPI3 and
-// compiled out of every other image; d, j, k, l, m, n, o, q and r are THE PAIR's,
+// compiled out of every other image; d, j, k, l, m, n, o, q, r and t are THE PAIR's,
 // against the desk partner. The I2S face is test_vx03_i2s's.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
@@ -15,11 +15,11 @@
 //
 // THE SUITE HAS TWO SETS (util/testbench.hpp's second set):
 //
-//  - `z`, THE SINGLE-BOARD LETTERS (a, b, c, e, f, g, v, and h, i on the CH32V303),
+//  - `z`, THE SINGLE-BOARD LETTERS (a, b, c, e, f, g, s, v, and h, i on the CH32V303),
 //    runnable with the far board dark - on its console, or on its
 //    spi_peer, whose dark listener drives nothing and is selected by
 //    nothing: the pair's select is never driven low by them.
-//  - `y`, THE PAIR'S LETTERS (d, j, k, l, m, n, o, q, r), against the far board
+//  - `y`, THE PAIR'S LETTERS (d, j, k, l, m, n, o, q, r, t), against the far board
 //    running `spi_peer`, commanded IN BAND over the bus under test through
 //    avrxt/src/apps/spi_link.hpp, included by relative path: one source of
 //    truth for the wire format on every architecture. They FAIL loudly
@@ -76,9 +76,9 @@
 //      this desk can judge - a polled read back, a command phase and a
 //      read with no out buffer, the ladder above the pair's ceiling to the
 //      strap's 36 MHz, 4 KB at the fastest code that passes clean, both
-//      DMA engines - a command phase polled before its data block and one
-//      on a block of its own chained to it, 16-bit frames on them as
-//      half-words over aligned buffers and run polled one byte off - and
+//      DMA engines - a command phase in the loop before its data block at
+//      one frame and at 32, 16-bit frames on them as half-words over aligned
+//      buffers and refused one byte off - and
 //      SpiBus (= BusMaster) over the engined host. The four modes, both
 //      orders and the CRC are the pair's (d, k), judged by a foreign
 //      client
@@ -91,19 +91,28 @@
 //      and after a real transfer error, with no wire: MISO held by its port at
 //      a level the failed request did not see, so a frame left over shows; and
 //      the transmit interrupt feeding a host's stream
-//   g  THE TWO WAYS TO RUN A REQUEST, on SPI1 with no wire: the
-//      asynchronous request REFUSED by the engineless host (spi_rejected,
-//      the block, the select and the D/C untouched) and run by the same
-//      host polled; on the engined host the short asynchronous request's
-//      edge (one frame under it inside start(), one at it on the engines),
-//      a command phase on a block of its own, a 16-bit request from an odd
-//      address run polled, a long polled read in the loop on the engined
-//      host with no channel interrupt, and under a mask; then THE COSTS the
-//      short-request rule is made of - E - F for a read and a write, the
-//      receive loop's dead bus and both loops' turns - each through one
-//      call, against the constants this core states, and the edge itself
-//      walked at three shapes against the arithmetic; SPI2's same figures
-//      printed where the part has it
+//   g  THE ENGINE A REQUEST NAMES, on SPI1 with no wire: a dma request
+//      REFUSED by the engineless host (spi_rejected, the block, the select and
+//      the D/C untouched) and run by the same host polled; on the engined host
+//      ONE FRAME on the engines at the fastest rates, read and written; what
+//      the engines cannot carry refused - 16-bit frames from an odd address or
+//      over engines of uint8_t, a transmit channel another block holds, on the
+//      CH32V303's DMA1 a run across 64 KB - the select, the D/C and the block
+//      unmoved and the next request exact; THE COMMAND RULE, D/C's edge
+//      captured by a timer against the count of SCK edges on both engines; a
+//      long polled read in the loop on the engined host with no channel
+//      interrupt, and under a mask; then WHAT EACH ENGINE COSTS THE CORE - E
+//      for a read and a write, each loop's frame and its fixed part F at every
+//      code, each through one call, the length from which the engines cost
+//      fewer cycles at each code, and that length walked at three shapes
+//      against the arithmetic; SPI2's same figures printed where the part has
+//      it
+//   s  WHEN A REQUEST ENDS THE WIRE HAS ENDED, no wire: right after each
+//      request ends the SCK pad read for the mode's idle level, the four modes,
+//      /256 and /64, read, write and a command alone, both engines, through a
+//      select and through a null one, on every instance; RXNE and BSY sampled
+//      against SCK's last edge on the resource, and the delay from that edge
+//      to the vector's read, which are what say how far the reading can see
 //   v  OVR AND ITS CLEAR on the resource, against 20.2.7: what raises it,
 //      which reads put it down, a zero written to it, the two verbs, and
 //      what the polled write's tail leaves
@@ -139,8 +148,8 @@
 //      far client at each slew class of this end's pads; a bit-order
 //      mismatch as an exact two-way reversal; the dummy MEASURED (a late
 //      first answer); sink_slow; ss_pulse; a ten-second stress
-//   j  THE LADDER: /256 to /2 on the polled host and the engines (an
-//      asynchronous request) against the far DMA serve, and the polled
+//   j  THE LADDER: /256 to /2 on the polled host and the engines (a
+//      request naming them) against the far DMA serve, and the polled
 //      host against the far POLLED run, every row's cycles beside the
 //      wire's; /2 with HSRXEN
 //   k  THE EXTENDED EXCHANGE: 16-bit frames on both shapes and both far
@@ -162,16 +171,21 @@
 //      bound by the section's arithmetic
 //   r  THE NEXT REQUEST WITH NOTHING CALLED, judged by the far client: a stall
 //      in each of the four modes, in a command phase before a data block, and
-//      three real transfer errors, each followed by a polled and by an
-//      asynchronous window exact both ways; the same queued behind the failure
+//      three real transfer errors, each followed by a polled and by a
+//      dma window exact both ways; the same queued behind the failure
 //      through SpiBus, the replies in order
+//   t  THE ENGINE A REQUEST NAMES, judged by the far client: one frame on the
+//      engines at rates where the loop costs the core less, both ways; a refused
+//      request inside the select's window, the far client counting nothing of it
+//      and the next request exact; a command phase then a data phase in all four
+//      modes and both widths, every frame heard in order; a command alone
 //   x  (by name) THE SLIP STATISTICS: each mode four times at /256, /64
 //      and /8, on both far serves, behind the polled host and the engines,
 //      and with the far client listening only - no verdict
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abe,fv,cg
-// build: groups.v203c8 = abcefgv,djklmnoqrx
+// build: groups = abe,cv,fs,g
+// build: groups.v203c8 = abcefv,gs,djklmnoqrtx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -238,6 +252,10 @@ using Host1 = SpiHost<1, loop_pins>;
 using Dma1 = SpiHost<1, loop_pins, DmaTxEngine<1, S1::dma_tx_channel>,
                      DmaRxEngine<1, S1::dma_rx_channel>>;
 using Moved = SpiHost<1, moved_pins>;
+using MovedDma = SpiHost<1, moved_pins, DmaTxEngine<1, S1::dma_tx_channel>, DmaRxEngine<1, S1::dma_rx_channel>>;
+/// SPI1 over engines of bytes: what 16-bit frames are refused on.
+using ByteDma1 = SpiHost<1, loop_pins, DmaTxEngine<1, S1::dma_tx_channel, uint8_t>,
+                         DmaRxEngine<1, S1::dma_rx_channel, uint8_t>>;
 using Spi2Host = SpiHost<second_spi, second_pins>;
 using Spi2Dma = SpiHost<second_spi, second_pins, DmaTxEngine<1, S2::dma_tx_channel>,
                         DmaRxEngine<1, S2::dma_rx_channel>>;
@@ -381,6 +399,15 @@ alignas(4) uint8_t tx_buf[chunk];
 alignas(4) uint8_t rx_buf[chunk];
 uint8_t cmd_buf[4];
 
+bool all_bytes(const uint8_t* p, uint16_t n, uint8_t want) {
+    for (uint16_t i = 0; i < n; ++i) {
+        if (p[i] != want) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
     for (uint16_t i = 0; i < n; ++i) {
         p[i] = static_cast<uint8_t>(seed + i * 7u + (i >> 3));
@@ -455,6 +482,18 @@ volatile bool host_done = false;
 volatile uint32_t spi1_isr_entries = 0;
 volatile uint32_t spi1_dma_entries = 0;   ///< SPI1's two channel vectors, together
 volatile bool dma_host_live = false;
+volatile bool moved_dma_live = false;     ///< letter g's: SPI1's channels serve the second column's host
+
+/// LETTER s's READING IN THE VECTOR, on the line after a body answered true: the
+/// SCK pad of the host under test and the STK's position. A null probe reads
+/// false, one branch, on every other letter.
+PinRef end_probe{};
+volatile bool end_level = false;
+volatile uint32_t end_stamp = 0;
+[[gnu::always_inline]] inline void end_seen() {
+    end_level = end_probe.read();
+    end_stamp = stk()->CNTL;
+}
 volatile bool bus_ao_live = false;
 
 bool done_within_ms(uint32_t ms) {
@@ -534,11 +573,10 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
 // The rate on the wire
 // ---------------------------------------------------------------------------
 
-/// One asynchronous block of `n` frames through an ENGINED host `H`,
+/// One block of `n` frames on the engines of an ENGINED host `H`,
 /// neither buffer named - the transmit engine pouring its fixed cell and
 /// the receive engine its sink - in core cycles from the start() call to
 /// the receive channel's vector (the engined hosts' while dma_host_live).
-/// Every block this file asks for is long enough to repay the engines.
 template <typename H>
 uint32_t engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
     typename H::Request r{};
@@ -901,7 +939,7 @@ void tb_held() {
 
 namespace kl {
 
-/// The arbiter over the ENGINED host: an asynchronous request is DMA.
+/// The arbiter over the ENGINED host: a request naming SpiEngine::dma is DMA.
 using SpiArb = SpiBus<Dma1, P, 4>;
 
 uint8_t out_a[8];
@@ -1112,11 +1150,10 @@ void tc_loop() {
                   "channels table 11-5 wires to this instance",
                   ds == spi_ok && same(tx_buf, rx_buf, chunk));
 
-    // A COMMAND PHASE: one frame, too short to repay a block of its own,
-    // polled inside start() before the data block; 32 frames at /8 (2048
-    // cycles written, past the write budget) a block of its own, chained
-    // to the data block from the receive channel's vector - two channel
-    // interrupts for the transaction.
+    // THE COMMAND RULE: a command phase with a data phase behind it runs in the
+    // loop inside start() at any length, here one frame and 32, and the data
+    // on the engines: one channel interrupt for the transaction, and no frame
+    // of the command in the in buffer.
     cmd_buf[0] = 0x0B;
     fill_pattern(tx_buf, 64, 0x5A);
     for (uint16_t i = 0; i < 64; ++i) {
@@ -1134,21 +1171,20 @@ void tc_loop() {
     const uint8_t chained = dma_xfer(tx_buf + 32, 32, tx_buf, rx_buf, 32, SpiClock::div8,
                                      SpiDataSize::bits8, false);
     const uint32_t chained_dma = spi1_dma_entries;
-    print(serial, "  a command frame polled then 32 data frames on the engines: ", cds_dma,
-          " channel interrupt(s); 32 command frames on a block of their own then 32 data frames: ", chained_dma,
-          crlf);
-    bench.verdict("a command frame polled inside start() then 32 data frames on the engines, exact, one "
+    print(serial, "  a command frame in the loop then 32 data frames on the engines: ", cds_dma,
+          " channel interrupt(s); 32 command frames in the loop then 32 data frames: ", chained_dma, crlf);
+    bench.verdict("a command frame in the loop inside start() then 32 data frames on the engines, exact, one "
                   "channel interrupt",
                   cds == spi_ok && cds_same && cds_dma == 1u);
-    bench.verdict("A COMMAND PHASE ON A BLOCK OF ITS OWN, the data block chained to it from the vector: two "
-                  "channel interrupts, the data exact",
-                  chained == spi_ok && same(tx_buf, rx_buf, 32) && chained_dma == 2u);
+    bench.verdict("A COMMAND PHASE OF 32 FRAMES runs in the loop too, one fixed rule at any length: one channel "
+                  "interrupt, the data exact",
+                  chained == spi_ok && same(tx_buf, rx_buf, 32) && chained_dma == 1u);
 
     // THE BEAT IS THE FRAME: sixteen 16-bit frames over half-word aligned
     // buffers ride the engines as half-words, one channel interrupt for the
     // transaction and no SPI one; the same frames over buffers one byte
-    // off are a block the engines cannot carry, and run polled inside
-    // start(), no interrupt at all.
+    // off are a block the engines cannot carry, REFUSED, the in buffer
+    // untouched; named polled they run in the loop, exact.
     fill_pattern(tx_buf, 32, 0x42);
     for (uint16_t i = 0; i < 32; ++i) {
         rx_buf[i] = 0xEE;
@@ -1170,16 +1206,20 @@ void tc_loop() {
                                 SpiDataSize::bits16, false);
     const uint32_t ps_isr = spi1_isr_entries;
     const uint32_t ps_dma = spi1_dma_entries;
+    const bool ps_untouched = all_bytes(rx_buf, 33, 0xEEu);
+    const uint8_t pl = dma_xfer(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiClock::div8, SpiDataSize::bits16, true);
+    const uint32_t pl_dma = spi1_dma_entries;
     print(serial, "  16 frames of 16 bits on the engined host: aligned ", hs_isr, " SPI and ",
-          hs_dma, " channel interrupt(s); one byte off ", ps_isr, " SPI and ", ps_dma,
-          " channel interrupt(s)", crlf);
+          hs_dma, " channel interrupt(s); one byte off status ", ps, " with ", ps_isr, " SPI and ", ps_dma,
+          " channel interrupt(s); one byte off named polled, status ", pl, crlf);
     bench.verdict("16-bit frames over aligned buffers ride the engines as half-words: one "
                   "channel interrupt, no SPI one, exact",
                   hs == spi_ok && hs_same && hs_isr == 0u && hs_dma == 1u);
-    bench.verdict("over buffers one byte off the engines cannot carry them: run polled inside start(), "
-                  "no interrupt at all, exact",
-                  ps == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && ps_isr == 0u &&
-                      ps_dma == 0u);
+    bench.verdict("over buffers one byte off the engines cannot carry them: refused, spi_rejected, no interrupt "
+                  "at all, the in buffer untouched",
+                  ps == spi_rejected && ps_untouched && ps_isr == 0u && ps_dma == 0u);
+    bench.verdict("... and the same frames named polled run in the loop, no interrupt, exact",
+                  pl == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && pl_dma == 0u);
 
     // ---- the kernel, over the engined host ----
     dma_host_live = false;
@@ -2329,8 +2369,7 @@ void hog_window(bool open) {
 }
 
 /// How this end clocks the exchange: the polled request, or the DMA engines
-/// (an asynchronous request on the engined host, every exchange here long
-/// enough to repay them).
+/// (a request naming SpiEngine::dma on the engined host).
 enum class Shape : uint8_t { polled, engines };
 
 const char* shape_name(Shape s) { return s == Shape::polled ? "polled" : "engines"; }
@@ -2365,7 +2404,16 @@ struct Exchange {
     bool high_speed = false; ///< HSRXEN under /2
     Failure failure = Failure::none;   ///< letter r's, staged before the window
     bool queued = false;     ///< letter r's: behind the failure through the arbiter
+    uint8_t command = 0;     ///< letter t's: the first frames as a command phase, on the engined host
+    bool command_alone = false;   ///< letter t's: every frame a command phase, no data phase
+    bool refused_first = false;   ///< letter t's: a request the engines refuse, inside the window
 };
+
+/// What the engined shape's start() answered, and what a refused request inside
+/// the window did: letter t's.
+bool exchange_went = false;
+uint8_t exchange_refusal = no_answer;
+bool exchange_refusal_sync = false;
 
 struct Outcome {
     bool ran = false;        ///< the peer acked the action and the transaction finished
@@ -2393,9 +2441,8 @@ FaultKind fault_kind_of(Failure f) {
 
 /// The failed request of letter r, no select: on the pair's engined host, the
 /// word primed. A stall: a polled write of four frames with the enable down, or
-/// a command phase run polled before a data block (a frame below the engines'
-/// fixed cost, which is why that stage runs at /8). A fault: 64 frames on the
-/// engines.
+/// a command phase in the loop before a data block on the engines. A fault: 64
+/// frames on the engines.
 PairDma::Request failed_request(const Exchange& e, SpiDataSize bits) {
     PairDma::Request r{};
     r.cs = {};
@@ -2513,18 +2560,38 @@ uint8_t clock_out(const Exchange& e, uint16_t n, uint32_t& cycles) {
         }
         PairNss::clear();
         link_hold();
+        if (e.refused_first) {
+            // Inside the window, the far client armed and selected: 16-bit frames
+            // from an odd address, at another mode and rate. A frame it clocked,
+            // or a word it wrote, would show in the far client's count.
+            PairDma::Request no{};
+            no.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx) + 1);
+            no.len = 8;
+            no.clock = SpiClock::div128;
+            no.mode = e.host_mode == SpiMode::mode3 ? SpiMode::mode0 : SpiMode::mode3;
+            no.bits = SpiDataSize::bits16;
+            no.engine = SpiEngine::dma;
+            exchange_refusal_sync = PairDma::start(no);
+            exchange_refusal = PairDma::status();
+        }
+        const uint16_t head = e.command_alone ? n : e.command;
+        const uint16_t head_bytes = wide_of(e) ? static_cast<uint16_t>(2u * head) : head;
         PairDma::Request r{};
         r.cs = {};
-        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
-        r.rx = lend<Lease::reply>(e.read ? xrx : nullptr);
-        r.len = n;
+        r.cmd = lend<Lease::reply>(head != 0u ? static_cast<const uint8_t*>(xtx) : nullptr);
+        r.cmd_len = static_cast<uint8_t>(head);
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx) + head_bytes);
+        r.rx = lend<Lease::reply>(e.read ? xrx + head_bytes : nullptr);
+        r.len = static_cast<uint16_t>(n - head);
         r.clock = e.rate;
         r.mode = e.host_mode;
         r.bits = bits;
         r.engine = SpiEngine::dma;
         host_done = false;
         const uint32_t t0 = cycles_now();
-        if (PairDma::start(r)) {
+        const bool sync = PairDma::start(r);
+        exchange_went = !sync;
+        if (sync) {
             cycles = cycles_now() - t0;
             st = PairDma::status();
         } else {
@@ -2614,7 +2681,8 @@ Outcome run_exchange(const Exchange& e) {
     o.reported = peer_report(o.r);
     const bool reversed = e.host_lsb != (e.cfg.dord != 0);
     if (e.read) {
-        for (uint16_t i = 0; i < bytes; ++i) {
+        // A command phase's frames are not read: its answers go nowhere.
+        for (uint16_t i = wide ? static_cast<uint16_t>(2u * e.command) : e.command; i < bytes; ++i) {
             const uint8_t want = spilink::wide_byte(e.pattern, e.seed_b, i, wide, reversed);
             if (xrx[i] != want) {
                 if (o.mism == 0u) {
@@ -3624,15 +3692,6 @@ void frames_left_standing() {
     (void)delay_us(clock, 2);
 }
 
-bool all_bytes(const uint8_t* p, uint16_t n, uint8_t want) {
-    for (uint16_t i = 0; i < n; ++i) {
-        if (p[i] != want) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /// The request after the failure, the same word as the failed one so start()
 /// writes nothing: a read of `len` frames, on PA8's latch as its select, the
 /// out side the host's 0xFF. A completion on the engines waited out: at most
@@ -3802,9 +3861,7 @@ void next_request_with_nothing_called() {
     stall_then<Dma1>(stalls, SpiMode::mode3, SpiClock::div64, true, false, true);
     stall_then<Dma1>(stalls, SpiMode::mode3, SpiClock::div64, true, false, false);
     stall_then<Dma1>(stalls, SpiMode::mode2, SpiClock::div64, false, false, false);
-    // A command phase below the engines' fixed cost at /16, polled before its
-    // data block: 128 cycles a frame against 261 and 394.
-    static_assert(spi_polled_frame_cost(spi_host_costs, 3, 8, 1, false) < spi_async_budget(spi_host_costs, false));
+    // A command phase in the loop before its data block on the engines.
     stall_then<Dma1>(stalls, SpiMode::mode0, SpiClock::div16, false, true, true);
     stall_then<Dma1>(stalls, SpiMode::mode0, SpiClock::div16, false, true, false);
     print(serial, "  ", stalls.runs, " stalls with the enable down, a write of 16 frames, a read of 16 and a command phase: ",
@@ -4049,14 +4106,14 @@ void tv_overrun() {
 }
 
 // ===========================================================================
-// g - the two ways to run a request, and the short one's costs (z, no wire)
+// g - the engine a request names, and what each costs the core (z, no wire)
 // ===========================================================================
 
-/// One request through host `H` - asynchronous or polled - waited out: the
-/// receive channel's vector ends one on the engines (the engined hosts'
-/// while dma_host_live). The ONE CALL every cost of letter g is timed
-/// through, so that its own cycles stand on both sides of a difference and
-/// cancel. `went` says whether start() handed it to the engines.
+/// One request through host `H`, on the engine `polled` says, waited out: the
+/// receive channel's vector ends one on the engines (the engined hosts' while
+/// dma_host_live). The ONE CALL every cost of letter g is timed through, so
+/// that its own cycles stand on both sides of a difference and cancel. `went`
+/// says whether start() handed it to the engines.
 template <typename H>
 uint8_t xfer_on(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
                 SpiClock rate, SpiDataSize bits, bool polled, bool* went = nullptr) {
@@ -4088,41 +4145,44 @@ uint8_t xfer_on(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t*
     return H::status();
 }
 
-/// The shapes the short request's edge is measured at: a read at /4 (the
-/// receive loop's dead bus) and at /2 (its turn), a write at /2 (the
-/// transmit-only loop's turn).
-struct EdgeShape {
-    SpiClock rate;
-    bool read;
-};
-constexpr EdgeShape edge_shapes[3] = {{SpiClock::div4, true}, {SpiClock::div2, true}, {SpiClock::div2, false}};
-
-/// THE SHORT REQUEST'S FIGURES on one engined host, every one through
-/// xfer_on<H>: E, the engines' fixed cost (an asynchronous read of 256 and
-/// of 32 byte frames at /4, the frame their difference over 224, E the
-/// 32-frame block less its frames); at each shape the polled line's frame
-/// (x10: the difference of a 12- and a 4-frame line over 8) and its fixed
-/// part (the 4-frame line less its frames); E - F; the edge the arithmetic
-/// gives on these figures, the host's own count, and the edge measured -
-/// the fewest frames whose polled line costs at least E, walked upward
-/// from four under the arithmetic's count. The best of five each.
-struct ShortCosts {
-    uint32_t engine_fixed = 0;
-    uint32_t block_frame_x10 = 0;
-    uint32_t line_frame[3] = {};
-    uint32_t line_fixed[3] = {};
-    uint32_t over_read = 0, over_written = 0;
-    uint16_t edge_calc[3] = {}, edge_host[3] = {}, edge_meas[3] = {};
-};
-
 /// The polled lines' two lengths: the frame their difference, F the wall
 /// extrapolated to no frames, the dead bus falling out with the frames.
 constexpr uint16_t line_short = 4;
 constexpr uint16_t line_long = 12;
 
+/// One code's figures: each loop's frame x10 and its fixed part F, and the
+/// length from which the engines cost the core fewer cycles,
+/// ceil((E - F) / frame), at least one.
+struct RungCosts {
+    uint32_t read_frame_x10 = 0, read_fixed = 0, write_frame_x10 = 0, write_fixed = 0;
+    uint16_t from_read = 0, from_write = 0;
+};
+
+/// WHAT EACH ENGINE COSTS THE CORE on one engined host, every figure through
+/// xfer_on<H>, the best of five: E, the engines' fixed cost for a read and for
+/// a write (a request of 256 and of 32 byte frames at /4, the frame their
+/// difference over 224, E the 32-frame request less its frames); each code's
+/// RungCosts; and the length walked at three shapes - a read at /4 and at /2, a
+/// write at /2 - the fewest frames whose polled line costs at least E, from four
+/// under the arithmetic's count.
+struct EngineCosts {
+    uint32_t e_read = 0, e_write = 0, block_frame_x10 = 0;
+    RungCosts rung[8];
+    uint16_t walked[3] = {};
+    uint16_t calc[3] = {};
+};
+
+constexpr uint32_t ceil_frames(uint32_t e, uint32_t f, uint32_t frame_x10) {
+    if (frame_x10 == 0u || e <= f) {
+        return 1u;
+    }
+    const uint32_t n = ((e - f) * 10u + frame_x10 - 1u) / frame_x10;
+    return n > 1u ? n : 1u;
+}
+
 template <typename H>
-ShortCosts measure_short_costs() {
-    ShortCosts c{};
+EngineCosts measure_costs() {
+    EngineCosts c{};
     auto best = [](uint16_t n, SpiClock rate, bool read, bool polled) {
         uint32_t least = 0xFFFF'FFFFUL;
         for (uint8_t k = 0; k < 5u; ++k) {
@@ -4133,79 +4193,155 @@ ShortCosts measure_short_costs() {
         }
         return least;
     };
-    const uint32_t big = best(256, SpiClock::div4, true, false);
-    const uint32_t small = best(32, SpiClock::div4, true, false);
-    c.block_frame_x10 = big > small ? (big - small) * 10u / 224u : 0u;
-    const uint32_t small_wire = 32u * c.block_frame_x10 / 10u;
-    c.engine_fixed = small > small_wire ? small - small_wire : 0u;
+    auto fixed_part = [&](bool read) {
+        const uint32_t big = best(256, SpiClock::div4, read, false);
+        const uint32_t small = best(32, SpiClock::div4, read, false);
+        const uint32_t frame_x10 = big > small ? (big - small) * 10u / 224u : 0u;
+        const uint32_t wire = 32u * frame_x10 / 10u;
+        if (read) {
+            c.block_frame_x10 = frame_x10;
+        }
+        return small > wire ? small - wire : 0u;
+    };
+    c.e_read = fixed_part(true);
+    c.e_write = fixed_part(false);
+    auto line = [&](SpiClock rate, bool read, uint32_t& frame_x10, uint32_t& fixed) {
+        const uint32_t p4 = best(line_short, rate, read, true);
+        const uint32_t p12 = best(line_long, rate, read, true);
+        frame_x10 = p12 > p4 ? (p12 - p4) * 10u / (line_long - line_short) : 0u;
+        const uint32_t frames4 = line_short * frame_x10 / 10u;
+        fixed = p4 > frames4 ? p4 - frames4 : 0u;
+    };
+    for (uint8_t code = 0; code < 8u; ++code) {
+        RungCosts& k = c.rung[code];
+        const SpiClock rate = static_cast<SpiClock>(code);
+        line(rate, true, k.read_frame_x10, k.read_fixed);
+        line(rate, false, k.write_frame_x10, k.write_fixed);
+        k.from_read = static_cast<uint16_t>(ceil_frames(c.e_read, k.read_fixed, k.read_frame_x10));
+        k.from_write = static_cast<uint16_t>(ceil_frames(c.e_write, k.write_fixed, k.write_frame_x10));
+    }
+    c.calc[0] = c.rung[1].from_read;
+    c.calc[1] = c.rung[0].from_read;
+    c.calc[2] = c.rung[0].from_write;
+    const SpiClock shape_rate[3] = {SpiClock::div4, SpiClock::div2, SpiClock::div2};
+    const uint32_t shape_e[3] = {c.e_read, c.e_read, c.e_write};
     for (uint8_t k = 0; k < 3u; ++k) {
-        const EdgeShape sh = edge_shapes[k];
-        const uint32_t p4 = best(line_short, sh.rate, sh.read, true);
-        const uint32_t p12 = best(line_long, sh.rate, sh.read, true);
-        c.line_frame[k] = p12 > p4 ? (p12 - p4) * 10u / (line_long - line_short) : 0u;
-        const uint32_t frames4 = line_short * c.line_frame[k] / 10u;
-        c.line_fixed[k] = p4 > frames4 ? p4 - frames4 : 0u;
-        const uint32_t over = c.engine_fixed > c.line_fixed[k] ? c.engine_fixed - c.line_fixed[k] : 0u;
-        c.edge_calc[k] = c.line_frame[k] != 0u
-                             ? static_cast<uint16_t>((over * 10u + c.line_frame[k] - 1u) / c.line_frame[k])
-                             : uint16_t{0};
-        c.edge_host[k] = H::async_min_frames(sh.rate, SpiDataSize::bits8, sh.read);
-        const uint16_t from = c.edge_calc[k] > 4u ? static_cast<uint16_t>(c.edge_calc[k] - 4u) : uint16_t{1};
-        for (uint16_t n = from; n < c.edge_calc[k] + 6u && c.edge_meas[k] == 0u; ++n) {
-            if (best(n, sh.rate, sh.read, true) >= c.engine_fixed) {
-                c.edge_meas[k] = n;
+        const uint16_t from = c.calc[k] > 4u ? static_cast<uint16_t>(c.calc[k] - 4u) : uint16_t{1};
+        for (uint16_t n = from; n < c.calc[k] + 6u && c.walked[k] == 0u; ++n) {
+            if (best(n, shape_rate[k], k != 2u, true) >= shape_e[k]) {
+                c.walked[k] = n;
             }
         }
     }
-    c.over_read = c.engine_fixed > c.line_fixed[0] ? c.engine_fixed - c.line_fixed[0] : 0u;
-    c.over_written = c.engine_fixed > c.line_fixed[2] ? c.engine_fixed - c.line_fixed[2] : 0u;
     return c;
 }
 
-void print_short_costs(const ShortCosts& c, uint32_t wire_div4) {
-    print(serial, "    E (the engines' fixed cost, /4) ", c.engine_fixed, " cycles, a frame inside the block ",
-          c.block_frame_x10 / 10u, ".", c.block_frame_x10 % 10u, "; E - F read ", c.over_read, ", written ",
-          c.over_written, crlf, "    polled lines, a frame x10 / the fixed part: read /4 ", c.line_frame[0], " / ",
-          c.line_fixed[0], " (dead bus ", c.line_frame[0] > 10u * wire_div4 ? (c.line_frame[0] - 10u * wire_div4) : 0u,
-          " x10), read /2 ", c.line_frame[1], " / ", c.line_fixed[1], ", written /2 ", c.line_frame[2], " / ",
-          c.line_fixed[2], crlf, "    the edge, measured / the arithmetic on these figures / the host's count: read /4 ",
-          c.edge_meas[0], "/", c.edge_calc[0], "/", c.edge_host[0], ", read /2 ", c.edge_meas[1], "/", c.edge_calc[1],
-          "/", c.edge_host[1], ", written /2 ", c.edge_meas[2], "/", c.edge_calc[2], "/", c.edge_host[2], crlf);
+void print_costs(const EngineCosts& c) {
+    print(serial, "    E (the engines' fixed cost, /4): a read ", c.e_read, " cycles, a write ", c.e_write,
+          "; a frame inside the block ", c.block_frame_x10 / 10u, ".", c.block_frame_x10 % 10u, crlf,
+          "    each code: a frame x10 / F / the engines cost less from, a read; the same, a write", crlf);
+    for (uint8_t code = 0; code < 8u; ++code) {
+        const RungCosts& k = c.rung[code];
+        print(serial, "      /", spi_division(static_cast<SpiClock>(code)), ": ", k.read_frame_x10, " / ", k.read_fixed,
+              " / ", k.from_read, " frames; ", k.write_frame_x10, " / ", k.write_fixed, " / ", k.from_write, " frames",
+              crlf);
+    }
+    print(serial, "    that length walked / the arithmetic: read /4 ", c.walked[0], "/", c.calc[0], ", read /2 ",
+          c.walked[1], "/", c.calc[1], ", written /2 ", c.walked[2], "/", c.calc[2], crlf);
 }
 
-/// `got` within `pct` per cent of `want`.
-bool within_pct(uint32_t got, uint32_t want, uint32_t pct) {
-    const uint32_t tol = want * pct / 100u;
-    return got + tol >= want && got <= want + tol;
+/// D/C's pad in this letter: a latch while it is a floating input, and
+/// TIM2's channel 1 under the partial remap while it is an output (letter a's
+/// counter on PB3 beside it, its count captured at D/C's edge).
+using DcPad = Pin<'A', 15>;
+
+/// A request the host must refuse: start() true, spi_rejected, the select's and
+/// D/C's latches where they stood, CTLR1 as primed, no frame clocked, no request
+/// raised, no channel interrupt. `r` asks for mode 3 and /8 over a block primed
+/// at mode 0 and /64, so a run of it would rewrite the word.
+template <typename H>
+bool refused_untouched(const char* what, const typename H::Request& r) {
+    H::prime(SpiMode::mode0, SpiClock::div64);
+    ThirdPad::clear();
+    DcPad::clear();
+    const uint16_t word = S1::regs().CTLR1;
+    spi1_dma_entries = 0;
+    const bool sync = H::start(r);
+    const uint8_t st = H::status();
+    const bool untouched = !ThirdPad::read_out() && !DcPad::read_out() && S1::regs().CTLR1 == word;
+    const bool quiet = !S1::busy() && !S1::rxne() && !H::busy() &&
+                       (S1::regs().CTLR2 & (spi_txdmaen | spi_rxdmaen)) == 0u && spi1_dma_entries == 0u;
+    const bool ok = sync && st == spi_rejected && untouched && quiet;
+    print(serial, "    ", what, ": status ", st, ok ? "" : " - NOT REFUSED CLEAN", crlf);
+    return ok;
 }
 
-/// THE BOUND ON A LOOP'S TURN, derived, in whole cycles. A turn at /2 is read
-/// as the difference of two polled walls over line_long - line_short = 8
-/// frames, each the best of five on a ruler exact to a cycle: a cycle's error
-/// in either wall is 2 / 8 = 0.25 cycle a frame, and with the rounding to a
-/// whole cycle (0.5) a reading stands at most 0.75 from the loop's own figure:
-/// 1 cycle. And the same loop reads differently by where the image places it:
-/// the V4F's transmit-only turn, one source, read 16.0, 17.0 and 18.1 on three
-/// images, so a constant taken from one image stands up to 2 cycles (rounded)
-/// from a reading on another, with no fault in the code. The allowance is
-/// their sum, 2 + 1 = 3 cycles.
-/// What it still catches: a turn 4 or more cycles from its constant, more than
-/// a fifth of the V4F's 18 and a quarter of the V4B's 16 (the two cores' read
-/// turns, 29 and 34, are 5 apart and the constants' swap fails here too). What
-/// it lets through is of a size with what the verdict's other terms admit: a
-/// turn 3 cycles off moves a request at the edge by 3 x 22 frames = 66 cycles
-/// at most (the V4F's write count at /2, the largest), where E - F's 15 %
-/// admits 394 x 15 % = 59.
-constexpr uint32_t turn_bound_cycles = 3u;
-constexpr bool turn_holds(uint32_t got, uint32_t want) {
-    return got + turn_bound_cycles >= want && got <= want + turn_bound_cycles;
+/// What a request refused on `H` must have left: the next dma read exact, MISO
+/// held low, on the engines. 16 frames at /64 of PB2, 8192 cycles, a tick and the
+/// vector beside them: done_within_ms(5) in next_read.
+bool next_exact() {
+    bool went = false;
+    const uint8_t got = next_read<Dma1>(16, SpiMode::mode0, SpiClock::div64, false, went);
+    return got == spi_ok && went && all_bytes(rx_buf, 16, 0x00u);
 }
-static_assert(turn_holds(16u, 18u) && turn_holds(18u, 16u), "the three images of one source agree");
-static_assert(!turn_holds(22u, 18u) && !turn_holds(14u, 18u), "four cycles is a constant that no longer describes the loop");
+
+/// What a timer saw of D/C and SCK in one request on the second column's
+/// engined host: the SCK count at D/C's edge of that polarity, the count at the
+/// end, whether the edge came, whether the engines took it.
+struct DcSeen {
+    uint8_t status = no_answer;
+    bool went = false;
+    bool edge = false;
+    uint32_t at_edge = 0;
+    uint32_t total = 0;
+    uint32_t entries = 0;
+};
+
+DcSeen dc_run(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint16_t len, SpiClock rate, SpiDataSize bits,
+              SpiEngine engine, TimCapturePolarity polarity) {
+    (void)SckCounter::capture_channel(0, {.select = TimChannelSelect::direct,
+                                          .polarity = polarity,
+                                          .prescaler = TimCapturePrescaler::every,
+                                          .filter = 0,
+                                          .enable = true});
+    DcPad::output(true);   // high before the request, as a bus idles it
+    MovedDma::prime(SpiMode::mode0, rate, bits);
+    SckCounter::set_count(0);
+    SckCounter::clear_flags(SckCounter::compare_flag(0));
+    MovedDma::Request r{};
+    r.dc = DcPad::ref();
+    r.cmd = lend<Lease::reply>(cmd);
+    r.cmd_len = cmd_len;
+    r.tx = lend<Lease::reply>(tx);
+    r.len = len;
+    r.mode = SpiMode::mode0;
+    r.clock = rate;
+    r.bits = bits;
+    r.engine = engine;
+    DcSeen d{};
+    spi1_dma_entries = 0;
+    host_done = false;
+    d.went = !MovedDma::start(r);
+    if (d.went) {
+        (void)done_within_ms(5);
+    }
+    d.status = MovedDma::status();
+    d.edge = (SckCounter::flags() & SckCounter::compare_flag(0)) != 0u;
+    d.at_edge = SckCounter::compare(0);
+    d.total = SckCounter::count();
+    d.entries = spi1_dma_entries;
+    return d;
+}
+
+void print_dc(const char* what, const DcSeen& d) {
+    print(serial, "    ", what, ": status ", d.status, d.went ? ", the engines" : ", inside start()", ", ", d.entries,
+          " channel interrupt(s), SCK edges at D/C's edge ", d.edge ? d.at_edge : 0xFFFFu, ", in all ", d.total, crlf);
+}
 
 void tg_two_ways() {
     third_pad_idle();
-    // ---- THE REFUSAL: an asynchronous request on the engineless host ----
+    DcPad::release();
+    // ---- THE REFUSAL: a dma request on the engineless host ----
     // The select is PA8, the strap node's third pad, a floating input for
     // the whole letter: a store to its output latch drives nothing, and the
     // latch, left LOW, is the witness - a transaction ends with the select
@@ -4237,71 +4373,206 @@ void tg_two_ways() {
     const bool polled_ran = ThirdPad::read_out() && S1::mode() == SpiMode::mode3;
     ThirdPad::release();
     print(serial, "  the engineless host (has_dma ", Host1::has_dma ? "true" : "false",
-          "): an asynchronous request answered ", refused_sync ? "at once" : "LATER", " with status ", refused_status,
+          "): a dma request answered ", refused_sync ? "at once" : "LATER", " with status ", refused_status,
           " (spi_rejected is ", spi_rejected, "), the select's latch ", latch_untouched ? "untouched" : "MOVED",
           ", CTLR1 ", ctlr1_untouched ? "unchanged" : "REWRITTEN", "; the same request polled ", polled_status,
           crlf);
-    bench.verdict("ASYNCHRONOUS IS DMA: the host with no engines REFUSES an asynchronous request - start() true at "
-                  "once, spi_rejected, the select, the block and the bus untouched",
+    bench.verdict("A HOST WITH NO ENGINES REFUSES a dma request - start() true at once, spi_rejected, the select, the "
+                  "block and the bus untouched",
                   !Host1::has_dma && refused_sync && refused_status == spi_rejected && latch_untouched &&
                       ctlr1_untouched && idle);
     bench.verdict("... and runs the same request polled, spi_ok, the select framing it and the block at its mode",
                   polled_sync && polled_status == spi_ok && polled_ran);
     Host1::release();
 
-    // ---- the engined host: which way each request runs ----
+    // ---- SpiEngine::dma MEANS DMA AT THE SHORTEST LENGTH ----
+    // One frame read and one written, at /2, /4 and /16 of PB2, where the loop
+    // costs the core far less than the engines (the figures below): start()
+    // false, one channel interrupt the end, a read exact at both levels of the
+    // port-held MISO. Each bound: a frame at /16 is 128 cycles, so 5 ms is a
+    // tick and the vector many times over (next_read).
     Dma<1>::open();
     dma_host_live = true;
     (void)Dma1::init(clock);
     NssPad::release();
+    MosiPad::release();
     fill_pattern(tx_buf, chunk, 0x47);
-    // The short request's edge at /4, a byte read.
-    const uint16_t edge = Dma1::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true);
-    bool under_went = true, at_went = false;
-    spi1_dma_entries = 0;
-    const uint8_t under_st = edge > 1u ? xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, static_cast<uint16_t>(edge - 1u),
-                                                       SpiClock::div4, SpiDataSize::bits8, false, &under_went)
-                                       : no_answer;
-    const uint32_t under_entries = spi1_dma_entries;
-    spi1_dma_entries = 0;
-    const uint8_t at_st =
-        xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, edge, SpiClock::div4, SpiDataSize::bits8, false, &at_went);
-    const uint32_t at_entries = spi1_dma_entries;
-    print(serial, "  the engined host's edge at /4 (a byte read): ", edge, " frames; ", edge - 1u, " went ",
-          under_went ? "to the engines" : "polled inside start()", " (status ", under_st, ", ", under_entries,
-          " channel interrupts), ", edge, " went ", at_went ? "to the engines" : "polled inside start()", " (status ",
-          at_st, ", ", at_entries, ")", crlf);
-    bench.verdict("THE SHORT ASYNCHRONOUS REQUEST: one frame under the edge completes inside start() spi_ok with no "
-                  "interrupt, one at the edge goes to the engines and ends spi_ok on one channel interrupt",
-                  edge > 1u && !under_went && under_st == spi_ok && under_entries == 0u && at_went &&
-                      at_st == spi_ok && at_entries == 1u);
+    constexpr SpiClock one_frame_rates[3] = {SpiClock::div2, SpiClock::div4, SpiClock::div16};
+    uint8_t one_right = 0;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        const SpiClock rate = one_frame_rates[k];
+        for (uint8_t level = 0; level < 2u; ++level) {
+            miso_level(level != 0u);
+            bool went = false;
+            spi1_dma_entries = 0;
+            const uint8_t st = next_read<Dma1>(1, SpiMode::mode0, rate, false, went);
+            const uint32_t entries = spi1_dma_entries;
+            const uint8_t got = rx_buf[0];
+            if (st == spi_ok && went && entries == 1u && got == (level != 0u ? 0xFFu : 0x00u)) {
+                ++one_right;
+            } else {
+                print(serial, "    one frame read at /", spi_division(rate), ": status ", st, went ? ", engines" : ", inside start()",
+                      ", ", entries, " channel interrupt(s), read ", hex(got), crlf);
+            }
+        }
+        bool went = false;
+        spi1_dma_entries = 0;
+        const uint8_t st = xfer_on<Dma1>(nullptr, 0, tx_buf, nullptr, 1, rate, SpiDataSize::bits8, false, &went);
+        const uint32_t entries = spi1_dma_entries;
+        if (st == spi_ok && went && entries == 1u) {
+            ++one_right;
+        } else {
+            print(serial, "    one frame written at /", spi_division(rate), ": status ", st, went ? ", engines" : ", inside start()",
+                  ", ", entries, " channel interrupt(s)", crlf);
+        }
+    }
+    print(serial, "  one frame named dma at /2, /4 and /16, read at both MISO levels and written: ", one_right, " of 9 on the engines, exact",
+          crlf);
+    bench.verdict("SpiEngine::dma MEANS DMA AT ONE FRAME: at /2, /4 and /16, read and written, start() false, one channel "
+                  "interrupt the end, spi_ok, the frame read exact",
+                  one_right == 9u);
 
-    // A command phase on a block of its own (32 frames at /4, 1024 cycles
-    // written, past the write budget), the whole request: one interrupt.
-    bool cmd_went = false;
-    spi1_dma_entries = 0;
-    const uint8_t cmd_st =
-        xfer_on<Dma1>(tx_buf, 32, nullptr, nullptr, 0, SpiClock::div4, SpiDataSize::bits8, false, &cmd_went);
-    const uint32_t cmd_entries = spi1_dma_entries;
-    // 16-bit frames from an odd address: a block the engines cannot carry.
-    bool odd_went = true;
-    spi1_dma_entries = 0;
-    const uint8_t odd_st = xfer_on<Dma1>(nullptr, 0, tx_buf + 1, rx_buf + 1, 64, SpiClock::div4,
-                                         SpiDataSize::bits16, false, &odd_went);
-    const uint32_t odd_entries = spi1_dma_entries;
-    print(serial, "  a command phase alone, 32 frames: ", cmd_went ? "a block" : "polled", " (status ", cmd_st, ", ",
-          cmd_entries, " channel interrupts); 64 16-bit frames from an odd address: ",
-          odd_went ? "the engines" : "polled inside start()", " (status ", odd_st, ", ", odd_entries, ")", crlf);
-    bench.verdict("A COMMAND PHASE THAT IS THE WHOLE REQUEST rides a block of its own: one channel interrupt, spi_ok",
-                  cmd_went && cmd_st == spi_ok && cmd_entries == 1u);
-    bench.verdict("16-BIT FRAMES FROM AN ODD ADDRESS, which the engines cannot carry, run polled inside start() "
-                  "whichever way they asked: spi_ok, no interrupt",
-                  !odd_went && odd_st == spi_ok && odd_entries == 0u);
+    // ---- WHAT THE ENGINES CANNOT CARRY IS REFUSED ----
+    print(serial, "  the refusals, each from mode 0 at /64 with the request at mode 3 and /8:", crlf);
+    miso_level(false);
+    bool refusals = true;
+    bool nexts = true;
+    Dma1::Request q{};
+    q.cs = ThirdPad::ref();
+    q.dc = DcPad::ref();
+    q.mode = SpiMode::mode3;
+    q.clock = SpiClock::div8;
+    q.bits = SpiDataSize::bits16;
+    q.engine = SpiEngine::dma;
+    q.len = 16;
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf) + 1);
+    q.rx = lend<Lease::reply>(rx_buf);
+    refusals = refused_untouched<Dma1>("16-bit frames, the out buffer odd", q) && refusals;
+    nexts = next_exact() && nexts;
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    q.rx = lend<Lease::reply>(rx_buf + 1);
+    refusals = refused_untouched<Dma1>("16-bit frames, the in buffer odd", q) && refusals;
+    nexts = next_exact() && nexts;
+    q.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    q.len = 0;
+    q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf) + 1);
+    q.cmd_len = 8;
+    refusals = refused_untouched<Dma1>("16-bit frames, a command alone at an odd address", q) && refusals;
+    nexts = next_exact() && nexts;
+    // The one test-and-set the engines have: a transmit channel another
+    // block holds, its claim taken by hand. The same engine type is the slot.
+    using Tx1 = DmaTxEngine<1, S1::dma_tx_channel>;
+    q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    q.cmd_len = 0;
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    q.rx = lend<Lease::reply>(rx_buf);
+    q.len = 16;
+    q.bits = SpiDataSize::bits8;
+    const bool claimed = Tx1::claim();
+    refusals = refused_untouched<Dma1>("the transmit channel claimed", q) && claimed && refusals;
+    Tx1::unclaim();
+    nexts = next_exact() && nexts;
+    // On the CH32V303's DMA1 a span across 64 KB (11.2.3's note (1)). The real
+    // run is in flash across 0x0801 0000, which the VC's array carries past the
+    // image's own bytes wherever the image ends; the SRAM here is one page
+    // ending at that same kind of boundary, so the in side's run is its last
+    // bytes and what lies past them, refused before anything is written. On the
+    // spans that end on the boundary or start on it nothing is refused.
+    if constexpr (DmaRxEngine<1, S1::dma_rx_channel>::bounded_to_64k) {
+        const auto* const flash_top = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(0x0801'0000UL));
+        q.tx = lend<Lease::reply>(flash_top - 16);
+        q.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+        q.len = 32;
+        refusals = refused_untouched<Dma1>("a byte run across 64 KB, the out buffer", q) && refusals;
+        nexts = next_exact() && nexts;
+        q.len = 17;
+        refusals = refused_untouched<Dma1>("one byte past the boundary", q) && refusals;
+        nexts = next_exact() && nexts;
+        q.bits = SpiDataSize::bits16;
+        q.len = 9;
+        refusals = refused_untouched<Dma1>("a half-word run across 64 KB, one half-word past it", q) && refusals;
+        nexts = next_exact() && nexts;
+        q.bits = SpiDataSize::bits8;
+        q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+        q.rx = lend<Lease::reply>(reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(0x2001'0000UL - 16UL)));
+        q.len = 32;
+        refusals = refused_untouched<Dma1>("a byte run across 64 KB, the in buffer", q) && refusals;
+        nexts = next_exact() && nexts;
+        bool below = false, above = false, wide_below = false;
+        const uint8_t st_below = xfer_on<Dma1>(nullptr, 0, flash_top - 16, nullptr, 16, SpiClock::div64, SpiDataSize::bits8,
+                                               false, &below);
+        const uint8_t st_above = xfer_on<Dma1>(nullptr, 0, flash_top, nullptr, 16, SpiClock::div64, SpiDataSize::bits8,
+                                               false, &above);
+        const uint8_t st_wide = xfer_on<Dma1>(nullptr, 0, flash_top - 16, nullptr, 8, SpiClock::div64, SpiDataSize::bits16,
+                                              false, &wide_below);
+        print(serial, "    runs ending on the boundary and starting on it, bytes, and half-words ending on it: status ", st_below,
+              ", ", st_above, ", ", st_wide, crlf);
+        bench.verdict("ONE SIDE OF THE BOUNDARY IS CARRIED: a run ending at 0x0800 FFFF and one starting at 0x0801 0000, on the "
+                      "engines, spi_ok",
+                      below && above && wide_below && st_below == spi_ok && st_above == spi_ok && st_wide == spi_ok);
+        if constexpr (pair_spi == 3u) {
+            // DMA2 has no such restriction (11.2.3's note (3)): the same run on
+            // SPI3's channels, the pair's select held high so that a far
+            // client hears nothing of it.
+            Dma1::release();
+            dma_host_live = false;
+            pair_dma_live = true;
+            PairNss::output(true);
+            (void)PairDma::init(clock);
+            bool crossed = false;
+            const uint8_t st_cross = xfer_on<PairDma>(nullptr, 0, flash_top - 16, nullptr, 32, SpiClock::div64,
+                                                      SpiDataSize::bits8, false, &crossed);
+            PairDma::release();
+            PairNss::release();
+            pair_dma_live = false;
+            print(serial, "    the same byte run on DMA2, SPI3's channels: status ", st_cross, crlf);
+            bench.verdict("... AND DMA2 CARRIES THE RUN ACROSS IT: note (3) of 11.2.3 gives it no such rule, spi_ok on the engines",
+                          crossed && st_cross == spi_ok);
+            dma_host_live = true;
+            (void)Dma1::init(clock);
+            NssPad::release();
+            MosiPad::release();
+            miso_level(false);
+        }
+    } else {
+        print(serial, "    no channel of this part is held to 11.2.3's 64 KB rule", crlf);
+    }
+    // Engines of bytes: 16-bit frames have no beat. The block is put back for
+    // the engined host after it.
+    Dma1::release();
+    (void)ByteDma1::init(clock);
+    NssPad::release();
+    MosiPad::release();
+    miso_level(false);
+    ByteDma1::Request b{};
+    b.cs = ThirdPad::ref();
+    b.dc = DcPad::ref();
+    b.mode = SpiMode::mode3;
+    b.clock = SpiClock::div8;
+    b.bits = SpiDataSize::bits16;
+    b.engine = SpiEngine::dma;
+    b.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    b.rx = lend<Lease::reply>(rx_buf);
+    b.len = 16;
+    refusals = refused_untouched<ByteDma1>("16-bit frames over engines of uint8_t, aligned", b) && refusals;
+    ByteDma1::release();
+    (void)Dma1::init(clock);
+    NssPad::release();
+    MosiPad::release();
+    miso_level(false);
+    nexts = next_exact() && nexts;
+    bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED: start() true, spi_rejected, the select and the D/C unmoved, the "
+                  "block's word unchanged, no frame clocked, no request raised, no channel interrupt",
+                  refusals);
+    bench.verdict("... and the next request, after each, runs exact on the engines", nexts);
 
     // A POLLED read runs the loop on the engined host at any length, the
-    // engines untouched: 256 frames at /4, past any count of theirs, and at
-    // /64, no channel interrupt. So it depends on no vector: the same read
-    // with global interrupts masked completes inside start(), spi_ok.
+    // engines untouched: 256 frames at /4 and at /64, no channel interrupt. So
+    // it depends on no vector: the same read with global interrupts masked
+    // completes inside start(), spi_ok.
+    (void)Dma1::init(clock);
+    NssPad::release();
     fill_pattern(tx_buf, 256, 0x93);
     spi1_dma_entries = 0;
     const uint8_t p_long = xfer_on<Dma1>(nullptr, 0, tx_buf, rx_buf, 256, SpiClock::div4, SpiDataSize::bits8, true);
@@ -4321,45 +4592,487 @@ void tg_two_ways() {
                   "inside start(), spi_ok",
                   p_masked == spi_ok);
 
-    // ---- THE COSTS the rule is made of, against the constants ----
+    // ---- WHAT EACH ENGINE COSTS THE CORE ----
     console_drain();
-    const ShortCosts c = measure_short_costs<Dma1>();
+    const EngineCosts c = measure_costs<Dma1>();
     print(serial, "  SPI1 (PB2 = HCLK), the figures through one call:", crlf);
-    print_short_costs(c, 32u);
-    print(serial, "    the constants: E - F read ", Dma1::async_read_budget_cycles, ", written ",
-          Dma1::async_write_budget_cycles, ", dead bus ", Dma1::polled_gap_cycles, ", turns ",
-          Dma1::polled_read_turn_cycles, " and ", Dma1::polled_write_turn_cycles, crlf);
-    const uint32_t gap = c.line_frame[0] > 320u ? (c.line_frame[0] - 320u + 5u) / 10u : 0u;
-    bench.verdict("THE CONSTANTS ARE THIS CORE'S: E - F for a read and a write within 15 % of the measured, the "
-                  "turns at /2 within 3 cycles (the bound's arithmetic above tg_two_ways), the dead bus at /4 within 3 cycles",
-                  within_pct(c.over_read, Dma1::async_read_budget_cycles, 15u) &&
-                      within_pct(c.over_written, Dma1::async_write_budget_cycles, 15u) &&
-                      turn_holds((c.line_frame[1] + 5u) / 10u, Dma1::polled_read_turn_cycles) &&
-                      turn_holds((c.line_frame[2] + 5u) / 10u, Dma1::polled_write_turn_cycles) &&
-                      gap + 3u >= Dma1::polled_gap_cycles && gap <= Dma1::polled_gap_cycles + 3u);
-    bool edges = true;
+    print_costs(c);
+    bool lengths = true;
     for (uint8_t k = 0; k < 3u; ++k) {
-        edges = edges && c.edge_meas[k] != 0u && c.edge_meas[k] + 1u >= c.edge_calc[k] &&
-                c.edge_meas[k] <= c.edge_calc[k] + 1u && c.edge_host[k] + 2u >= c.edge_meas[k] &&
-                c.edge_host[k] <= c.edge_meas[k] + 2u;
+        lengths = lengths && c.walked[k] != 0u && c.walked[k] + 1u >= c.calc[k] && c.walked[k] <= c.calc[k] + 1u;
     }
-    bench.verdict("THE EDGE IS WHERE THE ARITHMETIC PUTS IT: at three shapes the fewest frames whose polled line costs "
-                  "the engines' fixed cost is within one frame of ceil((E - F) / frame) on the same figures, and "
-                  "within two of the host's own count",
-                  edges);
+    bench.verdict("THE ADVICE'S ARITHMETIC HOLDS: at three shapes the fewest frames whose polled line costs the engines' "
+                  "fixed cost is within one frame of ceil((E - F) / frame) on the same figures",
+                  lengths);
     Dma1::release();
     if constexpr (has_two_spi) {
         // The PB1 instance's figures, printed: its register accesses cross to
         // a bus at half of HCLK, its frames twice as long at a code.
         (void)Spi2Dma::init(clock);
         console_drain();
-        const ShortCosts c2 = measure_short_costs<Spi2Dma>();
+        const EngineCosts c2 = measure_costs<Spi2Dma>();
         print(serial, "  SPI", second_spi, " (PB1 = HCLK / 2), printed:", crlf);
-        print_short_costs(c2, 64u);
+        print_costs(c2);
         Spi2Dma::release();
     }
     dma_host_live = false;
+
+    // ---- THE COMMAND RULE, D/C's edge against the count of SCK's ----
+    // TIM2 counts SCK's rising edges on PB3 (letter a's counter), and its
+    // channel 1 captures that count at D/C's edge, on PA15, with no core in
+    // the path: mode 0, eight rising edges a frame in 8-bit frames. A command
+    // phase then a data phase: D/C falls before the first edge and rises with
+    // the command's last edge behind it and the data's first ahead. The rates
+    // are /64 and /8 of PB2, inside the counter's ceiling at half the timer
+    // clock, 2 frames of command and 4 of data 6 x 512 cycles at /64; 5 ms is a
+    // tick and the vector many times over.
+    if (!sck_counter_arm()) {
+        bench.verdict("TIM2 counts SCK on PB3, for the command rule", false);
+    } else {
+        moved_dma_live = true;
+        (void)MovedDma::init(clock);
+        fill_pattern(tx_buf, 64, 0x6B);
+        constexpr uint8_t cmd2 = 2;
+        constexpr uint16_t data4 = 4;
+        const uint8_t* const cmd_at = tx_buf;
+        const uint8_t* const data_at = tx_buf + 16;
+        const DcSeen polled = dc_run(cmd_at, cmd2, data_at, data4, SpiClock::div64, SpiDataSize::bits8, SpiEngine::polled,
+                                     TimCapturePolarity::rising);
+        const DcSeen on_slow = dc_run(cmd_at, cmd2, data_at, data4, SpiClock::div64, SpiDataSize::bits8, SpiEngine::dma,
+                                      TimCapturePolarity::rising);
+        const DcSeen on_fast = dc_run(cmd_at, cmd2, data_at, data4, SpiClock::div8, SpiDataSize::bits8, SpiEngine::dma,
+                                      TimCapturePolarity::rising);
+        const DcSeen falls = dc_run(cmd_at, cmd2, data_at, data4, SpiClock::div64, SpiDataSize::bits8, SpiEngine::dma,
+                                    TimCapturePolarity::falling);
+        // A command at an odd address, 16-bit frames: the loop reads bytes, so
+        // only the data phase is the engines', and only its address is asked.
+        const DcSeen odd_cmd = dc_run(tx_buf + 1, 1, data_at, data4, SpiClock::div64, SpiDataSize::bits16, SpiEngine::dma,
+                                      TimCapturePolarity::rising);
+        const DcSeen alone = dc_run(cmd_at, 4, nullptr, 0, SpiClock::div64, SpiDataSize::bits8, SpiEngine::dma,
+                                    TimCapturePolarity::rising);
+        const DcSeen alone_polled = dc_run(cmd_at, 4, nullptr, 0, SpiClock::div64, SpiDataSize::bits8, SpiEngine::polled,
+                                           TimCapturePolarity::rising);
+        print(serial, "  the command rule, D/C on PA15 against SCK on PB3:", crlf);
+        print_dc("2 + 4 frames polled at /64", polled);
+        print_dc("2 + 4 frames dma at /64", on_slow);
+        print_dc("2 + 4 frames dma at /8", on_fast);
+        print_dc("2 + 4 frames dma at /64, D/C's fall", falls);
+        print_dc("1 + 4 16-bit frames dma, the command at an odd address", odd_cmd);
+        print_dc("a command alone of 4 frames dma", alone);
+        print_dc("a command alone of 4 frames polled", alone_polled);
+        auto boundary = [](const DcSeen& d, bool went, uint32_t at, uint32_t total) {
+            return d.status == spi_ok && d.went == went && d.entries == (went ? 1u : 0u) && d.edge && d.at_edge == at &&
+                   d.total == total;
+        };
+        bench.verdict("THE COMMAND IN THE LOOP, THE DATA ON THE ENGINES, D/C RIGHT AT THE BOUNDARY: named dma, at /64 and /8, "
+                      "one channel interrupt, D/C rising at exactly 16 SCK edges of 48, as the polled run of the same request",
+                      boundary(on_slow, true, 16u, 48u) && boundary(on_fast, true, 16u, 48u) &&
+                          boundary(polled, false, 16u, 48u));
+        bench.verdict("... D/C falling before the first edge", boundary(falls, true, 0u, 48u));
+        bench.verdict("... a command's address no matter for 16-bit frames: odd, in the loop, the data on the engines",
+                      boundary(odd_cmd, true, 16u, 80u));
+        bench.verdict("A COMMAND ALONE RIDES THE ENGINES as the whole request: one channel interrupt, D/C rising at its end, "
+                      "at the 32nd SCK edge of 32, as the polled run of the same request",
+                      boundary(alone, true, 32u, 32u) && boundary(alone_polled, false, 32u, 32u));
+        MovedDma::release();
+        moved_dma_live = false;
+        (void)Afio::remap(Remap::spi1, 0);
+        SckCounter::enable(false);
+        SckCounter::release();
+        DcPad::release();
+    }
     host_ready();
+}
+
+// ===========================================================================
+// s - when a request ends, the wire has ended (z, no wire)
+// ===========================================================================
+
+/*
+ * THE READING AND HOW FAR IT SEES. The pad's input is read on the first
+ * instruction after the request ended: start() returned true, or in the vector
+ * the line after dma_isr() answered true. In modes 0 and 2 a frame's last half
+ * bit holds SCK at the level away from idle, so a request that ended half a bit
+ * early, as 26.3.9 has it on another family's silicon, is a pad read away from
+ * idle, as long as the reading comes inside that half bit:
+ *
+ *     half a bit, in HCLK cycles  =  division x (HCLK / the bus) / 2
+ *        SPI1 (PB2 = HCLK)            /256: 128, /64: 32
+ *        SPI2, SPI3 (PB1 = HCLK / 2)  /256: 256, /64: 64
+ *
+ * What lies between a flag and the reading: on a polled path a few instructions - the read of DATAR, the
+ * stores, the return - counted in the release listing and stated on the page;
+ * on the engines the channel's last beat, the vector's entry, the body, which is
+ * measured below as the delay from SCK's last edge to the vector's reading. A rung
+ * whose half bit is shorter than that delay cannot show an early end by this
+ * reading, so RXNE and BSY are also sampled directly against the pad on the
+ * resource, in a masked loop, which sees to within one turn of that loop.
+ */
+
+enum class EndShape : uint8_t { read, write, command };
+/// Frames a request: four. The longest, four at /256 of PB1, is 16384 cycles, so
+/// done_within_ms(5) leaves a tick and the vector many times over.
+constexpr uint16_t end_frames = 4;
+
+struct EndTally {
+    uint16_t runs = 0;
+    uint16_t way_right = 0;   ///< start() answered as the engine says, spi_ok
+    uint16_t idle = 0;        ///< the pad at the mode's idle level at the reading
+    uint16_t released = 0;    ///< the select's latch high at the reading
+};
+
+template <typename H>
+void end_case(EndTally& t, SpiMode mode, SpiClock rate, EndShape shape, bool dma, bool select) {
+    using Sck = Pin<H::pin_pads.sck.port, H::pin_pads.sck.pin>;
+    typename H::Request r{};
+    r.cs = select ? ThirdPad::ref() : PinRef{};
+    r.mode = mode;
+    r.clock = rate;
+    r.engine = dma ? SpiEngine::dma : SpiEngine::polled;
+    if (shape == EndShape::command) {
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        r.cmd_len = end_frames;
+    } else {
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        r.rx = lend<Lease::reply>(shape == EndShape::read ? rx_buf : nullptr);
+        r.len = end_frames;
+    }
+    const PinRef sck = Sck::ref();
+    H::prime(mode, rate);
+    ThirdPad::clear();
+    end_probe = sck;
+    host_done = false;
+    const bool sync = H::start(r);
+    const bool at_return = sck.read();
+    const bool released_at_return = ThirdPad::read_out();
+    bool level = at_return;
+    bool released = released_at_return;
+    bool ended = sync;
+    if (!sync) {
+        ended = done_within_ms(5);
+        level = end_level;
+        released = ThirdPad::read_out();
+    }
+    end_probe = PinRef{};
+    const bool want_level = spi_mode_cpol(mode);
+    ++t.runs;
+    if (ended && sync != dma && H::status() == spi_ok) {
+        ++t.way_right;
+    }
+    if (level == want_level) {
+        ++t.idle;
+    } else {
+        print(serial, "    SCK AWAY FROM IDLE at the end: mode ", static_cast<uint8_t>(mode), ", /", spi_division(rate),
+              dma ? ", dma" : ", polled", select ? ", a select" : ", no select", ", shape ", static_cast<uint8_t>(shape), crlf);
+    }
+    if (!select || released) {
+        ++t.released;
+    }
+}
+
+/// SCK against STATR on the resource, one frame, the loop masked: the last
+/// sample of the pad away from idle, the first with RXNE up and the last with
+/// BSY up, in cycles from the DATAR store, and the turn of the loop.
+struct EdgeTrace {
+    uint32_t last_active = 0, rxne = 0xFFFF'FFFFUL, last_busy = 0, turn = 0;
+};
+
+template <typename H>
+EdgeTrace edge_trace(SpiMode mode, SpiClock rate) {
+    using S = typename H::Resource;
+    using Sck = Pin<H::pin_pads.sck.port, H::pin_pads.sck.pin>;
+    constexpr uint32_t stk_period = SysClock::hz / Ticker::ticks_per_second;
+    const uint32_t frame = 8u * spi_division(rate) * (SysClock::hz / H::reference_hz());
+    const bool idle_level = spi_mode_cpol(mode);
+    EdgeTrace e{};
+    H::prime(mode, rate);
+    SpiRegs& regs = S::regs();
+    uint32_t turns = 0;
+    {
+        InterruptGuard masked;
+        const uint32_t t0 = stk()->CNTL;
+        regs.DATAR = 0xA5u;
+        uint32_t d = 0;
+        while (d < 2u * frame) {
+            const uint32_t t = stk()->CNTL;
+            const uint16_t st = regs.STATR;
+            const bool level = Sck::read();
+            d = t >= t0 ? t - t0 : t + stk_period - t0;
+            if (level != idle_level) {
+                e.last_active = d;
+            }
+            if (e.rxne == 0xFFFF'FFFFUL && (st & spi_rxne) != 0u) {
+                e.rxne = d;
+            }
+            if ((st & spi_bsy) != 0u) {
+                e.last_busy = d;
+            }
+            ++turns;
+        }
+        e.turn = d / turns;
+    }
+    (void)regs.DATAR;
+    return e;
+}
+
+/// The delay from SCK's last edge to the vector's reading, the least of eight:
+/// a dma write at /256, mode 0, the thread sampling the pad until the vector
+/// has stamped. A tick in a run only lengthens it.
+template <typename H>
+uint32_t vector_delay() {
+    using Sck = Pin<H::pin_pads.sck.port, H::pin_pads.sck.pin>;
+    constexpr uint32_t stk_period = SysClock::hz / Ticker::ticks_per_second;
+    uint32_t least = 0xFFFF'FFFFUL;
+    for (uint8_t k = 0; k < 8u; ++k) {
+        typename H::Request r{};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        r.len = 1;
+        r.mode = SpiMode::mode0;
+        r.clock = SpiClock::div256;
+        r.engine = SpiEngine::dma;
+        H::prime(SpiMode::mode0, SpiClock::div256);
+        end_probe = Sck::ref();
+        host_done = false;
+        uint32_t last = stk()->CNTL;
+        if (H::start(r)) {
+            continue;
+        }
+        for (uint32_t i = 0; i < 400'000UL && !host_done; ++i) {
+            const uint32_t t = stk()->CNTL;
+            if (Sck::read()) {
+                last = t;
+            }
+        }
+        const uint32_t end = end_stamp;
+        const uint32_t d = end >= last ? end - last : end + stk_period - last;
+        least = d < least ? d : least;
+    }
+    end_probe = PinRef{};
+    return least;
+}
+
+/// Half a bit at a code, in HCLK cycles.
+template <typename H>
+constexpr uint32_t half_bit(SpiClock rate) {
+    return spi_division(rate) * (SysClock::hz / (H::number == 1u ? SysClock::pclk2_hz : SysClock::pclk1_hz)) / 2u;
+}
+
+/// One instance: the matrix through both engines, the traces, the delay.
+template <typename H>
+void end_matrix(const char* name, bool& polled_all, bool& dma_all, bool& flags_all) {
+    print(serial, "  ", name, ":", crlf);
+    EndTally polled{}, on_dma{};
+    constexpr SpiClock rungs_of_s[2] = {SpiClock::div256, SpiClock::div64};
+    constexpr EndShape shapes[3] = {EndShape::read, EndShape::write, EndShape::command};
+    for (uint8_t repeat = 0; repeat < 4u; ++repeat) {
+        for (uint8_t m = 0; m < 4u; ++m) {
+            for (uint8_t rung = 0; rung < 2u; ++rung) {
+                for (uint8_t sh = 0; sh < 3u; ++sh) {
+                    for (uint8_t sel = 0; sel < 2u; ++sel) {
+                        end_case<H>(polled, static_cast<SpiMode>(m), rungs_of_s[rung], shapes[sh], false, sel != 0u);
+                        end_case<H>(on_dma, static_cast<SpiMode>(m), rungs_of_s[rung], shapes[sh], true, sel != 0u);
+                    }
+                }
+            }
+        }
+    }
+    print(serial, "    polled: ", polled.idle, " of ", polled.runs, " at idle, the select's latch high on ", polled.released,
+          ", ", polled.way_right, " inside start() spi_ok; dma: ", on_dma.idle, " of ", on_dma.runs, " at idle, the latch high on ",
+          on_dma.released, ", ", on_dma.way_right, " on the engines spi_ok", crlf);
+    polled_all = polled_all && polled.idle == polled.runs && polled.released == polled.runs && polled.way_right == polled.runs;
+    dma_all = dma_all && on_dma.idle == on_dma.runs && on_dma.released == on_dma.runs && on_dma.way_right == on_dma.runs;
+    for (uint8_t rung = 0; rung < 2u; ++rung) {
+        const SpiClock rate = rungs_of_s[rung];
+        for (uint8_t m = 0; m < 4u; ++m) {
+            const EdgeTrace e = edge_trace<H>(static_cast<SpiMode>(m), rate);
+            // One turn of the sampling loop is the most by which RXNE can read
+            // ahead of the last sample away from idle without leading the edge:
+            // the STATR load comes before the pad's in a turn.
+            const bool not_early = e.rxne != 0xFFFF'FFFFUL && e.rxne + e.turn >= e.last_active;
+            flags_all = flags_all && not_early;
+            print(serial, "    mode ", m, " /", spi_division(rate), ": SCK's last sample away from idle ", e.last_active,
+                  ", RXNE first seen ", e.rxne, ", BSY last seen ", e.last_busy, ", a turn ", e.turn, " (half a bit ",
+                  half_bit<H>(rate), ")", not_early ? "" : " - RXNE EARLY", crlf);
+        }
+    }
+    const uint32_t delay = vector_delay<H>();
+    print(serial, "    SCK's last edge to the vector's reading ", delay, " cycles, the least of 8; half a bit at /256 ",
+          half_bit<H>(SpiClock::div256), ", so the vector's reading ",
+          delay < half_bit<H>(SpiClock::div256) ? "would see" : "could NOT see", " an end half a bit early at /256", crlf);
+}
+
+void ts_select_rule() {
+    third_pad_idle();
+    fill_pattern(tx_buf, 16, 0xA6);
+    Dma<1>::open();
+    bool polled_all = true, dma_all = true, flags_all = true;
+    dma_host_live = true;
+    (void)Dma1::init(clock);
+    NssPad::release();
+    end_matrix<Dma1>("SPI1 (half a bit at /256: 128 cycles)", polled_all, dma_all, flags_all);
+    const uint32_t delay_spi1 = vector_delay<Dma1>();
+    Dma1::release();
+    uint32_t delay_pb1 = 0;
+    if constexpr (has_two_spi) {
+        (void)Spi2Dma::init(clock);
+        console_drain();
+        end_matrix<Spi2Dma>("SPI2 (half a bit at /256: 256 cycles)", polled_all, dma_all, flags_all);
+        delay_pb1 = vector_delay<Spi2Dma>();
+        Spi2Dma::release();
+    }
+    dma_host_live = false;
+    if constexpr (pair_spi == 3u) {
+        // The pair's instance, its select held high: a far client hears nothing.
+        pair_dma_live = true;
+        PairNss::output(true);
+        (void)PairDma::init(clock);
+        console_drain();
+        end_matrix<PairDma>("SPI3 (half a bit at /256: 256 cycles)", polled_all, dma_all, flags_all);
+        PairDma::release();
+        PairNss::release();
+        pair_dma_live = false;
+    }
+    bench.verdict("A POLLED REQUEST ENDS AFTER THE WIRE: SCK already at the mode's idle level when start() returns, the select "
+                  "released, the four modes at /256 and /64, read, write and a command alone, through a select and through a "
+                  "null one, on every instance",
+                  polled_all);
+    bench.verdict("A DMA REQUEST ENDS AFTER THE WIRE: the same, read in the vector on the line after dma_isr() answered true",
+                  dma_all);
+    bench.verdict("THIS SILICON'S RXNE DOES NOT LEAD SCK'S LAST EDGE: sampled on the resource, within one turn of the sampling "
+                  "loop, in all four modes at /256 and /64 on every instance",
+                  flags_all);
+    const uint32_t half_pb1 = has_two_spi ? half_bit<Spi2Dma>(SpiClock::div256) : 0xFFFF'FFFFUL;
+    print(serial, "  the vector's delay against half a bit at /256: SPI1 ", delay_spi1, " against ", half_bit<Dma1>(SpiClock::div256),
+          "; the PB1 instance ", delay_pb1, " against ", half_pb1, crlf);
+    bench.verdict("THE READING CAN SEE: on the PB1 instance, half a bit at /256 is longer than the delay from SCK's last edge "
+                  "to the vector's reading (no PB1 instance: nothing to judge)",
+                  !has_two_spi || (delay_pb1 != 0xFFFF'FFFFUL && delay_pb1 < half_pb1));
+    host_ready();
+}
+
+// ===========================================================================
+// t - the engine a request names, the far client's judgement (y)
+// ===========================================================================
+
+void tt_engine_named() {
+    if (!need_peer()) {
+        return;
+    }
+    // ONE FRAME ON THE ENGINES, at /8, /16 and /32 of PB1: the rates the section's
+    // read-back bound judges, with a byte frame of 128 to 512 cycles against an E
+    // of hundreds (letter g), each way.
+    constexpr SpiClock rates[3] = {SpiClock::div8, SpiClock::div16, SpiClock::div32};
+    uint8_t one_right = 0;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        for (uint8_t dir = 0; dir < 2u; ++dir) {
+            Exchange e{};
+            e.rate = rates[k];
+            e.count = 1;
+            e.shape = Shape::engines;
+            e.read = dir == 0u;
+            e.seed_a = static_cast<uint8_t>(0x31u + 3u * k + dir);
+            e.seed_b = static_cast<uint8_t>(0x75u + 5u * k + dir);
+            exchange_went = false;
+            const Outcome o = run_exchange(e);
+            if (exact(e, o) && exchange_went) {
+                ++one_right;
+            } else {
+                print(serial, "    one frame at /", spi_division(rates[k]), dir == 0u ? ", read" : ", written",
+                      exchange_went ? ", the engines" : ", inside start()", crlf);
+                dump(o);
+            }
+        }
+    }
+    print(serial, "  one frame named dma at /8, /16 and /32, read and written: ", one_right, " of 6 on the engines, exact", crlf);
+    bench.verdict("SpiEngine::dma MEANS DMA AT ONE FRAME: start() false, the far client heard the frame, this end read its answer",
+                  one_right == 6u);
+
+    // A REFUSAL INSIDE THE WINDOW, the far client armed and selected: it counts
+    // what a refused request clocked, which must be nothing, and judges the next
+    // request's frames. Each mode at /32, 32 frames.
+    uint8_t refused_right = 0, next_right = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        Exchange e{};
+        e.cfg.mode = m;
+        e.host_mode = static_cast<SpiMode>(m);
+        e.rate = SpiClock::div32;
+        e.count = 32;
+        e.shape = Shape::engines;
+        e.refused_first = true;
+        e.seed_a = static_cast<uint8_t>(0x19u + m);
+        e.seed_b = static_cast<uint8_t>(0x63u + m);
+        exchange_refusal_sync = false;
+        exchange_refusal = no_answer;
+        const Outcome o = run_exchange(e);
+        if (exchange_refusal_sync && exchange_refusal == spi_rejected) {
+            ++refused_right;
+        }
+        if (exact(e, o)) {
+            ++next_right;
+        } else {
+            dump(o);
+        }
+    }
+    print(serial, "  16-bit frames from an odd address inside the window, four modes: ", refused_right, " refused, ", next_right,
+          " windows exact at both ends", crlf);
+    bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED ON THE WIRE'S JUDGEMENT: spi_rejected inside the select's window in all "
+                  "four modes, the far client counting nothing of it",
+                  refused_right == 4u && next_right == 4u);
+
+    // THE COMMAND RULE: four frames in the loop then 28 on the engines; every
+    // frame heard in order by the far client, the data phase's answers read
+    // exact. The four modes, both widths.
+    uint8_t rule_right = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        for (uint8_t wide = 0; wide < 2u; ++wide) {
+            Exchange e{};
+            e.cfg.mode = m;
+            e.host_mode = static_cast<SpiMode>(m);
+            e.rate = SpiClock::div32;
+            e.count = 32;
+            e.command = 4;
+            e.shape = Shape::engines;
+            e.spare = wide != 0u ? spilink::spare_wide : uint8_t{0};
+            e.seed_a = static_cast<uint8_t>(0x25u + 7u * m + wide);
+            e.seed_b = static_cast<uint8_t>(0x4Bu + 11u * m + wide);
+            exchange_went = false;
+            const Outcome o = run_exchange(e);
+            if (exact(e, o) && exchange_went) {
+                ++rule_right;
+            } else {
+                print(serial, "    a command then data, mode ", m, wide != 0u ? ", 16-bit" : ", 8-bit",
+                      exchange_went ? ", the engines" : ", inside start()", crlf);
+                dump(o);
+            }
+        }
+    }
+    uint8_t alone_right = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        Exchange e{};
+        e.cfg.mode = m;
+        e.host_mode = static_cast<SpiMode>(m);
+        e.rate = SpiClock::div32;
+        e.count = 32;
+        e.command_alone = true;
+        e.read = false;
+        e.shape = Shape::engines;
+        e.seed_a = static_cast<uint8_t>(0x37u + m);
+        e.seed_b = static_cast<uint8_t>(0x8Du + m);
+        exchange_went = false;
+        const Outcome o = run_exchange(e);
+        if (heard(e, o) && exchange_went) {
+            ++alone_right;
+        } else {
+            dump(o);
+        }
+    }
+    print(serial, "  a command then data, four modes by two widths: ", rule_right, " of 8 exact on the engines; a command alone, four modes: ",
+          alone_right, " of 4 heard, on the engines", crlf);
+    bench.verdict("A COMMAND THEN DATA, the command in the loop and the data on the engines: every frame heard in order at the far "
+                  "client, the data phase's answers read exact, four modes by two widths",
+                  rule_right == 8u);
+    bench.verdict("A COMMAND ALONE ON THE ENGINES: every frame heard in order at the far client, four modes", alone_right == 4u);
+    pair_done();
 }
 
 // ===========================================================================
@@ -4421,9 +5134,8 @@ void pump() {
     }
 }
 
-/// `len` frames of dummies at /256 with nothing read back - an
-/// asynchronous write, on the engines at any length here (a frame of 8192
-/// cycles), and no select of its own: the select wire is the far chip's in
+/// `len` frames of dummies at /256 with nothing read back - a write on the
+/// engines, and no select of its own: the select wire is the far chip's in
 /// this letter.
 PairDma::Request dummies(uint16_t len) {
     PairDma::Request r{};
@@ -4920,6 +5632,8 @@ void register_pair_letters() {
                             tq_handler_gap);
         bench.second_letter('r', "THE NEXT REQUEST WITH NOTHING CALLED: stalls and transfer errors, the far client's judgement",
                             tr_next_request);
+        bench.second_letter('t', "THE ENGINE A REQUEST NAMES, the far client's judgement: one frame, a refusal, the command rule",
+                            tt_engine_named);
         bench.letter('x', "the slip statistics against the peer: each mode, both far serves (no verdict)", tx_slips,
                      false);
     }
@@ -5029,6 +5743,7 @@ BRIO_CH32_LEAF_VECTOR(spi3_handler) {
     if (!done) {
         return;
     }
+    end_seen();
     if (bus_ao_live) {
         brio::post<kl::SpiArb>(brio::TransferDone{Dma1::status()});
     } else {
@@ -5037,13 +5752,17 @@ BRIO_CH32_LEAF_VECTOR(spi3_handler) {
 }
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
     spi1_dma_entries = spi1_dma_entries + 1u;
-    if (dma_host_live || bus_ao_live) {
+    if (moved_dma_live) {
+        spi1_engine_done(MovedDma::dma_rx_isr());
+    } else if (dma_host_live || bus_ao_live) {
         spi1_engine_done(Dma1::dma_rx_isr());
     }
 }
 BRIO_CH32_VECTOR(dma1_channel3_handler) {
     spi1_dma_entries = spi1_dma_entries + 1u;
-    if (dma_host_live || bus_ao_live) {
+    if (moved_dma_live) {
+        spi1_engine_done(MovedDma::dma_tx_isr());
+    } else if (dma_host_live || bus_ao_live) {
         spi1_engine_done(Dma1::dma_tx_isr());
     }
 }
@@ -5055,6 +5774,7 @@ BRIO_CH32_VECTOR(dma1_channel3_handler) {
     if (!done) {
         return;
     }
+    end_seen();
     if constexpr (pair_spi == 2u) {
         if (pair_bus_live) {
             brio::post<kt::PairArb>(brio::TransferDone{PairDma::status()});
@@ -5080,6 +5800,7 @@ BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (!done) {
         return;
     }
+    end_seen();
     if (pair_bus_live) {
         brio::post<kt::PairArb>(brio::TransferDone{PairDma::status()});
     } else {
@@ -5117,8 +5838,9 @@ int main() {
                  tc_loop);
     bench.letter('e', "the flags, the vectors, the line modes, the disable rule", te_flags);
     bench.letter('f', "a polled wait that runs out, and the transmit interrupt", tf_stalled_txe);
-    bench.letter('g', "the two ways: the refusal, the short request's edge, the command block, the costs",
+    bench.letter('g', "the engine a request names: one frame, the refusals, the command rule, the costs",
                  tg_two_ways);
+    bench.letter('s', "WHEN A REQUEST ENDS THE WIRE HAS ENDED: SCK read at the end, every mode, both engines", ts_select_rule);
     bench.letter('v', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, the verbs", tv_overrun);
     register_spi3_letters();
     register_pair_letters();

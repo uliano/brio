@@ -1013,11 +1013,10 @@ established:
   a receive keeps one frame in flight at every rate, so the clock waits
   for the read, and the bound on lost frames is zero in every pass. The
   suite's polled windows are 8 16-bit frames from an odd address and 8
-  byte frames, the short asynchronous request one byte frame and the
-  engines 32 frames: every rung from /256 to /8 byte-exact on all of them,
-  in the control and under pressure alike, over 126 passes of each
-  image - the short request on the engines down to /32 and polled inside
-  `start()` below, every rung the way the host's count says.
+  byte frames, and on the engines one byte frame and 32: every rung from
+  /256 to /8 byte-exact on all of them, in the control and under pressure
+  alike, over 91 passes of each image, the one-frame request ending at
+  the DMA vector on every rung.
 - **/4 = 18 MHz exact, /2 not, both printed.** Letter `p` judges to /8,
   where the two datasheets' timing still holds the client's answer
   ([spi.md](spi.md), the pair's section), and prints the two codes
@@ -1028,13 +1027,12 @@ established:
   first and a bit-order mismatch on the engines at /32, byte-exact in
   every pass, the data windows at 954 to 1000 per mille of the control's
   rate under pressure; three requesters of three priorities on one
-  select window at /8 - the one above the arbiter asynchronous on the
-  engines (6 frames), the one below it polled (8 frames, the loop) and
-  the preempting object asynchronous with one frame, under the engines'
-  count at /8 and so run polled inside `start()` - answered every one
+  select window at /8 - the one above the arbiter on the engines (6
+  frames), the one below it polled (8 frames, the loop) and the
+  preempting object on the engines with one frame - answered every one
   `spi_ok`, to its requester, in its order, with no timeout and no
-  rejection and the peer counting every frame exact, in 5539 to 8004 us
-  a window (ten runs on each image); a preemption of the polled loop is a
+  rejection and the peer counting every frame exact, in 5532 to 8016 us
+  a window (six runs on each image); a preemption of the polled loop is a
   gap on the bus.
 - **The UART receive side under preemption.** Numbered lines echoed by
   the far chip at 460800 and 921600, assembled by `LineReader` from the

@@ -108,8 +108,7 @@ void tasks() {
     a.engine = SpiEngine::dma;
     a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     a.len = 8;
-    (void)Host3Dma::start(a);   // asynchronous: the engines, or polled when short
-    (void)Host3Dma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, false);
+    (void)Host3Dma::start(a);   // on the engines
     Host3Dma::release();
 
     (void)Client3::init(clock, {.mode = SpiMode::mode3});

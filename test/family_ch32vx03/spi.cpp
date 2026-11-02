@@ -151,14 +151,6 @@ static_assert(!Host1::has_engines && Host1Dma::has_engines);
 // Asynchronous is DMA (docs/design/spi-bus.md): the engineless host refuses
 // every request naming SpiEngine::dma, and says so at compile time.
 static_assert(!Host1::has_dma && Host1Dma::has_dma && Host2Dma::has_dma);
-// The short request's count is a function of the code, the width, the
-// direction and the bus share alone - SPI1 at all of HCLK, SPI2 at half of
-// it above 72 MHz - and falls as the frame lengthens.
-static_assert(spi_hclk_over_pclk<1>(144'000'000UL) == 1u &&
-              spi_hclk_over_pclk<second_spi>(144'000'000UL) == (second_spi == 2u ? 2u : 1u));
-static_assert(Host1Dma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true, 1) >=
-                  Host1Dma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true, 1) &&
-              Host1Dma::async_min_frames(SpiClock::div256, SpiDataSize::bits8, true, 1) == 1u);
 static_assert(Client1::frames_ahead == 1, "one buffer, no FIFO (figure 20-1)");
 static_assert(Client1::has_nss_pad == pad_bonded(spi_default_pins<1>.nss));
 static_assert(Host1::number == 1 && Host2::number == second_spi);
@@ -282,7 +274,7 @@ void hosts()
     r.bits = SpiDataSize::bits8;
     r.engine = SpiEngine::polled;
     (void)Host1::start(r);
-    // The same request asynchronous: refused, spi_rejected, nothing on the wire.
+    // The same request naming the engines: refused, spi_rejected, nothing on the wire.
     r.engine = SpiEngine::dma;
     (void)Host1::start(r);
     (void)Host1::dma_isr();
@@ -303,15 +295,14 @@ void hosts()
     w.len = 4;
     w.bits = SpiDataSize::bits16;
     (void)Host1Dma::start(w);
-    // A command phase alone and a command phase before a data block, both
-    // asynchronous: a block of their own, or polled inside start().
+    // A command phase before a data block, in the loop inside start() and the
+    // data on the engines; a command phase alone, on the engines.
     w.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     w.cmd_len = 2;
     w.bits = SpiDataSize::bits8;
     (void)Host1Dma::start(w);
     w.len = 0;
     (void)Host1Dma::start(w);
-    (void)Host1Dma::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true);
     (void)Host1Dma::busy();
     (void)Host1Dma::recover();
     Host1Dma::release();
