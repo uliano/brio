@@ -49,7 +49,8 @@
  *     r.clock = brio::SpiClock::div4;                       // at 48 MHz: clamped to div8, 6 MHz
  *     r.mode = brio::SpiMode::mode0;
  *     r.reply = brio::reply_to<Display, brio::SpiDone>();
- *     brio::post<Spi>(r);                                   // asynchronous: polled stays false
+ *     r.engine = brio::SpiEngine::dma;
+ *     brio::post<Spi>(r);                                   // asynchronous
  *
  *     BRIO_CH32_VECTOR(dma1_channel2_handler) {
  *         if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -768,11 +769,11 @@ constexpr SpiAsyncCounts spi_async_counts(const SpiHostCosts& k) {
  *
  * The two ways (docs/design/spi-bus.md, "Two ways to run a request"):
  *
- *  - POLLED (`polled` true): the loops below inside start(), at any
+ *  - POLLED (`SpiEngine::polled`): the loops below inside start(), at any
  *    length, on a host with engines or without: it never touches a channel
  *    and depends on no interrupt vector. A long read that wants the wire
  *    asks asynchronously.
- *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
+ *  - ASYNCHRONOUS (`SpiEngine::dma`) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected
  *    in status(), before it touches the block, the select or the D/C, so
  *    nothing reaches the wire; `has_dma` says so at compile time. With
@@ -890,7 +891,7 @@ public:
     static constexpr bool has_engines = TxEngine::present;
     /// Can this host run an asynchronous request? The contract's name for
     /// has_engines (docs/design/spi-bus.md): false refuses every request
-    /// not marked polled, so a program that posts one asserts it -
+    /// naming SpiEngine::dma, so a program that posts one asserts it -
     /// `static_assert(Bus::has_dma)`.
     static constexpr bool has_dma = has_engines;
 
@@ -910,11 +911,11 @@ public:
         Borrowed<uint8_t, Lease::reply> rx;
         uint16_t len;      ///< phase 2 length, in FRAMES
         uint8_t cmd_len;   ///< in FRAMES (see the class comment)
-        /// The way to run it: true = polled inside start(); false =
-        /// asynchronous, on the DMA engines - polled inside start() when
-        /// too short to repay them (async_min_frames()), refused
+        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        /// start(); dma, asynchronous, on the DMA engines - polled inside
+        /// start() when too short to repay them (async_min_frames()), refused
         /// (spi_rejected) on a host with none (has_dma).
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
         /// Microseconds between the CS assertion and the first clock -
         /// what a device's datasheet calls CS setup. Spent spinning in
         /// start(), main context; 0 = none.
@@ -930,7 +931,7 @@ public:
     static_assert(std::is_trivially_copyable_v<Request>);
     static_assert(sizeof(Request) == 40u, "the Request is forty bytes with no padding on this ABI");
     static_assert(offsetof(Request, cmd) == 16u && offsetof(Request, rx) == 24u && offsetof(Request, len) == 28u &&
-                  offsetof(Request, polled) == 31u && offsetof(Request, cs_setup_us) == 32u &&
+                  offsetof(Request, engine) == 31u && offsetof(Request, cs_setup_us) == 32u &&
                   offsetof(Request, clock) == 33u && offsetof(Request, mode) == 34u && offsetof(Request, bits) == 35u &&
                   offsetof(Request, reply) == 36u,
                   "the tenure's words are the first eight of the Request, the configuration the ninth");
@@ -1060,6 +1061,7 @@ public:
             }
         }
         Request r{};
+        r.engine = SpiEngine::dma;
         r.clock = c;
         r.mode = m;
         r.bits = bits;
@@ -1097,7 +1099,7 @@ public:
     /// lent until the arbiter's reply.
     static bool start(const Request& r) {
         if constexpr (!has_dma) {
-            if (!r.polled) {
+            if (r.engine == SpiEngine::dma) {
                 // Asynchronous is DMA, and this host has no engines:
                 // refused before the block, the select or the D/C is
                 // touched, so nothing reaches the wire.
@@ -1131,7 +1133,7 @@ public:
         // error, init() and recover() flush what a reset or a prime left.
 
         if constexpr (has_dma) {
-            if (!r.polled && repays_engines(r)) {
+            if (r.engine == SpiEngine::dma && repays_engines(r)) {
                 return start_engines(r, code);
             }
         }
@@ -1649,6 +1651,7 @@ private:
         ctlr1_ = static_cast<uint16_t>(spi_ctlr1_of(applied_) | spi_spe);
         S::regs().CTLR1 = ctlr1_;
         Request r{};
+        r.engine = SpiEngine::dma;
         r.clock = applied_.clock;
         r.mode = applied_.mode;
         r.bits = applied_.bits;

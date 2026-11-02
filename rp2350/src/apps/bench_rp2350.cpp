@@ -933,6 +933,7 @@ enum class SpiWait : uint8_t { sleep, spin_ram, spin_apb };
 /// completion on line 0 with the core idling between.
 SpiRun spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, SpiWait wait = SpiWait::sleep) {
     Spi::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SpiSelect::ref();
     r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
     r.cmd_len = 0;
@@ -1125,7 +1126,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     r.clock = rate;
     r.mode = mode;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     console_drain();
     H::Resource::clear_pending(SpiInterrupt::overrun);
     spi_done = false;
@@ -1246,7 +1247,7 @@ void e_rx_proof() {
             r.len = 256;
             r.clock = rate.clock;
             r.mode = SpiMode::mode3;
-            r.polled = true;
+            r.engine = SpiEngine::polled;
             (void)Plain::start(r);
             if (std::memcmp(source_buffer, destination_buffer, 256) == 0) {
                 ++exact;
@@ -1296,7 +1297,7 @@ ColdRun e_cold_once(bool invalidate) {
     r.clock = e_rates[2].clock;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     console_drain();
     Plain::Resource::clear_pending(SpiInterrupt::overrun);
     const BenchCounters before = counters();

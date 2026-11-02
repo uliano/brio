@@ -235,7 +235,7 @@ private:
             brio::lend<brio::Lease::reply>(data), {}, n,
             brio::reply_to<Filler, brio::SpiDone>(),
             brio::SpiClock::div4,              // 6 MHz for the panel
-            brio::SpiMode::mode0, true});             // polled: bulk at wire speed
+            brio::SpiMode::mode0, brio::SpiEngine::polled});             // polled: bulk at wire speed
     }
 
     static void set_window(uint8_t c, uint16_t last) {
@@ -355,7 +355,7 @@ private:
             {}, 0,
             brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), 3,
             brio::reply_to<Touch, brio::SpiDone>(),
-            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // 1.5 MHz, XPT2046 limit; polled
+            brio::SpiClock::div16, brio::SpiMode::mode0, brio::SpiEngine::polled});   // 1.5 MHz, XPT2046 limit; polled
     }
 };
 

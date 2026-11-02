@@ -9,10 +9,10 @@ mode, a command phase and a data phase). The requester posts it to the
 bus active object, the arbiter, and gets a `SpiDone` event back; the
 arbiter runs one transaction at a time on the family's `SpiHost`, the
 host engine that owns the wire. It runs a request one of two ways, chosen
-by the request's `polled` flag: polled, an explicit loop inside
-`SpiHost::start()`, or asynchronously on the host's DMA engines (the two
-DMA channels bound to it). `polled = false` names an intention: a request
-too short to repay the engines still runs the polled loop (below). It is
+by the request's `engine` field: `SpiEngine::polled`, an explicit loop inside
+`SpiHost::start()`, or `SpiEngine::dma`, asynchronously on the host's DMA
+engines (the two DMA channels bound to it). `SpiEngine::dma` names an
+intention: a request too short to repay the engines still runs the polled loop (below). It is
 the reference form of the bus active-object pattern;
 [i2c-bus.md](i2c-bus.md) shares the same arbiter. It is written for an
 embedded programmer who has driven an SPI device from a loop and now
@@ -26,12 +26,12 @@ reply channel, `reply_to<Client, SpiDone>()`, then handles `SpiDone` in
 its own dispatch, the event's one field, `status`, holding the outcome.
 Posting never waits, whichever way the request runs: the post returns at
 once and the transaction runs later, in the arbiter's dispatch. A request
-marked `polled` runs its loop inside `start()` there, for its whole wire
-time, and needs no DMA and no vector. A request not marked `polled` is
-asynchronous: it rides the host's DMA engines, so the host needs engines
+naming `SpiEngine::polled`, the field's default, runs its loop inside
+`start()` there, for its whole wire time, and needs no DMA and no vector. A
+request naming `SpiEngine::dma` is asynchronous: it rides the host's DMA engines, so the host needs engines
 bound and the program's DMA vectors bound to `dma_isr()`. A host with no
 engines, always the AVR's and the SAM C21's, refuses it with `spi_rejected`
-and nothing on the wire, and there every request sets `polled = true`. So
+and nothing on the wire, and there every request runs `SpiEngine::polled`. So
 the program decides two things for every request: which way it runs, and
 **its buffers are lent until `SpiDone` arrives**, whichever way; the client
 must not touch them before, and must not reuse them for another request
@@ -65,7 +65,7 @@ the arbiter shared with I2C ([i2c-bus.md](i2c-bus.md)); `SpiDone` and
 ### Realizations
 
 Common to all but the simulated host: the `Request` field for field (`cs`,
-`dc`, `cmd`, `cmd_len`, `tx`, `rx`, `len`, `reply`, `mode`, `polled`,
+`dc`, `cmd`, `cmd_len`, `tx`, `rx`, `len`, `reply`, `mode`, `engine`,
 `cs_setup_us`), the engine's functions `init`, `start`, `rebase`, `recover`,
 `release`, `sck_hz`, `max_sck_hz`, the `has_dma` constant (whether the host
 can run an asynchronous request at all, "Two ways to run a request" below),
@@ -273,9 +273,9 @@ and a global init-time clock is a bug waiting for the second device.
 inside `start()`, and the arbiter replies with whatever the engine's
 `status()` reports; false means it is still on the wire and a
 `TransferDone` will arrive. The way travels per request in the
-`polled` flag: like the clock, the client knows its transaction.
+`engine` field: like the clock, the client knows its transaction.
 
-- **Polled** (`polled = true`), and **polled is an explicit loop**, at
+- **Polled** (`SpiEngine::polled`), and **polled is an explicit loop**, at
   any length and on every host. `start()` runs the whole transaction in
   that loop, in the arbiter's dispatch, and returns done. No DMA channel
   moves a frame and no interrupt vector is needed, on a host with engines
@@ -359,7 +359,7 @@ inside `start()`, and the arbiter replies with whatever the engine's
   boards where it was run. The CH32X035 has no benchmark suite: its
   figure is `test_x035_spi` letter b's, 1216 to 1232 cycles in all from
   the flash against the wire's 384, the suite's own call inside it.
-- **Asynchronous** (`polled = false`), and **asynchronous is DMA**. The
+- **Asynchronous** (`SpiEngine::dma`), and **asynchronous is DMA**. The
   data rides the host's DMA engines: `start()` arms them and returns
   false, and the engines' completion interrupt, `dma_isr()` returning
   true, is the edge on which the application's glue posts
@@ -378,7 +378,7 @@ inside `start()`, and the arbiter replies with whatever the engine's
   - **A short request runs the same loop.** Where the engines' fixed cost
     exceeds the polled transfer at the request's rate, `start()` runs
     that loop and returns true - the synchronous completion the arbiter
-    already handles. So `polled = false` does not promise that `start()`
+    already handles. So `SpiEngine::dma` does not promise that `start()`
     does not spin: a short request holds the dispatch for its whole time
     on the wire, as a polled one does. The threshold is derived per family from its
     measured costs. Call E the engines' fixed cost to the core (the
@@ -540,7 +540,7 @@ into one span (that is why the descriptor speaks spans) and amortize
 the round trip. For a device that demands chip-select-per-word
 framing, the noted engine extension would batch N words into one
 tenure. And a device that owns a bus alone can skip the arbiter
-entirely: with `polled = true`, `SpiHost<n>::start()` is a complete
+entirely: with `SpiEngine::polled`, `SpiHost<n>::start()` is a complete
 synchronous transfer function usable directly by the owning active
 object. The arbitration price is only paid where there is something to
 arbitrate.
@@ -608,7 +608,7 @@ The rate is a `SpiClock` division enum, with `ceiling_clock()` the optional
 SCK ceiling a rebase re-resolves and `clock_for(hz)` the chooser
 (`spi_clock_for(clk_per_hz, hz)` is the same arithmetic with the clock
 stated). Polled only: the AVR DA, DB and EA have no DMA controller, so
-`has_dma` is false and every request not marked polled is refused
+`has_dma` is false and every request naming `SpiEngine::dma` is refused
 (`spi_rejected`, nothing on the wire), the host arming no interrupt and
 keeping no transaction's state past `start()`. `status()` is `spi_rejected`
 after a refusal and `spi_ok` otherwise. `prime(mode, clock)` serves a caller
@@ -620,7 +620,7 @@ The rate is a `uint8_t baud` divisor (the SERCOM's own register), so the
 ceiling is `ceiling_baud()` and the chooser `baud_for(hz)`. Polled only: no
 engine slot (the family's DMA serves its Uart's transmitter alone, erratum
 1.10.4, [the SAM C21 DMAC page](../samc21/dmac.md)), so `has_dma` is false
-and every request not marked polled is refused (`spi_rejected`), the host
+and every request naming `SpiEngine::dma` is refused (`spi_rejected`), the host
 arming no interrupt and leaving its NVIC line disabled. `status()` is
 `spi_ok`, `spi_stalled` when a polled wait ran out, or `spi_rejected`. The
 placement moves the one polled transaction. `prime(mode, baud)` serves a

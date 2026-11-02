@@ -872,6 +872,7 @@ void td_dma() {
             uint8_t status = 0xFEu;
             const BenchSample s = best_block(4u, [&] {
                 DmaHost::Request r{};
+                r.engine = SpiEngine::dma;
                 r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
                 r.rx = lend<Lease::reply>(static_cast<uint8_t*>(spi_rx));
                 r.len = frames;
@@ -942,7 +943,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     r.clock = rate;
     r.mode = mode;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     drain();
     H::Resource::clear_pending(SpiInterrupt::overrun);
     plain_done = false;
@@ -1022,7 +1023,7 @@ void e_rx_proof() {
             r.len = 256;
             r.clock = rate.clock;
             r.mode = SpiMode::mode3;
-            r.polled = true;
+            r.engine = SpiEngine::polled;
             (void)Plain::start(r);
             if (std::memcmp(spi_tx, spi_rx, 256) == 0) {
                 ++exact;
@@ -1068,7 +1069,7 @@ ColdRun e_cold_once(bool invalidate) {
     r.clock = e_rates[2].clock;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     drain();
     Plain::Resource::clear_pending(SpiInterrupt::overrun);
     const BenchCounters before = counters();

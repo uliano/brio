@@ -120,7 +120,7 @@ Host::Request request(SimSpiPinRef cs, bool polled = true) {
     r.clock = SimSpiClock::div4;
     r.mode = SimSpiMode::mode0;
     r.bits = SimSpiDataSize::bits8;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 

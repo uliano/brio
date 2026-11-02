@@ -451,7 +451,7 @@ Host::Request request(uint8_t* rx, uint8_t len, bool polled, ReplyTo<SpiDone> re
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
     r.rx = lend<Lease::reply>(rx);
     r.len = len;
-    r.polled = polled || !Host::has_dma;
+    r.engine = (polled || !Host::has_dma) ? SpiEngine::polled : SpiEngine::dma;
     r.cs_setup_us = 0;
     bus_settings(r, rate, mode, SpiDataSize::bits8);
     r.reply = reply;
@@ -794,7 +794,7 @@ struct Client {
                 r.rx = win.rx;
                 r.len = win.len;
                 // A host without engines refuses an asynchronous request.
-                r.polled = win.polled || !Host::has_dma;
+                r.engine = (win.polled || !Host::has_dma) ? SpiEngine::polled : SpiEngine::dma;
                 if constexpr (cs_hold_us == 0u) {
                     // The 30 us the protocol pays between the select's fall
                     // and the first clock.

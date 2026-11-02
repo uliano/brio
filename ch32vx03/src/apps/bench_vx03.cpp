@@ -1060,7 +1060,7 @@ BenchSample spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, uint32_t&
         r.mode = SpiMode::mode0;
         r.clock = rate;
         r.bits = bits;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         spi_done = false;
         fresh_tick();
         const BenchCounters before = dma_counters();
@@ -1147,6 +1147,7 @@ bool spi_crc_judge(SpiDataSize bits, uint16_t frames) {
     const bool wide = bits == SpiDataSize::bits16;
     const uint16_t poly = wide ? 0x1021u : 0x0007u;
     SpiDma::Request r{};
+    r.engine = SpiEngine::dma;
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
     r.len = 1;
     r.clock = SpiClock::div16;
@@ -1271,7 +1272,7 @@ BenchSample spi_plain_once(uint16_t frames, SpiClock rate, SpiDataSize bits, boo
         r.mode = SpiMode::mode0;
         r.clock = rate;
         r.bits = bits;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         fresh_tick();
         const BenchCounters before = spi_counters();
         Stopwatch<Ruler> sw;
@@ -1357,7 +1358,7 @@ void spi_req_report() {
             r.mode = SpiMode::mode0;
             r.clock = rate;
             r.bits = SpiDataSize::bits8;
-            r.polled = true;
+            r.engine = SpiEngine::polled;
             fresh_tick();
             const BenchCounters before = spi_counters();
             Stopwatch<Ruler> sw;
@@ -1471,7 +1472,7 @@ void spi_live_report(const char* name) {
                     r.mode = SpiMode::mode0;
                     r.clock = rate;
                     r.bits = bits;
-                    r.polled = true;
+                    r.engine = SpiEngine::polled;
                     console_drain();
                     print(serial, live_line.text);
                     if (!H::start(r)) {
@@ -1537,7 +1538,7 @@ uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames, ui
     r.clock = c;
     r.mode = m;
     r.bits = bits;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     uint32_t best = UINT32_MAX;
     for (uint8_t run = 0; run < 6u; ++run) {
         const uint32_t t0 = stk()->CNTL;

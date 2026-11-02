@@ -1062,7 +1062,7 @@ void run_spi(SpiDataSize bits, SpiClock rate, uint16_t div) {
                 r.clock = rate;
                 r.mode = SpiMode::mode0;
                 r.bits = bits;
-                r.polled = false;
+                r.engine = SpiEngine::dma;
                 spi_done = false;
                 if (SpiHw::start(r)) {
                     return true;
@@ -1076,6 +1076,7 @@ void run_spi(SpiDataSize bits, SpiClock rate, uint16_t div) {
             ok, worst);
         // start() alone: the Request built outside the clock.
         SpiHw::Request lr{};
+        lr.engine = SpiEngine::dma;
         lr.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
         lr.rx = lend<Lease::reply>(spi_rx);
         lr.len = frames;
@@ -1187,7 +1188,7 @@ HostSample run_host(const char* op, SpiDataSize bits, SpiClock rate, uint16_t di
     r.clock = rate;
     r.mode = SpiMode::mode0;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
 
     (void)drain();
     BenchSample best{};
@@ -1317,6 +1318,7 @@ void te_host() {
     // the wire untouched.
     {
         SpiSw::Request a{};
+        a.engine = SpiEngine::dma;
         a.cs = ReqCs::ref();
         a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
         a.len = 16;

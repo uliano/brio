@@ -370,7 +370,7 @@ uint32_t frame_mc(SpiClock c, SpiMode m = SpiMode::mode0) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 3u; ++k) {
             const uint32_t t0 = Ruler::read();
-            const bool ok = Host::start({{}, {}, {}, 0, {}, {}, n, {}, c, m, true, 0});
+            const bool ok = Host::start({{}, {}, {}, 0, {}, {}, n, {}, c, m, SpiEngine::polled, 0});
             const uint32_t took = Ruler::read() - t0;
             if (ok && took < least) least = took;
         }
@@ -1228,14 +1228,14 @@ void tj_engine() {
     // Polled bulk read.
     for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
     bool ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                          SpiClock::div16, SpiMode::mode0, true, 0});
+                          SpiClock::div16, SpiMode::mode0, SpiEngine::polled, 0});
     bool all_ff = ok;
     for (uint8_t i = 0; i < 8; ++i) all_ff = all_ff && eng_rx[i] == 0xFF;
     verdict("a polled request completes synchronously and fills rx", all_ff);
     verdict("the engine released CS", Ss::read());
 
     // THE REFUSAL: asynchronous is DMA, and this host has none. A request
-    // not marked polled answers start() true at once with spi_rejected,
+    // naming SpiEngine::dma answers start() true at once with spi_rejected,
     // before the registers or the select are touched. The witnesses: the
     // SCK event counted on TCB1 stays at zero; the select (PE3) never
     // falls - its falling edge sensed into the pin's flag with interrupts
@@ -1258,7 +1258,7 @@ void tj_engine() {
         Ss::sense(PinSense::falling);
         Ss::clear_flag();
         const bool sync = Host::start({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                                       SpiClock::div64, SpiMode::mode3, false, 0});
+                                       SpiClock::div64, SpiMode::mode3, SpiEngine::dma, 0});
         const uint8_t status = Host::status();
         const uint16_t edges = SckCount::count();
         const bool cs_fell = Ss::flag();
@@ -1269,7 +1269,7 @@ void tj_engine() {
         Ss::clear_flag();
         for (uint8_t i = 0; i < 8; ++i) eng_rx[i] = 0;
         ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                         SpiClock::div64, SpiMode::mode0, true, 0});
+                         SpiClock::div64, SpiMode::mode0, SpiEngine::polled, 0});
         const uint16_t control = SckCount::count();
         const bool control_fell = Ss::flag();
         Ss::sense(PinSense::none);
@@ -1304,7 +1304,7 @@ void tj_engine() {
     MosiCount::init(ChMosi{});
     MosiCount::reset();
     ok = run_engine({{}, Ss::ref(), lend<Lease::reply>(eng_cmd), 3, {}, {}, 0, {},
-                     SpiClock::div16, SpiMode::mode0, true, 0});
+                     SpiClock::div16, SpiMode::mode0, SpiEngine::polled, 0});
     // 0x11, 0x22, 0x33 back to back from a line that PARKS HIGH between
     // bytes (test c). 0x11 = 0,0,0,1,0,0,0,1: two rises, ends high, the
     // park adds none. 0x22 = 0,0,1,0,0,0,1,0: two rises, ends low, the
@@ -1318,10 +1318,10 @@ void tj_engine() {
 
     // cs_setup_us and the degenerate request.
     ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 1, {},
-                     SpiClock::div16, SpiMode::mode3, true, 10});
+                     SpiClock::div16, SpiMode::mode3, SpiEngine::polled, 10});
     verdict("a request with a chip-select setup delay still runs", ok);
     verdict("a mode-3 request leaves SCK idle high", Sck::read());
-    ok = run_engine({{}, {}, {}, 0, {}, {}, 0, {}, SpiClock::div16, SpiMode::mode0, true, 0});
+    ok = run_engine({{}, {}, {}, 0, {}, {}, 0, {}, SpiClock::div16, SpiMode::mode0, SpiEngine::polled, 0});
     verdict("a zero-length request completes on the spot without the wire", ok);
 
     // The ceiling clamps a too-fast request.
@@ -1335,7 +1335,7 @@ void tj_engine() {
     min_ticks = 0xFFFF;
     sei();
     (void)run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {},
-                      SpiClock::div4, SpiMode::mode0, true, 0});
+                      SpiClock::div4, SpiMode::mode0, SpiEngine::polled, 0});
     const uint16_t clamped = min_ticks;
     print(serial, "  a CLK_PER/4 request under a 400 kHz ceiling ran at CLK_PER/",
           clamped, crlf);
@@ -1605,7 +1605,7 @@ void swept_request(uint16_t C, bool level, Swept& w) {
     T2::enable_capt_interrupt(true);
     const bool ok = run_engine({{}, {}, {}, 0, lend<Lease::reply>(static_cast<const uint8_t*>(out)),
                                 lend<Lease::reply>(static_cast<uint8_t*>(in)), 16, {},
-                                SpiClock::div16, SpiMode::mode0, true, 0});
+                                SpiClock::div16, SpiMode::mode0, SpiEngine::polled, 0});
     T2::enable_capt_interrupt(false);
     T2::disable();
     bool exact = true;
@@ -1804,7 +1804,7 @@ void tt_untaken() {
     (void)Host::init(clock);
     verdict("and the engine runs a request after them",
             run_engine({{}, {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div16,
-                        SpiMode::mode0, true, 0}));
+                        SpiMode::mode0, SpiEngine::polled, 0}));
     quiesce();
 }
 
@@ -3064,7 +3064,7 @@ bool b2b_exchange(const Exchange& e, bool answer_only, uint32_t& ticks) {
     const uint32_t t0 = Ruler::read();
     const bool ok = Host::start({{}, {}, {}, 0,
                                  lend<Lease::reply>(static_cast<const uint8_t*>(b2b_tx)),
-                                 lend<Lease::reply>(xrx), n, {}, e.rate, e.host_mode, true, 0});
+                                 lend<Lease::reply>(xrx), n, {}, e.rate, e.host_mode, SpiEngine::polled, 0});
     ticks = Ruler::read() - t0;
     gap();
     cs_release();

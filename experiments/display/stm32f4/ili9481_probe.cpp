@@ -298,7 +298,7 @@ bool start_on(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len, SpiCloc
     r.clock = rate;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     return H::start(r);
 }
 
@@ -1436,7 +1436,7 @@ void ty_census() {
 }
 
 /// (by name) THE ASYNCHRONOUS WAY ON THE ENGINELESS HOST: the same block
-/// written through requests with polled = false, then read back polled.
+/// written through requests naming SpiEngine::dma, then read back polled.
 /// The host's per-frame interrupt pump these letters measured is gone -
 /// an asynchronous request is DMA, and a host with no engines refuses it
 /// (spi_rejected, nothing on the wire) - so this path now reports the
@@ -1469,7 +1469,7 @@ bool transfer_isr(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len, Spi
     r.len = len;
     r.clock = rate;
     r.mode = SpiMode::mode0;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     isr_done = false;
     if (Host::start(r)) {
         return Host::status() == spi_ok;   // refused: spi_rejected
@@ -1490,7 +1490,7 @@ bool transfer_isr_dma(uint8_t cmd, const uint8_t* tx, uint8_t* rx, uint16_t len,
     r.len = len;
     r.clock = rate;
     r.mode = SpiMode::mode0;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     isr_done = false;
     if (DmaHost::start(r)) {
         return true;
@@ -1510,7 +1510,7 @@ bool transfer_polled_on_dma_host(uint8_t cmd, const uint8_t* tx, uint8_t* rx, ui
     r.len = len;
     r.clock = rate;
     r.mode = SpiMode::mode0;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     return DmaHost::start(r);
 }
 

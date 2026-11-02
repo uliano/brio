@@ -143,7 +143,7 @@
 //      time is the wire's, the bytes are not judged) - test_samc_spi's
 //      host pads - so what is measured is the polled loop, the one way
 //      this host moves a run (it has no DMA slot, and asynchronous is DMA:
-//      samc21/spi.hpp refuses a request not marked polled). Every line the
+//      samc21/spi.hpp refuses a request naming SpiEngine::dma). Every line the
 //      BEST of 8 by wall; the two rates are BAUD 1 (12 MHz, f_ref/4) and
 //      BAUD 7 (3 MHz, f_ref/16); a frame is eight bits on this family:
 //        spi.poll  a POLLED WRITE data phase (tx set, rx null - the
@@ -763,7 +763,7 @@ typename Host::Request request(uint16_t len, bool duplex, uint8_t baud, bool pol
     r.len = len;
     r.baud = baud;
     r.mode = SpiMode::mode0;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 

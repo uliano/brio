@@ -84,6 +84,7 @@ void pl022_host_verbs() {
     Plain::loopback(true);
     (void)Plain::loopback();
     Plain::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SimPl022PinRef{3};
     r.cs_setup_us = 2;
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
@@ -100,6 +101,7 @@ void pl022_engine_verbs() {
     constexpr Clock clock;
     (void)Engined::init(clock);
     Engined::Request d{};
+    d.engine = SpiEngine::dma;
     d.cs = SimPl022PinRef{3};
     d.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     d.cmd_len = 1;

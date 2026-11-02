@@ -72,7 +72,8 @@
  *   r.clock = brio::SpiClocks::div4;
  *   r.mode = brio::SpiMode::mode0;
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Spi>(r);                               // asynchronous: polled stays false
+ *   r.engine = brio::SpiEngine::dma;
+ *   brio::post<Spi>(r);                               // asynchronous
  *
  *   extern "C" void isr_dma_0() {
  *       if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -919,10 +920,10 @@ static_assert(pl022_async_min_frames({400u, 400u, 30u, 16u}, 16u, true) == 14u);
  *
  * The two ways (docs/design/spi-bus.md, "Two ways to run a request"):
  *
- *  - POLLED (`polled` true): the loops of the file header inside start(),
+ *  - POLLED (`SpiEngine::polled`): the loops of the file header inside start(),
  *    at any length and whether engines are bound or not, so a polled
  *    request needs no interrupt vector.
- *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
+ *  - ASYNCHRONOUS (`SpiEngine::dma`) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected in
  *    status(), before it touches the block, the select or the D/C, so
  *    nothing reaches the wire; `has_dma` says so at compile time. With
@@ -988,7 +989,7 @@ public:
     static constexpr bool has_engines = TxEngine::present;
     /// Can this host run an asynchronous request? The contract's name for
     /// has_engines (docs/design/spi-bus.md): false refuses every request
-    /// not marked polled, so a program that posts one asserts it -
+    /// naming SpiEngine::dma, so a program that posts one asserts it -
     /// `static_assert(Bus::has_dma)`.
     static constexpr bool has_dma = has_engines;
     /// Engines whose element is a half-word: 16-bit frames ride them.
@@ -1052,11 +1053,11 @@ public:
         uint8_t cmd_len;   ///< in FRAMES
         SpiMode mode = SpiMode::mode0;
         SpiDataSize bits = SpiDataSize::bits8;
-        /// The way to run it: true = polled inside start(); false =
-        /// asynchronous, on the DMA engines - polled inside start() when
-        /// too short to repay them (async_min_frames()), refused
+        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        /// start(); dma, asynchronous, on the DMA engines - polled inside
+        /// start() when too short to repay them (async_min_frames()), refused
         /// (spi_rejected) on a host with none (has_dma).
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -1264,7 +1265,7 @@ private:
     /// a data phase on the engines leaves that loop for them.
     [[gnu::always_inline]] static bool start_body(const Request& r) {
         if constexpr (!has_dma) {
-            if (!r.polled) {
+            if (r.engine == SpiEngine::dma) {
                 // Asynchronous is DMA, and this host has no engines:
                 // refused before the block, the select or the D/C is
                 // touched, so nothing reaches the wire.
@@ -1298,7 +1299,7 @@ private:
         // frame it wrote, and a stall or a bus error ends in the block's reset.
         bool engines = false;
         if constexpr (has_dma) {
-            if (!r.polled && repays_engines(r)) {
+            if (r.engine == SpiEngine::dma && repays_engines(r)) {
                 engines = true;
                 if (has_cmd && command_block(r)) {
                     // The command phase as a block of its own; its completion
@@ -1803,7 +1804,7 @@ private:
     // ---- the state ----------------------------------------------------------
 
     /// The request an engined transaction is running (take_tenure()).
-    static inline Request tenure_{};
+    static inline Request tenure_ = [] { Request r{}; r.engine = SpiEngine::dma; return r; }();
     /// A command block is on the engines; its end launches the data block.
     static inline bool in_cmd_ = false;
     static inline uint8_t status_ = spi_ok;

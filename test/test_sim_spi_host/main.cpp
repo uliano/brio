@@ -73,7 +73,7 @@ typename Host::Request request(uint16_t len, bool polled, uint8_t cmd_len = 0) {
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
     r.len = len;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 

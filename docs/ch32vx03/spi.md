@@ -35,7 +35,7 @@ r.rx      = brio::lend<brio::Lease::reply>(id);
 r.len     = 3;
 r.mode    = brio::SpiMode::mode0;
 r.clock   = brio::SpiClock::div16;
-r.polled  = true;
+r.engine  = brio::SpiEngine::polled;
 (void)Bus::start(r);                     // a polled request answers true, done or not: status() decides
 if (Bus::status() != brio::spi_ok) { /* spi_stalled: id holds nothing; "What each answer asks of the program" */ }
 ```
@@ -70,7 +70,7 @@ phase of three, which with no out buffer (`r.tx` left null) clocks 0xFF
 and keeps what comes back in `id`; `r.mode` and `r.clock` are the device's mode and rate,
 the rate a division of the instance's own bus (SPI2 sits on PB1, so
 `div16` is 4.5 MHz of SCK under a 144 MHz clock, where PB1
-runs at 72 MHz); and `r.polled = true` makes `start()` run the whole
+runs at 72 MHz); and `r.engine = SpiEngine::polled` makes `start()` run the whole
 transaction in an explicit loop before it returns, spinning under one
 spin budget for the transaction, global interrupts as the caller left
 them, depending on no interrupt vector. `start()` then answers true,
@@ -81,7 +81,7 @@ line after it decides whether `id` holds an answer. These lines run in
 
 A request runs one of two ways ([design/spi-bus.md, "Two ways to run a
 request"](../design/spi-bus.md)): POLLED, as above, or ASYNCHRONOUS
-(`r.polled = false`), and asynchronous is DMA: `start()` launches the
+(`r.engine = SpiEngine::dma`), and asynchronous is DMA: `start()` launches the
 instance's two DMA channels and returns, and the receive channel's
 interrupt ends the transaction. `Bus` above has no engines, so it
 refuses an asynchronous request - `start()` answers true at once with
@@ -101,7 +101,7 @@ BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (Fast::dma_tx_isr()) { brio::post<Arb>(brio::TransferDone{Fast::status()}); }
 }
 Fast::Request q{};                       // the fields of r above, then
-q.polled = false;
+q.engine = brio::SpiEngine::dma;
 q.reply  = brio::reply_to<MyAo, brio::SpiDone>();
 brio::post<Arb>(q);
 ```
@@ -122,7 +122,7 @@ it; its body calls `Fast::dma_rx_isr()`, which answers true when the
 transaction has just completed and the select is high again - the
 moment the body posts `TransferDone{Fast::status()}` to the arbiter. The
 transmit channel's vector rings only on a transfer error, and its body
-posts the same way. `q.polled = false` makes the request asynchronous,
+posts the same way. `q.engine = SpiEngine::dma` makes the request asynchronous,
 `q.reply` names the active object (`MyAo`) and the event (`SpiDone`)
 the answer comes back as, and `brio::post<Arb>(q)`, from one of
 `MyAo`'s handlers, copies the request into the arbiter's queue: the
@@ -619,7 +619,7 @@ with the rate and the frame size as this family's `SpiClock` and
 `SpiDataSize`: a chip select the engine asserts in `start()`, which the
 bus AO calls, a display D/C line, a CS setup time, a command phase and a data
 phase with optional out and in buffers, the mode/rate/frame size per
-request, and a `polled` flag choosing between the two ways to run it. The
+request, and an `engine` field choosing between the two ways to run it. The
 Request is laid out with no padding - the two `PinRef`s, the three
 buffers and the reply in eight words, the lengths and the four settings
 in two, 40 bytes - and it is lent for the call: a request that completes
@@ -632,7 +632,7 @@ engine's own Tenure in word stores, and the reply stays the arbiter's.
 **The two ways** ([design/spi-bus.md, "Two ways to run a
 request"](../design/spi-bus.md)):
 
-- **Polled** (`polled = true`): the loops below inside `start()`, at every
+- **Polled** (`SpiEngine::polled`): the loops below inside `start()`, at every
   length and on every host, whoever called `start()` spinning for the whole
   transaction under one spin budget and the engines never touched. Through
   the arbiter that is its dispatch: the client that posted does not wait and
@@ -642,7 +642,7 @@ request"](../design/spi-bus.md)):
   enabled. A request asks asynchronously when the others must keep running
   through it, whatever its direction, or when it is a long read that wants the
   wire's rate.
-- **Asynchronous** (`polled = false`) **is DMA**. On a host with no
+- **Asynchronous** (`SpiEngine::dma`) **is DMA**. On a host with no
   engines bound the request is refused: `start()` answers true at once
   with `spi_rejected` in `status()`, before it touches the block, the
   select or the D/C, and `has_dma` says so at compile time. On a host
@@ -872,7 +872,7 @@ r.rx      = brio::lend<brio::Lease::reply>(id);
 r.len     = 3;
 r.mode    = brio::SpiMode::mode0;
 r.clock   = brio::SpiClock::div16;
-r.polled  = true;
+r.engine  = brio::SpiEngine::polled;
 (void)Bus::start(r);                     // true: it is done, `id` is filled
 ```
 
@@ -892,7 +892,7 @@ BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (Fast::dma_tx_isr()) { brio::post<Arb>(brio::TransferDone{Fast::status()}); }
 }
 Fast::Request q{};                       // r's fields, then
-q.polled = false;                        // the engines, or polled inside start() when short
+q.engine = brio::SpiEngine::dma;         // the engines, or polled inside start() when short
 q.reply  = brio::reply_to<MyAo, brio::SpiDone>();
 brio::post<Arb>(q);
 ```

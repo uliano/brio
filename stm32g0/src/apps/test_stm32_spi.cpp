@@ -487,7 +487,7 @@ bool host_xfer(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
     r.clock = rate;
     r.mode = mode;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     if (Host::start(r)) {
         return true;
@@ -512,7 +512,7 @@ bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
     r.clock = rate;
     r.mode = SpiMode::mode0;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     if (DmaHost::start(r)) {
         return true;
@@ -746,7 +746,7 @@ bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n,
     r.clock = rate;
     r.mode = mode;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool done = Host::start(r);
     link_hold();
     CsPin::set();
@@ -2570,6 +2570,7 @@ void ti_dma() {
             peer_arm({.mode = SpiMode::mode0, .bits = SpiDataSize::bits16}, wide_answers, 16);
             dma_completions = 0;
             DmaHost::Request wr{};
+            wr.engine = SpiEngine::dma;
             wr.cs = CsPin::ref();
             wr.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
             wr.rx = lend<Lease::reply>(rx);
@@ -2899,7 +2900,7 @@ private:
             .clock = rate,
             .mode = SpiMode::mode0,
             .bits = SpiDataSize::bits8,
-            .polled = i == 1u,
+            .engine = i == 1u ? SpiEngine::polled : SpiEngine::dma,
         };
     }
 
@@ -2915,7 +2916,7 @@ private:
         r.len = fault ? way_frames : 9u;
         r.clock = way_rate;
         r.mode = way_mode;
-        r.polled = !fault;
+        r.engine = fault ? SpiEngine::dma : SpiEngine::polled;
         r.reply = reply_to<Driver, SpiDone>();
         return r;
     }
@@ -2929,7 +2930,7 @@ private:
         r.cs_setup_us = 30;
         r.clock = way_rate;
         r.mode = way_mode;
-        r.polled = polled;
+        r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
         r.reply = reply_to<Driver, SpiDone>();
         return r;
     }
@@ -3610,6 +3611,7 @@ ShapeResult run_shape(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock 
     bool done = false;
     if (engined) {
         DmaHost::Request r{};
+        r.engine = SpiEngine::dma;
         r.cs = CsPin::ref();
         r.cmd = lend<Lease::reply>(cmd);
         r.cmd_len = cmd_len;
@@ -3759,6 +3761,7 @@ void ts_shapes() {
         (void)CsWatch::arm(true);
         Nvic::enable(CsWatch::irq());
         Host::Request r{};
+        r.engine = SpiEngine::dma;
         r.cs = CsPin::ref();
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(shape_tx));
         r.len = 16;
@@ -3772,7 +3775,7 @@ void ts_shapes() {
         const bool sck_low = !Pin<'B', 3>::read();
         const uint8_t ftlvl = S1::tx_level();
         const uint8_t frlvl = S1::rx_level();
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         (void)Host::start(r);
         settle_ms(2);
         const uint16_t polled_falls = static_cast<uint16_t>(cs_falls - refused_falls);
@@ -4717,7 +4720,7 @@ Outcome run(const Ext& e) {
         r.clock = e.rate;
         r.mode = SpiMode::mode0;
         r.bits = bits;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         const uint32_t t0 = cycles_now();
         bool done = DmaHost::start(r);
         const uint32_t m0 = Ticker::millis();
@@ -4741,7 +4744,7 @@ Outcome run(const Ext& e) {
         r.clock = e.rate;
         r.mode = SpiMode::mode0;
         r.bits = bits;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const uint32_t t0 = cycles_now();
         bool done = Host::start(r);
         const uint32_t m0 = Ticker::millis();
@@ -5603,7 +5606,7 @@ bool link_xfer_unprimed(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rat
     r.clock = rate;
     r.mode = mode;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool done = Host::start(r);
     link_hold();
     CsPin::set();
@@ -6022,7 +6025,7 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode) {
     q.len = 9;
     q.clock = way_rate;
     q.mode = mode;
-    q.polled = true;
+    q.engine = SpiEngine::polled;
     if (shape == Shape::read) {
         q.rx = lend<Lease::reply>(way_rx);
     }
@@ -6031,7 +6034,7 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode) {
         q.cmd_len = 1;
         q.rx = lend<Lease::reply>(way_rx);
         q.len = way_frames;
-        q.polled = false;
+        q.engine = SpiEngine::dma;
     }
     Failed f{};
     const uint32_t t0 = cycles_now();
@@ -6062,7 +6065,7 @@ Failed run_faulted(bool bad_tx, PinRef cs, SpiMode mode) {
     q.len = way_frames;
     q.clock = way_rate;
     q.mode = mode;
-    q.polled = false;
+    q.engine = SpiEngine::dma;
     Failed f{};
     dma_completions = 0;
     host_done = false;
@@ -6113,7 +6116,7 @@ Window next_window(const spilink::Params& a, SpiMode mode, bool polled) {
     q.cs_setup_us = 30;
     q.clock = way_rate;
     q.mode = mode;
-    q.polled = polled;
+    q.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     o.ended = DmaHost::start(q);
     o.completed = completed_within(o.ended, 200u);

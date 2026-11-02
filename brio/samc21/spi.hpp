@@ -13,10 +13,9 @@
  *
  * then an active object posts a Request (the chip select, the buffers as
  * lend<Lease::reply>(...), baud = *SpiHw::baud_for(hz), the mode, and
- * polled = true) to SpiBus and gets an SpiDone back. Every request runs
+ * SpiEngine::polled) to SpiBus and gets an SpiDone back. Every request runs
  * polled, inside the arbiter's dispatch: asynchronous is DMA, and this
- * host has no engines - a request left at polled = false, the field's
- * default, is refused (SpiDone with spi_rejected, nothing on the wire;
+ * host has no engines - a request naming SpiEngine::dma is refused (SpiDone with spi_rejected, nothing on the wire;
  * `SpiHw::has_dma` is false for a program's static_assert). The host
  * binds no vector.
  *
@@ -919,8 +918,8 @@ public:
  * ONE WAY TO RUN A REQUEST. docs/design/spi-bus.md gives a host two:
  * polled, the transaction inside start(), and asynchronous, which is DMA.
  * This host has no DMA engines (NO DMA, below), so it runs every request
- * polled: `has_dma` is false, and a request with `polled` false - the
- * field's default - is refused, start() answering true at once with
+ * polled: `has_dma` is false, and a request naming SpiEngine::dma is
+ * refused, start() answering true at once with
  * status() spi_rejected before the registers, the select or the D/C are
  * touched. The SERCOM's interrupt is never armed and the program binds
  * no vector for this host (docs/design/spi-bus.md weighs a per-character
@@ -1066,7 +1065,7 @@ public:
 
     /// Can this host run an asynchronous request? Never: asynchronous is
     /// DMA (docs/design/spi-bus.md) and this host has no engines (the
-    /// class comment). Every request not marked polled is refused
+    /// class comment). Every request naming SpiEngine::dma is refused
     /// (spi_rejected), so a program that posts one asserts this -
     /// `static_assert(SpiHw::has_dma)` - and fails to compile here.
     static constexpr bool has_dma = false;
@@ -1088,14 +1087,14 @@ public:
         uint16_t len;      ///< phase 2 length
         uint8_t cmd_len;   ///< phase 1 length
 
-        /// The way to run it: true = POLLED inside start(), completing
-        /// synchronously - the only way this host has; false =
-        /// asynchronous, which is DMA, refused here (spi_rejected at
+        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        /// start(), completing synchronously - the only way this host has;
+        /// dma, asynchronous, refused here (spi_rejected at
         /// once, nothing on the wire: has_dma). A character at f_ref/2
         /// is sixteen CPU cycles, less than an interrupt's entry alone;
         /// the price is that the arbiter's dispatch blocks for the whole
         /// transfer (bounded), global interrupts enabled throughout.
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
 
         /// Microseconds between the CS assertion and the first clock -
         /// what a device's datasheet calls CS setup (the same field, byte
@@ -1257,7 +1256,7 @@ public:
     /// The request is read through `r` from the first field to the last
     /// and never copied.
     static bool start(const Request& r) {
-        if (!r.polled) {
+        if (r.engine == SpiEngine::dma) {
             // Asynchronous is DMA, and this host has none: refused before
             // the registers, the select or the D/C are touched.
             status_ = spi_rejected;

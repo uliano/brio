@@ -13,8 +13,8 @@
 // Without the jumper MISO floats and reads whatever the pad settles
 // at (all 0x00 on the bench board): FAIL is the expected no-jumper
 // outcome, OK proves the whole chain - request event -> arbiter ->
-// engine (polled inside start(): the AVR has no DMA, so a request not
-// marked polled is refused, its SpiDone carrying spi_rejected) -> reply.
+// engine (polled inside start(): the AVR has no DMA, so a request
+// naming SpiEngine::dma is refused, its SpiDone carrying spi_rejected) -> reply.
 
 #include <avr/interrupt.h>
 #include <stdint.h>
@@ -96,7 +96,7 @@ struct Tester : brio::Fsm<Tester, Kick, brio::SpiDone> {
                     {}, 0,                         // no command phase
                     brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), pattern_len,  // full duplex
                     brio::reply_to<Tester, brio::SpiDone>(),
-                    brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
+                    brio::SpiClock::div16, brio::SpiMode::mode0, brio::SpiEngine::polled});   // polled
                 return handled();
             },
             [](brio::SpiDone d) {

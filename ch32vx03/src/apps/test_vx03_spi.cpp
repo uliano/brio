@@ -483,7 +483,7 @@ uint8_t host_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_
     r.mode = mode;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     spi1_isr_entries = 0;
     if (Host1::start(r)) {
@@ -512,7 +512,7 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
     r.mode = SpiMode::mode0;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     if (Dma1::start(r)) {
         return Dma1::status();
@@ -547,7 +547,7 @@ uint32_t engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
     r.mode = SpiMode::mode0;
     r.clock = rate;
     r.bits = bits;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     host_done = false;
     const uint32_t t0 = cycles_now();
     if (!H::start(r)) {
@@ -695,7 +695,7 @@ void ta_rates() {
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
         r.len = frames;
         r.clock = rate;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         (void)Moved::start(r);
         const uint32_t cycles = cycles_now() - t0;
         const uint32_t edges = SckCounter::count();
@@ -753,7 +753,7 @@ void ta_rates() {
             r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
             r.len = chunk;
             r.clock = rate;
-            r.polled = true;
+            r.engine = SpiEngine::polled;
             (void)Spi2Host::start(r);
             const uint32_t cycles = cycles_now() - t0;
             const uint32_t bits = 8UL * chunk;
@@ -973,7 +973,7 @@ Dma1::Request request(const uint8_t* tx, uint8_t* rx, bool polled) {
     r.len = 8;
     r.mode = SpiMode::mode0;
     r.clock = SpiClock::div32;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }
@@ -2140,7 +2140,7 @@ bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = link_
     r.clock = rate;
     r.mode = mode;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool done = PairHost::start(r);
     link_hold();
     PairNss::set();
@@ -2405,19 +2405,19 @@ PairDma::Request failed_request(const Exchange& e, SpiDataSize bits) {
     if (e.failure == Failure::stall) {
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
         r.len = 4;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
     } else if (e.failure == Failure::stall_command) {
         r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
         r.cmd_len = 1;
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
         r.len = 32;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
     } else {
         const FaultKind k = fault_kind_of(e.failure);
         r.tx = lend<Lease::reply>(fault_out(k, static_cast<const uint8_t*>(xtx)));
         r.rx = lend<Lease::reply>(fault_in(k, fault_sink));
         r.len = fault_block_frames;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
     }
     return r;
 }
@@ -2477,7 +2477,7 @@ uint8_t clock_after_failure(const Exchange& e, uint16_t n, uint32_t& cycles) {
     r.clock = e.rate;
     r.mode = e.host_mode;
     r.bits = bits;
-    r.polled = e.shape == Shape::polled;
+    r.engine = e.shape == Shape::polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     const uint32_t t0 = cycles_now();
     uint8_t st = no_answer;
@@ -2521,7 +2521,7 @@ uint8_t clock_out(const Exchange& e, uint16_t n, uint32_t& cycles) {
         r.clock = e.rate;
         r.mode = e.host_mode;
         r.bits = bits;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         host_done = false;
         const uint32_t t0 = cycles_now();
         if (PairDma::start(r)) {
@@ -2558,7 +2558,7 @@ uint8_t clock_out(const Exchange& e, uint16_t n, uint32_t& cycles) {
     r.clock = e.rate;
     r.mode = e.host_mode;
     r.bits = bits;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     hog_window(true);
     const uint32_t t0 = cycles_now();
     (void)PairHost::start(r);
@@ -3645,7 +3645,7 @@ uint8_t next_read(uint16_t len, SpiMode mode, SpiClock rate, bool polled, bool& 
     r.len = len;
     r.mode = mode;
     r.clock = rate;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     for (uint16_t i = 0; i < len; ++i) {
         rx_buf[i] = 0xEE;
     }
@@ -3694,12 +3694,12 @@ void stall_then(NextTally& t, SpiMode mode, SpiClock rate, bool read, bool comma
         r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
         r.cmd_len = 1;
         r.len = 32;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
     } else {
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
         r.rx = lend<Lease::reply>(read ? rx_buf : nullptr);
         r.len = 16;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
     }
     const uint32_t spins = 100'000u + 2'048u * (command ? 1u : 16u);   // SpiHost's polled_budget()
     const uint32_t t0 = cycles_now();
@@ -3754,7 +3754,7 @@ void fault_then(NextTally& t, FaultKind k, SpiMode mode, bool next_polled) {
     r.len = fault_block_frames;
     r.mode = mode;
     r.clock = rate;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     host_done = false;
     const bool went = !Dma1::start(r);
     const bool answered = went && done_within_ms(5);
@@ -3878,7 +3878,7 @@ void tf_stalled_txe() {
     r.len = frames;
     r.mode = SpiMode::mode0;
     r.clock = SpiClock::div64;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     S1::bus_clock(false);
     const uint32_t t0 = cycles_now();
     const bool sync = Host1::start(r);
@@ -4070,7 +4070,7 @@ uint8_t xfer_on(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t*
     r.mode = SpiMode::mode0;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     const bool sync = H::start(r);
     if (went != nullptr) {
@@ -4225,13 +4225,13 @@ void tg_two_ways() {
     r.mode = SpiMode::mode3;
     r.clock = SpiClock::div8;
     r.bits = SpiDataSize::bits16;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     const bool refused_sync = Host1::start(r);
     const uint8_t refused_status = Host1::status();
     const bool latch_untouched = !ThirdPad::read_out();
     const bool ctlr1_untouched = S1::regs().CTLR1 == ctlr1_before;
     const bool idle = !S1::busy() && !S1::rxne();
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool polled_sync = Host1::start(r);
     const uint8_t polled_status = Host1::status();
     const bool polled_ran = ThirdPad::read_out() && S1::mode() == SpiMode::mode3;
@@ -4387,7 +4387,7 @@ public:
     static inline uint8_t last = 0;
     static inline uint8_t first = 0;   ///< the first reply's status
     static inline uint32_t at_ms = 0;
-    static inline PairDma::Request two[2]{};
+    static inline PairDma::Request two[2] = {[] { PairDma::Request r{}; r.engine = SpiEngine::dma; return r; }(), [] { PairDma::Request r{}; r.engine = SpiEngine::dma; return r; }()};
     static inline bool take_enable_down_first = false;
 
     static void init() { n = 0; }
@@ -4431,7 +4431,7 @@ PairDma::Request dummies(uint16_t len) {
     r.len = len;
     r.mode = SpiMode::mode0;
     r.clock = SpiClock::div256;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }
@@ -4533,7 +4533,7 @@ uint8_t clock_queued(const Exchange& e, uint16_t n, uint32_t& cycles) {
     second.clock = e.rate;
     second.mode = e.host_mode;
     second.bits = bits;
-    second.polled = e.shape == Shape::polled;
+    second.engine = e.shape == Shape::polled ? SpiEngine::polled : SpiEngine::dma;
     second.reply = reply_to<kt::Probe, SpiDone>();
     kt::Probe::two[0] = first;
     kt::Probe::two[1] = second;

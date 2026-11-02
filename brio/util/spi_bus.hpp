@@ -51,6 +51,20 @@ namespace brio {
 
 using SpiDone = BusDone;
 
+/// The way a request runs, the `engine` field of every host's Request, which
+/// the program names. A request naming neither gets `polled`, which works on
+/// every host and needs no vector.
+///
+///  - `polled`: an explicit loop inside start(), at any length, in the
+///    arbiter's dispatch: no DMA channel moves a frame and no interrupt vector
+///    is needed.
+///  - `dma`: asynchronous, on the host's DMA engines, whose completion is the
+///    TransferDone. A host with no engines refuses it (spi_rejected at once,
+///    nothing on the wire), and a request too short to repay the engines' fixed
+///    cost runs the same loop inside start(), so `dma` does not promise that
+///    start() does not spin (docs/design/spi-bus.md, "Two ways to run a request").
+enum class SpiEngine : uint8_t { dma = 0, polled = 1 };
+
 inline constexpr uint8_t spi_ok = bus_ok;
 /// The request never reached the wire: the arbiter's pending FIFO was full,
 /// or the host refused it - an asynchronous request on a host with no DMA

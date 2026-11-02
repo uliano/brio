@@ -1056,7 +1056,7 @@ void td_dma() {
                 r.clock = rate;
                 r.mode = SpiMode::mode0;
                 r.bits = bits;
-                r.polled = false;
+                r.engine = SpiEngine::dma;
                 BenchSample best{UINT32_MAX, 0, 0, 0};
                 bool all_done = true;
                 for (uint8_t run = 0; run < 5u; ++run) {   // the first one applies the rate
@@ -1180,7 +1180,7 @@ uint32_t frame_best(SpiClock c, SpiDataSize bits, SpiMode m, uint16_t frames, ui
     r.clock = c;
     r.mode = m;
     r.bits = bits;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     uint32_t best = UINT32_MAX;
     for (uint8_t run = 0; run < 6u; ++run) {
         uint32_t w = 0;
@@ -1284,7 +1284,7 @@ void te_spi() {
                 r.clock = rate;
                 r.mode = SpiMode::mode0;
                 r.bits = bits;
-                r.polled = true;
+                r.engine = SpiEngine::polled;
                 // spi.poll: the WRITE shape, rx null.
                 const SpiRun written = spi_best_of<PollSpi>(r, 6);
                 walls[wi][ri][0][ci] = written.best.wall;
@@ -1326,6 +1326,7 @@ void te_spi() {
     ReqDc::output(true);
     {
         PollSpi::Request a{};
+        a.engine = SpiEngine::dma;
         a.cs = ReqCs::ref();
         a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_out));
         a.len = 16;
@@ -1354,7 +1355,7 @@ void te_spi() {
         r.clock = SpiClock::div16;
         r.mode = SpiMode::mode0;
         r.bits = SpiDataSize::bits8;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const SpiRun req = spi_best_of<PollSpi>(r, 9);
         const uint32_t bytes = 1u + len;
         const uint32_t wire_cycles =
@@ -1382,7 +1383,7 @@ void te_spi() {
         r.clock = SpiClock::div16;
         r.mode = SpiMode::mode0;
         r.bits = SpiDataSize::bits8;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const SpiRun req = spi_best_of<FastSpi>(r, 9);
         const uint32_t bytes = 1u + len;
         const uint32_t wire_cycles =
@@ -1404,7 +1405,7 @@ void te_spi() {
             r.clock = rate;
             r.mode = SpiMode::mode0;
             r.bits = SpiDataSize::bits8;
-            r.polled = true;
+            r.engine = SpiEngine::polled;
             const SpiRun polled = spi_best_of<FastSpi>(r, 6);
             const uint32_t wire = FastSpi::sck_hz(rate) / 8u;
             const uint32_t wire_cycles =
@@ -1434,7 +1435,7 @@ void te_spi() {
         r.clock = SpiClock::div16;
         r.mode = SpiMode::mode0;
         r.bits = SpiDataSize::bits8;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         const SpiRun async = spi_best_of<FastSpi>(r, 9);
         const uint32_t wire = FastSpi::sck_hz(SpiClock::div16) / 8u;
         const uint32_t wire_cycles = static_cast<uint32_t>(static_cast<uint64_t>(64u) * Ruler::hz() / wire);
@@ -1442,7 +1443,7 @@ void te_spi() {
         print(serial, "  64 frames asynchronous at SCK ", FastSpi::sck_hz(SpiClock::div16), " Hz: ",
               async.engined ? "on the engines" : "INSIDE start()", ", ", async.all_done ? "completed" : "NOT COMPLETED",
               ", the least busy ", async.least_busy, crlf);
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const SpiRun polled = spi_best_of<FastSpi>(r, 9);
         bench_line(serial, with_rx ? "spi.e.poll64.rx" : "spi.e.poll64", 64u, polled.best, Ruler::hz(), wire);
         r.len = 16;

@@ -96,7 +96,7 @@ void tasks() {
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.rx = lend<Lease::reply>(in_buf);
     r.len = 8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)Host3::start(r);
     (void)Host3::recover();
     Host3::release();
@@ -105,6 +105,7 @@ void tasks() {
     (void)Host3Dma::init(clock);
     (void)Host3Dma::dma_isr();
     Host3Dma::Request a{};
+    a.engine = SpiEngine::dma;
     a.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     a.len = 8;
     (void)Host3Dma::start(a);   // asynchronous: the engines, or polled when short
@@ -121,6 +122,7 @@ void tasks() {
 
     Kernel::init_all();
     Host3Dma::Request q{};
+    q.engine = SpiEngine::dma;
     q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     q.rx = lend<Lease::reply>(in_buf);
     q.len = 8;

@@ -22,8 +22,8 @@
  * context, after the clock task's init(); init() answers false when the
  * ceiling cannot be produced at this clk_peri or the block did not come
  * up. start() is the arbiter's, called from its dispatch, and returns
- * true when the request completed inside it: a polled request (`r.polled`
- * set), which spins there for its whole wire time, an asynchronous one
+ * true when the request completed inside it: a polled request (`r.engine`
+ * naming SpiEngine::polled), which spins there for its whole wire time, an asynchronous one
  * too short to repay the DMA engines (run polled the same way), the empty
  * request (no command, no data), and on a host with no engines an
  * asynchronous one, refused (spi_rejected, nothing on the wire). Any
@@ -293,7 +293,8 @@ using Pl022 = Pl022Ssp<Rp2040Pl022, n>;
  *   r.clock = brio::SpiClocks::div4;                  // clamped to the ceiling
  *   r.mode = brio::SpiMode::mode0;
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Spi>(r);                               // asynchronous: polled stays false
+ *   r.engine = brio::SpiEngine::dma;
+ *   brio::post<Spi>(r);                               // asynchronous
  *
  *   extern "C" void isr_dma_0() {
  *       if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }

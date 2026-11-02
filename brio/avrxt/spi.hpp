@@ -58,7 +58,7 @@
  *       CsPin::ref(), {}, {}, 0,
  *       brio::lend<brio::Lease::reply>(tx), brio::lend<brio::Lease::reply>(rx), len,
  *       brio::reply_to<Me, brio::SpiDone>(),
- *       brio::SpiClock::div16, brio::SpiMode::mode0, true});   // true: polled
+ *       brio::SpiClock::div16, brio::SpiMode::mode0, brio::SpiEngine::polled});
  *
  *   int main() {
  *       SysClock::init();
@@ -72,9 +72,9 @@
  * The request names CLK_PER/16 and mode 0 and asks to be run polled,
  * the one way this host runs a request: the arbiter's dispatch runs the
  * whole transaction inside start(), and the reply, an SpiDone, reaches
- * Me once it is over - tx and rx are the engine's until then. Left at
- * its default (false, asynchronous), `polled` asks for DMA, which these
- * parts have not got: the request is refused, its SpiDone carrying
+ * Me once it is over - tx and rx are the engine's until then. A request
+ * naming SpiEngine::dma, asynchronous, asks for DMA, which these
+ * parts have not got: it is refused, its SpiDone carrying
  * spi_rejected and nothing on the wire (`has_dma` is false, for a
  * program's static_assert). No vector is bound: the host arms no
  * interrupt.
@@ -1008,8 +1008,8 @@ private:
  * ONE WAY TO RUN A REQUEST. docs/design/spi-bus.md gives a host two:
  * polled, the transaction inside start(), and asynchronous, which is DMA.
  * The AVR DA, DB and EA have no DMA controller, so this host runs every
- * request polled: `has_dma` is false, and a request with `polled` false -
- * the field's default - is refused, start() answering true at once with
+ * request polled: `has_dma` is false, and a request naming SpiEngine::dma
+ * is refused, start() answering true at once with
  * status() spi_rejected before the registers, the select or the D/C are
  * touched. The SPI's own interrupt is never armed and the program binds
  * no vector for this host: an interrupt's entry and exit alone outlast a
@@ -1111,7 +1111,7 @@ public:
 
     /// Can this host run an asynchronous request? Never: the AVR DA, DB
     /// and EA have no DMA controller, and asynchronous is DMA
-    /// (docs/design/spi-bus.md). Every request not marked polled is
+    /// (docs/design/spi-bus.md). Every request naming SpiEngine::dma is
     /// refused (spi_rejected), so a program that posts one asserts this
     /// - `static_assert(SpiHw::has_dma)` - and fails to compile here.
     static constexpr bool has_dma = false;
@@ -1144,15 +1144,15 @@ public:
         // ceiling that clamps it.
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
-        // The way to run it: true = polled inside start(), completing
-        // synchronously - the only way this host has; false =
-        // asynchronous, which is DMA, refused here (spi_rejected at once,
+        // The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        // start(), completing synchronously - the only way this host has;
+        // dma, asynchronous, refused here (spi_rejected at once,
         // nothing on the wire: has_dma). The loop is wire-bound from
         // CLK_PER/4 (a byte is 32 CPU cycles there and the loop fewer,
         // counted in docs/avrxt/spi.md); the price is that the arbiter's
         // dispatch blocks for the whole transfer, global interrupts
         // enabled throughout.
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
         // Chip-select setup: microseconds the engine waits between
         // asserting CS and the first SCK edge. Most devices need tens of
         // ns (what the code path takes anyway). A device waking
@@ -1275,7 +1275,7 @@ public:
     /// The request is lent for this call and read through `r`; nothing
     /// of it is kept.
     static bool start(const Request& r) {
-        if (!r.polled) {
+        if (r.engine == SpiEngine::dma) {
             // Asynchronous is DMA, and this host has none: refused before
             // the registers, the select or the D/C are touched.
             status_ = spi_rejected;

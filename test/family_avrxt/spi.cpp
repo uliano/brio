@@ -214,8 +214,10 @@ void use_tasks() {
     (void)Pinless::init(SysClock{});
     (void)Host0::start(typename Host0::Request{
         PinRef{}, PinRef{}, {}, 0, {}, lend<Lease::reply>(rx_buf), 4, {},
-        SpiClock::div64, SpiMode::mode3, true, 10});
-    (void)Host0::start(typename Host0::Request{});   // asynchronous: refused, spi_rejected
+        SpiClock::div64, SpiMode::mode3, SpiEngine::polled, 10});
+    typename Host0::Request refused{};
+    refused.engine = SpiEngine::dma;
+    (void)Host0::start(refused);   // asynchronous: refused, spi_rejected
     (void)Host0::status();
     Host0::rebase(12'000'000u);
     (void)Host0::max_sck_hz();

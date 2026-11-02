@@ -400,6 +400,7 @@ void engined_smoke() {
     static_assert(EnginedBus::has_engines == known && EnginedBus::has_dma == known);
     (void)EnginedBus::init(sys_clock, 1'000'000u);
     typename EnginedBus::Request r{};
+    r.engine = SpiEngine::dma;
     r.len = 4;
     (void)EnginedBus::start(r);
     static const uint8_t c[2] = {0x2Au, 0x2Bu};
@@ -452,9 +453,9 @@ void host_smoke() {
     req.mode = SpiMode::mode3;
     req.bits = SpiDataSize::bits8;
     req.cs_setup_us = 2;
-    req.polled = true;
+    req.engine = SpiEngine::polled;
     (void)Bus::start(req);
-    req.polled = false;
+    req.engine = SpiEngine::dma;
     (void)Bus::start(req);   // refused: spi_rejected, nothing on the wire
     static_assert(!Bus::has_dma);
     (void)Bus::dma_isr();

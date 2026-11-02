@@ -765,7 +765,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     q.clock = rate;
     q.mode = mode;
     q.bits = bits;
-    q.polled = true;
+    q.engine = SpiEngine::polled;
     const uint32_t t0 = us_now();
     (void)Host::start(q);
     const uint32_t took = us_now() - t0;

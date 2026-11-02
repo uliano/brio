@@ -149,7 +149,7 @@ uint8_t run_request(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, S
     r.clock = rate;
     r.mode = mode;
     r.bits = bits;
-    r.polled = !H::has_dma;
+    r.engine = H::has_dma ? SpiEngine::dma : SpiEngine::polled;
     pair_done = false;
     if (H::start(r)) {
         return H::status();
@@ -736,7 +736,7 @@ LinkDmaHost::Request request(const uint8_t* tx, uint8_t* rx, bool polled) {
     r.len = 8;
     r.mode = SpiMode::mode0;
     r.clock = link_clock;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }

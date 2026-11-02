@@ -48,7 +48,8 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -74,7 +75,7 @@ the host clamps a request to the bus's ceiling, here 8 MHz), the SPI
 mode, and the active object the `SpiDone` reply goes to; it is posted
 to the arbiter, and `post` copies the request into the arbiter's queue,
 so `r` itself may go out of scope - what it lends may not. The request is
-ASYNCHRONOUS (`polled` stays false), and on this host that means the DMA
+ASYNCHRONOUS (`SpiEngine::dma`), and on this host that means the DMA
 engines: the 64 data frames ride them, the core free for the wire's time
 (the one command frame, too short to repay a block of its own, goes out
 polled inside `start()` first). The
@@ -104,9 +105,9 @@ is and how a program lists them is the learning route's
 
 The host runs a request one of the two ways
 [../design/spi-bus.md](../design/spi-bus.md) gives every SPI host ("Two
-ways to run a request"): a request marked `polled` completes inside
-`start()`, the arbiter sending its reply in the same dispatch; any other
-is ASYNCHRONOUS, and asynchronous is the DMA engines - `start()` launches
+ways to run a request"): a request naming `SpiEngine::polled` completes inside
+`start()`, the arbiter sending its reply in the same dispatch; one naming
+`SpiEngine::dma` is ASYNCHRONOUS, and asynchronous is the DMA engines - `start()` launches
 them and returns, and the engines' one interrupt a block ends it. Three
 rules complete that, each described below ("The engine slots", "The
 short asynchronous request"): with no engines bound the request is
@@ -115,7 +116,7 @@ repay the engines' fixed cost at its rate runs polled and completes
 inside `start()`; and one the engines cannot carry - 16-bit frames on
 byte engines, or on half-word engines with a buffer not aligned to a
 half-word - runs polled inside `start()` whichever way it asked. A
-request marked `polled` runs an explicit loop at any length and whether
+request naming `SpiEngine::polled` runs an explicit loop at any length and whether
 engines are bound or not, so it needs no interrupt vector; a long read
 that wants the wire's rate asks asynchronously. The slots are empty by
 default (`NoDmaEngine` on both RP chips). The host arms no source of the

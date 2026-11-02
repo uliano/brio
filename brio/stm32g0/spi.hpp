@@ -55,7 +55,7 @@
  * engines, the vectors' glue posting TransferDone to the arbiter when
  * dma_isr() returns true, or inside start() itself, which then blocks
  * that dispatch for the whole transfer with global interrupts enabled -
- * a request that says `polled`, and an asynchronous one too short to
+ * a request naming SpiEngine::polled, and an asynchronous one too short to
  * repay the engines (an asynchronous request on a host with no engines
  * is refused there, spi_rejected, nothing on the wire). A request that
  * ends spi_stalled or spi_dma_fault leaves the next one a clean block and
@@ -1695,12 +1695,12 @@ static_assert(spi_async_min_frames(spi_costs_in_ram, SpiClock::div2, SpiDataSize
  *
  * THE TWO WAYS (docs/design/spi-bus.md, "Two ways to run a request"):
  *
- *  - POLLED (`polled` true): the loops below inside start(), at every
+ *  - POLLED (`SpiEngine::polled`): the loops below inside start(), at every
  *    length and on every host, the engines never touched, so a polled
  *    request depends on no interrupt vector. A long request that wants
  *    the wire's rate at PCLK/2, where a loop's turn is longer than the
  *    frame, asks asynchronously.
- *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
+ *  - ASYNCHRONOUS (`SpiEngine::dma`) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected
  *    in status(), before it touches the block, the select or the D/C, so
  *    nothing reaches the wire; `has_dma` says so at compile time. With
@@ -1971,7 +1971,7 @@ public:
     static constexpr bool has_engines = TxEngine::present;
     /// Can this host run an asynchronous request? The contract's name for
     /// has_engines (docs/design/spi-bus.md): false refuses every request
-    /// not marked polled, so a program that posts one asserts it -
+    /// naming SpiEngine::dma, so a program that posts one asserts it -
     /// `static_assert(Bus::has_dma)`.
     static constexpr bool has_dma = has_engines;
 
@@ -2031,13 +2031,13 @@ public:
         /// like the shared Request it is.
         SpiDataSize bits = SpiDataSize::bits8;
 
-        /// The way to run it, the client's call: true = POLLED inside
-        /// start(), this dispatch blocked for the whole transfer (bounded,
-        /// chosen here) with global interrupts enabled; false =
-        /// asynchronous, on the DMA engines - polled inside start() when
+        /// The way to run it, the client's call (SpiEngine,
+        /// util/spi_bus.hpp): polled, inside start(), this dispatch blocked
+        /// for the whole transfer (bounded, chosen here) with global
+        /// interrupts enabled; dma, asynchronous, on the DMA engines - polled inside start() when
         /// too short to repay them (async_min_frames()), refused
         /// (spi_rejected) on a host with none (has_dma).
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
     static_assert(sizeof(Request) == 40u, "the Request is forty bytes with no padding");
@@ -2251,7 +2251,7 @@ public:
     static bool start(const Request& r) {
         pay_owed_reset();
         if constexpr (!has_dma) {
-            if (!r.polled) {
+            if (r.engine == SpiEngine::dma) {
                 // Asynchronous is DMA, and this host has no engines:
                 // refused before the block, the select or the D/C is
                 // touched, so nothing reaches the wire.
@@ -2275,7 +2275,7 @@ public:
         }
 
         if constexpr (has_dma) {
-            if (!r.polled && repays_engines(r)) {
+            if (r.engine == SpiEngine::dma && repays_engines(r)) {
                 return start_engines(r);   // false: dma_isr() is the completion edge
             }
         }
@@ -3037,7 +3037,7 @@ private:
 
     /// An asynchronous tenure's own copy of the request (the class
     /// comment). A request that completes inside start() never writes it.
-    static inline Request req_{};
+    static inline Request req_ = [] { Request r{}; r.engine = SpiEngine::dma; return r; }();
     /// A command block is on the engines; its end puts the data block there.
     static inline bool in_cmd_ = false;
     /// The last completion's status. Plain: written before the

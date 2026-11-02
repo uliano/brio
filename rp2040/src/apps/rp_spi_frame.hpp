@@ -77,7 +77,7 @@ inline uint32_t least_wall(const uint8_t* out, uint8_t* in, SpiClock c, SpiDataS
     r.clock = c;
     r.mode = m;
     r.bits = bits;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     uint32_t least = 0xFFFF'FFFFu;
     for (uint8_t run = 0; run < 6u; ++run) {
         Plain::Resource::clear_pending(SpiInterrupt::overrun);

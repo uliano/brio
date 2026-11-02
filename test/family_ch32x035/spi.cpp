@@ -104,9 +104,9 @@ void host_verbs(uint8_t* buf) {
     r.clock = SpiClock::div2;
     r.mode = SpiMode::mode1;
     r.bits = SpiDataSize::bits16;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)H::start(r);
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     (void)H::start(r);
     (void)H::dma_isr();
     (void)H::status();

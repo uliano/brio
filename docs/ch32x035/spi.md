@@ -34,6 +34,7 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClock::div8;                       // 6 MHz at 48
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
+r.engine = brio::SpiEngine::dma;
 brio::post<Spi>(r);
 
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
@@ -68,7 +69,7 @@ and `pixels` must stay untouched and in scope until then; the two
 `BRIO_CH32_VECTOR` bindings are the channels' interrupt handlers,
 `extern "C"` functions as in C under the crt's names
 ([platform.md](platform.md)), posting the completion to the arbiter.
-The request is not marked `polled`, so it runs asynchronously, which on
+The request names `SpiEngine::dma`, so it runs asynchronously, which on
 this host means on the engines: the command byte polled inside
 `start()` (one frame repays no DMA block), the 64 pixels a block, and
 one interrupt at its end. What decides correctness even there: the
@@ -77,7 +78,7 @@ computed from the rate the clock type claims); the engines bound and
 both vectors too, since an asynchronous request completes on the
 receive channel's interrupt and a host with no engines refuses it
 (`spi_rejected`, the `static_assert` above says so at compile time), while
-a request marked `polled` runs its loop inside `start()` at any length,
+a request naming `SpiEngine::polled` runs its loop inside `start()` at any length,
 in the arbiter's dispatch with interrupts enabled, touching no channel and
 needing no vector; the
 select pin driven high before the first request is posted, the host
@@ -253,7 +254,7 @@ own `spi_peer` is that board's suite's instrument (below).
 | BR, /2../256 (16.3.1) | yes | the Request's `clock`, compared as one word with the last request's |
 | HSRXEN at /2 (16.3.8) | yes, as `Config::high_speed_read`, on by default | the host sets it only while /2 is in force and drops it before any other code; without it a client's answer at /2 has no timing margin (table 3-19) and the CH32V006's was read a bit wrong in up to 29 of 70 windows, with it in none of 28 (measured) |
 | HSRXEN's second ladder, HCLK/(BR+2) (16.3.1) | declined | 16.3.8 restricts the mode to /2, so no request asks for it, though the ladder carried exact data at /3, /5 and /6 against the CH32V006 (measured) |
-| DMA on channels 2 and 3 (RM 9.2.3) | yes, the engine slots | the asynchronous way, and the only one: at the wire at every code, one interrupt a block (the receive block's), a command phase worth a block of its own chained to its data block from the vector; a request too short to repay the engines' fixed cost runs polled inside `start()` instead (a byte read takes the engines from 15 frames up at /2, from 5 up at /16 and from 1 at /128 and slower, below); never for a request marked `polled`; no sleep while a block runs (How to use it) |
+| DMA on channels 2 and 3 (RM 9.2.3) | yes, the engine slots | the asynchronous way, and the only one: at the wire at every code, one interrupt a block (the receive block's), a command phase worth a block of its own chained to its data block from the vector; a request too short to repay the engines' fixed cost runs polled inside `start()` instead (a byte read takes the engines from 15 frames up at /2, from 5 up at /16 and from 1 at /128 and slower, below); never for a request naming `SpiEngine::polled`; no sleep while a block runs (How to use it) |
 | SSOE (16.2.1) | declined as the engine's select | it holds NSS low from the first frame to the next disable, a span no Request's tenure has; `claim_nss_pad()` for a program that wants it |
 | the hardware NSS input, MODF (16.2.1, 16.2.7) | the resource's | a multi-host bus has no user; measured against a second chip |
 | ODEN (16.3.2) | yes, as `Config::open_drain` | the one pad class, written once |
@@ -279,7 +280,7 @@ own `spi_peer` is that board's suite's instrument (below).
 - `SpiHost<1, pins, TxEngine, RxEngine, Placement>` is the engine
   `SpiBus` (= `BusMaster`) drives. Its `Request` is the other strata's
   field for field (a chip select `PinRef` and a D/C line, a command phase
-  and a data phase, the per-request `mode`, `clock` and `bits`, `polled`),
+  and a data phase, the per-request `mode`, `clock` and `bits`, `engine`),
   forty bytes with no padding in this host's order: the eight words an
   asynchronous tenure copies first, then the setup time and the three
   fields the host compares as one word with the last request's, then the
@@ -295,7 +296,7 @@ own `spi_peer` is that board's suite's instrument (below).
   `recover()`, `release()` - the block's reset pulse before its gate
   ([../design/dma.md](../design/dma.md)'s release contract) -,
   `claim_nss_pad<arrangement>()`. `has_dma` says whether engines are
-  bound: without them every request not marked `polled` is refused,
+  bound: without them every request naming `SpiEngine::dma` is refused,
   `spi_rejected` at once with the block, the select and the D/C
   untouched. `async_min_frames(code, bits, read)` is the short-request
   rule's count: an asynchronous request below it runs polled inside
@@ -326,14 +327,14 @@ DATAR (`test/family_ch32x035/neg/spi_*.cpp`).
 
 ## How to use it
 
-The engined host's requests are asynchronous unless marked `polled` (the
-smallest use above). The same host's `polled` request runs inside `start()`,
+A request naming `SpiEngine::dma` on the engined host is asynchronous (the
+smallest use above). The same host's `SpiEngine::polled` request runs inside `start()`,
 the arbiter answering in the dispatch that received it, and under
 `Tenuto` every other active object waits until it ends. An excerpt, over
 the smallest use's `Bus`, `Spi` and `r`:
 
 ```cpp
-r.polled = true;                                      // the loop runs later, in the arbiter's dispatch
+r.engine = brio::SpiEngine::polled;                   // the loop runs later, in the arbiter's dispatch
 brio::post<Spi>(r);                                   // returns at once: the buffers stay lent until SpiDone
 ```
 
@@ -342,7 +343,7 @@ channel, needs no vector and leaves interrupts enabled, a handler that lands
 being a gap on the bus. A request asks asynchronously when the other active
 objects must keep running through it, whatever its direction, or when it is a
 long read that wants the wire's rate. An asynchronous request short of the
-count below runs polled inside `start()` as well, so `polled = false`
+count below runs polled inside `start()` as well, so `SpiEngine::dma`
 does not promise that the call does not spin.
 
 An engined transfer keeps the core awake. In this die's Sleep the DMA
@@ -520,7 +521,7 @@ what the silicon does at a frame's end, above.
   the engines. And the refusal (letter c): an asynchronous request on the
   engineless host answered `spi_rejected` at once, the select never
   falling, CTLR1 the word it was and SCK at its idle level, where the
-  same request marked `polled` runs.
+  same request naming `SpiEngine::polled` runs.
 - **The SPI stack under the preemptive kernel** (`test_x035_rubato_link`
   key `z`, 120 verdicts, on each scheduler placement, the CH32V006's
   `spi_peer` its client, every data window in a CPOL = 1 mode its client

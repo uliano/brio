@@ -222,7 +222,7 @@ void command_now(uint8_t cmd, const uint8_t* params, uint16_t n) {
     r.len = n;
     r.clock = panel_rate;
     r.mode = SpiMode::mode0;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool sync = BootHost::start(r);
     if (bring_up_count < 8u) {
         bring_up_status[bring_up_count++] = static_cast<uint8_t>((sync ? 0x00u : 0x80u) | BootHost::status());
@@ -725,7 +725,7 @@ struct Painter : Fsm<Painter, Tap, Sample, PenUp, SpiDone, Restart, ShowResults>
         r.reply = reply_to<Painter, SpiDone>();
         r.clock = panel_rate;
         r.mode = SpiMode::mode0;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         post<Bus>(r);
     }
 
@@ -743,7 +743,7 @@ struct Painter : Fsm<Painter, Tap, Sample, PenUp, SpiDone, Restart, ShowResults>
         r.reply = reply_to<Painter, SpiDone>();
         r.clock = SpiClock::div32;   // 3 MHz
         r.mode = SpiMode::mode0;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         post<Bus>(r);
     }
 
@@ -959,7 +959,7 @@ private:
         r.reply = reply_to<Touch, SpiDone>();
         r.clock = touch_rate;
         r.mode = SpiMode::mode0;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         in_flight = true;
         post<Bus>(r);
     }

@@ -35,7 +35,8 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125, clamped to the ceiling
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -68,7 +69,7 @@ the ceiling's setting, 7.8125 MHz; the request names the select, a
 one-byte command, 64 data bytes, the clock divisor, the mode, and the
 active object the reply goes to (`Display`, which receives an
 `SpiDone`); mode 0 puts a gap of 1.5 SCK periods between frames on this block
-(the frame gap, bench findings). It is ASYNCHRONOUS, `polled` left false, and asynchronous is
+(the frame gap, bench findings). It is ASYNCHRONOUS, `SpiEngine::dma`, and asynchronous is
 the DMA engines: its 64 data frames ride them, the core free for their
 wire time (the one command frame, too short to repay a block of its own,
 goes out polled inside `start()` first), and `isr_dma_0` - the DMA line's handler under the pico-sdk's name
@@ -93,7 +94,7 @@ alone: an asynchronous one is refused at once, `spi_rejected` and nothing
 on the wire, and `static_assert(Bus::has_dma)` makes that a compile
 error in a program that posts one. An asynchronous request too short to
 repay the engines at its rate runs polled and completes inside `start()`
-("The short request" below). A request with `polled` set runs an explicit
+("The short request" below). A request naming `SpiEngine::polled` runs an explicit
 loop inside `start()`, in the arbiter's dispatch, for its whole wire time,
 holding every other active object meanwhile, with interrupts enabled; at any
 length and with engines bound or not, so it needs no vector. A polled wait that
@@ -199,7 +200,7 @@ its reset state, whose pull-down would fight the host's pull-up.
   select `PinRef` and a D/C line, a command phase (D/C low), a data
   phase with an optional out buffer (null = 0xFF dummies) and an
   optional in buffer (null = discard), the per-request `mode`, `clock`
-  and `bits`, `cs_setup_us`, and `polled` - true spins inside `start()`,
+  and `bits`, `cs_setup_us`, and `engine` - `SpiEngine::polled` spins inside `start()`,
   in the receive shape with eight frames in flight, discarding when there is
   no in buffer, and on one case alone (no in buffer, 8-bit frames, a run longer
   than the FIFO, a divisor under four) in a write shape that paces on TNF and
@@ -274,18 +275,19 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125, clamped to the ceiling
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```
 
-A polled read on a GPIO select is the same request with `r.polled = true` and
+A polled read on a GPIO select is the same request with `r.engine = SpiEngine::polled` and
 `r.rx` lent, on this host or the next: the post returns at once, the loop runs in
 the arbiter's dispatch and the buffers stay lent until `SpiDone`.
 Without the engines, `SpiHost<0, pins>`: polled requests alone, each
-run inside `start()` (`r.polled = true`), an asynchronous one answered
+run inside `start()` (`r.engine = SpiEngine::polled`), an asynchronous one answered
 `spi_rejected` - a program that posts one states `static_assert(
 Bus::has_dma)` and fails to compile instead. A client, its vector in SRAM (from
 the flash its first entry after a quiet spell is the XIP cache's fill, frames
@@ -314,7 +316,7 @@ if (!Feeder::init(clock)) { /* the block did not come up */ }
 Feeder::Request r{};                                  // r.cs left null
 r.tx = brio::lend<brio::Lease::reply>(frames); r.len = 64;
 r.mode = brio::SpiMode::mode0;
-r.polled = true;
+r.engine = brio::SpiEngine::polled;
 (void)Feeder::start(r);                               // a polled request answers true, done or not: status() decides
 if (Feeder::status() != brio::spi_ok) { /* spi_stalled: "What each answer asks of the program" */ }
 ```

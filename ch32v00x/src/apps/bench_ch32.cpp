@@ -986,6 +986,7 @@ bool spi_ready = false;   // letter s's host brought up once (again after letter
 BenchSample spi_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
     return dma_best(4, spi_done, [frames, clock, bits] {
         SpiDma::Request r{};
+        r.engine = SpiEngine::dma;
         r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
         r.len = frames;
         r.clock = clock;
@@ -1060,7 +1061,7 @@ typename H::Request poll_request(uint16_t frames, SpiClock clock, SpiDataSize bi
     r.len = frames;
     r.clock = clock;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 
@@ -1123,7 +1124,7 @@ void request_line(uint16_t len) {
         r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
         r.len = len;
         r.clock = SpiClock::div16;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const BenchCounters before = counters();
         Stopwatch<Ruler> sw;
         sw.start();

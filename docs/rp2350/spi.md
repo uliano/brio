@@ -41,7 +41,8 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 37.5 MHz at 150, clamped to the ceiling
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -73,7 +74,7 @@ its two buffers (`brio::lend<brio::Lease::reply>` - the buffers stay
 the caller's and are only read until the reply), the rate as a division
 of clk_peri, the mode, and where the reply goes (`Display`, the active
 object that posts it, receives an `SpiDone`); `post` hands it to the
-arbiter. The request is ASYNCHRONOUS, `polled` left false, and
+arbiter. The request is ASYNCHRONOUS, `SpiEngine::dma`, and
 asynchronous is the DMA engines: its 64 data frames ride them, the core
 free for their wire time (the one command frame, too short to repay a
 block of its own, goes out polled inside `start()` first); and the
@@ -95,8 +96,8 @@ requests alone and answers an asynchronous one `spi_rejected`, at once
 and with nothing on the wire - `static_assert(Bus::has_dma)` in a
 program that posts one makes it a compile error; and an asynchronous
 request too short to repay the engines at its rate runs polled and
-completes inside `start()` ("The short request" below). A request with
-`polled` set runs an explicit loop inside `start()`, in the arbiter's dispatch,
+completes inside `start()` ("The short request" below). A request naming
+`SpiEngine::polled` runs an explicit loop inside `start()`, in the arbiter's dispatch,
 for its whole wire time, holding every other active object meanwhile, with
 interrupts enabled; at any length and with engines bound or not, so it needs no
 vector. A polled wait that runs out answers `spi_stalled` and a DMA block the
@@ -316,7 +317,8 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClocks::div4;                      // 37.5 MHz at 150, clamped to the ceiling
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -333,7 +335,7 @@ block's one interrupt: the transmit engine is armed to report a bus
 error and nothing else ([dma.md](dma.md)).
 
 Without the engines, `SpiHost<0, pins>`: polled requests alone, each run
-inside `start()` (`r.polled = true`), an asynchronous one answered
+inside `start()` (`r.engine = SpiEngine::polled`), an asynchronous one answered
 `spi_rejected`.
 
 A client, whose select is a pad, its vector in SRAM (from the flash its first

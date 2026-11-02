@@ -149,7 +149,7 @@ using Host2Dma = SpiHost<second_spi, spi_default_pins<second_spi>,
 
 static_assert(!Host1::has_engines && Host1Dma::has_engines);
 // Asynchronous is DMA (docs/design/spi-bus.md): the engineless host refuses
-// every request not marked polled, and says so at compile time.
+// every request naming SpiEngine::dma, and says so at compile time.
 static_assert(!Host1::has_dma && Host1Dma::has_dma && Host2Dma::has_dma);
 // The short request's count is a function of the code, the width, the
 // direction and the bus share alone - SPI1 at all of HCLK, SPI2 at half of
@@ -280,10 +280,10 @@ void hosts()
     r.clock = SpiClock::div16;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)Host1::start(r);
     // The same request asynchronous: refused, spi_rejected, nothing on the wire.
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     (void)Host1::start(r);
     (void)Host1::dma_isr();
     (void)Host1::status();
@@ -297,6 +297,7 @@ void hosts()
     (void)Host1Dma::dma_tx_isr();
     // A 16-bit request on the engines, the beat the frame.
     Host1Dma::Request w{};
+    w.engine = SpiEngine::dma;
     w.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     w.rx = lend<Lease::reply>(in_buf);
     w.len = 4;
@@ -379,6 +380,7 @@ void kernel()
 {
     Kernel::init_all();
     Host1Dma::Request r{};
+    r.engine = SpiEngine::dma;
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.len = 8;
     r.reply = reply_to<Sink, SpiDone>();

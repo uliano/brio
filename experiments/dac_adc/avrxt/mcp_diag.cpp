@@ -318,15 +318,15 @@ void exp_z(brio::SpiMode mode, uint16_t trig_len, brio::SpiClock clk, bool prime
     if (prime) {
         // one dummy byte with NO chip select: parks SCK at CPOL (high in
         // mode 3) so the next CS falling edge finds it there
-        SpiHw::Request dummy{{}, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 1, {}, clk, mode, true};
+        SpiHw::Request dummy{{}, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 1, {}, clk, mode, brio::SpiEngine::polled};
         SpiHw::start(dummy);
         brio::delay_us(clock, 20);
     }
     const brio::PinRef cs = manual_cs ? brio::PinRef{} : Cs::ref();
     SpiHw::Request trig{cs, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), trig_len, {},
-                        clk, mode, true};
+                        clk, mode, brio::SpiEngine::polled};
     SpiHw::Request read{cs, {}, {}, 0, {}, brio::lend<brio::Lease::reply>(rx), 3, {},
-                        clk, mode, true};
+                        clk, mode, brio::SpiEngine::polled};
     if (manual_cs) { Cs::clear(); brio::delay_us(clock, 50); }
     SpiHw::start(trig);
     if (manual_cs) { Cs::set(); }

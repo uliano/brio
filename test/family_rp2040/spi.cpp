@@ -84,6 +84,7 @@ void spi_verbs() {
     Host::loopback(true);
     (void)Host::loopback();
     Host::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = Pin<17>::ref();
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     r.rx = lend<Lease::reply>(buf);
@@ -98,7 +99,7 @@ void spi_verbs() {
     d.cs = Pin<17>::ref();
     d.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     d.len = 16;
-    d.polled = true;
+    d.engine = SpiEngine::polled;
     (void)DmaHost::start(d);
     (void)DmaHost::dma_isr();
     (void)DmaHost::async_min_frames(SpiClocks::div4, SpiMode::mode0, SpiDataSize::bits8, true);

@@ -199,7 +199,7 @@ private:
             brio::lend<brio::Lease::reply>(data), {}, n,
             brio::reply_to<Filler, brio::SpiDone>(),
             brio::SpiClock::div4,              // ILI9481 happily at 6 MHz
-            brio::SpiMode::mode0, true});             // polled: bulk at wire speed
+            brio::SpiMode::mode0, brio::SpiEngine::polled});             // polled: bulk at wire speed
     }
 
     static void set_window(uint8_t c, uint16_t last) {

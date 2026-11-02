@@ -36,7 +36,8 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClock::div4;                       // at 48 MHz: clamped to div8, 6 MHz
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
-brio::post<Spi>(r);                                   // asynchronous: polled stays false
+r.engine = brio::SpiEngine::dma;
+brio::post<Spi>(r);                                   // asynchronous
 
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
@@ -73,8 +74,8 @@ before the first request. The request lends the host two buffers
 (`lend<Lease::reply>`: the buffers stay the sender's, lent until the
 reply comes), names the SCK as a division of HCLK and the mode, and
 says where the answer goes: a `SpiDone` event posted to `Display`, the
-program's active object that sent it. Its `polled` field is false, so
-it runs asynchronously: the command byte, one frame, is short of a DMA
+program's active object that sent it. Its `engine` field names
+`SpiEngine::dma`, so it runs asynchronously: the command byte, one frame, is short of a DMA
 block of its own and goes out polled inside the call, the 64 data bytes
 ride the engines, and the call returns while they move. The ceiling
 clamps and never speeds up: HCLK/4 is 12 MHz at 48 MHz, over the 8 MHz
@@ -231,10 +232,10 @@ own key).
   strata's fields name for name: a chip select `PinRef` and a D/C line, a
   command phase (D/C low), a data phase with an optional out buffer (null
   = 0xFF dummies) and an optional in buffer (null = discard), the
-  per-request `mode`, `clock` and `bits`, and `polled`, the way to run it
+  per-request `mode`, `clock` and `bits`, and `engine`, the way to run it
   ([design/spi-bus.md](../design/spi-bus.md), "Two ways to run a
-  request"): true spins inside `start()` and completes there, the explicit
-  loops at any length and no channel touched; false is
+  request"): `SpiEngine::polled` spins inside `start()` and completes there, the
+  explicit loops at any length and no channel touched; `SpiEngine::dma` is
   ASYNCHRONOUS, and asynchronous is the DMA engines - `start()` launches
   them and returns, the receive channel's completion ends the
   transaction. Two rules complete the asynchronous way. A host with no
@@ -720,6 +721,7 @@ r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
 r.clock = brio::SpiClock::div8;
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
+r.engine = brio::SpiEngine::dma;
 brio::post<Spi>(r);
 
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
@@ -731,7 +733,7 @@ BRIO_CH32_VECTOR(dma1_channel3_handler) {
 ```
 
 A host with no engines, `SpiHost<1>`, binds no vector and runs polled
-requests alone: each sets `r.polled = true` and completes inside the
+requests alone: each sets `r.engine = SpiEngine::polled` and completes inside the
 arbiter's dispatch, its `SpiDone` sent at once; an asynchronous one is
 answered `spi_rejected`, nothing on the wire. On the engined host a
 request short of `async_min_frames()` runs polled inside `start()`
@@ -833,7 +835,7 @@ against that part's own figures, ten runs each.
   (letter a): asked in mode 3 at HCLK/2 after the block was primed in
   mode 0 at HCLK/16, `start()` answers at once `spi_rejected`, the select
   high, CTLR1 the word it was and SCK at its mode-0 idle - nothing reached
-  the wire - and the same request marked polled runs `spi_ok`. Through
+  the wire - and the same request naming `SpiEngine::polled` runs `spi_ok`. Through
   the arbiter (letter f): the asynchronous request answered
   `spi_rejected` and the polled one queued behind it `spi_ok`.
 - **Every way completes with nothing driving MISO** (letter a): the two

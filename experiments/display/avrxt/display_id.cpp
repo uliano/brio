@@ -174,7 +174,7 @@ private:
             brio::lend<brio::Lease::reply>(&cur_cmd), 1,
             {}, {}, 0,
             brio::reply_to<Prober, brio::SpiDone>(),
-            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
+            brio::SpiClock::div16, brio::SpiMode::mode0, brio::SpiEngine::polled});   // polled
     }
 
     static void start_read() {
@@ -187,7 +187,7 @@ private:
             brio::lend<brio::Lease::reply>(&cur_cmd), 1,
             {}, brio::lend<brio::Lease::reply>(buf), probes[idx].len,     // rx-only data phase
             brio::reply_to<Prober, brio::SpiDone>(),
-            brio::SpiClock::div16, brio::SpiMode::mode0, true});   // polled
+            brio::SpiClock::div16, brio::SpiMode::mode0, brio::SpiEngine::polled});   // polled
     }
 
     static void report(brio::SpiDone d) {

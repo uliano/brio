@@ -96,7 +96,7 @@ AsyncRun async_once(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint
     r.mode = mode;
     r.clock = rate;
     r.bits = SpiDataSize::bits8;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     transfer_done = false;
     spi0_isr_entries = 0;
     dma_isr_entries = 0;
@@ -469,8 +469,8 @@ class Client {
 public:
     using Event = std::variant<Go, SpiDone>;
     static inline EventQueue<Event, 6, P> queue;
-    static inline DmaHost::Request first{};
-    static inline DmaHost::Request second{};
+    static inline DmaHost::Request first = [] { DmaHost::Request r{}; r.engine = SpiEngine::dma; return r; }();
+    static inline DmaHost::Request second = [] { DmaHost::Request r{}; r.engine = SpiEngine::dma; return r; }();
     static inline uint8_t replies[2] = {0xFEu, 0xFEu};
     static inline uint8_t n = 0;
 
@@ -501,7 +501,7 @@ DmaHost::Request request(const uint8_t* tx, uint8_t* rx, uint16_t len, SpiMode m
     r.len = len;
     r.mode = mode;
     r.clock = rate;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Client, SpiDone>();
     return r;
 }

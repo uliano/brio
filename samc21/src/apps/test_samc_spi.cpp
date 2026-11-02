@@ -357,7 +357,7 @@ bool link_xfer_bare(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
         .rx = lend<Lease::reply>(rx),
         .len = len,
         .cmd_len = 0,
-        .polled = true,
+        .engine = SpiEngine::polled,
         .baud = baud,
         .mode = mode,
         .reply = {},
@@ -1276,7 +1276,7 @@ bool loopback_burst(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
         .rx = lend<Lease::reply>(rx),
         .len = len,
         .cmd_len = 0,
-        .polled = true,
+        .engine = SpiEngine::polled,
         .baud = baud,
         .mode = mode,
         .reply = {},
@@ -1311,7 +1311,7 @@ uint32_t frame_permille(uint32_t hz, SpiMode mode = SpiMode::mode0) {
         for (uint8_t k = 0; k < 3u; ++k) {
             Loop::Request r{
                 .cs = {}, .dc = {}, .cmd = {}, .tx = {}, .rx = {},
-                .len = n, .cmd_len = 0, .polled = true,
+                .len = n, .cmd_len = 0, .engine = SpiEngine::polled,
                 .baud = *b, .mode = mode, .reply = {},
             };
             const uint32_t t0 = wall();
@@ -1366,7 +1366,7 @@ void tf_wireless() {
                 .cs = {}, .dc = {}, .cmd = {},
                 .tx = lend<Lease::reply>(static_cast<const uint8_t*>(lb_tx)),
                 .rx = lend<Lease::reply>(lb_rx),
-                .len = 16, .cmd_len = 0, .polled = true, .cs_setup_us = setup,
+                .len = 16, .cmd_len = 0, .engine = SpiEngine::polled, .cs_setup_us = setup,
                 .baud = command_baud, .mode = SpiMode::mode0, .reply = {},
             };
             const uint32_t t0 = wall();
@@ -1647,7 +1647,7 @@ private:
             .rx = lend<Lease::reply>(rx[i]),
             .len = payload,
             .cmd_len = 0,
-            .polled = polled,
+            .engine = polled ? SpiEngine::polled : SpiEngine::dma,
             .baud = command_baud,
             .mode = SpiMode::mode0,
             .reply = reply_to<Driver, SpiDone>(),
@@ -2645,7 +2645,7 @@ void tk_host_paths() {
         .cs = Cs::ref(), .dc = {}, .cmd = {},
         .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txs)),
         .rx = lend<Lease::reply>(rxs),
-        .len = 8, .cmd_len = 0, .polled = true, .baud = command_baud,
+        .len = 8, .cmd_len = 0, .engine = SpiEngine::polled, .baud = command_baud,
         .mode = SpiMode::mode0, .reply = {},
     });
     const uint32_t took = wall() - t0;

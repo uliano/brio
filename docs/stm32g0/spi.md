@@ -39,6 +39,7 @@ r.len     = 8;
 r.clock   = brio::SpiClock::div8;
 r.mode    = brio::SpiMode::mode0;
 r.reply   = brio::reply_to<Device, brio::SpiDone>();
+r.engine  = brio::SpiEngine::dma;
 brio::post<Arb>(r);               // returns at once; `cmd` and `rx` stay lent
 
 extern "C" void DMA1_Channel1_IRQHandler() {
@@ -50,8 +51,8 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
 ```
 
 An excerpt: `cmd` and `rx` are the device's buffers, `Device` its active
-object, `P` the platform. The request is ASYNCHRONOUS (its `polled`
-left false), and asynchronous is DMA: the host names its two engines
+object, `P` the platform. The request is ASYNCHRONOUS (its `engine`
+names `SpiEngine::dma`), and asynchronous is DMA: the host names its two engines
 and the program binds their channels' vectors to `dma_isr()`, the
 completion posted to the bus active object. Here the eight data frames
 ride the engines and the two command frames, too short to repay a block
@@ -237,7 +238,7 @@ ceiling and REFUSES one the prescaler cannot reach.
 `util/spi_bus.hpp` drives. Its `Request` carries the other targets'
 fields by name (cs and dc `PinRef`s, `cs_setup_us`, a command phase and
 a full-duplex data phase with `Borrowed<..., Lease::reply>` loans,
-`len`, `reply`, `polled`, and the per-transaction bus configuration)
+`len`, `reply`, `engine`, and the per-transaction bus configuration)
 with the rate as a `SpiClock`, the mode as a `SpiMode` and the frame size
 as a `SpiDataSize` defaulting to eight - so an 8-bit request looks
 exactly like the other targets'. The ORDER is this family's: the two
@@ -488,18 +489,18 @@ r.len     = 8;
 r.clock   = brio::SpiClock::div8;
 r.mode    = brio::SpiMode::mode0;
 r.reply   = brio::reply_to<Device, brio::SpiDone>();
-r.polled  = true;                 // the loop, in the arbiter's dispatch: this host has no engines
+r.engine  = brio::SpiEngine::polled;   // the loop, in the arbiter's dispatch: this host has no engines
 brio::post<Arb>(r);               // returns at once; `cmd` and `rx` stay lent
 ```
 
-On this engineless host every request says `polled`: an asynchronous
+On this engineless host every request runs `SpiEngine::polled`: an asynchronous
 one would be refused (`spi_rejected`, `has_dma` false). **A polled request
 needs no interrupt vector, on any host**: it runs an explicit loop at every
 length, on a host with engines too, and arms no interrupt of the block or
 of a channel.
 
 **The asynchronous way: the DMA engines.** Name both engine slots and
-bind the channels' vectors, and a request that leaves `polled` false
+bind the channels' vectors, and a request naming `SpiEngine::dma`
 rides them: a command phase on a block of its own when it would repay
 one, the data block chained to it from the vector, a shorter command
 phase polled inside `start()` before the data block - and a request too
@@ -833,7 +834,7 @@ less a request - and 9576 for the 256-frame receive at PCLK/2, where
 a flattened function of its own took 6470.
 
 **The asynchronous way is DMA** ([design/spi-bus.md](../design/spi-bus.md),
-"Two ways to run a request"). A request whose `polled` is false rides
+"Two ways to run a request"). A request naming `SpiEngine::dma` rides
 the host's two engines: `start()` copies the request (ten word moves),
 starts both channels and returns false; the receive channel's
 completion is the one interrupt a block, and `dma_isr()` answering true
@@ -898,7 +899,7 @@ asynchronous path and nothing on a polled one. Letter `s` finds the
 split itself at three shapes (byte frames read at PCLK/4 and written at
 PCLK/2, half-words read at PCLK/2): one frame under the count completes
 inside `start()` with no completion on a channel, the count rides the
-engines with one block and one completion. A request with `polled` set
+engines with one block and one completion. A request naming `SpiEngine::polled`
 takes no part in this rule: it runs the loop at every length, and a long
 read that wants the wire at PCLK/2, where the loop's turn is longer than
 the frame, asks asynchronously. The rule's approximations, each small against the order of

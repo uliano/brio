@@ -44,7 +44,7 @@ r.rx      = brio::lend<brio::Lease::reply>(&who);
 r.len     = 1;
 r.mode    = brio::SpiMode::mode3;
 r.clock   = brio::SpiClock::div16;
-r.polled  = true;
+r.engine  = brio::SpiEngine::polled;
 (void)Bus::start(r);                    // a polled request is always done on return
 const bool good = Bus::status() == brio::spi_ok;   // only then is `who` the device's
 ```
@@ -60,7 +60,7 @@ transaction), `cmd` and `cmd_len` the command phase, `rx` and `len` the
 data phase's input buffer and its length in frames (no `tx`: the data
 phase clocks out 0xFF), `mode` the SPI mode, `clock` the rate as a
 division of the instance's own APB clock (`div16`: SPI5 is on APB2, so
-90 MHz over 16 at a 180 MHz core) and `polled` the way to run it.
+90 MHz over 16 at a 180 MHz core) and `engine` the way to run it.
 `brio::lend<brio::Lease::reply>` marks each buffer as lent to the
 engine until the transaction ends ([design/kernel.md, "Payloads: what
 travels inside the event"](../design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
@@ -104,8 +104,8 @@ a frame: 781.7 ms on a request of 2048 frames at PCLK1/256). Through the
 arbiter a request is posted instead (the block "The same bus shared, through the
 arbiter" below): the post returns at once, the loop runs later in the arbiter's
 dispatch, and the buffers are lent from the post until the `SpiDone` reply
-arrives, untouched and in scope until then, which nothing checks. A request that
-is not polled is asynchronous, and asynchronous is DMA: the host names its two DMA
+arrives, untouched and in scope until then, which nothing checks. A request naming
+`SpiEngine::dma` is asynchronous, and asynchronous is DMA: the host names its two DMA
 engines, `Dma<n>::init()` comes before the host's `init()`, the streams' NVIC lines
 are opened when the host arms them, and the program binds the two streams' vectors
 to `Bus::dma_isr()`, whose true answer is the edge the glue posts `TransferDone` on;
@@ -336,7 +336,7 @@ The arithmetic: `i2s_frame_factor`, `i2s_fs_hz`, `i2s_prescaler_for`,
 [the shared SPI bus](../design/spi-bus.md) drives, with the fields of
 the shared `Request` by name (that page's "Realizations") and the rate
 and frame size in this family's types, in this family's order: `cs`,
-`dc`, `cmd`, `tx`, `rx`, `len`, `cmd_len`, `bits`, `polled`,
+`dc`, `cmd`, `tx`, `rx`, `len`, `cmd_len`, `bits`, `engine`,
 `cs_setup_us`, `clock`, `mode`, `reply` - in that order (a designated
 initializer follows it), 40 bytes with no padding, its head - `cs` to
 `bits` - being what a request that goes to the engines keeps for its
@@ -451,8 +451,8 @@ frame they clock and the transmit-only loop clears what stands at its tail, so
 nothing stands in it when a transaction ends well. A stall, `spi_dma_fault` and
 `recover()` reset the block, which empties it; `init()` flushes it once ("Types and verbs").
 
-**Two polled shapes, by the request's fields.** A request with `polled`
-set runs one of them at every length and on every host, and never the
+**Two polled shapes, by the request's fields.** A request naming
+`SpiEngine::polled` runs one of them at every length and on every host, and never the
 DMA engines. A handler can land on a polled loop at any instruction, and
 on this platform no interrupt nests, so every handler in the image is a
 window the loop cannot see through - the tick's, the console's, the
@@ -509,7 +509,7 @@ only after the last command frame came back, because a frame queued in
 the transmit buffer goes out the moment the one before it ends.
 
 **Asynchronous is DMA** ([design/spi-bus.md](../design/spi-bus.md),
-"Two ways to run a request"). A request whose `polled` is false rides
+"Two ways to run a request"). A request naming `SpiEngine::dma` rides
 the host's two engines: `start()` copies what the tenure keeps,
 starts both streams and raises both requests in one CR2 store, and
 returns false; the receive stream's completion is the one interrupt a
@@ -739,7 +739,7 @@ r.rx      = brio::lend<brio::Lease::reply>(&who);
 r.len     = 1;
 r.mode    = brio::SpiMode::mode3;
 r.clock   = brio::SpiClock::div16;
-r.polled  = true;
+r.engine  = brio::SpiEngine::polled;
 (void)Bus::start(r);                    // a polled request is always done on return
 const bool good = Bus::status() == brio::spi_ok;   // only then is `who` the device's
 ```
@@ -778,7 +778,7 @@ FastBus::init(clock);
 ```
 
 and shared, through the arbiter - the client posts and gets a `SpiDone`
-back; a request that is not polled is asynchronous, which needs the
+back; a request naming `SpiEngine::dma` is asynchronous, which needs the
 engines (`has_dma`), and the app's ISR glue on the two streams' vectors
 is the one vendor line. An excerpt. `Platform` is the program's platform type
 (`brio::Stm32f4Platform<brio::Ticker>`, say), `MyAo` the client's active object;
@@ -807,6 +807,7 @@ a.len     = sizeof block;
 a.mode    = brio::SpiMode::mode3;
 a.clock   = brio::SpiClock::div16;
 a.reply   = brio::reply_to<MyAo, brio::SpiDone>();
+a.engine  = brio::SpiEngine::dma;
 brio::post<Arb>(a);                // returns at once; `block` stays lent
 
 // In MyAo's dispatch, on the reply:
@@ -983,7 +984,7 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
   both shapes inlined, with three calls on the engineless host and four on the
   engined one, every one cold: the rate's change, the select's setup time, the
   stall and, with engines, the asynchronous path. With
-  `polled` set it reaches the loop past one byte test, no engine rule on
+  `SpiEngine::polled` it reaches the loop past one byte test, no engine rule on
   the way; no call in either loop, every field of the Request in a
   register. The width and the null out buffer are tested a frame, in
   registers, and in the receive loop inside the wire's time: the turn runs

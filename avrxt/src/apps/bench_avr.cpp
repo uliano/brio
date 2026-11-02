@@ -150,8 +150,8 @@
 //                    runs; the DB's PF0/PF1 carry the DA's 32 kHz
 //                    crystal) - and the line after prints wall minus the
 //                    wire's cycles, the fixed cost of the request.
-//      The letter's verdict judges the engine's refusal: a request not
-//      marked polled answers start() at once with spi_rejected, and
+//      The letter's verdict judges the engine's refusal: a request
+//      naming SpiEngine::dma answers start() at once with spi_rejected, and
 //      SCK, counted on its event, never moves.
 //      The vendor's column (`spi.vendor` in benchmark.md's protocol) is
 //      not in this image: the AVR has no vendor library, and the data
@@ -693,7 +693,7 @@ SpiHw::Request data_request(SpiClock c, uint16_t n, bool duplex, bool polled) {
     r.len = n;
     r.clock = c;
     r.mode = SpiMode::mode0;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 
@@ -714,7 +714,7 @@ void poll() {
     }
 }
 
-/// The refusal: a request not marked polled (asynchronous is DMA, and
+/// The refusal: a request naming SpiEngine::dma (asynchronous is DMA, and
 /// these parts have none) answers start() true at once with
 /// spi_rejected, and SCK - its event counted by TCB0 - never moves; the
 /// same request polled, the control, counts its 16 x 8 edges.
@@ -727,7 +727,7 @@ bool refusal() {
     const bool sync = SpiHw::start(r);
     const uint8_t status = SpiHw::status();
     const uint16_t edges = SckCount::count();
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool ran = SpiHw::start(r) && SpiHw::status() == spi_ok;
     const uint16_t control = SckCount::count();
     Tcb<0>::disable();
@@ -754,7 +754,7 @@ void req() {
         r.len = len;
         r.clock = SpiClock::div16;
         r.mode = SpiMode::mode0;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const uint16_t n = static_cast<uint16_t>(1u + len);
         const BenchSample s = best_of_8([&r] { (void)SpiHw::start(r); });
         bench_line(serial, "spi.req", n, s, Ruler::hz(), wire_bps(SpiClock::div16));

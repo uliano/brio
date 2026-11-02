@@ -132,7 +132,7 @@ its write ceiling: a third of it on the ILI9481.
 **A verb copies nothing: it fills the member in place and lends it.**
 What every tenure of a prototype shares is written into the link's copy
 once, by the constructor - the command byte lent from a member of the
-link's own, `cmd_len` of one, a null reply, `polled` - and a verb stores
+link's own, `cmd_len` of one, a null reply, `SpiEngine::polled` - and a verb stores
 only what its transaction brings, the two spans and the length, then
 hands the member to `Host::start()`. The arbiter's contract
 ([../design/spi-bus.md](../design/spi-bus.md)) is what makes the lend
@@ -299,7 +299,7 @@ Driver gaps:
 - **The asynchronous face** - a memory write answered later instead of
   on return. Born with the TILED surface shape, because its shape is
   decided by what a tile transfer needs and not by what a link could
-  offer; on this realization it is the same Request with `polled` false
+  offer; on this realization it is the same Request with `SpiEngine::dma`
   and a real `ReplyTo<SpiDone>`, posted to a `SpiBus` arbiter instead of
   handed to the engine, the tile on loan until the reply lands. The
   prototype pair above is already the configuration it would take.

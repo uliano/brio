@@ -341,7 +341,7 @@ void host_verbs() {
         .rx = lend<Lease::reply>(in),
         .len = 4,
         .cmd_len = 2,
-        .polled = false,
+        .engine = SpiEngine::dma,
         .cs_setup_us = 4,
         .baud = 23,
         .mode = SpiMode::mode3,
@@ -352,7 +352,7 @@ void host_verbs() {
     // A degenerate request completes inside start() - the arbiter's
     // synchronous-completion path.
     Host::Request empty{};
-    empty.polled = true;
+    empty.engine = SpiEngine::polled;
     (void)Host::start(empty);
     (void)Host::recover();
     Host::release();
@@ -383,9 +383,9 @@ void ram_host_verbs() {
     RamHost::Request r{};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
     r.len = 4;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)RamHost::start(r);   // the polled transaction, in SRAM
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     (void)RamHost::start(r);   // refused before the placed path
     fixture_placed_function();
     RamHost::release();

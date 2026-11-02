@@ -56,7 +56,7 @@
  *     r.len     = 3;
  *     r.mode    = brio::SpiMode::mode0;
  *     r.clock   = brio::SpiClock::div16;
- *     r.polled  = true;
+ *     r.engine  = brio::SpiEngine::polled;
  *     (void)Bus::start(r);                     // true: it is done, `id` is filled
  *
  * and its second block, the same request on a bus several active
@@ -67,7 +67,7 @@
  * `DmaRxEngine<1, 4>`), the two channels' vectors bound with
  * `BRIO_CH32_VECTOR` to bodies that post `TransferDone{Bus::status()}`
  * to the arbiter when `Bus::dma_rx_isr()` or `Bus::dma_tx_isr()` answers
- * true, then `r.polled = false`, a `reply_to<MyAo, SpiDone>()` and
+ * true, then `r.engine = SpiEngine::dma`, a `reply_to<MyAo, SpiDone>()` and
  * `brio::post<Arb>(r)` from an active object's handler (SpiHost below
  * writes it out). The chip select is a plain pin the program has made
  * an output and driven high first (pin.hpp's `output(true)`): the engine
@@ -1199,7 +1199,8 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  *   r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
  *   r.clock = brio::SpiClock::div8;               // 9 MHz on PB1 at 72
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Arb>(r);                           // asynchronous: polled stays false
+ *   r.engine = brio::SpiEngine::dma;
+ *   brio::post<Arb>(r);                           // asynchronous
  *
  *   BRIO_CH32_VECTOR(dma1_channel4_handler) {
  *       if (Bus::dma_rx_isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
@@ -1220,12 +1221,12 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * TWO WAYS TO RUN A REQUEST (docs/design/spi-bus.md, "Two ways to run a
  * request"):
  *
- *  - POLLED (`polled` true): the loops below inside start(), at every
+ *  - POLLED (`SpiEngine::polled`): the loops below inside start(), at every
  *    length and on every host, the caller spinning for the whole
  *    transaction and the engines never touched, so a polled request
  *    depends on no interrupt vector. A long read that wants the wire's
  *    rate asks asynchronously.
- *  - ASYNCHRONOUS (`polled` false) IS DMA. With no engines bound the
+ *  - ASYNCHRONOUS (`SpiEngine::dma`) IS DMA. With no engines bound the
  *    request is refused: start() answers true at once with spi_rejected
  *    in status(), before it touches the block, the select or the D/C, so
  *    nothing reaches the wire; `has_dma` says so at compile time. With
@@ -1365,7 +1366,7 @@ public:
     static constexpr bool has_engines = TxEngine::present;
     /// Can this host run an asynchronous request? The contract's name for
     /// has_engines (docs/design/spi-bus.md): false refuses every request
-    /// not marked polled, so a program that posts one asserts it -
+    /// naming SpiEngine::dma, so a program that posts one asserts it -
     /// `static_assert(Bus::has_dma)`.
     static constexpr bool has_dma = has_engines;
 
@@ -1417,11 +1418,11 @@ public:
         SpiMode mode = SpiMode::mode0;
         SpiDataSize bits = SpiDataSize::bits8;
 
-        /// The way to run it: true = polled inside start(); false =
-        /// asynchronous, on the DMA engines - polled inside start() when
-        /// too short to repay them (async_min_frames()), refused
+        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        /// start(); dma, asynchronous, on the DMA engines - polled inside
+        /// start() when too short to repay them (async_min_frames()), refused
         /// (spi_rejected) on a host with none (has_dma).
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
     static_assert(sizeof(Request) == 2u * sizeof(PinRef) + 4u * sizeof(void*) + 8u,
@@ -1603,7 +1604,7 @@ public:
     /// a verdict: status() carries how the transaction ended.
     static bool start(const Request& r) {
         if constexpr (!has_dma) {
-            if (!r.polled) {
+            if (r.engine == SpiEngine::dma) {
                 // Asynchronous is DMA, and this host has no engines:
                 // refused before the block, the select or the D/C is
                 // touched, so nothing reaches the wire.
@@ -1630,7 +1631,7 @@ public:
         }
 
         if constexpr (has_dma) {
-            if (!r.polled && repays_engines(r)) {
+            if (r.engine == SpiEngine::dma && repays_engines(r)) {
                 return start_engines(r, wide);
             }
         }

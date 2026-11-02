@@ -628,7 +628,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
         req.clock = rate;
         req.mode = mode_of(a.cfg.mode);
         req.bits = bits;
-        req.polled = true;
+        req.engine = SpiEngine::polled;
         if (!Host::start(req)) {
             break;   // a polled request completes here
         }

@@ -81,7 +81,7 @@
  * asynchronous face is born with the tiled pipeline and not before,
  * because its shape is decided by what a tile transfer needs and not by
  * what a link could offer: on this realization it is the same Request
- * with `polled` false and a real `ReplyTo<SpiDone>`, posted to a
+ * with SpiEngine::dma and a real `ReplyTo<SpiDone>`, posted to a
  * `SpiBus` arbiter instead of handed to the engine, the tile on loan
  * until the reply lands - which is why the configuration below is a
  * pair of prototype requests and not a bag of fields.
@@ -156,7 +156,7 @@ constexpr uint8_t dcs_spi_mode_number(Mode m) {
  * setup time, the rate, the mode, the frame size where the stratum has
  * one). The link copies each once, at construction, and supplies in
  * that copy what every tenure of its own shares - the command byte lent
- * from a member of its own, `cmd_len` of one, a null reply, `polled` -
+ * from a member of its own, `cmd_len` of one, a null reply, SpiEngine::polled -
  * and a verb then fills in place only what its transaction brings: the
  * two spans and the length, three stores, and lends the member to
  * `Host::start()`. The arbiter's contract (util/bus_master.hpp) is what
@@ -295,7 +295,7 @@ private:
         r.rx = {};
         r.len = 0;
         r.reply = {};
-        r.polled = true;
+        r.engine = SpiEngine::polled;
     }
 
     bool send(Request& r, uint8_t c, const uint8_t* tx, uint8_t* rx, size_t n) {

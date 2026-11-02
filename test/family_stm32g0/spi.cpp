@@ -320,9 +320,9 @@ void spi_tasks() {
     r.clock = SpiClock::div8;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)Host::start(r);
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     (void)Host::start(r);   // refused: spi_rejected, nothing on the wire
     static_assert(!Host::has_dma);
     (void)Host::dma_isr();
@@ -332,6 +332,7 @@ void spi_tasks() {
 
     (void)EngineHost::init(clock);
     EngineHost::Request e{};
+    e.engine = SpiEngine::dma;
     e.tx = lend<Lease::reply>(cmd);
     e.len = 2;
     (void)EngineHost::start(e);
@@ -347,11 +348,12 @@ void spi_tasks() {
 
     (void)WideHost::init(clock);
     WideHost::Request w{};
+    w.engine = SpiEngine::dma;
     w.tx = lend<Lease::reply>(cmd);
     w.len = 1;
     w.bits = SpiDataSize::bits16;
     (void)WideHost::start(w);
-    w.polled = true;
+    w.engine = SpiEngine::polled;
     (void)WideHost::start(w);
     (void)WideHost::dma_isr();
     (void)WideHost::recover();
@@ -439,9 +441,9 @@ void ram_host_verbs() {
     r.tx = lend<Lease::reply>(out);
     r.rx = lend<Lease::reply>(in);
     r.len = 4;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)RamHost::start(r);   // the polled transaction, in SRAM
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     (void)RamHost::start(r);   // refused: no engines
     fixture_placed_spi_vector();
     RamHost::release();
@@ -449,9 +451,9 @@ void ram_host_verbs() {
     RamEngineHost::Request e{};
     e.tx = lend<Lease::reply>(out);
     e.len = 4;
-    e.polled = true;
+    e.engine = SpiEngine::polled;
     (void)RamEngineHost::start(e);
-    e.polled = false;
+    e.engine = SpiEngine::dma;
     (void)RamEngineHost::start(e);   // short: polled inside start(), in SRAM
     (void)RamEngineHost::dma_isr();
     RamEngineHost::release();

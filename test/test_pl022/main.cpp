@@ -56,6 +56,7 @@ alignas(4) uint8_t in_buf[32];
 
 Host::Request plain_request(uint16_t len) {
     Host::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SimPl022PinRef{cs_pin};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.rx = lend<Lease::reply>(in_buf);
@@ -321,7 +322,7 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
     // An EMPTY polled request completes on the spot and never touches the
     // wire.
     Host::Request empty = plain_request(0);
-    empty.polled = true;
+    empty.engine = SpiEngine::polled;
     CHECK(Host::start(empty));
     CHECK(Host::status() == spi_ok);
     CHECK(SimPl022Bench::pin_clear_at[cs_pin] == 0u);
@@ -331,7 +332,7 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
     Host::Request r = plain_request(16);
     r.cs_setup_us = 5;
     r.clock = SpiClocks::div32;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     frames_come_back(true);
     CHECK(Host::start(r));
     frames_come_back(false);
@@ -391,7 +392,7 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
     cmd.dc = SimPl022PinRef{8};
     cmd.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     cmd.cmd_len = 2;
-    cmd.polled = true;
+    cmd.engine = SpiEngine::polled;
     frames_come_back(true);
     CHECK(Host::start(cmd));
     frames_come_back(false);
@@ -427,7 +428,7 @@ TEST_CASE("a request of 65536 frames in all is a request, not an empty one") {
     r.rx = lend<Lease::reply>(wrap_in);
     r.len = 65535;
     r.clock = SpiClocks::div16;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     frames_come_back(true);
     CHECK(Host::start(r));
     frames_come_back(false);
@@ -447,6 +448,7 @@ TEST_CASE("a request of 65536 frames in all is a request, not an empty one") {
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request a{};
+    a.engine = SpiEngine::dma;
     a.cs = SimPl022PinRef{cs_pin};
     a.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     a.cmd_len = 1;
@@ -523,6 +525,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(regs().SSPDMACR == 0u);
 
     Engined::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SimPl022PinRef{cs_pin};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.rx = lend<Lease::reply>(in_buf);
@@ -548,6 +551,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     // A request with no out buffer clocks the fixed dummy cell; one with
     // no in buffer lands in the sink.
     Engined::Request blind{};
+    blind.engine = SpiEngine::dma;
     blind.cs = SimPl022PinRef{cs_pin};
     blind.len = 8;
     CHECK_FALSE(Engined::start(blind));
@@ -576,6 +580,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     // At clk / 16 in mode 0 a frame is 152 cycles: one frame repays them.
     CHECK(Engined::async_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8, true) == 1u);
     Engined::Request brief{};
+    brief.engine = SpiEngine::dma;
     brief.cs = SimPl022PinRef{cs_pin};
     brief.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     brief.rx = lend<Lease::reply>(in_buf);
@@ -620,6 +625,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request two{};
+    two.engine = SpiEngine::dma;
     two.cs = SimPl022PinRef{cs_pin};
     two.dc = SimPl022PinRef{8};
     two.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
@@ -665,7 +671,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request held = brief;
-    held.polled = true;
+    held.engine = SpiEngine::polled;
     held.len = 32;
     frames_come_back(true);
     CHECK(Engined::start(held));
@@ -728,6 +734,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request wide{};
+    wide.engine = SpiEngine::dma;
     wide.cs = SimPl022PinRef{cs_pin};
     wide.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     wide.len = 8;
@@ -751,6 +758,7 @@ namespace {
 /// repay them on SimPl022's figures.
 Engined::Request engined_request() {
     Engined::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SimPl022PinRef{cs_pin};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.rx = lend<Lease::reply>(in_buf);
@@ -816,7 +824,7 @@ TEST_CASE("a bus error leaves the block's reset owed, and the next start() pays 
     CHECK(Engined::dma_isr());
     uint32_t resets_before = SimPl022Bench::resets;
     Engined::Request polled = r;
-    polled.polled = true;
+    polled.engine = SpiEngine::polled;
     frames_come_back(true);
     CHECK(Engined::start(polled));
     frames_come_back(false);
@@ -828,6 +836,7 @@ TEST_CASE("a bus error leaves the block's reset owed, and the next start() pays 
     CHECK(Engined::dma_isr());
     resets_before = SimPl022Bench::resets;
     Engined::Request empty{};
+    empty.engine = SpiEngine::dma;
     empty.cs = SimPl022PinRef{cs_pin};
     CHECK(Engined::start(empty));
     CHECK(Engined::status() == spi_ok);
@@ -920,8 +929,8 @@ struct Go {};
 struct QueueClient {
     using Event = std::variant<Go, SpiDone>;
     static inline EventQueue<Event, 6, HostPlatform> queue;
-    static inline Engined::Request first{};
-    static inline Engined::Request second{};
+    static inline Engined::Request first = [] { Engined::Request r{}; r.engine = SpiEngine::dma; return r; }();
+    static inline Engined::Request second = [] { Engined::Request r{}; r.engine = SpiEngine::dma; return r; }();
     static inline uint8_t replies[2] = {};
     static inline uint8_t n = 0;
 
@@ -966,7 +975,7 @@ TEST_CASE("a request queued behind a stall or a bus error finds a clean block") 
     // rides the engines, both started by one dispatch of the arbiter's. No
     // recover() is anywhere, and the arbiter calls none.
     Engined::Request stalling = good;
-    stalling.polled = true;
+    stalling.engine = SpiEngine::polled;
     stalling.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
     stalling.len = 2;
     QueueClient::first = stalling;
@@ -1025,6 +1034,7 @@ TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
     // A 16-bit request on aligned buffers rides the engines, one
     // half-word beat a frame, the length in FRAMES.
     WideHost::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = SimPl022PinRef{cs_pin};
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     r.rx = lend<Lease::reply>(in_buf);
@@ -1044,6 +1054,7 @@ TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
     // The same width with no buffers clocks the fixed cell and fills the
     // sink at the frame's beat.
     WideHost::Request blind{};
+    blind.engine = SpiEngine::dma;
     blind.cs = SimPl022PinRef{cs_pin};
     blind.len = 4;
     blind.bits = SpiDataSize::bits16;
@@ -1067,6 +1078,7 @@ TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
     // request runs polled inside start() and no block starts.
     const uint32_t blocks = WideTx::blocks;
     WideHost::Request odd{};
+    odd.engine = SpiEngine::dma;
     odd.cs = SimPl022PinRef{cs_pin};
     odd.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
     odd.len = 4;

@@ -343,7 +343,8 @@ using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
  *   r.clock = brio::SpiClocks::div4;                  // 37.5 MHz at 150
  *   r.mode = brio::SpiMode::mode0;
  *   r.reply = brio::reply_to<Display, brio::SpiDone>();
- *   brio::post<Spi>(r);                               // asynchronous: polled stays false
+ *   r.engine = brio::SpiEngine::dma;
+ *   brio::post<Spi>(r);                               // asynchronous
  *
  *   extern "C" void isr_dma_0() {
  *       if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }

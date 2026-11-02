@@ -386,7 +386,7 @@ bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = link_
     r.clock = rate;
     r.mode = mode;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool done = Host::start(r);
     link_hold();
     CsPin::set();
@@ -579,7 +579,7 @@ bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode
     r.clock = rate;
     r.mode = mode;
     r.bits = SpiDataSize::bits8;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     host_done = false;
     bool done = DmaHost::start(r);
     const uint32_t t0 = Ticker::millis();
@@ -1338,7 +1338,7 @@ private:
         r.cs_setup_us = 2;
         r.clock = rate;
         r.mode = SpiMode::mode0;
-        r.polled = i == 1u;
+        r.engine = i == 1u ? SpiEngine::polled : SpiEngine::dma;
         r.reply = reply_to<Driver, SpiDone>();
         return r;
     }
@@ -1355,7 +1355,7 @@ private:
         r.len = fault ? way_frames : 9u;
         r.clock = way_rate;
         r.mode = way_mode;
-        r.polled = !fault;
+        r.engine = fault ? SpiEngine::dma : SpiEngine::polled;
         r.reply = reply_to<Driver, SpiDone>();
         return r;
     }
@@ -1369,7 +1369,7 @@ private:
         r.cs_setup_us = 30;
         r.clock = way_rate;
         r.mode = way_mode;
-        r.polled = polled;
+        r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
         r.reply = reply_to<Driver, SpiDone>();
         return r;
     }
@@ -1538,6 +1538,7 @@ void tq_peer_kernel() {
         Nvic::enable(SelWatch::irq());
         static const uint8_t frame[2] = {0, 0};
         Host::Request q{};
+        q.engine = SpiEngine::dma;
         q.cs = CsPin::ref();
         q.tx = lend<Lease::reply>(frame);
         q.len = 2;
@@ -1546,7 +1547,7 @@ void tq_peer_kernel() {
         const uint8_t status = Host::status();
         settle_ms(2);
         const uint16_t refused_falls = sel_falls;
-        q.polled = true;
+        q.engine = SpiEngine::polled;
         (void)Host::start(q);
         settle_ms(2);
         const uint16_t polled_falls = static_cast<uint16_t>(sel_falls - refused_falls);
@@ -1899,7 +1900,7 @@ Outcome run(const Ext& e) {
         r.clock = e.rate;
         r.mode = SpiMode::mode0;
         r.bits = bits;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         dma_completions = 0;
         dma_blocks = 0;
         const uint32_t tick0 = Ticker::ticks();
@@ -1930,7 +1931,7 @@ Outcome run(const Ext& e) {
         r.clock = e.rate;
         r.mode = SpiMode::mode0;
         r.bits = bits;
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const uint32_t tick0 = Ticker::ticks();
         const uint32_t t0 = cycle_stamp();
         bool done = Host::start(r);
@@ -2933,7 +2934,7 @@ void tg_stall_irqs() {
     rq.clock = SpiClock::div256;
     rq.mode = SpiMode::mode0;
     rq.bits = SpiDataSize::bits8;
-    rq.polled = true;
+    rq.engine = SpiEngine::polled;
     const uint32_t t0 = CycleCounter::now();
     const bool done = Host::start(rq);
     const uint32_t t1 = CycleCounter::now();
@@ -3180,7 +3181,7 @@ HoldRun hold_window(uint8_t seed) {
     r.clock = SpiClock::div8;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     // The timer runs for the window alone, so the command channel around
     // it is not what it lands in.
     Tim<7>::enable(hog_armed);
@@ -3348,7 +3349,7 @@ Window run(uint8_t cmd_len, uint16_t len, SpiClock rate, uint8_t seed) {
     r.len = len;
     r.clock = rate;
     r.mode = SpiMode::mode0;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     dma_completions = 0;
     dma_blocks = 0;
     host_done = false;
@@ -3467,7 +3468,7 @@ void tj_count() {
     rq.bits = SpiDataSize::bits8;
     rq.clock = SpiClock::div8;
     rq.mode = SpiMode::mode0;
-    rq.polled = true;
+    rq.engine = SpiEngine::polled;
     const uint32_t t0 = CycleCounter::now();
     const bool done = Host::start(rq);
     const uint32_t wall = CycleCounter::now() - t0;
@@ -3623,7 +3624,7 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode, SpiClock rate = way_rat
     q.len = 9;
     q.clock = rate;
     q.mode = mode;
-    q.polled = true;
+    q.engine = SpiEngine::polled;
     if (shape == Shape::read) {
         q.rx = lend<Lease::reply>(way_rx);
     }
@@ -3632,7 +3633,7 @@ Failed run_stalled(Shape shape, PinRef cs, SpiMode mode, SpiClock rate = way_rat
         q.cmd_len = 1;
         q.rx = lend<Lease::reply>(way_rx);
         q.len = way_frames;
-        q.polled = false;
+        q.engine = SpiEngine::dma;
     }
     Failed f{};
     const uint32_t t0 = CycleCounter::now();
@@ -3663,7 +3664,7 @@ Failed run_faulted(bool bad_tx, PinRef cs, SpiMode mode) {
     q.len = way_frames;
     q.clock = way_rate;
     q.mode = mode;
-    q.polled = false;
+    q.engine = SpiEngine::dma;
     Failed f{};
     dma_completions = 0;
     host_done = false;
@@ -3714,7 +3715,7 @@ Window next_window(const spilink::Params& a, SpiMode mode, bool polled, SpiClock
     q.cs_setup_us = 30;
     q.clock = rate;
     q.mode = mode;
-    q.polled = polled;
+    q.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     o.ended = DmaHost::start(q);
     o.completed = completed_within(o.ended, 200u);
@@ -4246,7 +4247,7 @@ bool gyro_transfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8
     r.len = len;
     r.clock = rate;
     r.mode = mode;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     return Host::start(r);
 }
 
@@ -4816,7 +4817,7 @@ DmaHost::Request request(const uint8_t* cmd, uint8_t* rx, uint16_t len, bool pol
     r.len = len;
     r.mode = gyro_mode;
     r.clock = gyro_rate;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }
@@ -4921,7 +4922,7 @@ void tk_engines() {
     r.len = 5;
     r.mode = gyro_mode;
     r.clock = gyro_rate;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool sync = DmaHost::start(r);
     print(serial, "  a five-byte read polled on the engined host: ", hex(got[0]), " ",
           hex(got[1]), " ", hex(got[2]), " ", hex(got[3]), " ", hex(got[4]), ", status ",
@@ -4946,7 +4947,7 @@ void tk_engines() {
     a.len = 1;
     a.mode = gyro_mode;
     a.clock = gyro_rate;
-    a.polled = false;
+    a.engine = SpiEngine::dma;
     const bool async = DmaHost::start(a);
     uint32_t spins = 2'000'000u;
     while (GyroCs::read_out() == false && spins-- != 0u) {
@@ -4975,7 +4976,7 @@ void tk_engines() {
         b.len = 64;
         b.mode = gyro_mode;
         b.clock = c;
-        b.polled = false;
+        b.engine = SpiEngine::dma;
         const uint32_t t0 = cycle_stamp();
         const bool inside = DmaHost::start(b);
         uint32_t wait_spins = 8'000'000u;

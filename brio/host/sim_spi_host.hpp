@@ -24,7 +24,7 @@
  *
  * Contexts: a single-threaded test, which is also the program's
  * interrupt glue when it wants to be. A polled request completes inside
- * start(); an asynchronous one (not polled) completes there too under the
+ * start(); an asynchronous one (SpiEngine::dma) completes there too under the
  * `immediate` completion style (the default), and under `deferred` it is
  * held until the test calls finish(), which plays the DMA handler that
  * would post TransferDone - unless it is shorter than the count set by
@@ -207,8 +207,8 @@ public:
 
     static constexpr uint8_t number = n;
     /// Can this host run an asynchronous request? The contract's name
-    /// (docs/design/spi-bus.md): false refuses every request not marked
-    /// polled, so a program that posts one asserts it.
+    /// (docs/design/spi-bus.md): false refuses every request naming
+    /// SpiEngine::dma, so a program that posts one asserts it.
     static constexpr bool has_dma = dma;
     /// What a line nobody drives reads: the pull-up, and the only thing
     /// a bus with no device on it can say.
@@ -251,10 +251,10 @@ public:
         SimSpiMode mode = SimSpiMode::mode0;
         SimSpiDataSize bits = SimSpiDataSize::bits8;
 
-        /// The way to run it: true = POLLED inside start(); false =
-        /// asynchronous - answered later, inside start() when shorter than
+        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
+        /// start(); dma, asynchronous - answered later, inside start() when shorter than
         /// short_frames(), refused (spi_rejected) by a host without DMA.
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
 
@@ -322,7 +322,7 @@ public:
      * request is not a case the contract allows; it replaces the first.
      */
     static bool start(const Request& r) {
-        if (r.polled) {
+        if (r.engine == SpiEngine::polled) {
             ++polled_;
         } else {
             ++async_;
@@ -399,7 +399,7 @@ public:
     /// Transactions whose select line had no device on it.
     static uint32_t unaddressed() { return unaddressed_; }
     static uint32_t polled_requests() { return polled_; }
-    /// Requests not marked polled, refused and short ones included.
+    /// Requests naming SpiEngine::dma, refused and short ones included.
     static uint32_t async_requests() { return async_; }
     /// Asynchronous requests refused for want of DMA.
     static uint32_t refused_requests() { return refused_; }
@@ -554,7 +554,7 @@ private:
     }
 
     static inline Device devices_[device_slots]{};
-    static inline Request held_{};
+    static inline Request held_ = [] { Request r{}; r.engine = SpiEngine::dma; return r; }();
     static inline bool has_held_ = false;
     static inline SimSpiCompletion completion_ = SimSpiCompletion::immediate;
     static inline uint32_t short_frames_ = 0;

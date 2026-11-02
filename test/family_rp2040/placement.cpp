@@ -49,14 +49,16 @@ void placement_verbs() {
     constexpr SysClock clock;
     (void)RamHost::init(clock);
     RamHost::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = Pin<17>::ref();
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     r.len = 16;
     (void)RamHost::start(r);
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)RamHost::start(r);
     (void)RamDmaHost::init(clock);
     RamDmaHost::Request d{};
+    d.engine = SpiEngine::dma;
     d.cs = Pin<17>::ref();
     d.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buf));
     d.len = 16;

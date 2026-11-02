@@ -20,9 +20,10 @@ namespace {
 using brio::HostPlatform;
 using brio::ReplyTo;
 using brio::SpiDone;
+using brio::SpiEngine;
 using brio::TransferDone;
 
-// Fake engine: records which transaction ids were started. `polled`
+// Fake engine: records which transaction ids were started. `engine`
 // mirrors the real engine's contract: start() returning true means the
 // transaction completed synchronously and no TransferDone will follow -
 // the arbiter reads status() for that reply, and this engine always
@@ -31,12 +32,12 @@ struct FakeBus {
     struct Request {
         uint8_t id;
         ReplyTo<SpiDone> reply;
-        bool polled = false;
+        SpiEngine engine = SpiEngine::polled;
     };
     static inline std::vector<uint8_t> started;
     static bool start(const Request& r) {
         started.push_back(r.id);
-        return r.polled;
+        return r.engine == SpiEngine::polled;
     }
     static uint8_t status() { return brio::spi_ok; }
 };
@@ -69,11 +70,11 @@ void reset() {
 }
 
 FakeBus::Request req(uint8_t id) {
-    return {id, brio::reply_to<Client, SpiDone>()};
+    return {id, brio::reply_to<Client, SpiDone>(), SpiEngine::dma};
 }
 
 FakeBus::Request polled_req(uint8_t id) {
-    return {id, brio::reply_to<Client, SpiDone>(), true};
+    return {id, brio::reply_to<Client, SpiDone>(), SpiEngine::polled};
 }
 
 } // namespace

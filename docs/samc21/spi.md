@@ -32,7 +32,7 @@ using SpiHw = brio::SpiHost<1, my_pads>;
 using SpiBus = brio::SpiBus<SpiHw, P>;
 // in main: SpiHw::init(clock); kernel.init_all(); ...
 // from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
-// baud = *SpiHw::baud_for(6'000'000), mode, polled = true), post it to
+// baud = *SpiHw::baud_for(6'000'000), mode, engine = SpiEngine::polled), post it to
 // SpiBus, and consume the SpiDone reply.
 ```
 
@@ -50,9 +50,9 @@ every active object's `init()`, which is what `init_all()` names); and
 an active object (AO) fills a `Request` - the chip select as a
 `PinRef`, the buffers lent with `lend<Lease::reply>(...)`, the BAUD
 register value `baud_for()` computes for the device's 6 MHz, the mode,
-`polled = true` - posts it to `SpiBus` and receives `SpiDone` with the
+`SpiEngine::polled` - posts it to `SpiBus` and receives `SpiDone` with the
 status (`spi_ok`, `spi_stalled` when the request's spin budget ran
-out, or `spi_rejected` for a request not marked polled). No vector is
+out, or `spi_rejected` for a request naming `SpiEngine::dma`). No vector is
 bound: the host arms no interrupt.
 
 What decides correctness even there. `init()` comes after the clock
@@ -67,8 +67,8 @@ checks it. The chip select is an ordinary GPIO the device client owns:
 `init()` hands DO, SCK and (when the pads name one) DI to the SERCOM and
 nothing else, so the client configures its select pin as an output,
 high, before its first request (the engine drives it low around each
-transaction). Every request says `polled = true`: left at its default
-(false), the field asks for an asynchronous request, which this host
+transaction). Every request runs `SpiEngine::polled`, the field's default:
+one naming `SpiEngine::dma` asks for an asynchronous request, which this host
 refuses at once - `start()` answers with `spi_rejected`, the `SpiDone`
 carries it, and nothing reaches the wire. `SpiHw::has_dma` is false, so
 a program that relies on the asynchronous way states it with
@@ -288,7 +288,7 @@ item a reader would apply without checking the row.
   `util/spi_bus.hpp` (= `BusMaster`) drives: the shared Request shape
   (cs/dc `PinRef`s, two-phase cmd + full-duplex data, `Borrowed<...,
   Lease::reply>` spans, `ReplyTo<SpiDone>`, per-request BAUD value and
-  `SpiMode`, `polled` - true, the one way this host runs a request -,
+  `SpiMode`, `engine` - `SpiEngine::polled`, the one way this host runs a request -,
   and `cs_setup_us` - the
   microseconds between the CS assertion and the first clock, spent
   spinning in start() in main context on samc21/delay.hpp's rate, which
@@ -300,7 +300,7 @@ item a reader would apply without checking the row.
   for the call (util/bus_master.hpp): a request completes inside
   `start()`, read through the reference and copied nowhere, and the host
   keeps no state of it past the call (the size is pinned by a
-  static_assert). `has_dma` is false, and a request not marked polled is
+  static_assert). `has_dma` is false, and a request naming `SpiEngine::dma` is
   refused, `start()` answering at once with `spi_rejected` before the
   registers, the select or the D/C are touched. `apply()` compares the mode and
   the rate as one half-word against the applied one and reaches the
@@ -367,7 +367,7 @@ target:
     using SpiBus = brio::SpiBus<SpiHw, P>;
     // in main: SpiHw::init(clock); kernel.init_all(); ...
     // from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
-    // baud = *SpiHw::baud_for(6'000'000), mode, polled = true), post it to
+    // baud = *SpiHw::baud_for(6'000'000), mode, engine = SpiEngine::polled), post it to
     // SpiBus, and consume the SpiDone reply.
 
 A display's pixel stream with its loops in SRAM:

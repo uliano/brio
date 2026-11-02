@@ -263,7 +263,7 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
     r.mode = mode;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     transfer_done = false;
     spi0_isr_entries = 0;
     dma_isr_entries = 0;
@@ -778,7 +778,7 @@ DmaHost::Request request(const uint8_t* tx, uint8_t* rx, bool polled) {
     r.len = 8;
     r.mode = SpiMode::mode0;
     r.clock = SpiClocks::div16;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }

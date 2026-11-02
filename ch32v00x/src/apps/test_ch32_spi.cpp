@@ -274,7 +274,7 @@ uint8_t host_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t*
     r.mode = mode;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     spi_isr_entries = 0;
     dma_isr_entries = 0;
@@ -305,7 +305,7 @@ uint8_t dma_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* 
     r.mode = mode;
     r.clock = rate;
     r.bits = bits;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     host_done = false;
     spi_isr_entries = 0;
     dma_isr_entries = 0;
@@ -336,7 +336,7 @@ bool async_went_to_engines(uint16_t n, SpiClock rate, uint8_t& status) {
     r.mode = SpiMode::mode0;
     r.clock = rate;
     r.bits = SpiDataSize::bits8;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     host_done = false;
     if (D::start(r)) {
         status = D::status();
@@ -453,7 +453,7 @@ bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n) {
     r.clock = link_clock;
     r.mode = SpiMode::mode0;
     r.bits = SpiDataSize::bits8;
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     const bool done = Host::start(r);
     link_hold();
     CsPin::set();
@@ -897,13 +897,13 @@ void ta_block() {
     bench.verdict("disable() drains and drops SPE", !S::enabled());
     S::reset();
 
-    // ASYNCHRONOUS IS DMA: the engineless host refuses a request not marked
-    // polled, at once and before it touches anything - asked in mode 3 at
+    // ASYNCHRONOUS IS DMA: the engineless host refuses a request naming
+    // SpiEngine::dma, at once and before it touches anything - asked in mode 3 at
     // /2 after the block was primed in mode 0 at /16, the lone select in
     // the request: start() answers true with spi_rejected, the select stays
     // high, CTLR1 is the word it was (no CPOL flip on SCK: apply() never
     // ran, and every frame comes after it), and SCK reads its mode 0 idle,
-    // low. The same request marked polled then runs on the same host.
+    // low. The same request naming SpiEngine::polled then runs on the same host.
     host_ready();
     spi_isr_entries = 0;
     fill_pattern(tx_buf, 64, 0x21);
@@ -917,7 +917,7 @@ void ta_block() {
         r.len = 16;
         r.clock = SpiClock::div2;
         r.mode = SpiMode::mode3;
-        r.polled = false;
+        r.engine = SpiEngine::dma;
         const bool done = Host::start(r);
         const uint8_t st = Host::status();
         const bool cs_high = LoneCs::read_out() && LoneCs::read();
@@ -929,7 +929,7 @@ void ta_block() {
         bench.verdict("AN ASYNCHRONOUS REQUEST ON A HOST WITH NO ENGINES IS REFUSED: start() answers at once "
                       "spi_rejected, the select never falls, the control word and SCK are untouched",
                       done && st == spi_rejected && cs_high && word_kept && sck_idle);
-        r.polled = true;
+        r.engine = SpiEngine::polled;
         const bool polled_done = Host::start(r);
         bench.verdict("and the same request marked polled runs on it, spi_ok", polled_done && Host::status() == spi_ok);
     }
@@ -1889,7 +1889,7 @@ typename H::Request request(const uint8_t* tx, uint8_t* rx, bool polled, uint16_
     r.len = len;
     r.mode = SpiMode::mode0;
     r.clock = rate;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     r.reply = reply_to<Probe, SpiDone>();
     return r;
 }
@@ -2073,7 +2073,7 @@ typename H::Request fault_request(Stage s, SpiMode mode) {
     r.len = faulted_frames;
     r.mode = mode;
     r.clock = link_clock;
-    r.polled = false;
+    r.engine = SpiEngine::dma;
     return r;
 }
 
@@ -2126,7 +2126,7 @@ void real_faults(uint8_t& good_faults, uint8_t& good_next) {
     host_done = false;
     (void)H::start(f);
     (void)await_done();
-    const typename H::Request empty{};
+    const typename H::Request empty = [] { typename H::Request r{}; r.engine = SpiEngine::dma; return r; }();
     uint32_t t0 = cycles_now();
     (void)H::start(empty);
     const uint32_t owed = cycles_now() - t0;
@@ -2753,7 +2753,7 @@ typename H::Request next_request(bool polled) {
     r.len = next_frames;
     r.mode = next_mode;
     r.clock = link_clock;
-    r.polled = polled;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
     return r;
 }
 
@@ -2845,7 +2845,7 @@ bool queued_behind(Stage s, bool next_polled, uint8_t seed) {
         DmaHost::prime(next_mode, link_clock);
     } else {
         // The block held in reset, a polled read of sixteen at /16.
-        first.polled = true;
+        first.engine = SpiEngine::polled;
         first.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
         first.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
         first.len = 16;

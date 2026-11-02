@@ -36,7 +36,7 @@ brio::post<Bus>(SpiHw::Request{
     brio::lend<brio::Lease::reply>(cmd), 1,
     brio::lend<brio::Lease::reply>(data), {}, len,
     brio::reply_to<Me, brio::SpiDone>(),
-    brio::SpiClock::div4, brio::SpiMode::mode0, /*polled=*/true});
+    brio::SpiClock::div4, brio::SpiMode::mode0, brio::SpiEngine::polled});
 ```
 
 Line by line: `SpiHw` names the engine over SPI0 on its DEFAULT route
@@ -66,9 +66,9 @@ What decides correctness even there:
   the engine among its users (a compile error otherwise). `init()`
   returns false when the package does not bond the route's SCK, or when
   even CLK_PER/128 is faster than the ceiling.
-- **Every request says `polled = true`.** Left at its default (false),
-  the field asks for an asynchronous request, which is DMA: this host
-  refuses it at once - `start()` answers with `spi_rejected`, the
+- **Every request runs `SpiEngine::polled`, the field's default.** A
+  request naming `SpiEngine::dma` asks for the asynchronous way, which is
+  DMA: this host refuses it at once - `start()` answers with `spi_rejected`, the
   `SpiDone` carries it, and nothing reaches the wire. `SpiHw::has_dma`
   is false, so a program that relies on the asynchronous way states it
   with `static_assert(SpiHw::has_dma)` and fails to compile here;
@@ -223,7 +223,7 @@ RUNSTDBY control of its own.
 | `spi_max_host_sck_hz`, `spi_max_client_sck_hz` | the two ceilings of the timing tables |
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
 | `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, `flush_receive()` (the receive FIFO emptied whatever RXCIF says), the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
-| `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `has_dma` (false: no DMA on these parts), `start()` (a request completes inside it, reading the lent request and copying nothing; one not marked polled is refused before the registers or the select are touched), `status()` (`spi_rejected` after a refusal, `spi_ok` otherwise - a polled transfer has no fault of its own to report here), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp), which no transaction of this host can be: a demoted host re-armed and the FIFO read out whatever RXCIF says, nothing waited for |
+| `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `has_dma` (false: no DMA on these parts), `start()` (a request completes inside it, reading the lent request and copying nothing; one naming `SpiEngine::dma` is refused before the registers or the select are touched), `status()` (`spi_rejected` after a refusal, `spi_ok` otherwise - a polled transfer has no fault of its own to report here), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp), which no transaction of this host can be: a demoted host re-armed and the FIFO read out whatever RXCIF says, nothing waited for |
 | `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, THE RUNS `answer()`, `exchange()` and `receive()` - a transaction's bytes in one polled call, eight-bit characters (a run of `uint16_t` does not compile, nor one on a client the package cannot bond), in buffer mode READ BY COUNT and the read before the write (The client's runs, below), each returning `Run{count, end}` with `RunEnd` `complete`, `closed`, `stalled` and this family's fourth, `late` (a turn that missed its transfer: TXCIF or BUFOVF in buffer mode, WRCOL in normal mode, whose run leaves that turn's byte out of the count) -, the per-byte verbs `preload()`, `poll()`, `wait()` and `exchange(byte)` (paced by RXCIF: one byte at a time for a host that leaves a gap), the buffer-mode readbacks and `flags()`, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
@@ -247,7 +247,7 @@ brio::post<Bus>(SpiHw::Request{
     brio::lend<brio::Lease::reply>(cmd), 1,
     brio::lend<brio::Lease::reply>(data), {}, len,
     brio::reply_to<Me, brio::SpiDone>(),
-    brio::SpiClock::div4, brio::SpiMode::mode0, /*polled=*/true});
+    brio::SpiClock::div4, brio::SpiMode::mode0, brio::SpiEngine::polled});
 ```
 
 **One instance by hand** - a bare host on a route of its own:
@@ -448,7 +448,7 @@ than the engine's ceiling is slowed to the ceiling. Under a 24 -> 12 ->
 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 -> CLK_PER/8 ->
 CLK_PER/16 and the measured SCK stays at 1.5 MHz. These verdicts are
 the engine in buffer mode (below); test `t` adds the engine through the
-read below. THE REFUSAL (test `j`): a request not marked polled, asking
+read below. THE REFUSAL (test `j`): a request naming `SpiEngine::dma`, asking
 for mode 3 at CLK_PER/64 after a mode-0 request at CLK_PER/16, answers
 `start()` true with `spi_rejected` - no SCK edge counted on the SCK
 event, the select's fall never sensed on its pin (interrupts masked so
@@ -642,7 +642,7 @@ block's two cycles a byte. Measured on the AVR64EA48, the same core
 running the same instructions (below): 217, 166 for the command byte
 alone (n = 1) and 250 with fifteen bytes of data (n = 16).
 
-**The refusal** (`polled` false) is the first thing `start()` does: the
+**The refusal** (`SpiEngine::dma`) is the first thing `start()` does: the
 field's LDD and a CPSE, then on the refused path the `spi_rejected`
 store and the return. On a polled request the test is six cycles - the
 LDD, the CPSE, its taken RJMP and the `spi_ok` store (counted; inside
@@ -669,8 +669,7 @@ cycles (661 less the wire's 384 and this ruler's stopwatch floor of
 60), 166 for the command byte alone and 250 with fifteen bytes of data.
 The same core runs the same instructions, so the engine's cost in
 cycles does not move with the part, and its cost in time scales with
-CLK_PER. The letter's verdict is the refusal: a request not marked
-polled answers `spi_rejected` with no SCK edge counted, and the same
+CLK_PER. The letter's verdict is the refusal: a request naming `SpiEngine::dma` answers `spi_rejected` with no SCK edge counted, and the same
 request polled counts its 128.
 
 **`apply()`**: the request's `mode` and `clock` folded into the two

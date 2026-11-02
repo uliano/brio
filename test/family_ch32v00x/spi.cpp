@@ -88,6 +88,7 @@ void host_verbs(uint8_t* buf) {
     H::prime(SpiMode::mode0, SpiClock::div8, SpiDataSize::bits16);
     (void)H::bit_order(true); (void)H::lsb_first();
     typename H::Request r{};
+    r.engine = SpiEngine::dma;
     r.cs = Pin<'C', 1>::ref();
     r.cmd = Borrowed<const uint8_t, Lease::reply>{buf};
     r.cmd_len = 1;
@@ -95,7 +96,7 @@ void host_verbs(uint8_t* buf) {
     r.rx = Borrowed<uint8_t, Lease::reply>{buf + 8};
     r.len = 4;
     (void)H::start(r);
-    r.polled = true;
+    r.engine = SpiEngine::polled;
     (void)H::start(r);
     (void)H::dma_isr();
     (void)H::status();

@@ -200,7 +200,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, {}, 0,
                     {}, brio::lend<brio::Lease::reply>(spi_rx), 1,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, brio::SpiMode::mode3, true});   // polled
+                    brio::SpiClock::div64, brio::SpiMode::mode3, brio::SpiEngine::polled});   // polled
                 return handled();
             },
             [](brio::BusDone d) {
@@ -236,7 +236,7 @@ struct Loop : brio::Fsm<Loop, Kick, Tick, brio::BusDone> {
                     AdcCs::ref(), {}, {}, 0,
                     {}, brio::lend<brio::Lease::reply>(spi_rx), 3,
                     brio::reply_to<Loop, brio::BusDone>(),
-                    brio::SpiClock::div64, brio::SpiMode::mode3, true,   // polled
+                    brio::SpiClock::div64, brio::SpiMode::mode3, brio::SpiEngine::polled,   // polled
                     adc_cs_setup_us});
                 return handled();
             },
