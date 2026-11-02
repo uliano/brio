@@ -799,11 +799,11 @@ wall of 256 frames:
 
 | path | flash | SRAM (`InRam`, the vector in the flash) | SRAM bytes |
 |---|---|---|---|
-| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6199 | 1736 a host's polled transaction, both widths, engined or not |
-| the same at PCLK/4 (the wire 8192) | 9230 | 8545 | |
-| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11309 | 10038 | |
-| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4662 | 4477 | |
-| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 798, 2485 | 437, 773, 2484 | |
+| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6867 | 6182 | 1736 a host's polled transaction, both widths, engined or not |
+| the same at PCLK/4 (the wire 8192) | 9235 | 8528 | |
+| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11315 | 10024 | |
+| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4642 | 4444 | |
+| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 427, 774, 2461 | 410, 744, 2455 | |
 | USART transmit engine's completion, a block at 2 Mbaud | 232 | 212 | 264 (340 with a receive engine) |
 | USART transmitter's FIFO refill, eight bytes an entry at 115200 | 323 | 318 | 404 an engineless port's `isr()` |
 | USART receive, four bytes an entry at 115200 | 355 | 316 | 332 the `isr()` of a port whose transmitter is on its engine |
@@ -816,8 +816,8 @@ What the rows say:
 - THE SPI'S RECEIVE LOOP PAYS MOST. The polled transaction is a
   function of its own in either memory (spi.md says why), and from SRAM
   its receive loop is a tenth shorter at PCLK/2 (x 1.67 of the wire to
-  1.51), its 16-bit loop likewise (1.38 to 1.22), a polled request 1 to
-  25 cycles. Where a loop is the wire's already (everything from PCLK/16
+  1.50), its 16-bit loop likewise (1.38 to 1.22), a polled request 6 to
+  30 cycles. Where a loop is the wire's already (everything from PCLK/16
   down, the write shape from PCLK/4) SRAM changes nothing; at PCLK/4 the
   receive loop's flash figure moves with where the image places it
   (x 1.05 in one image, 1.12 in this one: spi.md's open finding), and
@@ -831,10 +831,10 @@ What the rows say:
   is `harvest()` out of line: from SRAM that is a veneer back into the
   flash, once a burst.
 - The SPI engines' transaction takes no placement: letter d reads
-  1165..1179 cycles above the wire in the flash image and 1119..1125 in
+  991..1016 cycles above the wire in the flash image and 982..1003 in
   the SRAM one, the difference the bench's DMA vector, which binds
-  letter u's ports beside the SPI host's completion - its entry 298
-  cycles where their bodies are inline, 263 where they are calls into
+  letter u's ports beside the SPI host's completion - its entry 255
+  cycles where their bodies are inline, 240 where they are calls into
   SRAM ([spi.md](spi.md)).
 - A path's cost from the flash moves with where it sits: two builds of
   `bench_stm32` that differed in the SPI host alone measured the USART

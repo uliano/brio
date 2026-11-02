@@ -1621,7 +1621,8 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *    a stall there ends the request as a polled one's does. A command with
  *    no data phase is the block. A channel that refuses the block at its
  *    launch - the transmit one a program holds - ends the request
- *    spi_rejected, its select back up, nothing clocked. The block's own
+ *    spi_rejected, its select back up, nothing of the data phase clocked
+ *    (a command phase ahead of it has already run in the loop). The block's own
  *    interrupts are never armed: the instance's vector is not the host's.
  *
  * WHEN A REQUEST ENDS THE WIRE HAS ENDED. The select rises, and start()
@@ -1630,7 +1631,8 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * RXNE, which in the CPHA = 0 modes comes half a bit before the frame's
  * last edge (measured), so their tail waits for the SCK pad's idle level,
  * on the transaction's budget (wire_ended()); the transmit-only shape's
- * tail, FTLVL and then BSY, is already after the edge (measured). The
+ * tail, FTLVL and then BSY, is already after the edge (measured at /256,
+ * where an early end would show). The
  * engines' completion needs no wait: half a bit is at most 128 core
  * cycles here (PCLK is HCLK, and /256 the slowest code), and the vector's
  * own body is longer (measured: the pad already idle when dma_isr()
@@ -2627,7 +2629,7 @@ private:
     /// 7.3.12) - so the tail waits for the pad to come back to the mode's idle
     /// level, on the transaction's budget, once a request. The transmit-only
     /// shape's tail needs nothing more: FTLVL and then BSY already put it after
-    /// the edge (measured too).
+    /// the edge (measured too, at /256, where an early end would show).
     [[gnu::always_inline]] static bool wire_ended(uint32_t& budget) {
         const uint32_t idle = spi_cpol(applied_.mode) ? SckPin::mask : 0u;
         const volatile uint32_t& idr = SckPin::port().IDR;
@@ -2769,8 +2771,10 @@ private:
     }
 
     /// A channel refused the block: the transmit one a program holds (claim()).
-    /// Nothing was clocked, since the transmit channel is what starts the clock
-    /// and it went second; the select comes back up and the request ends refused.
+    /// Nothing of the block was clocked, since the transmit channel is what
+    /// starts the clock and it went second - a command phase ahead of it already
+    /// went out in the loop, D/C left high; the select comes back up and the
+    /// request ends refused.
     [[gnu::noinline, gnu::cold]] static bool launch_refused() {
         dma_active_ = false;
         tenure_cs_.set();

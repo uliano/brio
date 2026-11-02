@@ -23,7 +23,7 @@ device, polled, on SPI2's own column:
 
 ```cpp
 using Bus = brio::SpiHost<2>;
-Bus::init(clock);                        // no ceiling: every rate legal
+(void)Bus::init(clock);                  // no ceiling, the default column: nothing to refuse
 
 const uint8_t cmd[1] = {0x9F};
 uint8_t id[3] = {};
@@ -288,10 +288,11 @@ register. That single fact shapes both roles:
   for every frame after it (measured).
 - **RXNE rises at the frame's end, in all four modes, never before the
   last SCK edge** (measured: `test_vx03_spi`'s letter s samples STATR and
-  the SCK pad together in a masked loop of 35 to 37 cycles a turn, one
-  frame at /256 and /64 on every instance; RXNE first read up one turn
-  after the last sample of SCK away from idle, BSY last read up on that
-  same sample, on both parts; `bench_vx03`'s letter e, `spi.rxne`, on SPI1
+  the SCK pad together in a masked loop of 31 to 39 cycles a turn, one
+  frame at /256 and /64 on every instance; RXNE first read up one to three
+  turns after the last sample of SCK away from idle, never on or before it,
+  and BSY last read up on that sample or one or two turns after it, on both
+  parts; `bench_vx03`'s letter e, `spi.rxne`, on SPI1
   at /256: the write to RXNE 2060 cycles on the CH32V203C8T6 and 2056 to
   2080 on the CH32V303VCT6 against 2048 of wire). 20.2.2 says RXNE is set
   when the last sampling edge arrives, which in modes 0 and 2 is half a
@@ -678,8 +679,9 @@ alone.
      transmit channel whose block is in flight, its claim being the one
      test-and-set the engines have and held by any owner of that slot.
      These are every refusal the channels' own launch could answer, asked
-     before anything moves, so none is left to answer after the select
-     fell. A program whose buffers may sit anywhere names
+     before anything moves; the one left to answer after the select fell is
+     a handler claiming the transmit slot between the test and the launch,
+     declined in "Not covered yet". A program whose buffers may sit anywhere names
      `SpiEngine::polled` for them, or aligns them;
   4. a command phase with a data phase behind it runs in the loop inside
      `start()`, D/C rising after its last frame's last edge, and the data
@@ -832,8 +834,9 @@ the arithmetic. At 144 MHz, thirteen runs a part, cycles:
 | F, SPI2, a read / a write (at /4) | 255 / 287 to 289 | 219 to 224 / 233 to 245 |
 
 N, the frames from which the engines cost the core fewer cycles, byte
-frames, a read / a write (16-bit frames are twice the wire's time a frame,
-so their N is about half):
+frames, a read / a write (letter g measures byte frames alone; 16-bit
+frames have no table here, and at /2 and /4, where the loop's turn and not
+the wire sets the frame, halving the byte figure would not give theirs):
 
 | code | SPI1, V4B | SPI1, V4F | SPI2, V4B | SPI2, V4F |
 |---|---|---|---|---|
@@ -858,8 +861,9 @@ which E leaves out, so there N sits a little higher. The V4F's E is the
 longer by its DMA vector, a naked trampoline over a handler that saves
 the f-registers ([platform.md](platform.md)); its loops are the quicker by
 a few cycles. A loop's figures move by a few cycles with where the image
-places it (`bench_vx03`'s letter e reads the receive loop's frame on SPI1
-at /4 in 8-bit frames 10 cycles over the wire, letter g 19).
+places it (on the CH32V203C8T6 `bench_vx03`'s letter e reads the receive
+loop's frame on SPI1 at /4 in 8-bit frames 19 cycles over the wire, letter g
+10; on the CH32V303VCT6 both read 14).
 
 ### The client
 
@@ -897,7 +901,7 @@ One device, polled, on SPI2's own column:
 
 ```cpp
 using Bus = brio::SpiHost<2>;
-Bus::init(clock);                        // no ceiling: every rate legal
+(void)Bus::init(clock);                  // no ceiling, the default column: nothing to refuse
 
 const uint8_t cmd[1] = {0x9F};
 uint8_t id[3] = {};
@@ -910,7 +914,8 @@ r.len     = 3;
 r.mode    = brio::SpiMode::mode0;
 r.clock   = brio::SpiClock::div16;
 r.engine  = brio::SpiEngine::polled;
-(void)Bus::start(r);                     // true: it is done, `id` is filled
+(void)Bus::start(r);                     // a polled request answers true, done or not: status() decides
+if (Bus::status() != brio::spi_ok) { /* spi_stalled: id holds nothing */ }
 ```
 
 A shared bus under the arbiter, the transactions on SPI2's two DMA
@@ -941,7 +946,7 @@ request of one frame on them, which they run as they run any length:
 ```cpp
 using One = brio::SpiHost<1, brio::spi_default_pins<1>,
                           brio::DmaTxEngine<1, 3>, brio::DmaRxEngine<1, 2>>;
-One::init(clock);                        // binds both engines to DATAR
+(void)One::init(clock);                  // binds both engines to DATAR; nothing to refuse
 volatile bool one_done = false;
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (One::dma_rx_isr()) { one_done = true; }   // One::status() says how it ended
@@ -1148,11 +1153,14 @@ other's `spi_peer` - in the one after it.
   166 to 180 on SPI2 and SPI3, both cores (measured: the thread sampling the
   pad until the vector's stamp), so on a PB1 instance at /256 an early end
   would show and on SPI1 it would not. RXNE itself, sampled
-  with the pad in a masked loop of 35 to 37 cycles a turn on the resource, came
-  up one turn after the last sample away from idle in every mode at both rates
-  on every instance, BSY last seen up on that last sample: the flag does not
-  lead the edge by more than a turn, against the half bit of up to 256 cycles
-  an early end would need.
+  with the pad in a masked loop of 31 to 39 cycles a turn on the resource, came
+  up after the last sample away from idle in every mode at both rates on every
+  instance, ten runs on each part: one turn after it in most cases, two or three
+  on the CH32V203C8T6's SPI1 at /64 (71 cycles in modes 0 and 2, 109 in modes 1
+  and 3, every run) and in a few runs of the CH32V303VCT6's instances (66 to 73,
+  and once 118), BSY last seen up on that sample or a turn or two after it. The
+  flag never leads the pad's return to idle, where an early end would show it
+  up to half a bit, 256 cycles, ahead.
 - **A POLLED WAIT THAT RUNS OUT ends `spi_stalled`** (letter f, both
   parts): a polled write of 16 frames started with SPI1's gate closed
   under the engine - every STATR load reading zero, so TXE never comes -

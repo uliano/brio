@@ -323,9 +323,9 @@ function in the flash under either placement: the RCC's pulse (RM0444 5.4.11 and
 applied configuration written back, the enable, under a thousand cycles. It declines
 35.5.9's disable procedure: that lets a last frame out, behind a released select nobody wants
 it, and with frames standing and SPE down it waits out its 200 000 polls on FTLVL, 28.4 ms,
-and leaves them there. `start()` pays a literal load, a byte load, a compare and a branch for it
-a request on a host with engines, 3 to 7 cycles of the polled rest measured across the images of
-either placement, none on a host without engines, and never a call.
+and leaves them there. On a host with engines `start()` pays for it a literal load, a byte load,
+a compare and a branch a request (the release listing), the call only when a reset is owed; on a
+host without engines the test compiles away.
 
 ## The client run
 
@@ -722,26 +722,27 @@ the wire SCK/8 bytes a second):
 
 | op | n | PCLK/ | wall | busy | irq | isr | wire cycles | rest |
 |---|---|---|---|---|---|---|---|---|
-| spi.dma (8-bit) | 64 | 2 | 2144 | 1046 | 1 | 270 | 1024 | 1120 |
-| spi.dma (8-bit) | 256 | 2 | 5216 | 1046 | 1 | 270 | 4096 | 1120 |
-| spi.dma (8-bit) | 64 | 8 | 5213 | 1046 | 1 | 270 | 4096 | 1117 |
-| spi.dma (8-bit) | 256 | 8 | 17501 | 1046 | 1 | 270 | 16384 | 1117 |
-| spi.dma.w16 | 128 | 2 | 3181 | 1058 | 1 | 270 | 2048 | 1133 |
-| spi.dma.w16 | 512 | 2 | 9325 | 1058 | 1 | 270 | 8192 | 1133 |
-| spi.dma.w16 | 128 | 8 | 9322 | 1059 | 1 | 270 | 8192 | 1130 |
-| spi.dma.w16 | 512 | 8 | 33898 | 1059 | 1 | 270 | 32768 | 1130 |
+| spi.dma (8-bit) | 64 | 2 | 2018 | 934 | 1 | 255 | 1024 | 994 |
+| spi.dma (8-bit) | 256 | 2 | 5090 | 934 | 1 | 255 | 4096 | 994 |
+| spi.dma (8-bit) | 64 | 8 | 5087 | 934 | 1 | 255 | 4096 | 991 |
+| spi.dma (8-bit) | 256 | 8 | 17375 | 934 | 1 | 255 | 16384 | 991 |
+| spi.dma.w16 | 128 | 2 | 3064 | 954 | 1 | 255 | 2048 | 1016 |
+| spi.dma.w16 | 512 | 2 | 9208 | 954 | 1 | 255 | 8192 | 1016 |
+| spi.dma.w16 | 128 | 8 | 9205 | 953 | 1 | 255 | 8192 | 1013 |
+| spi.dma.w16 | 512 | 8 | 33781 | 953 | 1 | 255 | 32768 | 1013 |
 
 Every frame beyond the first costs exactly the wire's time - 16.0 HCLK
 cycles a byte at PCLK/2, 64.0 at PCLK/8, either width - so the engines
 keep the FIFO fed at the top rate and the per-byte time is the wire's.
-What a transaction adds is a constant some 1125 cycles of wall: `start()`
+What a transaction adds is a constant 991 to 1016 cycles of wall, the same
+in three runs: `start()`
 itself (the engine's test, the refusals' tests, the compare of the
 settings, the select, the two pads kept, the engines' five stores each),
 ONE completion interrupt
-whose handler is 270 cycles with the meter's stamps, and the idle
+whose handler is 255 cycles with the meter's stamps, and the idle
 path's wake with the bench's own idle-window reads; of it the core is
-busy some 1050. In `bench_stm32_ram`, whose ports' bodies are calls into SRAM, the
-same vector's entry is 244 cycles and the transaction 1079 to 1095 above the
+busy 934 to 954. In `bench_stm32_ram`, whose ports' bodies are calls into SRAM, the
+same vector's entry is 240 cycles and the transaction 982 to 1003 above the
 wire - none of the engines' path is placed, so the figure is one for
 both placements. What the core pays of it against a polled transfer is E - F
 ("Which engine costs the core less", below).
@@ -758,18 +759,18 @@ board:
 
 | op | PCLK/ | `InFlash`: wall, x | `InRam`: wall, x | the vendor's loop |
 |---|---|---|---|---|
-| spi.poll (8-bit write) | 2 | 4662, 1.13 | 4477, 1.09 | 44709, 10.91 |
-| spi.poll | 4 | 8566, 1.04 | 8573, 1.04 | 44775, 5.46 |
-| spi.poll | 16 | 33128, 1.01 | 33131, 1.01 | 60398, 1.84 |
-| spi.poll.rx (8-bit read) | 2 | 6862, 1.67 | 6199, 1.51 | 44709, 10.91 |
-| spi.poll.rx | 4 | 9230, 1.12 | 8545, 1.04 | 44775, 5.46 |
-| spi.poll.rx | 16 | 33126, 1.01 | 33109, 1.01 | 60398, 1.84 |
-| spi.poll16 (16-bit write) | 2 | 8527, 1.04 | 8524, 1.04 | 48589, 5.93 |
-| spi.poll16 | 4 | 16712, 1.02 | 16723, 1.02 | 48589, 2.96 |
-| spi.poll16 | 16 | 65854, 1.00 | 65868, 1.00 | 103121, 1.57 |
-| spi.poll16.rx | 2 | 11309, 1.38 | 10038, 1.22 | 48589, 5.93 |
-| spi.poll16.rx | 4 | 16715, 1.02 | 16707, 1.01 | 48589, 2.96 |
-| spi.poll16.rx | 16 | 65851, 1.00 | 65852, 1.00 | 103121, 1.57 |
+| spi.poll (8-bit write) | 2 | 4642, 1.13 | 4444, 1.08 | 44709, 10.91 |
+| spi.poll | 4 | 8546, 1.04 | 8540, 1.04 | 44775, 5.46 |
+| spi.poll | 16 | 33108, 1.01 | 33098, 1.01 | 60398, 1.84 |
+| spi.poll.rx (8-bit read) | 2 | 6867, 1.67 | 6182, 1.50 | 44709, 10.91 |
+| spi.poll.rx | 4 | 9235, 1.12 | 8528, 1.04 | 44775, 5.46 |
+| spi.poll.rx | 16 | 33131, 1.01 | 33092, 1.00 | 60398, 1.84 |
+| spi.poll16 (16-bit write) | 2 | 8501, 1.03 | 8492, 1.03 | 48589, 5.93 |
+| spi.poll16 | 4 | 16690, 1.01 | 16692, 1.01 | 48589, 2.96 |
+| spi.poll16 | 16 | 65835, 1.00 | 65828, 1.00 | 103121, 1.57 |
+| spi.poll16.rx | 2 | 11315, 1.38 | 10024, 1.22 | 48589, 5.93 |
+| spi.poll16.rx | 4 | 16771, 1.02 | 16693, 1.01 | 48589, 2.96 |
+| spi.poll16.rx | 16 | 65851, 1.00 | 65839, 1.00 | 103121, 1.57 |
 
 The write shape is the chapter's transmit-only loop (frames in on TXE,
 two byte frames an access, the unread echoes' overrun cleared at the
@@ -783,7 +784,8 @@ slower; its PCLK/2 and /4 figures from the flash may move with where the image
 places the transaction (the open finding below). From the difference of
 the 256- and 16-frame walls at PCLK/2, the loop's frame is 16.8 cycles
 written, 25.5 read, 32.0 and 43.0 in half-words (16.0, 23.0, 31.95 and
-38.0 from SRAM). A request naming the engines on this host is refused at once - `start()` true,
+38.0 from SRAM; the walls above are the best of three runs of the letter on each
+image, which agree within 12 cycles). A request naming the engines on this host is refused at once - `start()` true,
 `spi_rejected`, both FIFOs empty and the select high after it.
 
 The vendor's loop is ST's HAL v1.4.7 `HAL_SPI_TransmitReceive`,
@@ -793,10 +795,10 @@ the same pads: one frame in flight (a `txallowed` flag alternates a
 TXE-gated store with an RXNE-gated load) and a `HAL_GetTick()` test per
 turn, 175 cycles a frame in byte frames and 190 in half-words at PCLK/4 - it does
 NOT pack in its polled path (the packing is its interrupt receiver's). So brio's loops
-take 4.9 to 5.2 times less of the time at PCLK/4 in bytes and 2.9 in half-words, and at
+take 4.8 to 5.2 times less of the time at PCLK/4 in bytes and 2.9 in half-words, and at
 PCLK/16, where brio's are the wire's, the vendor's stays 1.84 of it in bytes and 1.57 in
 half-words. Its fixed cost at PCLK/16 is 788 and 1063 cycles above the wire for a request
-of one and three frames, against brio's 316 and 414.
+of one and three frames, against brio's 299 and 390 (below).
 
 **A request's fixed cost** - the price of a DCS command - from the same
 letter: a polled command of one byte and 0, 2 and 15 bytes of data,
@@ -804,12 +806,12 @@ write-only, the select on PA15 and the D/C on PB6, at PCLK/16:
 
 | op | n | `InFlash`: wall, rest | `InRam`: wall, rest |
 |---|---|---|---|
-| spi.req | 1 | 444, 316 | 437, 309 |
-| spi.req | 3 | 798, 414 | 773, 389 |
-| spi.req | 16 | 2485, 437 | 2483, 435 |
+| spi.req | 1 | 427, 299 | 410, 282 |
+| spi.req | 3 | 774, 390 | 744, 360 |
+| spi.req | 16 | 2461, 413 | 2455, 407 |
 
 "Rest" is wall minus the wire's cycles, the Stopwatch's ~62 inside it;
-the 3-byte request's 352 net cycles (327 under `InRam`) are: the compare of the settings
+the 3-byte request's some 328 net cycles (298 under `InRam`) are: the compare of the settings
 and the clamp (~15 instructions), the select and the D/C edges (one
 store each, inline), the command phase (one frame in, the tail's wait
 on FTLVL and BSY, the overrun's clear and the drain - two reads), the
@@ -819,10 +821,7 @@ phase's two ends (the first edge after the write, BSY after the last) -
 some 180 instructions and 14 APB accesses from a flash at two wait
 states, and one call - into the transaction's own function, where the
 placement's flatten puts every loop (polled_transaction() in the
-header): the same transaction unflattened and inline in `start()`,
-measured in scratch builds, took 413, 768 and 2460 cycles - some 32
-less a request - and 9576 for the 256-frame receive at PCLK/2, where
-a flattened function of its own took 6470.
+header, whose comment says why it is out of line).
 
 **The engines** ([design/spi-bus.md](../design/spi-bus.md), "Two ways to run a
 request"). A request naming `SpiEngine::dma` rides the host's two engines at any
@@ -837,11 +836,18 @@ the other instance may be a client using it. In this order:
   `spi_rejected`, before the block, the select or the D/C is touched (letter `s`:
   the select's own pad sees no falling edge, CR1 keeps its polarity, both FIFOs
   stay empty), and `has_dma` says so at compile time.
+- A reset a transfer error left owed is paid next, on a host with engines: the
+  block alone, before any of the tests below.
 - An empty request completes on the spot, `spi_ok`.
-- What the engines cannot carry is refused the same way, before anything moves: a
+- What the engines cannot carry is refused the same way, before the select, the D/C
+  or the wire moves: a
   9- to 16-bit frame on byte engines, or one whose buffer, out or in, is not
   half-word aligned (10.4.3's note). Letter `S` judges every case: the select never
-  falls, D/C, CR1 and CR2 untouched, no edge on SCK, and the next request exact.
+  falls, D/C, CR1 and CR2 untouched, no edge on SCK, and the next request exact. The
+  SCK count is an EXTI counter, whose handler does not keep pace with SCK's edges
+  at this core's rate (which is why D/C's witness is the wire's state in D/C's own
+  handler), so its zero says that no frame was clocked rather than that no single
+  edge was.
 - A command phase followed by a data phase runs in the transmit-only loop inside
   `start()`, then the data phase on the engines: one fixed rule, no arithmetic - a
   command is short by nature, and a block of its own would cost a second launch and
@@ -853,29 +859,35 @@ the other instance may be a client using it. In this order:
 - A command with no data phase is the block, the whole request on the engines.
 - A channel that refuses the block at its launch - the transmit one a program holds
   with `claim()` - ends the request `spi_rejected` with `start()` true and its select
-  back up: the transmit channel, which starts the clock, goes second, so nothing is
-  clocked (letter `S`). Nothing else in the host's fields can make a channel refuse.
+  back up: the transmit channel, which starts the clock, goes second, so nothing of
+  the block is clocked (letter `S`). A command phase ahead of the block has already
+  gone out in the loop by then, D/C left high. Nothing in the request's own fields
+  can make a channel refuse.
 
 **When a request ends, the wire has ended.** The select rises, and `start()` or
 `dma_isr()` answers true, after the last SCK edge - also for a caller that frames
 the select itself (`cs` null), whichever engine the request named. The receive shapes
 end on their last RXNE, and in the CPHA = 0 modes (0 and 2) that comes half a bit
-before the frame's last edge: letter `E` on the host before it waited found the SCK
-pad still at the active level after a polled read at PCLK/256 in modes 0 and 2, every
-time. Nothing of the block marks that edge for a full-duplex master (ES0548 2.12.2's
-BSY concerns a client and 2.12.1 a receive-only master; this host is neither, and its
-receive tail is not BSY's), so the tail waits for the SCK pad's own input to read the
+before the frame's last edge: letter `E`'s control, the same letter over a receive
+tail that ends on the last RXNE, finds the SCK pad still at the active level after a
+polled read at PCLK/256 in modes 0 and 2, every time. Nothing of the block marks that
+edge for a full-duplex master: ES0548 2.12.1 is about BSY after the SPI is disabled
+(a transmitting master with TXE low, a receive-only master, a client losing its
+select) and 2.12.2 about a client's BSY at the end of a transfer, and this receive
+tail reads no BSY. So the tail waits for the SCK pad's own input to read the
 mode's idle level - the pad is sampled into IDR every AHB clock in its alternate
 function (RM0444 7.3.12) - once a request, on the transaction's budget. The
 transmit-only tail needs nothing more: FTLVL and then BSY already put it after the
-edge (letter `E`: never early, every mode, every rate). The engines' completion needs
+edge (letter `E`: never early, in every mode, at PCLK/256, the one rate where the
+control shows an early end). The engines' completion needs
 no wait either: half a bit is at most 128 core cycles here (PCLK is HCLK, /256 the
 slowest code), and the vector's own body from entry to `dma_isr()`'s answer is longer
 (258 to 260 cycles with the ruler's read), so letter `E` finds the pad idle when `dma_isr()`
 answers at every code, in every mode, read and write, command alone and command before
-data. The instrument's reach: from the flag to the pad's read is some 40 cycles on the
-polled path, so an early end is visible at /128 (half a bit 64 cycles) and /256 (128)
-and hidden at /64 and faster, where the half bit is over before the read anyway.
+data. The instrument's reach, from the control: an early end shows at /256 (half a
+bit 128 cycles) and not at /128 (64), so on the polled path the pad's read comes
+between 64 and 128 cycles after the flag, and at /128 and faster the half bit is over
+before the read.
 
 **Which engine costs the core less** - guidance for the program that names one; the
 host reads none of it. On the engines a request costs the core a fixed E - `start()`,
@@ -887,9 +899,12 @@ loops, so no frame pays an idle bus. So the engines cost the core less from N =
 (E - F) / frame frames, rounded up. `bench_stm32` letter `e` measures E - F as ONE
 difference: 64 frames at PCLK/16 on the engined host on the engines and polled through
 the same call, the least busy of the first's eight runs less the second's wall above
-the wire, so the ruler's own cycles cancel - **E 860 for a read and 875 for a
-write, F 412 and 389, E - F 448 and 486**, from the flash at 64 MHz, and
-from `bench_stm32_ram` E - F 447 and 468. The turns are the same letter's polled
+the wire, so the ruler's own cycles cancel - **E 846 for a read and 861 for a
+write, F 398 to 407 and 392 to 394, E - F 439 to 448 and 467 to 469** in three runs,
+from the flash at 64 MHz, and from `bench_stm32_ram` E - F 469 and 482. The figures
+move with the image's layout: an image of the same host code laid out otherwise reads
+E - F 448 for a read and 476 to 486 for a write from the flash (two runs), which moves
+the written row's cell at PCLK/2 up by one and the one at PCLK/4 by up to one. The turns are the same letter's polled
 lines at PCLK/2, where the loop and not the wire is the bound: **25.5 cycles a frame
 read in byte frames, 43.0 in half-words, 16.8 a frame written** (the wire's 16 and 32),
 23.0, 38.0 and 16.0 from SRAM; at PCLK/4, byte frames read from the flash run at 34.75
@@ -898,12 +913,12 @@ against the wire's 32. What that gives, from the flash:
 | the engines cost the core less from | /2 | /4 | /8 | /16 | /32 | /64 | /128 and slower |
 |---|---|---|---|---|---|---|---|
 | 8-bit frames read | 18 | 13 | 7 | 4 | 2 | 1 | 1 |
-| 8-bit frames written | 29 | 16 | 8 | 4 | 2 | 1 | 1 |
+| 8-bit frames written | 28 | 15 | 8 | 4 | 2 | 1 | 1 |
 | 16-bit frames read | 11 | 7 | 4 | 2 | 1 | 1 | 1 |
 
 In words: a single frame already costs the core more polled than on the engines at
 PCLK/64 and slower, at PCLK/32 for 16-bit frames read; at PCLK/2 a request under
-eighteen byte frames read, or twenty-nine written, costs it less in the loop. A cycle count at 64 MHz: at a slower clock the same code takes fewer cycles and
+eighteen byte frames read, or twenty-eight written, costs it less in the loop. A cycle count at 64 MHz: at a slower clock the same code takes fewer cycles and
 the edge sits a little lower. Through the arbiter the engines pay its second dispatch
 besides, which this arithmetic does not count. A request's length is the program's to
 know; the choice is its own.
@@ -916,10 +931,10 @@ stays in the flash, a call through the linker's long-branch veneer. The
 engines' path takes no placement (once a block), nor does `SpiClient` (its runs
 are inline in their caller, which the program places). Measured by
 `bench_stm32` and `bench_stm32_ram` (the tables above): the receive
-loop a tenth faster at PCLK/2 (6862 against 6199 in byte frames, 11309
-against 10038 in half-words), 7 % at PCLK/4 in byte frames (9230 against 8545), and
-nothing at PCLK/4 in half-words or at PCLK/16 and slower, where the wire is the bound; a
-polled request 1 to 25 cycles; and the loop's turns with it, so the
+loop a tenth faster at PCLK/2 (6867 against 6182 in byte frames, 11315
+against 10024 in half-words), 8 % at PCLK/4 in byte frames (9235 against 8528), and
+nothing that matters at PCLK/4 in half-words or at PCLK/16 and slower, where the wire
+is the bound; a polled request 6 to 30 cycles; and the loop's turns with it, so the
 lengths of "Which engine costs the core less" move by a frame at PCLK/2.
 
 **Two facts the letter found.** (1) FRLVL's two bits cannot count three
@@ -1557,16 +1572,16 @@ on every header of the pack, but no silicon has run it:
   two. The write shape, which is what a display's pixel path runs, is on
   the wire's time.
 - **whether the receive loop's flash figures move with where the image places
-  it**: the images on this tree read 256 byte frames in 6862 and 9230 cycles at PCLK/2
+  it**: the images on this tree read 256 byte frames in 6867 and 9235 cycles at PCLK/2
   and /4, the polled transaction at the start of a 32-byte line; with the same
   instructions 28 bytes into a line they read 6463 and 8602, an x of 1.05 against 1.12 at
   PCLK/4, in an image no build reproduces today. The flash's 64-bit lines behind the
   prefetch are the candidate; an alignment attribute on the transaction, measured on both
   placements of every host the stratum's images carry, would say.
-- **a 3-byte polled request costs 352 cycles above the wire** (327 from
-  SRAM): the breakdown above names the silicon's own latencies at the
-  four phase ends (~50), ~180 instructions from the flash and the 32
-  cycles the flattened transaction costs a request. A ceiling
+- **a 3-byte polled request costs some 328 cycles above the wire** (298 from
+  SRAM), net of the ruler: the breakdown above names the silicon's own latencies
+  at the four phase ends (~50), ~180 instructions from the flash and the call into
+  the flattened transaction. A ceiling
   kept as one byte instead of an optional, and the budget's arithmetic
   hoisted, are the next ten cycles; the rest is the shape of two phases
   around a D/C pin.

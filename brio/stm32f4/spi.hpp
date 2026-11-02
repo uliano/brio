@@ -90,7 +90,8 @@
  * select rises, and start() or dma_isr() answers, after the last SCK edge
  * - which in the CPHA = 0 modes comes half a bit after the last RXNE, so
  * the loops' tails and the vector wait for the SCK pad's idle level, the
- * vector with every other interrupt held off for at most that half bit
+ * vector with every other interrupt held off for that half bit at most
+ * when the edge comes, and for its bound's polls when it does not
  * (SpiHost's comment). This header takes no critical section of its own; the engines'
  * arming is stm32f4/dma.hpp's. The Request's three
  * buffers are lent (Lease::reply: each field is a Borrowed pointer,
@@ -1158,16 +1159,18 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *    time. An empty request completes on the spot. What the engines cannot
  *    carry is refused the same way, before anything moves: 16-bit frames on
  *    byte engines, a 16-bit frame whose buffer is not half-word aligned,
- *    and a buffer in the CCM's region (engines_carry()). A command phase
+ *    and a buffer in 0x1000 0000 to 0x1FFF FFFF, the region that opens
+ *    with the CCM (engines_carry()). A command phase
  *    followed by a data phase runs in the transmit-only loop inside
  *    start(), then the data phase on the engines - one fixed rule: a
  *    command is short by nature, and a block of its own would cost a
  *    second launch and a second interrupt; a stall there ends the request
  *    as a polled one's does. A command with no data phase is the block.
- *    A stream that refuses the block at its launch - one a program holds -
- *    ends the request spi_rejected, its select back up, nothing clocked.
- *    The block's own interrupts are never armed: the instance's vector is
- *    not the host's.
+ *    A stream that refuses the block at its launch - one a program holds,
+ *    or one not stopped - ends the request spi_rejected, its select back
+ *    up, nothing of the data phase clocked (a command phase ahead of it
+ *    has already run in the loop). The block's own interrupts are never
+ *    armed: the instance's vector is not the host's.
  *
  * WHEN A REQUEST ENDS THE WIRE HAS ENDED. The select rises, and start()
  * or dma_isr() answers true, after the last SCK edge, also for a caller
@@ -1178,12 +1181,14 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * every AHB1 cycle in its alternate function (RM0390 7.3.11). Each polled
  * phase's tail and the receive block's completion wait for it to read the
  * mode's idle level - once a phase, never a frame - the loops on the
- * transaction's budget, the vector on a bound of half a bit at the
- * applied rate plus a margin (wire_ended()); a wait that runs out ends
- * the request spi_stalled, the select released and a reset owed. The
- * wait in the vector holds every other interrupt off for at most half a
- * bit, and the vector's own entry covers that from /64 down on APB1 and
- * /128 down on APB2 (docs/stm32f4/spi.md has the table).
+ * transaction's budget, the vector on a count of polls, one for each core
+ * cycle of half a bit at the applied rate plus a margin (wire_ended()); a
+ * wait that runs out ends the request spi_stalled, the select released and
+ * a reset owed. The wait in the vector holds every other interrupt off for
+ * at most half a bit when the edge comes (longer, the whole count, when it
+ * does not), and the vector's own entry covers that half bit at /64 and
+ * faster on APB1 and at /128 and faster on APB2 (docs/stm32f4/spi.md has
+ * the table).
  *
  * THE REQUEST IS LENT FOR THE CALL (util/bus_master.hpp's contract): it
  * lies in a slot of the arbiter's that stays as it is until the dispatch
@@ -1597,10 +1602,12 @@ public:
     /// spi_dma_fault, the requests dropped, the streams put away and the
     /// select released here, and the block's reset left to the next start()
     /// (the class comment). The receive block's completion ends the
-    /// transaction: this body waits for the shifter's end in the vector, every
-    /// other interrupt held off for at most half a bit and its margin
-    /// (docs/stm32f4/spi.md has the table by rate), then raises D/C and the
-    /// select. spi_ok; spi_stalled, a reset owed, if BSY outlasted that bound.
+    /// transaction: this body waits in the vector for the SCK pad's idle
+    /// level, the wire's end, every other interrupt held off for half a bit
+    /// at most when the edge comes and for the bound's polls when it does not
+    /// (wire_ended(); docs/stm32f4/spi.md has the table by rate), then raises
+    /// D/C and the select. spi_ok; spi_stalled, a reset owed, if the pad did
+    /// not reach its idle level within that bound.
     /// Compiles away on an engineless host. True when the transaction just
     /// completed: the edge the program's glue posts TransferDone{status()} on,
     /// after the wire's last edge.
@@ -2004,12 +2011,17 @@ private:
 
     /// Whether the engines can carry a block of frames of this width out of
     /// `out` and into `in` - the refusals a request's own fields decide, tested
-    /// before anything moves. No stream reaches the CCM's region at 0x1000 0000:
-    /// the core-coupled memory sits on the CPU's D-bus alone (RM0090 2.3.1), and
-    /// on a part without one nothing answers there, so a block would die on its
-    /// first beat in a bus error. 8-bit frames otherwise always; 16-bit ones when
-    /// the engines' element is a half-word and both buffers sit on a half-word
-    /// (9.3.11: a stream's memory address is aligned on its beat). A null buffer
+    /// before anything moves. A buffer anywhere in 0x1000 0000 to 0x1FFF FFFF is
+    /// refused, one compare of an address's top four bits: the region opens with
+    /// the CCM, 64 KB at 0x1000 0000 on the parts that have one, which sits on the
+    /// CPU's D-bus alone so no stream reaches it (RM0090 2.3.1) - on a part
+    /// without one nothing answers there and a block would die on its first beat
+    /// in a bus error; the same compare also refuses the region's top, the system
+    /// memory, the OTP area and the option bytes, where that reason does not hold
+    /// (whether a stream reads them is not measured). 8-bit frames
+    /// otherwise always; 16-bit ones when the engines' element is a half-word and
+    /// both buffers sit on a half-word (RM0390 9.3.7: a half-word memory address
+    /// is aligned on a half-word). A null buffer
     /// is the engine's own cell, which passes both tests.
     [[gnu::always_inline]] static bool engines_carry(SpiDataSize bits, const uint8_t* out, const uint8_t* in) {
         const uint32_t a = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(out));
@@ -2060,8 +2072,10 @@ private:
     }
 
     /// A stream refused the block: one a program holds (claim()) or one that
-    /// has not stopped. Nothing was clocked, since the requests rise after both
-    /// streams run; the select comes back up and the request ends refused.
+    /// has not stopped. Nothing of the block was clocked, since the requests
+    /// rise after both streams run - a command phase ahead of it already went
+    /// out in the loop, D/C left high; the select comes back up and the
+    /// request ends refused.
     [[gnu::noinline, gnu::cold]] static bool launch_refused() {
         State& s = st_;
         s.dma_active = false;
