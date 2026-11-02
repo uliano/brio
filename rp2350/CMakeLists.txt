@@ -76,6 +76,17 @@ endif()
 if(RP2350_ARCH STREQUAL "riscv" AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv32")
     message(FATAL_ERROR "RP2350_ARCH=riscv with the ${CMAKE_SYSTEM_PROCESSOR} toolchain file: a preset states both, and they must agree")
 endif()
+# GCC 16.2.0 at -Os with Zcmp can drop the li a0,0 of a call's first argument
+# and end the function in cm.popretz (PR target/126454, fixed on
+# releases/gcc-16 after the tarball). The fixed build names it in its version
+# line, and a later release carries the fix anyway.
+if(RP2350_ARCH STREQUAL "riscv" AND CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 16.2.0)
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --version
+                    OUTPUT_VARIABLE RP2350_RISCV_VERSION_LINE ERROR_QUIET)
+    if(NOT RP2350_RISCV_VERSION_LINE MATCHES "pr126454")
+        message(FATAL_ERROR "${CMAKE_CXX_COMPILER} is GCC 16.2.0 without the fix for PR target/126454: it miscompiles calls under Zcmp. Build it with the patch (--with-pkgversion naming pr126454).")
+    endif()
+endif()
 
 # THE HAZARD3 ISA, as a cache variable because it is a MEASUREMENT still
 # owed. The core implements rv32ima with Zicsr/Zifencei, the bit

@@ -2,7 +2,8 @@
 #  toolchain-riscv.cmake - the RISC-V half of the RP2350 build: this chip's
 #  two Hazard3 cores, on the project's own upstream riscv32-unknown-elf-gcc
 #  16.2 at /sw/riscv32-unknown-elf (self-built, with a multilib for each of
-#  the two -march strings this core answers to), pointed at by absolute
+#  the two -march strings this core answers to, and GCC's fix for PR
+#  target/126454, which CMakeLists.txt checks), pointed at by absolute
 #  path. NOT WCH's compiler: that one carries an extension of its own and
 #  serves the two QingKe families; this core is upstream RISC-V and an
 #  upstream compiler is what it takes.

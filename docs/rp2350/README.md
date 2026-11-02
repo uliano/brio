@@ -82,7 +82,13 @@ Two, both self-built under `/sw`, both named by absolute path:
   QingKe families use: this core carries no vendor extension, and the
   `-march` string sits in a cache variable because the toolchain also
   has the multilib without Zcb and Zcmp, and what those two cost or save
-  on real images is a measurement this stratum still owes.
+  on real images is a measurement this stratum still owes. The compiler
+  must carry GCC's fix for PR target/126454, which landed on
+  `releases/gcc-16` after the 16.2.0 tarball: without it, `-Os` with Zcmp
+  can drop the `li a0,0` of a call's first argument and end the function
+  in `cm.popretz`, so the callee reads a stale argument and the caller
+  returns zero. This project's configure refuses a 16.2.0 whose version
+  line does not name the fix (`pr126454`).
 
 What is ARMv8-M and not Raspberry Pi's comes from the `cortexm/` core
 stratum (`brio/rp2350/core_m33.hpp` is the device header and then

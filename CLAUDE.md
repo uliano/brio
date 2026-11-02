@@ -183,10 +183,10 @@ Its twin is DERIVATION BY COPY: a new chip's engine written from the
 nearest existing stratum's, its shape justified by a chip it no longer
 runs on. It produces drivers that pass every suite while running a FIFO
 one entry deep, programming a DMA channel whole for every block, keeping
-one SPI frame in flight - and measured rates several times slower than
-the wire filed as facts instead of findings. The definition of done
-judged behaviour and never cost, so nothing caught it. The antidote to
-both, in practice:
+one SPI frame in flight over a FIFO that holds more - and measured rates
+several times slower than the wire filed as facts instead of findings.
+The definition of done judged behaviour and never cost, so nothing
+caught it. The antidote to both, in practice:
 
 - **Framework, not application.** The target is the whole AVR DA/DB
   range (and future targets), the AVR128DB48 is only the test vehicle.
@@ -622,7 +622,9 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   one build that examines all four cores and flashes from either side.
   The RP2350's Hazard3 half is built by a self-built upstream
   riscv32-unknown-elf-gcc 16.2 at `/sw/riscv32-unknown-elf`
-  (`/sw/src/build-riscv-elf.sh`, `rp2350/cmake/toolchain-riscv.cmake`)
+  (`/sw/src/build-riscv-elf.sh`, `rp2350/cmake/toolchain-riscv.cmake`),
+  with GCC's fix for PR target/126454 and a configure that refuses a
+  16.2.0 without it
   - NOT WCH's compiler, which the two QingKe families use and which
   carries a vendor extension this core has not; its Arm half takes the
   same arm-none-eabi-gcc as the other ARM targets, with the hard-float
