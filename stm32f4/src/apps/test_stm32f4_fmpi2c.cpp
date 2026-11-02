@@ -62,8 +62,13 @@
 //   m  THE SELF-LINK: FMPI2C1 the host, I2C1 the target - the probe, an
 //      absent address, a write, reads of one to four and eight bytes and
 //      a write-then-read at 100 and 400 kHz, the same through the DMA
-//      engines, and the last written byte of a write-then-read refused;
-//      declined by name where nothing answers 0x3A
+//      engines, the engine each Request names judged on the streams (a
+//      write and a read of one under `dma`, `interrupt` on the engined
+//      host touching no stream, a stream that refuses its start leaving
+//      its half to the event vector, `dma` refused on the engineless
+//      one), and
+//      the last written byte of a write-then-read refused on the pump and
+//      under `dma`; declined by name where nothing answers 0x3A
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -155,6 +160,9 @@ volatile bool bus_ao_live = false;
 volatile bool dma_host_live = false;
 volatile bool peer_live = false;
 volatile bool xfer_done = false;
+/// Entries of the two DMA streams' vectors, counted whoever owns them.
+volatile uint32_t tx_dma_entries = 0;
+volatile uint32_t rx_dma_entries = 0;
 
 /// What the EVENT vector saw, in order, for the tenure being watched: the
 /// ISR's own reading of ISR before the engine touches it. Four entries is
@@ -208,9 +216,17 @@ constexpr uint8_t parked = 0xFF;
 /// One tenure, driven by hand (the arbiter skipped, as i2c-bus.md allows a
 /// device that owns a bus alone). Returns the status the engine ended with,
 /// or `parked`; the wait is bounded.
+/// THE ENGINE: `dma` on the engined host, which is what DmaHost is in this
+/// suite for, and `interrupt` on the plain one, unless the caller names it.
+template <typename Bus>
+constexpr I2cEngine engine_of() {
+    return Bus::has_dma ? I2cEngine::dma : I2cEngine::interrupt;
+}
+
 template <typename Bus>
 uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
-               FmpI2cSpeed speed = FmpI2cSpeed::standard_100k) {
+               FmpI2cSpeed speed = FmpI2cSpeed::standard_100k,
+               I2cEngine engine = engine_of<Bus>()) {
     typename Bus::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(tx);
@@ -218,6 +234,7 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     r.rx = lend<Lease::reply>(rx);
     r.rx_len = rx_len;
     r.speed = speed;
+    r.engine = engine;
     xfer_done = false;
     if (Bus::start(r)) {
         return Bus::status();   // the synchronous refusal
@@ -1406,6 +1423,7 @@ struct Far {
     static inline volatile uint8_t pos = 0;
     static inline volatile uint8_t took = 0;
     static inline volatile uint8_t refuse_at = 0;
+    static inline volatile uint8_t matches = 0;   ///< address matches, whoever reads them
     static inline uint8_t sink[32];
 
     static uint8_t value(uint8_t i) { return static_cast<uint8_t>(0x47u + 0x1Du * i); }
@@ -1413,6 +1431,7 @@ struct Far {
     [[gnu::always_inline]] static void event() {
         switch (ClassicTarget::service()) {
             case I2cClientEvent::addressed:
+                matches = static_cast<uint8_t>(matches + 1u);
                 pos = 0;
                 serving = ClassicTarget::host_reads();
                 Classic::buffer_interrupt(true);
@@ -1591,6 +1610,154 @@ void tm_self_link() {
     DmaHost::release();
     print(serial, "  400 kHz, the engines: ", dma_exact, " of 9 shapes exact", crlf);
     bench.verdict("... and through the DMA engines", dma_exact == 9u);
+
+    // THE ENGINE NAMED, judged on the streams: which mechanism carried a
+    // half is read from the stream's memory address (zeroed before the
+    // tenure with the stream stopped, written by nothing but a block
+    // start, stm32f4/dma.hpp's launch()) and from its vector, entered once
+    // by the block's completion; identities, no tolerance.
+    dma_host_live = true;
+    (void)DmaHost::init(clock, base_config);
+    using TxRegs = DmaStream<TxEngine::controller, TxEngine::stream>;
+    using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+    struct Trace {
+        uint8_t status;
+        bool tx;
+        bool rx;
+        uint32_t tx_n;
+        uint32_t rx_n;
+    };
+    auto traced = [](const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
+                     I2cEngine e) {
+        // SxM0AR takes a write only with EN down (RM0390 9.5.8); a stream
+        // the test holds keeps its holder's address, and is not written.
+        if (!TxRegs::enabled()) {
+            TxRegs::regs().M0AR = 0;
+        }
+        if (!RxRegs::enabled()) {
+            RxRegs::regs().M0AR = 0;
+        }
+        tx_dma_entries = 0;
+        rx_dma_entries = 0;
+        const uint8_t st = tenure<DmaHost>(self_addr, tx, tx_len, rx, rx_len,
+                                           FmpI2cSpeed::fast_400k, e);
+        return Trace{st, tx != nullptr && TxRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx),
+                     rx != nullptr && RxRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx),
+                     tx_dma_entries, rx_dma_entries};
+    };
+    static const uint8_t one_out[1] = {0x6C};
+    uint8_t one_in = 0xEE;
+    Far::took = 0;
+    Trace t = traced(one_out, 1, nullptr, 0, I2cEngine::dma);
+    const bool w1 = t.status == i2c_ok && t.tx && t.tx_n == 1u && Far::took == 1u &&
+                    Far::sink[0] == one_out[0];
+    t = traced(nullptr, 0, &one_in, 1, I2cEngine::dma);
+    const bool r1 = t.status == i2c_ok && t.rx && t.rx_n == 1u && one_in == Far::value(0);
+    print(serial, "  dma, a write of one: ", w1 ? "on the transmit stream, exact" : "WRONG",
+          "; a read of one: ", r1 ? "on the receive stream, exact" : "WRONG", crlf);
+    bench.verdict("dma at one byte: a write and a read of one on the engines, each stream "
+                  "completing once, byte-exact",
+                  w1 && r1);
+    uint8_t eight_in[8] = {};
+    static const uint8_t eight_out[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    Far::took = 0;
+    t = traced(eight_out, 8, eight_in, 8, I2cEngine::interrupt);
+    bool i8 = t.status == i2c_ok && !t.tx && !t.rx && t.tx_n == 0u && t.rx_n == 0u &&
+              Far::took == 8u;
+    for (uint8_t i = 0; i < 8u && i8; ++i) {
+        i8 = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
+    }
+    print(serial, "  interrupt on the engined host, eight written and eight read: status ",
+          t.status, ", streams started tx ", t.tx, " rx ", t.rx, ", stream vector entries ",
+          t.tx_n + t.rx_n, crlf);
+    bench.verdict("interrupt on the engined host touches no stream, and the tenure is exact", i8);
+    // A STREAM WHOSE START REFUSES leaves its half to the event vector:
+    // each engine held in turn by a block of the test's own, started on its
+    // stream with no request raised (TXDMAEN and RXDMAEN are the tenure's),
+    // so start() finds the stream running before the START. The stream's
+    // memory address keeps naming the holder and its vector is never
+    // entered; the tenure completes byte-exact.
+    static uint8_t tx_holder[4] = {0xA1, 0xA2, 0xA3, 0xA4};
+    static uint8_t rx_holder[4] = {};
+    for (uint8_t i = 0; i < 8u; ++i) {
+        eight_in[i] = 0;
+    }
+    Far::took = 0;
+    const bool tx_held = TxEngine::start(std::span<const uint8_t>(tx_holder, 4));
+    t = traced(eight_out, 8, eight_in, 8, I2cEngine::dma);
+    TxEngine::stop();
+    bool tx_refused = tx_held && t.status == i2c_ok && !t.tx && t.rx && t.tx_n == 0u &&
+                      t.rx_n == 1u && Far::took == 8u &&
+                      TxRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx_holder);
+    for (uint8_t i = 0; i < 8u && tx_refused; ++i) {
+        tx_refused = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
+    }
+    for (uint8_t i = 0; i < 8u; ++i) {
+        eight_in[i] = 0;
+    }
+    Far::took = 0;
+    const bool rx_held = RxEngine::start(std::span<uint8_t>(rx_holder, 4));
+    t = traced(eight_out, 8, eight_in, 8, I2cEngine::dma);
+    RxEngine::stop();
+    bool rx_refused = rx_held && t.status == i2c_ok && t.tx && !t.rx && t.tx_n == 1u &&
+                      t.rx_n == 0u && Far::took == 8u &&
+                      RxRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx_holder);
+    for (uint8_t i = 0; i < 8u && rx_refused; ++i) {
+        rx_refused = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
+    }
+    print(serial, "  dma with a stream held, eight written and eight read: the write ",
+          tx_refused ? "on the event vector" : "WRONG", ", the read ",
+          rx_refused ? "on the event vector" : "WRONG", crlf);
+    bench.verdict("dma with the transmit stream refusing its start: the write rides the event "
+                  "vector, the read the receive stream, byte-exact",
+                  tx_refused);
+    bench.verdict("... and with the receive stream refusing: the read rides the event vector, "
+                  "byte-exact",
+                  rx_refused);
+    uint8_t d_nacked = 0;
+    uint8_t d_gone = 0;
+    uint8_t d_next = 0;
+    self_refusals<DmaHost>(FmpI2cSpeed::fast_400k, d_nacked, d_gone, d_next);
+    print(serial, "  dma, the last written byte refused, one to four written: 16 refusals, "
+                  "i2c_nack_data ", d_nacked, ", the bus let go ", d_gone,
+          ", the next tenure ok ", d_next, crlf);
+    bench.verdict("the LAST WRITTEN byte of a write-then-read refused under dma: i2c_nack_data, "
+                  "the bus let go, the next tenure running",
+                  d_nacked == 16u && d_gone == 16u && d_next == 16u);
+    dma_host_live = false;
+    DmaHost::release();
+
+    // `dma` on the host with no engines bound: refused inside start(), CR2
+    // untouched (no START), BUSY low and no address match at the far end;
+    // then the same host's next tenure exact.
+    (void)host_ready();
+    {
+        Far::matches = 0;
+        const uint32_t cr2 = S::cr2();
+        Host::Request q{};
+        q.addr = self_addr;
+        q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(eight_out));
+        q.tx_len = 4;
+        q.engine = I2cEngine::dma;
+        const bool sync = Host::start(q);
+        const uint8_t st = Host::status();
+        (void)delay_us(clock, 200u);   // an address would be at the far end in 25 us
+        const uint8_t matched = Far::matches;
+        const bool quiet = sync && st == i2c_rejected && S::cr2() == cr2 && !S::busy() &&
+                           matched == 0u;
+        Far::took = 0;
+        const uint8_t after = tenure<Host>(self_addr, eight_out, 4, nullptr, 0);
+        print(serial, "  dma on the engineless host: start() ", sync, ", status ", st,
+              ", address matches ", matched, "; the next write: status ", after,
+              ", the far end took ", Far::took, crlf);
+        bench.verdict("dma on a host with no engines bound: i2c_rejected inside start(), nothing "
+                      "on the wire",
+                      quiet);
+        bench.verdict("... and the next tenure on that host is exact",
+                      after == i2c_ok && Far::took == 4u && Far::sink[0] == eight_out[0] &&
+                          Far::sink[1] == eight_out[1] && Far::sink[2] == eight_out[2] &&
+                          Far::sink[3] == eight_out[3]);
+    }
 
     // The refusal of the last written byte, as this host sees it: its NACK
     // stops the tenure by hardware (23.4.9), whatever comes after.
@@ -1962,11 +2129,13 @@ extern "C" void FMPI2C1_ER_IRQHandler() {
 }
 
 extern "C" void DMA1_Stream5_IRQHandler() {
+    tx_dma_entries = tx_dma_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }
 }
 extern "C" void DMA1_Stream2_IRQHandler() {
+    rx_dma_entries = rx_dma_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }

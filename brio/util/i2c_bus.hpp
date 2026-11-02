@@ -81,30 +81,30 @@ constexpr bool i2c_address_in_range(uint8_t addr) {
            static_cast<uint8_t>(i2c_address_last - i2c_address_first);
 }
 
-/// Which mechanism moves a request's data bytes, on a host that can bind
-/// DMA engines (its `has_dma` says whether this one has). The address,
-/// the repeated START and the end of a tenure are the host's interrupt
-/// in every case; only the data halves - the bytes written, the bytes
-/// read - have a choice, each half decided on its own:
+/// Which mechanism moves a request's data bytes, named by the program in
+/// the Request's `engine` field on a host that takes it. The address, the
+/// repeated START and the end of a tenure are the host's interrupt in
+/// every case; only the data halves - the bytes written, the bytes read -
+/// move one way or the other:
 ///
-///   automatic  the default, what a Request that does not name the field
-///              gets: the host's own rule, the engines from the length at
-///              which they cost the core fewer cycles than the interrupt
-///              (the host's header states its count and the arithmetic
-///              behind it, docs/design/i2c-bus.md the rule)
-///   interrupt  the host's interrupt, one entry a byte, at any length
-///   dma        the engines at any length, for every half they can carry;
-///              a half they cannot carry (the host's header names which)
-///              stays on the interrupt, not refused
+///   interrupt  the default, what a Request that does not name the field
+///              gets: the host's interrupt, about one entry a byte, at any
+///              length
+///   dma        the DMA channels bound to the host (its engines) carry
+///              every half they can, at any length; a half they cannot
+///              carry (the host's header names which) stays on the
+///              interrupt and the request completes, not refused
 ///
-/// A host with no engines bound answers `dma` i2c_rejected from start(),
-/// nothing armed and nothing on the wire, as it answers an address
-/// outside the range. A host that does not carry the field yet has no
-/// such member, and a Request that names it does not compile there.
+/// The host never chooses: a wrong choice costs core cycles or a sleep,
+/// never correctness, and the length from which `dma` costs the core less
+/// is in each family's document. A host with no engines bound (its
+/// `has_dma` is false) answers `dma` i2c_rejected from start(), nothing
+/// armed and nothing on the wire, as it answers an address outside the
+/// range. A host that does not carry the field yet has no such member,
+/// and a Request that names it does not compile there.
 enum class I2cEngine : uint8_t {
-    automatic = 0,
-    interrupt = 1,
-    dma = 2,
+    interrupt = 0,
+    dma = 1,
 };
 
 /// The arbiter under I2C's name. `pending_depth` is how many requests

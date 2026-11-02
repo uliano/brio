@@ -27,12 +27,14 @@
 //   reference clock APB1 at 45 MHz under the static 180 MHz. Its engine,
 //   from the chapter (stm32f4/i2c.hpp's class comment, docs/stm32f4/i2c.md):
 //   the F1 lineage's event machine (RM0390 24.3.3), SB, ADDR and BTF each holding
-//   SCL until software runs the flag's sequence; the first two data bytes
-//   of a write loaded in the entry that clears ADDR (EV8_1, no interrupt for
-//   either); a write phase of three bytes or more on the transmit engine, a
-//   read phase of two or more on the receive engine under CR2.LAST, the
-//   one-byte read on the pump (the driver's dma_min_write, 3, a private
-//   constant, so the shapes below name their paths in prose); the repeated
+//   SCL until software runs the flag's sequence; on the pump the first two
+//   data bytes of a write loaded in the entry that clears ADDR (EV8_1, no
+//   interrupt for either); under a Request naming `dma` every phase on the
+//   engines, the transmit stream started at ADDR and the receive stream at
+//   the read's SB, a run of two or more under CR2.LAST and a run of one
+//   under 24.3.8's own sequence - and THIS SUITE NAMES THE ENGINE
+//   (EngineNamed below): `dma` when either half carries two bytes or more,
+//   `interrupt` otherwise, so letter o's shapes run on both paths; the repeated
 //   START requested on the last written byte's TxE behind a dummy store; a
 //   refused LAST written byte of a write-then-read closed by a void write
 //   from the Sr (24.6.1 forbids any CR1 access while START stands); the
@@ -61,8 +63,9 @@
 //   STM32G0's register file (23.4.9): NBYTES with AUTOEND carries a tenure,
 //   a write-then-read's repeated START is the one CR2 store at TC, STOPF the
 //   completion edge of every shape, a NACK recorded on the event vector and
-//   closed by the STOP the block sends itself; WITH ENGINES NAMED EVERY
-//   DATA BYTE RIDES THEM, whatever the length (23.4.16: the engines started
+//   closed by the STOP the block sends itself; THIS SUITE NAMES `dma` FOR
+//   EVERY REQUEST (EngineNamed below), so every data byte rides the
+//   engines, whatever the length (23.4.16: the engines started
 //   before the START; only the address phase and the end stay on the
 //   vectors); ES0298 2.12.3's spurious BERR counted; transmit_stall_risk()
 //   printed (ES0298 2.12.8's band on the APB-to-kernel ratio). start()
@@ -129,7 +132,7 @@
 //      closed by the F1 lineage's void write, which the peer acknowledges
 //      (refused_close_hits below).
 //   w  three requesters of three priorities at 400 kHz: the Client's
-//      write-then-reads of 1+6 (the read half on the engines), Minor's
+//      write-then-reads of 1+6 (both halves on the engines), Minor's
 //      writes of two, Pressure's probes: in order, i2c_ok, nothing
 //      rejected, no timeout, the peer's tallies exact.
 //   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
@@ -254,6 +257,22 @@ const char* pressure_dark() {
 
 // ---- the two hosts, and the one this image runs --------------------------------------
 
+/// THE ENGINE, NAMED BY THE SUITE. A host carries a half on the engine its
+/// Request names (Request::engine, util/i2c_bus.hpp) and the shared body
+/// builds every Request naming none, so this wrapper names it in start():
+/// `dma` for every Request when `always_dma`, otherwise `dma` when either
+/// half carries two bytes or more and `interrupt` when neither does - the
+/// suite's own `if`, one copy of the Request and a compare added to
+/// start()'s cycles. Every other verb is the host's own.
+template <typename Base, bool always_dma>
+struct EngineNamed : Base {
+    static bool start(const typename Base::Request& r) {
+        typename Base::Request q = r;
+        q.engine = (always_dma || r.tx_len >= 2u || r.rx_len >= 2u) ? I2cEngine::dma : I2cEngine::interrupt;
+        return Base::start(q);
+    }
+};
+
 /// Letter o's rows, each with the path the host takes for it.
 struct Shape {
     uint8_t tx_len;
@@ -291,7 +310,7 @@ struct OnI2c1 {
     /// (RM0390 table 28); the reserve checks the two cells.
     using TxEngine = DmaTxEngine<1, 6, 1>;
     using RxEngine = DmaRxEngine<1, 0, 1>;
-    using Host = I2cHost<1, pins, TxEngine, RxEngine>;
+    using Host = EngineNamed<I2cHost<1, pins, TxEngine, RxEngine>, false>;
     using Res = I2c<1>;
     using SclPin = Pin<'B', 8>;
     using SdaPin = Pin<'B', 9>;
@@ -304,10 +323,11 @@ struct OnI2c1 {
     static constexpr uint32_t hz(I2cSpeed s) { return i2c_speed_hz(s); }
 
     struct Traits : PeerTraits {
-        /// Letter o's table: a write phase of three bytes or more rides the
-        /// transmit engine and a read phase of two or more the receive
-        /// engine; one or two written bytes are EV8_1's, loaded in the
-        /// entry that clears ADDR, and the one-byte read is the pump's.
+        /// Letter o's table, each shape with the path it takes under
+        /// EngineNamed: a Request with a half of two bytes or more names
+        /// `dma` and rides the engines whole, its half of one too; one with
+        /// no longer half names `interrupt` and rides the vectors, one or
+        /// two written bytes EV8_1's, loaded in the entry that clears ADDR.
         /// Ends on a plain write (the shared body's counted serve).
         static constexpr Shape shapes[] = {
             {0, 0, "the probe: the address alone, the STOP requested in ADDR's entry"},
@@ -317,11 +337,11 @@ struct OnI2c1 {
             {0, 8, "engines"},
             {0, 32, "engines"},
             {1, 1, "pump both halves: the byte in ADDR's entry, the Sr on its TxE, the one-byte read"},
-            {1, 2, "pump write, engine read"},
-            {2, 8, "pump write (both bytes in ADDR's entry), engine read"},
+            {1, 2, "engines both halves, the one written byte on the transmit stream"},
+            {2, 8, "engines both halves"},
             {1, 0, "pump: the byte in ADDR's entry, BTF the end"},
-            {2, 0, "pump: both bytes in ADDR's entry (EV8_1), BTF the end"},
-            {3, 0, "engines: the transmit stream, BTF the end"},
+            {2, 0, "engines: the transmit stream, BTF the end"},
+            {3, 0, "engines"},
             {8, 0, "engines"},
             {32, 0, "engines"},
         };
@@ -382,7 +402,7 @@ struct OnFmpi2c1 {
     /// 2 (RM0390 table 28): the one cell each, which the reserve checks.
     using TxEngine = DmaTxEngine<1, 5, 2>;
     using RxEngine = DmaRxEngine<1, 2, 2>;
-    using Host = FmpI2cHost<1, pins, TxEngine, RxEngine>;
+    using Host = EngineNamed<FmpI2cHost<1, pins, TxEngine, RxEngine>, true>;
     using Res = FmpI2c<1>;
     using SclPin = Pin<'C', 6>;
     using SdaPin = Pin<'C', 7>;
@@ -398,10 +418,10 @@ struct OnFmpi2c1 {
     static constexpr uint32_t hz(FmpI2cSpeed s) { return fmpi2c_speed_hz(s); }
 
     struct Traits : PeerTraits {
-        /// Letter o's table: with the engines named every data half rides
-        /// them, started before the START (23.4.16) - the host keeps no
-        /// pump for data and no crossover; the address phase and the end
-        /// stay on the vectors. Ends on a plain write.
+        /// Letter o's table: EngineNamed names `dma` for every Request, so
+        /// every data half rides the engines, started before the START
+        /// (23.4.16); the address phase and the end stay on the vectors.
+        /// Ends on a plain write.
         static constexpr Shape shapes[] = {
             {0, 0, "the probe: the address alone, STOPF the edge"},
             {0, 1, "engines: the receive stream, one byte"},

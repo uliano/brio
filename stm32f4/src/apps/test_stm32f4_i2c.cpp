@@ -84,7 +84,11 @@
 //   g  the speeds and both fast-mode duties, with SCL counted on the pad
 //   h  a register written and read back, then the device's own reset
 //   i  THE KERNEL: I2cBus over I2cHost, the rejection, the sleep votes
-//   j  the same tenures through the two DMA engines
+//   j  the engine named: `dma` refused on the engineless host, the
+//      tenures through the two DMA engines at their shortest - a write
+//      and a read of one byte - `interrupt` on the engined host touching
+//      no stream, and a stream that refuses its start leaving its phase
+//      to the vectors
 //   k  the recovery verbs: SWRST, recover() and unstick()
 //   l  (the 32F469IDISCOVERY, by name only) A FINGER ON THE GLASS: the
 //      touch controller in interrupt trigger mode, its INT counted on
@@ -311,6 +315,9 @@ uint8_t peer_sys_ctrl2_boot = 0;
 volatile bool bus_ao_live = false;
 volatile bool dma_host_live = false;
 volatile bool xfer_done = false;
+/// Entries of the two DMA streams' vectors, counted whoever owns them.
+volatile uint32_t tx_dma_entries = 0;
+volatile uint32_t rx_dma_entries = 0;
 
 // ---- the rulers ------------------------------------------------------------------------
 
@@ -345,9 +352,17 @@ constexpr uint8_t parked = 0xFF;
 /// One tenure against `addr`, driven by hand (the arbiter skipped, as
 /// i2c-bus.md allows a device that owns a bus alone). Returns the status
 /// the engine ended with, or `parked`; the wait is bounded.
+/// THE ENGINE: `dma` on the engined host, which is what DmaHost is in this
+/// suite for, and `interrupt` on the plain one, unless the caller names it.
+template <typename Bus>
+constexpr I2cEngine engine_of() {
+    return Bus::has_dma ? I2cEngine::dma : I2cEngine::interrupt;
+}
+
 template <typename Bus>
 uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
-               I2cSpeed speed = I2cSpeed::standard_100k) {
+               I2cSpeed speed = I2cSpeed::standard_100k,
+               I2cEngine engine = engine_of<Bus>()) {
     typename Bus::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(tx);
@@ -355,6 +370,7 @@ uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uin
     r.rx = lend<Lease::reply>(rx);
     r.rx_len = rx_len;
     r.speed = speed;
+    r.engine = engine;
     xfer_done = false;
     if (Bus::start(r)) {
         return Bus::status();   // the synchronous refusal
@@ -978,6 +994,7 @@ SclReading timed_read(uint8_t n, I2cSpeed speed, uint8_t* into) {
     r.rx = lend<Lease::reply>(into);
     r.rx_len = n;
     r.speed = speed;
+    r.engine = I2cEngine::dma;
     xfer_done = false;
     if (DmaHost::start(r)) {
         return SclReading{};
@@ -1277,6 +1294,48 @@ void ti_kernel() {
 // j - the DMA engines
 // =============================================================================
 
+/// The two engines' streams, read and written by letter j between
+/// tenures (each stopped then: its block completed or never started).
+using TxStreamRegs = DmaStream<TxEngine::controller, TxEngine::stream>;
+using RxStreamRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+
+/// What one tenure left on the engines. WHICH MECHANISM CARRIED A PHASE is
+/// read from two things: the stream's memory address, zeroed before the
+/// tenure with the stream stopped and written by nothing but a block start
+/// (stm32f4/dma.hpp's launch()), so SxM0AR naming this tenure's buffer
+/// afterwards means its engine was started for it; and the stream's
+/// vector, entered exactly once by the block's completion (its transfer
+/// complete, the engines' one enabled flag). Both are identities, no
+/// tolerance.
+struct EngineTrace {
+    uint8_t status;
+    bool tx_carried;
+    bool rx_carried;
+    uint32_t tx_entries;
+    uint32_t rx_entries;
+};
+
+template <typename Bus>
+EngineTrace traced(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
+                   I2cEngine engine) {
+    // SxM0AR takes a write only with EN down (RM0390 9.5.8); a stream the
+    // test holds keeps its holder's address, and is not written.
+    if (!TxStreamRegs::enabled()) {
+        TxStreamRegs::regs().M0AR = 0;
+    }
+    if (!RxStreamRegs::enabled()) {
+        RxStreamRegs::regs().M0AR = 0;
+    }
+    tx_dma_entries = 0;
+    rx_dma_entries = 0;
+    const uint8_t st = tenure<Bus>(peer_addr, tx, tx_len, rx, rx_len, I2cSpeed::standard_100k,
+                                   engine);
+    return {st,
+            tx != nullptr && TxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx),
+            rx != nullptr && RxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx),
+            tx_dma_entries, rx_dma_entries};
+}
+
 void tj_engines() {
     if (!host_ready() || peer_addr == 0u) {
         bench.verdict("the host came up and a device answered", false);
@@ -1288,6 +1347,46 @@ void tj_engines() {
     // while the plain host still owns the vectors.
     const uint8_t start = read_reg(reg_sys_ctrl2);
 
+    // `dma` on the host with no engines bound: refused inside start(), CR1
+    // and CR2 as they were (no START, no event vector raised) and the
+    // controller never on the wire (MSL) - then the same read on `interrupt`
+    // exact on the same host.
+    {
+        const uint8_t cmd[1] = {reg_chip_id};
+        uint8_t got[8] = {};
+        // The last read's STOP off the wire first - a bit period after its
+        // completion, which comes when the STOP is requested - so CR1 and
+        // MSL are read at rest: two ticks, the way letter m waits.
+        const uint32_t t0 = Ticker::ticks();
+        while (Ticker::ticks() - t0 < 2u) {
+        }
+        const uint32_t cr1 = S::regs().CR1;
+        const uint32_t cr2 = S::regs().CR2;
+        Host::Request q{};
+        q.addr = peer_addr;
+        q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(cmd));
+        q.tx_len = 1;
+        q.rx = lend<Lease::reply>(static_cast<uint8_t*>(got));
+        q.rx_len = 8;
+        q.engine = I2cEngine::dma;
+        const bool sync = Host::start(q);
+        const uint8_t st = Host::status();
+        const bool refused = sync && st == i2c_rejected && S::regs().CR1 == cr1 &&
+                             S::regs().CR2 == cr2 && !S::host();
+        q.engine = static_cast<I2cEngine>(3);
+        const bool past = Host::start(q) && Host::status() == i2c_rejected;
+        const uint8_t next = read_regs<Host>(reg_chip_id, got, 8);
+        print(serial, "  dma on the engineless host: start() ", sync, ", status ", st,
+              refused ? ", nothing written, MSL clear" : ", SOMETHING MOVED",
+              "; the next read on interrupt: status ", next, crlf);
+        bench.verdict("dma on a host with no engines bound is answered i2c_rejected inside "
+                      "start(), CR1 and CR2 untouched and the controller never on the wire",
+                      refused);
+        bench.verdict("... a value past the enumeration the same way", past);
+        bench.verdict("... and the next read on that host is exact",
+                      next == i2c_ok && same(reference, got, 8));
+    }
+
     Dma<1>::init();
     bus_ao_live = false;
     if (!DmaHost::init(clock)) {
@@ -1296,28 +1395,91 @@ void tj_engines() {
     }
     dma_host_live = true;
 
-    // A write phase on the transmit engine, a read phase of eight on the
-    // receive engine under CR2.LAST.
+    // A write phase of one (the index) on the transmit engine, a read phase
+    // of eight on the receive engine under CR2.LAST.
+    const uint8_t index[1] = {reg_chip_id};
     uint8_t got[8] = {};
-    const uint8_t st = read_regs<DmaHost>(reg_chip_id, got, 8);
-    print(serial, "  eight bytes through the engines: ", hex(got[0]), " ", hex(got[1]), " ",
-          hex(got[2]), " ", hex(got[3]), " ", hex(got[4]), " ", hex(got[5]), " ", hex(got[6]), " ",
-          hex(got[7]), ", status ", st, crlf);
-    bench.verdict("a write-then-read tenure whose phases both ride the DMA ends i2c_ok",
-                  st == i2c_ok);
+    EngineTrace t = traced<DmaHost>(index, 1, got, 8, I2cEngine::dma);
+    print(serial, "  dma, the index and eight: ", hex(got[0]), " ", hex(got[1]), " ",
+          hex(got[2]), " ", hex(got[3]), " ", hex(got[4]), " ", hex(got[5]), " ", hex(got[6]),
+          " ", hex(got[7]), ", status ", t.status, "; streams started tx ", t.tx_carried, " rx ",
+          t.rx_carried, ", vector entries tx ", t.tx_entries, " rx ", t.rx_entries, crlf);
+    bench.verdict("a write-then-read under dma ends i2c_ok, both phases on the engines - the "
+                  "one-byte index too - each stream completing once",
+                  t.status == i2c_ok && t.tx_carried && t.rx_carried && t.tx_entries == 1u &&
+                      t.rx_entries == 1u);
     bench.verdict("... and the block is byte-exact against the same read on the pump",
                   same(reference, got, 8));
 
-    // A ONE-BYTE read stays on the pump even with the engines named: the
-    // ACK-before-ADDR sequence has no DMA expression.
+    // THE SHORTEST READ: one byte, on the receive engine under 24.3.8's
+    // own sequence (ACK cleared at the SB, the STOP after ADDR's clear).
     uint8_t one = 0;
-    const uint8_t one_st = read_regs<DmaHost>(reg_chip_id, &one, 1);
-    print(serial, "  a one-byte read with the engines named: ", hex(one), ", status ", one_st,
-          " (the pump served it - the ACK-before-ADDR sequence cannot be expressed as a block)",
-          crlf);
-    bench.verdict("the one-byte read is served by the pump under an engined host, and it is the "
-                  "same byte",
-                  one_st == i2c_ok && one == reference[0]);
+    t = traced<DmaHost>(index, 1, &one, 1, I2cEngine::dma);
+    print(serial, "  dma, the index and one: ", hex(one), ", status ", t.status,
+          "; streams started tx ", t.tx_carried, " rx ", t.rx_carried, ", vector entries tx ",
+          t.tx_entries, " rx ", t.rx_entries, crlf);
+    bench.verdict("a one-byte read under dma rides the receive engine, its stream completing "
+                  "once, and it is the same byte",
+                  t.status == i2c_ok && t.rx_carried && t.rx_entries == 1u && one == reference[0]);
+    // THE SHORTEST WRITE: the index alone, a write of one byte, on the
+    // transmit engine; the device's pointer is all it moves.
+    t = traced<DmaHost>(index, 1, nullptr, 0, I2cEngine::dma);
+    print(serial, "  dma, a write of one: status ", t.status, "; stream started ", t.tx_carried,
+          ", vector entries tx ", t.tx_entries, " rx ", t.rx_entries, crlf);
+    bench.verdict("a one-byte write under dma rides the transmit engine, its stream completing "
+                  "once",
+                  t.status == i2c_ok && t.tx_carried && t.tx_entries == 1u && t.rx_entries == 0u);
+    // `interrupt` on the engined host: the same read of eight on the
+    // vectors, no stream started, no stream vector entered.
+    for (uint8_t i = 0; i < 8u; ++i) {
+        got[i] = 0;
+    }
+    t = traced<DmaHost>(index, 1, got, 8, I2cEngine::interrupt);
+    print(serial, "  interrupt on the engined host, the index and eight: status ", t.status,
+          "; streams started tx ", t.tx_carried, " rx ", t.rx_carried, ", vector entries tx ",
+          t.tx_entries, " rx ", t.rx_entries, crlf);
+    bench.verdict("interrupt on the engined host touches no stream, and the read is exact",
+                  t.status == i2c_ok && !t.tx_carried && !t.rx_carried && t.tx_entries == 0u &&
+                      t.rx_entries == 0u && same(reference, got, 8));
+
+    // A STREAM WHOSE START REFUSES leaves its phase to the pump: each
+    // engine held in turn by a block of the test's own, started on its
+    // stream with no request raised (DMAEN is the tenure's), so the host's
+    // start of it is refused - the transmit stream's in the ADDR entry,
+    // before ADDR's clear, the receive stream's at the read's SB, before
+    // the address. The stream's memory address keeps naming the holder
+    // (SxM0AR takes no write while EN stands), its vector is never
+    // entered, and the tenure completes byte-exact on the vectors.
+    static uint8_t tx_holder[4] = {0xA1, 0xA2, 0xA3, 0xA4};
+    static uint8_t rx_holder[4] = {};
+    for (uint8_t i = 0; i < 8u; ++i) {
+        got[i] = 0;
+    }
+    const bool tx_held = TxEngine::start(std::span<const uint8_t>(tx_holder, 4));
+    t = traced<DmaHost>(index, 1, got, 8, I2cEngine::dma);
+    TxEngine::stop();
+    const bool tx_refused = tx_held && t.status == i2c_ok && !t.tx_carried && t.rx_carried &&
+                            t.tx_entries == 0u && t.rx_entries == 1u &&
+                            TxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx_holder) &&
+                            same(reference, got, 8);
+    for (uint8_t i = 0; i < 8u; ++i) {
+        got[i] = 0;
+    }
+    const bool rx_held = RxEngine::start(std::span<uint8_t>(rx_holder, 4));
+    t = traced<DmaHost>(index, 1, got, 8, I2cEngine::dma);
+    RxEngine::stop();
+    const bool rx_refused = rx_held && t.status == i2c_ok && t.tx_carried && !t.rx_carried &&
+                            t.tx_entries == 1u && t.rx_entries == 0u &&
+                            RxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx_holder) &&
+                            same(reference, got, 8);
+    print(serial, "  dma with a stream held: the index's ", tx_refused ? "on the pump" : "WRONG",
+          ", the read's ", rx_refused ? "on the pump" : "WRONG", crlf);
+    bench.verdict("dma with the transmit stream refusing its start: the index rides the pump, "
+                  "the read the receive stream, byte-exact",
+                  tx_refused);
+    bench.verdict("... and with the receive stream refusing: the read rides the pump, "
+                  "byte-exact",
+                  rx_refused);
 
     // A write of two bytes through the transmit engine, read back on the
     // pump: the engined write path really moves the bytes. Without the
@@ -1453,6 +1615,7 @@ uint8_t run_ms(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, I
     r.rx = lend<Lease::reply>(rx);
     r.rx_len = rx_len;
     r.speed = speed;
+    r.engine = engine_of<Bus>();
     xfer_done = false;
     if (Bus::start(r)) {
         return Bus::status();
@@ -2029,11 +2192,13 @@ extern "C" void BRIO_I2C_ER_HANDLER() {
 }
 
 extern "C" void BRIO_I2C_TX_DMA_HANDLER() {
+    tx_dma_entries = tx_dma_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }
 }
 extern "C" void BRIO_I2C_RX_DMA_HANDLER() {
+    rx_dma_entries = rx_dma_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }

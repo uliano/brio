@@ -308,7 +308,10 @@ DMA1 stream 2 channel 2, FMPI2C1_TX on DMA1 stream 5 channel 2, and
 nothing on the other controller. The reserve keys that per part class and
 refuses an engine on a class whose manual was not read. Only the data
 moves: 23.4.16 says the address "cannot be transferred with DMA", so a
-DMA tenure still costs the framing interrupts.
+DMA tenure still costs the framing interrupts. The data moves at any
+length, one byte included: TXDR is loaded "whenever the TXIS bit is
+set", RXDR read whenever RXNE is, and the NBYTES counter ends the
+transfer (23.4.16), with no length below which either does not hold.
 
 ## Types and verbs
 
@@ -336,7 +339,18 @@ the host and the client alike). The constants `number`, `event_irq`,
 
 `FmpI2cHost<n, pins, TxEngine, RxEngine>` - the bus engine, with the
 parameter list and the `Request` of [i2c.md](i2c.md)'s `I2cHost`, field
-for field, the speed an `FmpI2cSpeed` (with `fast_plus_1m`): `init`, `rebase`, `speed_ok`, `timing_of`, `scl_hz`,
+for field, the speed an `FmpI2cSpeed` (with `fast_plus_1m`). `engine`
+names what moves the data, and the host never chooses: `interrupt`, the
+default, the event vector at any length; `dma` the engines at any
+length, one byte included, started in `start()` before the START
+(23.4.16), on a host with both engine slots named - `has_dma` says so at
+compile time, and `dma` on a host without them is answered
+`i2c_rejected` inside `start()` with nothing on the wire. A half with no
+buffer stays on the vector under `dma` too, writing its filler or
+draining what it reads, and so does a half whose stream refuses its
+start (a block still holding it), read in `start()` before the START:
+the request completes either way. The field sits in the padding after
+`speed`, the Request 28 bytes with it and without it. The verbs: `init`, `rebase`, `speed_ok`, `timing_of`, `scl_hz`,
 `kernel_hz`, `reference_hz`, `transmit_stall_risk`,
 `spurious_bus_errors`, `fast_plus_drive`, `claim_smba_pad`, `idle`,
 `start`, `status`, `isr`, `error_isr`, `dma_isr`, `unstick`, `recover`,
@@ -420,14 +434,18 @@ Bus::init(clock, FmpI2cHostConfig{
                            .setup_ns = 100, .sync_ns = 240}});
 ```
 
-**The DMA engines**, on the only two cells the request mapping gives:
+**The DMA engines**, on the only two cells the request mapping gives,
+carry the data of a Request that names `dma`; one that names nothing
+still runs on the event vector:
 
 ```cpp
 using Bus = FmpI2cHost<1, pins, DmaTxEngine<1, 5, 2>, DmaRxEngine<1, 2, 2>>;
+static_assert(Bus::has_dma);         // or `dma` is answered i2c_rejected
 Dma<1>::init();                      // the controller is the app's
 Bus::init(clock);
 extern "C" void DMA1_Stream5_IRQHandler() { if (Bus::dma_isr()) { /* ... */ } }
 extern "C" void DMA1_Stream2_IRQHandler() { if (Bus::dma_isr()) { /* ... */ } }
+// and every request that should ride them: .engine = I2cEngine::dma
 ```
 
 **The SMBus time-outs**, sized from the kernel clock in force:
@@ -454,7 +472,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - and letter m makes
-I2C1 the target. `test_stm32f4_fmpi2c` is 96 verdicts over thirteen
+I2C1 the target. `test_stm32f4_fmpi2c` is 103 verdicts over thirteen
 letters.
 
 **The register file at reset is the chapter's**, and the one non-zero
@@ -651,14 +669,30 @@ write-then-read refused by the target (one to four written, four times
 a count, both speeds): 32 refusals of 32 `i2c_nack_data`, the bus let go
 (START and STOP down, BUSY clear, 2 ms on) and the next tenure `i2c_ok` -
 this block has no repeated START to withdraw, the STOP after a NACK
-being its own (23.4.9).
+being its own (23.4.9). And THE ENGINE EACH REQUEST NAMES, judged on the
+streams - a stream's memory address, zeroed before the tenure, names the
+tenure's buffer after it only if a block start wrote it, and its vector
+is entered once by the block's completion: under `dma` a write and a
+read of one byte each start their stream, byte-exact; under `interrupt`
+the engined host's write of eight and read of eight start neither and
+enter no stream vector; the last written byte refused under `dma`, 16
+refusals of 16 `i2c_nack_data`, the bus let go, the next tenure
+`i2c_ok`; and `dma` on the engineless host is answered `i2c_rejected`
+inside `start()`, CR2 untouched, BUSY low and no address match at I2C1
+over 200 us, the next write on that host exact; and with each stream in
+turn held by a block of the letter's own (started, its request never
+raised), `start()` is refused that stream before the START and the half
+rides the event vector, the held stream's address still the holder's
+and its vector never entered - the tenure's end leaves a block it did
+not start alone - eight written and eight read byte-exact. Ten runs of
+ten.
 
 **The target half answers a real controller.** As the peer of
 `test_stm32f4_i2c` on the same wires, `FmpI2cClient<1>` served from its
 own two vectors is a register file at 0x2C - the address match, each
 byte received and wanted, the controller's closing NACK (its byte asked
 for ahead dropped by 23.7.7's TXE flush) all reported by `service()` -
-through that suite's 68 verdicts, and CR2's NACK bit set as the byte
+through that suite's 75 verdicts, and CR2's NACK bit set as the byte
 before is taken refuses a chosen written byte (23.7.2: "a NACK is sent
 after current received byte"), 192 refusals of 192 on time with the core
 at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
@@ -675,6 +709,43 @@ event vector. The fixed cost carries the target's: the classic block
 stretches SCL from its address match until its vector has run, on the
 same core; I2C1 as the host against this block as the target pays 230
 for the same write ([i2c.md](i2c.md)).
+
+**Which engine, by the cycles** (the same letter, every row of one image;
+`irq` and `isr` the two I2C vectors' and the two streams', between the
+meter's stamps; on this block the engines are started in `start()`,
+so its cycles are counted too). At 400 kHz, the 100 kHz rows the same to
+the cycle:
+
+| half | `interrupt`: start, irq, isr | `dma`: start, irq, isr | `dma` - `interrupt` |
+|---|---|---|---|
+| write 1 | 325, 2, 395 | 475, 2, 489 | +244 |
+| write 2 | 325, 3, 521 | 475, 2, 489 | +118 |
+| write 3 | 325, 4, 661 | 475, 2, 489 | -22 |
+| write 16 | 324, 17, 2481 | 475, 2, 489 | -1841 |
+| read 1 | 329, 2, 376 | 463, 2, 614 | +372 |
+| read 2 | 329, 3, 513 | 463, 2, 614 | +235 |
+| read 16 | 329, 17, 2431 | 463, 2, 614 | -1683 |
+| register read 1+1 | 324, 4, 746 | 546, 4, 906 | +382 |
+| register read 1+2 | 324, 5, 883 | 546, 4, 906 | +245 |
+| register read 1+16 | 324, 19, 2801 | 546, 4, 906 | -1673 |
+
+The pump's figure a byte past the first is the slope, 140 cycles written
+and 137 read, one entry each, and an entry's own exception entry and
+return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
+each way at zero wait states), which no stamp sees - comes on top for
+every interrupt counted. So, in core cycles, **a write half costs the
+core fewer cycles on the engines from three bytes** (-22, with two
+interrupts fewer), **a read half from four** (a read of three by the
+slope is about 50 cycles dearer on the engines, the entries counted),
+and **a register read with a one-byte index from a read of four**: the
+engines' fixed cost to the core, their program in `start()` and their
+completion, is about 240 cycles for a write half and 370 for a read half
+- a write tenure's end stops no receive stream - against a byte's 140 or
+so on the pump. The speed changes none of these figures. The core
+sleeps while a stream works: the platform's idle is a WFI that asks no
+stream anything, and Sleep keeps the DMA clocked (RM0390
+6.3.15: DMA1LPEN is set at reset and written by no verb here) - so on
+this family `dma` costs no sleep, only its fixed cycles.
 
 **AGAINST THE DESK PARTNER** (set `t`, letter `n`, 12 verdicts, green ten
 runs of ten): the STM32G0 beside this board on the same two nodes,
@@ -739,9 +810,10 @@ kernel's.
   `start()` 15 times, the same shadow.
 - **Every shape on the engines, under every pressure as in the control**
   (letter `o`, at 400 kHz against one serve counted to its last byte):
-  with the engines named every data half rides them, a one-byte read and
-  a one-byte write included - this host keeps no pump for data and no
-  crossover - and the probe, the reads, the write-then-reads and the
+  the shared body's Requests name no engine, and the suite names `dma`
+  for every one in a wrapper around `start()`, so every data half rides
+  the engines, a one-byte read and a one-byte write included - and the
+  probe, the reads, the write-then-reads and the
   writes are every one `i2c_ok`, every read byte-exact, the partner's
   count, sum and address matches exact. The 32-byte write 819 to 821 us
   silent and at most 839 pressed (the classic block's 761: this block's

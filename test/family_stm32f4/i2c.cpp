@@ -214,7 +214,12 @@ void resource_smoke() {
 
 void host_smoke() {
     using Bus = I2cHost<1, i2c1_pins>;
-    static_assert(!Bus::has_engines);
+    static_assert(!Bus::has_engines && !Bus::has_dma);
+    // Request::engine: a Request naming nothing gets `interrupt`; `dma` on
+    // this engineless host is start()'s run-time refusal, a program's
+    // compile-time check being has_dma.
+    static_assert(Bus::Request{}.engine == I2cEngine::interrupt);
+    static_assert(sizeof(Bus::Request) == 28u);
     static_assert(std::is_same_v<Bus::Resource, I2c<1>>);
     static_assert(Bus::pin_sel.scl.pin == 6);
 
@@ -243,6 +248,8 @@ void host_smoke() {
     r.rx_len = 2;
     r.speed = I2cSpeed::fast_400k;
     (void)Bus::start(r);
+    r.engine = I2cEngine::dma;   // refused at run time: no engines bound
+    (void)Bus::start(r);
     (void)Bus::isr();
     (void)Bus::error_isr();
     (void)Bus::dma_isr();
@@ -268,7 +275,7 @@ void engined_smoke() {
     using Tx = std::conditional_t<known, DmaTxEngine<1, 6, 1>, NoDmaEngine>;
     using Rx = std::conditional_t<known, DmaRxEngine<1, 0, 1>, NoDmaEngine>;
     using EnginedBus = I2cHost<1, i2c1_pins, Tx, Rx>;
-    static_assert(EnginedBus::has_engines == known);
+    static_assert(EnginedBus::has_engines == known && EnginedBus::has_dma == known);
     (void)EnginedBus::init(sys_clock);
     static uint8_t out[2] = {0, 1};
     static uint8_t in[8] = {};
@@ -278,6 +285,8 @@ void engined_smoke() {
     r.tx_len = 1;
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
     r.rx_len = 8;
+    (void)EnginedBus::start(r);
+    r.engine = I2cEngine::dma;
     (void)EnginedBus::start(r);
     (void)EnginedBus::dma_isr();
     (void)EnginedBus::isr();

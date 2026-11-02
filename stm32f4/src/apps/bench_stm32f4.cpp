@@ -215,7 +215,8 @@
 //      Nucleo-F446RE; declined by name elsewhere). On the DISC1: I2C3 on
 //      PA8/PC9 against the board's STMPE811 at 0x41 - the one device the
 //      board puts on that bus - through the engineless host (the pump) and
-//      the host with DMA1 streams 4 and 2 on channel 3 (the engines),
+//      the host with DMA1 streams 4 and 2 on channel 3 (the engines, every
+//      Request naming `dma`),
 //      ISR-style, the thread idling until the completion, each line the
 //      best of 8 at 100 and 400 kHz (DUTY 2; this block has no Fm+):
 //        i2c.write      1, 2, 16 and 255 bytes (and 3, last): SYS_CTRL2's
@@ -1864,6 +1865,9 @@ typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, Speed s
     r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_in));
     r.rx_len = rx;
     r.speed = speed;
+    if constexpr (Host::has_dma) {
+        r.engine = I2cEngine::dma;   // the engined hosts' rows are the engines'
+    }
     return r;
 }
 

@@ -1817,9 +1817,10 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  *
  * Asynchronous whenever the wire moves: start() returns false and a
  * TransferDone follows from the ISR - even the probe, whose address phase
- * is the transaction. The two refusals that move nothing (a speed the
- * kernel clock cannot produce, a START still standing) are answered at
- * once, start() returning true (its comment below).
+ * is the transaction. The refusals that move nothing (a speed the kernel
+ * clock cannot produce, an address outside 0x08..0x77, `dma` on a host
+ * with no engines bound, a START still standing) are answered at once,
+ * start() returning true (its comment below).
  *
  * THE STATE MACHINE IS 23.4.9's, and the flags do most of it. A write half
  * runs with AUTOEND = 0 when a read half follows, so that TC fires with SCL
@@ -1836,9 +1837,10 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  *   i2c_arb_lost     ARLO - another controller won; the silicon has already
  *                    released the bus and switched to target mode, so no
  *                    STOP is ours to send
- *   i2c_rejected     a speed this kernel clock cannot produce, or an
- *                    address outside 0x08..0x77 - a synchronous
- *                    answer, no byte moved
+ *   i2c_rejected     a speed this kernel clock cannot produce, an
+ *                    address outside 0x08..0x77, or `dma` on a host with
+ *                    no engines bound - a synchronous answer, no byte
+ *                    moved
  *   i2c_bus_error    a START still standing at start(), the other
  *                    synchronous answer (below)
  *   fmpi2c_dma_fault a DMA stream reported an error mid-tenure
@@ -1855,11 +1857,23 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's and the SpiHost's shape,
  * for the same reason: an engineless build must stay byte-identical, so the
  * slots default to NoDmaEngine and every DMA branch folds away under
- * `if constexpr`). With engines named, the DATA of every tenure rides the
- * DMA while the address, the repeated START and the ending stay on the
- * interrupt, because 23.4.16 says the address "cannot be transferred with
- * DMA". The engines are started BEFORE the START bit, which is what 23.4.16
- * asks for and, incidentally, the first of ES0298 2.12.8's two workarounds.
+ * `if constexpr`). With engines bound, THE PROGRAM NAMES THE ENGINE of
+ * every Request (Request::engine, util/i2c_bus.hpp): `interrupt`, the
+ * default, moves both halves on the event vector at any length; `dma`
+ * puts every half with a length and a buffer on the engines, ONE BYTE
+ * INCLUDED - 23.4.16 loads TXDR "whenever the TXIS bit is set" and empties
+ * RXDR "whenever the RXNE bit is set", the NBYTES counter ending the
+ * transfer, and names no length below which that does not hold - while
+ * the address, the repeated START and the ending stay on the interrupt,
+ * because 23.4.16 says the address "cannot be transferred with DMA". A
+ * half with no buffer stays on the vector, writing its filler or draining
+ * what it reads, and so does a half whose engine refuses its start (a
+ * block still holding the stream): start() reads the refusal before the
+ * START and the request completes. The engines are started BEFORE the
+ * START bit, which is what 23.4.16 asks for and, incidentally, the first
+ * of ES0298 2.12.8's two workarounds. Which engine to name is the
+ * program's judgement; docs/stm32f4/fmpi2c.md gives the figures and the
+ * length from which the engines cost the core fewer cycles.
  *
  * THE DMA CONTROLLER IS THE APP'S: Dma<1>::init() before any engined
  * init(). The engines arm STREAMS of a controller somebody else owns.
@@ -1919,6 +1933,11 @@ public:
     using Resource = S;
     static constexpr FmpI2cPins pin_sel = pins;
     static constexpr bool has_engines = TxEngine::present;
+    /// Are DMA engines bound (both slots name one)? A Request's
+    /// `engine = I2cEngine::dma` on a host where this is false is answered
+    /// i2c_rejected by start(); a program that means to ask for the
+    /// engines may static_assert it instead.
+    static constexpr bool has_dma = has_engines;
 
     struct Request {
         /// The 7-bit client address, unshifted: 0x08 to 0x77
@@ -1935,8 +1954,18 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         FmpI2cSpeed speed = FmpI2cSpeed::standard_100k;
+        /// Which mechanism moves the data halves (util/i2c_bus.hpp): the
+        /// event vector by default, the engines at any length when the
+        /// program names `dma` (a half with no buffer stays on the
+        /// vector); `dma` on a host with no engines bound is answered
+        /// i2c_rejected with nothing on the wire. The byte sits in the
+        /// padding after `speed`: the Request is 28 bytes with it and
+        /// without it.
+        I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(sizeof(Request) == 28u,
+                  "the engine field must stay in the padding after the speed");
 
     // ---- lifecycle ----------------------------------------------------------------
 
@@ -2109,15 +2138,19 @@ public:
     /// false whenever the wire moves - the tenure runs on the ISR and a
     /// TransferDone{status()} follows - and true for the failures that
     /// move nothing, answered through status(): a speed this kernel clock
-    /// cannot produce or an address outside 0x08..0x77
-    /// (i2c_address_in_range), both i2c_rejected, and a START still
+    /// cannot produce, an address outside 0x08..0x77
+    /// (i2c_address_in_range) or `engine = I2cEngine::dma` on a host with
+    /// no engines bound, all i2c_rejected, and a START still
     /// standing from a tenure the peripheral never closed
     /// (i2c_bus_error). That is the
     /// I2cHost contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
-        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
+        // One compare refuses both an engine this host has not got (`dma`
+        // with no engines bound) and a value outside the enumeration.
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr) ||
+            static_cast<uint8_t>(r.engine) > engine_last) {
             status_ = i2c_rejected;
             phase_ = Phase::idle;
             return true;
@@ -2493,27 +2526,46 @@ private:
             return true;
         }
         if constexpr (has_engines) {
-            if (req_.tx.get() != nullptr) {   // launch_dma() put this write half on the engine
+            if (tx_dma_) {   // launch_dma() put this write half on the engine
                 return TxEngine::progress().remaining == req_.tx_len;
             }
         }
         return pos_ == 0u;
     }
 
+    /// The halves the engines carry this tenure, started before the START
+    /// (23.4.16), each with its DMA request enabled and its vector's flag
+    /// disarmed. Under `interrupt` none; under `dma` every half with a
+    /// length and a buffer, and a half whose engine refuses its start (a
+    /// block still holding the stream) stays on the vector, its request
+    /// never enabled - the refusal read here, before the wire moves.
     static void launch_dma() {
         if constexpr (has_engines) {
-            if (req_.rx_len != 0u && req_.rx.get() != nullptr) {
-                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
+            tx_dma_ = false;
+            rx_dma_ = false;
+            if (req_.engine != I2cEngine::dma) {
+                return;
+            }
+            if (req_.rx_len != 0u && req_.rx.get() != nullptr &&
+                RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len))) {
+                rx_dma_ = true;
                 S::dma_receive(true);
                 S::interrupt(FmpI2cInterrupt::rx, false);
             }
-            if (req_.tx_len != 0u && req_.tx.get() != nullptr) {
-                (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
+            if (req_.tx_len != 0u && req_.tx.get() != nullptr &&
+                TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len))) {
+                tx_dma_ = true;
                 S::dma_transmit(true);
                 S::interrupt(FmpI2cInterrupt::tx, false);
             }
         }
     }
+
+    /// The last I2cEngine value this host takes: `dma` where engines are
+    /// bound, `interrupt` where not, so that start()'s one compare refuses
+    /// `dma` on an engineless host and anything past the enumeration.
+    static constexpr uint8_t engine_last =
+        static_cast<uint8_t>(has_engines ? I2cEngine::dma : I2cEngine::interrupt);
 
     /// The two engines bound to THIS instance's TXDR and RXDR.
     ///
@@ -2529,10 +2581,21 @@ private:
         }
     }
 
+    /// The engines this tenure started taken back - a transmit block not
+    /// completed abandoned and counted, the receive stream stopped - and
+    /// only those: a stream whose start this tenure's launch_dma() was
+    /// refused holds a block that is not this host's to stop. Then both
+    /// requests off and the vector's two data flags armed again.
     static void put_engines_away() {
         if constexpr (has_engines) {
-            (void)TxEngine::abandon();
-            RxEngine::stop();
+            if (tx_dma_) {
+                (void)TxEngine::abandon();   // false, and nothing done, once completed
+                tx_dma_ = false;
+            }
+            if (rx_dma_) {
+                RxEngine::stop();
+                rx_dma_ = false;
+            }
             S::dma_transmit(false);
             S::dma_receive(false);
             S::interrupt(FmpI2cInterrupt::rx | FmpI2cInterrupt::tx, true);
@@ -2571,6 +2634,8 @@ private:
 
     static inline Request req_{};
     static inline uint8_t pos_ = 0;
+    static inline bool tx_dma_ = false;   ///< this tenure's write half is the transmit engine's
+    static inline bool rx_dma_ = false;   ///< and its read half the receive engine's
     static inline volatile Phase phase_ = Phase::idle;
     static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
     // Bumped by error_isr(), read from thread context: a volatile word.

@@ -27,10 +27,11 @@
 //   pumped write PRELOADED into TXDR before the START; a read's last byte
 //   taken at STOPF; a NACK read at STOPF with no NACKIE; one interrupt a
 //   data byte on the pump (no FIFO: TXDR, RXDR and the shifter); the
-//   engines carry halves of two bytes or more (the driver's
-//   automatic_min_write and automatic_min_read, what a Request that does not
-//   name its engine gets: a half of one costs the pump no data interrupt),
-//   armed for their errors alone, STOPF the edge; at rest ERRIE alone and
+//   engines carry every half of a Request that names `dma`, at any length
+//   - and THIS SUITE NAMES IT (EngineByLength below): `dma` when either
+//   half carries two bytes or more, `interrupt` otherwise, so letter o's
+//   shapes run on both paths - armed for their errors alone, STOPF the
+//   edge; at rest ERRIE alone and
 //   both DMA request enables clear; ES0548 2.10.2's spurious BERR counted
 //   (spurious_bus_errors()) and never a status. start() writes the enables
 //   and then the ONE CR2 store that carries START (transfer_now): nothing is
@@ -98,7 +99,7 @@
 //      byte of a 2+4 refused (i2c_nack_data, the read half never begun),
 //      the next tenure i2c_ok after each.
 //   w  three requesters of three priorities at 400 kHz: the Client's
-//      write-then-reads of 1+6 (the read half on the engines), Minor's
+//      write-then-reads of 1+6 (both halves on the engines), Minor's
 //      writes of one (the pump's preload), Pressure's probes: in order,
 //      i2c_ok, nothing rejected, no timeout, the peer's tallies exact.
 //   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
@@ -188,7 +189,23 @@ constexpr I2cPins host_pins{
 };
 using TxEngine = DmaTxEngine<1, 1>;
 using RxEngine = DmaRxEngine<1, 2>;
-using Host = I2cHost<1, host_pins, TxEngine, RxEngine>;
+
+/// THE ENGINE, NAMED BY THE SUITE. The host carries a half on the engine
+/// its Request names (Request::engine, util/i2c_bus.hpp) and the shared
+/// body builds every Request naming none, so this wrapper names it in
+/// start(): `dma` when either half carries two bytes or more, `interrupt`
+/// otherwise - the suite's own `if`, one copy of the Request and a compare
+/// added to start()'s cycles, which put letter o's shapes on both of the
+/// host's paths. Every other verb is the host's own.
+template <typename Base>
+struct EngineByLength : Base {
+    static bool start(const typename Base::Request& r) {
+        typename Base::Request q = r;
+        q.engine = (r.tx_len >= 2u || r.rx_len >= 2u) ? I2cEngine::dma : I2cEngine::interrupt;
+        return Base::start(q);
+    }
+};
+using Host = EngineByLength<I2cHost<1, host_pins, TxEngine, RxEngine>>;
 using H = I2c<1>;
 using SclPin = Pin<'B', 8>;
 using SdaPin = Pin<'B', 9>;
@@ -206,11 +223,12 @@ struct Shape {
     const char* path;
 };
 struct I2cTraits {
-    /// Letter o's table, each shape with the path this host takes: a half
-    /// of two bytes or more rides the engines, a half of one the pump
-    /// (the driver's automatic counts, 2 each way: the preload or the read
-    /// at the STOP costs the pump no data interrupt for it). Ends on a plain
-    /// write (the shared body's counted serve).
+    /// Letter o's table, each shape with the path this host takes under
+    /// EngineByLength: a Request with a half of two bytes or more names
+    /// `dma` and rides the engines whole, its half of one too; one with no
+    /// longer half names `interrupt` and rides the pump (the preload, the
+    /// read at the STOPF). Ends on a plain write (the shared body's
+    /// counted serve).
     static constexpr Shape shapes[] = {
         {0, 0, "the probe: the address alone, STOPF its one interrupt"},
         {0, 1, "pump: the one byte read at STOPF"},
@@ -219,7 +237,7 @@ struct I2cTraits {
         {0, 8, "engines"},
         {0, 32, "engines"},
         {1, 1, "pump both halves: the preload, TC's repeated START, the read at STOPF"},
-        {1, 2, "pump write (the preload), engine read"},
+        {1, 2, "engines both halves, the one written byte on the transmit channel"},
         {2, 8, "engines both halves"},
         {1, 0, "pump: the preload alone, STOPF the one interrupt"},
         {2, 0, "engines: the transmit channel, STOPF the edge"},
@@ -227,9 +245,7 @@ struct I2cTraits {
         {8, 0, "engines"},
         {32, 0, "engines"},
     };
-    static_assert(Host::has_dma && Host::automatic_min_write == 2u &&
-                      Host::automatic_min_read == 2u,
-                  "the table names engine paths");
+    static_assert(Host::has_dma, "the table names engine paths");
     /// Minor's writes of one: the pump's preload, so that letter w puts one
     /// requester on each path (the Client's read halves on the engines).
     static constexpr uint8_t w_minor_len = 1;

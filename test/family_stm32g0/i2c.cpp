@@ -357,12 +357,14 @@ void use() {
 
     (void)DmaHost::init(clock);
     (void)DmaHost::dma_isr();
-    // Request::engine: the three values, each host taking every one of
-    // them at compile time; `dma` on the engineless host is start()'s
-    // run-time refusal, a program's compile-time check being has_dma.
+    // Request::engine: the two values, each host taking both at compile
+    // time, a Request naming nothing getting `interrupt`; `dma` on the
+    // engineless host is start()'s run-time refusal, a program's
+    // compile-time check being has_dma.
     static_assert(!Host::has_dma && DmaHost::has_dma);
     static_assert(sizeof(Host::Request) == sizeof(DmaHost::Request));
-    static_assert(Host::Request{}.engine == brio::I2cEngine::automatic);
+    static_assert(Host::Request{}.engine == brio::I2cEngine::interrupt);
+    static_assert(DmaHost::Request{}.engine == brio::I2cEngine::interrupt);
     r.engine = brio::I2cEngine::dma;
     (void)Host::start(r);
     const DmaHost::Request d{.addr = 0x42,
@@ -372,7 +374,7 @@ void use() {
                              .rx_len = 0,
                              .reply = {},
                              .speed = brio::I2cSpeed::fast_400k,
-                             .engine = brio::I2cEngine::interrupt};
+                             .engine = brio::I2cEngine::dma};
     (void)DmaHost::start(d);
     (void)DmaHost::isr();
     DmaHost::release();

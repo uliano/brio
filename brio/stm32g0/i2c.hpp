@@ -1906,45 +1906,34 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * on the interrupt, because 32.7 says the address "cannot be transferred
  * with DMA".
  *
- * EACH DATA HALF CHOOSES, one table load and one compare at start()
- * (Request::engine; the rule is docs/design/i2c-bus.md's). Under
- * `automatic` the engines carry a half from the smallest length N where
- * they cost the core no more than the pump, E - F <= (N - 1) x b, in core
- * cycles (bench_stm32's letter i, docs/stm32g0/i2c.md):
- *   - E - F, the engines' fixed cost over the pump's, is one tenure of one
- *     byte through this one host both ways: 81 written (the channel's
- *     program over the preload at start(), 54; completing the transmit
- *     engine at the STOPF, 27) and 63 read (the program, 93; the pump's
- *     last byte no longer read at the STOPF, -30);
- *   - b, the pump's cycles a byte, is about 160 written and 166 read, the
- *     slopes 168 and 173 between the meter's stamps, less the stamps' 42,
- *     plus about 35 for the core's own entry and return, which no stamp
- *     sees (RP2040 datasheet 2.4.3.6 reproducing ARM's figure of 15 for
- *     the entry, at the flash's two wait states);
- *   - N - 1 because a half's first byte costs the pump no interrupt, the
- *     write's preloaded and the read's taken at the STOPF.
- * So N = 2 both ways (81 <= 160, 63 <= 166, and N = 1 would ask 81 <= 0).
- * A channel's two bus beats a byte are not in E: the core sleeps through
- * them, and in a running program they are a few cycles of contention at
- * most against a margin of 79 and 103.
+ * THE PROGRAM NAMES THE ENGINE of every Request (Request::engine,
+ * util/i2c_bus.hpp), and start() reads it with one compare: `interrupt`,
+ * the default, puts both halves on the pump at any length; `dma` puts
+ * every half the engines can carry on them at any length - one byte
+ * included: 32.7.1 loads TXDR "whenever the TXIS bit is set" and 32.7.2
+ * empties RXDR "whenever the RXNE bit is set", the NBYTES counter ending
+ * the transfer, and neither names a length below which it does not hold. WHAT THE ENGINES CANNOT CARRY IS A HALF
+ * WITH NO BUFFER: under either value it stays on the pump, writing its
+ * filler or draining what it reads, and the request completes. An engine
+ * whose start() refuses (a block still holding its channel) leaves its
+ * half to the pump the same way, decided in start() before the START.
+ * `dma` on a host with no engines bound is refused, i2c_rejected with
+ * nothing on the wire (start()).
  *
- * SPEED ENTERS NOWHERE ON THIS CHIP, so the counts are constants. Every
- * figure above is the same at 100 kHz, 400 kHz and 1 MHz. The pump does
- * not stretch at the top rung: SCL stretches only when TXDR is still empty
- * or RXDR still full a whole byte after TXIS or RXNE rose (32.4.7), and at
- * 64 MHz that byte is nine periods, at least 576 cycles, against the
- * pump's entry of about 200. And the core sleeps while a channel works:
- * the platform's idle() is a plain WFI that asks no channel anything, and
- * Sleep keeps the DMA clocked (RM0444 table 27, 5.4.18: DMA1SMEN and
- * DMA2SMEN set at reset, written by no verb here).
- *
- * `interrupt` puts every half on the pump, `dma` every half it can on the
- * engines at any length - which is for a program that wants the core free
- * and takes the fixed cost, or whose vectors are long enough to stretch
- * the pump. WHAT THE ENGINES CANNOT CARRY IS A HALF WITH NO BUFFER: under
- * every value it stays on the pump, writing its filler, and is not
- * refused. `dma` on a host with no engines bound is refused, i2c_rejected
- * with nothing on the wire (start()).
+ * Which to name is the program's judgement, and docs/stm32g0/i2c.md gives
+ * the arithmetic: the engines' fixed cost to the core over the pump's,
+ * 81 cycles for a write half and 63 for a read half, against the pump's
+ * 160 and 166 a byte past the first (the pump's first byte of a half
+ * takes no interrupt: the write's is preloaded, the read's taken at the
+ * STOPF), so a half of two bytes or more costs the core fewer cycles on
+ * the engines, at every speed (bench_stm32's letter i). The pump does not
+ * stretch the clock at the top rung: SCL stretches only when TXDR is
+ * still empty or RXDR still full a whole byte after TXIS or RXNE rose
+ * (32.4.7), and at 64 MHz that byte is nine periods, at least 576 cycles,
+ * against the pump's entry of about 200. And the core sleeps while a
+ * channel works: the platform's idle() is a plain WFI that asks no
+ * channel anything, and Sleep keeps the DMA clocked (RM0444 table 27,
+ * 5.4.18: DMA1SMEN and DMA2SMEN set at reset, written by no verb here).
  *
  * The completion edge is STOPF either way, and THAT IS WHY BOTH
  * ENGINES ARE ARMED FOR THEIR ERRORS ALONE (DmaIrq::error_only): a
@@ -2013,14 +2002,6 @@ public:
     /// i2c_rejected by start(); a program that means to ask for the
     /// engines may static_assert it instead.
     static constexpr bool has_dma = TxEngine::present;
-    /// AUTOMATIC'S COUNTS: the shortest write half and read half the engines
-    /// carry under I2cEngine::automatic - the length from which they cost
-    /// the core no more cycles than the pump, constants because no figure
-    /// moves with the speed (the class comment's arithmetic, its
-    /// measurement in docs/stm32g0/i2c.md). A suite judges the split at
-    /// them; they mean nothing where has_dma is false.
-    static constexpr uint8_t automatic_min_write = 2;
-    static constexpr uint8_t automatic_min_read = 2;
 
     /// One bus tenure, in the shape every target's I2cHost takes
     /// (docs/design/i2c-bus.md). The two buffers are loans
@@ -2043,13 +2024,14 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         I2cSpeed speed = I2cSpeed::standard_100k;
-        /// Which mechanism moves the data halves (util/i2c_bus.hpp):
-        /// automatic_min_write and automatic_min_read decide by default,
-        /// the interrupt or the engines at any length on request; `dma` on
-        /// a host with no engines bound is answered i2c_rejected with
-        /// nothing on the wire. The byte sits in the padding after
-        /// `speed`: the Request is 28 bytes with it and without it.
-        I2cEngine engine = I2cEngine::automatic;
+        /// Which mechanism moves the data halves (util/i2c_bus.hpp): the
+        /// interrupt by default, the engines at any length when the
+        /// program names `dma` (a half with no buffer stays on the
+        /// interrupt); `dma` on a host with no engines bound is answered
+        /// i2c_rejected with nothing on the wire. The byte sits in the
+        /// padding after `speed`: the Request is 28 bytes with it and
+        /// without it.
+        I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
     static_assert(sizeof(Request) == 28u,
@@ -2692,23 +2674,26 @@ private:
     }
 
     /// The halves the engines carry this tenure, started, and the DMA
-    /// request enables they need (start() writes them with the rest). A
-    /// half shorter than its direction's floor for the Request's engine
-    /// (engine_floor_tx, engine_floor_rx), or with no buffer, is the
-    /// pump's: a load, a compare and a null test a half.
+    /// request enables they need (start() writes them with the rest).
+    /// Under `interrupt` none; under `dma` every half with a length and a
+    /// buffer, and a half whose engine refuses its start (a block still
+    /// holding the channel) is the pump's like a half with no buffer -
+    /// the flags below say which, read by start() and the vector.
     [[gnu::always_inline]] static uint32_t launch_dma(I2cEngine e) {
         uint32_t en = 0;
         if constexpr (has_dma) {
-            const uint8_t k = static_cast<uint8_t>(e);   // start() refused past engine_last
             tx_dma_ = false;
             rx_dma_ = false;
-            if (t_.rx_len >= engine_floor_rx[k] && t_.rx.get() != nullptr) {
+            if (e != I2cEngine::dma) {
+                return en;
+            }
+            if (t_.rx_len != 0u && t_.rx.get() != nullptr) {
                 rx_dma_ = RxEngine::start(std::span<uint8_t>(t_.rx.get(), t_.rx_len));
                 if (rx_dma_) {
                     en |= I2cDmaEnable::rx;
                 }
             }
-            if (t_.tx_len >= engine_floor_tx[k] && t_.tx.get() != nullptr) {
+            if (t_.tx_len != 0u && t_.tx.get() != nullptr) {
                 tx_dma_ = TxEngine::start(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
                 if (tx_dma_) {
                     en |= I2cDmaEnable::tx;
@@ -2738,10 +2723,6 @@ private:
     /// `dma` on an engineless host and anything past the enumeration.
     static constexpr uint8_t engine_last = static_cast<uint8_t>(
         has_dma ? I2cEngine::dma : I2cEngine::interrupt);
-    /// The floors indexed by I2cEngine: automatic's count, never (256, past
-    /// any length a Request carries) for `interrupt`, one byte for `dma`.
-    static constexpr uint16_t engine_floor_tx[3] = {automatic_min_write, 256u, 1u};
-    static constexpr uint16_t engine_floor_rx[3] = {automatic_min_read, 256u, 1u};
 
     /// The tenure's own copy of the Request's fields its entries read.
     struct Tenure {
