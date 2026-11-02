@@ -138,9 +138,13 @@ the key that runs the image's set of letters.
   wrong bytes and completes.
 - **A read from or a write into a hole in the map, and a write into
   the flash, complete as normal blocks** (measured, five holes each way
-  and the flash locked and open): 8.2.1 promises TEIF and an automatic
-  EN drop for a reserved address, and no address the bench could name
-  produced either - TCIF rose, EN stood.
+  and the flash locked and open): TCIF rose, EN stood. 8.2.1 promises TEIF
+  for a reserved address, and it is the address just past a memory that gives
+  it: the end of the SRAM or of the flash, read or written ([spi.md](spi.md),
+  letter h). A store past the SRAM raises TEIF and still lands, wrapped onto the
+  SRAM's first bytes (measured: one byte at offset 0 on the CH32V006K8U6, four on
+  the CH32V003F4P6), so a receive buffer running off the SRAM's end costs what is
+  there as well as the error.
 - **About six HCLK cycles an item at every width** (measured): the
   controller is a master of the same bus matrix as the core, at HCLK,
   and a memory-to-memory item is a read, a write and the arbitration.
@@ -431,7 +435,8 @@ and i and letter d's writes measured on the CH32V006K8U6:
   operation armed, through the array's own address and through the 0x0800
   0000 alias the chapter's programming sequence writes, the same, STATR
   showing no WRPRTERR and the word still zero (ten runs). The error path
-  is armed on every engine and reachable by nothing the bench found.
+  is armed on every engine, and a block past the end of a memory reaches it
+  ([spi.md](spi.md), letter h).
 - **Unequal widths land as table 8-1 spells them** (letter h, ten
   runs): four items at each of the nine pairs of source and target
   widths, every target byte compared - a narrow source zero-filled into

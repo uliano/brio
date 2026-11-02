@@ -340,7 +340,7 @@ STATR's eight bits, and what each costs (20.2.7, 20.4.3):
 |------|------------------|
 | RXNE | a DATAR read |
 | TXE | a DATAR write |
-| OVR | a DATAR read followed by a STATR read |
+| OVR | a DATAR read followed by a STATR read, which still reads it up; the load after it reads it down (letter v) |
 | MODF | nothing software can do (measured below); the block's RCC reset pulse |
 | CRCERR | a zero into its bit and ones elsewhere (the one rc_w0 bit) |
 | BSY | hardware's, never software's |
@@ -685,23 +685,50 @@ as the `status` field of its `SpiDone`:
 | `status` | what happened | what it leaves | who acts |
 |---|---|---|---|
 | `spi_rejected` | the arbiter's FIFO was full, or a host with no engines refused an asynchronous request | nothing on the wire | the program: a full FIFO may be tried again, the refusal never (`static_assert(Bus::has_dma)`) |
-| `spi_stalled` | a polled flag never came within the budget | select released, receive buffer drained, the block otherwise as it stands | the program: `recover()`, with `busy()` false, after removing the cause |
-| `spi_dma_fault` | a channel reported a transfer error | requests down, both channels put away, receive buffer drained, select released | nobody: the arbiter answers and goes on, and the next request launches the engines again |
+| `spi_stalled` | a polled flag never came within the budget | select released, then the block reset and put back to the applied mode, rate and width, before `start()` returns | nobody: the next request starts on a clean block. A closed gate is the exception below |
+| `spi_dma_fault` | a channel reported a transfer error | requests down, both channels put away, select released, a reset owed, which the next `start()` or `prime()` pays before anything else | nobody: the arbiter answers and goes on, and the next request starts on a clean block |
 | `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()` | the program judges the device |
 
-A stall holds the core for its whole budget, 100 000 turns and 2048 a frame:
-some 1 600 000 cycles (11 ms at 144 MHz) for sixteen frames on the CH32V203C8T6
-(letter f below), every other active object waiting under `Tenuto`.
-`recover()` is what resets the block; with the gate open again the same
-request runs `spi_ok` without it, since a closed gate keeps the registers
-(letter f), and after a block that went through a reset or a mode fault it is
-what writes them back. The arbiter calls it on a timeout alone. A request
-already in the arbiter's FIFO starts in the same dispatch as the stall, before
-the requester's handler can run: on a block that still does not clock a polled
-one stalls for its own budget, and an asynchronous one goes to the engines and
-has no completion, `spi_timeout` on a timed bus and a bus busy for ever on an
-untimed one. `recover()` under a block on the engines takes that request away,
-its completion never coming, which is what `busy()` is for.
+**After `spi_stalled` or `spi_dma_fault` the program calls nothing**, in direct
+use or under the arbiter: the host does it, because it exists in both and
+because the arbiter goes on to the next waiting request before the requester
+has run. A request queued behind the failed one, in the same dispatch, starts
+on a clean block and runs exact (letter r).
+
+After a stall the select goes first and the reset second, inside `start()`: the
+reset takes CPOL down with CTLR1, so in modes 2 and 3 it moves the SCK pad, and
+the device must have seen the transaction end. A stall holds the core for its
+whole budget, 100 000 turns and 2048 a frame: some 1 600 000 cycles (11 ms at
+144 MHz) for sixteen frames on the CH32V203C8T6 (letter f below), every other
+active object waiting under `Tenuto`. The reset adds at most some 560 cycles to
+that (letter f), and the `disable()` in it spends nothing on a stalled block: it
+waits only when SPE reads back set, and every stall staged here reads it clear.
+
+After a transfer error the receive channel's or the transmit channel's vector
+decides and does not work: no disable, no reset, no configuration and no wait
+there. Up to a frame is still leaving the block and one stands in the receive
+buffer behind it, twelve runs of twelve (letter f); the reset the next `start()`
+runs first clears them, so no frame of the faulted block comes back in front of
+the next request. A program that frames the select by hand calls `prime()` before
+it falls, as it does anyway, and `prime()` pays the reset there, with the select
+high.
+
+**The limit is a closed clock gate.** A reset does not open one, so the next
+request stalls too, on its own budget, for as long as the gate stays closed, and
+the reset leaves such a block alone. Measured: with the RCC pulse and its writes
+run on a closed gate, a request on the gate opened stalled once more; with
+neither, a gate closed and opened keeps the registers, and the same request runs
+`spi_ok`. `recover()` answers false there.
+
+**What the reset does not put back** is what the applied mode, rate and width do
+not hold: a hardware NSS arrangement or the high-speed read a program set on the
+resource is the program's to set again, which it knows to do from the status. An
+asynchronous request on a block that stops clocking in flight has no completion,
+and a bus with no timeout then stays busy for ever: that is `spi_timeout`'s case,
+and `recover()` is its way back, called by a timed arbiter and open to a program
+with the bus idle. `recover()` under a block on the engines takes that request
+away, its completion never coming, which is what `busy()` is for; it answers
+false when a bounded wait ran out or the gate is closed.
 
 `apply()` compares one word: the request's mode, rate code and width are
 folded into CTLR1's own bits over the applied base (CPHA and CPOL are
@@ -712,7 +739,8 @@ it also recomputes the two frame costs the short request is folded from.
 Nothing is flushed at `start()`: the chapter gives no way for a frame to
 stand in the receive buffer at the start of a transaction but a tenure
 that ended without reading what it clocked, which is a fault path here,
-and every fault path drains the buffer.
+and every fault path has reset the block before the next request's first
+frame.
 
 Beside it: `has_dma` (= `has_engines`), the short request's
 `async_min_frames(code, bits, read)` at the clock in force and its
@@ -725,9 +753,9 @@ bus-wide SCK ceiling, `rebase()` for a dynamic clock's fan-out (the
 ceiling and the frame costs follow the new bus),
 `clock_for()` / `sck_hz()` / `reference_hz()`, `prime()` (mode and rate
 now, moving no data - a CPOL flip is an edge, so prime before the select
-falls), `bit_order()` (a property of the wire and so a bus-level verb),
+falls; it pays a reset a transfer error left owing), `bit_order()` (a property of the wire and so a bus-level verb),
 `pad_speed()` (the slew class of SCK and MOSI, a choice that survives
-the next `init()`), `start()`, `dma_rx_isr()` and `dma_tx_isr()` (the
+the next `init()` and a reset), `start()`, `dma_rx_isr()` and `dma_tx_isr()` (the
 two channels' bodies, each reading its own flags; `dma_isr()` is both,
 for a program that binds the two vectors to one function), `status()`,
 `busy()` (a block on the engines), `recover()`, `release()` and
@@ -772,9 +800,9 @@ beside them:
 
 | figure | CH32V203C8T6 (V4B) | CH32V303VCT6 (V4F) |
 |---|---|---|
-| E, the engines' fixed cost | 580 to 584 | 646 to 656 |
-| E - F, a read | 277 to 281 (constant 277) | 388 to 398 (392) |
-| E - F, a write | 261 to 265 (261) | 390 to 400 (394) |
+| E, the engines' fixed cost | 580 to 588 | 643 to 662 |
+| E - F, a read | 277 to 287 (constant 277) | 385 to 401 (392) |
+| E - F, a write | 261 to 270 (261) | 387 to 400 (394) |
 | the receive loop's frame at /4, the dead bus | 51.0, 19 (19) | 43.0, 11 (11) |
 | the receive loop's frame at /2 | 29.0 (29) | 33.6 to 34.0 (34) |
 | the transmit-only loop's frame at /2 | 16.0 (16) | 17.8 to 18.1 (18) |
@@ -1048,13 +1076,54 @@ other's `spi_peer` - in the one after it.
 - **A POLLED WAIT THAT RUNS OUT ends `spi_stalled`** (letter f, both
   parts): a polled write of 16 frames started with SPI1's gate closed
   under the engine - every STATR load reading zero, so TXE never comes -
-  returned `spi_stalled` after 1596796 to 1600107 cycles on the CH32V203C8T6 and
-  1331360 to 1333680 on the CH32V303VCT6, over the budget's 132768
-  spins: 12.0 and 10.0 cycles a spin of a loop of five
-  instructions (the STATR load, the bit test, the budget's decrement and
+  returned `spi_stalled` after 1593685 to 1596833 cycles on the CH32V203C8T6
+  and 1195283 to 1198411 on the CH32V303VCT6, over the budget's 132768
+  spins: 12.0 and 9.0 cycles a spin of a loop of five
+  instructions, and 11.0 and 10.0 in other layouts of the same loop (the STATR load, the bit test, the budget's decrement and
   test, the branch - poll_write's in the release listing), so the bound
-  the suite judges, 5 to 20 cycles a spin, holds on both; the same
-  request with the gate open again ran `spi_ok`. Thirteen runs a part.
+  the suite judges, 5 to 20 cycles a spin, holds on both. The next request
+  on the closed gate stalled too, on its own budget; with the gate open the
+  same request ran `spi_ok`. Fifteen runs a part.
+- **THE NEXT REQUEST WITH NOTHING CALLED, AFTER A STALL** (letter f, no
+  wire, and letter r, the far client's judgement; fifteen runs a part of
+  each). The stage is one a reset cures: the block's enable taken down under
+  the host with the request's own word primed, so `start()` writes nothing on
+  the way in (a changed word's disable and enable would raise SPE and cure it).
+  On letter f, two frames left standing with RXNE and OVR up and MISO held high
+  by its port; then a polled write of 16 frames, a polled read of 16, or a
+  command phase run polled before a data block, MISO held low. Every one ended
+  `spi_stalled` in 1123460 to 1600579 cycles on the CH32V203C8T6 and 919335 to
+  1328660 on the CH32V303VCT6, by the frames' budget, the select's latch high, and on `start()`'s
+  return CTLR1 held the applied word with SPE up in modes 0, 2 and 3, STATR read
+  TXE alone and SCK stood at the mode's idle level. The next polled read and the
+  next asynchronous read on the engines each read all zeros: no frame left
+  standing came back in front. On letter r, with a far client armed: a stall
+  in each of the four modes and in a command phase, each followed by a polled
+  and by an engined window of 32 frames at /64 (/8 behind the command phase), both
+  ends exact.
+  The reset itself, `recover()`'s whole call on an idle block, is 556 cycles
+  on the CH32V203C8T6 and 537 to 540 on the CH32V303VCT6.
+- **A REAL TRANSFER ERROR, AND THE NEXT REQUEST** (letters f and r, fifteen
+  runs a part). A channel is refused at the top of the SRAM region, 0x2FFF F000,
+  read or written ([dma.md](dma.md)), and on a read past the memory it can reach:
+  a block whose out buffer ends at the last byte below 0x2000 5000 on the
+  CH32V203C8T6, or below 0x0807 8000 on the CH32V303VCT6, runs 16 frames and is
+  refused mid-block. No address faulted the core, and neither board wedged. Each
+  of the three - the mid-block one, the transmit channel's first beat and the
+  receive channel's first - in modes 0 and 3: the vector's body answered true,
+  `spi_dma_fault`, the select's latch high, both requests down and the enable
+  standing, nothing reset in the vector; twelve runs of twelve then found a frame
+  standing in the receive buffer. MISO moved from high to low after the fault, the
+  next polled read and the next engined read each read all zeros, on SPI1 on DMA1.
+  On letter r, on the pair's instance, the same three, then a window exact at both
+  ends, twelve windows of twelve on SPI2 (DMA1) on the CH32V203C8T6 and SPI3 (DMA2)
+  on the CH32V303VCT6.
+- **QUEUED BEHIND A FAILURE THROUGH `SpiBus`** (letter r, fifteen runs a part):
+  one client posting two requests from one dispatch, the first staged to stall
+  or to fault mid-block, the second a window with its select in the Request. The
+  replies came in order, `spi_stalled` or `spi_dma_fault` and then `spi_ok`, the
+  second window exact at both ends, polled and on the engines, modes 0 and 3, four
+  of four each way. Nothing called `recover()`.
 - **THE TRANSMIT INTERRUPT ON A HOST** (letter f): SPI1 bare, no pad
   handed over, a vector writing the next frame on each TXE and silencing
   TXEIE after the last - 64 frames at /64 in 65 entries, every frame out
@@ -1144,9 +1213,15 @@ other's `spi_peer` - in the one after it.
 - **The one-wire line mode turns around on the same pad**: BIDIMODE with
   BIDIOE drives a frame out of MOSI, and clearing BIDIOE makes that same
   pad the receiver, with the clock running on either side of the turn.
-- **The overrun is a level with a sequence**: frames arriving on a full
-  buffer raise OVR, and only a DATAR read followed by a STATR read
-  clears it.
+- **The overrun is a level with a sequence, and 20.2.7's sequence holds**
+  (letter v, both parts, ten runs each, on the resource with no wire): two
+  frames at /32 with nothing read leave STATR at 0x43, RXNE and OVR with TXE.
+  DATAR then STATR clears it, with a load before the DATAR or none: that STATR
+  load, a microsecond after the read, reads 0x42, RXNE down and OVR still up,
+  and the load after it 0x02. A zero written to the flag leaves 0x43.
+  `clear_overrun()` and `flush_rx()` each leave 0x02 from both standing, and so
+  does the tail of a polled write of sixteen frames at /8, whose answers overrun
+  the buffer from the second frame on.
 ### On the CH32V303VCT6
 
 `test_vx03_spi`'s single-board set and `test_vx03_i2s` (15 verdicts) on
@@ -1383,6 +1458,14 @@ ceiling behind the polled host is /4 on both parts (the ladder).
 
 Driver gaps:
 
+- **A block across a 64 KB boundary on the CH32V303's DMA1**: the channel
+  driver refuses it (11.2.3, [dma.md](dma.md)) and `launch_beats()` discards
+  that answer, so an asynchronous request on SPI1 or SPI2 whose buffer straddles
+  one, a table in flash where the array is over 64 KB, never moves a frame and
+  never completes: `spi_timeout` on a timed bus, busy for ever on an untimed one.
+  Open because either answer costs every asynchronous request a compare (a run
+  polled, as for an odd address, or a refusal), and no program here keeps such a
+  table.
 - **The hardware NSS arrangements as the ENGINE's select** (SSOE's
   output and the multi-host input): declined. The bus AO's select is a
   GPIO the Request carries; SSOE's pad falls only with the first frame
@@ -1454,16 +1537,14 @@ Implemented but not bench-verified, each with what would measure it:
   a free pad, on the CH32V303VCT6's it is the pair's SPI select wire. A
   letter on the CH32V203C8T6 driving SSOE's output on PA4, and a second
   host's select into it, would measure it.
-- **`spi_dma_fault`**: the code path of the table above; no letter makes a
-  transfer error, and on this family addresses outside the map complete as
-  ordinary blocks ([dma.md](dma.md)). A block that does raise TEIF would
-  measure it, and the next request after it.
-- **OVR's clear with no load before the read**: letter e's sequence is a load
-  that shows the flag, then 20.2.7's DATAR and STATR, on the CH32V203C8T6's
-  strap. `flush_rx()` and `clear_overrun()` are DATAR then STATR with no load
-  first, the order that leaves the flag standing on the CH32V003F4P6 and the
-  CH32X035 ([../ch32v00x/spi.md](../ch32v00x/spi.md)). The letter of that page
-  run on these two parts would measure it.
+- **The high-speed read across a reset**: HSCR reads zero with HSRXEN just
+  written on both dies here, the bit write-only on them, so whether the RCC
+  pulse takes the mode down is the manual's reset value and not a reading.
+  Letter h's read at 36 MHz run after a stall would measure it.
+- **`Spi<n>::disable()`'s bounded waits inside the reset**: no stage here reaches
+  them, every stalled block reading SPE clear, and after a fault they wait out
+  at most the frame leaving the block. A stall with SPE reading set would
+  measure them, 400 000 polls at the outside.
 - **`rebase()`'s cs_setup timing**: the delay rate it recomputes is
   written and compiled, and letter o's requests carry no setup time; a
   request with `cs_setup_us` timed from the select's fall to the first

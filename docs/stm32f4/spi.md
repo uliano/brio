@@ -77,9 +77,10 @@ rate; a nonzero `cs_setup_us` also needs SysTick's counter running, since with
 it stopped the delay returns at once and the setup time is skipped in silence
 (`cortexm/delay.hpp`). And "it is done" is not "it succeeded": `start()`
 returns true on a polled request that stalled too (a flag the loop waited for
-never rose within its budget), with the peripheral reset and `status()`
-answering `spi_stalled` instead of `spi_ok`, so a program that must trust `who`
-reads `status()`, as the block does.
+never rose within its budget), with the select released, the peripheral reset
+and `status()` answering `spi_stalled` instead of `spi_ok`, so a program that
+must trust `who` reads `status()`, as the block does, and calls nothing else:
+the next request starts on a clean block.
 
 Two more decide correctness before the first frame. **On a bus of wires the
 slew class of every driven pad is a correctness parameter**: the default,
@@ -361,12 +362,27 @@ arithmetic behind them is at namespace level: `spi_frame_hclk_cycles()`,
 ([design/spi-bus.md, "What follows each code"](../design/spi-bus.md#what-follows-each-code-and-who-acts)):
 `spi_ok`; `spi_rejected`, an asynchronous request on a host with no engines,
 nothing on the wire and nothing to do but change the program; `spi_stalled`, the
-peripheral already reset and reconfigured, so the next request needs nothing of the
-program; `spi_dma_fault`, the requests dropped, both streams put away, the receive buffer read and
-the select released, but the peripheral not reset and a frame still on the wire can land
-behind that read, so a program calls `recover()` with the bus idle before the next request
-(no letter provokes one: "Not covered yet"). The arbiter calls `recover()` itself on
-`spi_timeout` and on nothing else.
+select released and then the peripheral reset and reconfigured, inside `start()`;
+`spi_dma_fault`, the requests dropped, both streams put away and the select
+released in the streams' vector, which does no more: the peripheral's reset is left
+to the next `start()`, which tests a flag first and pays it before anything else, so
+until then a frame can still be on the wire and another stand in the receive buffer.
+
+**After `spi_stalled` and `spi_dma_fault` the program calls nothing.** The next request
+starts on a clean block whoever calls it, in direct use or behind the arbiter, which goes
+on to the next waiting request before the requester has run. The select goes first
+because this block drives SCK only while SPE is set: the reset leaves the pad to whatever
+else holds the wire and the enable after it drives the pad again, an edge a device still
+selected would count. A request with a null `cs` has its select in the program's hands, so
+the host cannot release it and the reset happens under it; `prime()` pays an owed reset
+too, so a program framing the select itself primes first, as it must for a mode change.
+`recover()` remains, for the arbiter on `spi_timeout`, its one use there, and for a program
+with the bus idle; it waits for nothing, and answers false when the block did not come back.
+
+**What the reset cannot do: open a closed clock gate.** With the gate closed the next request
+stalls too, on its own budget, and `recover()` answers false. The first request after the
+gate reopens finds the block at its reset values and stalls as well, its own reset the way
+back, unless the program calls `recover()` when it opens the gate (Bench findings).
 
 With engines, the transmit stream is armed for its errors alone and the receive
 block's completion is the DMA block's one interrupt. **The receive stream arms at
@@ -433,7 +449,7 @@ calls, four a transaction). The setup time is tested before any call. **The rece
 flushed per request**: the receive loop and the receive stream read every
 frame they clock and the transmit-only loop clears what stands at its tail, so
 nothing stands in it when a transaction ends well. A stall, `spi_dma_fault` and
-`recover()` flush it themselves, `init()` once ("Types and verbs").
+`recover()` reset the block, which empties it; `init()` flushes it once ("Types and verbs").
 
 **Two polled shapes, by the request's fields.** A request with `polled`
 set runs one of them at every length and on every host, and never the
@@ -461,11 +477,19 @@ dispatch above the caller. That decides the shapes:
   the DR read and the DR write adjacent.
 
 One budget, 400 000 spins and 4096 a frame, bounds the whole transaction's
-spins; when it runs out the peripheral is reset and reconfigured and the
-transaction ends with `spi_stalled`. A request that changes the rate, the mode or
+spins; when it runs out the select is released, the peripheral reset and
+reconfigured and the transaction ends with `spi_stalled`. A request that changes the rate, the mode or
 the width runs the disable of 26.3.10 first, with bounded waits of its own outside
 that budget and an answer the host drops: the budget of the transaction that follows
 shows what it left as a stall of its own.
+
+**The reset, once, cold and out of line.** The stall, the owed reset and `recover()` call one
+function: the RCC's pulse (RM0390 6.3.8 and 6.3.9), the applied configuration written back,
+the enable, under a thousand cycles. It declines 26.3.10's disable: that procedure lets a last
+frame out, behind a released select nobody wants it, and on a block with SPE down or its
+gate closed it returns at once anyway. `start()` pays one load and one branch for it a
+request on a host with engines, 6 to 8 cycles of F at 180 MHz measured by building the
+same source without them, none on a host without engines, and never a call.
 
 **The transmit buffer's write-ahead (26.3.9, figure 311) is used by the
 transmit-only shape and declined by the receive shape.** Storing the next
@@ -519,10 +543,11 @@ for a read and one for a write, and `bench_stm32f4` letter `e` measures each as
 one difference. It times an asynchronous request of 64 frames at SCK 5.625 MHz on
 the engined host, its least busy run. From that it takes F, found by timing the
 polled request through the same call at 16 and at 64 frames, whole, and
-extrapolating to no frames - **473 for a read, 443 for a write** in three runs on
-this image, 461 and 428 on another whose `start()` differs by two instructions, the
-difference being where the flash fetch lands (`spi_costs` holds 460 and 430, and
-that much drift moves a count by at most a frame). The same letter's polled lines
+extrapolating to no frames - **494 to 525 for a read, 484 to 492 for a write** over four
+layouts of one source shifted by 4 to 16 bytes in the flash, the same to a cycle in four
+runs of one image, the difference being where the flash fetch lands (`spi_costs`
+holds 460 and 430, and that drift moves a count by a frame, two on a write at /2). The
+same letter's polled lines
 on the engineless host give the frame figures, from the difference of 256 and 16
 frames: the transmit-only turn **38 cycles** at SCK 45 MHz (the wire's 32; at 22.5
 MHz and slower the wire is the bound; `spi_costs` keeps 36 for it, and that moves no
@@ -906,9 +931,9 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
   11.25 and 5.625, and 1.00 to 1.01 in 16-bit frames at every rate. The
   receive shape in mode 0: x = 2.20 at 45 MHz, 1.47 at 22.5, 1.20 at 11.25
   and 1.07 at 5.625 in 8-bit frames, 1.47, 1.30, 1.11 and 1.05 in 16-bit
-  ones; the same loop over the engined host, placed elsewhere in the flash,
-  reads 2.33 and 1.60 at 45 and 22.5 MHz (design/benchmark.md's gap on
-  placement). What the receive loop's one frame in flight costs at every
+  ones; the same loop placed elsewhere in the flash reads 2.33 and 1.60 at 45 and
+  22.5 MHz, and which of an image's two hosts gets which moves with its layout, the
+  loop's instructions unchanged (design/benchmark.md's gap on placement). What the receive loop's one frame in flight costs at every
   rate, the letter's `spi.frame` lines, the receive frame's HCLK cycles over
   the wire's from 256 less 16 frames, each run with interrupts masked, the
   same figures to a tenth of a cycle in three runs of the letter:
@@ -924,6 +949,10 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
   | SPI2, mode 1, 8-bit | 64 | 56 | 60 | 68 | 56 to 64 |
   | SPI2, mode 1, 16-bit | 56 | 60 | 68 | 64 | 56 to 68 |
 
+  That is one layout. The same instructions at another address measure up to 12 cycles
+  apart in a cell: SPI1's mode 0, 8-bit row 38, 30, 28 and 10, SPI2's mode 0, 8-bit row 56,
+  40 and 24, and SPI2's mode 1 a flat 56.
+
   The wire's frame is 8 bits x the division x HCLK/PCLK: 64 cycles at /4 on
   SPI1 in 8-bit frames, four times that on SPI2 in 16-bit ones. In mode 0
   RXNE rises half a bit before the frame's end (26.3.9), and the turn hides
@@ -932,10 +961,10 @@ On the Nucleo-F446RE's SPI1 at 180 MHz with MISO floating, the host's costs:
   read at 70 cycles on SPI1 against the wire's 32 and 16-bit frames at 94
   against 64. The figures' alternation by 4 cycles from code to code in
   mode 1 was not looked into: on SPI1 it is two cycles of its APB clock.
-- **A short polled request's fixed cost: 194, 237 and 247 cycles** for
+- **A short polled request's fixed cost: 192, 235 and 245 cycles** for
   a command byte and 0, 2 and 15 data bytes at 5.625 MHz (wall minus
   the wire's time; D/C and the select on two pads, the data phase in the
-  transmit-only shape), and 196, 239 and 249 over the engined host, the
+  transmit-only shape), and 207, 249 and 259 over the engined host, the
   same loops. 256 frames polled at 45 and 22.5 MHz over the engined host
   run the loop too, with no completion (irq 0), a read and a write alike.
 - **The vendor's loop on the same board.** ST's HAL v1.8.5
@@ -1252,6 +1281,43 @@ ladder, are judged at PCLK1/2 too:
   ERRIE's vector runs ONCE on that fault, SR 0x22 (MODF, TXE standing beside it). The request is full
   duplex on purpose: on a transmit-only one OVR would come first, since nothing reads
   the receive buffer.
+- **The next request after a stall or a transfer error** (letter `k`, fifteen runs and three of `z`;
+  `recover()` called only where named). The peer's window is commanded first, and the engined host
+  is then not initialized again, so the request judged is the first the host has seen
+  since the failure and a frame left behind is a window out of place at both ends. A
+  stall is staged with SPE taken down under the host, on each path: a polled write and a
+  polled read of nine frames and the polled command phase of an asynchronous request, one
+  frame at PCLK1/8, where it costs less than a block. Each ends `spi_stalled` with the select
+  reading high, the next window, 32 frames at PCLK1/32 (PCLK1/8 after the command phase),
+  polled or on the streams, exact at both ends. The wall in `start()` is the budget at 180
+  MHz: 38.85 ms for the nine-frame write and 38.93 ms for the read, 16 cycles a poll on APB1,
+  and 36.01 ms for the command phase; a poll's turn moves with the image's layout, the read
+  measuring 48.64 ms, 20 cycles a poll, in another. The reset's share is under a thousand
+  cycles, `recover()` over a frame standing with SPE down measuring 850 (4.7 us).
+- **The order is on the pad** (letter `k`). This block drives SCK only while SPE is set: with
+  the pad's pull-down on in mode 3 it falls when SPE falls and rises on the enable, and with no
+  pull it held its level through the reset and no edge came within 1 ms on these wires. So
+  the letter stages mode 3 with that pull-down, as a bus with a pull on the wire would be,
+  counts SCK's edges through EXTI by where the select's output latch stands, and judges none
+  with it low and one with it high in `start()`, both stall paths. With the reset ahead of
+  the release the same stage counts that edge with the select low, and the verdict falls.
+- **A transfer error, staged and survived** (letter `k`): a buffer at 0x3000 0000, in RM0390
+  2.2.2's reserved 0x2003 0000 to 0x3FFF FFFF, gives a bus error and no fault of the core. A
+  transmit buffer there stops the stream on its first beat, no frame clocked; a receive buffer
+  there stops the receive stream on the first frame back, and a frame stands in the receive
+  buffer behind it every run. `dma_isr()` answers true once, in 572 to 623 cycles, `status()` is
+  `spi_dma_fault` and the select the request named is high. The next window, polled or on the
+  streams, is exact at both ends with no `recover()`; with the reset taken out, the frame standing
+  is read in front of a window on the streams, all 32 frames out of place.
+- **Queued behind a failure, through the arbiter** (letter `k`): two requests posted from one
+  dispatch, the first bound to fail, the second holding the peer's window. The replies come in
+  order, `spi_stalled` then `spi_ok` and `spi_dma_fault` then `spi_ok`, the second's window exact
+  at both ends, polled and on the streams.
+- **The clock gate closed under the host** (letter `k`): the reset's limit. A polled write
+  stalls in 38.93 ms, the next in 38.85 ms, `recover()` answers false; the gate opened and
+  `recover()` called, it answers true and the next window is exact. With the gate opened and no
+  `recover()`, CR1 reads 0x0000 (the pulse reached the block through the closed gate), one more
+  request stalls in 38.85 ms and its own reset is the way back, the next window exact.
 - **A CLIENT ON TXEIE, AND ERRIE ON A CLIENT THAT READS NOTHING** (letter
   `g`): enabling TXEIE with the buffer empty and the select high runs the
   vector at once, and that first entry is the preload; then one entry
@@ -1385,9 +1451,6 @@ Implemented, not bench-verified (each with what would measure it):
   `spi.frame` lines run modes 0 and 1 at /4 to /256, so the header's CPHA = 0 and
   CPHA = 1 figures extrapolate from one mode each; the same lines over the other two
   would measure them.
-- `spi_dma_fault`: no letter makes a stream report a transfer error, so the path
-  (requests dropped, streams put away, the receive buffer read, select released)
-  is read in the code. A stream pointed at an unmapped address would provoke it.
 - `SpiHost` on the STM32F429I-DISC1: that half of the suite compiles over the host as
   it runs a request here and was not run with these loops, so nothing above states the
   polled loop's cost against the two soldered devices on SPI5 (letter b's ladder, and

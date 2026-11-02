@@ -15,7 +15,7 @@
 //
 // TWO INSTRUMENTS:
 //
-//  - THE LOOP-BACK (a..f): the PL022's LBM feeds the transmitter into the
+//  - THE LOOP-BACK (a..h): the PL022's LBM feeds the transmitter into the
 //    receiver with nothing on the wire, which proves the frame sizes, the
 //    four modes, every rate, the engines, the asynchronous way's rules and
 //    the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
@@ -64,7 +64,11 @@
 //      with no engines, the short request at the host's count, a command
 //      block chained to its data block, and E - F measured
 //   g  A POLLED WAIT THAT RUNS OUT (rp_spi_async.hpp): spi_stalled, the
-//      select released, the receive FIFO drained, recover() the way back
+//      select released, the block reset, the next request exact with no
+//      recover(), polled and on the engines, directly and queued in SpiBus
+//   h  A DMA BLOCK THE BUS REFUSES (rp_spi_async.hpp): spi_dma_fault, the
+//      select released, the reset paid by the next start(), that request
+//      exact with no recover(), directly and queued in SpiBus
 //   n  THE PEER: ident (kind 0x09, on its crystal), ten pings, and the
 //      dark listener woken by nothing
 //   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
@@ -79,6 +83,8 @@
 //      widths, three rates
 //   m  THE PAD FACTS: the client's answer pad driven, under SOD and
 //      released, each under a foreign host's burst
+//   v  A WINDOW FRAMED BY HAND AFTER A FAULT: read by the foreign client and
+//      read back from it, the four modes, no recover()
 //   x  (outside z) the slip statistics: each mode ten times, two rates
 //
 // build: boards = pico,weact2040
@@ -128,7 +134,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 18> bench;
 
 // SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
 // no wire is on those pads.
@@ -173,6 +179,13 @@ uint32_t cycles_now() { return Ticker::cycles(); }
 /// What a miss adds to a wall at the boot's XIP setting: the figure under which E
 /// reads 765 to 771 over runs counting 2 to 10 misses (rp_spi_async.hpp).
 constexpr uint32_t xip_line_cycles = 92u;
+/// Letter h's bad buffer: an address in the APB's range past the last
+/// peripheral, where 2.2 says an unmapped range raises a bus error, a DMA read or
+/// write then READ_ERROR or WRITE_ERROR (2.5.6; test_rp2040_dma's letter h judges
+/// both). And the SRAM's range (2.2.2), a read past whose end is unmapped too.
+constexpr uintptr_t bus_hole = 0x40100000u;
+constexpr uintptr_t sram_base = 0x20000000u;
+constexpr uintptr_t sram_end = 0x20042000u;
 
 alignas(4) uint8_t tx_buf[256];
 alignas(4) uint8_t rx_buf[256];
@@ -692,7 +705,8 @@ int main() {
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
     bench.letter('f', "the asynchronous way: the refusal, the short request, the costs", tf_async);
-    bench.letter('g', "a polled wait that runs out: spi_stalled, recover()", tg_stall);
+    bench.letter('g', "a polled wait that runs out: spi_stalled, the next request clean", tg_stall);
+    bench.letter('h', "a DMA block the bus refuses: spi_dma_fault, the next request clean", th_fault);
     bench.letter('n', "the peer: ident, the command channel, the dark listener", link::tn_peer);
     bench.letter('o', "the matrix against the PIO client", link::to_matrix);
     bench.letter('p', "the ladder, judged to the client's ceiling", link::tp_ladder);
@@ -701,6 +715,7 @@ int main() {
     bench.letter('m', "the client's answer pad: driven, SOD, released", link::tm_pads);
     bench.letter('s', "the client from its vector: the ladder, the tail, the overrun", link::ts_client_vector);
     bench.letter('w', "the wedge: the per-bus timeout and recover()", link::tw_wedge);
+    bench.letter('v', "a window framed by hand after a fault, read by the peer", link::tv_framed);
     bench.letter('x', "slip statistics (outside z)", link::tx_slips, false);
 
     if (serial_ok) {

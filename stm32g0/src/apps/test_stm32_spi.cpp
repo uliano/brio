@@ -159,6 +159,10 @@
 //      and its receive-only run, and every pair of modes applied inside an
 //      open select window - the slip prime() exists to prevent, counted by
 //      the F446's client into CPHA = 0 alone
+//   K  THE NEXT REQUEST AFTER A STALL OR A TRANSFER ERROR, recover() never
+//      called: every stall path and a bus error on either channel, directly
+//      and queued through SpiBus, the next polled and asynchronous windows
+//      exact at both ends; the clock gate closed, which no reset opens
 //   t  (OUTSIDE z) THE CRCNEXT WINDOW: the store walked away from the
 //      last data store one loop turn at a time, one frame in flight -
 //      the instrument behind w's burst (spi.md)
@@ -171,7 +175,7 @@
 // plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghijklmnopqs,rtuvwxy
+// build: groups = abcdefghijklmnopqsK,rtuvwxy
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -300,10 +304,10 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-// The table holds every letter registered in main(), 25 of them: a
+// The table holds every letter registered in main(), 26 of them: a
 // letter past its capacity is refused (letter() returns false), and the
 // suite does not check the return, so it would be missing in silence.
-TestBench<Serial, 25> bench;
+TestBench<Serial, 26> bench;
 
 using CsPin = Pin<'A', 15>;          ///< the host's chip select, a GPIO
 using ClientNssPin = Pin<'B', 12>;   ///< the client's NSS - and letter e's witness
@@ -436,6 +440,14 @@ volatile bool host_done = false;
 /// block is two blocks and one completion.
 volatile uint16_t dma_completions = 0;
 volatile uint16_t dma_blocks = 0;
+/// Letter K's stopwatch on the completing vector, the ticker's cycles.
+volatile bool time_vector = false;
+volatile uint32_t vector_cycles = 0;
+/// Letter K's witness of the order: SCK's edges on its own pad, each counted by
+/// where the select's output latch stood when it was seen.
+using SckWatch = ExtInt<Pin<host_pins.sck.port, host_pins.sck.pin>>;
+volatile uint16_t sck_edges_selected = 0;
+volatile uint16_t sck_edges_released = 0;
 /// The select's falling edges, letter s's CsWatch.
 volatile uint16_t cs_falls = 0;
 /// Letter s stretches the tick's handler to prove the receive loops lose
@@ -2751,6 +2763,23 @@ struct Kick {};
 struct Fill {};
 struct Ask {};
 struct Wedge {};
+/// Letter K: two requests posted from one dispatch, the first bound to fail.
+struct Pair {
+    bool fault;    ///< the first ends spi_dma_fault; else it ends spi_stalled
+    bool polled;   ///< the way the second one runs
+};
+
+/// Letter K's window: long enough for the engines at letter K's rate (a read
+/// rides them from 3 frames at PCLK/32, the arithmetic above SpiHostCosts).
+constexpr uint16_t way_frames = 32;
+constexpr SpiClock way_rate = SpiClock::div32;
+uint8_t way_tx[way_frames];
+uint8_t way_rx[way_frames];
+/// 0x3000 0000 is reserved on every part of the family (RM0444 2.2, the three
+/// memory maps), and 10.4.7 makes a read or a write of reserved space a transfer
+/// error that clears the channel's EN. Nothing reads or writes this but a channel.
+inline uint8_t* way_bad_address() { return reinterpret_cast<uint8_t*>(uintptr_t{0x3000'0000u}); }
+SpiMode way_mode = SpiMode::mode0;
 
 /// Letter q hands the chip select to the LETTER instead of the engine:
 /// the peer's `exchange` is ONE burst of `queued x payload` characters,
@@ -2774,7 +2803,7 @@ class Driver;
 /// magnitude above the longest transaction here.
 using SpiArb = SpiBus<DmaHost, P, 3, BusPassThrough, 100>;
 
-class Driver : public Fsm<Driver, SpiDone, Kick, Fill, Ask, Wedge, SleepVote> {
+class Driver : public Fsm<Driver, SpiDone, Kick, Fill, Ask, Wedge, Pair, SleepVote> {
 public:
     static inline EventQueue<Event, 12, P> queue;
     static inline uint8_t replies = 0;
@@ -2824,6 +2853,11 @@ private:
                 post<SpiArb>(request(0));
                 return handled();
             },
+            [](const Pair& p) {
+                post<SpiArb>(bound_to_fail(p.fault));
+                post<SpiArb>(the_good_one(p.polled));
+                return handled();
+            },
             [](const SpiDone& d) {
                 if (order_n < queued + 2u) {
                     order[order_n] = d.status;
@@ -2869,6 +2903,36 @@ private:
         };
     }
 
+    /// Letter K's first request: a polled write over a block whose enable the
+    /// letter took down, or an asynchronous one out of a reserved address. The
+    /// select is null on a fault's: the frames a receive error lets out must
+    /// not reach the window the peer holds for the good one.
+    static DmaHost::Request bound_to_fail(bool fault) {
+        DmaHost::Request r{};
+        r.cs = fault ? PinRef{} : CsPin::ref();
+        r.tx = lend<Lease::reply>(fault ? static_cast<const uint8_t*>(way_bad_address())
+                                        : static_cast<const uint8_t*>(way_tx));
+        r.len = fault ? way_frames : 9u;
+        r.clock = way_rate;
+        r.mode = way_mode;
+        r.polled = !fault;
+        r.reply = reply_to<Driver, SpiDone>();
+        return r;
+    }
+    /// The good one: the whole window the peer holds, its own select, read back.
+    static DmaHost::Request the_good_one(bool polled) {
+        DmaHost::Request r{};
+        r.cs = CsPin::ref();
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(way_tx));
+        r.rx = lend<Lease::reply>(way_rx);
+        r.len = way_frames;
+        r.cs_setup_us = 30;
+        r.clock = way_rate;
+        r.mode = way_mode;
+        r.polled = polled;
+        r.reply = reply_to<Driver, SpiDone>();
+        return r;
+    }
 };
 
 using BusKernel = Tenuto<P, Driver, SpiArb>;
@@ -5824,6 +5888,479 @@ void ty_simplex() {
 }
 
 
+// =============================================================================
+// K - THE NEXT REQUEST AFTER A STALL OR A TRANSFER ERROR
+// =============================================================================
+//
+// The host puts its own block right, so nothing here calls recover() between a
+// failure and the request judged after it, and nothing re-initializes the host:
+// the peer's exchange is commanded FIRST, through the engineless host on the
+// same instance, then the engined host comes up and is not touched again until
+// the window has been clocked. The peer's DMA serve counts frames and takes no
+// notice of a select that falls and rises with no clock under it, so a stalled
+// request may frame itself with the real select and the window survives it.
+//
+// A STALL IS STAGED WITH SPE DOWN UNDER THE HOST (S1::disable() on the resource):
+// the request's compare finds nothing to change, so the enable stays down, the
+// frames written stand in the TXFIFO - the write-ahead's own worst case - and the
+// flag the loop waits for never rises. THE FRAMES STANDING ARE THE TEST OF THE
+// RESET: one left in the TXFIFO would go out in front of the next request and
+// the window would be frames out of place at both ends. MODE 3 WITH A PULL-DOWN
+// ON SCK IS THE TEST OF THE ORDER, as a bus with a pull on that wire would be:
+// this block drives SCK only while SPE is set (measured here), so the pad falls
+// when SPE does and the reset's enable raises it, a rising edge; were the select
+// still low the peer's client would count it. SCK's edges are also counted on the
+// pad itself, each by where the select's latch stood: none with it low and at
+// least one with it high is the order read directly.
+//
+// A TRANSFER ERROR IS A BUFFER IN RESERVED SPACE (kl::way_bad_address()). A bad
+// transmit buffer stops the channel on its first beat: nothing reaches DR, no
+// clock, so the real select can frame it. A bad receive buffer stops the
+// receive channel on the first frame back, with the transmit channel already
+// ahead of it: frames still clock, others stand in the FIFOs, so its request
+// carries no select - the peer's window stays deaf - and the one after it is the
+// first thing the peer hears. A frame of the faulted block read in front of the
+// window would put this end's read-back out of place.
+//
+// The select's level is read on its output latch, the store the host made. The
+// walls are printed against the budget, not judged: a handler can only lengthen
+// them, and the figure is read beside the arithmetic in docs/stm32g0/spi.md. The
+// vector's cost is the ticker's cycles, around DmaHost::dma_isr().
+//
+// THE BOUNDS. The peer holds its window for 400 ms from the command: in front of
+// the window stand at most two stalls, 58 ms each at the longest wall measured, or
+// one of 64 ms, and a millisecond of settling. A fault's completion waits 100 ms
+// for a first beat or a first frame back, 8 x 32 PCLK cycles, 4 us; a window's
+// waits 200 ms for 32 such frames, 128 us; the arbiter's 100 ticks are not spent
+// on a stall, whose wall is inside start() and untimed. The verdicts themselves
+// are exact counts, with no tolerance to derive.
+
+namespace way {
+
+using kl::way_frames;
+using kl::way_rate;
+using kl::way_rx;
+using kl::way_tx;
+
+enum class Shape : uint8_t {
+    write,     ///< polled, nothing read back: the transmit-only loop
+    read,      ///< polled, read back: the receive loop
+    command,   ///< asynchronous with a command phase too short for a block: polled before it
+};
+
+struct Failed {
+    bool ended = false;       ///< start() answered true
+    bool completed = false;   ///< ended, or the vector answered true within the wait
+    uint16_t completions = 0;
+    uint8_t status = 0xFFu;
+    bool released = false;
+    uint32_t wall = 0;        ///< cycles inside start()
+};
+
+/// Clear the window, then command the peer. False when the peer refused.
+bool arm_peer(spilink::Params& a, uint8_t seed, SpiMode mode) {
+    (void)link_command_mode();
+    a = spilink::Params{};
+    a.cfg = spilink::Cfg{.apply = 1,
+                         .mode = static_cast<uint8_t>(mode),
+                         .dord = 0,
+                         .regime = spilink::regime_buffer_wait};
+    a.count = way_frames;
+    a.ms = 400;
+    a.seed_a = seed;
+    a.seed_b = static_cast<uint8_t>(seed ^ 0x6Cu);
+    a.pattern = spilink::pattern_prbs;
+    spilink::Stream out(a.pattern, a.seed_a);
+    for (uint16_t i = 0; i < way_frames; ++i) {
+        way_tx[i] = out.next();
+        way_rx[i] = 0xEE;
+    }
+    return peer_act(Op::exchange, a);
+}
+
+/// The engined host up at the letter's rate, the select high.
+void host_up(SpiMode mode) {
+    kl::way_mode = mode;
+    software_cs_pads();
+    dma_host_live = true;
+    (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
+    DmaHost::prime(mode, way_rate);
+    settle_ms(1);
+}
+
+/// Letter's pull on SCK, which the next init() takes away with the pad's
+/// function: what makes the pad's being undriven with SPE clear an edge.
+void pull_sck_down() {
+    Pin<host_pins.sck.port, host_pins.sck.pin>::pull(PinPull::down);
+    settle_ms(1);
+}
+
+/// SCK's edges counted over one call: the pad is an input to the EXTI whatever
+/// its function, on line 3.
+void watch_sck(bool on) {
+    if (on) {
+        (void)SckWatch::select();
+        (void)SckWatch::configure(ExtiSense::both);
+        (void)SckWatch::clear();
+        sck_edges_selected = 0;
+        sck_edges_released = 0;
+    }
+    (void)SckWatch::arm(on);
+    if (on) {
+        Nvic::enable(SckWatch::irq());
+    } else {
+        Nvic::disable(SckWatch::irq());
+        (void)SckWatch::clear();
+    }
+}
+
+/// A request made to stall, the block already unable to clock.
+Failed run_stalled(Shape shape, PinRef cs, SpiMode mode) {
+    DmaHost::Request q{};
+    q.cs = cs;
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(way_tx));
+    q.len = 9;
+    q.clock = way_rate;
+    q.mode = mode;
+    q.polled = true;
+    if (shape == Shape::read) {
+        q.rx = lend<Lease::reply>(way_rx);
+    }
+    if (shape == Shape::command) {
+        q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(way_tx));
+        q.cmd_len = 1;
+        q.rx = lend<Lease::reply>(way_rx);
+        q.len = way_frames;
+        q.polled = false;
+    }
+    Failed f{};
+    const uint32_t t0 = cycles_now();
+    f.ended = DmaHost::start(q);
+    f.wall = cycles_now() - t0;
+    f.completed = f.ended;
+    f.status = DmaHost::status();
+    f.released = CsPin::read_out();
+    return f;
+}
+
+/// The completion, however it comes: `ended` when start() already answered, or
+/// the vector's answer within `ms`.
+bool completed_within(bool ended, uint32_t ms) {
+    const uint32_t m0 = Ticker::millis();
+    while (!ended && !host_done && Ticker::millis() - m0 < ms) {
+    }
+    return ended || host_done;
+}
+
+/// A block whose buffer gives a bus error, and the vector's answer.
+Failed run_faulted(bool bad_tx, PinRef cs, SpiMode mode) {
+    DmaHost::Request q{};
+    q.cs = cs;
+    q.tx = lend<Lease::reply>(bad_tx ? static_cast<const uint8_t*>(kl::way_bad_address())
+                                     : static_cast<const uint8_t*>(way_tx));
+    q.rx = lend<Lease::reply>(bad_tx ? way_rx : kl::way_bad_address());
+    q.len = way_frames;
+    q.clock = way_rate;
+    q.mode = mode;
+    q.polled = false;
+    Failed f{};
+    dma_completions = 0;
+    host_done = false;
+    time_vector = true;
+    const uint32_t t0 = cycles_now();
+    f.ended = DmaHost::start(q);
+    f.wall = cycles_now() - t0;
+    f.completed = completed_within(f.ended, 100u);
+    time_vector = false;
+    f.completions = dma_completions;
+    f.status = DmaHost::status();
+    f.released = CsPin::read_out();
+    return f;
+}
+
+struct Window {
+    bool ended = false;       ///< start() answered true
+    bool completed = false;
+    uint8_t status = 0xFFu;
+    bool reported = false;
+    spilink::Report r{};
+    uint16_t mism = 0;        ///< this end's read-back, frames wrong
+};
+
+/// What every window ends in: the host put away, the peer's report, this end's
+/// read-back against what the peer owes.
+void close_window(const spilink::Params& a, Window& o) {
+    DmaHost::release();
+    dma_host_live = false;
+    (void)link_command_mode();
+    o.reported = peer_report(o.r);
+    spilink::Stream want(a.pattern, a.seed_b);
+    for (uint16_t i = 0; i < way_frames; ++i) {
+        if (way_rx[i] != want.next()) {
+            ++o.mism;
+        }
+    }
+}
+
+/// The whole window, the first request the host has seen since the failure.
+Window next_window(const spilink::Params& a, SpiMode mode, bool polled) {
+    Window o{};
+    DmaHost::Request q{};
+    q.cs = CsPin::ref();
+    q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(way_tx));
+    q.rx = lend<Lease::reply>(way_rx);
+    q.len = way_frames;
+    q.cs_setup_us = 30;
+    q.clock = way_rate;
+    q.mode = mode;
+    q.polled = polled;
+    host_done = false;
+    o.ended = DmaHost::start(q);
+    o.completed = completed_within(o.ended, 200u);
+    o.status = DmaHost::status();
+    close_window(a, o);
+    return o;
+}
+
+/// Exact at both ends, and run the way it asked: inside start() when polled, on
+/// the engines when not.
+bool exact(const Window& o, bool polled) {
+    return o.completed && o.status == spi_ok && o.ended == polled && o.reported && o.r.count == way_frames &&
+           o.r.mism == 0u && o.mism == 0u;
+}
+
+void print_window(const char* what, const Window& o) {
+    print(serial, "      then ", what, ": status ", o.status, ", inside start() ", o.ended ? 1u : 0u, ", host mism ",
+          o.mism, ", the peer read ", o.r.count, " mism ", o.r.mism, o.completed ? "" : " NEVER COMPLETED", crlf);
+}
+
+void print_failed(const char* what, const Failed& f) {
+    print(serial, "    ", what, ": start() ", f.ended ? "true" : "false", ", status ", f.status, " (stalled ",
+          spi_stalled, ", fault ", spi_dma_fault, "), ", f.wall, " cycles (", f.wall / (SysClock::hz() / 1'000'000u),
+          " us) in start(), select ", f.released ? "high" : "LOW", crlf);
+}
+
+/// One request queued behind a failing one, through the arbiter. The replies and
+/// the good one's window, which the peer has held since before the failure.
+struct Queued {
+    uint8_t replies = 0;
+    uint8_t first = 0;
+    uint8_t second = 0;
+    Window o{};
+};
+Queued run_queued(bool fault, bool polled, uint8_t seed) {
+    Queued q{};
+    spilink::Params a{};
+    const bool armed = arm_peer(a, seed, SpiMode::mode0);
+    kl::BusKernel::init_all();
+    host_up(SpiMode::mode0);
+    bus_ao_live = true;
+    if (!fault) {
+        (void)S1::disable();
+    }
+    post<kl::Driver>(kl::Pair{.fault = fault, .polled = polled});
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 800u && kl::Driver::replies < 2u) {
+        kl::pump();
+    }
+    bus_ao_live = false;
+    q.replies = kl::Driver::replies;
+    q.first = kl::Driver::order[0];
+    q.second = kl::Driver::order[1];
+    q.o.completed = armed;
+    q.o.ended = polled;
+    q.o.status = q.second;
+    close_window(a, q.o);
+    return q;
+}
+
+bool queued_clean(const Queued& q, uint8_t first, bool polled) {
+    return q.replies == 2u && q.first == first && exact(q.o, polled);
+}
+
+void print_queued(const char* what, const Queued& q) {
+    print(serial, "    ", what, ": ", q.replies, " replies, status ", q.first, " then ", q.second, ", host mism ", q.o.mism,
+          ", the peer read ", q.o.r.count, " mism ", q.o.r.mism, crlf);
+}
+
+}  // namespace way
+
+void tK_way_back() {
+    if (!need_peer()) {
+        return;
+    }
+    print(serial, "  a stall: 32 frames at PCLK/32, the enable taken down under the host first", crlf);
+
+    // ---- a stall on each path, the next request exact --------------------------
+    spilink::Params a{};
+    bool armed = way::arm_peer(a, 0x21, SpiMode::mode3);
+    way::host_up(SpiMode::mode3);
+    way::pull_sck_down();
+    (void)S1::disable();
+    way::watch_sck(true);
+    const way::Failed f_write = way::run_stalled(way::Shape::write, CsPin::ref(), SpiMode::mode3);
+    way::watch_sck(false);
+    const uint16_t under_write = sck_edges_selected;
+    const uint16_t after_write = sck_edges_released;
+    const way::Window n_write = way::next_window(a, SpiMode::mode3, true);
+    way::print_failed("a polled write, mode 3", f_write);
+    print(serial, "      SCK's edges in start(): ", under_write, " with the select low, ", after_write, " with it high", crlf);
+    way::print_window("a polled window", n_write);
+    bench.verdict("A POLLED WRITE THAT STALLS, MODE 3, THEN A POLLED REQUEST WITH NO recover(): spi_stalled, the select "
+                  "released, and the window exact at both ends - the frames that stood in the TXFIFO gone, SCK moved by "
+                  "the reset behind a select already up",
+                  armed && f_write.ended && f_write.status == spi_stalled && f_write.released && under_write == 0u && after_write != 0u &&
+                      way::exact(n_write, true));
+
+    armed = way::arm_peer(a, 0x34, SpiMode::mode0);
+    way::host_up(SpiMode::mode0);
+    (void)S1::disable();
+    const way::Failed f_read = way::run_stalled(way::Shape::read, CsPin::ref(), SpiMode::mode0);
+    const way::Window n_read = way::next_window(a, SpiMode::mode0, false);
+    way::print_failed("a polled read, mode 0", f_read);
+    way::print_window("an asynchronous window", n_read);
+    bench.verdict("A POLLED READ THAT STALLS, THEN AN ASYNCHRONOUS REQUEST WITH NO recover(): spi_stalled, the select "
+                  "released, and the window on the engines exact at both ends",
+                  armed && f_read.ended && f_read.status == spi_stalled && f_read.released &&
+                      way::exact(n_read, false));
+
+    armed = way::arm_peer(a, 0x47, SpiMode::mode3);
+    way::host_up(SpiMode::mode3);
+    way::pull_sck_down();
+    (void)S1::disable();
+    way::watch_sck(true);
+    const way::Failed f_cmd = way::run_stalled(way::Shape::command, CsPin::ref(), SpiMode::mode3);
+    way::watch_sck(false);
+    const uint16_t under_cmd = sck_edges_selected;
+    const uint16_t after_cmd = sck_edges_released;
+    const way::Window n_cmd = way::next_window(a, SpiMode::mode3, true);
+    way::print_failed("an asynchronous request's polled command phase, mode 3", f_cmd);
+    print(serial, "      SCK's edges in start(): ", under_cmd, " with the select low, ", after_cmd, " with it high", crlf);
+    way::print_window("a polled window", n_cmd);
+    bench.verdict("AN ASYNCHRONOUS REQUEST WHOSE POLLED COMMAND PHASE STALLS ends inside start(), spi_stalled, the select "
+                  "released, no block started; the next request exact at both ends",
+                  armed && f_cmd.ended && f_cmd.status == spi_stalled && f_cmd.released && under_cmd == 0u && after_cmd != 0u &&
+                      way::exact(n_cmd, true));
+
+    // ---- queued behind a stall, through the arbiter ----------------------------
+    const way::Queued q_stall_p = way::run_queued(false, true, 0x5A);
+    way::print_queued("queued behind a stall, polled", q_stall_p);
+    const way::Queued q_stall_a = way::run_queued(false, false, 0x6D);
+    way::print_queued("queued behind a stall, asynchronous", q_stall_a);
+    bench.verdict("TWO REQUESTS FROM ONE DISPATCH, THE FIRST STALLS: the replies in order, spi_stalled then spi_ok, the "
+                  "second's window exact at both ends, polled and on the engines, recover() never called",
+                  way::queued_clean(q_stall_p, spi_stalled, true) && way::queued_clean(q_stall_a, spi_stalled, false));
+
+    // ---- a transfer error, the next request exact ------------------------------
+    print(serial, "  a transfer error: 32 frames at PCLK/32, a buffer at 0x30000000", crlf);
+    armed = way::arm_peer(a, 0x71, SpiMode::mode0);
+    way::host_up(SpiMode::mode0);
+    const way::Failed e_tx = way::run_faulted(true, CsPin::ref(), SpiMode::mode0);
+    const uint32_t tx_vector = vector_cycles;
+    const way::Window n_tx = way::next_window(a, SpiMode::mode0, true);
+    way::print_failed("a transmit buffer in reserved space", e_tx);
+    print(serial, "      the vector's cost ", tx_vector, " cycles (the channel's error, one completion)", crlf);
+    way::print_window("a polled window", n_tx);
+    bench.verdict("A BUS ERROR ON THE TRANSMIT CHANNEL: dma_isr() answers true once, spi_dma_fault, the select released, no "
+                  "recover(); the next polled request exact at both ends",
+                  armed && !e_tx.ended && e_tx.completed && e_tx.completions == 1u &&
+                      e_tx.status == spi_dma_fault && e_tx.released && way::exact(n_tx, true));
+
+    armed = way::arm_peer(a, 0x83, SpiMode::mode0);
+    way::host_up(SpiMode::mode0);
+    const way::Failed e_rx = way::run_faulted(false, {}, SpiMode::mode0);
+    const uint32_t rx_vector = vector_cycles;
+    settle_ms(2);
+    const uint8_t rx_stood = static_cast<uint8_t>(S1::rx_level());
+    const uint8_t tx_stood = static_cast<uint8_t>(S1::tx_level());
+    const way::Window n_rx = way::next_window(a, SpiMode::mode0, false);
+    way::print_failed("a receive buffer in reserved space, no select", e_rx);
+    print(serial, "      the vector's cost ", rx_vector, " cycles; RXFIFO level ", rx_stood, ", TXFIFO level ", tx_stood, " behind it",
+          crlf);
+    way::print_window("an asynchronous window", n_rx);
+    bench.verdict("A BUS ERROR ON THE RECEIVE CHANNEL: dma_isr() answers true once, spi_dma_fault, no recover(); the next "
+                  "asynchronous request exact at both ends, no frame of the faulted block read back in front of it",
+                  armed && !e_rx.ended && e_rx.completed && e_rx.completions == 1u &&
+                      e_rx.status == spi_dma_fault && way::exact(n_rx, false));
+
+    // The same error with the select the request names; no window is armed, so
+    // the peer's command listener hears a frame or two of nothing it knows.
+    (void)link_command_mode();
+    way::host_up(SpiMode::mode0);
+    const way::Failed e_sel = way::run_faulted(false, CsPin::ref(), SpiMode::mode0);
+    settle_ms(1);
+    way::print_failed("a receive buffer in reserved space, the select named", e_sel);
+    DmaHost::release();
+    dma_host_live = false;
+    bench.verdict("...and the vector itself releases the select the request named",
+                  !e_sel.ended && e_sel.completed && e_sel.status == spi_dma_fault && e_sel.released);
+
+    // ---- queued behind a transfer error, through the arbiter -------------------
+    const way::Queued q_fault_p = way::run_queued(true, true, 0x95);
+    way::print_queued("queued behind a transfer error, polled", q_fault_p);
+    const way::Queued q_fault_a = way::run_queued(true, false, 0xA7);
+    way::print_queued("queued behind a transfer error, asynchronous", q_fault_a);
+    bench.verdict("TWO REQUESTS FROM ONE DISPATCH, THE FIRST A BUS ERROR: the replies in order, spi_dma_fault then spi_ok, "
+                  "the second's window exact at both ends, polled and on the engines, recover() never called",
+                  way::queued_clean(q_fault_p, spi_dma_fault, true) && way::queued_clean(q_fault_a, spi_dma_fault, false));
+
+    // ---- what a reset cannot do: the clock gate closed under the host ----------
+    armed = way::arm_peer(a, 0xB9, SpiMode::mode0);
+    way::host_up(SpiMode::mode0);
+    S1::bus_clock(false);
+    const way::Failed g_first = way::run_stalled(way::Shape::write, {}, SpiMode::mode0);
+    const way::Failed g_second = way::run_stalled(way::Shape::write, {}, SpiMode::mode0);
+    const bool answer_closed = DmaHost::recover();
+    S1::bus_clock(true);
+    const bool answer_open = DmaHost::recover();
+    const way::Window n_gate = way::next_window(a, SpiMode::mode0, true);
+    way::print_failed("the gate closed, a polled write", g_first);
+    way::print_failed("the gate still closed, the next", g_second);
+    print(serial, "      recover() with the gate closed ", answer_closed ? "true" : "false", ", opened ",
+          answer_open ? "true" : "false", crlf);
+    way::print_window("a polled window", n_gate);
+    bench.verdict("A RESET DOES NOT OPEN A CLOSED GATE: the request after a stall stalls too, on its own budget, and "
+                  "recover() answers false until the gate is open",
+                  g_first.status == spi_stalled && g_second.status == spi_stalled && !answer_closed && answer_open);
+    bench.verdict("...and with the gate open and recover() called, the next request exact at both ends",
+                  armed && way::exact(n_gate, true));
+
+    armed = way::arm_peer(a, 0xCB, SpiMode::mode0);
+    way::host_up(SpiMode::mode0);
+    S1::bus_clock(false);
+    const way::Failed h_first = way::run_stalled(way::Shape::write, {}, SpiMode::mode0);
+    S1::bus_clock(true);
+    const uint32_t cr1_open = S1::regs().CR1;
+    const way::Failed h_second = way::run_stalled(way::Shape::write, {}, SpiMode::mode0);
+    const way::Window n_open = way::next_window(a, SpiMode::mode0, true);
+    way::print_failed("the gate closed, a polled write", h_first);
+    print(serial, "      the gate opened: CR1 ", hex(cr1_open), crlf);
+    way::print_failed("the gate open, no recover(), a polled write", h_second);
+    way::print_window("a polled window", n_open);
+    bench.verdict("WITH THE GATE REOPENED AND NO recover(), the block found at its reset values: one more request stalls, "
+                  "and that stall's reset is the way back, the next request exact at both ends",
+                  armed && h_first.status == spi_stalled && (cr1_open & SPI_CR1_SPE) == 0u &&
+                      h_second.status == spi_stalled && way::exact(n_open, true));
+
+    // recover() over frames standing in the TXFIFO, SPE down: its wall.
+    way::host_up(SpiMode::mode0);
+    (void)S1::disable();
+    S1::data_byte(0xFFu);
+    S1::data_byte(0xFFu);
+    S1::data_byte(0xFFu);
+    const uint8_t standing = static_cast<uint8_t>(S1::tx_level());
+    const uint32_t r0 = cycles_now();
+    (void)DmaHost::recover();
+    const uint32_t recover_wall = cycles_now() - r0;
+    print(serial, "    recover() over TXFIFO level ", standing, ", the enable down: ", recover_wall, " cycles (",
+          recover_wall / (SysClock::hz() / 1'000'000u), " us)", crlf);
+    DmaHost::release();
+    dma_host_live = false;
+
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the letter", command(Op::ping));
+}
+
 void banner() {
     print(serial, crlf, "test_stm32_spi - SPI/I2S on a G0 Nucleo", crlf);
     if (self_link) {
@@ -5898,6 +6435,18 @@ extern "C" void BRIO_STM32G0_SPI2_HANDLER() {
     }
 }
 
+/// Letter K's witness of SCK.
+extern "C" void EXTI2_3_IRQHandler() {
+    if (SckWatch::pending()) {
+        (void)SckWatch::clear();
+        if (CsPin::read_out()) {
+            sck_edges_released = static_cast<uint16_t>(sck_edges_released + 1u);
+        } else {
+            sck_edges_selected = static_cast<uint16_t>(sck_edges_selected + 1u);
+        }
+    }
+}
+
 extern "C" void EXTI4_15_IRQHandler() {
     if (NssWatch::pending()) {
         (void)NssWatch::clear();
@@ -5909,11 +6458,21 @@ extern "C" void EXTI4_15_IRQHandler() {
     }
 }
 
+/// The engined host's body, from either channel's vector; letter K times it.
+void dma_host_vector() {
+    const uint32_t t0 = time_vector ? cycles_now() : 0u;
+    const bool ended = DmaHost::dma_isr();
+    if (ended && time_vector) {
+        vector_cycles = cycles_now() - t0;
+    }
+    if (ended) {
+        dma_host_done();
+    }
+}
+
 extern "C" void DMA1_Channel1_IRQHandler() {
     if (dma_host_live) {
-        if (DmaHost::dma_isr()) {
-            dma_host_done();
-        }
+        dma_host_vector();
     } else {
         (void)HostTx::service();
     }
@@ -5925,9 +6484,7 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 extern "C" void DMA1_Channel2_3_IRQHandler() {
     if (dma_host_live) {
         dma_blocks = static_cast<uint16_t>(dma_blocks + 1u);
-        if (DmaHost::dma_isr()) {
-            dma_host_done();
-        }
+        dma_host_vector();
         (void)PeerTx::service();
         return;
     }
@@ -5986,6 +6543,8 @@ int main() {
     bench.letter('w', "THE CRC against the peer's unit, and a wrong CRC caught", tw_crc);
     bench.letter('y', "THE SIMPLEX LINES, THE SOFTWARE SELECT AND prime() against the peer",
                  ty_simplex);
+    bench.letter('K', "THE NEXT REQUEST AFTER A STALL OR A TRANSFER ERROR, recover() never called",
+                 tK_way_back);
     bench.letter('t', "THE CRCNEXT WINDOW against the peer: the walk, no verdict",
                  tt_crcnext_walk, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "

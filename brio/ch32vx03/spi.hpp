@@ -92,7 +92,8 @@
  * an explicit loop whatever its length and whatever engines the host
  * names, and completes inside start(), spinning under one spin budget for
  * the transaction (polled_budget(): a budget that runs out ends
- * spi_stalled); it depends on no interrupt vector, so it runs with global
+ * spi_stalled, the select released and the block reset before start()
+ * returns); it depends on no interrupt vector, so it runs with global
  * interrupts masked as it does with them enabled. Asynchronous, it
  * rides the DMA engines: start() launches them and returns, and the
  * receive channel's vector ends it; a request too short to repay the
@@ -103,13 +104,18 @@
  * mode, the rate or the width drains the block first with the same
  * bounded waits, their answer discarded (apply()). dma_rx_isr(),
  * dma_tx_isr() and dma_isr() are vector bodies, called from the program's
- * bound vector and nowhere else; they wait for nothing. On the CH32V303's
- * images (the F extension, the hardware prologue on) the vector
- * BRIO_CH32_VECTOR binds is a naked trampoline whose body must do no
- * floating-point work (pfic.hpp); these bodies do none. recover() is the
- * timed arbiter's, on a tenure (a transaction's time on the bus) that
- * never answered, and waits, bounded, for the drain. status() and busy()
- * are reads of volatile flags, legal from any context. Without engines
+ * bound vector and nowhere else; they wait for nothing, and on a transfer
+ * error they only drop the requests, put the channels away, release the
+ * select and note that a reset is owed. On the CH32V303's images (the F
+ * extension, the hardware prologue on) the vector BRIO_CH32_VECTOR binds
+ * is a naked trampoline whose body must do no floating-point work
+ * (pfic.hpp); these bodies do none. AFTER spi_stalled OR spi_dma_fault THE
+ * PROGRAM CALLS NOTHING: the next start() finds a clean block, and a
+ * request queued behind the failed one runs on it (SpiHost below).
+ * recover() is the timed arbiter's, on a tenure (a transaction's time on
+ * the bus) that never answered, or a program's, and waits, bounded, for
+ * the drain. status() and busy() are reads of volatile flags, legal from
+ * any context. Without engines
  * nothing here masks interrupts; with them, wherever a DMA block starts
  * or ends (in start(), in the vectors, in init(), recover() and
  * release()) the channel's entry into or exit from the count of active
@@ -818,7 +824,8 @@ struct Spi {
 
     static bool overrun() { return (regs().STATR & spi_ovr) != 0u; }
     /// "Reading the data register followed by the status register will
-    /// clear this bit" - DATAR then STATR, in that order.
+    /// clear this bit" - DATAR then STATR, in that order. Measured so on both
+    /// parts: that STATR load still reads the flag up, the load after it down.
     static void clear_overrun() {
         (void)regs().DATAR;
         (void)regs().STATR;
@@ -841,7 +848,7 @@ struct Spi {
      * flag went down, rather than promising what the words say. A host
      * that has been demoted has lost SPE and MSTR with the flag and must
      * be reconfigured anyway: reset() then configure() is that path, and
-     * SpiHost::recover() is it written out.
+     * SpiHost's reset_block() is it written out.
      */
     static bool clear_mode_fault() {
         (void)regs().STATR;
@@ -1057,9 +1064,9 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // The two other codes this host answers are the vocabulary's
 // (util/spi_bus.hpp). spi_stalled: a polled frame's flag never came within
 // the transaction's one spin budget - a clock that stopped, a block that is
-// dead; the select is released and the receive side flushed. spi_rejected:
-// an asynchronous request on a host with no engines bound, refused before
-// anything reaches the wire.
+// dead; the select is released and the block reset and reconfigured before
+// start() returns. spi_rejected: an asynchronous request on a host with no
+// engines bound, refused before anything reaches the wire.
 
 /// A frame of `bits` bits at BR `code` in HCLK cycles, on a bus whose rate
 /// is HCLK over `hclk_over_pclk` (1 on PB2; 2 on PB1 above 72 MHz of
@@ -1129,10 +1136,10 @@ struct SpiHostCosts {
 };
 /// Measured on SPI1 at 144 MHz (test_vx03_spi letter g, its engined host,
 /// F the polled wall of 4 and 12 frames extrapolated to no frames): the
-/// V4B's on the CH32V203C8T6 - E 580 to 584 cycles, E - F 277 to 281 read and 261 to 265
+/// V4B's on the CH32V203C8T6 - E 580 to 588 cycles, E - F 277 to 287 read and 261 to 270
 /// written, the receive loop's frame 51 at /4 and 29 at /2, the
 /// transmit-only loop's 16 at /2 - and the V4F's on the CH32V303VCT6 -
-/// E 646 to 656, E - F 388 to 398 read and 390 to 400 written, 43 at /4, 34 at /2, 18. The
+/// E 643 to 662, E - F 385 to 401 read and 387 to 400 written, 43 at /4, 34 at /2, 18. The
 /// V4F's E is the longer by its DMA vector, a naked trampoline over a
 /// handler that saves the f-registers (docs/ch32vx03/platform.md); its
 /// loops are quicker by a few cycles.
@@ -1280,12 +1287,34 @@ constexpr uint16_t spi_async_min_frames(const SpiHostCosts& k, uint8_t code, uin
  * the frame size (the polled loops' load_frame() and store_into()), one
  * half-word in memory, which is what an engine's beat moves.
  *
+ * AFTER A FAILURE THE NEXT REQUEST STARTS ON A CLEAN BLOCK, whoever calls
+ * it, and the program calls nothing. This type does it because it exists in
+ * direct use as it does under the arbiter, and the arbiter goes on to the
+ * next waiting request before the requester has run. After spi_stalled, in
+ * start(): the select released FIRST, because the reset takes CPOL down with
+ * CTLR1 and so moves the SCK pad in modes 2 and 3, and the device must have
+ * seen the transaction end; then reset_block(), the block's RCC reset and the
+ * applied configuration written back. After spi_dma_fault, in the vector: the
+ * requests down, the channels put away, the select released and reset_owed_
+ * set, and nothing else - no disable, no reset, no configuration and no wait;
+ * the next start() tests that flag first and runs reset_block() before
+ * anything else. The flag needs no critical section: the vector writes it
+ * only while a transaction is in flight, and main context reads and clears it
+ * only when none is. A caller framing the select by hand primes before it
+ * falls, and prime() pays what a fault left owing, so the reset and the
+ * frames still leaving the block stay outside that window. What a reset cannot
+ * do: it does not open a closed clock gate, so on a block whose gate is closed
+ * the next request stalls too, on its own budget. What it takes with it:
+ * whatever CTLR1, CTLR2 and HSCR hold outside the applied configuration (a
+ * hardware NSS arrangement, the high-speed read a program set on the
+ * resource), the program's to set again.
+ *
  * NO FLUSH AT START: the chapter gives no way for a frame to stand in the
  * receive buffer at the start of a transaction but a tenure that ended
  * without reading what it clocked, which here is a fault path - the
- * engines abandoned, a polled frame that never came - and
- * every fault path drains the buffer and clears OVR (20.2.7's sequence)
- * before the next start(). The normal paths read every frame by count.
+ * engines abandoned, a polled frame that never came - and every fault path
+ * has reset the block before the next request's first frame. The normal
+ * paths read every frame by count.
  *
  * IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE on this family, so a
  * host with engines holds the program awake while a block is in flight;
@@ -1449,6 +1478,7 @@ public:
         in_cmd_ = false;
         dma_active_ = false;
         if constexpr (has_engines) {
+            reset_owed_ = false;
             arm_engines();
         }
         // The pads go to the peripheral only now, with the registers
@@ -1520,8 +1550,16 @@ public:
     /// Put the peripheral at this mode, rate and frame size NOW, moving
     /// no data - for callers that frame the select window themselves
     /// (Request.cs null). A mode change is a CPOL FLIP ON THE WIRE and a
-    /// selected client counts it as an edge: prime FIRST, then select.
+    /// selected client counts it as an edge: prime FIRST, then select. It
+    /// pays the reset a spi_dma_fault left owing, so for a caller framing the
+    /// select by hand that reset and the frames still leaving the block stay
+    /// outside the window.
     static void prime(SpiMode m, SpiClock c, SpiDataSize bits = SpiDataSize::bits8) {
+        if constexpr (has_engines) {
+            if (reset_owed_) {
+                (void)reset_block();
+            }
+        }
         apply(ctlr1_for(m, clamp_code(c), bits));
     }
 
@@ -1555,9 +1593,11 @@ public:
     /// The arbiter's call, from its dispatch, or the program's for a
     /// polled request on a bus no arbiter owns. A request that runs
     /// polled spins here for the whole transaction under one spin budget
-    /// (spi_stalled when it runs out), depending on no vector and masking
-    /// nothing; the chip-select setup time is a busy wait here too. The
-    /// buffers stay
+    /// (spi_stalled when it runs out, the select released and the block
+    /// reset before the return), depending on no vector and masking
+    /// nothing; the chip-select setup time is a busy wait here too. After
+    /// a spi_dma_fault the reset that fault left owing runs first, here, in
+    /// main context. The buffers stay
     /// the engine's until the reply, or until the return for a polled
     /// request called directly. The answer is the completion style, never
     /// a verdict: status() carries how the transaction ended.
@@ -1570,6 +1610,8 @@ public:
                 status_ = spi_rejected;
                 return true;
             }
+        } else if (reset_owed_) [[unlikely]] {
+            (void)reset_block();
         }
         status_ = spi_ok;
         if ((static_cast<uint32_t>(r.cmd_len) + r.len) == 0u) {
@@ -1605,11 +1647,11 @@ public:
             st = r.rx.get() == nullptr ? poll_write_phase(r.tx.get(), r.len, wide, budget)
                                        : poll_duplex_phase(r.tx.get(), r.rx.get(), r.len, wide, budget);
         }
-        if (st != spi_ok) {
-            status_ = st;
-            S::flush_rx();   // a frame may stand unread: drained, OVR down (20.2.7)
-        }
         r.cs.set();
+        if (st != spi_ok) [[unlikely]] {
+            status_ = st;
+            (void)reset_block();
+        }
         return true;
     }
 
@@ -1619,9 +1661,10 @@ public:
     /// command block's completion raises D/C and launches the data block
     /// (or ends the transaction when there is none), a data block's ends
     /// it, the select released; a transfer error ends it with
-    /// spi_dma_fault. Compiles away on an engineless host. True when the
-    /// transaction just completed: the edge the program's glue posts
-    /// TransferDone{status()} on.
+    /// spi_dma_fault and leaves the block's reset to the next start().
+    /// Compiles away on an engineless host. True when the transaction just
+    /// completed: the edge the program's glue posts TransferDone{status()}
+    /// on.
     [[gnu::always_inline]] static bool dma_rx_isr() {
         if constexpr (has_engines) {
             const uint8_t rx = RxEngine::service();
@@ -1669,30 +1712,23 @@ public:
     /// start(), on the caller's own stack.
     static bool busy() { return dma_active_; }
 
-    /// Put the ENGINE back where start() is legal (the verb a timed
-    /// SpiBus calls on a transaction that never answered, and the program's
-    /// to call after a start() that answered spi_stalled, busy() false; the
-    /// arbiter calls it on no synchronous answer): the select
-    /// released FIRST, the engines put away and re-claimed, the
-    /// peripheral reset and reconfigured to the applied state. False when
-    /// a bounded wait ran out.
+    /// Put the ENGINE back where start() is legal, a tenure on the engines
+    /// included: the verb a timed SpiBus calls on a transaction that never
+    /// answered (spi_timeout), and a program's with the bus idle. Nothing
+    /// needs it after spi_stalled or spi_dma_fault, which leave the next
+    /// start() a clean block by themselves. The select released FIRST, the
+    /// engines put away and re-claimed, then reset_block(). Main context;
+    /// it waits, bounded, for the drain. False when a bounded wait ran out or
+    /// the block's gate is closed.
     static bool recover() {
         t_.cs.set();
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             arm_engines();
         }
-        Pfic::disable(S::irq);
         in_cmd_ = false;
         dma_active_ = false;
-        const bool ok = S::disable();
-        S::reset();
-        (void)S::remap(pins.remap);
-        const bool cfg = S::configure(applied_);
-        S::enable();
-        S::flush_rx();
-        take_words();
-        return ok && cfg;
+        return reset_block();
     }
 
     /// SPE cleared and the gate closed, with NO reset pulse - unlike the
@@ -1704,6 +1740,7 @@ public:
         if constexpr (has_engines) {
             TxEngine::stop();
             RxEngine::stop();
+            reset_owed_ = false;
         }
         Pfic::disable(S::irq);
         (void)S::disable();
@@ -1843,10 +1880,10 @@ private:
             }
             uint32_t budget = polled_budget(r.cmd_len);
             const uint8_t st = poll_write_phase(r.cmd.get(), r.cmd_len, wide, budget);
-            if (st != spi_ok) {
-                status_ = st;
-                S::flush_rx();
+            if (st != spi_ok) [[unlikely]] {
                 r.cs.set();
+                status_ = st;
+                (void)reset_block();
                 return true;
             }
             r.dc.set();
@@ -1924,16 +1961,17 @@ private:
     /// both channels are stopped - the receive one too, whose EN a
     /// completed block leaves set and whose bus-master count would
     /// otherwise keep the core awake (ch32vx03/bus_activity.hpp). A fault
-    /// leaves the receive buffer drained. The select is released; the
-    /// vector's caller posts completion.
+    /// notes the reset it owes and leaves it to the next start(), which clears
+    /// the frames still in the block and the one the receive buffer may hold.
+    /// The select is released; the vector's caller posts completion.
     static void finish_dma(uint8_t st) {
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             if (st != spi_ok) {
                 status_ = st;
+                reset_owed_ = true;
                 (void)TxEngine::abandon();
                 RxEngine::stop();
-                S::flush_rx();
             } else {
                 (void)TxEngine::complete();
                 RxEngine::complete();
@@ -1942,6 +1980,42 @@ private:
         in_cmd_ = false;
         dma_active_ = false;
         t_.cs.set();
+    }
+
+    /**
+     * THE ONE RESET: the block back to its reset state and the applied
+     * configuration written over it, whatever failed. The stall paths call
+     * it, the reset a fault left owing, and recover(); each has released the
+     * select first. Cold and out of line, main context only: disable() can
+     * wait, so no vector calls it. False when a bounded wait of disable() ran
+     * out, which it asks only of a block whose SPE reads back set: a closed
+     * gate reads CTLR1 as zero, and a demoted host has lost the bit. The
+     * column is written again because the field is the instance's and another
+     * host type on it may have moved it; the pads are not this reset's.
+     *
+     * A CLOSED GATE IS LEFT ALONE, and the answer is false. Measured: with the
+     * pulse and its writes run on a closed gate, a request on the gate opened
+     * stalled once more; with neither, a gate closed and opened keeps the
+     * registers and the same request runs spi_ok. So the next request on a
+     * closed gate stalls on its own budget, and one on the gate opened runs on
+     * the block as it was; what a fault left owing stays owed.
+     */
+    [[gnu::cold, gnu::noinline]] static bool reset_block() {
+        if (!Rcc::enabled(S::bus, spi_gate_for(n))) {
+            return false;
+        }
+        if constexpr (has_engines) {
+            reset_owed_ = false;
+        }
+        Pfic::disable(S::irq);
+        const bool ok = S::disable();
+        S::reset();
+        (void)S::remap(pins.remap);
+        const bool cfg = S::configure(applied_);
+        S::enable();
+        S::flush_rx();
+        take_words();
+        return ok && cfg;
     }
 
     /// A slower rate is a LARGER code, so the ceiling is a floor on it.
@@ -2136,6 +2210,11 @@ private:
     static inline volatile bool in_cmd_ = false;
     static inline volatile uint8_t status_ = spi_ok;
     static inline volatile bool dma_active_ = false;
+    /// A fault ended a tenure on the engines and the next start() owes the
+    /// block its reset: the vector sets it, while a transaction is in flight;
+    /// main context tests and clears it when none is. Named on a host with
+    /// engines alone.
+    static inline volatile bool reset_owed_ = false;
     /// A polled frame's cost at the code, width and bus share in force,
     /// read and written (costs_for()): what start() folds an asynchronous
     /// request from.

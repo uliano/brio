@@ -71,9 +71,10 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 // host has DMA engine slots and by none that has not: the engines reported
 // a block they could not finish. Only the engines answer it, so only an
 // asynchronous request that rode them can carry it; a block that simply
-// never completes is the arbiter's spi_timeout, on a bus with a timeout. No
-// letter on any family provokes a transfer error, so what follows it is read
-// in the code (docs/design/spi-bus.md, "What follows each code").
+// never completes is the arbiter's spi_timeout, on a bus with a timeout. The
+// select is released in the interrupt and the next start() or prime() resets
+// the block first, so the program calls nothing (docs/design/spi-bus.md, "What
+// follows each code").
 // The code below has one spelling and one value on every family, distinct
 // from that one.
 
@@ -82,13 +83,14 @@ inline constexpr uint8_t spi_timeout = bus_timeout;
 /// (a gate closed, the enable down, a mode fault that demoted it). Every
 /// host whose loop has such a budget answers it, whether the request
 /// asked for the loop or was short enough to run it; the AVR's has none,
-/// a transfer written there always completing. The select is released
-/// and the receive side drained; what else the host does to the block (a
-/// reset and a reconfiguration on the STM32F4, nothing on the other hosts)
-/// is the family's. Where it does nothing else the way back is recover(),
-/// the program's to call with the bus idle: the arbiter does not call it, and
-/// goes on at once to the next waiting request (docs/design/spi-bus.md,
-/// "What follows each code").
+/// a transfer written there always completing. The select is released,
+/// then the block reset and reconfigured, so the next request starts on a
+/// clean block and the program calls nothing; a reset cannot open a closed
+/// clock gate, and behind one the next request stalls too. The SAM C21 alone
+/// drains the receive side and leaves the block as it is: there the way back
+/// is recover(), the program's to call with the bus idle, the arbiter going
+/// on at once to the next waiting request (docs/design/spi-bus.md, "What
+/// follows each code").
 inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
 
 /// The arbiter under SPI's name. `pending_depth` is how many requests

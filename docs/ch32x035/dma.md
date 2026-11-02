@@ -106,8 +106,10 @@ key that runs them all), the transport's engines across a wire in
   half-words and completes (measured).
 - **A read from or a write into a hole in the map, and a write into the
   flash, complete as normal blocks** (measured, five holes each way and the
-  flash locked and open): 9.2.1 promises TEIF and an automatic EN drop for a
-  reserved address, and no address the bench could name produced either.
+  flash locked and open). 9.2.1 promises TEIF for a reserved address, and it is
+  the address just past a memory that gives it: the end of the SRAM or of the
+  flash, read or written ([spi.md](spi.md), letter f); a store past the SRAM moved
+  nothing in the SRAM's first 64 bytes.
 - **Six HCLK cycles an item at every width** from SRAM, eleven and a half
   a word from the flash (two wait states at 48 MHz): the controller is a
   master of the bus matrix at HCLK, and an item is a read, a write and the

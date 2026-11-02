@@ -220,7 +220,27 @@
  * echo, a command block on the receive channel's completion), so D/C
  * flips between them on the wire. The receive FIFO is not flushed at
  * start(): every transaction takes back every frame it wrote, so a frame
- * can stand in it only after a fault, and the fault paths drain it.
+ * can stand in it only after a stall or a bus error, and those end in the
+ * block's reset.
+ *
+ * After a stall or a bus error the next request starts on a clean block,
+ * whoever called it, and the program calls nothing: this type does it
+ * because it exists in direct use and under the arbiter alike, and the
+ * arbiter starts a waiting request before the requester has run. A polled
+ * wait that runs out answers spi_stalled from inside start(), the select
+ * released first and then the block reset and reconfigured to the state
+ * applied. A bus error on a channel answers spi_dma_fault from the DMA line:
+ * the interrupt decides and does not work, so it drops the requests, puts
+ * the channels away, releases the select and leaves the reset owed, and the
+ * next start() pays it before anything else. prime() pays it too: a caller
+ * that frames the select by hand primes, lowers the select and only then
+ * calls start(), and a reset under a low select would clock what stood in the
+ * FIFOs, and in modes 2 and 3 move SCK, in front of a device listening. Until
+ * then what stood in the FIFOs goes on shifting with the select high, thrown
+ * away by that reset. With a null select the program's own select stands
+ * through a stall's reset: the host cannot release what it does not hold. A
+ * reset does not start a stopped clock: on a block whose clock stays off the
+ * next request stalls too, on its own budget.
  *
  * The Request is laid out without padding: the four words first (the two
  * out buffers, the in buffer, the reply), then the two half-words (the
@@ -299,7 +319,7 @@
  * transaction, the one whose code the cache has not got (the family's
  * platform document, "A handler in SRAM"). The engines' launch is one
  * body under either tag (shared()), and a change of mode, rate or width
- * and a polled wait that ran out stay out of line in the flash.
+ * and the block's reset stay out of line in the flash.
  *
  * Not built, each with its reason in docs/pl022/README.md: the National
  * Semiconductor Microwire transaction (half duplex, a control frame and then the
@@ -1084,6 +1104,7 @@ public:
             // transmit holds SCK between two frames and loses nothing.
             TxEngine::arm(S::data_address(), S::dreq_tx, false, TxEngine::Report::errors);
             arm_rx_engine();
+            reset_owed_ = false;
         }
         // The pads go to the peripheral with the registers already
         // holding the idle polarity, then SSE: a pad handed over first
@@ -1134,8 +1155,11 @@ public:
     /// Put the peripheral at this mode, rate and frame size NOW, moving
     /// no data - for callers that frame the select window themselves
     /// (Request.cs null). A mode change is a CPOL FLIP ON THE WIRE and a
-    /// selected client counts it as an edge: prime FIRST, then select.
+    /// selected client counts it as an edge: prime FIRST, then select. A
+    /// reset a bus error left owed is paid here before anything else, for the
+    /// same reason (the file header). Main context, with nothing in flight.
     static void prime(SpiMode m, SpiClock c, SpiDataSize bits = SpiDataSize::bits8) {
+        settle_owed_reset();
         reconfigure(clamp(c), m, bits);
     }
 
@@ -1153,9 +1177,12 @@ public:
     /// request waits here for its whole transaction in the explicit loop,
     /// bounded by one budget and needing no vector. A budget that runs out
     /// ends the transaction with spi_stalled in status(), the select
-    /// released, the receive FIFO drained and the block otherwise left as
-    /// it is: recover() is the way back, and a later request is promised
-    /// nothing before it.
+    /// released and then the block reset and reconfigured (the file header's
+    /// paragraph on a stall and a bus error), so nothing is owed by the
+    /// program. A reset a bus error left owed is paid here first, whichever
+    /// way the request runs. The reset's one wait is the family's for the
+    /// block to come out of it, and it lies in the flash under either
+    /// placement.
     static bool start(const Request& r) {
         return Hot<Placement>::run([&r] { return start_body(r); });
     }
@@ -1165,12 +1192,16 @@ public:
     /// ends a block: a command block's end raises D/C and puts the data
     /// block on the engines, a data block's end (or a command block with no
     /// data phase after it) ends the transaction, the select released. A
-    /// bus error on either channel ends it with spi_dma_fault; the transmit
-    /// channel reports a bus error and nothing else (init()), so a block
-    /// of its own on the line IS an error. Compiles away on an engineless
-    /// host. True when the transaction just completed: the edge the
-    /// program's glue posts TransferDone{status()} on. Runs to completion
-    /// and masks nothing.
+    /// bus error on either channel ends it with spi_dma_fault, the requests
+    /// down, the channels put away and the select released; the block's reset
+    /// is left to the next start(), and nothing here disables, configures or
+    /// waits for the block (putting a channel away is the family DMA's abort,
+    /// its own bounded spin, which the channel's bus error makes the short
+    /// case). The transmit channel reports a
+    /// bus error and nothing else (init()), so a block of its own on the line
+    /// IS an error. Compiles away on an engineless host. True when the
+    /// transaction just completed: the edge the program's glue posts
+    /// TransferDone{status()} on. Runs to completion and masks nothing.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             return Hot<Placement>::run([] { return dma_isr_body(); });
@@ -1184,12 +1215,13 @@ public:
     /// start() that answered true.
     static uint8_t status() { return status_; }
 
-    /// Put the engine back where start() is legal (the verb a timed
-    /// SpiBus calls on a transaction that never answered, and the program's
-    /// to call after a start() that answered spi_stalled, the bus idle; the
-    /// arbiter calls it on neither that nor any other synchronous answer):
-    /// the select released first, the engines put away and re-claimed, the
-    /// block reset and reconfigured to the applied state.
+    /// Put the engine back where start() is legal: the select released
+    /// first, the engines put away and re-claimed, the block reset and
+    /// reconfigured to the applied state, false when it did not come back.
+    /// The timed arbiter calls it on a transaction that never answered, on
+    /// nothing else, and a program may with the bus idle; neither a stall
+    /// nor a bus error asks for it, since the host resets the block itself
+    /// after both.
     static bool recover() {
         tenure_.cs.set();
         if constexpr (has_engines) {
@@ -1197,22 +1229,18 @@ public:
             (void)TxEngine::abandon();
             RxEngine::stop();
             arm_rx_engine();
+            reset_owed_ = false;
         }
         in_cmd_ = false;
         dma_active_ = false;
-        S::enable(false);
-        const bool ok = S::reset();
-        const bool cfg = S::configure(applied_);
-        S::interrupts(SpiInterrupt::all, false);
-        S::enable(true);
-        S::flush_rx();
-        return ok && cfg;
+        return reset_block();
     }
 
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();
             RxEngine::stop();
+            reset_owed_ = false;
         }
         Chip::Interrupts::disable(S::irq());
         S::interrupts(SpiInterrupt::all, false);
@@ -1244,6 +1272,7 @@ private:
                 return true;
             }
         }
+        settle_owed_reset();
         status_ = spi_ok;
         // 32 bits: cmd_len + len reaches 65790, and a 16-bit sum of 65536 would
         // read as an empty request and answer spi_ok with nothing on the wire.
@@ -1265,8 +1294,8 @@ private:
         // Does the data phase ride the engines? A polled request never does:
         // it runs the loop below at any length and needs no vector. An
         // asynchronous one does when it repays them and they can carry it.
-        // No flush of the receive FIFO here: every path leaves it empty, and
-        // the fault paths drain it.
+        // No flush of the receive FIFO here: a transaction takes back every
+        // frame it wrote, and a stall or a bus error ends in the block's reset.
         bool engines = false;
         if constexpr (has_dma) {
             if (!r.polled && repays_engines(r)) {
@@ -1311,10 +1340,12 @@ private:
             in = r.rx.get();
             count = r.len;
         }
-        if (!ok) {
-            settle_fault();
-        }
+        // The select first: the reset of a stall can move the SCK pad in
+        // modes 2 and 3, and the device has seen the transaction end by then.
         r.cs.set();
+        if (!ok) {
+            stalled();
+        }
         return true;
     }
 
@@ -1495,7 +1526,10 @@ private:
     }
 
     /// One exit for a tenure on the engines: the requests down, a failed
-    /// block put away, the select released.
+    /// block put away, the select released. A failed one leaves the block's
+    /// reset owed to the next start(): this is the interrupt, which decides
+    /// and does not work, and the frames still in the FIFOs go with that
+    /// reset whenever it comes - one landing here behind a drain would not.
     static void finish_dma(uint8_t st) {
         S::dma_requests(false, false);
         if (st != spi_ok) {
@@ -1503,7 +1537,7 @@ private:
             (void)TxEngine::abandon();
             RxEngine::stop();
             arm_rx_engine();
-            S::flush_rx();   // a frame the stopped channel never took
+            reset_owed_ = true;
         } else if (TxEngine::busy()) {
             // The receive block completing is proof the transmit one did.
             (void)TxEngine::complete();
@@ -1720,18 +1754,50 @@ private:
         return run_duplex<false>(out, in, count, budget);
     }
 
-    /// After a polled wait ran out: spi_stalled, what the util/spi_bus.hpp
-    /// code promises kept here and in the caller - the frames still in the
-    /// FIFOs given a bounded time to leave, the receive FIFO drained, and
-    /// the select released on the way out of start(). Nothing else is done
-    /// to the block: a block that does not clock may still hold frames in
-    /// its transmit FIFO, and recover(), which resets it, is the way back.
-    [[gnu::noinline, gnu::cold]] static void settle_fault() {
-        status_ = spi_stalled;
-        uint32_t spins = 200'000u;
-        while (S::busy() && spins-- != 0u) {
+    /// THE BLOCK'S RESET, the one sequence, called by a stall, by the reset a
+    /// bus error left owed and by recover(): held and released, then the
+    /// state applied written back and SSE up. It is all the block needs: the
+    /// reset leaves SSE clear, every source masked, no DMA request raised
+    /// and both FIFOs empty (the register tables' reset values, 12.3.5 of
+    /// the RP2350 data sheet, 4.4.4 of the RP2040's), so no disable goes
+    /// before it and no drain after it, and what a block that does not clock
+    /// holds in its transmit FIFO goes with it. Cold and out of line under
+    /// either placement. False when the block did not come back, and then no
+    /// register of it is touched: recover() answers that, and neither of the
+    /// other two callers has anyone to tell. It does not open a closed clock
+    /// gate: on a clock that stays stopped the next request stalls too, on
+    /// its own budget.
+    [[gnu::noinline, gnu::cold]] static bool reset_block() {
+        if (!S::reset()) {
+            return false;
         }
-        S::flush_rx();
+        const bool cfg = S::configure(applied_);
+        S::enable(true);
+        return cfg;
+    }
+
+    /// After a polled wait ran out, the select released: spi_stalled, and
+    /// the next request starts on a clean block.
+    [[gnu::noinline, gnu::cold]] static void stalled() {
+        status_ = spi_stalled;
+        (void)reset_block();
+    }
+
+    /// The reset a bus error left owed (finish_dma()), paid by the next
+    /// start() or prime() with nothing in flight.
+    [[gnu::noinline, gnu::cold]] static void pay_owed_reset() {
+        reset_owed_ = false;
+        (void)reset_block();
+    }
+
+    /// The test both of them begin with: one load and one branch where there
+    /// are engines, nothing where there are none, the payment out of line.
+    [[gnu::always_inline]] static void settle_owed_reset() {
+        if constexpr (has_engines) {
+            if (reset_owed_) [[unlikely]] {
+                pay_owed_reset();
+            }
+        }
     }
 
     // ---- the state ----------------------------------------------------------
@@ -1742,6 +1808,10 @@ private:
     static inline bool in_cmd_ = false;
     static inline uint8_t status_ = spi_ok;
     static inline volatile bool dma_active_ = false;
+    /// A bus error ended the last tenure and the block's reset is owed. No
+    /// critical section: the interrupt writes it only while a transaction is
+    /// in flight, and main context reads and clears it only when none is.
+    static inline volatile bool reset_owed_ = false;
     /// What a polled frame costs the core at the configuration in force,
     /// read and written (costs_for()): what start() decides an asynchronous
     /// request's way from.

@@ -70,10 +70,10 @@
 //   d  THE TRANSFER ERROR: five addresses no peripheral answers at,
 //      read by a channel with its error interrupt armed, then WRITTEN at
 //      each width, with the image's own pattern in the locked flash at
-//      both of its addresses; what the flag did, whether the silicon
+//      both of its addresses, and the top of the SRAM region, which does
+//      refuse a channel, both ways; what the flag did, whether the silicon
 //      dropped EN by itself, and the ledger's count across it - and the
-//      copy engine's block on an address whose write faults, where one
-//      does
+//      copy engine's block on the address whose write faults
 //   e  THE REQUEST PATH WITH NO WIRE: a timer's update copying another
 //      timer's counter into a buffer once per period (the values a
 //      staircase whose step is the period), and the BURST ENGINE
@@ -868,6 +868,9 @@ uint32_t te_target = 0;
 
 /// The holes of figure 1-11 letter d reads and writes.
 constexpr uint32_t holes[5] = {0x3000'0000UL, 0x4000'8000UL, 0x4002'4000UL, 0x6000'0000UL, 0xA000'0000UL};
+/// An address that does refuse a channel, read or written at every width: the
+/// SRAM region's top, far past either part's SRAM.
+constexpr uint32_t refused_address = 0x2FFF'F000UL;
 
 /// Whether a four-word write to `target` from RAM ends in a transfer error
 /// on DMA1's channel 3, its line silent: the probe letter g asks when
@@ -883,6 +886,18 @@ bool word_write_faults(uint32_t target) {
     }
     Ch::stop();
     return (f & DmaFlag::error) != 0u;
+}
+
+/// Every word of the SRAM below the stack in use, folded: what a refused store
+/// would land in. Masked at its call, so nothing else moves a word under it.
+[[gnu::noinline]] uint32_t sram_fold() {
+    const uint8_t here = 0;
+    const uint32_t end = (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&here)) - 128u) & ~3UL;
+    uint32_t fold = 0x811C'9DC5UL;
+    for (uint32_t a = 0x2000'0000UL; a < end; a += 4u) {
+        fold = (fold ^ *reinterpret_cast<const volatile uint32_t*>(a)) * 16'777'619UL;
+    }
+    return fold;
 }
 
 void td_error() {
@@ -923,8 +938,20 @@ void td_error() {
               hex(destination[1]), hex(destination[2]), hex(destination[3]), crlf);
     }
     Ch::stop();
+    Ch::arm(DmaFlag::error | DmaFlag::complete, true);
+    scrub(16);
+    (void)Ch::load(copy(reinterpret_cast<const volatile void*>(refused_address), destination, 4, DmaWidth::word));
+    uint32_t refused_read = 0;
+    for (uint32_t spins = 200'000UL; spins != 0u && (refused_read & (DmaFlag::error | DmaFlag::complete)) == 0u; --spins) {
+        refused_read = Ch::flags();
+    }
+    const bool refused_read_en = Ch::enabled();
+    Ch::stop();
     print(serial, "  of five holes: ", errors, " raised a transfer error, ", completions,
-          " completed as an ordinary block", crlf);
+          " completed as an ordinary block; a read of ", hex(refused_address), ": flags ", hex(refused_read),
+          refused_read_en ? " EN set" : " EN clear", crlf);
+    bench.verdict("A READ OF THE SRAM REGION'S TOP raises the transfer error, and the hardware clears EN",
+                  (refused_read & DmaFlag::error) != 0u && !refused_read_en);
     bench.verdict("five addresses no window of the map answers at were each read by a "
                   "channel with its error interrupt armed, and every one of them ended",
                   static_cast<uint8_t>(errors + completions) == 5u);
@@ -940,8 +967,8 @@ void td_error() {
     // the channel's line enabled; the image's pattern - the flash target -
     // read back afterwards must still be itself.
     const uint32_t alias = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&source.word[64]));
-    const uint32_t targets[7] = {alias,    flash_array_base + (alias - flash_alias_base),
-                                 holes[0], holes[1], holes[2], holes[3], holes[4]};
+    const uint32_t targets[8] = {alias,    flash_array_base + (alias - flash_alias_base),
+                                 holes[0], holes[1], holes[2], holes[3], holes[4], refused_address};
     const uint32_t before_word = source.word[64];
     for (uint8_t i = 0; i < 16u; ++i) {
         destination[i] = static_cast<uint8_t>(0xA0u + i);
@@ -998,11 +1025,41 @@ void td_error() {
     Ch::stop();
     Pfic::disable(dma_channel_irq(1, Ch::number));
     const bool pattern_kept = source.word[64] == before_word;
-    print(serial, "  of 21 writes (7 targets, 3 widths): ", write_errors, " raised a transfer error; the pattern ",
+    print(serial, "  of 24 writes (8 targets, 3 widths): ", write_errors, " raised a transfer error; the pattern ",
           pattern_kept ? "intact" : "CHANGED", crlf);
     bench.verdict("A WRITE INTO THE LOCKED FLASH, or into a hole of the map, ends at every width - a transfer "
                   "error or an ordinary completion - and the array is untouched",
-                  written == 21u && pattern_kept);
+                  written == 24u && pattern_kept);
+    bench.verdict("A WRITE TO THE SRAM REGION'S TOP raises the transfer error at each of the three widths, and "
+                  "nothing else written does",
+                  write_errors == 3u && te_target == refused_address);
+    // WHERE A REFUSED STORE GOES. The SRAM below the stack folded before and
+    // after four items at each width, into that address and into the first byte
+    // past the part's SRAM, masked, the channel's line silent. A store that
+    // landed anywhere in it, SRAM+0 first of all, changes the fold.
+    uint8_t refused = 0;
+    uint8_t moved = 0;
+    Ch::stop();
+    for (const uint32_t target : {refused_address, 0x2000'0000UL + device::sram_bytes}) {
+        for (const DmaWidth w : {DmaWidth::byte, DmaWidth::half, DmaWidth::word}) {
+            P::CriticalSection cs;
+            const uint32_t before = sram_fold();
+            Ch::arm(DmaFlag::error | DmaFlag::complete, false);
+            (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, w));
+            uint32_t f = 0;
+            for (uint32_t spins = 200'000UL; spins != 0u && (f & (DmaFlag::error | DmaFlag::complete)) == 0u; --spins) {
+                f = Ch::flags();
+            }
+            Ch::stop();
+            refused = static_cast<uint8_t>(refused + ((f & DmaFlag::error) != 0u ? 1u : 0u));
+            moved = static_cast<uint8_t>(moved + (sram_fold() != before ? 1u : 0u));
+        }
+    }
+    print(serial, "  six refused stores: ", refused, " raised the error, ", moved, " moved a word of the SRAM below the stack",
+          crlf);
+    bench.verdict("A REFUSED STORE LANDS NOWHERE: at the SRAM region's top and just past the part's SRAM, the error "
+                  "raised at each width and no word of the SRAM below the stack moved",
+                  refused == 6u && moved == 0u);
     bench.verdict("... and wherever one raises a transfer error the hardware drops EN, the vector is entered, "
                   "and the controller's LEDGER keeps the channel's bus-master count until software stops the "
                   "channel, which gives it back",
@@ -4303,7 +4360,8 @@ int main() {
     bench.letter('a', "memory to memory: the gate, the widths, the flags, the cost", ta_memory);
     bench.letter('b', "circular mode, paced by a timer's update request", tb_circular);
     bench.letter('c', "the sleep: what a channel moves while the core is not awake", tc_sleep);
-    bench.letter('d', "the transfer error: five holes read and written, the locked flash written", td_error);
+    bench.letter('d', "the transfer error: five holes read and written, the locked flash written, the SRAM region's top",
+                 td_error);
     bench.letter('e', "the request path with no wire: a staircase, and the burst engine",
                  te_request);
     bench.letter('f', "the priorities: two channels contending for one bus", tf_priority);

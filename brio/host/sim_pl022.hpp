@@ -60,15 +60,16 @@
  * itself, and SSPDR then reads back whatever was written last: enough for
  * the receive shape to run to its end, never a frame's worth of data
  * judged (and a drain of the receive FIFO, which loops while that bit is
- * up, is kept out of such a test: the bring-up's flush, recover(), the
- * transmit-only shape's tail).
+ * up, is kept out of such a test: the bring-up's flush, the transmit-only
+ * shape's tail).
  *
  * What it records, beside the registers: which pad was claimed or
- * released when, when SSPCR1's enable went up, and which way a Request's
- * select line was driven and when - so a test can assert the order the
- * IP file's init() and start() promise (the pads after the registers
- * hold the idle polarity, the select asserted before the first frame),
- * which is a thing no bench can see.
+ * released when, when SSPCR1's enable went up, when the block was last
+ * reset, and which way a Request's select line was driven and when - so a
+ * test can assert the order the IP file's init() and start() promise (the
+ * pads after the registers hold the idle polarity, the select asserted
+ * before the first frame, released before the reset of a stall), which is
+ * a thing no bench can see.
  */
 
 #pragma once
@@ -150,6 +151,10 @@ struct SimPl022Bench {
     static inline uint32_t stamp = 0;        ///< ticks on every recorded act
     static inline uint32_t enabled_at = 0;   ///< when SSPCR1's enable last went up
     static inline uint32_t resets = 0;
+    static inline uint32_t reset_at = 0;     ///< when a block's reset last ran
+    /// What SSPSR holds beside its reset value after a reset, the test's to
+    /// set: frames that go on coming back to a request a reset ran ahead of.
+    static inline uint32_t status_after_reset = 0;
     static inline bool held[2]{};
 
     static inline uint32_t waited_us = 0;       ///< what the busy-wait was asked for
@@ -171,6 +176,8 @@ struct SimPl022Bench {
         stamp = 0;
         enabled_at = 0;
         resets = 0;
+        reset_at = 0;
+        status_after_reset = 0;
         held[0] = held[1] = false;
         waited_us = 0;
         waited_cycles = 0;
@@ -282,9 +289,10 @@ struct SimPl022 {
     template <uint8_t i>
     static bool reset() {
         block[i] = Regs{};
-        block[i].SSPSR = status_reset;
+        block[i].SSPSR = status_reset | SimPl022Bench::status_after_reset;
         SimPl022Bench::held[i] = false;
         SimPl022Bench::resets = SimPl022Bench::resets + 1u;
+        SimPl022Bench::reset_at = SimPl022Bench::tick();
         return true;
     }
     template <uint8_t i>

@@ -426,29 +426,64 @@ polled loop on the same board is the figure beside them).
   write-only loop reading the same as this one's
   ([../rp2350/spi.md](../rp2350/spi.md)).
 - A POLLED WAIT THAT RUNS OUT ANSWERS `spi_stalled` (`util/spi_bus.hpp`),
-  with or without engines; `spi_dma_fault` is what the engines answer. The
-  select is released and the receive FIFO drained, the frames still in
-  the transmit FIFO given a bounded time to leave first. Nothing else is
-  done to the block, and `recover()` is the way back: the select released,
-  the engines put away and bound again, the block reset and reconfigured
-  to the state applied, which throws away what a block that does not clock
-  still holds in its transmit FIFO. The arbiter calls it only when a timed
-  asynchronous request goes unanswered, so after a `spi_stalled` it is the
-  program's to call, with nothing on the engines; before it, a later request
-  is promised nothing. That later request does not wait for the program: one
-  already in the arbiter's FIFO starts in the same dispatch, before the
-  requester's handler can run. On a block that still does not clock, a polled
-  one spends its own budget and answers `spi_stalled` too, and an asynchronous
-  one goes to the engines and has no completion, which is `spi_timeout` on a
-  timed bus and a bus busy for ever on an untimed one; on a block that clocks
-  again, the frames left in the transmit FIFO go out first, under the new
-  select. No verb says the engines are idle, and `recover()` under a request on
-  them takes it away, its completion never coming, so a program calls it when
-  it knows: every request it has posted answered, on a bus with one client.
-  Each family's suite stages this on its silicon, the
-  block's enable taken down under a polled write (letter g of
-  `test_rp2040_spi` and `test_rp2350_spi`), and the next polled request
-  after `recover()` is exact.
+  with or without engines, and the next request starts on a clean block with
+  nothing asked of the program. Inside `start()`, in main context, the select
+  is released first, because the reset can move the SCK pad in modes 2 and 3
+  and the device must have seen the transaction end; then the block is reset
+  and reconfigured to the state applied. The reset throws away what stands in
+  both FIFOs, frames a block that does not clock still holds in its transmit
+  FIFO among them, so no wait for BSY and no drain go with it. A command phase
+  polled ahead of an engined data block takes the same path, with no block
+  launched. With a null select in the Request the program's own select stands
+  through the reset, since the host cannot release what it does not hold, and that
+  caller raises it when `start()` answers. The budget itself is the hold-up, one slowest frame a frame, and
+  each family's document measures it.
+- A BUS ERROR ON A CHANNEL ANSWERS `spi_dma_fault`, what the engines answer, and
+  the next request starts on a clean block the same way. `dma_isr()` runs in the
+  interrupt, which decides and does not work: it drops the requests, puts both
+  channels away and binds them again, releases the select and leaves the reset
+  owed, a flag. It disables, resets and configures nothing. The next `start()`
+  tests that flag before anything else, one load and one branch a request on a
+  host with engines and nothing on a host with none, and pays the reset first,
+  whichever way the request runs. `prime()` tests and pays it the same way, because
+  a caller that frames the select by hand primes, lowers the select and only then
+  calls `start()`: a reset paid there would run under a low select, what stood in the
+  FIFOs shifting in front of a device listening and, in modes 2 and 3, SCK moving.
+  Until then what stood in the FIFOs goes on
+  shifting with the select high; a drain in the interrupt would not have caught
+  a frame still on the wire, and the reset takes it whenever it lands. The flag
+  takes no critical section: the interrupt writes it only while a transaction is
+  in flight, and main context reads and clears it only when none is. `recover()`,
+  `init()` and `release()` clear it.
+- THE HOST DOES BOTH BECAUSE NOTHING ELSE CAN. It exists in direct use and under
+  the arbiter alike, where the arbiter does not exist in direct use and starts a
+  waiting request in the dispatch that answers the one before, ahead of the
+  requester's handler. So a request queued behind a stall or a fault finds a
+  clean block, its data exact, each suite's letters g and h judging it through
+  `SpiBus`, and letter v a window framed by hand behind a fault, read by a foreign
+  client.
+- THE RESET EXISTS ONCE, `reset_block()`, cold and out of line in the flash under
+  either placement, and the stall, the owed reset and `recover()` all call it:
+  the family's hold and release, the state applied written back, SSE up. It does
+  nothing else because the block's reset leaves nothing else to do: SSE clear,
+  every source masked, no DMA request raised, both FIFOs empty (each family's
+  register tables; the suites' letter a reads the FIFOs and the enable on
+  silicon). A disable
+  ahead of it would be one more store and no wait, and it gains nothing. False
+  when the block did not come back, and then no register of it is touched.
+- WHAT THE RESET CANNOT DO is open a closed clock gate. On a block whose clock
+  stays off the next polled request stalls too, on its own budget, and an
+  asynchronous one goes to the engines and has no completion, `spi_timeout` on a
+  timed bus and a bus busy for ever on an untimed one. No suite stages a stopped
+  clock yet (each family's second list under "Not covered yet").
+- `recover()` STAYS, the verb that also ends a tenure from outside: the select
+  released, the engines put away and bound again, then the same reset, and its
+  answer. The timed arbiter calls it when an asynchronous request goes unanswered
+  and on nothing else, and a program may with the bus idle. No verb says the
+  engines are idle, and `recover()` under a request on them takes it away, its
+  completion never coming, so a program calls it when it knows: every request it
+  has posted answered, on a bus with one client. Neither a stall nor a bus error
+  asks for it.
 - THE BLOCK'S OWN INTERRUPT LINE IS DECLINED BY THE HOST. Four sources
   on one line (RXIM at the receive FIFO's half, RTIM a frame waiting
   with no clock for 32 bit periods, TXIM, RORIM) are what a per-frame
@@ -465,9 +500,8 @@ polled loop on the same board is the figure beside them).
   none.
 - THE RECEIVE FIFO IS NOT FLUSHED AT `start()`. Every transaction takes
   back every frame it wrote, so a frame can stand in the FIFO only after
-  a fault, and the fault paths - a polled wait that ran out, `recover()`
-  - are where it is drained. The chapter names no other way a frame
-  arrives.
+  a stall or a bus error, and both end in the block's reset. The chapter
+  names no other way a frame arrives.
 - THE PINS are the family's run-time pin, driven by its own one-store
   verb; a null D/C line is skipped inside that verb; `cs_setup_us` is
   tested before any call.
@@ -507,8 +541,8 @@ polled loop on the same board is the figure beside them).
   data block chained from the vector) and stays ONE body under either
   tag (out of line in the flash, or its own instance in SRAM - flattened
   it is some 1 KB of the engines' programming); a change of mode, rate or
-  width (`reconfigure()`, the frame costs with it) and a polled wait that
-  ran out (`settle_fault()`) stay out of line in the flash under both. `InRam` compiles only where the family's chip
+  width (`reconfigure()`, the frame costs with it) and the block's reset
+  (`reset_block()`) stay out of line in the flash under both. `InRam` compiles only where the family's chip
   traits say `places_fast_text` (`HotPlacement`); a third tag does not
   compile. THE ENGINES' DUMMY CELL IS IN RAM, never a constant: the
   transmit engine reads it once a frame of a read with no out buffer, and
@@ -555,7 +589,9 @@ instead of spending them. It is compiled twice - by the host suite
 block, the way each request was run - refused, polled inside `start()`
 at any length on a host with engines too, a command block chained to its
 data block, the short request's edge, a polled wait that ran out and its
-`spi_stalled` - and the ORDER of the acts of a bring-up,
+`spi_stalled`, a bus error and the reset it leaves owed, a request queued
+behind either through the arbiter - and the ORDER of the acts of a bring-up
+and of a stall, the select released before the block's reset,
 and by a family's compile check (`test/family_rp2040/pl022_ip.cpp`),
 which names every verb of the resource, of the host with both engine
 slots empty and both filled, and of the client. A driver that needed a

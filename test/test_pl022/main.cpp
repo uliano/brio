@@ -13,8 +13,13 @@
 
 #include <stdint.h>
 
+#include <variant>
+
+#include "host/platform.hpp"
 #include "host/sim_pl022.hpp"
+#include "kernel/tenuto.hpp"
 #include "pl022/spi.hpp"
+#include "util/spi_bus.hpp"
 
 using namespace brio;
 
@@ -263,6 +268,7 @@ TEST_CASE("the ceiling clamps from below, and a no-op re-application writes noth
 /// SSPDR reads back whatever was written last (brio/host/sim_pl022.hpp).
 /// Nothing that drains the receive FIFO may run meanwhile.
 void frames_come_back(bool on) {
+    SimPl022Bench::status_after_reset = on ? SpiFlag::rx_not_empty : 0u;
     if (on) {
         regs().SSPSR = regs().SSPSR | SpiFlag::rx_not_empty;
     } else {
@@ -341,18 +347,31 @@ TEST_CASE("a polled transaction asserts its select, waits its setup and runs ins
 
     // A loop whose frames never come back runs out of its budget:
     // spi_stalled, as every family's host answers it, never the engines'
-    // spi_dma_fault; the select released, the block left for recover(). The
-    // drain is not judged here: a receive FIFO of plain memory holds nothing
-    // to drain (brio/host/sim_pl022.hpp); the suites' letter c judges it on
-    // silicon.
+    // spi_dma_fault; the select released and THEN the block reset, since the
+    // reset can move the SCK pad in modes 2 and 3; the state applied written
+    // back and SSE up, with nothing asked of the program. What the reset does
+    // to the FIFOs is not judged here: plain memory has none (brio/host/
+    // sim_pl022.hpp); the suites' letter g judges it on silicon.
     const uint32_t stalled_from = SimPl022Bench::pin_clear_at[cs_pin];
+    const uint32_t resets_before = SimPl022Bench::resets;
     CHECK(Host::start(r));
     CHECK(Host::status() == spi_stalled);
     CHECK(Host::status() != spi_dma_fault);
     CHECK(SimPl022Bench::pin_clear_at[cs_pin] > stalled_from);
     CHECK(SimPl022Bench::pin_set_at[cs_pin] > SimPl022Bench::pin_clear_at[cs_pin]);
     CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
+    CHECK(regs().SSPCR0 == ((15u << 8) | 7u));
+    CHECK(regs().SSPCR1 == SpiControl1::enable);
     CHECK(regs().SSPIMSC == 0u);
+
+    // The next request needs no recover() and pays no second reset.
+    frames_come_back(true);
+    CHECK(Host::start(r));
+    frames_come_back(false);
+    CHECK(Host::status() == spi_ok);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
 
     // recover() releases the select FIRST and puts the block back where
     // start() is legal, with the applied configuration standing and the
@@ -545,6 +564,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(TxEngine::faults == 2u);
     CHECK(Engined::status() == spi_dma_fault);
     CHECK(regs().SSPDMACR == 0u);
+    (void)Engined::recover();   // the case below judges what the fault leaves
 
     // THE SHORT ASYNCHRONOUS REQUEST (pl022/spi.hpp's arithmetic over
     // SimPl022's figures): at clk / 2 in mode 3 a byte frame is 16 cycles,
@@ -675,17 +695,21 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(Engined::status() == spi_ok);
     CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
     // Its budget running out on the engined host is the same answer as on
-    // the host with none: spi_stalled, and no engine touched.
+    // the host with none: spi_stalled, no engine touched, the select released
+    // and then the block reset and enabled.
+    uint32_t resets_before = SimPl022Bench::resets;
     CHECK(Engined::start(held));
     CHECK(Engined::status() == spi_stalled);
     CHECK(TxEngine::blocks == 0u);
     CHECK(TxEngine::faults == 0u);
     CHECK(SimPl022Bench::pin_level[cs_pin]);
-    CHECK(Engined::recover());
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
     CHECK(regs().SSPCR1 == SpiControl1::enable);
     // And a command phase polled ahead of an engined data block that runs
     // out ends the request there with the same answer: no block launched,
-    // true from start(), the select released.
+    // true from start(), the select released, then the same reset.
+    resets_before = SimPl022Bench::resets;
     Engined::Request two_stalled = brief;
     two_stalled.dc = SimPl022PinRef{8};
     two_stalled.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
@@ -695,6 +719,9 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(Engined::status() == spi_stalled);
     CHECK(TxEngine::blocks == 0u);
     CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
+    CHECK(regs().SSPCR1 == SpiControl1::enable);
 
     // Sixteen-bit frames on BYTE engines: the engines cannot carry them,
     // so the request runs polled inside start() whichever way it asked.
@@ -716,6 +743,277 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     Engined::release();
     CHECK(TxEngine::stops == 1u);
     CHECK(RxEngine::stops == 1u);
+}
+
+namespace {
+
+/// An asynchronous request that rides the engines: 24 frames at clk / 16
+/// repay them on SimPl022's figures.
+Engined::Request engined_request() {
+    Engined::Request r{};
+    r.cs = SimPl022PinRef{cs_pin};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    r.rx = lend<Lease::reply>(in_buf);
+    r.len = 24;
+    return r;
+}
+
+}   // namespace
+
+TEST_CASE("a bus error leaves the block's reset owed, and the next start() pays it first") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    Engined::prime(SpiMode::mode3, SpiClocks::div16);
+    const uint32_t cr0 = regs().SSPCR0;
+    Engined::Request r = engined_request();
+    r.mode = SpiMode::mode3;
+    r.clock = SpiClocks::div16;
+
+    // Either channel. The interrupt decides and does not work: the requests
+    // down, the channels put away, the select released, and not one register
+    // of the block's control touched - no reset and no disable.
+    for (const bool on_tx : {true, false}) {
+        CHECK_FALSE(Engined::start(r));
+        const uint32_t resets_before = SimPl022Bench::resets;
+        const uint32_t armed_before = RxEngine::armed;
+        if (on_tx) {
+            TxEngine::next_flags = TxEngine::flag_error;
+        } else {
+            RxEngine::next_flags = RxEngine::flag_error;
+        }
+        CHECK(Engined::dma_isr());
+        CHECK(Engined::status() == spi_dma_fault);
+        CHECK(regs().SSPDMACR == 0u);
+        CHECK_FALSE(TxEngine::busy());
+        CHECK_FALSE(RxEngine::busy());
+        CHECK(RxEngine::armed == armed_before + 1u);
+        CHECK(SimPl022Bench::pin_level[cs_pin]);
+        CHECK(SimPl022Bench::resets == resets_before);
+        CHECK((regs().SSPCR1 & SpiControl1::enable) != 0u);
+
+        // The next start() resets the block before anything else, its own
+        // select after, and the state applied stands; once.
+        CHECK_FALSE(Engined::start(r));
+        CHECK(SimPl022Bench::resets == resets_before + 1u);
+        CHECK(SimPl022Bench::reset_at < SimPl022Bench::pin_clear_at[cs_pin]);
+        CHECK(regs().SSPCR0 == cr0);
+        CHECK((regs().SSPCR1 & SpiControl1::enable) != 0u);
+        CHECK(Engined::status() == spi_ok);
+        RxEngine::next_flags = RxEngine::flag_complete;
+        CHECK(Engined::dma_isr());
+        CHECK(Engined::status() == spi_ok);
+        CHECK_FALSE(Engined::start(r));
+        CHECK(SimPl022Bench::resets == resets_before + 1u);
+        RxEngine::next_flags = RxEngine::flag_complete;
+        CHECK(Engined::dma_isr());
+    }
+
+    // The polled way pays it too, and so does the empty request: the test
+    // comes before anything else start() does.
+    CHECK_FALSE(Engined::start(r));
+    TxEngine::next_flags = TxEngine::flag_error;
+    CHECK(Engined::dma_isr());
+    uint32_t resets_before = SimPl022Bench::resets;
+    Engined::Request polled = r;
+    polled.polled = true;
+    frames_come_back(true);
+    CHECK(Engined::start(polled));
+    frames_come_back(false);
+    CHECK(Engined::status() == spi_ok);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+
+    CHECK_FALSE(Engined::start(r));
+    TxEngine::next_flags = TxEngine::flag_error;
+    CHECK(Engined::dma_isr());
+    resets_before = SimPl022Bench::resets;
+    Engined::Request empty{};
+    empty.cs = SimPl022PinRef{cs_pin};
+    CHECK(Engined::start(empty));
+    CHECK(Engined::status() == spi_ok);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+}
+
+TEST_CASE("prime() pays a reset that is owed, for a caller framing its own select") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    Engined::prime(SpiMode::mode3, SpiClocks::div16);
+    Engined::Request r = engined_request();
+    r.mode = SpiMode::mode3;
+    r.clock = SpiClocks::div16;
+    CHECK_FALSE(Engined::start(r));
+    TxEngine::next_flags = TxEngine::flag_error;
+    CHECK(Engined::dma_isr());
+
+    // The program's select falls after prime() and before start(), so the reset
+    // is prime()'s, once, and the request behind it pays none.
+    const uint32_t resets_before = SimPl022Bench::resets;
+    const SimPl022PinRef own{cs_pin};
+    Engined::prime(SpiMode::mode3, SpiClocks::div16);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK((regs().SSPCR1 & SpiControl1::enable) != 0u);
+    own.clear();
+    const uint32_t lowered = SimPl022Bench::pin_clear_at[cs_pin];
+    CHECK(SimPl022Bench::reset_at < lowered);
+    r.cs = SimPl022PinRef{};
+    CHECK_FALSE(Engined::start(r));
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] == lowered);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    own.set();
+
+    // With no reset owed prime() is what it always was.
+    Engined::prime(SpiMode::mode1, SpiClocks::div8);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(regs().SSPCR0 == spi_cr0_of({.mode = SpiMode::mode1, .bits = 8, .clock = SpiClocks::div8}));
+}
+
+TEST_CASE("recover(), init() and release() each clear a reset that is owed") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    const Engined::Request r = engined_request();
+    const auto fault = [&] {
+        CHECK_FALSE(Engined::start(r));
+        TxEngine::next_flags = TxEngine::flag_error;
+        CHECK(Engined::dma_isr());
+        CHECK(Engined::status() == spi_dma_fault);
+    };
+    const auto next_pays_nothing = [&] {
+        const uint32_t resets_before = SimPl022Bench::resets;
+        CHECK_FALSE(Engined::start(r));
+        CHECK(SimPl022Bench::resets == resets_before);
+        RxEngine::next_flags = RxEngine::flag_complete;
+        CHECK(Engined::dma_isr());
+    };
+
+    // recover() answers true and resets once, the select first.
+    fault();
+    uint32_t resets_before = SimPl022Bench::resets;
+    CHECK(Engined::recover());
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
+    CHECK((regs().SSPCR1 & SpiControl1::enable) != 0u);
+    next_pays_nothing();
+
+    fault();
+    REQUIRE(Engined::init(clock));
+    next_pays_nothing();
+
+    fault();
+    Engined::release();
+    REQUIRE(Engined::init(clock));
+    next_pays_nothing();
+}
+
+namespace {
+
+/// One client over the arbiter over the engined host: what is queued behind a
+/// stall or a bus error starts in the dispatch that answers it, before the
+/// client has run.
+using QueueBus = SpiBus<Engined, HostPlatform, 4>;
+
+struct Go {};
+
+struct QueueClient {
+    using Event = std::variant<Go, SpiDone>;
+    static inline EventQueue<Event, 6, HostPlatform> queue;
+    static inline Engined::Request first{};
+    static inline Engined::Request second{};
+    static inline uint8_t replies[2] = {};
+    static inline uint8_t n = 0;
+
+    static void init() { n = 0; }
+    static void dispatch(const Event& e) {
+        match(e,
+              [](const Go&) {
+                  post<QueueBus>(first);
+                  post<QueueBus>(second);
+              },
+              [](const SpiDone& d) {
+                  REQUIRE(n < 2u);
+                  replies[n] = d.status;
+                  ++n;
+              });
+    }
+};
+
+using QueueKernel = Tenuto<HostPlatform, QueueClient, QueueBus>;
+
+void run_queue() {
+    while (QueueKernel::step()) {
+    }
+}
+
+}   // namespace
+
+TEST_CASE("a request queued behind a stall or a bus error finds a clean block") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    QueueKernel::init_all();
+    Engined::prime(SpiMode::mode3, SpiClocks::div16);
+    const uint32_t cr0 = regs().SSPCR0;
+
+    Engined::Request good = engined_request();
+    good.mode = SpiMode::mode3;
+    good.clock = SpiClocks::div16;
+    good.reply = reply_to<QueueClient, SpiDone>();
+
+    // Behind a stall: the first request's frames never come back, the second
+    // rides the engines, both started by one dispatch of the arbiter's. No
+    // recover() is anywhere, and the arbiter calls none.
+    Engined::Request stalling = good;
+    stalling.polled = true;
+    stalling.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    stalling.len = 2;
+    QueueClient::first = stalling;
+    QueueClient::second = good;
+    QueueClient::n = 0;
+    const uint32_t blocks_before = TxEngine::blocks;
+    uint32_t resets_before = SimPl022Bench::resets;
+    post<QueueClient>(Go{});
+    run_queue();
+    CHECK(QueueClient::n == 1u);
+    CHECK(QueueClient::replies[0] == spi_stalled);
+    CHECK(TxEngine::blocks == blocks_before + 1u);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(regs().SSPCR0 == cr0);
+    CHECK((regs().SSPCR1 & SpiControl1::enable) != 0u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    REQUIRE(Engined::dma_isr());
+    post<QueueBus>(TransferDone{Engined::status()});
+    run_queue();
+    CHECK(QueueClient::n == 2u);
+    CHECK(QueueClient::replies[1] == spi_ok);
+
+    // Behind a bus error: the first on the engines fails in the interrupt, the
+    // glue posts its code, and the dispatch that answers it starts the second,
+    // whose start() pays the reset before it launches.
+    QueueClient::first = good;
+    QueueClient::second = good;
+    QueueClient::n = 0;
+    resets_before = SimPl022Bench::resets;
+    post<QueueClient>(Go{});
+    run_queue();
+    CHECK(QueueClient::n == 0u);
+    TxEngine::next_flags = TxEngine::flag_error;
+    REQUIRE(Engined::dma_isr());
+    CHECK(SimPl022Bench::resets == resets_before);
+    post<QueueBus>(TransferDone{Engined::status()});
+    run_queue();
+    CHECK(QueueClient::n == 1u);
+    CHECK(QueueClient::replies[0] == spi_dma_fault);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::reset_at < SimPl022Bench::pin_clear_at[cs_pin]);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    REQUIRE(Engined::dma_isr());
+    post<QueueBus>(TransferDone{Engined::status()});
+    run_queue();
+    CHECK(QueueClient::n == 2u);
+    CHECK(QueueClient::replies[1] == spi_ok);
 }
 
 TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {

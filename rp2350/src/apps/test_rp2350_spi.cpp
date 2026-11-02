@@ -18,7 +18,7 @@
 //
 // TWO INSTRUMENTS:
 //
-//  - THE LOOP-BACK (a..f): the PL022's LBM feeds the transmitter into the
+//  - THE LOOP-BACK (a..h): the PL022's LBM feeds the transmitter into the
 //    receiver with nothing on the wire, which proves the frame sizes, the
 //    four modes, every rate, the engines, the asynchronous way's rules and
 //    the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
@@ -79,8 +79,13 @@
 //      host's count, a command block chained to its data block, and E - F
 //      measured
 //   g  A POLLED WAIT THAT RUNS OUT (rp2040/src/apps/rp_spi_async.hpp):
-//      spi_stalled, the select released, the receive FIFO drained,
-//      recover() the way back
+//      spi_stalled, the select released, the block reset, the next request
+//      exact with no recover(), polled and on the engines, directly and
+//      queued in SpiBus
+//   h  A DMA BLOCK THE BUS REFUSES (rp2040/src/apps/rp_spi_async.hpp):
+//      spi_dma_fault, the select released, the reset paid by the next
+//      start(), that request exact with no recover(), directly and queued
+//      in SpiBus
 //   n  THE PEER: ident (kind 0x08, on its crystal), ten pings, and the
 //      dark listener woken by nothing
 //   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
@@ -95,6 +100,8 @@
 //      widths, three rates
 //   m  THE PAD FACTS: the client's answer pad driven, under SOD and
 //      released, each under a foreign host's burst
+//   v  A WINDOW FRAMED BY HAND AFTER A FAULT: read by the foreign client and
+//      read back from it, the four modes, no recover()
 //   x  (outside z) the slip statistics: each mode ten times, two rates
 //
 // build: boards = weact2350b,weact2350b-rv
@@ -147,7 +154,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 18> bench;
 
 // SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
 // no wire is on those pads.
@@ -203,6 +210,14 @@ uint32_t xip_misses() {
 /// setting: a line costs 66 to 82 cycles (docs/rp2350/spi.md's first item on the
 /// XIP cache; rp_spi_async.hpp takes the least so as never to flatter a run).
 constexpr uint32_t xip_line_cycles = 66u;
+/// Letter h's bad buffer: the SIO's window, which 12.6.7 names as what the
+/// DMA's bus ports cannot see ("SIO is not visible from the DMA bus ports"), a
+/// bus error on a read and on a write (test_rp2350_dma's letter h and its write
+/// verdict judge them). And the SRAM's range (2.2.3), a read past whose end the
+/// fabric fails to decode.
+constexpr uintptr_t bus_hole = 0xD0000000u;
+constexpr uintptr_t sram_base = 0x20000000u;
+constexpr uintptr_t sram_end = 0x20082000u;
 
 // Aligned for the engines' half-word beat (letter d, the 16-bit frames).
 alignas(4) uint8_t tx_buf[256];
@@ -892,7 +907,8 @@ int main() {
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
     bench.letter('f', "the asynchronous way: the refusal, the short request, the costs", tf_async);
-    bench.letter('g', "a polled wait that runs out: spi_stalled, recover()", tg_stall);
+    bench.letter('g', "a polled wait that runs out: spi_stalled, the next request clean", tg_stall);
+    bench.letter('h', "a DMA block the bus refuses: spi_dma_fault, the next request clean", th_fault);
     // The two-board letters drive link pads: each behind the partner-rail
     // guard (pair_power.hpp).
     bench.letter('n', "the peer: ident, the command channel, the dark listener",
@@ -905,6 +921,8 @@ int main() {
     bench.letter('s', "the client from its vector: the ladder, the tail, the overrun",
                  pair::guarded<bench, clock, link::ts_client_vector>);
     bench.letter('w', "the wedge: the per-bus timeout and recover()", pair::guarded<bench, clock, link::tw_wedge>);
+    bench.letter('v', "a window framed by hand after a fault, read by the peer",
+                 pair::guarded<bench, clock, link::tv_framed>);
     bench.letter('x', "slip statistics (outside z)", pair::guarded<bench, clock, link::tx_slips>, false);
 
     if (serial_ok) {

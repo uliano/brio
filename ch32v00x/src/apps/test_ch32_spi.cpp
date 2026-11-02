@@ -67,8 +67,17 @@
 //   f  THE KERNEL: SpiBus (= BusMaster) over the engined SpiHost, replies
 //      in order, the rejection, both votes; over the engineless one, an
 //      asynchronous request answered spi_rejected (the peer deselected)
-//   h  THE STALLED EXIT, wireless: a polled request over a block held in
-//      reset ends spi_stalled within its budget, and recover() after it
+//   h  THE STALLED EXIT, wireless: a block held in reset and a block whose
+//      enable was taken down under the host, each stalling a polled request
+//      and a polled command phase in front of an asynchronous block; the
+//      status, the select released, the block put back by the host alone, the
+//      next requests spi_ok with no recover(). A real transfer error, a block
+//      running past the end of a memory, the same. A closed clock gate, which a
+//      reset does not open, and a block over each hole in the map
+//   t  THE NEXT REQUEST AFTER A FAILURE, against the peer, with no recover():
+//      a stall and a transfer error, directly and queued through SpiBus, the
+//      next request polled and asynchronous exact both ways, in both
+//      placements
 //   v  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
 //      what raises the flag, which reads clear it, flush_rx(), the polled
 //      write's tail
@@ -97,14 +106,15 @@
 //   x  (outside z) the slip statistics: each mode ten times
 //
 // build: boards = v006k8,v003f4
-// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v
-// build: groups.v006k8 = abcdh,gefv,knopqrmxs
+// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v,t
+// build: groups.v006k8 = abcdh,gefv,knopqrmxs,t
 // (on the CH32V006 the suite whole passes the 40 KB of program flash, so it
-// builds as three images there: the block, the asynchronous way, the polled
+// builds as four images there: the block, the asynchronous way, the polled
 // path, the engines and the stalled exit; the rate on the wire with the
-// host's costs, the CRC, the kernel and OVR's clear; and the command channel, the
+// host's costs, the CRC, the kernel and OVR's clear; the command channel, the
 // matrix, the ladder, the handler beside the polled loop, the kernel against
-// the peer, the client, MODF and the two statistics letters)
+// the peer, the client, MODF and the two statistics letters; and the next
+// request after a failure)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -170,15 +180,17 @@ TestBench<Serial> bench;
 /// letters): the vectors and the window serve only what some carried
 /// letter starts, so a group image links no host it never runs.
 constexpr bool carries(char key) { return selection_carries(test_letters, key); }
-/// The engines: a, b, d, g, p, s, and the kernel's f and q.
+/// The engines: a, b, d, g, p, s, the kernel's f and q, and h's and t's next requests.
 constexpr bool image_engines = carries('a') || carries('b') || carries('d') || carries('g') || carries('p') ||
-                               carries('s') || carries('f') || carries('q');
-/// The arbiter: f and q.
-constexpr bool image_kernel = carries('f') || carries('q');
-/// The engined host with its polled loops in SRAM, letter g's second
-/// placement: carried where the image has room - the 16 KB part's would
+                               carries('s') || carries('f') || carries('q') || carries('h') || carries('t');
+/// The arbiter: f, q and t's queued cases, which the 16 KB part's image has no
+/// room for and whose board has no peer on its wires for them to run against.
+constexpr bool image_queue = carries('t') && device::flash_bytes > 16u * 1024u;
+constexpr bool image_kernel = carries('f') || carries('q') || image_queue;
+/// The engined host with its polled loops in SRAM, the second placement of
+/// letters g and t: carried where the image has room - the 16 KB part's would
 /// overflow.
-constexpr bool image_ram_twin = carries('g') && device::flash_bytes > 16u * 1024u;
+constexpr bool image_ram_twin = (carries('g') || carries('t')) && device::flash_bytes > 16u * 1024u;
 
 volatile bool host_done = false;
 volatile bool dma_host_live = false;
@@ -1966,30 +1978,329 @@ void tf_kernel() {
 //
 // spi_stalled is the polled path's answer to a flag that never comes - a
 // clock that stopped, a block that is dead - spent from ONE budget for the
-// whole transaction (poll_budget: the frames' cycles plus two, in poll
-// turns of several instructions each). Provoked here with SPI1 HELD IN
-// RESET under a polled duplex request: its registers ignore every write,
-// RXNE never rises. The lone select (PC3) frames it, the peer's deselected.
+// whole transaction (poll_budget: the frames' cycles plus two, in poll turns of
+// several instructions each). The host releases the select and puts the block
+// back itself, so the next request needs no recover(). Staged two ways a reset
+// cures: SPI1 HELD IN RESET, its registers ignoring every write and RXNE never
+// rising, the host's own pulse being what lets the line go; and SPE TAKEN DOWN
+// under the host, a frame left standing in the transmit buffer and TXE never
+// rising again, the host's compare seeing no change because the request's
+// clock, mode and width are primed first. Then the one failure a reset does
+// not cure, the gate closed, a transfer error, and a block pointed at each hole
+// in the map. The lone select (PC3) frames every request, the peer's deselected.
+// What came back is letter t's to judge, against the peer.
+//
+// THE WALL'S BOUND. At /16 and 8 bits a frame's budget is 2^7 turns, so sixteen
+// frames spend (16 + 2) x 128 = 2304 turns, and a command phase of one frame
+// (1 + 2) x 128 = 384. The dearest turn measured on the three silicons' loops is
+// 25 cycles (a load, a test, a count, two branches from the flash), and moving
+// the loop half a fetch word costs up to 6 more (docs/ch32v00x/spi.md, "The
+// loops are aligned to the fetch's word"): 31 cycles a turn. On top, 3 000 cycles: two ticks' handlers in the
+// span, the host's way in, and the reset. So 2304 x 31 + 3000 = 74 424 and
+// 384 x 31 + 3000 = 14 904.
+constexpr uint32_t wall_of_sixteen = 2304UL * 31UL + 3000UL;
+constexpr uint32_t wall_of_command = 384UL * 31UL + 3000UL;
+
+/// The ways a request is made to stall, and the two a transfer error takes.
+enum class Stage : uint8_t { held_in_reset, spe_down_write, spe_down_command, fault_rx, fault_tx };
+
+const char* stage_name(Stage s) {
+    switch (s) {
+        case Stage::held_in_reset: return "a read over a block held in reset";
+        case Stage::spe_down_write: return "a write with SPE taken down";
+        case Stage::spe_down_command: return "a command phase with SPE taken down";
+        case Stage::fault_rx: return "a transfer error on the receive channel";
+        default: return "a transfer error on the transmit channel";
+    }
+}
+
+/// The stall staged, on the lone select at /16, `mode` already primed (the
+/// caller's): the status, the wall from start() to its return in `took`.
+template <typename H>
+uint8_t stall_stage(Stage s, SpiMode mode, uint32_t& took) {
+    constexpr SpiDataSize bits = SpiDataSize::bits8;
+    uint8_t st = no_answer;
+    uint32_t t0 = 0;
+    switch (s) {
+        case Stage::held_in_reset:
+            rcc()->PB2PRSTR |= rcc_pb2_spi1;
+            t0 = cycles_now();
+            st = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16, bits, true, mode);
+            break;
+        case Stage::spe_down_write:
+            S::regs().CTLR1 = static_cast<uint16_t>(S::regs().CTLR1 & ~spi_spe);
+            t0 = cycles_now();
+            st = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, nullptr, 16, SpiClock::div16, bits, true, mode);
+            break;
+        default:
+            // Asynchronous, sixty-four frames for the engines; the one command
+            // frame runs polled in front of them (async_min_frames()).
+            S::regs().CTLR1 = static_cast<uint16_t>(S::regs().CTLR1 & ~spi_spe);
+            t0 = cycles_now();
+            st = dma_xfer<H>(LoneCs::ref(), cmd_buf, 1, tx_buf, rx_buf, 64, SpiClock::div16, bits, false, mode);
+            break;
+    }
+    took = cycles_now() - t0;
+    return st;
+}
+
+/// The ends of the memories: RM 8.2.1 promises a transfer error for a reserved
+/// address, and on this silicon it is these that give it, where a hole elsewhere
+/// in the map completes as an ordinary block (the survey below prints both). A
+/// store past the SRAM raises it too, but on two of the family's parts the store
+/// wraps onto the SRAM's first bytes (docs, the DMA page), so the suite stores
+/// past the flash, where no programming is armed and nothing lands.
+constexpr uint32_t past_sram = 0x20000000u + device::sram_bytes;
+constexpr uint32_t past_flash = device::flash_bytes;
+constexpr uint16_t faulted_frames = 32;
+
+/// A block a real transfer error stops, thirty-two frames at /256 on the lone
+/// select. On the receive channel the first frame's store falls past the flash,
+/// so the channel stops one frame in; on the transmit channel the buffer's last
+/// eight bytes are the SRAM's (stack, read and not written), so it stops eight
+/// frames in.
+template <typename H>
+typename H::Request fault_request(Stage s, SpiMode mode) {
+    typename H::Request r{};
+    r.cs = LoneCs::ref();
+    if (s == Stage::fault_rx) {
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        r.rx = lend<Lease::reply>(reinterpret_cast<uint8_t*>(past_flash));
+    } else {
+        r.tx = lend<Lease::reply>(reinterpret_cast<const uint8_t*>(past_sram - 8u));
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    }
+    r.len = faulted_frames;
+    r.mode = mode;
+    r.clock = link_clock;
+    r.polled = false;
+    return r;
+}
+
+/// The bound on a completion the vector signals: the suite's own spin.
+bool await_done() {
+    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
+    }
+    return host_done;
+}
+
+/// The transfer errors, each followed at once by a polled and an asynchronous
+/// request; what came back is letter t's to judge.
+template <typename H>
+void real_faults(uint8_t& good_faults, uint8_t& good_next) {
+    constexpr SpiMode mode = SpiMode::mode3;
+    for (const Stage s : {Stage::fault_rx, Stage::fault_tx}) {
+        dma_ready<H>();
+        H::prime(mode, link_clock);
+        const typename H::Request f = fault_request<H>(s, mode);
+        host_done = false;
+        dma_isr_entries = 0;
+        const bool inside = H::start(f);
+        const bool answered = await_done();
+        const uint8_t st = H::status();
+        const uint32_t entries = dma_isr_entries;
+        const bool lone_high = LoneCs::read_out();
+        const uint8_t next_polled = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, link_clock,
+                                                SpiDataSize::bits8, true, mode);
+        const uint8_t next_async = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, link_clock,
+                                               SpiDataSize::bits8, false, mode);
+        H::release();
+        print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", stage_name(s), ": dma_isr() ",
+              answered ? "true" : "never", ", status ", st, " (spi_dma_fault ", spi_dma_fault, "), ", entries,
+              " interrupts, select ", lone_high ? "high" : "LOW", "; then polled ", next_polled, ", asynchronous ",
+              next_async, crlf);
+        if (!inside && answered && st == spi_dma_fault && entries == 1u && lone_high) {
+            ++good_faults;
+        }
+        if (next_polled == spi_ok && next_async == spi_ok) {
+            ++good_next;
+        }
+    }
+
+    // WHAT THE OWED RESET COSTS THE NEXT start(): an empty request answers true at
+    // once, so the same call with the reset owed and with nothing owed differ by
+    // the reset, the first start() having nothing else to do.
+    dma_ready<H>();
+    H::prime(mode, link_clock);
+    const typename H::Request f = fault_request<H>(Stage::fault_rx, mode);
+    host_done = false;
+    (void)H::start(f);
+    (void)await_done();
+    const typename H::Request empty{};
+    uint32_t t0 = cycles_now();
+    (void)H::start(empty);
+    const uint32_t owed = cycles_now() - t0;
+    t0 = cycles_now();
+    (void)H::start(empty);
+    const uint32_t paid = cycles_now() - t0;
+    H::release();
+    print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", "an empty start() with the reset owed ", owed,
+          " cycles, with nothing owed ", paid, crlf);
+}
+
+/// Each hole, read and written by the engines through a real request.
+struct HoleSurvey {
+    uint8_t blocks = 0;
+    uint8_t faults = 0;
+    uint8_t hung = 0;
+};
+
+void hole_line(HoleSurvey& h, const char* way, uint32_t address, uint8_t st) {
+    print(serial, "  a block ", way, " ", hex(address), ": status ", st, crlf);
+    ++h.blocks;
+    if (st == spi_dma_fault) {
+        ++h.faults;
+    } else if (st != spi_ok) {
+        ++h.hung;
+    }
+}
 
 void th_stalled() {
     host_ready();
     fill_pattern(tx_buf, 16, 0x5A);
+
+    // 1. The host with no engines, a polled read of sixteen at /16.
     rcc()->PB2PRSTR |= rcc_pb2_spi1;
     const uint32_t t0 = cycles_now();
     const uint8_t st = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                  SpiClock::div16, SpiDataSize::bits8, true);
     const uint32_t took = cycles_now() - t0;
-    rcc()->PB2PRSTR &= ~rcc_pb2_spi1;
-    const bool rec = Host::recover();
+    const bool released = LoneCs::read_out();
+    const uint16_t ctlr1 = S::regs().CTLR1;
+    const uint16_t statr = S::status();
     const uint8_t after = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                     SpiClock::div16, SpiDataSize::bits8, true);
-    print(serial, "  a polled request of 16 at /16 with the block held in reset: status ", st, " (spi_stalled ",
-          spi_stalled, ") after ", took, " cycles (the wire's 2048); recover() ", rec ? 1 : 0,
-          ", the next request ", after, crlf);
-    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled - the budget runs out, the call "
-                  "returns - within ten milliseconds (480 000 cycles), and after recover() the next request is "
-                  "spi_ok",
-                  st == spi_stalled && took < 480'000u && rec && after == spi_ok);
+    print(serial, "  a polled read of 16 at /16 with the block held in reset: status ", st, " (spi_stalled ",
+          spi_stalled, ") after ", took, " cycles (the bound ", wall_of_sixteen, ", the wire's 2048), select ",
+          released ? "high" : "LOW", ", CTLR1 ", hex(ctlr1), " STATR ", hex(statr), ", the next request ", after, crlf);
+    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled within its derived bound, the select "
+                  "released",
+                  st == spi_stalled && took < wall_of_sixteen && released);
+    bench.verdict("the host has put the block back: the reset line let go, SPE and MSTR up, nothing in the receive "
+                  "buffer, and with no recover() the next request is spi_ok",
+                  (ctlr1 & (spi_spe | spi_mstr)) == (spi_spe | spi_mstr) && (statr & (spi_rxne | spi_ovr)) == 0u &&
+                      after == spi_ok);
+
+    // 2. The host with engines, every stall path, each followed at once by a
+    // polled and an asynchronous request. Mode 3: SCK idles high, so the reset
+    // moves its pad, with the select already released.
+    constexpr SpiMode mode = SpiMode::mode3;
+    uint8_t good_stalls = 0;
+    uint8_t good_next = 0;
+    for (const Stage s : {Stage::held_in_reset, Stage::spe_down_write, Stage::spe_down_command}) {
+        dma_ready();
+        DmaHost::prime(mode, SpiClock::div16);
+        uint32_t wall = 0;
+        const uint8_t stalled = stall_stage<DmaHost>(s, mode, wall);
+        const uint32_t stall_entries = dma_isr_entries;
+        const bool lone_high = LoneCs::read_out();
+        const uint32_t bound = s == Stage::spe_down_command ? wall_of_command : wall_of_sixteen;
+        const uint8_t next_polled = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16,
+                                             SpiDataSize::bits8, true, mode);
+        const uint32_t polled_entries = dma_isr_entries;
+        const uint8_t next_async = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16,
+                                            SpiDataSize::bits8, false, mode);
+        const uint32_t async_entries = dma_isr_entries;
+        dma_done();
+        print(serial, "  ", stage_name(s), ": status ", stalled, " after ", wall, " cycles (the bound ", bound,
+              "), select ", lone_high ? "high" : "LOW", ", channel interrupts ", stall_entries, "; then polled ",
+              next_polled, " (", polled_entries, " interrupts), asynchronous ", next_async, " (", async_entries, ")",
+              crlf);
+        if (stalled == spi_stalled && wall < bound && lone_high && stall_entries == 0u) {
+            ++good_stalls;
+        }
+        if (next_polled == spi_ok && polled_entries == 0u && next_async == spi_ok && async_entries == 1u) {
+            ++good_next;
+        }
+    }
+    bench.verdict("EVERY STALL PATH ON THE ENGINED HOST, the polled command phase in front of an asynchronous block "
+                  "among them, ends spi_stalled inside start() within its bound, the select released, no channel "
+                  "interrupt",
+                  good_stalls == 3u);
+    bench.verdict("and each time, with no recover(), the next polled request and the next asynchronous one, on the "
+                  "engines with their one interrupt, are spi_ok",
+                  good_next == 3u);
+
+    // 3. A CLOSED GATE, which a reset does not open. Each request stalls on its
+    // own budget; the gate opened, the block has lost its registers to the
+    // pulse under the closed gate, so the first request stalls once more and
+    // puts it back, and the one after it runs.
+    host_ready();
+    S::bus_clock(false);
+    const uint16_t closed_ctlr1 = S::regs().CTLR1;
+    const uint16_t closed_statr = S::status();
+    uint32_t tg = cycles_now();
+    const uint8_t gate_1 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
+                                     SpiDataSize::bits8, true);
+    const uint32_t gate_1_took = cycles_now() - tg;
+    tg = cycles_now();
+    const uint8_t gate_2 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
+                                     SpiDataSize::bits8, true);
+    const uint32_t gate_2_took = cycles_now() - tg;
+    tg = cycles_now();
+    const bool drained = S::disable();
+    const uint32_t drain_took = cycles_now() - tg;
+    S::bus_clock(true);
+    const uint8_t open_1 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
+                                     SpiDataSize::bits8, true);
+    const uint8_t open_2 = host_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClock::div16,
+                                     SpiDataSize::bits8, true);
+    print(serial, "  the gate closed: CTLR1 reads ", hex(closed_ctlr1), ", STATR ", hex(closed_statr),
+          "; two requests ", gate_1, " after ", gate_1_took, " and ", gate_2, " after ", gate_2_took,
+          " cycles; Spi::disable() ", drained ? "true" : "false", " after ", drain_took,
+          " cycles; the gate opened, requests ", open_1, " and ", open_2, crlf);
+    bench.verdict("A CLOSED GATE IS NOT CURED: every request behind it stalls, each on its own budget within the bound",
+                  gate_1 == spi_stalled && gate_2 == spi_stalled && gate_1_took < wall_of_sixteen &&
+                      gate_2_took < wall_of_sixteen);
+    bench.verdict("the gate opened, the host needs no recover(): at most one more stall, and the next request is spi_ok",
+                  (open_1 == spi_ok || open_1 == spi_stalled) && open_2 == spi_ok);
+
+    // 4. A TRANSFER ERROR, real, with no recover() after it. The channels' stop in
+    // the middle of a block, the select released from the vector, the next
+    // requests at once. Exact against the peer in letter t.
+    uint8_t good_faults = 0;
+    uint8_t good_after_fault = 0;
+    real_faults<DmaHost>(good_faults, good_after_fault);
+    bench.verdict("A BLOCK RUNNING PAST THE END OF A MEMORY, read or written, is a transfer error: dma_isr() true once, "
+                  "spi_dma_fault, the select released",
+                  good_faults == 2u);
+    bench.verdict("and with no recover() the next polled request and the next asynchronous one are spi_ok",
+                  good_after_fault == 2u);
+
+    // 5. THE REST OF THE MAP: a real request whose buffer sits on a hole
+    // (test_ch32_dma letter d's five, read and written), and for reading three
+    // more classes - a core-private address, the closed gate of TIM1 and the end
+    // of the flash. Printed, and judged for what must hold either way: a block
+    // ends.
+    HoleSurvey holes{};
+    constexpr uint32_t both_ways[] = {0x30000000u, 0x40030000u, 0x50000000u, 0x60000000u, 0xF0000000u};
+    constexpr uint32_t read_only[] = {0xE000E000u, 0x40012C00u, device::flash_bytes};
+    rcc()->PB2PCENR &= ~rcc_pb2_tim1;
+    dma_ready();
+    for (const uint32_t a : both_ways) {
+        hole_line(holes, "read from", a,
+                  dma_xfer(LoneCs::ref(), nullptr, 0, reinterpret_cast<const uint8_t*>(a), rx_buf, 16, SpiClock::div16,
+                           SpiDataSize::bits8, false));
+        hole_line(holes, "written into", a,
+                  dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, reinterpret_cast<uint8_t*>(a), 16, SpiClock::div16,
+                           SpiDataSize::bits8, false));
+    }
+    for (const uint32_t a : read_only) {
+        hole_line(holes, "read from", a,
+                  dma_xfer(LoneCs::ref(), nullptr, 0, reinterpret_cast<const uint8_t*>(a), rx_buf, 16, SpiClock::div16,
+                           SpiDataSize::bits8, false));
+    }
+    const uint8_t after_holes = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16,
+                                         SpiDataSize::bits8, false);
+    dma_done();
+    print(serial, "  ", holes.blocks, " blocks over the rest of the map: ", holes.faults, " transfer errors, ",
+          holes.hung, " with no answer", crlf);
+    bench.verdict("every one of those blocks ended, and the next asynchronous request is spi_ok",
+                  holes.hung == 0u && after_holes == spi_ok);
+    // The engines count what was staged here; letter d judges that it has none.
+    DmaTx::clear_faults();
+    DmaRx::clear_faults();
+    host_ready();
 }
 
 // ===========================================================================
@@ -2370,6 +2681,273 @@ void tq_peer_kernel() {
                   replies_ok && mism == 0u && rep && r.count == total && r.mism == 0u);
     (void)link_command_mode();
     bench.verdict("the command channel is back after the kernel's window", command(Op::ping));
+}
+
+// ===========================================================================
+// t - the next request after a failure, against the peer
+// ===========================================================================
+//
+// After spi_stalled or spi_dma_fault the next request starts on a clean block,
+// whoever posted it and with no recover(). What says so is a second chip: the
+// next request's frames, exact both ways. The exchange is commanded FIRST, then
+// the host is brought up and never touched again, so that nothing but the host
+// itself can have cleaned the block - no init(), no recover(), no prime() - and
+// the request frames its own select on the peer's wire, its setup time the
+// link's hold. The failed request frames the lone select, so the peer never sees it.
+// Mode 3, whose idle SCK the reset moves.
+//
+// The transfer errors are real (fault_request(), past the end of a memory, the host's own letter h's stage), so the next
+// request meets frames of the faulted block still on the wire: thirty-two frames
+// at /256, 2048 cycles each, with the channels stopped after the first frame or
+// the eighth, and a frame shifting and perhaps another waiting in the transmit
+// buffer when the next start() runs. The verdict that its first frame read is its
+// own is the verdict that they did not come back in front of it.
+
+constexpr uint16_t next_frames = 16;
+constexpr SpiMode next_mode = SpiMode::mode3;
+static_assert(faulted_frames >= DmaHost::async_min_frames(link_clock, SpiDataSize::bits8, true) &&
+              next_frames >= DmaHost::async_min_frames(link_clock, SpiDataSize::bits8, true),
+              "the faulted block and the next asynchronous request both ride the engines at /256");
+
+alignas(4) uint8_t next_tx[next_frames];
+alignas(4) uint8_t next_rx[next_frames];
+
+/// The peer commanded to one exchange of `next_frames`, and this end's buffers
+/// made ready for it.
+bool arm_peer(spilink::Params& a, uint8_t seed) {
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 3, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = next_frames;
+    a.ms = 400;
+    a.seed_a = seed;
+    a.seed_b = static_cast<uint8_t>(seed + 0x40u);
+    a.pattern = spilink::pattern_prbs;
+    spilink::Stream out(a.pattern, a.seed_a);
+    for (uint16_t i = 0; i < next_frames; ++i) {
+        next_tx[i] = out.next();
+        next_rx[i] = 0xEE;
+    }
+    return peer_act(Op::exchange, a);
+}
+
+/// What the peer said of the exchange, and what this end read, against the
+/// streams. The channel is the plain host's, so the failed host is given up.
+bool exchange_judged(const spilink::Params& a, uint16_t& mism, spilink::Report& r) {
+    mism = 0;
+    spilink::Stream want(a.pattern, a.seed_b);
+    for (uint16_t i = 0; i < next_frames; ++i) {
+        if (next_rx[i] != want.next()) {
+            ++mism;
+        }
+    }
+    const bool rep = peer_report(r);
+    return rep && mism == 0u && r.count == next_frames && r.mism == 0u;
+}
+
+template <typename H>
+typename H::Request next_request(bool polled) {
+    typename H::Request r{};
+    r.cs = CsPin::ref();
+    r.cs_setup_us = 30;   // the link's hold (link_hold())
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(next_tx));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(next_rx));
+    r.len = next_frames;
+    r.mode = next_mode;
+    r.clock = link_clock;
+    r.polled = polled;
+    return r;
+}
+
+/// One failure and the request after it, directly on the host. Status, select,
+/// the next request's way and its frames judged; true when all of it holds. With
+/// `framed` the next request is a caller's that frames its own select: prime()
+/// first, which pays what is owed, the select by hand around a request naming none.
+template <typename H>
+bool failure_then_next(Stage s, bool next_polled, uint8_t seed, bool framed = false) {
+    spilink::Params a{};
+    if (!arm_peer(a, seed)) {
+        print(serial, "  the peer refused the exchange", crlf);
+        return false;
+    }
+    dma_ready<H>();
+    LoneCs::output(true);
+    settle();
+    uint8_t st = no_answer;
+    bool failed_right = false;
+    if (s == Stage::fault_rx || s == Stage::fault_tx) {
+        H::prime(next_mode, link_clock);
+        const uint32_t faults_before = DmaTx::faults();
+        const typename H::Request f = fault_request<H>(s, next_mode);
+        host_done = false;
+        dma_isr_entries = 0;
+        const bool inside = H::start(f);
+        const bool answered = await_done();
+        st = H::status();
+        failed_right = !inside && answered && dma_isr_entries == 1u && st == spi_dma_fault &&
+                       DmaTx::faults() == faults_before + 1u;
+    } else {
+        uint32_t wall = 0;
+        H::prime(next_mode, SpiClock::div16);
+        st = stall_stage<H>(s, next_mode, wall);
+        failed_right = st == spi_stalled;
+    }
+    const bool selects_high = LoneCs::read_out() && CsPin::read_out();
+
+    // THE NEXT REQUEST, at once: nothing has touched the host since it failed.
+    typename H::Request n = next_request<H>(next_polled);
+    if (framed) {
+        n.cs = {};
+        n.cs_setup_us = 0;
+        H::prime(next_mode, link_clock);
+        (void)delay_us(clock, 20);   // SCK at its idle level before the select
+        CsPin::clear();
+        link_hold();
+    }
+    host_done = false;
+    dma_isr_entries = 0;
+    const bool inside = H::start(n);
+    const bool answered = inside || await_done();
+    const uint8_t next_st = answered ? H::status() : no_answer;
+    const bool way_right = next_polled ? (inside && dma_isr_entries == 0u) : (!inside && dma_isr_entries == 1u);
+    (void)delay_us(clock, 30);
+    CsPin::set();
+    H::release();
+
+    uint16_t mism = 0;
+    spilink::Report r{};
+    const bool exact = exchange_judged(a, mism, r);
+    print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", stage_name(s), ": status ", st, ", selects ",
+          selects_high ? "high" : "LOW", "; next ", next_polled ? "polled" : "asynchronous", " ", next_st,
+          ", host mism ", mism, ", the peer read ", r.count, " mism ", r.mism, crlf);
+    return failed_right && selects_high && next_st == spi_ok && way_right && exact;
+}
+
+namespace kt {
+
+/// One client posts two requests from one dispatch: the first fails, the second
+/// is good. Replies in order, the second's frames exact, no recover().
+bool queued_behind(Stage s, bool next_polled, uint8_t seed) {
+    spilink::Params a{};
+    if (!arm_peer(a, seed)) {
+        print(serial, "  the peer refused the exchange", crlf);
+        return false;
+    }
+    const bool fault = s == Stage::fault_rx || s == Stage::fault_tx;
+    kl::BusKernel::init_all();
+    dma_ready<DmaHost>();
+    bus_ao_live = true;
+    LoneCs::output(true);
+    settle();
+    DmaHost::Request first = fault_request<DmaHost>(s, next_mode);
+    DmaHost::Request second = next_request<DmaHost>(next_polled);
+    first.reply = reply_to<kl::Probe, SpiDone>();
+    second.reply = reply_to<kl::Probe, SpiDone>();
+    if (fault) {
+        DmaHost::prime(next_mode, link_clock);
+    } else {
+        // The block held in reset, a polled read of sixteen at /16.
+        first.polled = true;
+        first.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        first.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+        first.len = 16;
+        first.clock = SpiClock::div16;
+        DmaHost::prime(next_mode, SpiClock::div16);
+        rcc()->PB2PRSTR |= rcc_pb2_spi1;
+    }
+    post<kl::SpiArb>(first);
+    post<kl::SpiArb>(second);
+    kl::pump_until(2, 400);
+    const bool selects_high = LoneCs::read_out() && CsPin::read_out();
+    (void)delay_us(clock, 30);
+    DmaHost::release();
+    bus_ao_live = false;
+    uint16_t mism = 0;
+    spilink::Report r{};
+    const bool exact = exchange_judged(a, mism, r);
+    const uint8_t first_st = kl::Probe::replies[0];
+    const uint8_t second_st = kl::Probe::replies[1];
+    print(serial, "  queued behind ", stage_name(s), ": ", kl::Probe::n, " replies [", first_st, " ", second_st,
+          "], the second ", next_polled ? "polled" : "asynchronous", ", host mism ", mism, ", the peer read ", r.count,
+          " mism ", r.mism, crlf);
+    return kl::Probe::n == 2u && first_st == (fault ? spi_dma_fault : spi_stalled) && second_st == spi_ok &&
+           selects_high && exact;
+}
+
+}  // namespace kt
+
+void tt_next_after_failure() {
+    if (!need_peer()) {
+        return;
+    }
+    fill_pattern(tx_buf, faulted_frames, 0x5A);
+    cmd_buf[0] = 0x2C;
+
+    uint8_t stalls = 0;
+    uint8_t seed = 0x11;
+    for (const Stage s : {Stage::held_in_reset, Stage::spe_down_write, Stage::spe_down_command}) {
+        for (const bool next_polled : {true, false}) {
+            if (failure_then_next<DmaHost>(s, next_polled, seed)) {
+                ++stalls;
+            }
+            seed = static_cast<uint8_t>(seed + 5u);
+        }
+    }
+    bench.verdict("A STALL, THEN THE NEXT REQUEST WITH NO recover(): spi_stalled, the select released, then a polled "
+                  "and an asynchronous request exact both ways, read back by a second chip; three stall paths, six "
+                  "cases",
+                  stalls == 6u);
+
+    uint8_t faults = 0;
+    for (const Stage s : {Stage::fault_rx, Stage::fault_tx}) {
+        for (const bool next_polled : {true, false}) {
+            if (failure_then_next<DmaHost>(s, next_polled, seed)) {
+                ++faults;
+            }
+            seed = static_cast<uint8_t>(seed + 5u);
+        }
+    }
+    // A caller framing its own select: prime() has paid the reset, with the select
+    // still high, so in mode 3 the SCK pad it moves reaches no selected device.
+    for (const bool next_polled : {true, false}) {
+        if (failure_then_next<DmaHost>(Stage::fault_rx, next_polled, seed, true)) {
+            ++faults;
+        }
+        seed = static_cast<uint8_t>(seed + 5u);
+    }
+    bench.verdict("A REAL TRANSFER ERROR IN THE MIDDLE OF A BLOCK, THEN THE NEXT REQUEST WITH NO recover(): dma_isr() "
+                  "true once, spi_dma_fault, the select released, the transmit engine's fault counted once, then a "
+                  "polled and an asynchronous request exact, no frame of the faulted block in front of them; six cases, "
+                  "two of them framing their own select after prime()",
+                  faults == 6u);
+
+    if constexpr (image_ram_twin) {
+        uint8_t in_ram = 0;
+        for (const Stage s : {Stage::held_in_reset, Stage::fault_rx}) {
+            for (const bool next_polled : {true, false}) {
+                if (failure_then_next<RamDmaHost>(s, next_polled, seed)) {
+                    ++in_ram;
+                }
+                seed = static_cast<uint8_t>(seed + 5u);
+            }
+        }
+        bench.verdict("the same with the polled loops in SRAM: a stall and a transfer error, four cases", in_ram == 4u);
+    }
+
+    if constexpr (image_queue) {
+        uint8_t queued = 0;
+        for (const Stage s : {Stage::held_in_reset, Stage::fault_rx, Stage::fault_tx}) {
+            for (const bool next_polled : {true, false}) {
+                if (kt::queued_behind(s, next_polled, seed)) {
+                    ++queued;
+                }
+                seed = static_cast<uint8_t>(seed + 5u);
+            }
+        }
+        bench.verdict("QUEUED BEHIND A FAILURE, THROUGH SpiBus: two requests posted from one dispatch, replies in "
+                      "order, the failure's code then spi_ok, the second's frames exact, no recover(); six cases",
+                      queued == 6u);
+    }
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the letter", command(Op::ping));
 }
 
 // ===========================================================================
@@ -2864,10 +3442,15 @@ int main() {
     bench.letter('g', "THE RATE ON THE WIRE: a frame inside an engined block, the peer deselected", tg_wire);
     bench.letter('e', "THE HARDWARE CRC against a foreign CRC unit, 8 and 16 bits, a mismatch caught", te_crc);
     bench.letter('f', "THE KERNEL: SpiBus over SpiHost, the rejection, the votes", tf_kernel);
-    bench.letter('h', "the stalled exit: a polled request over a block held in reset", th_stalled);
+    bench.letter('h', "the stalled exit and the transfer error, wireless: the next requests with no recover(), a "
+                      "closed gate, the rest of the map",
+                 th_stalled);
     bench.letter('v', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, flush_rx()", tv_overrun);
     bench.letter('k', "A HANDLER BESIDE THE POLLED LOOP IS A GAP ON THE BUS: ten windows exact under a dragged tick",
                  tk_handler_gap);
+    bench.letter('t', "THE NEXT REQUEST AFTER A FAILURE against the peer: a stall and a transfer error, direct and "
+                      "through SpiBus, exact with no recover()",
+                 tt_next_after_failure);
     bench.letter('n', "THE PEER: the spi_link command channel, ident, ten pings", tn_peer_link);
     bench.letter('o', "the matrix against the peer: four modes, both serves, both bit orders", to_peer_matrix);
     bench.letter('p', "the BR ladder against the peer, both host paths, both serves, the transmit-only path",

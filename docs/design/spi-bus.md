@@ -438,8 +438,8 @@ A synchronous completion is not a success by definition. A polled wait
 that runs out of its spin budget (a flag that never rose, a peripheral
 whose clock does not run: a gate closed, the enable down, a mode fault that
 demoted it) ends the request inside `start()` with `spi_stalled` in
-`status()`, the select released and the receive side drained, and that
-code is what the requester's `SpiDone` carries. Every host whose loop has
+`status()` and the select released, and that code is what the requester's
+`SpiDone` carries. Every host whose loop has
 a budget answers it, one spelling and one value on every family, in
 `util/spi_bus.hpp` (the range `util/bus_master.hpp` leaves to engines). The
 budget is the hold-up a stall costs: hundreds of milliseconds at a slow rate
@@ -462,18 +462,32 @@ has run. So:
 | code | what the host has done | who acts |
 |---|---|---|
 | `spi_rejected` | nothing: the request never reached the wire | the client: a full FIFO clears, so it may post again; on a host with no engines it never clears |
-| `spi_stalled` | select released, receive side drained. The STM32F4 also resets and reconfigures the peripheral. Every other host with a budget (the STM32G0, the SAM C21, the CH32V00x, the CH32V203 and CH32V303, the CH32X035, the PL022) leaves the peripheral as it is | on the STM32F4 nobody: the next request starts on a clean peripheral. Elsewhere the program: `recover()` is the way back, and until it runs a request starts on the peripheral that stalled |
-| `spi_dma_fault` | select released, both channels put away, the receive side drained; a frame still on the wire can land behind the drain. No host resets the peripheral | the program: `recover()` with the bus idle before the next request. No letter on any family provokes a transfer error, so this path is read in the code and not measured |
+| `spi_stalled` | select released first, then the block reset and reconfigured, inside `start()`. The SAM C21 is the exception: it drains the receive side and leaves the peripheral as it is | nobody: the next request starts on a clean block. On the SAM C21 the program: `recover()` is the way back, and until it runs a request starts on the peripheral that stalled |
+| `spi_dma_fault` | in the DMA interrupt: select released, both channels put away, a reset marked as owed. The next `start()` or `prime()` pays it before anything else | nobody: each family with engines provokes a real transfer error in its suite and reads the next request back exact |
 | `spi_timeout` | the arbiter has called `recover()`: the stale completion silenced, the select raised, the peripheral reset | nobody for the engine; the wire and the device stay the application's to judge |
 
-A request queued behind a stall starts in the same dispatch, before the
-requester's handler can call anything, so on a host that leaves the
-peripheral as it is N queued polled requests on a dead peripheral stall N
-times in a row, each on its own budget, and each is answered `spi_stalled`.
+`SpiHost` does this itself because nobody else can. A request queued behind
+a stall or a fault starts in the same dispatch, before the requester's handler
+can call anything, so a program could not reset the block in time; and a
+program that drives `SpiHost` directly has no arbiter at all. A stall resets at
+once, in main context, the select first because the reset can move the SCK pad
+and a device still selected would count the edge. A fault only marks the reset,
+because a DMA interrupt decides and does not work: it neither waits nor
+reprograms the block. The mark costs a host with engines one load and one branch
+a request, never one a frame. `prime()` pays it too, because a caller that frames
+the select itself must have the block clean before the select goes low. Such a
+caller's select, a null one in the request, stands low through a stall's reset:
+the driver cannot release what it does not hold.
 
-**`recover()` is the program's to call with the bus idle, and the arbiter
-publishes no such fact**: no verb says whether a request is in flight or
-waiting. A client knows the bus is idle only by its own bookkeeping, every
+What a reset cannot do is open a closed clock gate. Behind one, N queued polled
+requests stall N times in a row, each on its own budget, and each is answered
+`spi_stalled`; on the SAM C21, which leaves the peripheral as it is, any cause of
+a stall does the same.
+
+**A program owes `recover()` nothing after a stall or a fault**, the SAM C21's
+stall apart: the verb stays for the arbiter's timeout. A program that calls it
+anyway does so with the bus idle, and the arbiter publishes no such fact: no verb
+says whether a request is in flight or waiting. A client knows the bus is idle only by its own bookkeeping, every
 request of every client answered; on a bus with one client that is the
 `SpiDone` it holds, having posted nothing since. `recover()` over an
 asynchronous request in flight puts its engines away, so its `TransferDone`

@@ -34,6 +34,8 @@
 //   client_pad_follows_select  this chip's nSSPOE reaches the client's
 //                            answer pad (the RP2350's) or not (the RP2040's),
 //                            which letter m judges
+//   sram_tail()              an out buffer that runs off the SRAM's end, the
+//                            bus error of letter v (rp_spi_async.hpp, above it)
 //
 // and binds isr_spi1 to `pair_spi_isr()` and isr_dma_1 to
 // `pair_dma_isr()`.
@@ -326,6 +328,9 @@ struct Exchange {
     bool wide = false;      ///< 16-bit frames (spilink::spare_wide), `count` frames
     uint16_t ms = 400;
     bool engines = false;   ///< this end runs the data asynchronously, on its DMA engines
+    /// Letter v: a bus error provoked with the select high first, frames left on
+    /// their way, and the window framed by hand right behind it.
+    bool fault_first = false;
 };
 
 /// The most BYTES an exchange carries.
@@ -343,6 +348,8 @@ uint16_t exchange_bytes(const Exchange& e) {
 bool reversed(const Exchange& e) { return e.cfg.dord != 0; }
 
 uint8_t last_status = 0;
+uint8_t fault_status = 0;
+alignas(4) uint8_t fault_rx[64];
 
 bool do_exchange(const Exchange& e) {
     spilink::Params a{};
@@ -374,6 +381,12 @@ bool do_exchange(const Exchange& e) {
     const SpiMode mode = static_cast<SpiMode>(e.cfg.mode & 3u);
     if (e.engines) {
         (void)link_dma_mode();
+        if (e.fault_first) {
+            // 64 frames, the read failing after 16: at /128 the eight frames
+            // standing then take 66 us or so to leave, against the 10 us
+            // link_xfer() spends between prime() and the select.
+            fault_status = run_request<LinkDmaHost>(sram_tail(16), fault_rx, 64, e.rate, mode, SpiDataSize::bits8);
+        }
         last_status = link_xfer<LinkDmaHost>(xtx, xrx, n, e.rate, mode, bits);
     } else {
         last_status = link_xfer(xtx, xrx, n, e.rate, mode, bits);
@@ -1270,6 +1283,15 @@ ClientRun client_vector_burst(uint8_t mode, bool wide, uint16_t count, uint16_t 
         return out;
     }
     LinkClient::interrupts(SpiInterrupt::all, false);
+    // ONE ENTRY OF THE VECTOR, FOR ITS OWN LINES: what it fetches from the flash
+    // (the crt's dispatch and table on Hazard3, the vector table on the Arm cores) is
+    // what stands between the first interrupt of a burst and the refill, and the
+    // prints and the command channel since the last burst may have put those
+    // lines out of the XIP cache, each miss some 70 cycles against the 320 of four
+    // frames at /10 in mode 3. The transmit FIFO is empty here, so TXIM raises the
+    // line at once, and the owner being none the vector masks it and leaves.
+    LinkClient::interrupts(SpiInterrupt::tx, true);
+    (void)wait_until([] { return LinkClient::Resource::interrupts() == 0u; }, 1000u);
     spilink::Stream answers(a.pattern, a.seed_b);
     const uint16_t bytes = static_cast<uint16_t>(wide ? 2u * count : count);
     for (uint16_t i = 0; i < bytes; ++i) {
@@ -1510,6 +1532,47 @@ void tw_wedge() {
                   after_n == 4u && ok == 4u);
     (void)link_command_mode();
     bench.verdict("the command channel is back after the wedge", command(Op::ping));
+    pair_release();
+}
+
+// =============================================================================
+// v - A WINDOW FRAMED BY HAND AFTER A FAULT, through a device's own eyes
+// =============================================================================
+
+void tv_framed() {
+    if (!need_peer()) {
+        return;
+    }
+    // The fault with the select high, the peer not addressed; then link_xfer():
+    // prime, select low, 30 us, start with a null select in the Request, 30 us,
+    // select high. Judged by the foreign client's report and by what comes back,
+    // sixteen frames in each mode: a reset paid under the low select would let the
+    // frames still standing shift in front of it, and in modes 2 and 3 move SCK. No
+    // recover(). Each window's fault at /128, the command channel's own rate, the
+    // peer's ceiling far off.
+    uint8_t exact = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        Exchange e{};
+        e.cfg.mode = m;
+        e.engines = true;
+        e.fault_first = true;
+        e.seed_a = static_cast<uint8_t>(0x23u + m);
+        e.seed_b = static_cast<uint8_t>(0x67u + m);
+        Verify v{};
+        spilink::Report r{};
+        fault_status = 0;
+        const bool ok = exchange_exact(e, v, r) && fault_status == spi_dma_fault;
+        exact = static_cast<uint8_t>(exact + (ok ? 1u : 0u));
+        print(serial, "  mode ", m, ": the fault's status ", fault_status, ", the window ", ok ? "exact" : "BAD");
+        if (!ok) {
+            print_miss(v, r);
+        }
+        print(serial, crlf);
+    }
+    bench.verdict("A WINDOW FRAMED BY HAND AFTER A FAULT, read by the foreign client and read back from it: spi_dma_fault "
+                  "with the select high, then prime, select, start, select, sixteen frames exact both ways in all four "
+                  "modes, no recover()",
+                  exact == 4u);
     pair_release();
 }
 

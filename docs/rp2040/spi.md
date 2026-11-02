@@ -97,9 +97,10 @@ repay the engines at its rate runs polled and completes inside `start()`
 loop inside `start()`, in the arbiter's dispatch, for its whole wire time,
 holding every other active object meanwhile, with interrupts enabled; at any
 length and with engines bound or not, so it needs no vector. A polled wait that
-runs out answers `spi_stalled`, the select released and the receive FIFO drained,
-and `recover()` is the program's way back ("What each answer asks of the
-program" below). The other answers the arbiter can bring are there too.
+runs out answers `spi_stalled` and a DMA block the bus refuses `spi_dma_fault`,
+each with the select released, and the next request starts on a clean block
+with nothing asked of the program ("What each answer asks of the program"
+below, where the other answers the arbiter can bring are too).
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does, with the PL022's two facts as a client;
@@ -333,21 +334,24 @@ the handler of `Display`:
 | `status` | what happened | what it leaves | who acts |
 |---|---|---|---|
 | `spi_rejected` | the arbiter's FIFO was full, or a host with no engines refused an asynchronous request | nothing on the wire | the program: a full FIFO may be tried again, the refusal never (`static_assert(Bus::has_dma)`) |
-| `spi_stalled` | a polled wait ran out of its budget | select released, receive FIFO drained, the block otherwise as it stands, frames perhaps in its transmit FIFO | the program: `recover()`, with nothing on the engines, after removing the cause |
-| `spi_dma_fault` | a channel reported a bus error | requests down, both channels put away and bound again, receive FIFO drained, select released | nobody: the arbiter answers and goes on, and the next request launches the engines again |
+| `spi_stalled` | a polled wait ran out of its budget | select released, then the block reset and reconfigured to the state applied, both FIFOs empty | nobody: the next request starts on a clean block. Remove the cause: a reset does not start a stopped clock |
+| `spi_dma_fault` | a channel reported a bus error | requests down, both channels put away and bound again, select released, the block's reset owed to the next `start()`, frames perhaps still shifting until then with the select high | nobody: the arbiter answers and goes on, and the next `start()` resets the block before anything else |
 | `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()` | the program judges the device |
 
 A stall holds the core for its budget, 200 000 turns of the wait a frame and one
-frame more: 2 000 000 turns in 208 ms for nine frames (letter g), every other active object
-waiting under `Tenuto`. `recover()` is what resets the block, which throws away
-what its transmit FIFO still holds; the arbiter calls it on a timeout alone, never
-on a synchronous answer, and before it a later request is promised nothing. A
-request already in the arbiter's FIFO starts in the same dispatch as the stall,
-before the requester's handler can run: on a block that still does not clock a
-polled one stalls for its own budget, and an asynchronous one goes to the engines
-and has no completion, `spi_timeout` on a timed bus and a bus busy for ever on an
-untimed one; on a block that clocks again the frames left in the transmit FIFO go
-out first, under the new select. No verb says the engines are idle, and `recover()`
+frame more: 2 000 000 turns in 192 ms for nine frames (letter g), every other active object
+waiting under `Tenuto`. The block's reset then throws away what its two FIFOs hold
+and costs the request that pays it some tens to a few hundred cycles warm (letter h). A request already in the arbiter's FIFO starts in the same dispatch
+as a stall or as the answer to a fault, before the requester's handler can run, and
+finds that clean block; the program calls nothing after either. `prime()` pays a reset
+a fault left owed, for a caller framing its own select, so that it is paid before the
+select falls; with a null select the program's own stands through a stall's reset, and
+that caller raises it when `start()` answers. A reset does not
+start a stopped clock: on a block whose clock stays off a queued polled request
+stalls too, on its own budget, and an asynchronous one goes to the engines and has
+no completion, `spi_timeout` on a timed bus and a bus busy for ever on an untimed
+one. `recover()` stays for a timed arbiter's unanswered request and for a program
+that wants it with the bus idle. No verb says the engines are idle, and `recover()`
 under a request on them takes it away, its completion never coming, so a program
 calls it when it knows: every request it has posted answered, on a bus with one
 client.
@@ -355,8 +359,8 @@ client.
 ## Bench findings
 
 The reference suite is `test_rp2040_spi`, green on the WeAct board,
-clk_sys and clk_peri at 125 MHz: 66 verdicts, 36 of seven letters on the
-loop-back (LBM, no wire) and 30 of eight on the pair's wire against the
+clk_sys and clk_peri at 125 MHz: 75 verdicts, 44 of eight letters on the
+loop-back (LBM, no wire) and 31 of nine on the pair's wire against the
 desk partner's peer (the last group below).
 
 - The rate chooser: clk_peri / 2 at the top (62.5 MHz), 8.93 MHz under
@@ -433,8 +437,8 @@ desk partner's peer (the last group below).
     and 33 of the stretched ticks landing inside the requests.
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
-    7.8125 MHz): wall less the wire's cycles **286 for one byte, 400 for
-    three, 718 for sixteen**, of which the block's mode-0 gap is 24 / 72 /
+    7.8125 MHz): wall less the wire's cycles **295 for one byte, 403 for
+    three, 721 for sixteen**, of which the block's mode-0 gap is 24 / 72 /
     384 and the phase boundary's drain (the data frames wait for the
     command frame to come back whole, so D/C flips on the wire) one
     frame's latency.
@@ -523,16 +527,16 @@ desk partner's peer (the last group below).
   instrument for the request: `spi.req`'s three-byte polled request
   after every line of the XIP cache is flushed (`Xip::flush()`), under
   the mask, the cache's misses (accesses less hits) read around it -
-  **11459 cycles and 136 misses with the host in the flash, 2942 and 41
-  with it InRam, against 789 and 802 warm**; the 41 are the caller's
+  **11555 cycles and 137 misses with the host in the flash, 2946 and 41
+  with it InRam, against 792 and 805 warm**; the 41 are the caller's
   (the ruler's reads, the call site, the veneer). Warm the two read the
   same but for the veneer, 13 cycles a request here and 18 in `spi.req`'s line. The engined block cold
   (letter d after letter c, 16 frames at 31.25 MHz, warm 1459 to 1737) splits the
   same way: 33954 to 34050 cycles from the flash, 18040 with the host InRam, 23086
   with the vectors placed, 10776 to 10868 with both - the host's code some 16000 of
   the difference, the vectors' some 11000, the caller's the rest. THE
-  SRAM IT COSTS under InRam: `start()` 748 bytes without engines and 1040
-  with them, the shared engine launch 576, the DMA line's body 620. Every
+  SRAM IT COSTS under InRam: `start()` 760 bytes without engines and 1084
+  with them, the shared engine launch 576, the DMA line's body 608. Every
   call across the boundary goes through
   a veneer (a push, a literal load, a move into ip, a pop, a `bx`): the
   Cortex-M0+'s `bl` reaches 16 MB, and the SRAM lies 256 MB from the
@@ -540,10 +544,43 @@ desk partner's peer (the last group below).
 - **A POLLED WAIT THAT RUNS OUT** (`test_rp2040_spi` letter g): the
   block's enable taken down under a polled write of nine frames at clk_peri
   / 2 with three frames left standing in the receive FIFO, so the transmit
-  FIFO fills and the loop's budget runs out, 2 000 000 turns in 208 ms:
-  `spi_stalled`, the select released, the receive FIFO drained; the transmit
-  FIFO still holds its frames, and after `recover()` sixteen frames polled
-  come back exact. Twelve runs.
+  FIFO fills and the loop's budget runs out, 2 000 000 turns in 192 ms:
+  `spi_stalled`, the select released, both FIFOs empty and the block enabled at
+  the word applied. With no `recover()` the next request is exact, polled on
+  the host with no engines, polled and asynchronous on the host with them. A
+  command frame polled ahead of an engined block, its enable down and its
+  budget 400 000 turns, answers the same inside `start()` with no block
+  launched. Through `SpiBus`, two requests from one dispatch, the first stalled:
+  the replies `spi_stalled` then `spi_ok` in that order and the second's data
+  exact, polled and on the engines. Thirteen runs. That the select goes up before
+  the reset is judged on the simulated chip (`test_pl022`); no letter here reads
+  the SCK pad across it.
+- **A DMA BLOCK THE BUS REFUSES** (`test_rp2040_spi` letter h): an asynchronous
+  request of 64 frames at clk_peri / 128 with its buffer where 2.2 says a range is
+  unmapped: the out or the in buffer at 0x40100000, past the last peripheral of the
+  APB, and an out buffer 16 frames short of the SRAM's end, a read failing with frames
+  already on their way. A bus error on the channel and never a fault of the core.
+  `dma_isr()` answers true, one interrupt, `spi_dma_fault`, the select released. With
+  frames on their way the block is still enabled and its transmit FIFO not empty
+  afterwards, which is what the interrupt left for the next `start()`. With no
+  `recover()` that request, polled or asynchronous, is exact, no frame of the faulted
+  block in front of it; through `SpiBus`, queued behind the read off the end,
+  `spi_dma_fault` then `spi_ok` and its data exact both ways. Thirteen runs. It paid the
+  reset first, and what that costs it is not pinned: a difference of two walls taken
+  with interrupts on and no XIP count beside it, reading most often 41 in this image,
+  141 and 231 in two other layouts of this suite, 0 to 507 at the extremes. A WRITE THE BUS
+  REFUSES LANDS NOWHERE IN THE SRAM: 32 half-words of a mark written at the hole,
+  `spi_dma_fault`, and across it no kilobyte of the 264 holds the mark once more than
+  it did, 13 runs of 13; the same count with the write aimed inside the SRAM finds
+  all 32 in their block. A landing in a peripheral it could not see.
+- **A WINDOW FRAMED BY HAND AFTER A FAULT** (letter h on the loop-back, letter v on
+  the pair's wire): the select null in the Request, `prime()`, the select low,
+  `start()`, the select high, behind a fault that left frames on their way, with no
+  `recover()`. On the loop-back both FIFOs are clean when `prime()` returns, before the
+  select falls, and the window is exact, polled and asynchronous. On the wire the
+  foreign client reads sixteen frames exact and answers sixteen exact, in the four
+  modes, the fault taken with the select high. Thirteen runs. Without `prime()`'s payment the
+  window read 16 of 16 frames wrong both ways in three of the four modes.
 - THE KERNEL over it, unchanged: four transactions through SpiBus over
   the engined host with four replies, on the engines and polled
   interleaved on one bus; six
@@ -551,7 +588,7 @@ desk partner's peer (the last group below).
   request answered once; an idle bus votes for the sleep, a busy one
   against.
 
-ON THE PAIR'S WIRE (letters n, o, p, q, r, m, s and w, the two Raspberry
+ON THE PAIR'S WIRE (letters n, o, p, q, r, m, s, w and v, the two Raspberry
 Pi suites' shared letters, against the WeAct RP2350B's peer on either
 half: its client a PIO program at 150 MHz, its host that chip's PL022):
 
@@ -654,9 +691,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `spi_dma_fault`: only a bus error on a channel answers it, judged through the
-  simulated chip in `test_pl022` and made by no letter on this silicon; a block
-  pointed at an address the bus refuses would.
+- A stall on a stopped clock: every stall the suite stages is a block whose enable
+  went down, which its reset cures. What the reset does with `clk_peri` stopped,
+  and what the next request answers, a letter that stops it around a request with
+  the console quiet would measure.
 - The vendor's loop on this board: the pinned pico-sdk's
   `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
   the SDK's own placement, against letter e's 42 and 21 cycles a frame

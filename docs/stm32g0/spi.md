@@ -107,7 +107,8 @@ letters `n`..`r` (20 verdicts) and `u`..`w` (16) on the link to a PEER
 BOARD running `spi_peer`, commanded in band over
 `avrxt/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
 (16-bit frames, a client that only listens, both ends' CRC units), with
-`t` and `x` beside them outside `z`. The peer may be any of the three ports of
+`t` and `x` beside them outside `z`, and `K` (12 verdicts) on the same link, the next
+request after a stall or a transfer error. The peer may be any of the three ports of
 that app - the AVR's, the SAM C21's, this stratum's own, which answers
 on SPI1 AF0 at the same pin names this board hosts on, or the STM32F4's,
 on the F446's SPI2 - and the peer's `ident` names which one answered
@@ -256,12 +257,10 @@ engines, `dma_isr()` posts `TransferDone`), `dma_isr()` (the channels'
 interrupt body; the host arms no interrupt of the block and binds no
 vector of its own), `status()` (`spi_ok`; `spi_rejected`, an
 asynchronous request on a host with no engines; `spi_dma_fault`, both channels
-put away, the RXFIFO drained and the select raised, the peripheral not reset, so
-a frame still on the wire can land behind the drain and a program calls `recover()`
-with the bus idle before the next request; or `spi_stalled` when a polled wait ran out of its budget,
-no frame back within it, the select raised and the RXFIFO drained, the peripheral
-left as it is with whatever its TXFIFO holds, `recover()` the way back and the program's to
-call: the arbiter calls it on `spi_timeout` alone), `prime()`,
+put away and the select raised in the vector, which does no more, the peripheral's
+reset left to the next `start()`; or `spi_stalled` when a polled wait ran out of its
+budget, no frame back within it, the select raised and then the peripheral reset and
+reconfigured, inside `start()`; the next paragraph says what follows both), `prime()`,
 `bit_order()`, `recover()`, `rebase(hz)`, `clock_for(hz)`,
 `sck_hz(code)`, `release()`. The constants state the engine's numbers:
 `has_dma` (whether engines are bound: an asynchronous request needs them,
@@ -301,6 +300,36 @@ per-frame pump must keep queued ahead of the host's clock), `write`,
 `poll`, `selected()` (a live read of the NSS PAD - the peripheral
 publishes no such status bit), `drive_output` (the dark listener), the
 error accessors, `isr()`, `disable()`, `release()`.
+
+**After `spi_stalled` and `spi_dma_fault` the program calls nothing.** The next request
+starts on a clean block whoever calls it, in direct use or behind the arbiter, which goes
+on to the next waiting request before the requester has run. The write-ahead makes the
+reset the cure and not a courtesy: frames written to the TXFIFO stand there when the block
+does not clock, and they would go out in front of the next request. After a stall the reset
+runs inside `start()`, the select released first, because this block drives SCK only while
+SPE is set: the reset leaves the pad to whatever else holds the wire and the enable after it
+drives the pad again, an edge a device still selected would count. After a transfer error the
+channels' vector decides and does not work, and until the next `start()` tests its flag
+and pays the reset, frames can stand in the FIFOs and be on the wire. A request with a null
+`cs` has its select in the program's hands, so the host cannot release it and the reset
+happens under it; `prime()` pays an owed reset too, so a program framing the select itself
+primes first, as it must for a mode change. `recover()` remains, for the arbiter on
+`spi_timeout`, its one use there, and for a program with the bus idle; it waits for nothing,
+and answers false when the block did not come back.
+
+**What the reset cannot do: open a closed clock gate.** With the gate closed the next request
+stalls too, on its own budget, and `recover()` answers false. The first request after the
+gate reopens finds the block at its reset values and stalls as well, its own reset the way
+back, unless the program calls `recover()` when it opens the gate (Bench findings).
+
+**The reset, once, cold and out of line.** The stall, the owed reset and `recover()` call one
+function in the flash under either placement: the RCC's pulse (RM0444 5.4.11 and 5.4.12), the
+applied configuration written back, the enable, under a thousand cycles. It declines
+35.5.9's disable procedure: that lets a last frame out, behind a released select nobody wants
+it, and with frames standing and SPE down it waits out its 200 000 polls on FTLVL, 28.4 ms,
+and leaves them there. `start()` pays a literal load, a byte load, a compare and a branch for it
+a request on a host with engines, 3 to 7 cycles of the polled rest measured across the images of
+either placement, none on a host without engines, and never a call.
 
 ## The client run
 
@@ -1297,6 +1326,50 @@ bit. So the peer drives MISO at very-high in modes 0 and 3 and at medium
 in modes 1 and 2 (its header), and that suite's x is 0 of 40 and its
 back-to-back rung 0 of 30.
 
+**The next request after a stall or a transfer error** (letter `K`, fifteen runs and three of `z`;
+`recover()` called only where named). The peer's window is commanded first, and the engined
+host is then not initialized again, so the request judged is the first the host has seen
+since the failure and a frame left behind is a window out of place at both ends. A stall is
+staged with SPE taken down under the host, which leaves the frames written standing in the
+TXFIFO, on each path: a polled write and a polled read of nine frames and the polled command
+phase of an asynchronous request, one frame. Each ends `spi_stalled` with the select reading
+high and the next window, 32 frames at PCLK/32, polled or on the engines, exact at both ends;
+with no reset the same windows are wrong in all 32 frames. The wall in `start()` is the budget
+at 64 MHz: 39.3 ms for the nine-frame write and 53.2 ms for the read in this image, 23 and 31
+cycles a poll, and 15.9 ms for the command phase, 10 cycles a poll. The two loops in the polled
+body keep the budget on the stack and a poll's turn there moves with the image's layout, 34 and
+37 cycles a poll measured in another (58.1 and 63.4 ms); the command phase's own function does
+not move. `recover()` over three frames standing in the TXFIFO with SPE down measures 973 cycles
+(15 us).
+
+**The order is on the pad** (letter `K`). This block drives SCK only while SPE is set: with the
+pad's pull-down on in mode 3 it falls when SPE falls and rises on the enable, and with no pull it
+held its level through the reset and no edge came within 1 ms on these wires. So the letter
+stages mode 3 with that pull-down, as a bus with a pull on the wire would be, counts SCK's edges
+through EXTI by where the select's output latch stands, and judges none with it low and at
+least one with it high in `start()`, both stall paths.
+
+**A transfer error, staged and survived** (letter `K`): a buffer at 0x3000 0000, reserved on
+every part of the family (RM0444 2.2.2, the three maps), gives the 10.4.7 transfer error and no
+fault of the core. A transmit buffer there stops the channel on its first beat, no frame
+clocked; a receive buffer there stops the receive channel on the first frame back, the
+transmit channel ahead of it, and three frames stand in the RXFIFO behind it every run. `dma_isr()`
+answers true once, in 320 to 334 cycles on the ticker's ruler, `status()` is `spi_dma_fault` and
+the select the request named is high. The next window, polled or on the engines, is exact at both
+ends with no `recover()`; with the reset taken out, the window on the engines reads the frames
+standing in front of it, all 32 frames out of place.
+
+**Queued behind a failure, through the arbiter** (letter `K`): two requests posted from one
+dispatch, the first bound to fail, the second holding the peer's window. The replies come in
+order, `spi_stalled` then `spi_ok` and `spi_dma_fault` then `spi_ok`, the second's window exact at
+both ends, polled and on the engines.
+
+**The clock gate closed under the host** (letter `K`): the reset's limit. A polled write stalls
+in 39.4 ms, the next in 39.3 ms, `recover()` answers false; the gate opened and `recover()`
+called, it answers true and the next window is exact. With the gate opened and no `recover()`, CR1
+reads 0x0000 (the pulse reached the block through the closed gate), one more request stalls in
+39.3 ms and its own reset is the way back, the next window exact.
+
 THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`; that host's reads
 judged to 11.25 MHz and printed at 22.5 MHz, where on this cable they are not exact, and
 what this end hears judged at 22.5 MHz too: [the STM32F4 SPI page](../stm32f4/spi.md),
@@ -1420,12 +1493,6 @@ must reach the registers itself:
 
 **Implemented but not bench-verified** - the code is there and compiles
 on every header of the pack, but no silicon has run it:
-
-- **`spi_stalled` and `spi_dma_fault` on this host**: no letter stages a stall on the
-  G0's host or a transfer error on its channels, so both exits, and how long a stall holds
-  the core (the budget is a thousand polls a frame, by the listing some twice the slowest
-  frame), are read in the code. A stall staged and timed as the STM32F4's letter `g` does,
-  and a channel pointed at an unmapped address, would measure them.
 
 - **the self-link letters as the asynchronous way reshaped them**: `b`'s
   sixteen frames on the engines and its command block chained to the

@@ -850,22 +850,36 @@ named.
   channel enabled and idle - and while it is set every configuring verb
   of the driver refuses: the configuration, the count, a whole transfer
   and an address, with CFGR unchanged across all four.
-- **NO ADDRESS THE BENCH COULD NAME RAISES A TRANSFER ERROR, READ OR
-  WRITTEN.** Reads of 0x3000 0000, 0x4000 8000, 0x4002 4000, 0x6000 0000
-  and 0xA000 0000 - five addresses outside every window of the map - each
-  completed as an ORDINARY BLOCK: TCIF up, TEIF down, EN still set, with
-  TEIE armed on every one of them. 11.2.1 promises a transfer error and
-  an automatic drop of EN for a reserved area, and none of the five
-  produced either. The first three read zeros on both parts; on the
-  CH32V303VCT6 the last two are the FSMC's bank 1 and its register block,
-  and with the FSMC's gate closed each read the word 0x0FFF FFFF. The same
-  is true of the CH32V00x's controller. WRITES end the same way (letter
-  d): four items at each width into the same five holes, and into the
-  image's own pattern in the flash - at the alias the image is linked at
-  and at the array's own address, the FPEC locked as at every boot - all
-  twenty-one writes ordinary completions on both parts, the vector entered
-  for the completion alone and the pattern read back unchanged: the
-  locked array drops the store in silence.
+- **A TRANSFER ERROR COMES FROM THE MEMORY ZONES, AND NOTHING FROM 0x3000 0000
+  UP RAISES ONE.** Walked over the map on both parts, read at every width every
+  64 MB and at some sixty named points, and written where nothing answers: the
+  zones below 0x3000 0000 refuse a channel past the memory that is there.
+  A read at 0x1FFF 0000, at 0x0808 0000 and at the first byte past the SRAM (0x2000
+  5000 on the CH32V203C8T6, 0x2001 0000 on the CH32V303VCT6) raises TEIF and drops EN,
+  as does a read or a write at 0x2FFF F000, the top of the SRAM region (letter d, a
+  word read and all three widths written, on the suites' verdicts; the SPI host's
+  letters f and r run blocks into it, [spi.md](spi.md)). Above them nothing did:
+  reads of 0x3000 0000, 0x4000 8000, 0x4002 4000, 0x6000 0000
+  and 0xA000 0000 each completed as an ORDINARY BLOCK, TCIF up, TEIF down, EN still
+  set, with TEIE armed; the first three read zeros on both parts; on the
+  CH32V303VCT6 the last two are the FSMC's bank 1 and its register block, and with
+  the FSMC's gate closed each read the word 0x0FFF FFFF. Writes end the same way
+  there (letter d): four items at each width into the same five holes, and into
+  the image's own pattern in the flash - at the alias the image is linked at and
+  at the array's own address, the FPEC locked as at every boot - all twenty-one
+  ordinary completions on both parts, the vector entered for the completion alone
+  and the pattern read back unchanged: the locked array drops the store in
+  silence. So 11.2.1's "reserved address area" is narrower than the map's own word
+  for it. No access by a channel faulted the core, and neither board wedged.
+  Where one is raised (letter d, the three writes at 0x2FFF F000, ten runs a part)
+  the first item is refused with three left, EN clear, the vector entered once, and
+  the ledger keeps the channel's bus-master count until `stop()` gives it back; the
+  copy engine's block into it ends with the fault counted, the engine free and no
+  master left, and its next block runs whole. A refused store lands nowhere: six of
+  them, each width at 0x2FFF F000 and at the first byte past the SRAM, raised the
+  error and moved no word of the SRAM below the stack, SRAM+0 among them, on both
+  parts' DMA1 and in a walk of the CH32V303VCT6's DMA2 as well; the CH32V00x
+  controller does land such a store ([../ch32v00x/dma.md](../ch32v00x/dma.md)).
 - **A circular channel reloads its count and its addresses by itself.**
   Eight compares poured into a timer by its own update request, four
   laps: four half flags and four complete ones, the count seen stepping
@@ -954,9 +968,12 @@ named.
 - **THE RECEIVE RING, WITH NO WIRE** (letter g, the CH32V203C8T6). From
   `init()` the receive channel runs circular over the whole 128-byte
   storage, its count at 128 with nothing arrived and one bus master
-  counted; stopped by `abandon()` - standing for the transfer error that
-  is the one way a ring stops - it was running again from its first byte
-  after the consumer's next look, the fault counted. Then bursts banged
+  counted; stopped by `abandon()` it was running again from its first byte
+  after the consumer's next look, the fault counted. The real thing does the
+  same: the channel's memory address pointed by register at 0x2FFF F000 and a
+  frame banged, the hardware dropped EN, the transport's vector counted one
+  fault, and the next look ran the ring again from its first byte, the next 24
+  bytes in order, ten runs on each part. Then bursts banged
   into the receive pad through its pull at 115200 baud, the core doing
   nothing else: 100 bytes into the empty ring read back in order, the
   vectors reporting the edge and `harvest()` asked after it answering
@@ -1128,19 +1145,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The transfer-error path** - TEIE, the engines' `abandon()` on an
-  error, their fault counters and the ledger giving the count of a
-  channel the hardware stopped back - is written from 11.2.1 and provoked
-  by nothing the bench can name on either part: the five holes read and
-  written and the locked flash written all end as ordinary blocks (the
-  findings). Letter d judges the path wherever a write does raise one,
-  and runs it through the copy engine; a peripheral or an address that
-  raises the error is what would measure it.
-- **A ring restarted after a real transfer error**: the consumer's next
-  look starts a ring whose channel stopped again, measured with `abandon()` standing
-  for the error; letter g stages the real one - the ring's memory address
-  pointed by register at an address whose write faults - as soon as
-  letter d's probe finds such an address, and none is known (above).
 - **UART4's receive request on DMA2's channel 3**: its transmit request
   is measured held on channel 5 (letter s); the receive side wants a
   frame on its pad, and both of that port's columns are the desk pair's
