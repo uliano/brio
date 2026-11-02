@@ -407,11 +407,11 @@ and i and letter d's writes measured on the CH32V006K8U6:
   polling core sees them. The SPI host's engined write at the wire,
   32.0 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both widths,
   934 to 937 cycles a transaction above it, the bench's own instrument
-  inside ([spi.md](spi.md), "The host above the wire" and "The short
-  request"). Stamps
+  inside ([spi.md](spi.md), "The host above the wire" and "Which engine
+  to name"). Stamps
   placed in a scratch build put the launch at 587 cycles with two of
   the ruler's reads (41 to 48 each) and the request's construction
-  inside - `start()`'s write path, `launch_dma()` and `launch_beats()`,
+  inside - `start()`'s write path and the two engines' block starts,
   some 125 instructions where the count above takes `launch_beats()`'s
   59 -, the completion vector's body at some 145 cycles, and its exit
   and the wake from `idle()` at some 100.

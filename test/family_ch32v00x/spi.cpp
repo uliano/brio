@@ -33,15 +33,6 @@ using Client = SpiClient<1>;
 using RamHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
 using RamHost16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, InRam>;
 static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
-// The loops' cost follows the placement, and so do the counts drawn from it.
-static_assert(RamHost::polled_gap_cycles < Host::polled_gap_cycles);
-// The short asynchronous request: one count per code, width and kind, the
-// same at every placement's code from /128 on (a frame of 1024 cycles and
-// more repays E - F by itself).
-static_assert(HostDma::async_min_frames(SpiClock::div128, SpiDataSize::bits8, true) == 1u &&
-              RamHost16::async_min_frames(SpiClock::div128, SpiDataSize::bits8, false) == 1u);
-static_assert(HostDma::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true) >
-              HostDma::async_min_frames(SpiClock::div16, SpiDataSize::bits8, true));
 
 static_assert(!Host::has_engines && HostDma::has_engines && HostDma16::has_engines);
 static_assert(!Host::has_dma && HostDma::has_dma && HostDma16::has_dma && !RamHost::has_dma && RamHost16::has_dma);

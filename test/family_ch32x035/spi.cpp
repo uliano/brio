@@ -170,15 +170,9 @@ struct Hosts<pins, true> {
     using RamHost16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, InRam>;
     static_assert(!Host::has_engines && Host8::has_engines && Host16::has_engines);
     // has_dma is the contract's name for it (docs/design/spi-bus.md): an
-    // engineless host refuses every asynchronous request.
+    // engineless host refuses every request naming the engines.
     static_assert(!Host::has_dma && !RamHost::has_dma && Host8::has_dma && RamHost16::has_dma);
     static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
-    // The costs follow the placement, and so do the counts drawn from them.
-    static_assert(RamHost::polled_read_turn_cycles < Host::polled_read_turn_cycles);
-    static_assert(Host8::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
-                      spi_async_min_frames(spi_costs_in_flash, SpiClock::div4, SpiDataSize::bits8, true) &&
-                  RamHost16::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true) ==
-                      spi_async_min_frames(spi_costs_in_ram, SpiClock::div4, SpiDataSize::bits8, true));
     static_assert(std::is_trivially_copyable_v<typename Host::Request> && sizeof(typename Host::Request) == 40u);
 
     using PlainBus = SpiBus<Host, P, 4>;

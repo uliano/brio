@@ -147,9 +147,7 @@
 //                    receive side discarding), no chip select, MISO left
 //                    floating: the time is the wire's and nothing needs to
 //                    be judged. 32 and 256 frames of 8 bits at SCK =
-//                    HCLK/4 (12 MHz) and HCLK/16 (3 MHz) - both past the
-//                    host's short-request count, so both ride the engines
-//                    - the best of 4; spi.dma16 the same frame counts of
+//                    HCLK/4 (12 MHz) and HCLK/16 (3 MHz), the best of 4; spi.dma16 the same frame counts of
 //                    16 bits, the half-word beat. A note line per rate:
 //                    the cycles a byte above the wire's, and THE FIXED COST
 //                    A TRANSACTION (wall less the wire's time), the round's
@@ -978,11 +976,9 @@ using SpiDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngi
 volatile bool spi_done = false;
 bool spi_ready = false;   // letter s's host brought up once (again after letter e)
 
-/// One asynchronous SPI write of `frames` frames of `bits`, MISO floating:
-/// the line the round is judged by. A request short of the host's count
-/// would complete inside start() (the short request, ch32v00x/spi.hpp):
-/// the lines' sizes are past it (static_assert below), and a synchronous
-/// completion still ends the sample rather than idle for an interrupt.
+/// One SPI write of `frames` frames of `bits` on the engines, MISO floating:
+/// the line the round is judged by. A completion inside start() (a refusal)
+/// still ends the sample rather than idle for an interrupt.
 BenchSample spi_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
     return dma_best(4, spi_done, [frames, clock, bits] {
         SpiDma::Request r{};
@@ -996,9 +992,6 @@ BenchSample spi_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
         }
     });
 }
-static_assert(32u >= SpiDma::async_min_frames(SpiClock::div4, SpiDataSize::bits8, false) &&
-                  32u >= SpiDma::async_min_frames(SpiClock::div4, SpiDataSize::bits16, false),
-              "letter s's smaller block rides the engines at HCLK/4, and so at HCLK/16");
 
 void spi_lines(SpiClock clock, uint8_t div) {
     const uint32_t wire = SysClock::hz / div / 8u;   // bytes a second
@@ -1082,6 +1075,11 @@ BenchSample poll_best(uint8_t runs, uint16_t frames, SpiClock clock, SpiDataSize
         }
     }
     return best;
+}
+
+/// A frame's time on the wire in HCLK cycles (16.3.1's BR table).
+constexpr uint32_t frame_wire(SpiClock c, SpiDataSize bits) {
+    return static_cast<uint32_t>(spi_data_bits(bits)) << (static_cast<uint8_t>(c) + 1u);
 }
 
 /// The polled lines of one rate: both widths, both shapes, two sizes;
@@ -1198,7 +1196,7 @@ void frame_table(const char* name) {
             const SpiMode mode = mi == 0u ? SpiMode::mode0 : SpiMode::mode1;
             for (uint8_t ci = 0; ci < frame_codes; ++ci) {
                 const SpiClock c = static_cast<SpiClock>(ci);
-                const uint16_t big = frame_long(spi_frame_cycles(c, bits));
+                const uint16_t big = frame_long(frame_wire(c, bits));
                 const uint16_t small = big / 4u;
                 const uint32_t w_small = frame_best<H>(c, bits, mode, small);
                 const uint32_t w_big = frame_best<H>(c, bits, mode, big);
@@ -1211,7 +1209,7 @@ void frame_table(const char* name) {
         const SpiDataSize bits = wi == 0u ? SpiDataSize::bits8 : SpiDataSize::bits16;
         for (uint8_t mi = 0; mi < 2u; ++mi) {
             for (uint8_t ci = 0; ci < frame_codes; ++ci) {
-                const uint32_t wire = spi_frame_cycles(static_cast<SpiClock>(ci), bits);
+                const uint32_t wire = frame_wire(static_cast<SpiClock>(ci), bits);
                 const uint32_t per = frame_x100[wi][mi][ci];
                 const uint32_t over = per > wire * 100u ? per - wire * 100u : 0u;
                 print(serial, "  spi.frame ", name, " bits", wi == 0u ? 8u : 16u, " mode", mi, " div", 2u << ci, " wire ",
