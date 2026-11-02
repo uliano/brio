@@ -112,7 +112,8 @@
  * has released its select and, inside start(), reset the block and written
  * the applied configuration back; a transfer error ends its transaction in
  * dma_isr() with the requests down, the channels put away and the select
- * released, and the next start() resets the block before anything else, so
+ * released, and the next request that moves something (or prime()) resets
+ * the block before anything else, so
  * no interrupt spends its time on it. Either way the next request, whoever
  * posted it, starts on a clean block. A reset does not open a closed clock
  * gate: there the next request stalls too, on its own budget. recover()
@@ -1022,7 +1023,8 @@ public:
     /// ends the transaction, D/C raised and the select released. A
     /// transfer error on either channel ends it with spi_dma_fault: requests
     /// down, channels put away, select released, and the block's reset left
-    /// to the next start() - this body waits for nothing and resets nothing.
+    /// to the next request that moves something, or to prime() - this body
+    /// waits for nothing and resets nothing.
     /// INTFR is read once for both. Compiles away on an engineless host. True
     /// when the transaction just completed: the edge the program's glue posts
     /// TransferDone{status()} on.
@@ -1454,7 +1456,8 @@ private:
     /// One exit for a tenure on the engines, the select released: the
     /// vector's caller posts completion. A failure decides and does not work:
     /// the requests down, the channels halted (two register stores each), the
-    /// flag that makes the next start() reset the block - a frame still on the
+    /// flag that makes the next request that moves something, or prime(),
+    /// reset the block - a frame still on the
     /// wire, or one the stopped channel never took, goes with that reset. No
     /// critical section: this writes the flag only while a transaction is in
     /// flight, and main context reads and clears it only when none is.

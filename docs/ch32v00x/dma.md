@@ -388,7 +388,7 @@ and i and letter d's writes measured on the CH32V006K8U6:
   on the CH32V006K8U6 (`test_ch32_serial` letter i), the SPI host's on
   the PC6-PC7 jumper (`test_ch32_spi` letter d: 16-bit frames in
   half-word beats with no SPI interrupt, an odd buffer's 16-bit request
-  run polled inside `start()`, and ONE DMA interrupt a transaction, the transmit
+  refused with nothing on the wire, and ONE DMA interrupt a transaction, the transmit
   channel armed for its errors alone) and the I2C host's against the
   CH32X035 peer on the CH32V006K8U6 (`test_ch32_i2c` letters g and n:
   one completion interrupt a block, the write's handing its half back to
@@ -407,16 +407,10 @@ and i and letter d's writes measured on the CH32V006K8U6:
   as its own; a block of 256 words paced by TIM1's update at 10 kHz
   1.00 of its pace, the intervals 4794 to 4812 cycles against 4800 as a
   polling core sees them. The SPI host's engined write at the wire,
-  32.0 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both widths,
-  934 to 937 cycles a transaction above it, the bench's own instrument
-  inside ([spi.md](spi.md), "The host above the wire" and "Which engine
-  to name"). Stamps
-  placed in a scratch build put the launch at 587 cycles with two of
-  the ruler's reads (41 to 48 each) and the request's construction
-  inside - `start()`'s write path and the two engines' block starts,
-  some 125 instructions where the count above takes `launch_beats()`'s
-  59 -, the completion vector's body at some 145 cycles, and its exit
-  and the wake from `idle()` at some 100.
+  32.0 to 32.1 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both
+  widths, 913 cycles a transaction above it in 8-bit frames and 928 in
+  16-bit ones, the bench's own instrument inside ([spi.md](spi.md), "The
+  host above the wire" and "Which engine to name").
 - **`DmaCopyEngine`** (letter g, both parts): copy and fill at the
   three beats, polled and by its own interrupt, exact; a half-word run
   off its boundary, a count of zero or over CNTR's and a block on a

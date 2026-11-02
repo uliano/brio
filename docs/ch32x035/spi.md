@@ -47,8 +47,10 @@ BRIO_CH32_VECTOR(dma1_channel3_handler) {
 
 This is an excerpt: it assumes the program's platform `P`, its clock
 object `clock`, an active object `Display` that handles `SpiDone`, the
-buffers `cmd` and `pixels`, and the statements where they belong, the
-setup in `main()` and the post in a handler.
+buffers `cmd` and `pixels`, the headers its names come from (the family's
+`ch32x035/` headers, `util/spi_bus.hpp`, and `kernel/time.hpp` for
+`ticks_from_ms`), and the statements where they belong, the setup in
+`main()` and the post in a handler.
 
 `Bus` is the engine over SPI1 on its default column, the one the QFN20
 bonds, with the DMA engines on the two channels this instance's requests
@@ -138,7 +140,7 @@ own `spi_peer` is that board's suite's instrument (below).
   channel's completion flag the same; and a frame's dead bus from the flash is
   the same in modes 0 and 1 at every code, at /256 too, where that half bit
   is 128 cycles and the loop's turn under 50. So when a request ends the
-  wire has ended, on both engines, with no wait of the host's own (the
+  wire has ended, on both engines, with no wait added for that edge (the
   bench findings, "When a request ends"). From SRAM the 16-bit figure is 8 cycles higher in mode 1 but
   at /2, where both modes read 14, the 8-bit one the same.
 - **RXNE leads TXE by less than a load** (measured on the resource, letter d;
@@ -322,7 +324,7 @@ own `spi_peer` is that board's suite's instrument (below).
   `Placement` is util/placement.hpp's
   `InFlash` (the default) or `InRam`, where the two polled loops run from;
   any other tag does not compile. The
-  engine slots are `DmaTxEngine<3, Elem>`  engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`,
+  engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`,
   both or neither, on those two channels alone, the receive at very_high
   and the transmit at high (armed for its errors alone).
 - `SpiClient<1, pins>`: `init(clock, Config)` refusing an answering
@@ -342,8 +344,10 @@ DATAR (`test/family_ch32x035/neg/spi_*.cpp`).
 ## How to use it
 
 A request naming `SpiEngine::dma` on the engined host runs on the engines (the
-smallest use above). The same host's `SpiEngine::polled` request runs inside `start()`,
-the arbiter answering in the dispatch that received it, and under
+smallest use above). The same host's `SpiEngine::polled` request runs inside `start()`:
+on an idle bus in the arbiter's dispatch that received it, which answers it there;
+behind a request in flight it waits in the arbiter's FIFO and runs in the
+dispatch that ends the one ahead of it. Under
 `Tenuto` every other active object waits until it ends. An excerpt, over
 the smallest use's `Bus`, `Spi` and `r`:
 
@@ -405,7 +409,7 @@ the handler of `Display`:
 
 | `status` | what happened | what it leaves | who acts |
 |---|---|---|---|
-| `spi_rejected` | the arbiter's FIFO was full; a host with no engines refused a request naming them; or the engines could not carry it (16-bit frames off a half-word boundary or over engines of `uint8_t`, a transmit engine another owner holds) | nothing on the wire, the select and D/C untouched, a reset still owed left owed | the program: a full FIFO may be tried again; a refusal never as it stands (`static_assert(Bus::has_dma)`, the buffers aligned, the engines of `uint16_t`) |
+| `spi_rejected` | the arbiter's FIFO was full; a host with no engines refused a request naming them; or the engines could not carry it (16-bit frames off a half-word boundary or over engines of `uint8_t`, a transmit engine another owner holds) | nothing on the wire, the select and D/C untouched, a reset still owed left owed | the program: a full FIFO may be tried again; a held transmit engine refuses until its owner lets it go, or, left claimed by a lost request, until `recover()` (below); any other refusal is never cured by posting the request again (`static_assert(Bus::has_dma)`, the buffers aligned, the engines of `uint16_t`) |
 | `spi_stalled` | a polled flag never came within the budget | select released, then the block reset and reconfigured inside `start()`: frames standing or shifting are gone | nobody, for the host: the next request starts on a clean block. The program judges the device |
 | `spi_dma_fault` | a channel reported a transfer error | requests down, both channels put away, select released, a reset owed, which the next request that moves something, or `prime()`, pays before anything else | nobody, for the host: the arbiter answers and goes on, and the next request starts on a clean block. The program judges the device and its buffer |
 | `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()` | the program judges the device |
@@ -433,7 +437,9 @@ having moved the SCK pad under it in modes 2 and 3.
 `recover()` stays for what the host cannot see: a request on the engines that
 never answered. A transmit engine left claimed by a lost request makes the next
 request on the engines `spi_rejected` rather than a hang, until `recover()`. The timed arbiter calls it on `spi_timeout` and on no other
-answer; it releases the select, puts the engines away, drains (its answer is
+answer; it releases the select, puts the engines away - it halts the transmit
+channel whoever holds it, so a program does not call it while another owner's
+block runs there -, drains (its answer is
 false when a bounded wait ran out, some 100 ms at worst on a block with SPE up)
 and resets. A program may call it. No verb says the engines are idle, and
 `recover()` under a request on them takes it away, its completion never coming, so
@@ -466,12 +472,13 @@ what the silicon does at a frame's end, above.
   fields take a write under SPE.
 - **The engines run at the rate asked**: a frame inside an engined block,
   the difference of a 256- and a 32-frame block with the select high, is
-  1000 to 1015 thousandths of its SCK periods at /2, 999 to 1000 at every
-  code from /4 to /256, and 999 to 1002 in 16-bit frames at /4, 1000 at /16,
-  thirteen runs.
-- **HSRXEN's rate**: 16 000 to 16 178, 23 982 to 24 125, 31 964 to 32 053,
-  39 982 to 40 053, 47 982 to 48 089, 55 982 to 56 071, 63 964 to 64 071
-  and 72 017 to 72 071 thousandths of a cycle an 8-bit frame at BR 0..7 -
+  1000 to 1011 thousandths of its SCK periods at /2, 999 to 1000 at every
+  code from /4 to /256, and 998 to 1000 in 16-bit frames at /4, 999 to 1000 at
+  /16, thirteen runs.
+- **HSRXEN's rate**: 16 000 to 16 053, 23 946 to 24 071, 31 982 to 32 035,
+  39 928 to 40 053, 48 000 to 48 035, 55 964 to 56 017, 63 964 to 64 035
+  and 71 964 to 72 017 thousandths of a cycle an 8-bit frame at BR 0..7, the
+  same thirteen runs -
   8 x (BR + 2) cycles at every code, which meets the usual ladder of
   powers of two at BR 0 alone.
 - **The waveforms, this chip as the analyser** (letter w: PA4..PA7
@@ -535,9 +542,10 @@ what the silicon does at a frame's end, above.
   idle level, where the same request naming `SpiEngine::polled` runs.
 - **The engine a request names** (letter i, wireless, fifteen runs): ONE FRAME
   at /2, read and written, rides the engines - `start()` false, one DMA
-  interrupt the end, `spi_ok` - where the loop costs the core some 770
-  cycles against the engines' 1 370; on the code before this rule both ran
-  polled inside `start()`, the letter's control. THE COMMAND RULE, D/C
+  interrupt the end, `spi_ok` - where, by letter b's figures from the
+  flash, the loop would cost the core F and one frame, some 730 to 790
+  cycles, against the engines' E, 1368 to 1400 ("Which engine to name"
+  below). THE COMMAND RULE, D/C
   sampled by the tick on PA0, a pad with no wire: a command of 64 frames at
   /256 then 64 data frames, D/C low on every tick inside `start()` and high
   on every tick after it while the engines move the data, one interrupt; a
@@ -565,9 +573,12 @@ what the silicon does at a frame's end, above.
   polls over a 2048-cycle frame at /256, 9 or 10 over 512 at /64), so an early
   flag would leave the pad off idle for two polls at /256, and at /64 would
   be seen on most passes; from /32 up the instrument cannot see it. The vector
-  reads the pad 368 to 492 cycles after the flag, past the half bit at every
-  rung, so its read proves the order and the flag's read the timing. So the
-  host adds nothing: no wait in the loop's tail, none in the vector.
+  reads the pad at most 368 to 492 cycles after the flag (each run's worst; the
+  shortest is not printed), so its read is taken to prove the order alone, and
+  the flag's read the timing. So the host adds no wait for the edge: the
+  receive loop and the vector end at their flag, and the transmit-only loop's
+  tail is the wait on TXE and then on BSY it needs to know the shifter is
+  empty, the frames the loop wrote ahead having left it no other witness.
 - **The SPI stack under the preemptive kernel** (`test_x035_rubato_link`
   key `z`, 120 verdicts, on each scheduler placement, the CH32V006's
   `spi_peer` its client, every data window in a CPOL = 1 mode its client
@@ -675,28 +686,28 @@ boot; PB3 is never touched. What the far chip measured of this client:
 What a transaction costs beyond its frames' time, measured by letter b at
 48 MHz with the select high, in one image for both placements - the
 suite's hosts `InRam`, their twins `InFlash` - each line the best of
-three or five, the console quiet, the figures the range over ten runs;
+three or five, the console quiet, the figures the range over thirteen runs;
 a line going out beside a measurement lengthens it, a 256-frame block at /2
 lasting about what a console character does at 115200, and the engines' frame
 at /2 read up to 1045 thousandths that way; `fixed` from a
 32-frame transaction less 32 frames, the suite's call - a request built,
 the call, the wait on the completion - inside it. The call's own cycles
 move with where its code sits (a zero-length request through the two
-twins' copies of one call takes 436 to 440 and 420 cycles), so a fixed cost is
+twins' copies of one call takes 396 to 400 and 384 cycles), so a fixed cost is
 a figure of one image. The frame costs are not, bar the receive turn's
 two values from SRAM (above):
 
 | path | a frame, SRAM / flash | fixed, SRAM / flash | the wire a frame |
 |---|---|---|---|
-| the engines | the wire (1000 to 1015 thousandths at /2, 999 to 1000 from /4 to /256) | 1320 to 1360 / 1428 to 1440 | 16 at /2, 32 at /4 |
-| the receive loop | 23.9 to 24.0 / 47.9 at /2, 39.9 to 40.0 / 47.9 to 48.0 at /4, 139.9 to 140.1 / 147.9 to 148.2 at /16, 524.0 to 524.6 / 532.0 to 532.4 at /64 | 701 to 718 / 720 to 728 at /4 | 16, 32, 128, 512 |
-| the transmit-only loop | 16.0 / 23.9 to 24.0 at /2, 31.9 to 32.0 / 32.0 at /4, 64.0 / 63.9 to 64.1 at /8, 127.9 to 128.0 / 127.9 to 128.0 at /16 | - | 16, 32, 64, 128 |
-| a 3-frame polled request (a command and two data frames) | 1213 to 1215 / 1216 to 1232 in all at /16 | - | 384 |
+| the engines | the wire (1000 to 1011 thousandths at /2, 999 to 1000 from /4 to /256) | 1224 / 1368 to 1400 | 16 at /2, 32 at /4 |
+| the receive loop | 23.9 / 47.9 to 48.0 at /2, 39.9 to 40.0 / 48.0 at /4, 139.9 to 140.0 / 148.0 to 148.1 at /16, 523.9 to 524.6 / 532.0 to 532.4 at /64 | 695 to 709 / 716 to 720 at /4 | 16, 32, 128, 512 |
+| the transmit-only loop | 15.9 to 16.0 / 24.0 to 24.1 at /2, 31.9 to 32.0 / 32.0 at /4, 63.9 to 64.0 / 64.0 at /8, 127.9 to 128.0 / 127.9 to 128.0 at /16 | - | 16, 32, 64, 128 |
+| a 3-frame polled request (a command and two data frames) | 1192 / 1196 to 1204 in all at /16 | - | 384 |
 
 - **The transmit-only loop** is seven instructions a frame with one taken
   branch, specialized on whether the out buffer exists (the dummy an
   immediate): from SRAM at the wire at every code; from the flash at the
-  wire at /4 and slower, its frame at /2 24.0, the fetch's bound (28.0 when the function sat half a word off, above).
+  wire at /4 and slower, its frame at /2 24.0 to 24.1, the fetch's bound (28.0 when the function sat half a word off, above).
 - **The receive loop** keeps one frame in flight at every rate: the poll's
   last turn, the read and the write are the bus's dead time, and the table
   below is what that costs, `spi.frame` of letter b (best of five, interrupts
@@ -742,9 +753,11 @@ of the arithmetic on the same figures in every run:
 |---|---|---|---|---|---|---|---|
 | CH32X035F8U6 | 1224 / 1368 to 1400 | 746 to 758 / 735 to 759 | 719 to 734 / 740 | 756 to 776 / 704 to 716 | 466 to 478 / 633 to 665 | 448 to 468 / 652 to 696 | 12 to 13, 21, 29 to 30 / 13 to 14, 14, 28 to 29 |
 
-E moves with the image: the flash's 1368 and 1400 are two layouts of one host
-in two runs' images of the same source, and from SRAM the receive turn takes
-one of its two values by where the image puts the loop (the gap list). The
+E from the flash takes two values from run to run of one flashed image, 1368
+in five runs and 1400 in six (1372 and 1396 once each), where E from SRAM reads
+1224 in all thirteen; what picks the value is not established ("Not covered
+yet", the second list). From SRAM the receive turn takes one of its two values
+by where the image puts the loop ("Not covered yet", the first list). The
 guidance at every code, in byte frames, from those figures (a read's frame the
 wire plus `spi.frame`'s dead bus, a write's the wire, the loop's turn at /2):
 the engines cost the core fewer cycles than the loop from
@@ -772,8 +785,9 @@ gap list).
   SPI1 held in reset ends `spi_stalled` after about 59 350 cycles from the flash -
   the poll budget, some 29 times the wire's 2048, some 850 of them the reset -
   and about 21 000 with the loops in SRAM; the same with SPE taken down under
-  the host, a write of sixteen (40 350, 21 000) and a command phase in the loop
-  in front of a block on the engines (10 100, 5 340). The host's own pulse lets
+  the host, a write of sixteen (40 388 to 40 432, 20 904 to 21 035) and a
+  command phase in the loop in front of a block on the engines (9 884 to 9 928,
+  5 095 to 5 121), thirteen runs. The host's own pulse lets
   the reset line go: CTLR1 reads 0x35C, SPE and MSTR up, RXNE and OVR down, and
   with no `recover()` the next polled request and the next on the engines are
   `spi_ok`, the latter with its one interrupt. Exact against the peer in
@@ -820,7 +834,7 @@ gap list).
   select behind `prime()`; a stall and a transfer error with the loops in SRAM; and
   through `SpiBus`, two requests posted from one dispatch, the first failing:
   replies in order, the failure's code then `spi_ok`. Every next request exact
-  both ways, 0 mismatches, in all 15 runs of 22 cases. With the reset taken out of
+  both ways, 0 mismatches, in all 13 runs of 22 cases. With the reset taken out of
   a scratch build every case fails, the sixteen frames of a next read all wrong
   behind a transfer error.
 - **A polled request over a dead channel** (letter f): TIM1's
@@ -873,7 +887,9 @@ Driver gaps, each with its reason:
 - `start()` and the engines' launch under `InRam`: declined - kept in
   the flash under either placement, since they run once a transaction and
   would take SRAM a host type for a cost a transaction, where the placed
-  paths' is a cost a frame (`start()` is 512 bytes on the engined host); a
+  paths' is a cost a frame (on the engined host `start()` is 332 bytes and
+  its engines' path, `start_engines()`, 524 under `InFlash`, 398 and 520 under
+  `InRam`, in the suite's image); a
   placement of their own waits for a program that needs those cycles. A variant
   of the host with them in `.fast_text` beside letter b would measure what it
   buys.
@@ -901,11 +917,15 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The last 15 thousandths of the engines' frame at /2**: letter b
-  reads 1000 to 1015 with the console quiet, and the same rung measured
+- **The last 11 thousandths of the engines' frame at /2**: letter b
+  reads 1000 to 1011 with the console quiet, and the same rung measured
   5 000 times over in a scratch letter 998 to 1002, so the engines hold the
   wire and something in the letter's first reading does not cancel. Printing
   the two blocks' timings of each run of the letter would find it.
+- **E's two values from the flash**: letter b reads the engines' fixed cost
+  from the flash 1368 or 1400 cycles from run to run of one image, from SRAM
+  1224 in every run. Printing the 32-frame block's own timings and the
+  completion vector's entry on each run would say which part moves.
 - **This host's receive in mode 1 against an answering client**: the
   desk's CH32V006 client answers with CPOL = 1 only, so letter o reads it
   in modes 2 and 3, and this chip's own client answers only under a host
