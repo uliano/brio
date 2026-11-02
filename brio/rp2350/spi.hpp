@@ -8,7 +8,7 @@
  * The smallest use, a host whose select is an ordinary pin, is written
  * out at the SpiHost alias below: the pads named by number, `using Bus =
  * brio::SpiHost<0, pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5,
- * uint16_t>>` (two DMA channels, the host's asynchronous way), `using
+ * uint16_t>>` (two DMA channels, what SpiEngine::dma rides), `using
  * Spi = brio::SpiBus<Bus, P, 4>` (the arbiter, an active object - a
  * component with its own event queue that the kernel serves one event at
  * a time), `Dma::init()` and then `Bus::init(clock, ceiling)` after the
@@ -44,12 +44,13 @@
  * the block did not come up, and it hands the pads over itself. A
  * client of the bus posts its Request to the arbiter from its own
  * dispatch; the arbiter calls start() from main context, which runs a
- * polled request to its end inside the call, and an asynchronous one on
- * the DMA engines - or polled, when too short to repay them, and refused
- * (spi_rejected) on a host with none. dma_isr() is the interrupt body,
- * called from the program's handler for the engines' DMA line and
- * nowhere else; true means the transaction completed and the glue posts
- * TransferDone. The host arms no source of the instance's own line. The
+ * request naming SpiEngine::polled to its end inside the call, and one naming
+ * SpiEngine::dma on the DMA engines at whatever length, refusing it
+ * (spi_rejected) on a host with none and when they cannot carry it. dma_isr()
+ * is the interrupt body, called from the program's handler for the engines'
+ * DMA line and nowhere else; true means the transaction completed, the wire
+ * with it, and the glue posts TransferDone. The host arms no source of the
+ * instance's own line. The
  * Request's buffers are lent from
  * the post to the SpiDone the arbiter replies with: untouched and in
  * scope until then, which nothing checks. The select pin a Request
@@ -212,18 +213,6 @@ struct Rp2350Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
-    /// What the host's two ways cost this chip's cores at 150 MHz, one set
-    /// per architecture (Pl022Costs; docs/rp2350/spi.md, "The short
-    /// request"), measured by test_rp2350_spi's letter f through one call:
-    /// E - F 223 to 230 for a read and 234 to 235 for a write on the
-    /// Cortex-M33, 222 and 231 on Hazard3 (the engines' fixed cost 481 / 513
-    /// against the polled loop's 251 and 248 / 291 and 285), and the two loops'
-    /// frames at clk_peri / 2, 24 / 26 cycles received and stored and 16
-    /// written on TNF - the wire's own frame there, so the transmit-only
-    /// loop's turn is no longer and any figure up to 16 draws the same
-    /// counts.
-    static constexpr Pl022Costs costs = core_kind == CoreKind::hazard3 ? Pl022Costs{220u, 230u, 26u, 16u}
-                                                                       : Pl022Costs{230u, 235u, 24u, 16u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).
@@ -356,8 +345,8 @@ using Pl022 = Pl022Ssp<Rp2350Pl022, n>;
  *
  * The two engine slots take rp2350/dma.hpp's DmaTxEngine / DmaRxEngine
  * on any two channels, both or neither; with neither (NoDmaEngine, the
- * default) the host runs polled requests alone and refuses an
- * asynchronous one (`has_dma`).
+ * default) the host runs polled requests alone and refuses one naming dma
+ * (`has_dma`).
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

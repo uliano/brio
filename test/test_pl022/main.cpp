@@ -277,7 +277,7 @@ void frames_come_back(bool on) {
     }
 }
 
-TEST_CASE("an asynchronous request on a host with no engines is refused, and touches nothing") {
+TEST_CASE("a request naming dma on a host with no engines is refused, and touches nothing") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Host::init(clock));
@@ -287,8 +287,8 @@ TEST_CASE("an asynchronous request on a host with no engines is refused, and tou
     }
     const uint32_t cr0 = regs().SSPCR0;
 
-    // Asynchronous is DMA, and there are no engines: start() answers at
-    // once with spi_rejected, before the block, the select, the D/C or the
+    // dma names the engines, and there are none: start() answers at once
+    // with spi_rejected, before the block, the select, the D/C or the
     // setup time is touched - even for a request whose mode would flip
     // the clock's idle level, and even for an empty one.
     Host::Request r = plain_request(16);
@@ -442,9 +442,9 @@ TEST_CASE("a request of 65536 frames in all is a request, not an empty one") {
     CHECK(regs().SSPDR == 0x5Au);
     CHECK(wrap_in[65534] == 0x5Au);
 
-    // The same sum asynchronously on a host with engines goes to them: at /16 the
-    // one command frame repays a block of its own (152 cycles of frame against the
-    // fixture's budget), chained to the data block of 65535 from the vector.
+    // The same sum naming dma on a host with engines: the one command frame in
+    // the loop inside start(), then the data block of 65535 on the engines, one
+    // interrupt its end.
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request a{};
@@ -456,10 +456,10 @@ TEST_CASE("a request of 65536 frames in all is a request, not an empty one") {
     a.rx = lend<Lease::reply>(wrap_in);
     a.len = 65535;
     a.clock = SpiClocks::div16;
+    frames_come_back(true);
     CHECK_FALSE(Engined::start(a));
-    CHECK(TxEngine::length == 1u);
-    RxEngine::next_flags = RxEngine::flag_complete;
-    CHECK_FALSE(Engined::dma_isr());
+    frames_come_back(false);
+    CHECK(TxEngine::blocks == 1u);
     CHECK(TxEngine::length == 65535u);
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
@@ -570,15 +570,10 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(regs().SSPDMACR == 0u);
     (void)Engined::recover();   // the case below judges what the fault leaves
 
-    // THE SHORT ASYNCHRONOUS REQUEST (pl022/spi.hpp's arithmetic over
-    // SimPl022's figures): at clk / 2 in mode 3 a byte frame is 16 cycles,
-    // so a read rides the engines from 5 frames and a write from 7.
+    // dma MEANS DMA AT THE SHORTEST LENGTH: one frame, read or written, at the
+    // fastest rate, goes to the engines; nothing else decides.
     fresh();
     REQUIRE(Engined::init(clock));
-    CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, true) == 5u);
-    CHECK(Engined::async_min_frames(SpiClocks::div2, SpiMode::mode3, SpiDataSize::bits8, false) == 7u);
-    // At clk / 16 in mode 0 a frame is 152 cycles: one frame repays them.
-    CHECK(Engined::async_min_frames(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8, true) == 1u);
     Engined::Request brief{};
     brief.engine = SpiEngine::dma;
     brief.cs = SimPl022PinRef{cs_pin};
@@ -586,42 +581,26 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     brief.rx = lend<Lease::reply>(in_buf);
     brief.clock = SpiClocks::div2;
     brief.mode = SpiMode::mode3;
-    // One frame short: polled inside start(), no block, no interrupt.
-    brief.len = 4;
-    frames_come_back(true);
-    CHECK(Engined::start(brief));
-    frames_come_back(false);
-    CHECK(Engined::status() == spi_ok);
-    CHECK(TxEngine::blocks == 0u);
-    CHECK(regs().SSPDMACR == 0u);
-    CHECK(regs().SSPIMSC == 0u);
-    CHECK(SimPl022Bench::pin_level[cs_pin]);
-    // At the count: the engines.
-    brief.len = 5;
+    brief.len = 1;
     CHECK_FALSE(Engined::start(brief));
     CHECK(TxEngine::blocks == 1u);
-    CHECK(TxEngine::length == 5u);
+    CHECK(TxEngine::length == 1u);
+    CHECK(regs().SSPDMACR == (SpiDmaControl::tx | SpiDmaControl::rx));
+    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
-    // A write of six is short, of seven is not.
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
     Engined::Request write = brief;
     write.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
-    write.len = 6;
-    frames_come_back(true);
-    CHECK(Engined::start(write));
-    frames_come_back(false);
-    CHECK(TxEngine::blocks == 1u);
-    write.len = 7;
     CHECK_FALSE(Engined::start(write));
     CHECK(TxEngine::blocks == 2u);
+    CHECK(RxEngine::discarded);
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
 
-    // A COMMAND PHASE THAT REPAYS A BLOCK OF ITS OWN (8 frames written,
-    // 128 cycles against 100) rides the engines first, D/C low, its echo
-    // discarded; its completion raises D/C and launches the data block
-    // from the vector - one interrupt a block, the transaction ending on
-    // the second.
+    // THE COMMAND RULE. A command ahead of a data phase runs in the loop inside
+    // start(), D/C low, and D/C rises before the data block goes onto the
+    // engines; one interrupt ends the request, whatever the command's length.
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request two{};
@@ -629,40 +608,42 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     two.cs = SimPl022PinRef{cs_pin};
     two.dc = SimPl022PinRef{8};
     two.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
-    two.cmd_len = 8;
-    two.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 8));
+    two.cmd_len = 16;
+    two.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 16));
     two.rx = lend<Lease::reply>(in_buf);
     two.len = 16;
-    two.clock = SpiClocks::div2;
+    two.clock = SpiClocks::div4;   // the receive shape, whose loop the bench's frames can end
     two.mode = SpiMode::mode3;
+    frames_come_back(true);
     CHECK_FALSE(Engined::start(two));
+    frames_come_back(false);
     CHECK(TxEngine::blocks == 1u);
-    CHECK(TxEngine::length == 8u);
-    CHECK(RxEngine::discarded);
-    CHECK_FALSE(SimPl022Bench::pin_level[8]);
-    RxEngine::next_flags = RxEngine::flag_complete;
-    CHECK_FALSE(Engined::dma_isr());
-    CHECK(SimPl022Bench::pin_level[8]);
-    CHECK(TxEngine::blocks == 2u);
     CHECK(TxEngine::length == 16u);
     CHECK_FALSE(RxEngine::discarded);
-    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
+    CHECK(SimPl022Bench::pin_level[8]);
+    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);   // held across both phases
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
     CHECK(SimPl022Bench::pin_level[cs_pin]);
     CHECK(Engined::status() == spi_ok);
-    // A command phase too short for a block of its own (one frame) runs
-    // polled inside start(), and the data block follows it there.
-    two.cmd_len = 1;
-    frames_come_back(true);
-    CHECK_FALSE(Engined::start(two));
-    frames_come_back(false);
-    CHECK(TxEngine::blocks == 3u);
+    // A command with no data phase rides the engines as the whole request, its
+    // echoes discarded, D/C low on its way and raised at its end, before the
+    // select - where a polled command leaves it.
+    Engined::Request alone = two;
+    alone.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    alone.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    alone.len = 0;
+    CHECK_FALSE(Engined::start(alone));
+    CHECK(TxEngine::blocks == 2u);
     CHECK(TxEngine::length == 16u);
-    CHECK(SimPl022Bench::pin_set_at[8] > SimPl022Bench::pin_clear_at[8]);
-    CHECK_FALSE(SimPl022Bench::pin_level[cs_pin]);   // held across both phases
+    CHECK(RxEngine::discarded);
+    CHECK_FALSE(SimPl022Bench::pin_level[8]);
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
+    CHECK(SimPl022Bench::pin_level[8]);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(SimPl022Bench::pin_set_at[8] < SimPl022Bench::pin_set_at[cs_pin]);
 
     // A POLLED REQUEST IS THE LOOP, at any length, on a host with engines
     // too: a read and a write of the whole buffer, past every count above,
@@ -729,19 +710,33 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
     CHECK(regs().SSPCR1 == SpiControl1::enable);
 
-    // Sixteen-bit frames on BYTE engines: the engines cannot carry them,
-    // so the request runs polled inside start() whichever way it asked.
+    // Sixteen-bit frames on BYTE engines: the engines cannot carry them, so a
+    // request naming dma is refused - before the block, the select or the D/C
+    // is touched - and the same request polled runs the loop.
     fresh();
     REQUIRE(Engined::init(clock));
+    const uint32_t cr0_before = regs().SSPCR0;
     Engined::Request wide{};
     wide.engine = SpiEngine::dma;
     wide.cs = SimPl022PinRef{cs_pin};
+    wide.dc = SimPl022PinRef{8};
     wide.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
     wide.len = 8;
     wide.bits = SpiDataSize::bits16;
+    wide.mode = SpiMode::mode3;
+    CHECK(Engined::start(wide));
+    CHECK(Engined::status() == spi_rejected);
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] == 0u);
+    CHECK(SimPl022Bench::pin_set_at[8] == 0u);
+    CHECK(SimPl022Bench::pin_clear_at[8] == 0u);
+    CHECK(regs().SSPCR0 == cr0_before);
+    CHECK(regs().SSPDR == 0u);
+    wide.engine = SpiEngine::polled;
     frames_come_back(true);
     CHECK(Engined::start(wide));
     frames_come_back(false);
+    CHECK(Engined::status() == spi_ok);
     CHECK(TxEngine::blocks == 0u);
     CHECK(regs().SSPIMSC == 0u);
     // Two bytes low-first make one frame, and the loop wrote eight.
@@ -754,8 +749,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
 
 namespace {
 
-/// An asynchronous request that rides the engines: 24 frames at clk / 16
-/// repay them on SimPl022's figures.
+/// A request that rides the engines: 24 frames naming dma.
 Engined::Request engined_request() {
     Engined::Request r{};
     r.engine = SpiEngine::dma;
@@ -1074,23 +1068,141 @@ TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
     WideRx::next_flags = WideRx::flag_complete;
     CHECK(WideHost::dma_isr());
 
-    // A buffer one byte off a half-word is not one the DMA can take: the
-    // request runs polled inside start() and no block starts.
+    // A buffer one byte off a half-word is not one the DMA can take: a request
+    // naming dma is refused, no block starts and the select is not touched -
+    // the out buffer, the in buffer, a command alone, a command ahead of such
+    // data (refused before the command is clocked).
     const uint32_t blocks = WideTx::blocks;
+    const uint32_t lowered = SimPl022Bench::pin_clear_at[cs_pin];
+    const uint32_t dr = regs().SSPDR;
     WideHost::Request odd{};
     odd.engine = SpiEngine::dma;
     odd.cs = SimPl022PinRef{cs_pin};
     odd.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
     odd.len = 4;
     odd.bits = SpiDataSize::bits16;
-    frames_come_back(true);
     CHECK(WideHost::start(odd));
-    frames_come_back(false);
-    CHECK(WideHost::status() == spi_ok);
+    CHECK(WideHost::status() == spi_rejected);
+    WideHost::Request odd_in = r;
+    odd_in.rx = lend<Lease::reply>(in_buf + 1);
+    CHECK(WideHost::start(odd_in));
+    CHECK(WideHost::status() == spi_rejected);
+    WideHost::Request odd_cmd{};
+    odd_cmd.engine = SpiEngine::dma;
+    odd_cmd.cs = SimPl022PinRef{cs_pin};
+    odd_cmd.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
+    odd_cmd.cmd_len = 2;
+    odd_cmd.bits = SpiDataSize::bits16;
+    CHECK(WideHost::start(odd_cmd));
+    CHECK(WideHost::status() == spi_rejected);
+    WideHost::Request cmd_then_odd = odd;
+    cmd_then_odd.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    cmd_then_odd.cmd_len = 2;
+    CHECK(WideHost::start(cmd_then_odd));
+    CHECK(WideHost::status() == spi_rejected);
     CHECK(WideTx::blocks == blocks);
+    CHECK(SimPl022Bench::pin_clear_at[cs_pin] == lowered);
+    CHECK(regs().SSPDR == dr);
     CHECK(regs().SSPIMSC == 0u);
+    // A command off a half-word ahead of aligned 16-bit data is carried: the
+    // command runs in the loop, a frame at a time, and the data rides.
+    WideHost::Request odd_ahead = r;
+    odd_ahead.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
+    odd_ahead.cmd_len = 2;
+    frames_come_back(true);
+    CHECK_FALSE(WideHost::start(odd_ahead));
+    frames_come_back(false);
+    CHECK(WideTx::blocks == blocks + 1u);
+    CHECK(WideTx::beat == 2u);
+    WideRx::next_flags = WideRx::flag_complete;
+    CHECK(WideHost::dma_isr());
+    CHECK(WideHost::status() == spi_ok);
 
     WideHost::release();
+}
+
+TEST_CASE("a refused request leaves a reset that is owed for the next one") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    Engined::Request r = engined_request();
+    CHECK_FALSE(Engined::start(r));
+    TxEngine::next_flags = TxEngine::flag_error;
+    CHECK(Engined::dma_isr());
+    // Byte engines refuse 16-bit frames: answered before anything moves, the
+    // block's reset still owed, then paid by the next request, once.
+    const uint32_t resets_before = SimPl022Bench::resets;
+    Engined::Request wide = r;
+    wide.bits = SpiDataSize::bits16;
+    CHECK(Engined::start(wide));
+    CHECK(Engined::status() == spi_rejected);
+    CHECK(SimPl022Bench::resets == resets_before);
+    CHECK_FALSE(Engined::start(r));
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    CHECK(Engined::status() == spi_ok);
+}
+
+TEST_CASE("when a request ends, the wire has ended: BSY waited for with SPH = 0, and bounded") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Engined::init(clock));
+    const auto busy = [](bool on) {
+        regs().SSPSR = on ? (regs().SSPSR | SpiFlag::busy) : (regs().SSPSR & ~SpiFlag::busy);
+    };
+
+    // POLLED, SPH = 0: the loop's tail waits for BSY on the request's budget. A
+    // shifter that never stops runs the budget out: spi_stalled, the select
+    // released first, the block reset.
+    Engined::Request polled = engined_request();
+    polled.engine = SpiEngine::polled;
+    polled.mode = SpiMode::mode0;
+    frames_come_back(true);
+    busy(true);
+    uint32_t resets_before = SimPl022Bench::resets;
+    CHECK(Engined::start(polled));
+    CHECK(Engined::status() == spi_stalled);
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    CHECK(SimPl022Bench::pin_set_at[cs_pin] < SimPl022Bench::reset_at);
+    // With SPH = 1 the end is not early and nothing waits for BSY.
+    frames_come_back(true);
+    busy(true);
+    polled.mode = SpiMode::mode1;
+    CHECK(Engined::start(polled));
+    CHECK(Engined::status() == spi_ok);
+    busy(false);
+    frames_come_back(false);
+
+    // THE VECTOR, SPH = 0: the completion waits for BSY on a bound of one SCK
+    // period and a margin; run out, the request ends spi_stalled, the select
+    // released, the reset owed and paid by the next start().
+    Engined::Request dma = engined_request();
+    dma.mode = SpiMode::mode2;
+    dma.clock = SpiClocks::div16;
+    CHECK_FALSE(Engined::start(dma));
+    busy(true);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    resets_before = SimPl022Bench::resets;
+    CHECK(Engined::dma_isr());
+    CHECK(Engined::status() == spi_stalled);
+    CHECK(SimPl022Bench::pin_level[cs_pin]);
+    CHECK(regs().SSPDMACR == 0u);
+    CHECK(SimPl022Bench::resets == resets_before);
+    busy(false);
+    CHECK_FALSE(Engined::start(dma));
+    CHECK(SimPl022Bench::resets == resets_before + 1u);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    CHECK(Engined::status() == spi_ok);
+    // SPH = 1: BSY up is not waited for.
+    dma.mode = SpiMode::mode3;
+    CHECK_FALSE(Engined::start(dma));
+    busy(true);
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Engined::dma_isr());
+    CHECK(Engined::status() == spi_ok);
+    busy(false);
 }
 
 TEST_CASE("a client frames on its own select pad, and may listen dark") {

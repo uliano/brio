@@ -116,7 +116,6 @@ void pl022_engine_verbs() {
     d.len = 8;
     (void)Engined::start(d);
     (void)Engined::dma_isr();
-    (void)Engined::async_min_frames(SpiClocks::div4, SpiMode::mode0, SpiDataSize::bits8, true);
     (void)Engined::status();
     (void)Engined::recover();
     Engined::release();

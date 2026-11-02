@@ -767,9 +767,9 @@ What the rows say:
   closest to a warm one; what it still fetches is the caller's code, the
   idle path and the tick.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
-  `start()` 760 bytes without engines and 1084 with them, its shared
-  engine launch 576, the DMA line's body 608 (a command block chained to
-  its data block from there); the
+  `start()` 824 bytes without engines and 1572 with them (the engines'
+  launch folded in), the DMA line's body 684 (the wait for the end of the
+  last frame there); the
   I2C host's 592 to 1652; the UART's 156 to 720 - the bench's four
   drivers, in all their types, 10.6 KB.
 

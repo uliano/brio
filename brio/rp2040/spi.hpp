@@ -22,14 +22,14 @@
  * context, after the clock task's init(); init() answers false when the
  * ceiling cannot be produced at this clk_peri or the block did not come
  * up. start() is the arbiter's, called from its dispatch, and returns
- * true when the request completed inside it: a polled request (`r.engine`
- * naming SpiEngine::polled), which spins there for its whole wire time, an asynchronous one
- * too short to repay the DMA engines (run polled the same way), the empty
- * request (no command, no data), and on a host with no engines an
- * asynchronous one, refused (spi_rejected, nothing on the wire). Any
- * other returns false, rides the engines and a TransferDone follows on
- * the DMA line: dma_isr() is that line's body, called by the program's
- * handler and nothing else, true when the transaction just completed.
+ * true when the request completed inside it: a request naming
+ * SpiEngine::polled, which spins there for its whole wire time, the empty
+ * request (no command, no data), and a request naming SpiEngine::dma that is
+ * refused (spi_rejected, nothing on the wire): on a host with no engines, or
+ * one the engines cannot carry. Any other request naming dma returns false,
+ * rides the engines at whatever length and a TransferDone follows on the DMA
+ * line: dma_isr() is that line's body, called by the program's handler and
+ * nothing else, true when the transaction just completed and the wire with it.
  * The host arms no source of the instance's own line. The Request's
  * buffers (`cmd`, `tx`,
  * `rx`) are lent (`brio::lend<brio::Lease::reply>`) from the post until
@@ -177,14 +177,6 @@ struct Rp2040Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
-    /// What the host's two ways cost this chip's Cortex-M0+ at 125 MHz
-    /// (Pl022Costs; docs/rp2040/spi.md, "The short request"), measured by
-    /// test_rp2040_spi's letter f through one call: E - F 305 to 309 for a
-    /// read and 309 for a write (the engines' fixed cost 768 against the polled
-    /// loop's 462 and 459), and the two loops' frames at clk_peri / 2, 42
-    /// cycles received and stored, 21 written on TNF - the Cortex-M0+'s
-    /// floor where the wire's frame is 16.
-    static constexpr Pl022Costs costs{305u, 310u, 42u, 21u};
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).
@@ -312,20 +304,19 @@ using Pl022 = Pl022Ssp<Rp2040Pl022, n>;
  * the ceiling's setting, 7.8125 MHz, and enables the line the engines
  * report on (their arm() does). `cmd` goes out first, then `pixels`, with
  * a D/C line low for the command and high for the data only when the
- * request names one in `r.dc` (none here); 64 data frames at 7.8 MHz
- * repay the engines many times over, so they ride them, the one command
- * frame going out polled inside start() first - a request too short to
- * repay them runs polled whole and completes inside start()
- * (`Bus::async_min_frames()`). `cmd`
+ * request names one in `r.dc` (none here); the request names the engines, so
+ * the 64 data frames ride them, the one command frame going out in the loop
+ * inside start() first, the command rule whatever its length. `cmd`
  * and `pixels` are lent until `Display` receives its SpiDone. The handler
  * is the DMA line's vector under the pico-sdk's name, and its post is
  * legal from an interrupt handler (kernel/post.hpp).
  *
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine / DmaRxEngine
  * on any two channels, both or neither, both of one element: uint16_t
- * (SSPDR's width) carries 8- and 16-bit frames alike. A host with no
- * engines (both slots left at NoDmaEngine) runs polled requests alone and
- * refuses an asynchronous one (`has_dma`). `Placement`, the last
+ * (SSPDR's width) carries 8- and 16-bit frames alike, and a 16-bit request off
+ * a half-word, or on byte engines, is refused. A host with no engines (both
+ * slots left at NoDmaEngine) runs polled requests alone and refuses one naming
+ * dma (`has_dma`). `Placement`, the last
  * parameter, is util/placement.hpp's tag: InRam makes start() and the DMA
  * line's body one flattened instance each in SRAM
  * (docs/rp2040/platform.md, "A handler in SRAM").

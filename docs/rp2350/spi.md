@@ -74,10 +74,10 @@ its two buffers (`brio::lend<brio::Lease::reply>` - the buffers stay
 the caller's and are only read until the reply), the rate as a division
 of clk_peri, the mode, and where the reply goes (`Display`, the active
 object that posts it, receives an `SpiDone`); `post` hands it to the
-arbiter. The request is ASYNCHRONOUS, `SpiEngine::dma`, and
-asynchronous is the DMA engines: its 64 data frames ride them, the core
-free for their wire time (the one command frame, too short to repay a
-block of its own, goes out polled inside `start()` first); and the
+arbiter. The request names the DMA engines, `SpiEngine::dma`: its 64 data
+frames ride them, the core free for their wire time, and the one command
+frame goes out in the loop inside `start()` first, as a command ahead of a
+data phase always does; and the
 `extern "C"` function is the DMA line's handler, under the crt's name
 for line 0, the same on both architectures, which tells the arbiter when
 the transaction has completed.
@@ -92,18 +92,23 @@ completion goes into the crt's default spin and the program stops there
 (the arbiter's per-bus timeout cannot answer from inside a spinning
 handler); the host's `init()` binds the engines and enables that line in this
 core's interrupt controller ([dma.md](dma.md)). A host with no engines (`SpiHost<0, pins>`) runs polled
-requests alone and answers an asynchronous one `spi_rejected`, at once
+requests alone and answers one naming dma `spi_rejected`, at once
 and with nothing on the wire - `static_assert(Bus::has_dma)` in a
-program that posts one makes it a compile error; and an asynchronous
-request too short to repay the engines at its rate runs polled and
-completes inside `start()` ("The short request" below). A request naming
+program that posts one makes it a compile error; a request naming dma that
+the engines cannot carry - 16-bit frames with a buffer off a half-word - is
+refused the same way, and there is no other refusal
+([../pl022/README.md](../pl022/README.md) has the rules in their order). A
+request naming
 `SpiEngine::polled` runs an explicit loop inside `start()`, in the arbiter's dispatch,
 for its whole wire time, holding every other active object meanwhile, with
 interrupts enabled; at any length and with engines bound or not, so it needs no
 vector. A polled wait that runs out answers `spi_stalled` and a DMA block the
 bus refuses `spi_dma_fault`, each with the select released, and the next request
 starts on a clean block with nothing asked of the program ("What each answer
-asks of the program" below). The two lent buffers must stay
+asks of the program" below). When a request ends, on either engine, its wire
+has ended: in modes 0 and 2 that is a wait for the block's BSY, up to one SCK
+period, and on the engines that wait is in the DMA line's handler, every other
+interrupt held off for it (bench findings, "When a request ends"). The two lent buffers must stay
 untouched and in scope from the post to the `SpiDone` the arbiter
 replies with; nothing checks it. The request is posted from an active
 object's handler, which is what the reply is sent back to. `init()`
@@ -157,7 +162,7 @@ statistics, which runs by name.
 
 This page says what is the RP2350's. What the block itself does - the
 prescaler pair, the disabled-write rule, the phase boundary, the engine
-slots, the short request's arithmetic, the client's one frame per select
+slots, the rules of the engine a request names, the wire's end, the client's one frame per select
 window in modes 0 and 2 - is the IP stratum's page and is not restated
 here.
 
@@ -246,7 +251,7 @@ concept takes the controller as a type.
 
 What the IP stratum names (the mode and framing vocabulary, the prescaler
 arithmetic, the register bit layouts, the resource's verbs, the host's
-Request, `has_dma`, the short request's counts and its one interrupt
+Request, `has_dma`, the engine a request names and its one interrupt
 body, the DMA line's, the client's surface) is in
 [../pl022/README.md](../pl022/README.md). This stratum adds:
 
@@ -277,14 +282,9 @@ body, the DMA line's, the client's surface) is in
   three IP templates, with `NoDmaEngine` in both slots and `InFlash` by
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM").
-- `Rp2350Pl022::costs`, the figures the short request is drawn from, one
-  set per architecture - E - F 230 for a read and 235 for a write on the
-  Cortex-M33, 220 and 230 on Hazard3, the receive loop's turn 24 on the
-  Cortex-M33 and 26 on Hazard3,
-  the transmit-only loop's 16 (measured: "The short request" in the
-  bench findings). The host's receive engine arms at HIGH_PRIORITY, a
-  frame landing on a full receive FIFO being lost, its transmit engine
-  at normal ([dma.md](dma.md)).
+- The host's receive engine arms at HIGH_PRIORITY, a frame landing on a
+  full receive FIFO being lost, its transmit engine at normal
+  ([dma.md](dma.md)).
 
 Beside them, at the foot of the file, is the vocabulary check: the IP
 file spells the block's bit layout itself, because it may not read a
@@ -328,14 +328,14 @@ extern "C" void isr_dma_0() {
 The same source builds for both architectures; `isr_dma_0` is a
 vector-table slot on one half and a dispatch entry on the other. The
 engines are half-word engines, SSPDR's width, so 8-bit frames ride them
-at a byte beat and 16-bit frames at a half-word one; byte engines leave
-a 16-bit request to the polled loop inside `start()`, as does a buffer
+at a byte beat and 16-bit frames at a half-word one; byte engines refuse a
+16-bit request naming dma, as half-word engines refuse one whose buffer is
 not aligned to a half-word. The receive block's completion is the
-block's one interrupt: the transmit engine is armed to report a bus
+request's one interrupt: the transmit engine is armed to report a bus
 error and nothing else ([dma.md](dma.md)).
 
 Without the engines, `SpiHost<0, pins>`: polled requests alone, each run
-inside `start()` (`r.engine = SpiEngine::polled`), an asynchronous one answered
+inside `start()` (`r.engine = SpiEngine::polled`), one naming dma answered
 `spi_rejected`.
 
 A client, whose select is a pad, its vector in SRAM (from the flash its first
@@ -369,8 +369,8 @@ the handler of `Display`:
 
 | `status` | what happened | what it leaves | who acts |
 |---|---|---|---|
-| `spi_rejected` | the arbiter's FIFO was full, or a host with no engines refused an asynchronous request | nothing on the wire | the program: a full FIFO may be tried again, the refusal never (`static_assert(Bus::has_dma)`) |
-| `spi_stalled` | a polled wait ran out of its budget | select released, then the block reset and reconfigured to the state applied, both FIFOs empty | nobody: the next request starts on a clean block. Remove the cause: a reset does not start a stopped clock |
+| `spi_rejected` | the arbiter's FIFO was full, or the host refused a request naming dma: it has no engines, or they cannot carry it (16-bit frames off a half-word) | nothing on the wire | the program: a full FIFO may be tried again, a refusal never (`static_assert(Bus::has_dma)`; a buffer aligned to a half-word, or the request named polled) |
+| `spi_stalled` | a polled wait ran out of its budget, or the DMA line's wait for the end of the last frame (modes 0 and 2) ran out of its bound | select released; polled, the block reset and reconfigured to the state applied, both FIFOs empty; on the engines, the reset owed to the next `start()` | nobody: the next request starts on a clean block. Remove the cause: a reset does not start a stopped clock |
 | `spi_dma_fault` | a channel reported a bus error | requests down, both channels put away and bound again, select released, the block's reset owed to the next `start()`, frames perhaps still shifting until then with the select high | nobody: the arbiter answers and goes on, and the next `start()` resets the block before anything else |
 | `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()` | the program judges the device |
 
@@ -384,7 +384,7 @@ a fault left owed, for a caller framing its own select, so that it is paid befor
 select falls; with a null select the program's own stands through a stall's reset, and
 that caller raises it when `start()` answers. A reset does not
 start a stopped clock: on a block whose clock stays off a queued polled request
-stalls too, on its own budget, and an asynchronous one goes to the engines and has
+stalls too, on its own budget, and one naming dma goes to the engines and has
 no completion, `spi_timeout` on a timed bus and a bus busy for ever on an untimed
 one. `recover()` stays for a timed arbiter's unanswered request and for a program
 that wants it with the bus idle. No verb says the engines are idle, and `recover()`
@@ -423,9 +423,9 @@ the same.
   and under one on the other, so the letter warms the polled path before
   it weighs it.
 - **THE LOOP-BACK ON THE ENGINES.** The four modes at 8 and 16 bits,
-  sixteen frames each asynchronous, byte-exact with **ONE DMA interrupt**
-  each; a two-frame command phase (polled inside `start()`, too short for
-  a block of its own) then 32 data frames, the echo discarded; a read
+  sixteen frames each on the engines, byte-exact with **ONE DMA interrupt**
+  each; a two-frame command phase (in the loop inside `start()`, the command
+  rule) then 32 data frames, the echo discarded; a read
   with no out buffer clocks 0xFF; an empty request completes on the spot.
 - **THE POLLED LADDER.** 64 frames on the loop-back, Cortex-M33 then
   Hazard3: div2 25 to 27 / 25 to 28 us, div4 20 / 21, div8 35 to 37 / 36 to 37,
@@ -453,7 +453,8 @@ the same.
     wire, which is the one rate the transmit-only shape is taken at, on
     runs longer than the FIFO: its tail, up to eight reads after the wire
     has finished, is work the receive shape does under the wire instead
-    ("Not covered yet" says what would measure it on a short request).
+    ("Not covered yet" says what would measure it on a request of a few
+    frames).
   - THE FRAME AGAINST THE WIRE AT EVERY DIVISOR (`spi.frame`: 8 and 16 bits,
     modes 0 and 1, a frame by the difference of two lengths, the least of
     five under the mask, the whole table measured before a line of it is
@@ -471,7 +472,7 @@ the same.
     | no in buffer, 16-bit | the wire (35) | the wire (32) |
 
     So the one rate and shape with dead bus is the 8-bit read at 75 MHz; a
-    long one that wants the wire asks asynchronously, as does any request the
+    long one that wants the wire names the engines, as does any request the
     other active objects must keep running through: on the engines 256
     frames in mode 3 take the wire and the fixed cost, where the loop takes 1.50
     / 1.63 times the nominal wire's time (larger being slower).
@@ -485,14 +486,15 @@ the same.
     loop off cannot overrun it, whatever its length.
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
-    9.375 MHz): wall less the wire's cycles **195 / 174 for one byte,
-    274 / 256 for three, 590 / 573 for sixteen** (the band across builds
+    9.375 MHz): wall less the wire's cycles **206 / 182 for one byte,
+    295 / 272 for three, 616 / 589 for sixteen** (the band across builds
     is the XIP cache's line alignment, which every link moves) - of which
-    the block's mode-0 gap is 24 / 72 / 384 and the phase boundary's drain
-    (the data frames wait for the command frame to come back whole, so
-    D/C flips on the wire) one frame's latency; the host's own code under
-    200. In mode 3 the same three take the same loop with no gap: 187 / 168, 280 /
-    249 and 596 / 569.
+    the block's mode-0 gap is 24 / 72 / 384, the wait for the end of each
+    phase's last frame one SCK period, 16 cycles a phase (16 to 30 more
+    than on the code that took the receive FIFO's flag for the end), and the
+    phase boundary's drain (the data frames wait for the command frame to
+    come back whole and its last edge, so D/C flips on the wire) one frame's
+    latency; the host's own code under 200.
   - THE VENDOR'S LOOP ON THE SAME BOARD (pico-sdk 2.3.1's
     `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
     the SDK's own placement, built by its CMake with its crt, the select a
@@ -505,48 +507,108 @@ the same.
     vendor's at 75, and a 16-frame transfer costs the vendor 61 cycles
     over the wire against this host's write of the same within the wire's
     own time.
-- **THE SHORT REQUEST** (`test_rp2350_spi` letter f, the IP stratum's
-  page, "The short asynchronous request", has the rule). An asynchronous
-  request rides the engines from the smallest frame count whose polled
-  cost reaches the engines' fixed cost beyond the polled loop's, E - F,
-  and runs polled inside `start()` below it. E - F MEASURED AS ONE
-  DIFFERENCE THROUGH ONE CALL, the suite's own `xfer()`, so the call's
-  cycles cancel: E the 32-frame asynchronous block's wall less its 32
-  frames on the wire, F an 8-frame polled request's wall less 8 frames at
-  the loop's pace (the difference of a 24- and an 8-frame request), both
-  at clk_peri / 4 in mode 3, the best of fifteen in three rounds 3 ms
-  apart; Cortex-M33 / Hazard3, sixteen runs each: **E 474 to 481 / 508 to 512,
-  F 245 / 291 to 292 and E - F 229 to 236 / 217 to 221 for a read; E 476 to 483 /
-  516, F 243 to 245 / 285 and E - F 233 to 240 / 231 for a write**; the two loops'
-  turns at clk_peri / 2 on the host with no engines, 24.0 / 26.0 received
-  and stored and 16.0 written on TNF - the wire's own frame, so the
-  transmit-only loop's turn is no longer. The walls are net of the XIP
-  cache's misses, which the letter prints beside them ([the RP2040's
-  page](../rp2040/spi.md), "The short request", says why; these images
-  counted none in those runs). The traits carry 230 and 235 on the Cortex-M33, 220
-  and 230 on Hazard3, and the turns 24 / 26 and 16 (`Rp2350Pl022::costs`);
-  letter f judges each within a quarter of its measurement. The counts they
-  draw, judged at their edge in ten runs on each half (one frame under the
-  count inside `start()` with no DMA interrupt, the count itself on the
-  engines with one, every read byte-exact): a read rides the engines from
-  **10 / 9 frames at 75 MHz in mode 3, 7 / 6 at 37.5 MHz in mode 0 and 4 / 3
-  at 18.75 MHz in mode 0**, a write from 15 at 75 MHz on both. A command
-  phase of 15 frames at 75 MHz repays a
-  block of its own and is chained to its data block from the vector, two
-  DMA interrupts; a one-frame command runs polled ahead of the data
-  block, one.
-- THE REFUSAL (letter f, both halves): an asynchronous request on the
-  host with no engines comes back from `start()` at once with
-  `spi_rejected` - the select never driven, the control word as it was
-  though the request asked mode 3 over mode 0, both FIFOs empty and the
-  block idle, the in buffer untouched, no interrupt - and the same
-  request polled runs exact.
+- **WHICH ENGINE COSTS THE CORE LESS** (`test_rp2350_spi` letter f, both
+  halves; the IP stratum's page, "Which engine costs the core less", has the
+  arithmetic). Nothing in the host reads these figures: they are the
+  programmer's guidance. E and F are measured through one call, the suite's
+  own `xfer()`, so the call's cycles cancel: E the 32-frame block's wall on the
+  engines less its 32 frames on the wire, F the intercept of two polled lengths
+  (an 8-frame request's wall less 8 frames at the loop's own pace, that pace the
+  difference of a 24- and an 8-frame request), both at clk_peri / 4 in mode 3,
+  the best of fifteen in three rounds 3 ms apart; Cortex-M33 / Hazard3, fifteen
+  runs each: **E 450 / 476 for a read and 455 / 480 for a write, F 264 /
+  289 to 290 and 261 / 280**, the loop's frame there 31.6 / 31.7 to 31.8 and 32.1 /
+  32.5 cycles; the two loops' turns at clk_peri / 2 on the host with no
+  engines, 23.0 / 26.0 received and stored and 16.0 / 16.0 written on TNF -
+  the wire's own frame. The walls are net of the XIP cache's misses, which the
+  letter prints beside them ([the RP2040's page](../rp2040/spi.md) says why;
+  these runs counted none). So E - F is 186 / 187 for a read and 194 /
+  200 for a write, and the engines cost the core fewer cycles than the
+  loop from ceil((E - F) / frame) frames, a frame the wire's or the loop's
+  turn, the longer (mode 3, 8-bit frames; in modes 0 and 2 the wire's frame is
+  9.5 periods and the counts smaller):
+
+  | rate | a frame read, the count | a frame written, the count |
+  |---|---|---|
+  | clk_peri / 2, 75 MHz | 23 / 26 cycles (the loop), 9 / 8 | 16 (the wire), 13 / 13 |
+  | / 4, 37.5 MHz | 32 (the wire), 6 / 6 | 32, 7 / 7 |
+  | / 8, 18.75 MHz | 64, 3 / 3 | 64, 4 / 4 |
+  | / 16, 9.4 MHz | 128, 2 / 2 | 128, 2 / 2 |
+  | / 32 and slower | 256 and more, 1 | 1 |
+
+  In words: at clk_peri / 32 and slower the engines cost the core less from a
+  single frame on both halves; at / 2 a read needs nine frames to repay them on the Cortex-M33 and eight on Hazard3, and a write thirteen on both. The core's
+  cycles are not all a choice weighs (what else must run meanwhile, the
+  vector's wait below), which is why the program chooses.
+- **dma IS DMA AT ANY LENGTH** (letter f, both halves): one frame, read and
+  written, at clk_peri / 2 and / 4, where the loop costs the core less -
+  `start()` answers false, `dma_isr()` is the end, one DMA interrupt, the read
+  exact, the select released; on the code that chose for the program the same
+  requests ran inside `start()`. THE REFUSALS: 16-bit frames naming dma with
+  the out buffer, the in buffer, both, a write, a read, a command alone, or a
+  command ahead of such data off a half-word, and 16-bit frames on byte engines
+  however aligned, each answered `spi_rejected` inside `start()` with the select
+  held low beforehand still low, the D/C held high still high, the control word
+  as it was though the request asked another mode, the block quiet and the in
+  buffer untouched, no interrupt; the next request on aligned buffers exact on
+  the engines. THE COMMAND RULE: a command of 1, 2, 8, 9, 128 or 200 frames
+  then 32 data frames at clk_peri / 4, the command in the loop and the data on
+  the engines - one DMA interrupt every time, D/C high when `start()` answers
+  false, the data exact; a command of 16 frames alone rides the engines,
+  `start()` false with D/C and the select low on its way, one interrupt, both
+  high after it; a command off a half-word ahead of 16-bit data is carried, the
+  command a frame at a time in the loop. Fifteen runs of the letter on each
+  half.
+- **WHEN A REQUEST ENDS, THE WIRE HAS ENDED** (`test_rp2350_spi` letter t, both
+  halves; the IP stratum's page has the rule). The SCK pad, GP18 with the
+  loop-back off, read as an input right after the end - after `start()`
+  answers true, or in the DMA line's handler right after `dma_isr()` answers
+  true - in the four modes, read and write, the request's select and the
+  program's (a null `cs`), on both engines, at every rung from clk_peri / 65024
+  to / 2. THE INSTRUMENT first: the pad reads each mode's idle level after
+  `prime()` and both levels inside a frame. On the code that took the receive
+  FIFO's flag for the end (one run of the letter on each half), every end in
+  modes 0 and 2 found SCK off its idle level at clk_peri / 65024 and / 4096 on
+  both engines, and the polled ones at / 1024 and / 256 too, the pad coming
+  idle up to 32 408 / 32 449 cycles after the end at / 65024 (half a period is
+  32 512) and BSY clearing up to 64 922 / 64 968 cycles after it (one period).
+  Below those the instrument goes blind by degrees, half a period growing
+  shorter than the way from the end to the read: on the engines 5 / 5 of 8 ends
+  at / 1024 and 1 / 0 at / 256, polled 0 / 4 of 8 at / 128, none at / 64 and
+  faster. Modes 1 and 3 were never early. With the wait, **no end
+  in any mode, rung, engine or select found SCK off its idle level**, the
+  request's select high at its end and the program's still low, fifteen runs on
+  each half. A command's end: one command frame at clk_peri / 65024, `start()`'s
+  wall 585 406 to 586 996 cycles in modes 0 and 2 (BSY's fall, nine periods of
+  65 024 from the write that starts the frame) and 520 416 to 520 609 in modes 1
+  and 3 (the last edge, eight periods) on the Cortex-M33, 585 415 to 587 069 and 520 420 to 520 653 on Hazard3,
+  polled alone and on the way to the engines alike, so D/C rises after the
+  command's last edge; on the code before, the way to the engines took 248 to
+  770 cycles, the command riding a block of its own. THE VECTOR'S WAIT, the
+  handler's cycles around `dma_isr()` less the same in mode 1, which waits for
+  nothing (77 / 59 cycles), the least of four, fifteen runs (one run of fifteen on
+  Hazard3 read some 110 cycles more at most rungs, its cause not established):
+
+  | rate | the wait in mode 0, every other interrupt held off (Cortex-M33 / Hazard3) |
+  |---|---|
+  | clk_peri / 65024 | 64 943 to 64 951 / 64 936 cycles, 433 us |
+  | / 4096 | 4015 / 4008 cycles, 26.8 us |
+  | / 1024 | 943 to 951 / 936 cycles, 6.3 us |
+  | / 256 | 183 / 168 cycles, 1.2 us |
+  | / 128 | 47 / 40 cycles |
+  | / 64 and faster | 7 / 7 cycles: one read of SSPSR and its test |
+
+  That is one SCK period less the way into the handler: from clk_peri / 64 up
+  the vector's own entry covers it on both halves. In modes 1 and 3 the handler
+  waits for nothing. The polled loop's tail waits the same period in modes 0
+  and 2, on the core and with interrupts on.
 - **THE ENGINES ON THE LOOP-BACK.** 128 bytes at 37.5 MHz, ISR-completed,
   are exact with **ONE DMA interrupt**, and 64 16-bit frames ride the
   engines at a half-word beat exact with no SPI interrupt and one DMA
-  interrupt; a 16-bit request on a buffer one byte off a half-word runs
-  polled inside `start()` and is exact there, no interrupt of either
-  line. A command frame polled inside `start()` then data on the engines,
+  interrupt; a 16-bit request naming dma on a buffer one byte off a
+  half-word is refused, the in buffer untouched, no interrupt of either
+  line, and the same request polled is exact. A command frame in the loop
+  inside `start()` then data on the engines,
   a polled read of 64 frames at 75 MHz in mode 3 on the same host, the loop
   inside `start()` with no interrupt of either line, and a read with no out
   buffer through the transmit engine's fixed 0xFF cell are all exact.
@@ -565,14 +627,23 @@ the same.
 - **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2350` letter d**, the
   ruler TIMER1 on clk_sys, MISO floating (and the same on the loop-back),
   the core asleep between the start and the completion; Cortex-M33 /
-  Hazard3. `start()` returns after **252 / 209 cycles** - the request's
-  words copied into the tenure, one compare for the rate, the
-  short-request fold, the select, both engines started - and the
-  transaction's ONE interrupt follows the last frame; with it a
-  transaction costs the core **614 / 378 busy cycles** whatever its size,
-  and its fixed cost, the wall less its frames' own time, is **520 / 490
-  cycles at 16 frames (3.5 / 3.3 us), of which 48 the block's gap**, the
-  same at 256 frames and at both rates. THE FRAMES' OWN TIME IS NOT THE NOMINAL
+  Hazard3, the same binding built twice: `bench_rp2350_ram`, the host
+  InRam and the vectors placed, so that the code fetches nothing from the
+  flash, and `bench_rp2350`, both in the flash. From SRAM `start()` returns
+  after **217 / 179 cycles** - one compare for the rate, the select, its
+  two pins kept, both engines started - and the transaction's ONE interrupt
+  follows the last frame, its handler 155 / 124 cycles with the wait for
+  the end of the last frame (one read of SSPSR at these rates); a
+  transaction costs the core **650 to 755 / 365 to 470 busy cycles**
+  whatever its size, and its fixed cost, the wall less its frames' own time,
+  is **525 / 473 cycles at 16 frames (3.5 / 3.2 us), of which 48 the block's
+  gap**, the same at 256 frames and at both rates. From the flash the same
+  instructions read `start()` at 209 to 547 / 174 to 283 cycles, the handler
+  at 421 to 629 / 215 to 382 and the fixed cost at 1310 to 1537 / 670 to 914
+  for 16 frames:
+  the difference is the fetch from the flash through the XIP cache, which this
+  image's layout pays on every transaction (the cache's own item below); which
+  lines miss is not established. THE FRAMES' OWN TIME IS NOT THE NOMINAL
   WIRE'S: in mode 0 the PL022 raises its frame signal between two frames
   of a continuous transfer (12.3.4.10, and 12.3.4.12 for mode 2), and the
   gap is 1.5 SCK periods - measured 19 cycles a byte at 75 MHz where the
@@ -585,13 +656,13 @@ the same.
   wire exactly, on both halves, where modes 0 and 2 give 19.00 and 76.00.
   The same by `test_rp2350_spi` letter d against THE RATE ASKED (a frame
   inside a block, from the difference of a 2048- and a 256-frame
-  asynchronous block, against clk_peri over the divisor): 999 to 1004
+  block on the engines, against clk_peri over the divisor): 999 to 1004
   thousandths on the Cortex-M33 and 999 to 1001 on Hazard3 at clk_peri / 4, / 16
   and / 64 in mode 3, in mode 0 with its gap and in 16-bit frames, fifteen runs
   on each half.
   256 16-bit frames at 75 MHz take 9435 / 9409
-  cycles, 1.15 times the nominal wire's, with ONE interrupt; the same request on byte engines,
-  or from a misaligned buffer, runs polled inside `start()` at the
+  cycles, 1.15 times the nominal wire's, with ONE interrupt; the same request naming dma on
+  byte engines, or from a misaligned buffer, is refused, and named polled it runs at the
   loop's 35 cycles a frame, the core held for it. The core spinning on a
   flag in RAM or on a register behind the APB bridge while the engines
   run changes a 256-byte block by under a hundredth.
@@ -614,10 +685,10 @@ the same.
   three-byte polled request with every line of the cache invalidated
   first (`Xip::invalidate_all()`), under the mask so that no tick's
   handler lands in the one shot, the counters cleared before the start
-  and read after the wall - **4956 / 4524 cycles missing 69 / 66 lines
-  with the host in the flash (Cortex-M33 / Hazard3), 830 / 742 missing
-  5 / 5 with it InRam, against 658 to 768 / 636 to 860 warm from the flash and
-  664 / 642 to 809 InRam**; the few left are the
+  and read after the wall - **5221 / 4859 cycles missing 71 / 69 lines
+  with the host in the flash (Cortex-M33 / Hazard3), 926 / 757 missing
+  5 / 3 with it InRam, against 679 to 788 / 656 warm from the flash and
+  687 / 660 to 757 InRam**; the few left are the
   caller's (the call site with the ruler's reads around it, and on the
   Cortex-M33 the veneer). THE WARM PRICE of InRam is the call: on the
   Cortex-M33 a `bl` reaches 16 MB and the SRAM is 256 MB from the flash,
@@ -638,7 +709,8 @@ the same.
   76.00 at 18.75 MHz, on both halves** - so the frame gap is the block's
   and the engines run at the wire. Its warm 16-frame transfer, completed
   by the same interrupt, takes **405 / 452 cycles against this driver's
-  776 / 746**: its transfer is two `dma_channel_configure()` calls and
+  781 / 729 with its code in SRAM** (1652 to 1793 / 926 from the flash in
+  this image, the misses of the item above): its transfer is two `dma_channel_configure()` calls and
   one store, inlined, where this one carries the arbiter's Request
   through `start()`. And its first transfer after `spi_init()`,
   completed by its interrupt, pays the same price per line - 14 to 24
@@ -651,7 +723,7 @@ the same.
   the transmit FIFO fills and the loop's budget runs out, 2 000 000 turns in
   160 / 147 ms: `spi_stalled`, the select released, both FIFOs empty and the
   block enabled at the word applied. With no `recover()` the next request is
-  exact, polled on the host with no engines, polled and asynchronous on the
+  exact, polled on the host with no engines, polled and on the engines on the
   host with them. A command frame polled ahead of an engined block, its enable
   down and its budget 400 000 turns, answers the same inside `start()` with no
   block launched. Through `SpiBus`, two requests from one dispatch, the first
@@ -659,8 +731,8 @@ the same.
   data exact, polled and on the engines. Thirteen runs on each half. That the
   select goes up before the reset is judged on the simulated chip (`test_pl022`);
   no letter here reads the SCK pad across it.
-- **A DMA BLOCK THE BUS REFUSES** (`test_rp2350_spi` letter h, both halves): an
-  asynchronous request of 64 frames at clk_peri / 128 with its buffer where the fabric
+- **A DMA BLOCK THE BUS REFUSES** (`test_rp2350_spi` letter h, both halves): a
+  request on the engines of 64 frames at clk_peri / 128 with its buffer where the fabric
   fails to decode the address (12.6.7): the out or the in buffer at 0xD0000000, the
   SIO's window, which that section says the DMA's bus ports cannot see, and an out
   buffer 16 frames short of the SRAM's end, a read failing with frames already on their
@@ -668,7 +740,7 @@ the same.
   true, one interrupt, `spi_dma_fault`, the select released. With frames on their way
   the block is still enabled and its transmit FIFO not empty afterwards, which is what
   the interrupt left for the next `start()`. With no `recover()` that request, polled
-  or asynchronous, is exact, no frame of the faulted block in front of it; through
+  or on the engines, is exact, no frame of the faulted block in front of it; through
   `SpiBus`, queued behind the read off the end, `spi_dma_fault` then `spi_ok` and its
   data exact both ways. Thirteen runs on each half. It paid the reset first, and what
   that costs it is not pinned: a difference of two walls taken with interrupts on and
@@ -683,7 +755,7 @@ the same.
   the pair's wire): the select null in the Request, `prime()`, the select low,
   `start()`, the select high, behind a fault that left frames on their way, with no
   `recover()`. On the loop-back both FIFOs are clean when `prime()` returns, before the
-  select falls, and the window is exact, polled and asynchronous. On the wire the
+  select falls, and the window is exact, polled and on the engines. On the wire the
   foreign client reads sixteen frames exact and answers sixteen exact, in the four
   modes, the fault taken with the select high. Thirteen runs on each half. Without
   `prime()`'s payment the window read wrong both ways in all four modes on both halves, 7
@@ -708,8 +780,8 @@ same on both halves:
   answer-only exact; the command channel at clk_peri / 128 (1.17 MHz)
   ten pings of ten; noise under a held select wakes nothing.
 - THE LADDER AND THE ENGINES ON THE WIRE: the polled host (32 frames) and
-  the half-word engines on channels 6 and 7 (64 frames, each window an
-  asynchronous request) **exact both ways
+  the half-word engines on channels 6 and 7 (64 frames, each window a
+  request on them) **exact both ways
   at clk_peri / 14 (10.7 MHz, a half period of 46.7 ns) and slower**; at /12 (12.5
   MHz) this host reads the answers wrong while the client hears it exact
   at /6 (25 MHz) and slower - the answer path, four of the client's cycles (32 ns)
@@ -811,9 +883,14 @@ Implemented but not bench-verified, each with what would measure it:
   went down, which its reset cures. What the reset does with `clk_peri` stopped,
   and what the next request answers, a letter that stops it around a request with
   the console quiet would measure.
-- What the transmit-only shape's tail costs a short request: `run_polled` built
+- The DMA line's wait for the end of the last frame running out of its bound
+  (modes 0 and 2): a block whose clock stops between the last frame's arrival
+  and BSY's fall. It answers `spi_stalled` with the select released and the
+  block's reset owed, judged on the simulated chip (`test_pl022`); a letter that
+  stops clk_peri inside that one period would measure it on silicon.
+- What the transmit-only shape's tail costs a request of a few frames: `run_polled` built
   to take that shape on every write, beside letter e's `spi.req`, would measure it.
-- Where this driver's 776 / 746 goes against the vendor's 405 / 452: stamps
+- Where this driver's 781 / 729 goes against the vendor's 405 / 452: stamps
   through `start()` and the completion's handler in the same transfer would split it.
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no

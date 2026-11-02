@@ -132,11 +132,9 @@ bool link_dma_mode() {
 /// side, for the client's loop to see the edge.
 void link_hold() { spin_us(30); }
 
-/// One request through a host, the status or no_answer: POLLED on a host
-/// without engines, and ASYNCHRONOUS on one with them - on the engines, or
-/// polled inside start() where the host's count says the request is too
-/// short for them - its completion awaited on the DMA line's flag, bounded
-/// at 200 ms (the slowest window here, 256 frames at /512, is 33 ms).
+/// One request through a host, the status or no_answer: naming the loop on a host
+/// without engines and the engines on one with them, its completion awaited on the
+/// DMA line's flag, bounded at 200 ms (the slowest window here, 256 frames at /512, is 33 ms).
 template <typename H>
 uint8_t run_request(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode mode, SpiDataSize bits) {
     typename H::Request r{};
@@ -694,9 +692,8 @@ namespace pk {
 /// A 100-tick per-bus timeout (100 ms of the ticker): three orders of
 /// magnitude above the longest transaction here (8 frames at /128, 65 us),
 /// so only a completion that never comes meets it (letter w). Over the
-/// engined host: an asynchronous request of 8 frames at /128 repays the
-/// engines many times over, so the three asynchronous requests ride them
-/// and complete on the DMA line.
+/// engined host: the three requests naming dma ride them and complete on the
+/// DMA line.
 using SpiArb = SpiBus<LinkDmaHost, P, 4, BusPassThrough, 100>;
 
 class Probe {

@@ -102,7 +102,6 @@ void spi_verbs() {
     d.engine = SpiEngine::polled;
     (void)DmaHost::start(d);
     (void)DmaHost::dma_isr();
-    (void)DmaHost::async_min_frames(SpiClocks::div4, SpiMode::mode0, SpiDataSize::bits8, true);
     (void)DmaHost::recover();
     DmaHost::release();
 

@@ -1,9 +1,9 @@
 // test_rp2350_spi - the reference bench suite for this chip's SPI
 // (rp2350/spi.hpp over datasheet 12.3, the ARM PL022 at revision r1p4):
 // the host on its loop-back, the polled path and the DMA engines - the
-// asynchronous way, its refusal on a host with none, its short request
-// and the figures that draw it - and util/spi_bus.hpp's arbiter with not
-// one line changed - and,
+// engine a request names, its refusals, the command rule, what each engine
+// costs the core and the wire ended when a request ends - and
+// util/spi_bus.hpp's arbiter with not one line changed - and,
 // across the desk's link to the WeAct RP2040 running spi_peer, the host
 // against a FOREIGN client in every mode, width and serve, the rate ladder
 // against it on the polled loop and on the engines, the arbiter read back
@@ -20,8 +20,8 @@
 //
 //  - THE LOOP-BACK (a..h): the PL022's LBM feeds the transmitter into the
 //    receiver with nothing on the wire, which proves the frame sizes, the
-//    four modes, every rate, the engines, the asynchronous way's rules and
-//    the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
+//    four modes, every rate, the engines, the rules of the engine a request
+//    names and the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
 //    GP17 as its select; no wire is on those pads.
 //  - THE DESK PARTNER (n, o, p, q, r, m and x): SPI1 on GP30 (SCK), GP31
 //    (TX), GP28 (RX) with GP41 the select - 1.5 kOhm to the RP2040's 3V3 -
@@ -63,8 +63,8 @@
 //      command phase, ONE DMA interrupt a transaction (the transmit
 //      engine reports errors alone), a polled read of 64 frames on that
 //      host, the loop, no interrupt of either line, 16-bit frames ON THE ENGINES at a half-word
-//      beat, and a 16-bit request on a misaligned buffer run polled inside
-//      start() instead. The first block and
+//      beat, and a 16-bit request naming dma on a misaligned buffer
+//      refused, and exact polled. The first block and
 //      the first polled request are timed TWICE, cold and then warm, with
 //      the XIP cache's misses beside each: the first transaction after
 //      the host is brought up runs its code out of the flash, and that -
@@ -74,10 +74,14 @@
 //      rate asked, in modes 3 and 0 and at 16 bits
 //   e  THE KERNEL: SpiBus (= BusMaster) over the engined SpiHost, replies
 //      in order, the rejection, both sleep votes
-//   f  THE ASYNCHRONOUS WAY (rp2040/src/apps/rp_spi_async.hpp): the
-//      refusal on the host with no engines, the short request at the
-//      host's count, a command block chained to its data block, and E - F
+//   f  THE ENGINE A REQUEST NAMES (rp2040/src/apps/rp_spi_async.hpp): the
+//      refusal on the host with no engines, dma on the engines at one
+//      frame, what they cannot carry refused, the command rule, and E and F
 //      measured
+//   t  WHEN A REQUEST ENDS, THE WIRE HAS ENDED (rp2040/src/apps/
+//      rp_spi_async.hpp): the SCK pad read right after the end, polled and
+//      on the engines, every mode, clk_peri / 65024 to / 2, and what the
+//      vector's wait costs
 //   g  A POLLED WAIT THAT RUNS OUT (rp2040/src/apps/rp_spi_async.hpp):
 //      spi_stalled, the select released, the block reset, the next request
 //      exact with no recover(), polled and on the engines, directly and
@@ -154,14 +158,17 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial, 18> bench;
+TestBench<Serial, 19> bench;
 
 // SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
 // no wire is on those pads.
 constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
 using Host = SpiHost<0, host_pins>;
 using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
+using ByteDmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint8_t>, DmaRxEngine<5, uint8_t>>;
 using CsPin = Pin<17>;
+using DcPin = Pin<22>;
+using SckPad = Pin<host_pins.sck>;
 
 // SPI1 on the pair's wires (the header): the host with its GPIO select, the
 // same with half-word engines on channels 6 and 7 (DMA_IRQ_1), the client
@@ -187,7 +194,7 @@ void open_count_window() { (void)CountBlk::gpio_base(16); }
 constexpr bool client_pad_follows_select = true;
 
 // Which task owns each instance's vector at the moment.
-enum class Spi0Owner : uint8_t { none, host, dma_host };
+enum class Spi0Owner : uint8_t { none, host, dma_host, wire_probe };
 volatile Spi0Owner spi0_owner = Spi0Owner::none;
 volatile uint32_t spi0_isr_entries = 0;
 volatile uint32_t dma_isr_entries = 0;
@@ -658,18 +665,20 @@ void td_dma() {
     bench.verdict("16-bit frames ride the engines at a half-word beat, exact, with no SPI "
                   "interrupt and one DMA interrupt",
                   st4 == spi_ok && exact4 && spi4 == 0u && line4 == 1u);
-    // A buffer one byte off a half-word cannot be a run of half-words: the
-    // request runs polled inside start(), and is exact there.
+    // A buffer one byte off a half-word cannot be a run of half-words: a request
+    // naming dma is refused, and the same request polled is exact.
     fill_pattern(tx_buf + 1, 32, 0x71);
     for (uint16_t i = 0; i < 33; ++i) {
         rx_buf[i] = 0xEE;
     }
     const uint8_t st4b = xfer<DmaHost>(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiMode::mode3,
                                        SpiClocks::div16, SpiDataSize::bits16, false);
-    bench.verdict("16-bit frames on a misaligned buffer run polled inside start() instead, exact, "
-                  "no interrupt of either line",
-                  st4b == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && spi0_isr_entries == 0u &&
-                      dma_isr_entries == 0u);
+    bench.verdict("16-bit frames naming dma on a misaligned buffer are refused, the in buffer untouched, no "
+                  "interrupt of either line; polled, the same request is exact",
+                  st4b == spi_rejected && rx_buf[1] == 0xEEu && spi0_isr_entries == 0u && dma_isr_entries == 0u &&
+                      xfer<DmaHost>(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiMode::mode3, SpiClocks::div16,
+                                    SpiDataSize::bits16, true) == spi_ok &&
+                      same(tx_buf + 1, rx_buf + 1, 32));
     for (uint16_t i = 0; i < 16; ++i) {
         rx_buf[i] = 0x00;
     }
@@ -706,8 +715,8 @@ void td_dma() {
 // =============================================================================
 namespace kl {
 
-/// Over the engined host: an asynchronous request rides the engines and
-/// completes on the DMA line (8 frames at /16 repay them many times over).
+/// Over the engined host: a request naming dma rides the engines and
+/// completes on the DMA line.
 using SpiArb = SpiBus<DmaHost, P, 4>;
 
 uint8_t out_a[8];
@@ -880,6 +889,10 @@ extern "C" [[gnu::section(".fast_text")]] void isr_spi1() { link::pair_spi_isr()
 extern "C" void isr_dma_1() { link::pair_dma_isr(); }
 extern "C" void isr_dma_0() {
     dma_isr_entries = dma_isr_entries + 1u;
+    if (spi0_owner == Spi0Owner::wire_probe) {
+        wire_probe_vector();
+        return;
+    }
     if (spi0_owner == Spi0Owner::dma_host && DmaHost::dma_isr()) {
         transfer_status = DmaHost::status();
         transfer_done = true;
@@ -906,7 +919,8 @@ int main() {
     bench.letter('c', "the polled path at every named rate", tc_rates);
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
-    bench.letter('f', "the asynchronous way: the refusal, the short request, the costs", tf_async);
+    bench.letter('f', "the engine a request names: the refusals, dma at one frame, the command rule, the costs", tf_async);
+    bench.letter('t', "when a request ends, the wire has ended: the SCK pad read", tt_wire_end);
     bench.letter('g', "a polled wait that runs out: spi_stalled, the next request clean", tg_stall);
     bench.letter('h', "a DMA block the bus refuses: spi_dma_fault, the next request clean", th_fault);
     // The two-board letters drive link pads: each behind the partner-rail
