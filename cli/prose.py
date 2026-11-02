@@ -25,6 +25,8 @@ mechanically and this tool catches them before a reader does:
      REVIEW: is it the surface, or a reason that belongs to another
      silicon? Source comments only - the documents' realizations tables
      are the designated home of the cross-target view.
+  5. AN UNFILLED PLACEHOLDER: a token such as @BUSY_DMA@ left where a
+     figure or a name was to be written in. Every hit is an ERROR.
 
 Plus the repo's own ASCII rule (every byte <= 127) on every file it
 reads, as an ERROR.
@@ -66,6 +68,7 @@ ERROR_PATTERNS = [
     (re.compile(r"\b(first|second|third|fourth) (silicon|target|architecture|die)\b", re.I),
      "an ordinal silicon (name the part)"),
     (re.compile(r"\b(board|position)s? [A-G]\b(?![A-Za-z0-9_])"), "a desk position (board A..G)"),
+    (re.compile(r"@[A-Z][A-Z0-9_]*@"), "an unfilled placeholder"),
 ]
 
 REVIEW_PATTERNS = [
