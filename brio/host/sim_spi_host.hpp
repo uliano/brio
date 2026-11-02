@@ -27,9 +27,8 @@
  * start(); an asynchronous one (SpiEngine::dma) completes there too under the
  * `immediate` completion style (the default), and under `deferred` it is
  * held until the test calls finish(), which plays the DMA handler that
- * would post TransferDone - unless it is shorter than the count set by
- * short_frames(), when it completes inside start() as a family's host runs
- * a request too short for its engines. A host instantiated without DMA
+ * would post TransferDone - at any length, as a family's host runs a
+ * request naming its engines. A host instantiated without DMA
  * (`dma` false) refuses every asynchronous request, spi_rejected at once
  * and nothing on the wire, as the contract says an engineless family host
  * does. Nothing waits: cs_setup_us is counted, never spent.
@@ -59,10 +58,8 @@
  * ways to run a request"), because the arbiter distinguishes a request
  * answered inside `start()` from one answered later and a test of an
  * asynchronous transfer needs the one that does not answer inside
- * `start()`; and so are the contract's two rules on the asynchronous
- * way, the refusal of a host with no DMA (`has_dma`) and the short
- * request run polled - its threshold a count the test sets, there being
- * no rate here to derive one from.
+ * `start()`; and so is the contract's rule on the asynchronous way, the
+ * refusal of a host with no DMA (`has_dma`).
  *
  * What it does not model: the wire and the time on it. There is no
  * clock rate, no mode, no setup or hold, no bit - a mode the device
@@ -252,8 +249,8 @@ public:
         SimSpiDataSize bits = SimSpiDataSize::bits8;
 
         /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
-        /// start(); dma, asynchronous - answered later, inside start() when shorter than
-        /// short_frames(), refused (spi_rejected) by a host without DMA.
+        /// start(); dma, asynchronous - answered later at any length,
+        /// refused (spi_rejected) by a host without DMA.
         SpiEngine engine = SpiEngine::polled;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
@@ -311,12 +308,11 @@ public:
      * nothing on the wire and nothing counted as a transaction. On a host
      * with DMA it completes here too while the mode is `immediate` - the
      * synchronous completion the contract allows, and the arbiter then
-     * sends the reply itself - or, in `deferred` mode, when its frames
-     * (cmd_len + len) are fewer than short_frames(), the short request a
-     * family's host runs polled; otherwise it is held and this returns
-     * false, which is the engine saying "my DMA handler will end it". The
-     * test is then the app's ISR glue: `finish()` performs the transfer
-     * and hands back the status a `TransferDone` would carry.
+     * sends the reply itself; in `deferred` mode it is held, whatever its
+     * length, and this returns false, which is the engine saying "my DMA
+     * handler will end it". The test is then the app's ISR glue:
+     * `finish()` performs the transfer and hands back the status a
+     * `TransferDone` would carry.
      *
      * The arbiter starts one transaction at a time, so a second held
      * request is not a case the contract allows; it replaces the first.
@@ -332,12 +328,9 @@ public:
                 return true;
             }
             if (completion_ == SimSpiCompletion::deferred) {
-                if (static_cast<uint32_t>(r.cmd_len) + r.len >= short_frames_) {
-                    held_ = r;
-                    has_held_ = true;
-                    return false;
-                }
-                ++short_;
+                held_ = r;
+                has_held_ = true;
+                return false;
             }
         }
         perform(r);
@@ -384,14 +377,6 @@ public:
     static SimSpiCompletion completion() { return completion_; }
     static void completion(SimSpiCompletion c) { completion_ = c; }
 
-    /// The short request's threshold, in frames: an asynchronous request
-    /// of fewer frames completes inside start() in the `deferred` style. A
-    /// family's host derives its count from its rate and its measured
-    /// costs; here there is no rate, so the test sets one. 0 (the default):
-    /// no request is short.
-    static uint32_t short_frames() { return short_frames_; }
-    static void short_frames(uint32_t frames) { short_frames_ = frames; }
-
     // ---- what a test reads --------------------------------------------------
 
     static uint32_t transactions() { return transactions_; }
@@ -399,12 +384,10 @@ public:
     /// Transactions whose select line had no device on it.
     static uint32_t unaddressed() { return unaddressed_; }
     static uint32_t polled_requests() { return polled_; }
-    /// Requests naming SpiEngine::dma, refused and short ones included.
+    /// Requests naming SpiEngine::dma, refused ones included.
     static uint32_t async_requests() { return async_; }
     /// Asynchronous requests refused for want of DMA.
     static uint32_t refused_requests() { return refused_; }
-    /// Asynchronous requests run inside start() as short.
-    static uint32_t short_requests() { return short_; }
     /// Every `cs_setup_us` the bus was asked for, added up and not spent.
     static uint32_t waited_us() { return waited_us_; }
     /// The stamp of the first and the last byte of the last transaction,
@@ -434,7 +417,6 @@ public:
         polled_ = 0;
         async_ = 0;
         refused_ = 0;
-        short_ = 0;
         waited_us_ = 0;
         first_byte_at_ = 0;
         last_byte_at_ = 0;
@@ -557,7 +539,6 @@ private:
     static inline Request held_ = [] { Request r{}; r.engine = SpiEngine::dma; return r; }();
     static inline bool has_held_ = false;
     static inline SimSpiCompletion completion_ = SimSpiCompletion::immediate;
-    static inline uint32_t short_frames_ = 0;
     static inline uint8_t status_ = spi_ok;
 
     static inline uint32_t transactions_ = 0;
@@ -566,7 +547,6 @@ private:
     static inline uint32_t polled_ = 0;
     static inline uint32_t async_ = 0;
     static inline uint32_t refused_ = 0;
-    static inline uint32_t short_ = 0;
     static inline uint32_t waited_us_ = 0;
     static inline uint32_t first_byte_at_ = 0;
     static inline uint32_t last_byte_at_ = 0;

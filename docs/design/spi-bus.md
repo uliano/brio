@@ -848,15 +848,13 @@ request inside `start()`, `deferred` holds an asynchronous one (`start()` false,
 `finish()` performing it and returning the status the application's DMA glue would
 post), which is how an asynchronous transfer is staged with no interrupt anywhere.
 `dma` false (`has_dma`) refuses every asynchronous request, `spi_rejected` and the wire
-untouched. The simulation still keeps `short_frames()`, a count the test sets below
-which a `deferred` host completes a request naming `dma` inside `start()`: no family's
-host does that any longer ("Two ways to run a request"), so a test that sets the count
-stages a path the families no longer take; left at its default, zero, it changes
-nothing.
+untouched. A `deferred` host with DMA holds a request naming `dma` at any length, down
+to one frame, as every family's host runs it on its engines ("Two ways to run a
+request").
 
 `test_dcs_link` runs the arbiter over it in both styles, which is what proves it
 satisfies this contract and not only its shape, and `test_sim_spi_host` the refusal and
-that count at the engine and through the arbiter. Beside it, `SpiBus` is
+the two ways at the engine and through the arbiter. Beside it, `SpiBus` is
 host-tested over a fake `Bus` (`test_spi_bus`, `test_bus_master`), and the IP stratum's
 own driver against a PL022 made of RAM (`test_pl022`, `host/sim_pl022.hpp`), the
 realization with no family behind it that proves the driver knows no chip.

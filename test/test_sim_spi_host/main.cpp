@@ -2,14 +2,10 @@
 // against the contract's two ways to run a request
 // (docs/design/spi-bus.md, "Two ways to run a request"): POLLED inside
 // start(), or ASYNCHRONOUS, which is DMA - refused at once by a host with
-// no DMA (has_dma false: spi_rejected, nothing on the wire), run polled
-// inside start() when shorter than the host's threshold, and answered
-// later otherwise. Each rule is judged at the engine and again through the
-// arbiter of util/bus_master.hpp, which is what a client sees: the reply.
-//
-// The simulation has no rate and no cost, so the short request's threshold
-// is a count the test sets (short_frames()), standing for the one a
-// family's host derives from its rate and its measured costs.
+// no DMA (has_dma false: spi_rejected, nothing on the wire), and answered
+// later at any length otherwise. Each rule is judged at the engine and
+// again through the arbiter of util/bus_master.hpp, which is what a client
+// sees: the reply.
 //
 // Run with: ctest --preset host (or ctest --preset host -R test_sim_spi_host)
 
@@ -82,8 +78,6 @@ void fresh() {
     PlainBus::release();
     DmaBus::completion(SimSpiCompletion::deferred);
     PlainBus::completion(SimSpiCompletion::deferred);
-    DmaBus::short_frames(0);
-    PlainBus::short_frames(0);
     SimSpiBench::reset();
     dma_dev = Counter{};
     plain_dev = Counter{};
@@ -142,35 +136,47 @@ TEST_CASE("a host without DMA runs the same request polled") {
     CHECK(PlainBus::transactions() == 1);
 }
 
-TEST_CASE("a short asynchronous request completes inside start(), a long one is held") {
+TEST_CASE("an asynchronous request is held for its handler at any length, nothing on the wire until then") {
     fresh();
-    DmaBus::short_frames(6);
-    // Five frames (a command and four data frames): under six, so short.
-    CHECK(DmaBus::start(request<DmaBus>(4, false, 1)));
-    CHECK(DmaBus::status() == spi_ok);
-    CHECK_FALSE(DmaBus::pending());
-    CHECK(dma_dev.bytes == 5);
-    CHECK(DmaBus::short_requests() == 1);
-    // Six frames: at the threshold, held for the DMA handler.
-    CHECK_FALSE(DmaBus::start(request<DmaBus>(6, false)));
+    // One frame: the shortest request there is, held all the same.
+    CHECK_FALSE(DmaBus::start(request<DmaBus>(1, false)));
     CHECK(DmaBus::pending());
-    CHECK(dma_dev.bytes == 5);
+    CHECK(dma_dev.bytes == 0);
+    CHECK(DmaBus::transactions() == 0);
     CHECK(DmaBus::finish() == spi_ok);
-    CHECK(dma_dev.bytes == 11);
-    CHECK(DmaBus::short_requests() == 1);
+    CHECK_FALSE(DmaBus::pending());
+    CHECK(dma_dev.bytes == 1);
+    // A command frame and four data frames: held, then performed whole.
+    CHECK_FALSE(DmaBus::start(request<DmaBus>(4, false, 1)));
+    CHECK(DmaBus::pending());
+    CHECK(dma_dev.bytes == 1);
+    CHECK(DmaBus::finish() == spi_ok);
+    CHECK(dma_dev.bytes == 6);
+    CHECK(DmaBus::transactions() == 2);
     CHECK(DmaBus::async_requests() == 2);
     CHECK(DmaBus::refused_requests() == 0);
 }
 
-TEST_CASE("with no threshold set every asynchronous request is held, and a polled one never is") {
+TEST_CASE("a polled request completes inside start() at any length, on the host with DMA too") {
     fresh();
-    CHECK_FALSE(DmaBus::start(request<DmaBus>(1, false)));
-    CHECK(DmaBus::finish() == spi_ok);
     CHECK(DmaBus::start(request<DmaBus>(1, true)));
-    DmaBus::short_frames(100);
-    CHECK(DmaBus::start(request<DmaBus>(50, true)));   // polled: the threshold is not its
-    CHECK(DmaBus::short_requests() == 0);
+    CHECK_FALSE(DmaBus::pending());
+    CHECK(DmaBus::start(request<DmaBus>(16, true)));
+    CHECK_FALSE(DmaBus::pending());
+    CHECK(dma_dev.bytes == 17);
+    CHECK(in[15] == 0x5A);
     CHECK(DmaBus::polled_requests() == 2);
+    CHECK(DmaBus::async_requests() == 0);
+}
+
+TEST_CASE("in the immediate style an asynchronous request completes inside start()") {
+    fresh();
+    DmaBus::completion(SimSpiCompletion::immediate);
+    CHECK(DmaBus::start(request<DmaBus>(8, false)));
+    CHECK(DmaBus::status() == spi_ok);
+    CHECK_FALSE(DmaBus::pending());
+    CHECK(dma_dev.bytes == 8);
+    CHECK(DmaBus::async_requests() == 1);
 }
 
 // =============================================================================
@@ -236,38 +242,52 @@ TEST_CASE("through the arbiter: the refusal is the requester's reply, and the bu
     CHECK(plain_dev.bytes == 8);
 }
 
-TEST_CASE("through the arbiter: a short asynchronous request is answered in the dispatch that received it") {
+TEST_CASE("through the arbiter: a polled request is answered in the dispatch that received it") {
     arbiter_fresh();
-    DmaBus::short_frames(4);
-    auto s = request<DmaBus>(3, false);
-    s.reply = reply_to<Client, SpiDone>();
-    post<DmaArb>(s);
+    auto p = request<DmaBus>(3, true);
+    p.reply = reply_to<Client, SpiDone>();
+    post<DmaArb>(p);
     settle();
     CHECK(Client::replies == std::vector<uint8_t>{spi_ok});
     CHECK_FALSE(DmaBus::pending());
     CHECK(dma_dev.bytes == 3);
 }
 
-TEST_CASE("through the arbiter: a long one waits for its handler, the short ones behind it are answered in turn") {
+TEST_CASE("through the arbiter: a one-frame asynchronous request waits for its handler") {
     arbiter_fresh();
-    DmaBus::short_frames(4);
+    auto one = request<DmaBus>(1, false);
+    one.reply = reply_to<Client, SpiDone>();
+    post<DmaArb>(one);
+    settle();
+    CHECK(Client::replies.empty());
+    CHECK(DmaBus::pending());
+    CHECK(dma_dev.bytes == 0);
+    post<DmaArb>(TransferDone{DmaBus::finish()});
+    settle();
+    CHECK(Client::replies == std::vector<uint8_t>{spi_ok});
+    CHECK(dma_dev.bytes == 1);
+}
+
+TEST_CASE("through the arbiter: an asynchronous one waits for its handler, the polled ones behind it are answered in turn") {
+    arbiter_fresh();
     auto big = request<DmaBus>(8, false);
     big.reply = reply_to<Client, SpiDone>();
-    auto small = request<DmaBus>(2, false);
+    auto small = request<DmaBus>(2, true);
     small.reply = reply_to<Client, SpiDone>();
     post<DmaArb>(big);
     post<DmaArb>(small);
     post<DmaArb>(small);
     settle();
-    // The long one is on the "engines"; the short ones wait behind it.
+    // The asynchronous one is on the "engines"; the polled ones wait behind it.
     CHECK(Client::replies.empty());
     CHECK(DmaBus::pending());
     // THE TEST IS THE DMA HANDLER'S GLUE: the transfer ends, its status
-    // posted; the arbiter answers it and drains the two short ones, each
+    // posted; the arbiter answers it and drains the two polled ones, each
     // completing inside its start().
     post<DmaArb>(TransferDone{DmaBus::finish()});
     settle();
     CHECK(Client::replies == std::vector<uint8_t>{spi_ok, spi_ok, spi_ok});
     CHECK(dma_dev.bytes == 12);
-    CHECK(DmaBus::short_requests() == 2);
+    CHECK(DmaBus::polled_requests() == 2);
+    CHECK(DmaBus::async_requests() == 1);
 }
