@@ -9,6 +9,7 @@
 // app-level fact and is not compiled here.
 #include "samc21/clock.hpp"
 #include "samc21/platform.hpp"
+#include "samc21/dmac.hpp"
 #include "samc21/spi.hpp"
 #include "kernel/time.hpp"
 #include "util/spi_bus.hpp"
@@ -310,8 +311,7 @@ void resource_verbs() {
 using Host = SpiHost<0, host_pads>;
 using Peer = SpiClient<0, client_pads>;
 
-// No engine slot: every request runs polled, an asynchronous one refused
-// (samc21/spi.hpp; neg/spi_engine_slot_absent.cpp).
+// No engines named: every request naming SpiEngine::dma is refused (samc21/spi.hpp).
 static_assert(!Host::has_dma);
 
 // The Request is the bus arbiter's token and must be copyable into its
@@ -347,7 +347,7 @@ void host_verbs() {
         .mode = SpiMode::mode3,
         .reply = {},
     };
-    (void)Host::start(r);   // asynchronous: refused, spi_rejected
+    (void)Host::start(r);   // dma on a host with no engines: refused, spi_rejected
     (void)Host::status();
     // A degenerate request completes inside start() - the arbiter's
     // synchronous-completion path.
@@ -367,7 +367,7 @@ void host_verbs() {
 // An unknown tag is refused (neg/spi_host_placement_unknown.cpp).
 static_assert(platform_places_fast_text<SamPlatform>);
 static_assert(HotPlacement<InRam, SamPlatform> && HotPlacement<InFlash, SamPlatform>);
-using RamHost = SpiHost<0, host_pads, 0, InRam>;
+using RamHost = SpiHost<0, host_pads, 0, NoDmaEngine, NoDmaEngine, InRam>;
 // The placement moves code, never the Request a device client fills.
 static_assert(sizeof(RamHost::Request) == sizeof(Host::Request));
 
@@ -389,6 +389,47 @@ void ram_host_verbs() {
     (void)RamHost::start(r);   // refused before the placed path
     fixture_placed_function();
     RamHost::release();
+}
+
+// ---- the engines (samc21/dmac.hpp) ------------------------------------------------
+// The pair, and the transmit engine alone; a receive engine alone is refused
+// (neg/spi_receive_engine_alone.cpp), and so are two engines on one channel
+// (neg/spi_engines_one_channel.cpp). The placement after them places the loops,
+// the engined command loop with them.
+using PairHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+using WriteHost = SpiHost<0, host_pads, 0, DmaTxEngine<1>>;
+using RamPairHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>, InRam>;
+static_assert(PairHost::has_dma && PairHost::has_rx_engine);
+static_assert(WriteHost::has_dma && !WriteHost::has_rx_engine);
+static_assert(sizeof(PairHost::Request) == sizeof(Host::Request));
+static_assert(spi_dma_fault == bus_engine_status);
+
+template <typename H>
+void engined_host_verbs() {
+    constexpr SysClock clock;
+    (void)H::init(clock);
+    static uint8_t cmd[1] = {0x2C};
+    static uint8_t out[4] = {1, 2, 3, 4};
+    static uint8_t in[4] = {};
+    typename H::Request r{};
+    r.cs = Pin<'B', 0>::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(cmd));
+    r.cmd_len = 1;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.rx = lend<Lease::reply>(in);
+    r.len = 4;
+    r.engine = SpiEngine::dma;
+    (void)H::start(r);       // the command in the loop, the data on the engines
+    (void)H::dma_isr();      // the SERCOM's vector and the DMAC's
+    (void)H::status();
+    (void)H::recover();
+    H::prime(SpiMode::mode2, 7);
+    H::release();
+}
+void engined_hosts() {
+    engined_host_verbs<PairHost>();
+    engined_host_verbs<WriteHost>();   // the read refused: spi_rejected
+    engined_host_verbs<RamPairHost>();
 }
 
 void client_verbs() {

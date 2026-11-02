@@ -214,8 +214,8 @@ with VREGSMOD in performance mode switches to the low-power regulator
 and keeps requesting GCLK0; the workaround is SUPC.VREG.RUNSTDBY)
 is live and stated where it belongs; **1.8.7** (a DMA write performed
 while sleepwalking may not land on RTC.COUNT, the TC/TCC control and
-count registers, or ADC/SDADC SWTRIG) is live and unreachable: the one
-DMA channel this stratum drives writes a SERCOM's DATA and is never
+count registers, or ADC/SDADC SWTRIG) is live and unreachable: the DMA
+channels this stratum drives move a SERCOM's DATA and are never
 configured to run in standby ([dmac.md](dmac.md)); **1.8.5** (higher
 standby current, no workaround) is a number, not a behaviour. Not this
 silicon, revision B only: 1.8.1, 1.8.11, 1.8.6.
@@ -702,7 +702,7 @@ character its polled loop has not fetched yet. What it established:
   peer's quartz, so no drift builds a backlog.
 - **The UART transmit side, both transmitters.** 300 lines blasted into
   the peer's sink through the interrupt transmitter and then through
-  the DMA transmit engine (channel 0, the stratum's one DMA user),
+  the DMA transmit engine (channel 0),
   counted and summed exact, no block abandoned; 996 to 999 per mille of
   the wire with the pressure light. At 97 us x 3000 the writer, the
   lowest object, cannot refill the ring as fast as the wire drains it:
@@ -921,8 +921,8 @@ pull-walking that makes this stratum's pin tests wireless
 ([eic.md](eic.md): a free pad walked between the rails through its own
 pull resistor by writing the PORT OUT bit that sets the pull's
 direction) is a CPU store and is therefore unavailable in a
-standby, and the DMAC cannot stand in for it: the one channel this
-stratum drives is the Uart's transmitter, never configured to run in
+standby, and the DMAC cannot stand in for it: the channels this
+stratum drives serve the serial transports, never configured to run in
 standby (CHCTRLA.RUNSTDBY clear, 25.6.7).
 What is left is the PORT as an EVENT USER with EVACT = OUT, the one
 action 28.6.4 says survives a standby - and it does. The chain that
@@ -1165,13 +1165,13 @@ Driver gaps (not built):
 - **The MPU**: nothing here needs memory protection; born with its
   first user. (The MTB trace is built - [mtb.md](mtb.md) - and DIVAS
   as the toolchain's division is ruled out, [divas.md](divas.md).)
-- **The DMA transmitter across a standby entry.** 25.6.7 makes a channel
+- **The DMA engines across a standby entry.** 25.6.7 makes a channel
   with CHCTRLA.RUNSTDBY clear software's to suspend before standby (its
-  SYNCBUSY bits checked) and to resume after; the Uart's transmit engine
-  ([dmac.md](dmac.md)) is such a channel and nothing suspends it, so a
-  standby entered with a console block in flight is outside what this
+  SYNCBUSY bits checked) and to resume after; every engine of this
+  stratum ([dmac.md](dmac.md)) is such a channel and nothing suspends it,
+  so a standby entered with a block in flight is outside what this
   stratum has run. Born with the first program that sleeps to standby
-  on a console whose Uart names `DmaTxEngine`.
+  with an engined transport.
 
 Implemented but not bench-verified:
 - **`in_handler()` on this core**: IPSR is the architecture's (ARMv6-M

@@ -151,7 +151,7 @@ Driver: [avrxt/spi.hpp](../../brio/avrxt/spi.hpp). The arbiter above it:
 [spi-bus.md](../design/spi-bus.md) (`util/bus_master.hpp`,
 `util/spi_bus.hpp`). Reference test: `test_avr_spi` - a letter is one
 command key of the suite's console and the group of verdicts it runs;
-`z` runs the single-board set (letters a to j and t) and `y` the set
+`z` runs the single-board set (letters a to j, t and x) and `y` the set
 that needs a partner board running `spi_peer` (k to s, u, v and w).
 
 ## What the silicon does
@@ -320,6 +320,26 @@ back to back to 10 MHz and broken at 12 gapped and back to back alike ([../samc2
 holds that client's facts). An AVR host that watches its SS (SSD = 0) pulls
 the line up itself, which is what holds it against that peer: its SS
 pad can carry no pull-up.
+
+**When a request ends the wire has ended** (letter x, on the AVR64EA48 at
+its 20 MHz: the four modes, read and write, with the select and with a
+null one, at CLK_PER/128 and CLK_PER/16, ten runs). A burst ends on
+TXCIF, shifter and buffer empty (28.3.2.1.2), and right after `start()`
+returns the SCK pad reads at its idle level in every request at /128; in
+modes 2 and 3, whose last edge rises, the SPI's own SCK event counted on
+a TCB shows no edge after the end at either rate. The bound: at /128 half
+a bit is 64 cycles and the pad is read some tens of cycles after TXCIF
+(the tail's reads, the select's store, the return), so in modes 0 and 1
+the pad's witness is marginal and the edge count, with no latency, is
+the one that rules out an early end in the modes whose count it can
+make. So the AVR's end is not early, and nothing waits for it.
+
+**A request of 65536 frames is one** (letter x): a command of one and
+65535 data frames at CLK_PER/4 runs 2,228,674 cycles against the wire's
+2,097,152 and ends `spi_ok`. The two lengths are tested apart for the
+empty request: a sum of a byte and a sixteen-bit length taken in sixteen
+bits wraps there, and such a request returned `spi_ok` in 249 cycles with
+nothing on the wire (the control, the letter on that code).
 
 **The bit rates are exact.** All seven divisions measured through the
 SPI's own SCK event into a TCB frequency meter (period between rising
@@ -970,7 +990,12 @@ client selects itself with INVEN on its own pulled-up SS pin.
   on the polled loop alone), and `bench_avr` letter `e`'s verdict (the
   refusal), on the AVR128DB48 and the AVR128DA48: measured on the
   AVR64EA48 alone - the same core, chapter and instructions -, and a run
-  of each on those boards would measure them;
+  of each on those boards would measure them, and so would letter `x`;
+- the select's rule in modes 0 and 1 beyond the pad's witness (letter
+  `x`): their last edge falls, which the SCK event's rising-edge count
+  cannot see, and the pad read is marginal against half a bit at /128; a
+  count of the falling edges (the event inverted onto a second channel)
+  would rule an early end out there as it does in modes 2 and 3;
 
 - the AVR EA's DEFAULT route (PA4..PA7) and ALT4/ALT5 as a HOST: the
   board's PD6 and PC2 forbid the latter two (above), and DEFAULT carries

@@ -109,6 +109,9 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
+#ifndef SPI_SELECT_CONTROL
+#include "samc21/dmac.hpp"
+#endif
 #include "samc21/nvic.hpp"
 #include "samc21/osc32kctrl.hpp"
 #include "samc21/pin.hpp"
@@ -1394,8 +1397,7 @@ void tf_wireless() {
     // frame against the transmit-only turn's 34 (docs/samc21/spi.md) - and
     // there the reading is the wire's; at 12 and 24 MHz the frame is 32 and
     // 16 cycles, shorter than the turn, so the instrument cannot time them:
-    // printed, not judged - a DMA data phase would time them, and this
-    // stratum declines one (erratum 1.10.4, docs/samc21/dmac.md).
+    // printed, not judged - the engines time them (letter r).
     if (!ruler_ok) {
         print(serial, "  the crystal ruler did not come up - the rate measurement "
                       "is skipped and the verdict declined",
@@ -2704,6 +2706,921 @@ void tk_host_paths() {
     (void)link_command_mode();
 }
 
+// ===========================================================================
+// The engines (samc21/dmac.hpp, samc21/spi.hpp): letters l .. r
+// ===========================================================================
+//
+// THE ENGINED HOSTS name their channels from the budget of two: the pair
+// takes channels 0 (transmit) and 1 (receive), the transmit engine alone
+// channel 1, so that the console's transmit engine (channel 0) may run
+// beside it - a display's shape. Every engined host on SERCOM1 is owner 2
+// (the SERCOM plus one), whichever of them claims, so they take the
+// channels in turn by re-arming; a letter releases its host at its end, so
+// the next one finds the budget free.
+//
+// THE SPY PIN: a PinRef whose group is a PORT group in SRAM, so the host's
+// OUTCLR and OUTSET stores land in a struct this suite reads - the proof
+// that a refused request moved neither the select nor the D/C, and of the
+// order a request moved them in.
+namespace dm {
+
+// SPI_SELECT_CONTROL builds letter l's polled half alone, over the headers of
+// the code before the engines - the control its verdict is shown failing on.
+#ifndef SPI_SELECT_CONTROL
+using DBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+using WBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<1>>;
+using DLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
+using WLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<1>>;
+/// The console with its transmit engine on channel 0 (letter o).
+using UDma = Uart<5, console_pads, 64, 256, DmaTxEngine<0>>;
+constexpr UDma udma{};
+#endif
+
+/// The wireless letters' stand-in select: PB23, the pad bench_samc's
+/// letter e scripts its D/C on (an LED on this board, lit while selected).
+using Fake = Pin<'B', 23>;
+
+port_group_registers_t spy_group{};
+constexpr uint32_t spy_cs = 1u << 0;
+constexpr uint32_t spy_dc = 1u << 1;
+void spy_reset() {
+    spy_group.PORT_OUTSET = 0u;
+    spy_group.PORT_OUTCLR = 0u;
+}
+PinRef spy(uint32_t mask) { return PinRef{&spy_group, mask}; }
+
+/// The engined host that is live, through two plain functions the vectors
+/// call - the hosts' bodies are always inline, and a lambda without a
+/// capture converts to a function pointer.
+bool (*volatile live_isr)() = nullptr;
+uint8_t (*volatile live_status)() = nullptr;
+volatile bool dma_done = false;
+volatile uint8_t dma_status = 0;
+volatile bool sck_at_end = false;
+volatile uint32_t dma_end_at = 0;
+volatile bool console_engined = false;
+
+template <typename H>
+void engage() {
+    live_status = [] { return H::status(); };
+    live_isr = [] { return H::dma_isr(); };
+}
+void disengage() {
+    live_isr = nullptr;
+    live_status = nullptr;
+}
+
+/// The vectors' common half: the end of a request on the engines, the SCK
+/// pad read right after dma_isr() said so.
+[[gnu::always_inline]] inline void dma_vector() {
+#ifdef SPI_SELECT_CONTROL
+    if (live_isr == nullptr) return;
+#endif
+    bool (*isr)() = live_isr;
+    if (isr != nullptr && isr()) {
+        sck_at_end = SckPin::read();
+        dma_end_at = wall();
+        dma_status = live_status();
+        dma_done = true;
+    }
+}
+
+/// One request: true when the engines had it (start() returned false). The
+/// end is the vector's: waited for on the ruler, bounded, and a request that
+/// never ended is recovered and reported as 0xEE.
+template <typename H>
+uint8_t run(const typename H::Request& r, bool& on_engines, uint32_t timeout_ms = 300) {
+    dma_done = false;
+    on_engines = !H::start(r);
+    if (!on_engines) {
+        return H::status();
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (!dma_done && Ticker::millis() - t0 < timeout_ms) {
+    }
+    if (!dma_done) {
+        (void)H::recover();
+        return 0xEEu;
+    }
+    return dma_status;
+}
+
+template <typename H>
+typename H::Request request(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
+                            SpiMode mode, SpiEngine engine) {
+    typename H::Request r{};
+    r.tx = lend<Lease::reply>(tx);
+    r.rx = lend<Lease::reply>(rx);
+    r.len = len;
+    r.baud = baud;
+    r.mode = mode;
+    r.engine = engine;
+    return r;
+}
+
+#ifndef SPI_SELECT_CONTROL
+/// A protocol window on an engined host: the host brought up (it takes the
+/// SERCOM back from the command channel's engineless one), the mode primed,
+/// the select by hand around a request on the engines, the command channel
+/// back after it.
+template <typename H>
+uint8_t window(typename H::Request r, bool& on_engines) {
+    (void)H::init(clock);
+    engage<H>();
+    H::prime(r.mode, r.baud);
+    Cs::clear();
+    link_hold();
+    const uint8_t st = run<H>(r, on_engines);
+    link_hold();
+    Cs::set();
+    disengage();
+    (void)link_command_mode();
+    return st;
+}
+
+/// The peer's side of a window: an exchange of `count` frames, the answers
+/// the pattern from `seed_b`, judged by the peer from `seed_a`.
+bool arm_peer(uint16_t count, uint8_t spare = 0, uint8_t mode = 0, uint8_t seed_a = 0x13,
+              uint8_t seed_b = 0x57) {
+    spilink::Params a{};
+    a.cfg.apply = 1;
+    a.cfg.mode = mode;
+    a.cfg.regime = spilink::regime_buffer_wait;
+    a.count = count;
+    a.ms = 400;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.spare = spare;
+    const bool ok = peer_act(Op::exchange, a);
+    settle();
+    return ok;
+}
+
+#endif
+
+uint8_t big_tx[1024];
+uint8_t big_rx[1024];
+
+void fill_stream(uint8_t* p, uint16_t n, uint8_t seed) {
+    spilink::Stream s(spilink::pattern_prbs, seed);
+    for (uint16_t i = 0; i < n; ++i) {
+        p[i] = s.next();
+    }
+}
+uint16_t answers_wrong(const uint8_t* got, uint16_t n, uint8_t seed, uint16_t from = 0) {
+    uint16_t bad = 0;
+    for (uint16_t i = 0; i < n; ++i) {
+        if (got[i] != spilink::pattern_value(spilink::pattern_prbs, seed, static_cast<uint16_t>(i + from))) {
+            ++bad;
+        }
+    }
+    return bad;
+}
+
+}  // namespace dm
+
+// ---- l - the select's rule ----------------------------------------------------
+
+/**
+ * WHEN A REQUEST ENDS THE WIRE HAS ENDED: right after the end - start()
+ * returning on the loop, dma_isr() answering true in the vector - the SCK
+ * pad must already rest at the mode's idle level. On the loop-back (no
+ * peer: PA17 high, its client unselected), modes 0..3, read and write, a
+ * real select (PB23) and a null one, at BAUD 255 (93.75 kHz, a bit 512
+ * core cycles) and BAUD 23 (1 MHz, a bit 48), four frames a request.
+ *
+ * THE BOUND, derived: an end that comes with the receiver's RXC, the last
+ * bit's sampling edge, is early by half a bit in modes 0 and 2, whose last
+ * edge is the one after it - 256 core cycles at BAUD 255. The pad is read a
+ * few tens of cycles after the end (the return and one PORT load, or the
+ * vector's exit path and one load), well inside those 256, so an early end
+ * at BAUD 255 reads the active level and cannot be missed; at BAUD 23 the
+ * half bit is 24 cycles, shorter than that path, and the instrument no
+ * longer sees it - those rows are printed, judged only at the slowest rung.
+ * Modes 1 and 3 sample on the last edge itself: there an early end has no
+ * half bit to hide in, and the verdict holds them to the same rule.
+ */
+void tl_select() {
+    dm::Fake::set();
+    dm::Fake::output();
+    constexpr uint8_t bauds[2] = {255, 23};
+    uint8_t out[4] = {0x5A, 0xC3, 0x0F, 0xA5};
+    uint8_t in[4] = {};
+    uint16_t bad_slow[2] = {};   // [polled, dma]
+    uint16_t bad_mid[2] = {};
+    uint16_t rows[2] = {};
+    uint16_t data_bad = 0;
+    uint16_t not_engines = 0;
+    for (uint8_t engine = 0; engine < 2u; ++engine) {
+#ifdef SPI_SELECT_CONTROL
+        if (engine == 1u) break;   // the code before has no engines
+#endif
+        for (uint8_t m = 0; m < 4u; ++m) {
+            const SpiMode mode = static_cast<SpiMode>(m);
+            const bool idle = spi_cpol(mode);
+            for (const uint8_t baud : bauds) {
+                for (uint8_t read = 0; read < 2u; ++read) {
+                    for (uint8_t real_cs = 0; real_cs < 2u; ++real_cs) {
+                        for (uint8_t k = 0; k < 4u; ++k) in[k] = 0xEE;
+                        bool sck = idle;
+                        bool on = false;
+                        if (engine == 0u) {
+                            (void)Loop::init(clock);
+                            SckPin::function(PinFunction::c, {.input_enable = true});
+                            auto r = dm::request<Loop>(out, read ? in : nullptr, 4, baud, mode,
+                                                       SpiEngine::polled);
+                            r.cs = real_cs ? dm::Fake::ref() : PinRef{};
+                            (void)Loop::start(r);
+                            sck = SckPin::read();
+                        }
+#ifndef SPI_SELECT_CONTROL
+                        else {
+                            (void)dm::DLoop::init(clock);
+                            SckPin::function(PinFunction::c, {.input_enable = true});
+                            dm::engage<dm::DLoop>();
+                            auto r = dm::request<dm::DLoop>(out, read ? in : nullptr, 4, baud, mode,
+                                                            SpiEngine::dma);
+                            r.cs = real_cs ? dm::Fake::ref() : PinRef{};
+                            const uint8_t st = dm::run<dm::DLoop>(r, on);
+                            sck = dm::sck_at_end;
+                            dm::disengage();
+                            if (!on || st != spi_ok) ++not_engines;
+                        }
+#endif
+                        ++rows[engine];
+                        const bool good = sck == idle;
+                        if (!good) {
+                            if (baud == 255u) ++bad_slow[engine];
+                            else ++bad_mid[engine];
+                            print(serial, "    ", engine ? "dma   " : "polled", " mode ", m,
+                                  " BAUD ", baud, read ? " read " : " write", real_cs ? " cs  " : " null",
+                                  ": SCK ", sck ? "high" : "low", " at the end, idle ",
+                                  idle ? "high" : "low", crlf);
+                        }
+                        if (read) {
+                            for (uint8_t k = 0; k < 4u; ++k) {
+                                if (in[k] != out[k]) ++data_bad;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+#ifndef SPI_SELECT_CONTROL
+    dm::DLoop::release();
+#endif
+    dm::Fake::set();
+    dm::Fake::release();
+    (void)link_command_mode();
+    print(serial, "  polled: ", rows[0], " requests, ", bad_slow[0], " ended before the last edge at "
+          "BAUD 255, ", bad_mid[0], " read so at BAUD 23 (the instrument blind there)", crlf);
+    print(serial, "  dma:    ", rows[1], " requests, ", bad_slow[1], " at BAUD 255, ", bad_mid[1],
+          " at BAUD 23, ", not_engines, " not ended spi_ok by the engines; ", data_bad,
+          " read bytes wrong in both", crlf);
+    bench.verdict("THE SELECT'S RULE, polled: at BAUD 255 every request of the four modes, read and "
+                  "write, with a select and without, ends with SCK at its idle level",
+                  bad_slow[0] == 0u);
+#ifndef SPI_SELECT_CONTROL
+    bench.verdict("and on the engines too, the end read in the vector right after dma_isr() said so",
+                  bad_slow[1] == 0u && rows[1] == rows[0] && not_engines == 0u);
+#endif
+    bench.verdict("every byte read back on the loop exact", data_bad == 0u);
+}
+
+#ifndef SPI_SELECT_CONTROL
+
+// ---- m - the engines: what dma means, what is refused, the command rule ------
+
+void tm_engines() {
+    if (!need_peer()) return;
+    const uint8_t baud = *Bus::baud_for(1'000'000UL);   // a frame 384 cycles: the loop cheaper by far
+    dm::fill_stream(dm::big_tx, 64, 0x13);
+
+    // ONE FRAME ON THE ENGINES, written and read.
+    bool on = false;
+    bool rep_ok = false;
+    spilink::Report rp{};
+    bool w1 = false;
+    if (dm::arm_peer(1, spilink::spare_receive_only)) {
+        const uint8_t st = dm::window<dm::WBus>(
+            dm::request<dm::WBus>(dm::big_tx, nullptr, 1, baud, SpiMode::mode0, SpiEngine::dma), on);
+        rep_ok = peer_report(rp);
+        w1 = on && st == spi_ok && rep_ok && rp.count == 1u && rp.mism == 0u;
+        print(serial, "  one frame written on the transmit engine alone: on the engines ", on,
+              ", status ", st, ", the peer counted ", rp.count, " mism ", rp.mism, crlf);
+    }
+    bench.verdict("SpiEngine::dma at ONE frame, written: start() false, dma_isr() the end, spi_ok, "
+                  "the peer received it exact",
+                  w1);
+    bool r1 = false;
+    if (dm::arm_peer(1)) {
+        dm::big_rx[0] = 0xEE;
+        const uint8_t st = dm::window<dm::DBus>(
+            dm::request<dm::DBus>(dm::big_tx, dm::big_rx, 1, baud, SpiMode::mode0, SpiEngine::dma), on);
+        rep_ok = peer_report(rp);
+        const uint16_t bad = dm::answers_wrong(dm::big_rx, 1, 0x57);
+        r1 = on && st == spi_ok && bad == 0u && rep_ok && rp.count == 1u && rp.mism == 0u;
+        print(serial, "  one frame read on the pair: on the engines ", on, ", status ", st,
+              ", read ", hex(dm::big_rx[0]), " (", bad, " wrong), the peer counted ", rp.count,
+              " mism ", rp.mism, crlf);
+    }
+    bench.verdict("SpiEngine::dma at ONE frame, read: start() false, dma_isr() the end, the answer "
+                  "exact both ways",
+                  r1);
+    bool r16 = false;
+    if (dm::arm_peer(16, 0, 3)) {
+        const uint8_t st = dm::window<dm::DBus>(
+            dm::request<dm::DBus>(dm::big_tx, dm::big_rx, 16, baud, SpiMode::mode3, SpiEngine::dma), on);
+        rep_ok = peer_report(rp);
+        const uint16_t bad = dm::answers_wrong(dm::big_rx, 16, 0x57);
+        r16 = on && st == spi_ok && bad == 0u && rep_ok && rp.count == 16u && rp.mism == 0u;
+        print(serial, "  sixteen frames read on the pair in mode 3: status ", st, ", ", bad,
+              " wrong, the peer counted ", rp.count, " mism ", rp.mism, crlf);
+    }
+    bench.verdict("sixteen frames read on the pair in mode 3, exact both ways", r16);
+
+    // WHAT CANNOT BE CARRIED IS REFUSED, before the block, the select or the D/C.
+    dm::spy_reset();
+    (void)dm::WBus::init(clock);
+    Raw::clear_flags(SpiFlag::txc);
+    auto rr = dm::request<dm::WBus>(dm::big_tx, dm::big_rx, 8, baud, SpiMode::mode0, SpiEngine::dma);
+    rr.cs = dm::spy(dm::spy_cs);
+    rr.dc = dm::spy(dm::spy_dc);
+    const bool w_true = dm::WBus::start(rr);
+    const uint8_t w_st = dm::WBus::status();
+    const uint32_t spy_touched = dm::spy_group.PORT_OUTSET | dm::spy_group.PORT_OUTCLR;
+    const bool no_frame = !Raw::txc_flag() && !Raw::rxc_flag();
+    auto rb = dm::request<Bus>(dm::big_tx, dm::big_rx, 8, baud, SpiMode::mode0, SpiEngine::dma);
+    rb.cs = dm::spy(dm::spy_cs);
+    rb.dc = dm::spy(dm::spy_dc);
+    (void)Bus::init(clock);
+    const bool b_true = Bus::start(rb);
+    const uint8_t b_st = Bus::status();
+    const uint32_t spy_touched_b = dm::spy_group.PORT_OUTSET | dm::spy_group.PORT_OUTCLR;
+    auto re = dm::request<dm::DBus>(nullptr, nullptr, 0, baud, SpiMode::mode0, SpiEngine::dma);
+    re.cs = dm::spy(dm::spy_cs);
+    (void)dm::DBus::init(clock);
+    const bool e_true = dm::DBus::start(re);
+    const uint8_t e_st = dm::DBus::status();
+    const uint32_t spy_touched_e = dm::spy_group.PORT_OUTSET | dm::spy_group.PORT_OUTCLR;
+    (void)link_command_mode();
+    print(serial, "  a read on the transmit engine alone: start() ", w_true, ", status ", w_st,
+          ", select and D/C stores ", hex(spy_touched), ", a frame moved ", !no_frame,
+          "; dma on the engineless host: ", b_true, ", ", b_st, ", stores ", hex(spy_touched_b),
+          "; an empty dma request: ", e_true, ", ", e_st, ", stores ", hex(spy_touched_e), crlf);
+    bench.verdict("a read naming dma on the transmit engine alone: start() true, spi_rejected, the "
+                  "select and the D/C never stored, no frame on the wire",
+                  w_true && w_st == spi_rejected && spy_touched == 0u && no_frame);
+    bench.verdict("dma on a host with no engines: start() true, spi_rejected, nothing stored",
+                  b_true && b_st == spi_rejected && spy_touched_b == 0u);
+    bench.verdict("an empty request naming dma: start() true, spi_ok, nothing stored",
+                  e_true && e_st == spi_ok && spy_touched_e == 0u);
+    bool after = false;
+    if (dm::arm_peer(16)) {
+        const uint8_t st = dm::window<dm::DBus>(
+            dm::request<dm::DBus>(dm::big_tx, dm::big_rx, 16, baud, SpiMode::mode0, SpiEngine::dma), on);
+        rep_ok = peer_report(rp);
+        after = on && st == spi_ok && dm::answers_wrong(dm::big_rx, 16, 0x57) == 0u && rep_ok &&
+                rp.count == 16u && rp.mism == 0u;
+    }
+    bench.verdict("and the next request after the refusals exact both ways", after);
+
+    // THE COMMAND RULE: a command then data, the command in the loop and the
+    // data on the engines; a command alone on the engines. The peer counts
+    // the command and the data as one stream; the spy D/C says the D/C was
+    // cleared and set, and a command alone leaves it set at the end, as a
+    // polled one does.
+    bool cmd_data = false;
+    if (dm::arm_peer(17, spilink::spare_receive_only)) {
+        dm::spy_reset();
+        auto r = dm::request<dm::WBus>(dm::big_tx + 1, nullptr, 16, baud, SpiMode::mode0, SpiEngine::dma);
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dm::big_tx));
+        r.cmd_len = 1;
+        r.dc = dm::spy(dm::spy_dc);
+        const uint8_t st = dm::window<dm::WBus>(r, on);
+        const uint32_t dc_cleared = dm::spy_group.PORT_OUTCLR;
+        const uint32_t dc_set = dm::spy_group.PORT_OUTSET;
+        rep_ok = peer_report(rp);
+        cmd_data = on && st == spi_ok && rep_ok && rp.count == 17u && rp.mism == 0u &&
+                   dc_cleared == dm::spy_dc && dc_set == dm::spy_dc;
+        print(serial, "  a command of 1 then 16 data on the engines: status ", st,
+              ", the peer counted ", rp.count, " mism ", rp.mism, ", D/C cleared ", hex(dc_cleared),
+              " set ", hex(dc_set), crlf);
+    }
+    bench.verdict("a command then data: start() false, the command in the loop and the data on "
+                  "the engines, the peer received all seventeen in order, D/C low then high",
+                  cmd_data);
+    bool cmd_alone = false;
+    if (dm::arm_peer(4, spilink::spare_receive_only)) {
+        dm::spy_reset();
+        auto r = dm::request<dm::DBus>(nullptr, nullptr, 0, baud, SpiMode::mode0, SpiEngine::dma);
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dm::big_tx));
+        r.cmd_len = 4;
+        r.dc = dm::spy(dm::spy_dc);
+        const uint8_t st = dm::window<dm::DBus>(r, on);
+        rep_ok = peer_report(rp);
+        cmd_alone = on && st == spi_ok && rep_ok && rp.count == 4u && rp.mism == 0u &&
+                    dm::spy_group.PORT_OUTCLR == dm::spy_dc && dm::spy_group.PORT_OUTSET == dm::spy_dc;
+        print(serial, "  a command of 4 alone on the engines: on them ", on, ", status ", st,
+              ", the peer counted ", rp.count, " mism ", rp.mism, crlf);
+    }
+    bench.verdict("a command alone rides the engines: start() false, the peer received the four, "
+                  "D/C low through it and high at the end",
+                  cmd_alone);
+
+    // LONG POLLED STAYS THE LOOP, the engines bound: the channel's slot is
+    // never written (a sentinel in its count), start() returns true, the
+    // bytes exact on the loop-back.
+    (void)dm::DLoop::init(clock);
+    DmaChannel<0>::slot().DMAC_BTCNT = 0xBEEFu;
+    dm::fill_stream(dm::big_tx, 1024, 0x21);
+    for (auto& b : dm::big_rx) b = 0;
+    const bool lp_true = dm::DLoop::start(
+        dm::request<dm::DLoop>(dm::big_tx, dm::big_rx, 1024, 3, SpiMode::mode0, SpiEngine::polled));
+    const bool slot_kept = DmaChannel<0>::slot().DMAC_BTCNT == 0xBEEFu;
+    uint16_t lp_bad = 0;
+    for (uint16_t i = 0; i < 1024u; ++i) {
+        if (dm::big_rx[i] != dm::big_tx[i]) ++lp_bad;
+    }
+    print(serial, "  1024 polled frames at 6 MHz on the engined loop: start() ", lp_true,
+          ", the channel's slot untouched ", slot_kept, ", ", lp_bad, " wrong", crlf);
+    bench.verdict("a long polled request with the engines bound runs in the loop: start() true, "
+                  "no channel programmed, every byte exact",
+                  lp_true && slot_kept && lp_bad == 0u && dm::DLoop::status() == spi_ok);
+
+    // THE SUM THAT WOULD WRAP: a command of one and 65535 data frames, 65536
+    // frames, polled and on the engines, at 6 MHz (a frame 64 core cycles,
+    // 32 ruler ticks): each must take the wire's 65536 x 32 ticks.
+    for (uint8_t engine = 0; engine < 2u; ++engine) {
+        dm::engage<dm::DLoop>();
+        auto r = dm::request<dm::DLoop>(nullptr, nullptr, 65535u, 3, SpiMode::mode0,
+                                        engine ? SpiEngine::dma : SpiEngine::polled);
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dm::big_tx));
+        r.cmd_len = 1;
+        const uint32_t t0 = wall();
+        const uint8_t st = dm::run<dm::DLoop>(r, on, 2000);
+        const uint32_t took = (engine ? dm::dma_end_at : wall()) - t0;
+        dm::disengage();
+        print(serial, "  1 + 65535 frames ", engine ? "on the engines" : "polled", ": status ", st,
+              ", ", took, " ticks against the wire's ", 65536UL * 32UL, crlf);
+        bench.verdict(engine ? "cmd_len + len = 65536 on the engines: all of it on the wire"
+                             : "cmd_len + len = 65536 polled: all of it on the wire, not an empty request",
+                      st == spi_ok && took >= 65536UL * 32UL);
+    }
+    dm::DLoop::release();
+    (void)link_command_mode();
+}
+
+// ---- n - the block's reset after a stall and after a fault -------------------
+
+/**
+ * THE NEXT REQUEST STARTS ON A CLEAN BLOCK, no recover() called, judged on the
+ * loop-back (the bytes read back are the bytes sent, so a character left from
+ * before reads as a shift) with nothing between the two requests - no init(),
+ * which would reset the block itself.
+ *
+ * AFTER A STALL: a polled request of eight with SERCOM1's core clock channel
+ * disconnected stalls; the clock comes back; the next polled read of sixteen
+ * must be exact. Without the reset, what the stall left in DATA shifts out once
+ * the clock returns and its echo waits in the receiver for the next read.
+ *
+ * AFTER A FAULT: a read on the pair whose transmit run ends past the end of the
+ * SRAM (a bus error, TERR, after its first beats) ends spi_dma_fault; then the
+ * next read - on the engines, and in another round polled - must be exact.
+ * Without the reset the frames in flight at the fault leave their echoes in the
+ * receiver.
+ */
+void tn_reset() {
+    const uint8_t baud = *Bus::baud_for(1'000'000UL);
+    bool on = false;
+    uint8_t sixteen[16];
+    uint8_t got[16];
+    dm::fill_stream(sixteen, 16, 0x29);
+    dm::Fake::set();
+    dm::Fake::output();
+
+    // The stall.
+    (void)Loop::init(clock);
+    GclkChannel::disconnect(Raw::gclk_core_id());
+    for (uint32_t k = 0; k < 100000u && GclkChannel::connected(Raw::gclk_core_id()); ++k) {
+    }
+    auto rs = dm::request<Loop>(sixteen, nullptr, 8, baud, SpiMode::mode0, SpiEngine::polled);
+    rs.cs = dm::Fake::ref();
+    (void)Loop::start(rs);
+    const uint8_t stall_st = Loop::status();
+    (void)Raw::core_clock(0);
+    for (auto& b : got) b = 0xEE;
+    (void)Loop::start(dm::request<Loop>(sixteen, got, 16, baud, SpiMode::mode0, SpiEngine::polled));
+    uint16_t bad_stall = 0;
+    for (uint8_t i = 0; i < 16u; ++i) {
+        if (got[i] != sixteen[i]) ++bad_stall;
+    }
+    print(serial, "  a polled request on a clockless SERCOM: status ", stall_st,
+          "; the next read of sixteen once the clock is back: ", bad_stall, " wrong, status ",
+          Loop::status(), ", first ", hex(got[0]), " for ", hex(sixteen[0]), crlf);
+    bench.verdict("a stall ends spi_stalled", stall_st == spi_stalled);
+    bench.verdict("and the next request is exact, with no recover() called",
+                  bad_stall == 0u && Loop::status() == spi_ok);
+
+    // The fault, then the next request on the engines; again, then polled.
+    const uint8_t* past = reinterpret_cast<const uint8_t*>(HSRAM_ADDR + HSRAM_SIZE - 8u);
+    (void)dm::DLoop::init(clock);
+    dm::engage<dm::DLoop>();
+    const uint32_t faults0 = DmaTxEngine<0>::faults();
+    uint8_t fault_st[2] = {};
+    uint16_t bad_next[2] = {};
+    uint8_t next_st[2] = {};
+    for (uint8_t round = 0; round < 2u; ++round) {
+        fault_st[round] = dm::run<dm::DLoop>(
+            dm::request<dm::DLoop>(past, dm::big_rx, 16, baud, SpiMode::mode0, SpiEngine::dma), on);
+        for (auto& b : got) b = 0xEE;
+        next_st[round] = dm::run<dm::DLoop>(
+            dm::request<dm::DLoop>(sixteen, got, 16, baud, SpiMode::mode0,
+                                   round == 0u ? SpiEngine::dma : SpiEngine::polled),
+            on);
+        for (uint8_t i = 0; i < 16u; ++i) {
+            if (got[i] != sixteen[i]) ++bad_next[round];
+        }
+    }
+    dm::disengage();
+    dm::DLoop::release();
+    dm::Fake::release();
+    (void)link_command_mode();
+    print(serial, "  a read whose transmit run crosses the SRAM's end at ",
+          hex(static_cast<uint32_t>(HSRAM_ADDR + HSRAM_SIZE)), ": status ", fault_st[0], " and ",
+          fault_st[1], ", the transmit channel's abandoned blocks ", DmaTxEngine<0>::faults() - faults0,
+          "; the next read on the engines ", bad_next[0], " wrong (status ", next_st[0],
+          "), polled ", bad_next[1], " wrong (status ", next_st[1], ")", crlf);
+    bench.verdict("a bus error on the transmit channel ends the request spi_dma_fault, both times",
+                  fault_st[0] == spi_dma_fault && fault_st[1] == spi_dma_fault);
+    bench.verdict("and the next request on the engines is exact, with no recover() called",
+                  bad_next[0] == 0u && next_st[0] == spi_ok);
+    bench.verdict("and a polled one after a fault is exact too", bad_next[1] == 0u && next_st[1] == spi_ok);
+}
+
+// ---- o, p - the two SPI shapes, held for minutes ------------------------------
+
+/// The marked line a shape letter prints each second of its run, read by
+/// bin/brio's judge: whole, and as many as the closing "#count" says.
+uint32_t marked = 0;
+template <typename Sink>
+void mark(Sink s, uint32_t sec, uint32_t a, uint32_t b, uint32_t c) {
+    char tag[8] = {'S', 0, 0, 0, 0, 0, 0, 0};
+    uint32_t v = marked;
+    for (int8_t k = 5; k >= 1; --k) {
+        tag[k] = static_cast<char>('0' + v % 10u);
+        v /= 10u;
+    }
+    print(s, "#<", static_cast<const char*>(tag), " t=", sec, " a=", a, " b=", b, " c=", c,
+          " 0123456789abcdefghijklmnopqrstuvwxyz :", static_cast<const char*>(tag), ">#", crlf);
+    ++marked;
+}
+
+uint32_t shape_seconds = 600;
+
+/**
+ * SHAPE ONE, A DISPLAY'S: the SPI transmit engine alone (channel 1) beside the
+ * console's transmit engine (channel 0), both running at once for
+ * `shape_seconds`. Each turn: a marked line queued on the console (its block
+ * running), then a window of 256 frames written on the engines into the peer's
+ * receive-only run at 2 MHz, judged by the peer, then four 1024-frame writes at
+ * 12 MHz on the loop-back (no reader: judged by their ends). Every class of
+ * fault is counted: a request not ended spi_ok or not on the engines, a peer
+ * count or mismatch, a peer report missed, either engine's abandoned blocks, the
+ * console's DMA faults; the console's lines by the host (#count).
+ */
+void to_display() {
+    if (!need_peer()) return;
+    const uint8_t peer_baud = *Bus::baud_for(2'000'000UL);
+    print(serial, "  the console moves to its transmit engine for ", shape_seconds,
+          " s: marked lines follow", crlf);
+    while (!Serial::tx_idle()) {
+    }
+    Serial::release();
+    (void)dm::UDma::init(clock, 115200);
+    dm::console_engined = true;
+    DmaTxEngine<1>::clear_faults();
+    marked = 0;
+    uint32_t turns = 0, windows = 0, loops = 0, bad_status = 0, bad_peer = 0, no_report = 0;
+    dm::fill_stream(dm::big_tx, 1024, 0x13);
+    const uint32_t t0 = Ticker::millis();
+    uint32_t next_mark = t0;
+    bool on = false;
+    while (Ticker::millis() - t0 < shape_seconds * 1000u) {
+        if (Ticker::millis() >= next_mark) {
+            mark(dm::udma, (Ticker::millis() - t0) / 1000u, windows, bad_status + bad_peer + no_report,
+                 dm::UDma::dma_faults());
+            next_mark += 1000u;
+        } else {
+            (void)dm::UDma::write_bulk(std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>("..............................\r\n"), 32));
+        }
+        ++turns;
+        if (dm::arm_peer(256, spilink::spare_receive_only)) {
+            const uint8_t st = dm::window<dm::WBus>(
+                dm::request<dm::WBus>(dm::big_tx, nullptr, 256, peer_baud, SpiMode::mode0, SpiEngine::dma),
+                on);
+            if (!on || st != spi_ok) ++bad_status;
+            spilink::Report rp{};
+            if (!peer_report(rp)) {
+                ++no_report;
+            } else if (rp.count != 256u || rp.mism != 0u) {
+                ++bad_peer;
+            }
+            ++windows;
+        } else {
+            ++no_report;
+        }
+        (void)dm::WLoop::init(clock);
+        dm::engage<dm::WLoop>();
+        for (uint8_t k = 0; k < 4u; ++k) {
+            const uint8_t st = dm::run<dm::WLoop>(
+                dm::request<dm::WLoop>(dm::big_tx, nullptr, 1024, 1, SpiMode::mode0, SpiEngine::dma), on);
+            if (!on || st != spi_ok) ++bad_status;
+            ++loops;
+        }
+        dm::disengage();
+        (void)link_command_mode();
+    }
+    print(dm::udma, "#count ", marked, crlf);
+    const uint32_t spi_faults = DmaTxEngine<1>::faults();
+    const uint8_t console_faults = dm::UDma::dma_faults();
+    while (!dm::UDma::tx_idle()) {
+    }
+    dm::UDma::release();
+    dm::console_engined = false;
+    (void)Serial::init(clock, 115200);
+    dm::WBus::release();
+    (void)link_command_mode();
+    print(serial, "  ", shape_seconds, " s: ", turns, " turns, ", windows, " windows of 256 to the peer, ",
+          loops, " blocks of 1024 at 12 MHz; requests not ended spi_ok ", bad_status,
+          ", peer counts or mismatches ", bad_peer, ", reports missed ", no_report,
+          ", SPI channel blocks abandoned ", spi_faults, ", console DMA faults ", console_faults, crlf);
+    bench.verdict("THE DISPLAY'S SHAPE: the SPI transmit engine beside the console's, every request "
+                  "ended spi_ok on the engines, every window exact at the peer, no block abandoned",
+                  windows > 0u && bad_status == 0u && bad_peer == 0u && no_report == 0u &&
+                      spi_faults == 0u && console_faults == 0u);
+}
+
+/**
+ * SHAPE TWO: the SPI pair holding both channels, the console on its interrupt
+ * beside it, for `shape_seconds`. Each turn: a marked line, then a window of
+ * sixteen frames read and written on the engines with the peer at 2 MHz, judged
+ * both ways, then four 1024-frame reads at 12 MHz on the loop-back, every byte
+ * judged by this board.
+ */
+void tp_pair() {
+    if (!need_peer()) return;
+    const uint8_t peer_baud = *Bus::baud_for(2'000'000UL);
+    DmaTxEngine<0>::clear_faults();
+    DmaRxEngine<1>::clear_faults();
+    marked = 0;
+    uint32_t windows = 0, loops = 0, bad_status = 0, bad_peer = 0, no_report = 0, bad_loop = 0;
+    bool on = false;
+    dm::fill_stream(dm::big_tx, 1024, 0x31);
+    const uint32_t t0 = Ticker::millis();
+    uint32_t next_mark = t0;
+    while (Ticker::millis() - t0 < shape_seconds * 1000u) {
+        if (Ticker::millis() >= next_mark) {
+            mark(serial, (Ticker::millis() - t0) / 1000u, windows, bad_status + bad_peer + no_report,
+                 bad_loop);
+            next_mark += 1000u;
+        }
+        if (dm::arm_peer(16)) {
+            for (uint8_t i = 0; i < 16u; ++i) dm::big_rx[i] = 0xEE;
+            dm::fill_stream(dm::big_tx, 16, 0x13);
+            const uint8_t st = dm::window<dm::DBus>(
+                dm::request<dm::DBus>(dm::big_tx, dm::big_rx, 16, peer_baud, SpiMode::mode0, SpiEngine::dma),
+                on);
+            if (!on || st != spi_ok) ++bad_status;
+            if (dm::answers_wrong(dm::big_rx, 16, 0x57) != 0u) ++bad_peer;
+            spilink::Report rp{};
+            if (!peer_report(rp)) {
+                ++no_report;
+            } else if (rp.count != 16u || rp.mism != 0u) {
+                ++bad_peer;
+            }
+            ++windows;
+        } else {
+            ++no_report;
+        }
+        dm::fill_stream(dm::big_tx, 1024, static_cast<uint8_t>(0x31u + windows));
+        (void)dm::DLoop::init(clock);
+        dm::engage<dm::DLoop>();
+        for (uint8_t k = 0; k < 4u; ++k) {
+            for (auto& b : dm::big_rx) b = 0;
+            const uint8_t st = dm::run<dm::DLoop>(
+                dm::request<dm::DLoop>(dm::big_tx, dm::big_rx, 1024, 1, SpiMode::mode0, SpiEngine::dma), on);
+            if (!on || st != spi_ok) ++bad_status;
+            for (uint16_t i = 0; i < 1024u; ++i) {
+                if (dm::big_rx[i] != dm::big_tx[i]) {
+                    ++bad_loop;
+                    break;
+                }
+            }
+            ++loops;
+        }
+        dm::disengage();
+        (void)link_command_mode();
+    }
+    print(serial, "#count ", marked, crlf);
+    const uint32_t faults = DmaTxEngine<0>::faults() + DmaRxEngine<1>::faults();
+    dm::DBus::release();
+    (void)link_command_mode();
+    print(serial, "  ", shape_seconds, " s: ", windows, " windows of 16 both ways with the peer, ", loops,
+          " reads of 1024 at 12 MHz on the loop; requests not ended spi_ok ", bad_status,
+          ", peer windows wrong ", bad_peer, ", reports missed ", no_report, ", loop reads wrong ",
+          bad_loop, ", channel blocks abandoned ", faults, crlf);
+    bench.verdict("THE PAIR'S SHAPE: both channels the SPI's, the console on its interrupt, every "
+                  "request ended spi_ok, every byte exact both ways, no block abandoned",
+                  windows > 0u && bad_status == 0u && bad_peer == 0u && no_report == 0u &&
+                      bad_loop == 0u && faults == 0u);
+}
+
+// ---- q - a channel disabled mid-block beside a running one ---------------------
+
+/**
+ * RULE TWO INSIDE THE DRIVER, measured: the one path of the host that can
+ * disable a running channel is recover() - the timed arbiter's verb on a
+ * request that never answered - with a block in flight. Beside it here runs
+ * a Uart's transmit engine (channel 0) on SERCOM2's loop through PA12 at
+ * 1 Mbaud, its receiver on the same pad by interrupt judging the stream: the
+ * transmitter's producer fills its ring at every turn until a run is
+ * refused whole, so its dead-block repair is asked at every turn, the
+ * receiver drained between the runs. Each turn: a
+ * 256-frame write at 1.5 MHz on the loop-back (channel 1), recover() a
+ * pseudo-random 0..150 us into it. Two
+ * variants, `turns` each: A, recover() as written (the channels put away, then
+ * the SERCOM reset); B, the SERCOM disabled first - its request withdrawn - and
+ * then recover(). Counted: the Uart's blocks abandoned (its predicate's repair),
+ * the stream's bytes lost and repeated at the receiver, and the SPI channel's.
+ * Printed, not judged: it measures a hazard the page states.
+ */
+namespace rq {
+constexpr UartPads loop2_pads{
+    .tx = SercomPad::pad0,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 12, PinFunction::c},
+    .rx_pin = {'A', 12, PinFunction::c},
+};
+using Loop2 = Uart<2, loop2_pads, 1024, 512, DmaTxEngine<0>>;
+volatile bool live = false;
+/// The stream: a count modulo 251, so a byte repeated or skipped is a step
+/// the receiver reads as a jump, back or forward, and resynchronizes on.
+uint8_t next_out = 0;
+uint8_t expect = 0;
+uint32_t got = 0, back_jumps = 0, back_bytes = 0, fwd_jumps = 0, fwd_bytes = 0;
+
+void receive() {
+    uint8_t buf[64];
+    for (;;) {
+        const uint32_t n = Loop2::read_bulk(buf);
+        if (n == 0u) return;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint8_t v = buf[i];
+            ++got;
+            if (v != expect) {
+                const uint32_t ahead = (v + 251u - expect) % 251u;
+                if (ahead < 125u) {
+                    ++fwd_jumps;
+                    fwd_bytes += ahead;
+                } else {
+                    ++back_jumps;
+                    back_bytes += 251u - ahead;
+                }
+            }
+            expect = static_cast<uint8_t>((v + 1u) % 251u);
+        }
+    }
+}
+}  // namespace rq
+
+uint32_t q_turns = 20000;
+
+void tq_rule_two() {
+    for (uint8_t variant = 0; variant < 2u; ++variant) {
+        rq::next_out = 0;
+        rq::expect = 0;
+        rq::got = rq::back_jumps = rq::back_bytes = rq::fwd_jumps = rq::fwd_bytes = 0;
+        DmaTxEngine<1>::clear_faults();
+        if (!rq::Loop2::init(clock, 1'000'000u)) {
+            bench.verdict("the loop's Uart comes up on SERCOM2, PA12", false);
+            return;
+        }
+        rq::live = true;
+        (void)dm::WLoop::init(clock);
+        dm::engage<dm::WLoop>();
+        uint32_t lfsr = 0x1234567u;
+        uint32_t recovered = 0;
+        uint32_t refused = 0;
+        for (uint32_t t = 0; t < q_turns; ++t) {
+            // The ring kept full, and a run more refused whole - the refusal
+            // is where the transmitter's dead-block repair runs.
+            for (uint8_t k = 0; k < 16u; ++k) {
+                uint8_t chunk[128];
+                uint8_t v = rq::next_out;
+                for (auto& c : chunk) {
+                    c = v;
+                    v = static_cast<uint8_t>((v + 1u) % 251u);
+                }
+                const uint32_t put = rq::Loop2::write_bulk(std::span<const uint8_t>(chunk, sizeof chunk));
+                rq::next_out = static_cast<uint8_t>((rq::next_out + put) % 251u);
+                rq::receive();
+                if (put == 0u) {
+                    ++refused;
+                    break;
+                }
+            }
+            dm::dma_done = false;
+            (void)dm::WLoop::start(dm::request<dm::WLoop>(dm::big_tx, nullptr, 256, 15, SpiMode::mode0,
+                                                         SpiEngine::dma));
+            lfsr = lfsr * 1103515245u + 12345u;
+            (void)delay_us(clock, (lfsr >> 16) % 150u);
+            if (!dm::dma_done) {
+                if (variant == 1u) {
+                    (void)Raw::enable(false);
+                    (void)delay_us(clock, 6);
+                }
+                (void)dm::WLoop::recover();
+                ++recovered;
+            }
+            rq::receive();
+        }
+        dm::disengage();
+        const uint32_t t0 = Ticker::millis();
+        while (Ticker::millis() - t0 < 300u) {
+            rq::receive();
+        }
+        rq::live = false;
+        const uint8_t uart_faults = rq::Loop2::dma_faults();
+        const uint8_t overruns = rq::Loop2::hw_overruns();
+        rq::Loop2::release();
+        dm::WLoop::release();
+        print(serial, "  variant ", variant ? "B (the SPI requests withdrawn first)" : "A (as written)",
+              ": ", q_turns, " turns, ", recovered, " SPI blocks recovered mid-block; the Uart's "
+              "blocks abandoned ", uart_faults, " (", refused, " refusals asked its repair); the "
+              "receiver read ", rq::got, " bytes, ", rq::back_jumps, " jumps back (", rq::back_bytes,
+              " bytes repeated), ", rq::fwd_jumps, " forward (", rq::fwd_bytes, " lost; the receiver's "
+              "own overruns ", overruns, ")", crlf);
+    }
+    (void)link_command_mode();
+    bench.verdict("ran", true);
+}
+
+// ---- r - the 24 MHz write, timed ------------------------------------------------
+
+/**
+ * WHERE THE WRITE ON ONE CHANNEL LOSES TO THE WIRE: blocks of 64 and 1024
+ * frames on the transmit engine alone, loop-back, BAUD 0, 1, 3 and 7, the
+ * source in SRAM and in the flash, the core spinning on a flag in SRAM or
+ * asleep (WFI) until the end; the frame's core cycles from the two lengths
+ * (the request's fixed cost cancels) against the wire's 16 x (BAUD + 1).
+ */
+alignas(4) const uint8_t flash_run[1024] = {1, 2, 3};
+
+void tr_rate() {
+    (void)dm::WLoop::init(clock);
+    dm::engage<dm::WLoop>();
+    bool on = false;
+    for (const uint8_t baud : {0, 1, 3, 7}) {
+        for (uint8_t src = 0; src < 2u; ++src) {
+            for (uint8_t sleep = 0; sleep < 2u; ++sleep) {
+                uint32_t t[2] = {};
+                for (uint8_t which = 0; which < 2u; ++which) {
+                    const uint16_t n = which ? 1024u : 64u;
+                    uint32_t best = 0xFFFFFFFFu;
+                    for (uint8_t run = 0; run < 4u; ++run) {
+                        dm::dma_done = false;
+                        const uint32_t t0 = wall();
+                        on = !dm::WLoop::start(dm::request<dm::WLoop>(src ? flash_run : dm::big_tx, nullptr, n,
+                                                                     baud, SpiMode::mode0, SpiEngine::dma));
+                        while (!dm::dma_done) {
+                            if (sleep) __WFI();
+                        }
+                        const uint32_t took = dm::dma_end_at - t0;
+                        if (took < best) best = took;
+                    }
+                    t[which] = best;
+                }
+                // Ruler ticks at 24 MHz are two core cycles.
+                const uint32_t milli = (t[1] - t[0]) * 2000u / 960u;
+                print(serial, "  BAUD ", baud, src ? " flash" : " SRAM ", sleep ? " WFI " : " spin",
+                      ": a frame ", milli / 1000u, ".", (milli % 1000u) / 100u, (milli % 100u) / 10u,
+                      " core cycles against the wire's ", 16u * (baud + 1u), crlf);
+            }
+        }
+    }
+    (void)on;
+    dm::disengage();
+    dm::WLoop::release();
+    (void)link_command_mode();
+    bench.verdict("ran", true);
+}
+
+#endif  // SPI_SELECT_CONTROL
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -2715,6 +3632,7 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// ONE vector for the whole SERCOM, and only letter j's client arms it:
 /// the hosts run every request polled and arm no interrupt.
 extern "C" void SERCOM1_Handler() {
+    dm::dma_vector();
     if (client_isr && Raw::ssl_flag()) {
         ssl_at = wall();
         Raw::clear_flags(SpiFlag::ssl);
@@ -2724,7 +3642,35 @@ extern "C" void SERCOM1_Handler() {
     }
 }
 
+#ifdef SPI_SELECT_CONTROL
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+#else
+extern "C" void SERCOM5_Handler() {
+    if (dm::console_engined) {
+        (void)dm::UDma::isr();
+    } else {
+        (void)Serial::isr();
+    }
+}
+
+/// The engined letters' second vector: an engined SPI host's transfer errors,
+/// the console's transmit engine (letter o) and the loop Uart's (letter q).
+extern "C" void DMAC_Handler() {
+    dm::dma_vector();
+    if (dm::console_engined) {
+        (void)dm::UDma::dma_isr();
+    }
+    if (rq::live) {
+        (void)rq::Loop2::dma_isr();
+    }
+}
+
+extern "C" void SERCOM2_Handler() {
+    if (rq::live) {
+        (void)rq::Loop2::isr();
+    }
+}
+#endif
 
 /// Letter k's one-shot: the core held inside a host request, the SERCOM's
 /// flags sampled at the hold's end.
@@ -2776,6 +3722,23 @@ int main() {
                       "SSL as a wake-up (needs the peer)",
                  tj_client_edges);
     bench.letter('k', "the host's rare paths: the spin budget, an early TXC", tk_host_paths);
+    bench.letter('l', "THE SELECT'S RULE: SCK idle when a request ends, both engines", tl_select);
+#ifndef SPI_SELECT_CONTROL
+    bench.letter('m', "THE ENGINES: dma at one frame, the refusals, the command rule, the long loop, "
+                      "the sum (needs the peer)",
+                 tm_engines);
+    bench.letter('n', "the block's reset after a stall and after a fault, no recover()", tn_reset);
+    bench.letter('o', "the display's shape for minutes: SPI transmit engine beside the console's "
+                      "(needs the peer)",
+                 to_display, false);
+    bench.letter('p', "the pair's shape for minutes: both channels the SPI's, the console on its "
+                      "interrupt (needs the peer)",
+                 tp_pair, false);
+    bench.letter('q', "a channel disabled mid-block beside a running one: recover() measured",
+                 tq_rule_two, false);
+    bench.letter('r', "the write on one channel against the wire: BAUD 0..7, SRAM and flash", tr_rate,
+                 false);
+#endif
 
     bench.menu();
     bench.prompt();

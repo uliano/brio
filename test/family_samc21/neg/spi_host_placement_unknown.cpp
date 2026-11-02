@@ -19,4 +19,4 @@ constexpr SpiPads host_pads{
     .data_in_pin = {'A', 7, PinFunction::d},
 };
 
-void f() { (void)SpiHost<0, host_pads, 0, InTheCloud>::status(); }
+void f() { (void)SpiHost<0, host_pads, 0, NoDmaEngine, NoDmaEngine, InTheCloud>::status(); }

@@ -18,10 +18,8 @@
 //    (SpiClient::answer and ::exchange), placed in SRAM here; serve()
 //    and run_exchange() are each one call of it.
 //
-//  - THE POLLED RUN IS THE ONLY SERVE. This stratum drives the DMAC for
-//    one user alone, the Uart's transmitter, because erratum 1.10.4
-//    (DS80000740S) corrupts the live write-back descriptor under
-//    concurrent channel triggers (docs/samc21/dmac.md). So
+//  - THE POLLED RUN IS THE ONLY SERVE: this stratum's SPI client has no
+//    DMA engine (docs/samc21/spi.md, "Not covered yet"). So
 //    spilink::spare_polled_pump is accepted and changes nothing (bit
 //    0x04 of aux2, the engined serve, is never set here);
 //    spilink::spare_answer_only serves an exchange's answers on the

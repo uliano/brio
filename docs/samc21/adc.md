@@ -608,7 +608,8 @@ Driver gaps:
 - **No rebase / ClockUser**, deliberately: the converter has its own
   generic clock channel and a main-clock change does not move CLK_ADC.
 - **The DMA request** (RESRDY, 38.6.4): declined - this stratum drives
-  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
+  the DMAC for the serial transports' engines alone, within a budget of
+  two channels ([dmac.md](dmac.md), "The rule").
 
 Implemented but not bench-verified:
 - **WINMON and OVERRUN as WAKE sources** (RESRDY's is measured, and

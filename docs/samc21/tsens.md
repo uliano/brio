@@ -575,7 +575,8 @@ rather than a dropped store.
 Driver gaps (not built):
 
 - **The DMA request** (RESRDY, 43.6.3): declined - this stratum drives
-  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
+  the DMAC for the serial transports' engines alone, within a budget of
+  two channels ([dmac.md](dmac.md), "The rule").
 
 - **A `MeterSource` or sampler adapter.** `util/analog_sampler.hpp`'s
   converter concept wants an unsigned reading and a `void select()`; this

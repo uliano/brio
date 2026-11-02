@@ -99,14 +99,14 @@ copy, the caller's buffer being free when the call returns -
 number of bytes the ring took, so a caller that writes directly
 handles the rest itself, where `print` waits for it; and on the
 transport without an engine nothing masks interrupts (the transmit
-interrupt is armed by a plain INTENSET store), where the engined one
-masks the engine's claim alone ("The optional transmit engine" below).
+interrupt is armed by a plain INTENSET store), where an engined one
+masks an engine's claim alone ("The optional engines" below).
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does, ending with the transmit and the receive
-side item by item; the types and verbs; the optional transmit engine;
+side item by item; the types and verbs; the optional engines;
 how to use it, one example per shape (the console, the engined
-transmitter, its placement, a synchronous host, an asynchronous rate on
+transmitter, the engined pair, the placement, a synchronous host, an asynchronous rate on
 either generator, RS485, LIN, collision detection, the loop with no
 wire); the bench findings, most of the page; and what is not covered.
 
@@ -126,8 +126,8 @@ detection's clock rule, refused at configuration) and 1.17.2 (auto-baud's
 missing stop bit, answered by the die's revision), all encoded in code
 (1.17.4, 1.17.14 and 1.17.19 are named where their fields live), and
 1.10.4 (the DMAC's, [dmac.md](dmac.md)). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
-`Uart<n, pads, rx, tx, TxEngine, Placement>` task, the one engine slot - the
-transmit one - optional, and where its completion runs from). The family fixture is `test/family_samc21/sercom.cpp` plus
+`Uart<n, pads, rx, tx, TxEngine, RxEngine, Placement>` task, the two engine
+slots optional, and where their completions run from). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
 `test_samc_uart`, driven from the host by `brio stress` (a letter,
 cited below for this suite and for the `bench_samc` cost instrument,
@@ -316,10 +316,8 @@ taking a burst, and what this driver does with each:
   reads clear, so one entry serves the two characters a late entry
   finds, and the receiver keeps a 3 Mbaud stream (letter t).
 - RXC as a DMA request (31.6.4.1, cleared by the channel's read of
-  DATA): declined - this stratum drives the DMAC for one user, and that
-  user is the transmitter ([dmac.md](dmac.md): the transport's own
-  transmit and receive pair was measured writing this SERCOM's
-  registers under erratum 1.10.4).
+  DATA): used by the receive engine, which comes with the transmit
+  engine and never alone ("The optional engines" below).
 - An idle-line flag, a receiver time-out: not in this silicon - the
   receiver's interrupts are RXC, RXS, RXBRK and ERROR (31.6.4.2), and no
   counter of bit times after the last stop bit exists. The interrupt
@@ -409,7 +407,7 @@ taking a burst, and what this driver does with each:
   the device header's own `MUX_...` constants.
 - **`UartFormat`** - bits (5..9), parity (one enum, because FORM and
   PMODE must agree), stop bits, and the LSB-first default above.
-- **`Uart<n, pads, rx_size, tx_size, TxEngine, Placement>`** - the
+- **`Uart<n, pads, rx_size, tx_size, TxEngine, RxEngine, Placement>`** - the
   task: two SPSC rings (lock-free at any size here - `atomic_width` 4
   - so 64/256 are console-class defaults, not a ceiling),
   `init(clock, baud, format)` speaking hertz off the clock tag,
@@ -450,8 +448,8 @@ taking a burst, and what this driver does with each:
   enable, and only then the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
   reaches the wire. `ByteTransport`, `EdgeSink` and `ClockUser` are
-  static_asserted. The engine slot defaults to `NoDmaEngine` - see "The
-  optional transmit engine" below.
+  static_asserted. Both engine slots default to `NoDmaEngine` - see "The
+  optional engines" below.
 - **The transmit room and edge** (util/stream.hpp's `RoomSink` and
   `EdgeSink`, [design/serial.md](../design/serial.md)): `tx_room()` is
   the bytes `write_bulk()` would take now, the transmit ring's free
@@ -472,24 +470,36 @@ taking a burst, and what this driver does with each:
   three to three and a half when they do not (it copies
   words across alignments too, [design/runtime.md](../design/runtime.md)).
   Measured with letter u, below.
-- **The resource's DMA constants** - `Sercom<n>::dma_tx_trigger()`
-  (table 25-2's code, read off the device header per instance beside the
-  GCLK id and APB mask) and `data_address()`, the one register the
-  transmit engine writes.
+- **The resource's DMA constants** - `Sercom<n>::dma_tx_trigger()` and
+  `dma_rx_trigger()` (table 25-2's codes, read off the device header per
+  instance beside the GCLK id and APB mask) and `data_address()`, the one
+  register the engines write and read.
 
-## The optional transmit engine
+## The optional engines
 
-An application that wants the transmitter on the DMAC includes
-`samc21/dmac.hpp` alongside this header and names the engine in the
-Uart's one slot; the receiver keeps its interrupt:
+An application that wants a direction on the DMAC includes
+`samc21/dmac.hpp` alongside this header and names the engines in the
+Uart's two slots, each a channel of the two an image may hold
+([dmac.md](dmac.md), "The rule"). The transmitter alone, the receiver on
+its interrupt:
 
 ```cpp
-using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine>;
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<0>>;
 
-extern "C" void DMAC_Handler() { Serial::dma_isr(); }
+extern "C" void DMAC_Handler() { (void)Serial::dma_isr(); }
 ```
 
-The engine is a policy, not a feature of the task:
+Both directions, the pair holding the whole budget:
+
+```cpp
+using Link = brio::Uart<1, link_pads, 1024, 1024, brio::DmaTxEngine<0>, brio::DmaRxEngine<1>>;
+
+extern "C" void DMAC_Handler() {
+    if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
+}
+```
+
+The engines are a policy, not a feature of the task:
 
 - **Zero when absent.** `NoDmaEngine` (the default) is a tag with
   `present = false`; every engine branch sits behind `if constexpr`, so
@@ -497,18 +507,21 @@ The engine is a policy, not a feature of the task:
   sercom.hpp never includes dmac.hpp, so a program with a serial port
   does not carry the controller.
 - **The trigger replaces the interrupt.** DRE is the same condition as
-  the DMA trigger, so the engined transmitter does not arm DRE - both
-  armed would serve every byte twice.
-- **One engine, one channel, one owner at a time.** The DMAC is this
-  stratum's for the Uart's transmitter alone (erratum 1.10.4,
-  [dmac.md](dmac.md)): there is no receive slot - naming one is a
-  compile error (`neg/uart_receive_engine_slot.cpp`) - and the engine
-  is channel 0. Two Uarts naming it are two owners of one channel, so
-  `init()` claims it with the SERCOM's number and an `init()` that finds
-  it held by another transport panics (the breadcrumb's context names
-  the refused SERCOM, dmac.md); `release()` gives the claim back, so
-  transports may take the engine in turn. The engine brings the DMAC
-  block up itself at `init()`: nothing else in the program owns it.
+  the transmit trigger and RXC as the receive one, so an engined
+  direction does not arm its interrupt - both armed would serve every
+  byte twice.
+- **The budget's two channels, and the receive engine never alone.** The
+  engines name channel 0 or 1, each a channel the transport claims at
+  `init()` with its SERCOM's number and holds to `release()`; a claim
+  that finds its channel held by another transport panics (the
+  breadcrumb's context names the refused SERCOM, dmac.md). A receive
+  engine comes with the transmit engine
+  (`neg/uart_receive_engine_alone.cpp`), on the other channel
+  (`neg/uart_engines_one_channel.cpp`): a receive block on an idle line
+  has no end, and the transport lets its receive channel go only when it
+  knows no other channel runs, which the pair, holding the whole budget,
+  guarantees. The first engine of the image brings the DMAC block up at
+  its `init()`, the last one's `release()` takes it down.
 - **TX drains the ring in blocks of half the ring at most.**
   `write_byte`, `write_bulk` and `print` are unchanged; the engine is
   handed the ring's contiguous run (`read_span`, design/ring.md), cut at
@@ -524,12 +537,43 @@ The engine is a policy, not a feature of the task:
   the handler) takes the engine's reservation - a test-and-set of its
   busy flag under PRIMASK - and reads the run and programs the channel
   unmasked, because no completion of an engine that has no block in
-  flight can land under it. The block itself is three stores into the
-  descriptor slot and one store of the channel's enable; an engined
-  transmit ring is at most 65535 bytes, a run being one block and BTCNT
-  sixteen bits (refused at compile time). A bus error on a block (TERR,
-  the channel disabled by the silicon, 25.6.2.8) is a block lost:
-  abandoned, counted in `dma_faults()`, the next run started.
+  flight can land under it; the enable is a select and a store under the
+  mask (dmac.md). An engined transmit ring is at most 65535 bytes, a run
+  being one block and BTCNT sixteen bits (refused at compile time). A
+  bus error on a block (TERR, the channel disabled by the silicon,
+  25.6.2.8) is a block lost: abandoned, counted in `dma_faults()`, the
+  next run started.
+- **RX fills the ring in blocks of half the ring at most, and the tail is
+  asked for.** The receive engine writes straight into the ring's free
+  run, and nothing is visible to the consumer until a publish: at a
+  block's completion, in the DMAC's handler, which publishes the run and
+  hands the channel the next one; or at `harvest()`, the owner's verb,
+  which publishes what has landed of a block still filling - this silicon
+  has no idle-line flag and no receiver time-out, so the tail of a burst
+  shorter than the block waits for the owner to ask (a line protocol at
+  its terminator's expected time, a stream at its end, a time event).
+  `harvest()` reads the count with no suspend (dmac.md's rule forbids
+  one), the decision of who retires a finished block under the mask and
+  the next run's stores outside it. STATUS is read at each publish, and
+  an error found there - an overflow, a frame or parity error - is
+  reported to the receive ring as a loss after the run is published, so
+  the consumer's next look discards everything queued, the run with it:
+  per-byte attribution is what a receive engine trades away, and a
+  console that wants it keeps the interrupt receiver. A full ring leaves
+  the channel idle, counted in `rx_overruns()`, and the consumer's next
+  release starts it again.
+- **The receive channel first.** A filled receive block leaves its channel
+  idle until the handler's re-arm, and the receiver's two levels and its
+  shifter are all that covers the gap: a third character completing
+  overflows (31.6.2.6). So `dma_isr()` asks the receive channel first and
+  again after each turn, a transmit completion's work never ahead of a
+  pending re-arm. Measured on the loop through PA18 (`test_samc_uart`
+  letter u): the pair exact at 115200 (8 KB), 1 Mbaud and 3 Mbaud (16 KB
+  each), no overrun, skip or fault, in ten runs; and for ten minutes at
+  1 Mbaud beside the console on its interrupt, 59,999,732 bytes exact
+  (letter 2). At 3 Mbaud two frames are 320 core cycles: with the receive
+  completion served after the transmit one, one byte was lost in each
+  1 KB block.
 - **The standing request, and why nothing kicks.** DRE is a level -
   "my transmit buffer is free" (31.6.4.1) - and the channel serves it as
   it finds it: standing when the channel is enabled, or when the claim
@@ -541,19 +585,19 @@ The engine is a policy, not a feature of the task:
   its own disable: a DRE that rose and fell while it was disabled fires
   no beat at the next enable ([dmac.md](dmac.md), "A released
   requester").
-- **The dead-block predicate, on the refused-byte path.** A channel
-  that waits enabled with no trigger pending and no beat moving while
-  DRE - its trigger - and TXC both stand cannot be running, so the
-  block is abandoned and counted in `dma_faults()`. What killed blocks
-  that way, measured, was erratum 1.10.4's corruption by a concurrently
-  triggered channel; with one channel in the image it has no known
-  cause, and every suite judges `dma_faults()` zero. The channel is
-  asked and not the engine's own "in flight", which stays true from a
-  block's last beat until its completion is heard and is true again for
-  a block the handler has just started: with main context preempted for
-  a character time across a completion, that test abandoned live blocks
-  at 2 Mbaud with one channel in the image (Bench findings). The three
-  readings are taken under the mask.
+- **The dead-block predicate, on the refused-byte path.** A transmit
+  channel that waits enabled with no trigger pending and no beat moving
+  while DRE - its trigger - and TXC both stand cannot be running, so the
+  block is abandoned and counted in `dma_faults()`. Inside the rule the
+  one known cause is another channel disabled mid-block beside this one,
+  which loses this one's pending trigger (dmac.md, "The rule"); every
+  suite judges `dma_faults()` zero. The channel is asked and not the
+  engine's own "in flight", which stays true from a block's last beat
+  until its completion is heard and is true again for a block the
+  handler has just started: with main context preempted for a character
+  time across a completion, that test abandoned live blocks at 2 Mbaud
+  with one channel in the image (Bench findings). The three readings are
+  taken under the mask.
 - **A refused byte still nudges.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
   answers that false by trying again for ever - so the refusal path
@@ -562,6 +606,16 @@ The engine is a policy, not a feature of the task:
   through `write_bulk()` is a legal call for exactly this: it queues
   nothing and takes the same path, which is how a loop waiting for the
   ring to drain still gives the transport its push.
+- **`release()` lets the transmit block end first.** A channel is
+  disabled only at its block's end or when no other channel runs
+  (dmac.md, "The rule"), and another transport's channel may be
+  running, so `release()` waits for the block in flight to end - the
+  channel disabled by the silicon, so it needs no vector and holds under
+  a mask - bounded by that block's time on the wire (thirteen bits a
+  frame, the bit's length read back from BAUD), and disables a block
+  that outlives the bound anyway. The receive channel goes after it,
+  the pair leaving no other channel running. What the rings still held
+  is dropped.
 
 ## How to use it
 
@@ -590,23 +644,35 @@ int main() {
 The transmitter on the engine, the receiver on its interrupt:
 
 ```cpp
-using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine>;
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<0>>;
 
 extern "C" void SERCOM5_Handler() {     // the receiver
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" void DMAC_Handler() { Serial::dma_isr(); }   // the transmit blocks
+extern "C" void DMAC_Handler() { (void)Serial::dma_isr(); }   // the transmit blocks
+```
+
+Both directions on the engines, the receive side published at each
+completion and its tail on `harvest()`, which the line-reading active
+object asks at its own cadence:
+
+```cpp
+using Link = brio::Uart<1, link_pads, 1024, 1024, brio::DmaTxEngine<0>, brio::DmaRxEngine<1>>;
+
+extern "C" void DMAC_Handler() {
+    if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
+}
 ```
 
 The completion in SRAM, for a program that keeps the DMAC's vector in
-the flash - util/placement.hpp's `InRam` after the engine, the
-completion and the next block's launch one instance in `.fast_text.brio`
+the flash - util/placement.hpp's `InRam` after the engines, the
+completions and the next blocks' launches one instance in `.fast_text.brio`
 (a program that places the vector itself in `.fast_text` leaves this at
 `InFlash`, the default: the body inline in a placed vector is faster
 than the call, [platform.md](platform.md)):
 
 ```cpp
-using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine, brio::InRam>;
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<0>, brio::NoDmaEngine, brio::InRam>;
 ```
 
 A synchronous host on a crystal generator - the resource, configured once,
@@ -890,21 +956,18 @@ bridge between the pads and the PC - as much as of the driver.
   181 against 185 a transmitted byte and 207 against 202 a received one
   - the veneer and the frame eat what the fetch saves - so it takes no
   placement: the program places the vector.
-- **Erratum 1.10.4 can turn the transmit channel into a writer of the
-  SERCOM's own registers** - the measurement that leaves the Uart with
-  no receive slot ([dmac.md](dmac.md)). A both-engines echo that
-  stopped answering, halted over SWD, sat in SERCOM5_Handler re-entered without end,
-  INTENSET reading 0xAE (ERROR, RXBRK, RXS, RXC and TXC armed - a byte of
-  the stream) and TXC, which the engined transport never serves,
-  standing. The transmit channel's write-back held BTCTRL 0x0809 - the
-  RECEIVE descriptor's, destination incrementing - with BTCNT 17 and DATA
-  as both addresses, while its first-descriptor slot was intact: running
-  that live copy, the channel read received bytes from DATA and wrote
-  them at "end minus remaining", up through the registers below DATA.
-  The dead-block predicate cannot see this (the block is running), and
-  nothing at the channel level undoes it. Over twenty such echoes the
-  erratum struck in nineteen: blocks abandoned, INTENSET scribbled, the
-  transmitter wedged, and once the board silent.
+- **A both-engines echo that turned the transmit channel into a writer of
+  the SERCOM's own registers** was a suspend's doing, not the pair's: the
+  transport's receive side then read its channel's count by suspending
+  it, and a suspend of a running channel corrupts the other channel's
+  live descriptor ([dmac.md](dmac.md), "The rule"). Halted over SWD, the
+  echo sat in SERCOM5_Handler re-entered without end, INTENSET reading
+  0xAE, the transmit channel's write-back holding the RECEIVE
+  descriptor's BTCTRL 0x0809 with DATA as both addresses, while its
+  first-descriptor slot was intact - nineteen echoes of twenty so. The
+  same pair with the count read by no suspend is clean (64 MB, zero
+  faults), and putting the suspend back reproduces the failure (1,263 of
+  1,855 windows): the receive engine reads with no suspend.
 - **The dead-block predicate, asked of the engine alone, fired on live
   blocks.** Tested as the engine's `busy()` and the two flags, unmasked,
   it abandoned blocks in nine runs of twenty of letter h's 2 Mbaud echo,
@@ -1120,11 +1183,15 @@ BREAK-TO-SYNC DELAY AT EVERY HDRDLY, where 31.8.3's table gives the
 ## Not covered yet
 
 Driver gaps (not built):
-- A RECEIVE ENGINE: declined - this stratum drives the DMAC for one
-  user, the transmitter (erratum 1.10.4, [dmac.md](dmac.md)); the
-  interrupt receiver takes every level of the buffer an entry and keeps
-  3 Mbaud.
-- THE TRANSMIT ENGINE ACROSS A STANDBY: its channel has RUNSTDBY = 0,
+- A RECEIVE ENGINE WITHOUT THE TRANSMIT ENGINE: declined - the pair
+  holding the whole budget is what lets the transport disable its
+  receive channel with no other channel running ([dmac.md](dmac.md), "The
+  rule"); the interrupt receiver takes every level of the buffer an
+  entry and keeps 3 Mbaud.
+- AN ENGINED DIRECTION LENT AT RUN TIME to another transport while this
+  one stays up: not built, no program asks for it ([dmac.md](dmac.md),
+  "Not covered yet", with its measurements).
+- THE ENGINES ACROSS A STANDBY: a channel has RUNSTDBY = 0,
   which 25.6.7 makes software's to suspend before standby; nothing does
   (dmac.md). Born with the first program that sleeps to standby with an
   engined Uart.

@@ -1282,7 +1282,9 @@ public:
             return true;
         }
         status_ = spi_ok;
-        if (static_cast<uint16_t>(r.cmd_len) + r.len == 0) {
+        // Each length tested on its own: their sum takes seventeen bits, and
+        // in sixteen a request of 65536 frames would read as a request of none.
+        if (r.cmd_len == 0 && r.len == 0) {
             return true;  // nothing to move: complete on the spot
         }
         apply(r.mode, clamp(r.clock));

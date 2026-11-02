@@ -414,7 +414,7 @@ and one device-level item; **one is this silicon**.
   with a control on both sides** (below).
 - **1.8.7 DMA Write Access** (all revisions) names `SDADC: SWTRIG` among
   the registers a SleepWalking DMA write may fail to reach - unreachable
-  here: the stratum's one DMA channel writes a SERCOM's DATA, never
+  here: the stratum's DMA channels move a SERCOM's DATA, never
   SWTRIG, and never in standby ([dmac.md](dmac.md)).
 
 **NOT this silicon**, and each is the read-the-row trap the errata
@@ -737,7 +737,8 @@ the same vector.
 Driver gaps:
 
 - **The DMA request** (RESRDY, 39.6.4): declined - this stratum drives
-  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
+  the DMAC for the serial transports' engines alone, within a budget of
+  two channels ([dmac.md](dmac.md), "The rule").
 - **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST` stay DECLINED, and this is
   the reason rather than an omission.** 39.8.21 calls the first
   "Debug/Characterization" and lists no values for it, and gives the

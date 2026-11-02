@@ -15,4 +15,4 @@ constexpr UartPads pads{
     .rx_pin = {'A', 5, PinFunction::d},
 };
 
-void f() { (void)Uart<0, pads, 64, 256, DmaTxEngine, InTheCloud>::tx_idle(); }
+void f() { (void)Uart<0, pads, 64, 256, DmaTxEngine<0>, NoDmaEngine, InTheCloud>::tx_idle(); }

@@ -433,24 +433,31 @@ void task_verbs() {
     Loop::release();
 }
 
-// ---- the optional DMA engine -------------------------------------------------
-// The engine lives in samc21/dmac.hpp, not in sercom.hpp: including the
+// ---- the optional DMA engines ------------------------------------------------
+// The engines live in samc21/dmac.hpp, not in sercom.hpp: including the
 // DMAC from the SERCOM would give every program with a serial port the
-// descriptor sections. So an application that wants it includes both
-// headers and names it, and the Uart takes it in its ONE slot - the
-// transmit one - which DEFAULTS to NoDmaEngine, so every use above
-// compiles unchanged. A receive slot does not exist
-// (neg/uart_receive_engine_slot.cpp).
+// descriptor sections. So an application that wants them includes both
+// headers and names them, each a channel of the two an image may hold; both
+// slots DEFAULT to NoDmaEngine, so every use above compiles unchanged. A
+// receive engine comes with a transmit engine (neg/uart_receive_engine_alone.cpp),
+// on another channel (neg/uart_engines_one_channel.cpp), and no engine names a
+// third channel (neg/dmac_channel_past_budget.cpp).
 #include "samc21/dmac.hpp"
 
-using TxEngined = Uart<0, pads, 64, 256, DmaTxEngine>;
+using TxEngined = Uart<0, pads, 64, 256, DmaTxEngine<0>>;
+using PairEngined = Uart<0, pads, 64, 256, DmaTxEngine<1>, DmaRxEngine<0>>;
 
 static_assert(!NoDmaEngine::present);
-static_assert(!Serial::has_tx_engine && TxEngined::has_tx_engine);
-static_assert(DmaTxEngine::present && DmaTxEngine::channel == 0);
-// The concepts hold whether or not the engine is named.
+static_assert(!Serial::has_tx_engine && TxEngined::has_tx_engine && !TxEngined::has_rx_engine);
+static_assert(PairEngined::has_tx_engine && PairEngined::has_rx_engine);
+static_assert(DmaTxEngine<0>::present && DmaTxEngine<0>::channel == 0 && DmaTxEngine<0>::level == 2);
+static_assert(DmaRxEngine<1>::present && DmaRxEngine<1>::channel == 1 && DmaRxEngine<1>::level == 3);
+static_assert(Dmac::budget == 2);
+// The concepts hold whether or not the engines are named.
 static_assert(ByteTransport<TxEngined> && BulkSink<TxEngined> && EdgeSink<TxEngined> && SkippingSource<TxEngined> &&
               ClockUser<TxEngined>);
+static_assert(ByteTransport<PairEngined> && BulkSink<PairEngined> && EdgeSink<PairEngined> &&
+              SkippingSource<PairEngined> && ClockUser<PairEngined>);
 uint32_t edge_verbs_TxEngined() { return TxEngined::tx_room() + (TxEngined::tx_drained() ? 1u : 0u); }
 // The refused claim's breadcrumb names the refused owner.
 static_assert(dma_claim_refused_context(6) == 0xD6);
@@ -459,28 +466,39 @@ void engined_uart_verbs() {
     constexpr SysClock clock;
     (void)TxEngined::init(clock, 9600);
     (void)TxEngined::isr();          // the receiver's RXC, still an interrupt
-    TxEngined::dma_isr();            // the DMAC's one vector
+    (void)TxEngined::dma_isr();      // the DMAC's one vector
     (void)TxEngined::write_byte('x');
     (void)TxEngined::write_bulk(std::span<const uint8_t>());
     (void)TxEngined::dma_faults();
     (void)TxEngined::tx_idle();
     TxEngined::release();
-    // The claim, as a verb: one owner at a time.
-    (void)DmaTxEngine::claim(1);
-    (void)DmaTxEngine::owner();
-    DmaTxEngine::release(1);
+    (void)PairEngined::init(clock, 1'000'000);
+    (void)PairEngined::dma_isr();    // both channels, the receive one first
+    (void)PairEngined::harvest();    // the tail no completion reports
+    uint8_t buf[8];
+    (void)PairEngined::read_bulk(buf);
+    (void)PairEngined::read_span();
+    PairEngined::consume(1);
+    PairEngined::release();
+    // The claim, as a verb: one owner a channel, two channels an image.
+    (void)DmaTxEngine<0>::claim(1);
+    (void)DmaTxEngine<0>::owner();
+    (void)Dmac::owner(0);
+    (void)Dmac::held();
+    DmaChannel<0>::release(1);
     (void)Serial::dma_faults();      // engineless: 0, and free
+    (void)Serial::harvest();         // engineless: false, and free
 }
 
 // ---- the placement (util/placement.hpp) -----------------------------------------
-// The engined port's last parameter: InRam places the transmit engine's
-// completion (dma_isr()) as ONE instance in `.fast_text.brio`; the per-byte
-// isr() stays inline in the vector, which the program places itself - a
-// `.fast_text` function in the same TU as the COMDAT instance (the
-// section-type trap util/placement.hpp states). An unknown tag, and InRam
-// on a port with no engine, are refused (neg/uart_placement_unknown.cpp,
+// The engined port's last parameter: InRam places the engines' completions
+// (dma_isr()) as ONE instance in `.fast_text.brio`; the per-byte isr() stays
+// inline in the vector, which the program places itself - a `.fast_text`
+// function in the same TU as the COMDAT instance (the section-type trap
+// util/placement.hpp states). An unknown tag, and InRam on a port with no
+// engine, are refused (neg/uart_placement_unknown.cpp,
 // neg/uart_in_ram_without_engine.cpp).
-using RamEngined = Uart<0, pads, 64, 256, DmaTxEngine, InRam>;
+using RamEngined = Uart<0, pads, 64, 256, DmaTxEngine<0>, NoDmaEngine, InRam>;
 static_assert(RamEngined::has_tx_engine);
 
 extern "C" [[gnu::section(".fast_text")]] void fixture_placed_sercom_vector() {
@@ -491,7 +509,7 @@ extern "C" [[gnu::section(".fast_text")]] void fixture_placed_sercom_vector() {
 void ram_engined_uart_verbs() {
     constexpr SysClock clock;
     (void)RamEngined::init(clock, 9600);
-    RamEngined::dma_isr();           // the completion, in SRAM
+    (void)RamEngined::dma_isr();     // the completion, in SRAM
     (void)RamEngined::write_byte('x');
     fixture_placed_sercom_vector();
     RamEngined::release();

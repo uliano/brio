@@ -184,7 +184,7 @@ of the kind. The driver does not offer it.
   anyway and does not find it (below).
 - **1.8.7 DMA Write Access** (a DMA write during standby may not land;
   RTC.COUNT is on the list) names every revision and is unreachable
-  here: the stratum's one DMA channel writes a SERCOM's DATA, never
+  here: the stratum's DMA channels move a SERCOM's DATA, never
   RTC.COUNT, and never in standby ([dmac.md](dmac.md)).
 
 ## Types and verbs

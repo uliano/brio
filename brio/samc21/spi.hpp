@@ -13,11 +13,15 @@
  *
  * then an active object posts a Request (the chip select, the buffers as
  * lend<Lease::reply>(...), baud = *SpiHw::baud_for(hz), the mode, and
- * SpiEngine::polled) to SpiBus and gets an SpiDone back. Every request runs
- * polled, inside the arbiter's dispatch: asynchronous is DMA, and this
- * host has no engines - a request naming SpiEngine::dma is refused (SpiDone with spi_rejected, nothing on the wire;
- * `SpiHw::has_dma` is false for a program's static_assert). The host
- * binds no vector.
+ * the engine it names) to SpiBus and gets an SpiDone back. The program names
+ * how each request runs. SpiEngine::polled is the loop, inside the arbiter's
+ * dispatch, at any length, no vector bound. SpiEngine::dma is the DMA engines,
+ * at any length: the board file names them in the host's template arguments
+ * (samc21/dmac.hpp, its budget of two channels), the program binds the DMAC's
+ * vector and the SERCOM's to dma_isr(), and start() returns with the wire
+ * running. On a host with no engines, a request naming dma is refused (SpiDone
+ * with spi_rejected, nothing on the wire; `SpiHw::has_dma` is false for a
+ * program's static_assert).
  *
  * Who calls what, and from where. init() is a setup call in main(),
  * after the clock task's init() and before interrupts are enabled
@@ -28,7 +32,8 @@
  * enabled, bounded by one spin budget, the request's cs_setup_us spent
  * spinning there first; a refused one returns at once. A change of mode
  * or rate costs start() a disable/enable pair and its bounded
- * synchronization waits first. The host arms no interrupt of the
+ * synchronization waits first. dma_isr() is the vectors' body and ends a
+ * request on the engines. A host with no engines arms no interrupt of the
  * SERCOM's and leaves its NVIC line disabled. The Request's three buffers
  * are lent from the post until the SpiDone the arbiter replies with:
  * untouched and in scope until then, which nothing checks. The chip
@@ -45,13 +50,13 @@
  *              the one combined interrupt question this core's single
  *              vector has to ask.
  *
- *  SpiHost<n, pads, generator, Placement>
+ *  SpiHost<n, pads, generator, TxEngine, RxEngine, Placement>
  *              the task util/spi_bus.hpp (= util/bus_master.hpp) drives:
  *              the transfer engine. A Request is a two-phase transaction
  *              in one chip-select window, the buffers travel with it as
- *              Lease::reply loans, and it completes inside start(),
- *              polled. It is the descriptor shape every target's SpiHost
- *              carries, so a device client reads unchanged on any of them.
+ *              Lease::reply loans, and it runs in the loop or on the DMA
+ *              engines as it names. It is the descriptor shape every target's
+ *              SpiHost carries, so a device client reads unchanged on any of them.
  *
  *  SpiClient<n, pads>
  *              the other end of the wire: a polled surface plus the ISR
@@ -119,7 +124,10 @@
  *  - RXC is set when a character has been fully shifted in, and reading
  *    DATA is what clears it. It is therefore the exact "one character
  *    has moved, both ways" edge, which the host engine's receive loop
- *    waits for, the received byte in hand when it reads;
+ *    waits for, the received byte in hand when it reads. It is not the
+ *    wire's end: in the modes whose last edge is not the sampling one it
+ *    rises half a bit before that edge (measured, docs/samc21/spi.md), and
+ *    TXC is what closes the frame;
  *  - STATUS carries one error bit, BUFOVF (32.6.2.7), and CTRLA.IBON
  *    decides whether it is raised at the overflow or travels with the
  *    data through the two-level receive buffer;
@@ -893,6 +901,12 @@ public:
     }
     [[gnu::always_inline]] static void data(uint16_t v) { regs().SERCOM_DATA = v; }
 
+    /// The address the DMA engines write and read: DATA, whose low byte a byte beat
+    /// reaches. The two triggers are Sercom<n>'s, the instance's own constants.
+    static volatile void* data_address() { return &regs().SERCOM_DATA; }
+    static constexpr uint8_t dma_tx_trigger() { return Base::dma_tx_trigger(); }
+    static constexpr uint8_t dma_rx_trigger() { return Base::dma_rx_trigger(); }
+
     /// Drain the two-level receive buffer (and the shifter's spill).
     static void flush_rx() {
         for (uint8_t i = 0; i < 4u && rxc_flag(); ++i) {
@@ -908,22 +922,91 @@ public:
 // =============================================================================
 
 /*
- * SpiHost<n, pads, generator>
+ * SpiHost<n, pads, generator, TxEngine, RxEngine, Placement>
  *
  * The transfer ENGINE: the target-side half of the SPI stack, driven by
  * util/spi_bus.hpp (which owns arbitration and replies). This task owns
- * the wire: chip select, the D/C line of display-style devices, and the
- * polled loops that move the characters.
+ * the wire: chip select, the D/C line of display-style devices, the
+ * polled loops and the DMA engines that move the characters.
  *
- * ONE WAY TO RUN A REQUEST. docs/design/spi-bus.md gives a host two:
- * polled, the transaction inside start(), and asynchronous, which is DMA.
- * This host has no DMA engines (NO DMA, below), so it runs every request
- * polled: `has_dma` is false, and a request naming SpiEngine::dma is
- * refused, start() answering true at once with
- * status() spi_rejected before the registers, the select or the D/C are
- * touched. The SERCOM's interrupt is never armed and the program binds
- * no vector for this host (docs/design/spi-bus.md weighs a per-character
- * interrupt against the character).
+ * TWO WAYS TO RUN A REQUEST, AND THE REQUEST NAMES ONE. Nothing here chooses
+ * by cost: a wrong choice costs time, never correctness, and the wire does the
+ * same under both. Under either, when a request ends the wire has ended: the
+ * select rises after the last SCK edge, and whatever tells the caller so comes
+ * after that edge too.
+ *  - SpiEngine::polled: the loops below, inside start(), at any length. No DMA,
+ *    no vector, and start() returns true.
+ *  - SpiEngine::dma: the engines, at any length. start() returns false and
+ *    dma_isr() ends it, a command followed by data excepted (below). In order:
+ *    on a host with no engines, spi_rejected; nothing to move, spi_ok; what the
+ *    engines cannot carry - on a host with the transmit engine alone, a request
+ *    that reads (rx not null) - spi_rejected, before the registers, the select or
+ *    the D/C are touched, so the program names polled for its reads; a command
+ *    followed by data runs the command in the loop, one fixed rule, a command being
+ *    short and a block of its own a second launch and a second interrupt, and the
+ *    data on the engines; a command alone rides the engines; and otherwise the
+ *    engines. start() returns true for a polled request, an empty one and a refused
+ *    one, and false only when the engines have it.
+ *
+ * THE ENGINE SLOTS: both, the transmit one alone, or neither (the defaults). The
+ * engines are samc21/dmac.hpp's, each a channel of the two an image may hold,
+ * claimed at init() and held to release() whether a request runs or not. So a board
+ * file spends the budget: the pair takes it whole, and the console beside it takes
+ * no channel; the transmit engine alone leaves one, a display's writes beside a
+ * console's transmitter.
+ *
+ * ONE INTERRUPT A REQUEST, TXC, in every shape. "In Host mode, this flag is set when
+ * the data have been shifted out and there are no new data in DATA" (32.8.6): it
+ * closes the last frame on the wire, where a receive block's completion would come up
+ * to half a bit early (RXC, the file header), so no vector here waits for the shifter.
+ * Both channels are silent, armed for their transfer errors alone (DmaCompletion). A
+ * buffer that ran dry BETWEEN two beats raises TXC too, the channel late for one frame,
+ * and the next beat clears it ("cleared ... by writing new data to DATA", 32.8.6): only a
+ * transmit channel that has disabled itself has written its last beat, and then TXC can
+ * only be the last frame's. A receive channel's last beat follows RXC, which is up by
+ * then, by a few bus cycles at most; a bound on it that runs out is a fault. What the
+ * contradiction proves is a fault too: TXC up, DRE up, and a transmit channel enabled
+ * with nothing pending has lost its trigger, and no beat would ever clear the flag.
+ *
+ * THE TWO VECTORS ARE BOTH THE PROGRAM'S, each calling dma_isr(): the SERCOM's for TXC
+ * and the DMAC's for a channel's bus error, the second shared with every other owner of a
+ * channel (samc21/dmac.hpp):
+ *
+ *     extern "C" void SERCOM1_Handler() {
+ *         if (SpiHw::dma_isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
+ *     }
+ *     extern "C" void DMAC_Handler() {
+ *         if (SpiHw::dma_isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
+ *     }
+ *
+ * A vector left unbound is the crt's weak alias of its silent spin, where the program stops
+ * at the first request's end. A polled request needs neither.
+ *
+ * A WRITE RIDES THE TRANSMIT CHANNEL ALONE (a null rx: a display's pixels), on a pair too, the
+ * pair still holding both claims. The receiver stays on, its two levels overflow in silence,
+ * ERROR is never armed, and the end drains them and clears BUFOVF (32.6.2.7). A read starts
+ * its receive channel first: RXC is clear, every character of a command phase having been read
+ * back, and it is the transmit channel's first beat that starts the clock. Neither is kicked:
+ * DRE stands, and the enable fires the first beat by itself (samc21/dmac.hpp).
+ *
+ * AFTER A STALL OR A TRANSFER ERROR THE NEXT REQUEST STARTS ON A CLEAN BLOCK, whoever calls it,
+ * and the program calls nothing: the host is the one type there is both in direct use and under
+ * the arbiter, and the arbiter goes on to the next waiting request before the requester has
+ * run. A stall resets the SERCOM inside start(), main context, the select released FIRST: SWRST
+ * takes the instance out of host mode, the pads undriven until the enable drives them again, and
+ * in modes 2 and 3 that return to an idle high is an edge on a line with a pull or a charge on it
+ * (measured, docs/samc21/spi.md), which only a released select makes harmless. With a null select
+ * the program's own select stands through it: the host cannot release what it does not hold. A
+ * transfer error is met in the vector, which decides and does not work: the channels put away,
+ * the select released, a reset owed. The debt is a value of the half-word apply() compares
+ * (reset_owed_key), so the next start() or prime() pays it on the path that already asks, out of
+ * line, and neither a polled request nor a refusal carries a test for it; written in the vector
+ * only while a request is in flight and read in main context only when none is, it needs no
+ * critical section. reset_block() is the one sequence, called by the stall, by the owed reset and
+ * by recover(). What it cannot do: on a SERCOM whose core clock is stopped SWRST never completes,
+ * and nothing else may be written to it - so the debt stands, the next request stalls on its own
+ * budget, and the first one after the clock returns pays it and runs. recover() stays for the
+ * timed arbiter (util/bus_master.hpp) and a program's own use.
  *
  * Transaction descriptor (Request) - two phases in ONE chip-select
  * window, the shape every target's SpiHost carries:
@@ -941,9 +1024,9 @@ public:
  *
  * THE REQUEST IS LENT FOR THE CALL (util/bus_master.hpp's contract): it
  * lies in a slot of the arbiter's that stays as it is until the dispatch
- * ends, and a request completes inside start(), so it is read through
- * the reference and copied NOWHERE; the host keeps no state of a
- * transaction past it.
+ * ends. A request that completes inside start() is read through the
+ * reference and copied nowhere; one on the engines keeps its two pins, what
+ * dma_isr() raises at the end, and nothing else of it.
  *
  * WHY THE CHIP SELECT IS A GPIO AND NOT THE PERIPHERAL'S. CTRLB.MSSEN
  * exists and this driver exposes it - but 32.6.3.5 says hardware SS is
@@ -1008,32 +1091,49 @@ public:
  * here, neither reachable on the standard 1000 Hz ticker with a uint8_t
  * of microseconds.
  *
- * NO DMA. The SERCOM has its DMAC triggers (RX and TX), but this
- * stratum drives the DMAC for one user alone, the Uart's transmitter,
- * because erratum 1.10.4 kills a full-duplex pair beside any third active
- * channel and hangs even one SPI channel beside two others
- * (docs/samc21/dmac.md): no engine slot is born here. status() is
- * therefore spi_ok, spi_stalled when a request's bounded spin ran out,
- * or spi_rejected when an asynchronous request was refused.
+ * status() is spi_ok, spi_stalled when a request's bounded spin ran out,
+ * spi_dma_fault when a channel took a bus error or lost its trigger, or
+ * spi_rejected when a request was refused.
  *
  * WHERE THE HOT PATH RUNS FROM: the host's placement, its last template
- * parameter (util/placement.hpp). One path takes it, ONE function of it:
- * the polled transaction - its command phase, the D/C flip and its data
- * phase in whichever of the loops below the spans pick - which start()
- * calls once a request. Under InFlash, the default, it is what it would
+ * parameter (util/placement.hpp). It places the loops: the polled transaction
+ * - its command phase, the D/C flip and its data phase in whichever of the loops
+ * below the spans pick - which start() calls once a request, and the command loop
+ * of a request on the engines. Under InFlash, the default, each is what it would
  * be without the placement, in the flash; under InRam it is one instance
  * in SRAM (`.fast_text.brio`), a call through the linker's long-branch
- * veneer from the flash. The flash runs behind two wait states at 48 MHz
+ * veneer from the flash. dma_isr() takes the place of the vector that binds it.
+ * The flash runs behind two wait states at 48 MHz
  * (DS60001479M table 45-41), and the receive loop fetched from it holds
  * a character longer than the wire's at the top rate. The measured
  * figures, every placement, are docs/samc21/spi.md's.
  */
-template <uint8_t n, SpiPads pads, uint8_t generator = 0, typename Placement = InFlash>
+
+/// A DMA transfer error, or a channel found dead, as a BusDone status - the first
+/// engine-defined code the bus_master contract reserves (bus_engine_status).
+inline constexpr uint8_t spi_dma_fault = bus_engine_status;
+
+template <uint8_t n, SpiPads pads, uint8_t generator = 0, typename TxEngine = NoDmaEngine,
+          typename RxEngine = NoDmaEngine, typename Placement = InFlash>
 class SpiHost {
     using S = Spi<n>;
 
     static_assert(HotPlacement<Placement, SamPlatform>,
                   "brio SpiHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: samc21/dmac.hpp's DmaTxEngine "
+                  "and DmaRxEngine, or NoDmaEngine (the default)");
+    static_assert(!RxEngine::present || TxEngine::present,
+                  "brio SpiHost: a receive engine comes with a transmit engine - the transmit "
+                  "channel's beats are what clock the wire; a host that writes alone names the "
+                  "transmit engine alone");
+    static_assert([] {
+        if constexpr (RxEngine::present) {
+            return TxEngine::channel != RxEngine::channel;
+        } else {
+            return true;
+        }
+    }(), "brio SpiHost: the two engines ride two different DMA channels, 0 and 1");
 
     static_assert(spi_pads_valid(pads),
                   "these SERCOM pads cannot carry an SPI host: CTRLA.DOPO fixes the "
@@ -1063,12 +1163,14 @@ public:
     /// baud divisor from the app's Clock tag alone.
     static constexpr uint8_t core_generator = generator;
 
-    /// Can this host run an asynchronous request? Never: asynchronous is
-    /// DMA (docs/design/spi-bus.md) and this host has no engines (the
-    /// class comment). Every request naming SpiEngine::dma is refused
-    /// (spi_rejected), so a program that posts one asserts this -
-    /// `static_assert(SpiHw::has_dma)` - and fails to compile here.
-    static constexpr bool has_dma = false;
+    /// The engines this host was given (the class comment).
+    static constexpr bool has_engines = TxEngine::present;
+    static constexpr bool has_rx_engine = RxEngine::present;
+    /// Can this host run a request naming SpiEngine::dma? False refuses every
+    /// such request (spi_rejected), so a program that posts one asserts this -
+    /// `static_assert(SpiHw::has_dma)`. True on the transmit engine alone
+    /// refuses the ones that read.
+    static constexpr bool has_dma = has_engines;
 
     /// Forty bytes and no padding - the two pin references, the three
     /// spans, then every narrow field packed, the reply capsule closing
@@ -1087,13 +1189,11 @@ public:
         uint16_t len;      ///< phase 2 length
         uint8_t cmd_len;   ///< phase 1 length
 
-        /// The way to run it (SpiEngine, util/spi_bus.hpp): polled, inside
-        /// start(), completing synchronously - the only way this host has;
-        /// dma, asynchronous, refused here (spi_rejected at
-        /// once, nothing on the wire: has_dma). A character at f_ref/2
-        /// is sixteen CPU cycles, less than an interrupt's entry alone;
-        /// the price is that the arbiter's dispatch blocks for the whole
-        /// transfer (bounded), global interrupts enabled throughout.
+        /// The way to run it (SpiEngine, util/spi_bus.hpp), and the host does
+        /// what it says (the class comment): polled, the loop, inside start(),
+        /// the arbiter's dispatch held for the whole transfer (bounded), global
+        /// interrupts enabled throughout; dma, the engines, start() returning
+        /// with the wire running, refused on a host that cannot carry it.
         SpiEngine engine = SpiEngine::polled;
 
         /// Microseconds between the CS assertion and the first clock -
@@ -1128,10 +1228,11 @@ public:
 
     // ---- lifecycle -----------------------------------------------------------
 
-    /// Bring the instance up as a host: clocks, configuration, pads,
-    /// pins; the NVIC line left disabled (the host arms no interrupt).
-    /// Setup's call, main context; it waits, bounded, for the
-    /// peripheral's synchronizations.
+    /// Bring the instance up as a host: clocks, configuration, the engines'
+    /// claims (a panic when a channel is held by another owner: the budget,
+    /// samc21/dmac.hpp), pads, pins; on a host with no engines the NVIC line left
+    /// disabled (it arms no interrupt), on one with engines opened for TXC. Setup's
+    /// call, main context; it waits, bounded, for the peripheral's synchronizations.
     ///
     /// Call after the main clock is set up and before interrupts are
     /// enabled globally; `clock` is the app's brio::Clock tag, so the
@@ -1147,7 +1248,8 @@ public:
     /// meaningful. 0 = no ceiling.
     ///
     /// False when the ceiling cannot be produced at this clock, or when
-    /// one of the peripheral's synchronizations did not complete.
+    /// one of the peripheral's synchronizations, or a channel's reset, did not
+    /// complete.
     template <typename Clock>
     static bool init(Clock clock, uint32_t max_sck_hz = 0) {
         static_assert(clock_follows<Clock, SpiHost>(),
@@ -1179,6 +1281,22 @@ public:
             return false;
         }
         status_ = spi_ok;
+        if constexpr (has_engines) {
+            const uint8_t owner = static_cast<uint8_t>(n + 1u);
+            dma_active_ = false;
+            if (!TxEngine::arm(owner, S::data_address(), S::dma_tx_trigger(),
+                               TxEngine::Completion::silent)) {
+                return false;
+            }
+            if constexpr (has_rx_engine) {
+                if (!RxEngine::arm(owner, S::data_address(), S::dma_rx_trigger(),
+                                   RxEngine::Completion::silent)) {
+                    TxEngine::release(owner);
+                    return false;
+                }
+            }
+            Nvic::enable(S::irq());
+        }
 
         // The pads go to the SERCOM only now, with the peripheral
         // already enabled and SCK sitting at its configured idle level:
@@ -1242,30 +1360,48 @@ public:
     /// THE WIRE: flipped inside an open select window it is one extra
     /// edge, and a selected client counts it into the character (measured
     /// as a one-bit slip in both directions). Prime FIRST, then assert
-    /// the select.
+    /// the select. A reset owed since a stall or a transfer error is paid
+    /// here too, before that select.
     static void prime(SpiMode mode, uint8_t baud) { apply(mode, clamp(baud)); }
 
     // ---- the transfer --------------------------------------------------------
 
-    /// Run a transaction (called by SpiBus from main context). Always
-    /// true: it completed inside the call - a polled request, the empty
-    /// one, or a refused one (an asynchronous request: spi_rejected in
-    /// status(), the wire untouched) - util/bus_master.hpp's engine
-    /// contract, its synchronous half.
+    /// Run a transaction, or begin it (called by SpiBus from main context). True
+    /// when it ended inside the call - a polled request, the empty one, a refused
+    /// one (spi_rejected in status(), the wire untouched), a command loop that
+    /// stalled - and false when the engines have it and dma_isr() will end it:
+    /// util/bus_master.hpp's engine contract. True is "ended", not "succeeded": a
+    /// request whose budget ran out returns true with the select released, the
+    /// SERCOM reset and status() = spi_stalled, so a caller driving the engine
+    /// without the arbiter reads status() and calls nothing else. The order of the
+    /// refusals is the class comment's.
     ///
-    /// The request is read through `r` from the first field to the last
-    /// and never copied.
+    /// The request is read through `r` and copied nowhere; on the engines its two
+    /// pins are kept.
     static bool start(const Request& r) {
-        if (r.engine == SpiEngine::dma) {
-            // Asynchronous is DMA, and this host has none: refused before
-            // the registers, the select or the D/C are touched.
-            status_ = spi_rejected;
-            return true;
+        const bool on_engines = r.engine == SpiEngine::dma;
+        if constexpr (!has_engines) {
+            if (on_engines) {
+                // This host has no engines: refused before the registers, the
+                // select or the D/C are touched.
+                status_ = spi_rejected;
+                return true;
+            }
         }
         status_ = spi_ok;
-        const uint16_t total = static_cast<uint16_t>(r.cmd_len + r.len);
-        if (total == 0) {
+        // cmd_len is a byte and len sixteen bits: the sum needs seventeen, or a
+        // request of 65536 frames would read as a request of none.
+        const uint32_t total = static_cast<uint32_t>(r.cmd_len) + r.len;
+        if (total == 0u) {
             return true;   // nothing to move: complete on the spot
+        }
+        if constexpr (has_engines && !has_rx_engine) {
+            if (on_engines && r.rx.get() != nullptr) {
+                // A transmit engine alone has nowhere to put what comes back:
+                // the program names polled for its reads.
+                status_ = spi_rejected;
+                return true;
+            }
         }
         apply(r.mode, clamp(r.baud));
         if (r.cmd_len != 0) {
@@ -1280,44 +1416,109 @@ public:
             // class comment.
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
+        if constexpr (has_engines) {
+            if (on_engines) {
+                return start_engines(r);   // false: dma_isr() is the completion edge
+            }
+        }
         // Global interrupts STAY ENABLED, so the ticker and anything else
-        // preempt this loop freely; the SERCOM's own interrupt is never
-        // armed by this host.
+        // preempt this loop freely.
         polled_transaction(r, total);
         r.cs.set();   // release: transaction done
+        if (status_ == spi_stalled) [[unlikely]] {
+            (void)reset_block();   // the select released first: the class comment
+        }
         return true;
     }
 
-    /// The last request's status, which the arbiter reads after start()
-    /// returns: spi_ok, spi_stalled when its bounded spin ran out, or
-    /// spi_rejected when it was refused (asynchronous, has_dma).
+    /// The vectors' body, on a host with engines: call it from the SERCOM's handler
+    /// and from DMAC_Handler, and from nowhere else (the class comment). True when
+    /// the transaction just completed, the select released: the edge the program's
+    /// glue posts TransferDone{status()} on. Runs to completion and waits at most a
+    /// few bus cycles, bounded, for a receive channel's last beat. False, and free, on
+    /// a host with no engines; one load and a branch between its requests, which is
+    /// what this body costs another owner's completion.
+    [[gnu::always_inline]] static bool dma_isr() {
+        if constexpr (has_engines) {
+            // Nothing of this host is pending between its requests: a channel
+            // interrupts for its transfer error alone, and TXC is armed from a
+            // launch to its end. So another owner's completion pays this load.
+            if (!dma_active_) {
+                return false;
+            }
+            uint8_t flags = TxEngine::take_interrupt();
+            if constexpr (has_rx_engine) {
+                flags = static_cast<uint8_t>(flags | RxEngine::take_interrupt());
+            }
+            if ((flags & TxEngine::flag_error) != 0u) [[unlikely]] {
+                return end_on_fault();
+            }
+            if (S::txc_flag()) {
+                return transmit_complete();
+            }
+        }
+        return false;
+    }
+
+    /// The last request's status: read by the arbiter after a start() that returned
+    /// true, and by the glue in the vector right after a dma_isr() that returned true.
+    /// spi_ok, spi_stalled when its bounded spin ran out, spi_dma_fault when a channel
+    /// took a bus error or lost its trigger, or spi_rejected when it was refused.
     static uint8_t status() { return status_; }
 
 public:
-    /// Put the ENGINE back where start() is legal: the peripheral reset
-    /// and reconfigured to the applied state. Clocks, pads and the
-    /// ceiling arithmetic are untouched (a SERCOM software reset reaches
-    /// none of them), so no Clock is needed.
+    /// Put the ENGINE back where start() is legal: the select of a transaction on the
+    /// engines released first, its channels put away and re-claimed, the peripheral
+    /// reset and reconfigured to the applied state. Clocks, pads and the ceiling
+    /// arithmetic are untouched (a SERCOM software reset reaches none of them), so no
+    /// Clock is needed.
     ///
     /// The verb a timed SpiBus calls on a transaction that never answered
-    /// (util/bus_master.hpp) - which no transaction of this host can be,
-    /// every one ending inside start(), its select released there even
-    /// when its spin ran out. What it still serves is a program's own
-    /// call after a request answered spi_stalled: the SERCOM whose clock
-    /// stopped is reset and brought back. Main context.
+    /// (util/bus_master.hpp); a program may call it with the bus idle, and owes it after
+    /// nothing: a stall and a transfer error need no call (the class comment). Main
+    /// context. A channel running here is disabled mid-block, and beside another owner's
+    /// running channel that is what docs/samc21/dmac.md's rule speaks of: this is the
+    /// one path of the host that can do it.
     ///
     /// Returns false when a synchronization never settled (the bounded
     /// waits' honesty: a false engine is refusing, not hanging).
     static bool recover() {
-        bool ok = S::reset();
-        ok = S::configure(applied_) && ok;
-        ok = S::enable(true) && ok;
-        S::flush_rx();
-        return ok;
+        if constexpr (has_engines) {
+            bool was_active = false;
+            {
+                typename SamPlatform::CriticalSection cs;
+                was_active = dma_active_;
+                dma_active_ = false;
+            }
+            S::enable_txc_interrupt(false);
+            if (was_active) {
+                tenure_cs_.set();
+                tenure_dc_.set();
+                put_channels_away();
+            }
+        }
+        return reset_block();
     }
 
-    /// Hand the pins back, then the peripheral.
+    /// Hand the pins back, then the peripheral: the engines and their claims first, so
+    /// another transport may take the channels. THE TRANSMIT BLOCK IN FLIGHT ENDS FIRST
+    /// (docs/samc21/dmac.md, "The rule": another owner's channel may be running), the wait
+    /// on the channel itself, so no vector is needed, and bounded by that block's time on
+    /// the wire; a block that outlives the bound is disabled anyway.
     static void release() {
+        if constexpr (has_engines) {
+            const uint8_t owner = static_cast<uint8_t>(n + 1u);
+            // A frame is 16 x (BAUD + 1) core cycles and a poll turn several.
+            uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * 16u *
+                             (static_cast<uint32_t>(applied_.baud) + 1u);
+            while (TxEngine::running() && spins-- != 0u) {
+            }
+            TxEngine::release(owner);
+            if constexpr (has_rx_engine) {
+                RxEngine::release(owner);
+            }
+            dma_active_ = false;
+        }
         Nvic::disable(S::irq());
         S::release();
         DoPin::release();
@@ -1349,6 +1550,10 @@ private:
         return static_cast<uint16_t>((static_cast<uint16_t>(mode) << 8) | baud);
     }
 
+    /// The half-word that says a reset is owed: no mode has this high byte, so the next
+    /// apply() compares unequal and pays it (the class comment).
+    static constexpr uint16_t reset_owed_key = 0xFF00u;
+
     /**
      * Put the peripheral where this request wants it: ONE compare on the
      * path a run of requests to one device takes, the change outlined.
@@ -1356,7 +1561,7 @@ private:
      * CTRLA (which is where CPOL and CPHA live on this peripheral) and
      * BAUD are BOTH enable-protected, so any change costs a
      * disable/enable pair - which is why the applied state is cached and
-     * the pair is paid only when something really moved.
+     * the pair is paid only when something really moved - or a reset is owed.
      */
     [[gnu::always_inline]] static void apply(SpiMode mode, uint8_t baud) {
         if (key_of(mode, baud) != applied_key_) {
@@ -1365,9 +1570,14 @@ private:
     }
 
     [[gnu::noinline]] static void apply_change(SpiMode mode, uint8_t baud) {
+        const bool owed = applied_key_ == reset_owed_key;
         applied_key_ = key_of(mode, baud);
         applied_.mode = mode;
         applied_.baud = baud;
+        if (owed) {
+            (void)reset_block();
+            return;
+        }
         (void)S::enable(false);
         S::regs().SERCOM_CTRLA = spi_ctrla(applied_);
         S::baud_reg(baud);
@@ -1378,8 +1588,8 @@ private:
     /// of it, generous - the slowest character this generator can
     /// produce is 512 x 9 core-clock cycles, and a wait is a few
     /// instructions a turn.
-    static uint32_t spin_budget(uint16_t frames) {
-        return 200000u + 6000u * static_cast<uint32_t>(frames);
+    static uint32_t spin_budget(uint32_t frames) {
+        return 200000u + 6000u * frames;
     }
 
     /// Spin until an INTFLAG bit stands, charging the transaction's
@@ -1502,15 +1712,15 @@ private:
     /// that ran out leaves the request completed as far as it went, the
     /// receiver flushed and the status spi_stalled (util/spi_bus.hpp):
     /// the SERCOM clocked nothing back in a budget many times the
-    /// transaction's own length, so its clock is not running -
-    /// recover() is the way back. One function of the host's
+    /// transaction's own length, so its clock is not running, and
+    /// start() resets it, the select released. One function of the host's
     /// placement (the class comment), called once a request.
-    static void polled_transaction(const Request& r, uint16_t total) {
+    static void polled_transaction(const Request& r, uint32_t total) {
         Hot<Placement>::run([&r, total] { polled_body(r, total); });
     }
 
     /// The polled transaction's path, written once.
-    [[gnu::always_inline]] static void polled_body(const Request& r, uint16_t total) {
+    [[gnu::always_inline]] static void polled_body(const Request& r, uint32_t total) {
         uint32_t budget = spin_budget(total);
         bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
         r.dc.set();   // data phase (a no-op when len == 0)
@@ -1533,21 +1743,171 @@ private:
                                       : run_phase<false, true>(nullptr, rx, r.len, budget);
             }
         }
+        // WHEN THE REQUEST ENDS THE WIRE HAS ENDED: the receive shapes stop on RXC, up to
+        // half a bit before the last SCK edge (the file header), and TXC closes the frame.
+        // One wait a request, one load where the shape stopped on TXC already. A
+        // character's writes cleared any TXC an early rise left, so this one is the last
+        // character's.
+        if (whole && !wait_flag(SpiFlag::txc, budget)) {
+            whole = false;
+        }
         if (!whole) {
             status_ = spi_stalled;
             S::flush_rx();
         }
     }
 
-    /// The last request's status (spi_ok / spi_stalled / spi_rejected):
-    /// written in start(), read by the arbiter after it returns, one
-    /// context.
-    static inline uint8_t status_ = spi_ok;
+    // ---- the engines ---------------------------------------------------------
+
+    /// The command phase of a request on the engines, in the loop (the class comment):
+    /// one more instance of the host's placement. True when its last character came back.
+    static bool command_loop(const Request& r) {
+        bool whole = false;
+        Hot<Placement>::run([&r, &whole] {
+            uint32_t budget = spin_budget(r.cmd_len);
+            whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
+        });
+        return whole;
+    }
+
+    /// A request onto the engines, once a transaction, out of start()'s polled path: the
+    /// two pins kept for the end, a command followed by data in the loop with no channel
+    /// armed (so a stall there has nothing to put away), a command alone on the engines, and
+    /// the block. False: dma_isr() ends it. True only when the command loop stalled.
+    [[gnu::noinline]] static bool start_engines(const Request& r) {
+        tenure_cs_ = r.cs;
+        tenure_dc_ = r.dc;
+        if (r.cmd_len != 0u) {
+            if (r.len == 0u) {
+                launch_engines(r.cmd.get(), nullptr, r.cmd_len);
+                return false;
+            }
+            if (!command_loop(r)) {
+                status_ = spi_stalled;
+                S::flush_rx();
+                r.cs.set();
+                (void)reset_block();
+                return true;
+            }
+            r.dc.set();
+        }
+        launch_engines(r.tx.get(), r.rx.get(), r.len);
+        return false;
+    }
+
+    /// One block: TXC cleared and armed before anything can raise it, the receive channel
+    /// first where there is one to fill, the transmit channel last, its first beat the
+    /// standing DRE's. Whether this request reads travels with it for the end.
+    static void launch_engines(const uint8_t* tx, uint8_t* rx, uint16_t len) {
+        dma_active_ = true;
+        S::clear_flags(SpiFlag::txc);
+        S::enable_txc_interrupt(true);
+        if constexpr (has_rx_engine) {
+            tenure_reads_ = rx != nullptr;
+            if (rx != nullptr) {
+                RxEngine::start(rx, len);
+            }
+        } else {
+            (void)rx;
+        }
+        if (tx != nullptr) {
+            TxEngine::start_run(tx, len);
+        } else {
+            TxEngine::start_fixed(&tx_dummy_, len);
+        }
+    }
+
+    /// TXC stands on a request on the engines (the class comment): the last frame's when
+    /// the transmit channel has written its last beat; otherwise a buffer that ran dry,
+    /// which the next beat clears, or a channel that lost its trigger, a contradiction: the
+    /// flags read again after the channel, a beat landing between the two looks having
+    /// cleared them.
+    [[gnu::always_inline]] static bool transmit_complete() {
+        if (TxEngine::running()) {
+            if (TxEngine::waiting() && S::dre_flag() && S::txc_flag()) {
+                return end_on_fault();
+            }
+            return false;
+        }
+        if constexpr (has_rx_engine) {
+            if (tenure_reads_) {
+                // RXC is up by now, and the channel's beat takes a few bus cycles: 64
+                // turns are hundreds of core cycles. One that does not end has missed a
+                // character the receiver overflowed on.
+                uint8_t left = 64u;
+                while (!RxEngine::idle()) {
+                    if (--left == 0u) {
+                        return end_on_fault();
+                    }
+                }
+            } else {
+                S::flush_rx();
+            }
+        } else {
+            S::flush_rx();
+        }
+        (void)TxEngine::complete();
+        S::enable_txc_interrupt(false);
+        tenure_dc_.set();   // a command alone leaves D/C where a polled one does
+        tenure_cs_.set();
+        dma_active_ = false;
+        return true;
+    }
+
+    /// A channel's bus error, or a channel found dead: the vector decides and does not work
+    /// (the class comment). The channels put away, the select released, a reset owed.
+    [[gnu::noinline, gnu::cold]] static bool end_on_fault() {
+        S::enable_txc_interrupt(false);
+        put_channels_away();
+        tenure_dc_.set();
+        tenure_cs_.set();
+        status_ = spi_dma_fault;
+        applied_key_ = reset_owed_key;
+        dma_active_ = false;
+        return true;
+    }
+
+    /// Both channels reset and re-armed, whichever of them took the fault or was running.
+    [[gnu::noinline, gnu::cold]] static void put_channels_away() {
+        (void)TxEngine::abandon();
+        if constexpr (has_rx_engine) {
+            RxEngine::abandon();
+        }
+    }
+
+    /// THE ONE RESET SEQUENCE (the class comment), cold and out of line: SWRST (32.6.2.2),
+    /// what stood in the buffers and the shifter going with the registers' values, the
+    /// applied configuration written back, the instance enabled, the receiver empty. The
+    /// caller has released the select. False leaves a reset owed: SWRST did not complete, the
+    /// core clock stopped, and nothing else may be written to the instance until it does.
+    [[gnu::noinline, gnu::cold]] static bool reset_block() {
+        if (S::reset() && S::configure(applied_) && S::enable(true)) {
+            S::flush_rx();
+            applied_key_ = key_of(applied_.mode, applied_.baud);
+            return true;
+        }
+        applied_key_ = reset_owed_key;
+        return false;
+    }
+
+    /// The last request's status: written in start() and at the end of a request on the
+    /// engines, read by the arbiter after it returns or in the vector after the end.
+    static inline volatile uint8_t status_ = spi_ok;
+    /// A request is on the engines: from its launch to its end in the vector.
+    static inline volatile bool dma_active_ = false;
+    /// It reads: the receive channel's last beat is part of its end.
+    static inline bool tenure_reads_ = false;
+    /// The pins it keeps for its end.
+    static inline PinRef tenure_cs_{};
+    static inline PinRef tenure_dc_{};
+    /// The dummy a null tx sends (0xFF): const, so it costs no RAM, and the DMAC reads the
+    /// flash as well as the SRAM.
+    static constexpr uint8_t tx_dummy_ = 0xFFu;
     /// The configuration really in the registers - the record a re-init
     /// or recover() writes wholesale - and its mode-and-rate half-word,
     /// the one thing apply() compares.
     static inline SpiConfig applied_{};
-    static inline uint16_t applied_key_ = 0;
+    static inline volatile uint16_t applied_key_ = 0;
     static inline uint32_t ref_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<uint8_t> ceiling_{};

@@ -12,11 +12,13 @@
 // dmac.hpp's DmaTxEngine) beside the interrupt receiver - and what is
 // checked here is the BYTES through each of them, on both sides at once,
 // with a pattern in which a lost, duplicated or reordered byte is
-// IDENTIFIED and not merely counted. The engine is one channel, channel 0,
-// claimed by one owner at a time (erratum 1.10.4, DS80000740S, leaves the
-// DMAC one lane): letter d exercises the claim as a value, letter x the
-// refusal of a second owner as the panic it is, and letter h carries the
-// duplex link at a rate where the shape matters.
+// IDENTIFIED and not merely counted. Each engine is a channel of the
+// image's two (erratum 1.10.4, DS80000740S, docs/samc21/dmac.md), claimed
+// by one owner at a time: letter d exercises the claim as a value, letter x
+// the refusal of a second owner as the panic it is, letter 1 a third claim
+// beside two running channels, letter u the both-engine pair, and letter h
+// carries the duplex link on the transmit engine at a rate where the shape
+// matters.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
 // both ends (brio stress runs the identical arithmetic). The
@@ -182,9 +184,10 @@ constexpr uint32_t rx_ring = 512;
 constexpr uint32_t tx_ring = 512;
 
 using UPlain = Uart<5, console_pads, rx_ring, tx_ring>;
-using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine>;
+using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<0>>;
 
 constexpr UPlain plain;
+constexpr UTxDma utx;
 
 using Sc5 = UPlain::Resource;
 
@@ -196,7 +199,7 @@ using brio::crlf;
 using brio::print;
 
 /// The engine's owner id each engined transport claims with: its SERCOM
-/// number plus one (samc21/dmac.hpp, DmaTxEngine::claim()).
+/// number plus one (samc21/dmac.hpp, DmaTxEngine<0>::claim()).
 constexpr uint8_t console_owner = static_cast<uint8_t>(Sc5::index + 1u);
 
 // =============================================================================
@@ -209,7 +212,7 @@ constexpr uint8_t console_owner = static_cast<uint8_t>(Sc5::index + 1u);
 // members shared by every Uart that names it, and each Uart's dma_isr()
 // consumes its OWN ring by a completed block's length - so DMAC_Handler
 // tells exactly one transport about a completion: the one that holds the
-// claim (DmaTxEngine::owner()).
+// claim (DmaTxEngine<0>::owner()).
 
 // The numbers are brio stress's protocol.
 enum class Mode : uint8_t { plain = 0, txdma = 1 };
@@ -344,11 +347,11 @@ EngineSnapshot snapshot() {
     s.sercom_flags = Sc5::flags();
     s.sercom_armed = Sc5::armed();
     s.sercom_status = Sc5::status();
-    s.owner = DmaTxEngine::owner();
-    s.busy = DmaTxEngine::busy();
-    s.in_flight = DmaTxEngine::in_flight();
-    s.waiting = s.owner != 0u && DmaTxEngine::waiting();
-    s.faults = DmaTxEngine::faults();
+    s.owner = DmaTxEngine<0>::owner();
+    s.busy = DmaTxEngine<0>::busy();
+    s.in_flight = DmaTxEngine<0>::in_flight();
+    s.waiting = s.owner != 0u && DmaTxEngine<0>::waiting();
+    s.faults = DmaTxEngine<0>::faults();
     return s;
 }
 
@@ -437,7 +440,7 @@ void open_leg(const Leg& leg) {
     (void)mode_init(leg.mode, leg.baud, leg.format);
     spin_ms(120);
     mode_clear_errors();
-    DmaTxEngine::clear_faults();
+    DmaTxEngine<0>::clear_faults();
 }
 
 /// One host-driven leg, start to finish (see the choreography at the top).
@@ -774,7 +777,7 @@ void td_engine() {
     bench.verdict("the plain transport names no engine", !UPlain::has_tx_engine);
     bench.verdict("the engined one names the transmit engine", UTxDma::has_tx_engine);
     bench.verdict("the engine is one channel, channel 0",
-                  DmaTxEngine::present && DmaTxEngine::channel == 0u);
+                  DmaTxEngine<0>::present && DmaTxEngine<0>::channel == 0u);
     bench.verdict("an engineless transport reports no DMA faults, for free",
                   UPlain::dma_faults() == 0);
     // The trigger code is the device header's, read per instance by
@@ -786,17 +789,17 @@ void td_engine() {
     // exercised directly with owners no transport uses. The console runs
     // plain under z, so nobody holds the engine on entry. (A refused claim
     // inside arm() is the panic letter x proves; claim() alone answers.)
-    const uint8_t on_entry = DmaTxEngine::owner();
-    const bool a_first = DmaTxEngine::claim(owner_a);
-    const bool b_refused = !DmaTxEngine::claim(owner_b);
-    const uint8_t held_by = DmaTxEngine::owner();
-    const bool a_again = DmaTxEngine::claim(owner_a);
-    DmaTxEngine::release(owner_a);
-    const uint8_t after_a = DmaTxEngine::owner();
-    const bool b_now = DmaTxEngine::claim(owner_b);
-    const uint8_t held_by_b = DmaTxEngine::owner();
-    DmaTxEngine::release(owner_b);
-    const uint8_t after_b = DmaTxEngine::owner();
+    const uint8_t on_entry = DmaTxEngine<0>::owner();
+    const bool a_first = DmaTxEngine<0>::claim(owner_a);
+    const bool b_refused = !DmaTxEngine<0>::claim(owner_b);
+    const uint8_t held_by = DmaTxEngine<0>::owner();
+    const bool a_again = DmaTxEngine<0>::claim(owner_a);
+    DmaTxEngine<0>::release(owner_a);
+    const uint8_t after_a = DmaTxEngine<0>::owner();
+    const bool b_now = DmaTxEngine<0>::claim(owner_b);
+    const uint8_t held_by_b = DmaTxEngine<0>::owner();
+    DmaTxEngine<0>::release(owner_b);
+    const uint8_t after_b = DmaTxEngine<0>::owner();
     print(plain, "  owner on entry ", on_entry, "; claim(", owner_a, ") ", a_first, ", claim(",
           owner_b, ") ", !b_refused, " while ", held_by, " holds, claim(", owner_a, ") again ",
           a_again, "; after release(", owner_a, ") ", after_a, "; claim(", owner_b, ") ", b_now,
@@ -814,14 +817,14 @@ void td_engine() {
     // transport holds the engine for the reading and gives it back.
     std::optional<uint8_t> level;
     if (arm_loop_engine()) {
-        level = DmaTxEngine::priority();
+        level = DmaTxEngine<0>::priority();
         release_loop_engine();
     }
     print(plain, "  the armed channel's level: ", level ? static_cast<uint32_t>(*level) : 0xFFu,
           level ? "" : " (not enabled in CTRL)", crlf);
     bench.verdict("the transmit engine arms at level 2 of four, the rule's NEXT for a transmit, "
                   "with that level enabled in CTRL",
-                  level.has_value() && *level == DmaTxEngine::level && DmaTxEngine::level == 2u);
+                  level.has_value() && *level == DmaTxEngine<0>::level && DmaTxEngine<0>::level == 2u);
 }
 
 // =============================================================================
@@ -861,9 +864,8 @@ Leg base_leg(Op op, Mode m) {
 
 void te_plain_echo() { run_and_report(base_leg(Op::echo, Mode::plain), true); }
 void tf_txdma_echo() { run_and_report(base_leg(Op::echo, Mode::txdma), true); }
-/// THE DUPLEX LINK. The Uart's one engine slot is the transmit one
-/// (samc21/sercom.hpp), so a link that wants bulk both ways takes the
-/// engine on the transmit side and keeps the receiver on RXC. Two rates,
+/// THE DUPLEX LINK on the transmit engine, the receiver kept on RXC (the
+/// both-engine pair is letter u's). Two rates,
 /// two claims:
 ///  - at 1 Mbaud the shape is LOSSLESS - every byte back, in order,
 ///    nothing dropped, no hardware overrun;
@@ -873,8 +875,8 @@ void tf_txdma_echo() { run_and_report(base_leg(Op::echo, Mode::txdma), true); }
 ///    together), and the echo gains on the board's slow clock (below):
 ///    loss is allowed and SILENCE is not, as in letter k.
 /// At both, NO TRANSMIT BLOCK MAY BE ABANDONED: the engine's channel is
-/// the only one the stratum drives, so erratum 1.10.4 has nothing to
-/// corrupt it with, and an abandoned block is the dead-block predicate
+/// the only one of the image, so nothing disables another beside it, and
+/// an abandoned block is the dead-block predicate
 /// firing on a live one - which a test of the engine's own "in flight" and
 /// the flags alone does at 2 Mbaud, where main context is preempted for a
 /// character time across a completion (samc21/sercom.hpp,
@@ -1241,11 +1243,11 @@ constexpr UartPads loop_pads{
 };
 
 using LPlain = Uart<1, loop_pads, 512, 512>;
-using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine>;
+using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine<0>>;
 using Sc1 = LPlain::Resource;
 constexpr uint8_t loop_owner = static_cast<uint8_t>(Sc1::index + 1u);
 
-enum class Loop : uint8_t { none, plain, txdma, link_dma };
+enum class Loop : uint8_t { none, plain, txdma, link_dma, pair, tx1 };
 volatile Loop loop_live = Loop::none;
 /// The receive edges the loop's vector returned.
 volatile uint32_t loop_edges = 0;
@@ -2128,19 +2130,19 @@ Bound bind_probe(uint8_t trigger) {
     Bound b{};
     probe_sink = probe_mark;
     probe_flags = 0;
-    b.armed = DmaTxEngine::arm(probe_owner, &probe_sink, trigger);
+    b.armed = DmaTxEngine<0>::arm(probe_owner, &probe_sink, trigger);
     if (b.armed) {
-        (void)DmaTxEngine::start(std::span<const uint8_t>(probe_run, sizeof probe_run));
+        (void)DmaTxEngine<0>::start(std::span<const uint8_t>(probe_run, sizeof probe_run));
         spin_ms(1);
         b.moved = probe_sink != probe_mark;
         b.beat = static_cast<uint8_t>(probe_sink & 0xFFu);
-        b.busy = DmaTxEngine::busy();
-        b.waiting = DmaTxEngine::waiting();
+        b.busy = DmaTxEngine<0>::busy();
+        b.waiting = DmaTxEngine<0>::waiting();
         b.flags = probe_flags;
-        (void)DmaTxEngine::abandon();
-        DmaTxEngine::clear_faults();
+        (void)DmaTxEngine<0>::abandon();
+        DmaTxEngine<0>::clear_faults();
     }
-    DmaTxEngine::release(probe_owner);
+    DmaTxEngine<0>::release(probe_owner);
     return b;
 }
 
@@ -2182,7 +2184,7 @@ enum class Way : uint8_t { disabled, enabled, reset };
 /// `keep_enabled`, the core clock and the bus clock gated - then the pin,
 /// in Uart::release()'s order.
 void release_unreset(bool keep_enabled) {
-    DmaTxEngine::release(loop_owner);
+    DmaTxEngine<0>::release(loop_owner);
     Nvic::disable(Sc1::irq());
     Sc1::enable_interrupt(SercomFlag::all, false);
     if (!keep_enabled) {
@@ -2351,6 +2353,252 @@ void tw_released_requester() {
                   wire_rungs({baud}));
 }
 
+// =============================================================================
+// The both-engine Uart on the loop, the budget, and two shapes for minutes
+// =============================================================================
+//
+// THE PAIR: SERCOM1 on the loop through PA18 with both engines, the transmit
+// one on channel 0 and the receive one on channel 1 - the whole budget, so no
+// other channel runs while it does. Its receive side publishes a block at each
+// completion (half its ring) and the tail on harvest(), which the letters ask
+// at every turn of their loop.
+
+using LPair = Uart<1, loop_pads, 1024, 1024, DmaTxEngine<0>, DmaRxEngine<1>>;
+/// The loop's transmit engine on the budget's OTHER channel (letter 1).
+using LTx1 = Uart<1, loop_pads, 512, 512, DmaTxEngine<1>>;
+/// A third transport for letter 1's refused claim: SERCOM2 on PA12, function
+/// C, its own loop, naming channel 1 - which the loop then holds.
+constexpr UartPads third_pads{
+    .tx = SercomPad::pad0,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 12, PinFunction::c},
+    .rx_pin = {'A', 12, PinFunction::c},
+};
+using LThird = Uart<2, third_pads, 64, 64, DmaTxEngine<1>>;
+
+/// The pair's stream: the 32-bit xorshift of the file header, low byte, the
+/// receiver checking it from the same seed and counting what disagrees.
+struct PairStream {
+    uint32_t tx_state = 0x2545F491u;
+    uint32_t rx_state = 0x2545F491u;
+    uint32_t sent = 0, got = 0, wrong = 0;
+    static uint8_t step(uint32_t& s) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return static_cast<uint8_t>(s);
+    }
+};
+
+/// Push what fits, take what landed: one turn of a pair run.
+void pair_turn(PairStream& ps, uint32_t total) {
+    uint8_t chunk[128];
+    if (ps.sent < total) {
+        const uint32_t room = LPair::tx_room();
+        uint32_t want = total - ps.sent;
+        if (want > sizeof chunk) want = sizeof chunk;
+        if (want > room) want = room;
+        if (want != 0u) {
+            uint32_t s = ps.tx_state;
+            for (uint32_t i = 0; i < want; ++i) chunk[i] = PairStream::step(s);
+            const uint32_t put = LPair::write_bulk(std::span<const uint8_t>(chunk, want));
+            for (uint32_t i = 0; i < put; ++i) (void)PairStream::step(ps.tx_state);
+            ps.sent += put;
+        }
+    }
+    (void)LPair::harvest();
+    for (;;) {
+        const uint32_t n = LPair::read_bulk(std::span<uint8_t>(chunk, sizeof chunk));
+        if (n == 0u) break;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (chunk[i] != PairStream::step(ps.rx_state)) ++ps.wrong;
+        }
+        ps.got += n;
+    }
+}
+
+struct PairResult {
+    uint32_t sent, got, wrong;
+    uint8_t hw_overruns, rx_overruns, frame, dma_faults;
+    uint32_t skips;
+    bool up;
+};
+
+/// `total` bytes through the pair at `baud`, the receive side drained as it
+/// goes, then the line given its tail's time and a last harvest.
+PairResult pair_run(uint32_t baud, uint32_t total) {
+    PairResult r{};
+    loop_live = Loop::pair;
+    r.up = LPair::init(clock, baud);
+    PairStream ps{};
+    const uint32_t skips0 = LPair::rx_skips();
+    if (r.up) {
+        const uint32_t t0 = cycles_now();
+        // Bounded: the stream's wire time four times over, and 50 ms more.
+        const uint32_t budget = (total / (baud / 10u) + 1u) * 4u * SysClock::hz + SysClock::hz / 20u;
+        while ((ps.got < total || ps.sent < total) && cycles_now() - t0 < budget) {
+            pair_turn(ps, total);
+        }
+    }
+    r.sent = ps.sent;
+    r.got = ps.got;
+    r.wrong = ps.wrong;
+    r.hw_overruns = LPair::hw_overruns();
+    r.rx_overruns = LPair::rx_overruns();
+    r.frame = LPair::frame_errors();
+    r.dma_faults = LPair::dma_faults();
+    r.skips = LPair::rx_skips() - skips0;
+    LPair::release();
+    loop_live = Loop::none;
+    return r;
+}
+
+void print_pair(uint32_t baud, const PairResult& r) {
+    print(plain, "  ", baud, " baud: sent ", r.sent, ", received ", r.got, ", wrong ", r.wrong,
+          "; hardware overruns ", r.hw_overruns, ", ring overruns ", r.rx_overruns, ", frame errors ",
+          r.frame, ", skips ", r.skips, ", DMA faults ", r.dma_faults, crlf);
+}
+
+bool pair_clean(const PairResult& r, uint32_t total) {
+    return r.up && r.sent == total && r.got == total && r.wrong == 0u && r.hw_overruns == 0u &&
+           r.rx_overruns == 0u && r.frame == 0u && r.skips == 0u && r.dma_faults == 0u;
+}
+
+/**
+ * u - THE PAIR AT THREE RATES: 16 KB through both engines at 115200 (half of
+ * it: 0.7 s of wire), 1 Mbaud and 3 Mbaud, every byte checked, every class of
+ * loss counted. The receive completion is served first in the DMAC's vector and
+ * its re-arm is the race against the receiver's two levels and the shifter: at
+ * 3 Mbaud two frames are 320 core cycles.
+ */
+void tu_pair() {
+    const PairResult a = pair_run(115'200u, 8192u);
+    print_pair(115'200u, a);
+    const PairResult b = pair_run(1'000'000u, 16384u);
+    print_pair(1'000'000u, b);
+    const PairResult c = pair_run(3'000'000u, 16384u);
+    print_pair(3'000'000u, c);
+    bench.verdict("the both-engine Uart on the loop at 115200: every byte exact, nothing lost or "
+                  "abandoned",
+                  pair_clean(a, 8192u));
+    bench.verdict("at 1 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(b, 16384u));
+    bench.verdict("at 3 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(c, 16384u));
+}
+
+/**
+ * 1 - THE BUDGET AS A PANIC: two channels held and running - the console's
+ * transmit engine (channel 0, owner 6) printing, the loop's (channel 1, owner
+ * 2) sending - and then a third transport's init(), SERCOM2's naming channel
+ * 1, must PANIC with the breadcrumb PanicCode::assert_failed,
+ * dma_claim_refused_context(3) = 0xD3. The proof is read at the next boot.
+ * Reached past that init only when the refusal did NOT happen.
+ */
+void t1_budget_panic() {
+    print(plain, "  two channels held and running, then a third transport's init (SERCOM2, owner 3)",
+          crlf, "  must PANIC: THE BOARD STOPS HERE. The banner after a reset prints code ",
+          static_cast<uint32_t>(PanicCode::assert_failed), ", context ",
+          hex(dma_claim_refused_context(3)), crlf);
+    (void)drain();
+    mode_release();
+    const bool console_up = mode_init(Mode::txdma, 115200);
+    loop_live = Loop::tx1;
+    const bool loop_up = LTx1::init(clock, 115'200u);
+    static const uint8_t junk[64] = {0x55};
+    (void)LTx1::write_bulk(std::span<const uint8_t>(junk, sizeof junk));
+    print(utx, "  console ", console_up, ", loop ", loop_up, ": channels held ", Dmac::held(),
+          ", owners ", Dmac::owner(0), " and ", Dmac::owner(1), ", the loop's block running ",
+          DmaTxEngine<1>::running(), crlf);
+    while (!UTxDma::tx_idle()) {
+    }
+    spin_ms(5);
+    (void)LThird::init(clock, 115'200u);
+    // Past this line only when the third claim was not refused.
+    LThird::release();
+    LTx1::release();
+    loop_live = Loop::none;
+    mode_release();
+    (void)mode_init(Mode::plain, 115200);
+    spin_ms(150);
+    print(plain, "  the third transport's init RETURNED: no panic", crlf);
+    bench.verdict("a third claim panics while two channels are held", false);
+}
+
+/// The marked line the shape letter prints each second, read by bin/brio's
+/// judge: whole, and as many as the closing "#count" says.
+uint32_t marked = 0;
+template <typename Sink>
+void mark(Sink s, uint32_t sec, uint32_t a, uint32_t b, uint32_t c) {
+    char tag[8] = {'U', 0, 0, 0, 0, 0, 0, 0};
+    uint32_t v = marked;
+    for (int8_t k = 5; k >= 1; --k) {
+        tag[k] = static_cast<char>('0' + v % 10u);
+        v /= 10u;
+    }
+    print(s, "#<", static_cast<const char*>(tag), " t=", sec, " a=", a, " b=", b, " c=", c,
+          " 0123456789abcdefghijklmnopqrstuvwxyz :", static_cast<const char*>(tag), ">#", crlf);
+    ++marked;
+}
+
+uint32_t shape_seconds = 600;
+
+/**
+ * 2 - TWO SHAPES FOR MINUTES, `shape_seconds` each. THE PAIR: both engines of
+ * the loop's Uart at 1 Mbaud, a stream that never stops, every byte checked and
+ * every class of loss counted, the console on its interrupt printing a marked
+ * line a second. THEN THE CONSOLE ALONE: the console's transmit engine the one
+ * channel held, a marked line written as fast as the ring takes it - the
+ * host's judge counts them whole (#count).
+ */
+void t2_shapes() {
+    marked = 0;
+    loop_live = Loop::pair;
+    const bool up = LPair::init(clock, 1'000'000u);
+    PairStream ps{};
+    const uint32_t skips0 = LPair::rx_skips();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t next = t0;
+    while (up && Ticker::millis() - t0 < shape_seconds * 1000u) {
+        if (Ticker::millis() >= next) {
+            mark(plain, (Ticker::millis() - t0) / 1000u, ps.got, ps.wrong, LPair::dma_faults());
+            next += 1000u;
+        }
+        pair_turn(ps, 0xFFFFFFFFu);
+    }
+    const uint32_t tail0 = Ticker::millis();
+    while (Ticker::millis() - tail0 < 50u) {
+        pair_turn(ps, ps.sent);
+    }
+    const PairResult r{ps.sent, ps.got, ps.wrong, LPair::hw_overruns(), LPair::rx_overruns(),
+                       LPair::frame_errors(), LPair::dma_faults(), LPair::rx_skips() - skips0, up};
+    LPair::release();
+    loop_live = Loop::none;
+    print(plain, "#count ", marked, crlf);
+    print_pair(1'000'000u, r);
+    bench.verdict("THE UART PAIR'S SHAPE for the run: every byte exact, nothing lost, skipped or "
+                  "abandoned",
+                  up && r.got + 1024u >= r.sent && r.wrong == 0u && r.hw_overruns == 0u &&
+                      r.rx_overruns == 0u && r.frame == 0u && r.skips == 0u && r.dma_faults == 0u);
+
+    (void)drain();
+    mode_release();
+    (void)mode_init(Mode::txdma, 115200);
+    marked = 0;
+    const uint32_t t1 = Ticker::millis();
+    while (Ticker::millis() - t1 < shape_seconds * 1000u) {
+        mark(utx, (Ticker::millis() - t1) / 1000u, marked, UTxDma::dma_faults(), 0);
+    }
+    print(utx, "#count ", marked, crlf);
+    const uint8_t faults = UTxDma::dma_faults();
+    while (!UTxDma::tx_idle()) {
+    }
+    mode_release();
+    (void)mode_init(Mode::plain, 115200);
+    print(plain, "  the console alone on its transmit engine: ", marked, " marked lines, DMA faults ",
+          faults, crlf);
+    bench.verdict("THE CONSOLE ALONE: no transmit block abandoned (the lines are the host's to count)",
+                  faults == 0u);
+}
+
 // ---- x - the one-user rule as a panic ----------------------------------------
 
 /// THE REFUSAL, AS IT IS ENFORCED: the loop's engined transport holds the
@@ -2372,19 +2620,19 @@ void tx_refusal() {
     (void)drain();
     loop_live = Loop::txdma;
     const bool loop_up = LTxDma::init(clock, 115'200u);
-    const bool loop_holds = DmaTxEngine::owner() == loop_owner;
+    const bool loop_holds = DmaTxEngine<0>::owner() == loop_owner;
     if (!loop_up || !loop_holds) {
         LTxDma::release();
         loop_live = Loop::none;
         print(plain, "  the loop's engined transport did not come up (init ", loop_up,
-              ", owner ", DmaTxEngine::owner(), ")", crlf);
+              ", owner ", DmaTxEngine<0>::owner(), ")", crlf);
         bench.verdict("the loop's engined transport holds the claim", false);
         return;
     }
     mode_release();
     const bool up = mode_init(Mode::txdma, 115200);
     // Past this line only when the second owner's arm() was not refused.
-    const uint8_t owner = DmaTxEngine::owner();
+    const uint8_t owner = DmaTxEngine<0>::owner();
     UTxDma::release();
     LTxDma::release();
     loop_live = Loop::none;
@@ -3176,7 +3424,7 @@ uint16_t burst(uint32_t n, uint16_t v0, uint16_t mask) {
 /// as the console's regime and the rung's configuration is written under
 /// it - the generator and the regime the letter judges -, the engine left
 /// armed. `n` frames of 0x30, 0x31, ... and their sum, or nullopt.
-using LkDma = Uart<1, link_pads, 64, 512, DmaTxEngine>;
+using LkDma = Uart<1, link_pads, 64, 512, DmaTxEngine<0>>;
 
 std::optional<uint16_t> engine_burst(uint32_t n, const SercomUartConfig& u, uint8_t generator) {
     loop_live = Loop::link_dma;
@@ -5138,6 +5386,8 @@ extern "C" void SERCOM1_Handler() {
             break;
         case Loop::txdma: (void)LTxDma::isr(); break;
         case Loop::link_dma: (void)LkDma::isr(); break;
+        case Loop::pair: (void)LPair::isr(); break;
+        case Loop::tx1: (void)LTx1::isr(); break;
         default: break;
     }
 }
@@ -5153,7 +5403,14 @@ extern "C" void SERCOM5_Handler() {
 // THE ENGINE TELLS ITS OWNER ALONE - see the note beside `live`: the
 // completion goes to the transport that holds the claim, and to no other.
 extern "C" void DMAC_Handler() {
-    const uint8_t owner = brio::DmaTxEngine::owner();
+    if (loop_live == Loop::pair) {
+        (void)LPair::dma_isr();
+        return;
+    }
+    if (loop_live == Loop::tx1) {
+        (void)LTx1::dma_isr();
+    }
+    const uint8_t owner = brio::DmaTxEngine<0>::owner();
     if (owner == loop_owner) {
         // SERCOM1 has two engined transports, never live at once.
         if (loop_live == Loop::link_dma) {
@@ -5166,7 +5423,7 @@ extern "C" void DMAC_Handler() {
     } else {
         // Letter w's hand-staged bindings: the flags taken and kept, so a
         // completion nobody consumes cannot hold the line up.
-        probe_flags = static_cast<uint8_t>(probe_flags | brio::DmaTxEngine::take_interrupt());
+        probe_flags = static_cast<uint8_t>(probe_flags | brio::DmaTxEngine<0>::take_interrupt());
     }
 }
 
@@ -5206,7 +5463,11 @@ int main() {
     bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
     bench.letter('w', "a released requester: what reaches the next owner of the channel",
                  tw_released_requester);
-    bench.letter('x', "the one-user rule as a PANIC (stops the board)", tx_refusal, false);
+    bench.letter('x', "a claim on a held channel as a PANIC (stops the board)", tx_refusal, false);
+    bench.letter('u', "the both-engine Uart on the loop at 115200, 1 Mbaud and 3 Mbaud", tu_pair);
+    bench.letter('1', "THE BUDGET: two channels running, a third claim a PANIC (stops the board)",
+                 t1_budget_panic, false);
+    bench.letter('2', "two shapes for minutes: the Uart pair, then the console alone", t2_shapes, false);
 
     bench.second_letter('J', "the link and the far peer", tJ_link);
     bench.second_letter('K', "the rate, judged by a foreign receiver on a crystal", tK_rate);

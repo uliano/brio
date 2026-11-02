@@ -141,9 +141,8 @@
 //   e  THE SPI HOST ABOVE THE WIRE (samc21/spi.hpp, docs/samc21/spi.md):
 //      SpiHost<1> on PA16 (MOSI), PA19 (SCK) and PA18 (MISO, FLOATING: the
 //      time is the wire's, the bytes are not judged) - test_samc_spi's
-//      host pads - so what is measured is the polled loop, the one way
-//      this host moves a run (it has no DMA slot, and asynchronous is DMA:
-//      samc21/spi.hpp refuses a request naming SpiEngine::dma). Every line the
+//      host pads - the polled loop on the host with no engines, then the
+//      engined host's two ways. Every line the
 //      BEST of 8 by wall; the two rates are BAUD 1 (12 MHz, f_ref/4) and
 //      BAUD 7 (3 MHz, f_ref/16); a frame is eight bits on this family:
 //        spi.poll  a POLLED WRITE data phase (tx set, rx null - the
@@ -161,7 +160,18 @@
 //                  an ordinary GPIO) and the D/C on PB23 (the board's LED):
 //                  two real pads, two real edges each. The line after prints
 //                  wall minus the wire's cycles (128 a byte at 3 MHz) - the
-//                  instrument's `interval` of letter r is inside it.
+//                  instrument's `interval` of letter r is inside it;
+//        spi.async THE TWO WAYS' FIXED COSTS on the ENGINED host (the pair,
+//                  DMA channels 0 and 1, both vectors bound): 64 frames at
+//                  3 MHz, written (spi.async) and read (spi.async.rx) on
+//                  the engines - start() and then a masked idle wait for
+//                  the end, which the SERCOM's TXC vector reports - and the
+//                  same request polled through the same call (spi.e.poll,
+//                  spi.e.poll.rx); the closing line prints E, the least busy
+//                  of the engines' 8 runs, F, the polled rest above the
+//                  wire, and E - F for a read and a write;
+//        spi.dma   a write of 1024 frames on the engines at 24 and 12 MHz
+//                  (BAUD 0 and 1): the wall against the wire.
 //   u  THE UART ON A LOOP (samc21/sercom.hpp, docs/samc21/sercom.md):
 //      SERCOM1 with TxD and RxD on one pad, PAD[2] = PA18 under function
 //      C - 31.6.3.8's loop-back through the pad, nothing driving it - at
@@ -718,7 +728,7 @@ void tt_tick() {
 }
 
 // =============================================================================
-// e - the SPI host above the wire: spi.poll, spi.poll.rx, spi.req
+// e - the SPI host above the wire: spi.poll, spi.poll.rx, spi.req, spi.async
 // =============================================================================
 namespace ee {
 
@@ -737,7 +747,7 @@ constexpr SpiPads spi_pads{
 
 /// The host: the polled loop. It shares SERCOM1 with letter u's loop and
 /// the two are never up at once; it arms no interrupt.
-using SpiPoll = SpiHost<1, spi_pads, 0, HotSpi>;
+using SpiPoll = SpiHost<1, spi_pads, 0, NoDmaEngine, NoDmaEngine, HotSpi>;
 
 uint8_t spi_tx[256];
 uint8_t spi_rx[256];
@@ -832,6 +842,92 @@ void req(const char* op) {
     }
 }
 
+/// THE TWO WAYS' FIXED COSTS on the engined host (the pair, channels 0 and
+/// 1, the host's placement): the same 64-frame request at 3 MHz on the engines
+/// and polled through the same call, written and read. E is the least busy of
+/// the first's 8 runs - start(), the one TXC vector, the masked idle wait's own
+/// turns - and F the rest of the second above the wire; E - F, the ruler's own
+/// cycles cancelling, is what the engines cost the core beyond the loop's
+/// turn-around, and the page turns it into the length from which they repay.
+using SpiDma = SpiHost<1, spi_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>, HotSpi>;
+volatile bool spi_dma_live = false;
+volatile bool spi_dma_done = false;
+
+struct TwoWays {
+    BenchSample best{};
+    uint32_t least_busy = 0;
+    bool engined = false;
+    bool ok = true;
+};
+
+TwoWays two_ways(const char* op, uint16_t n, bool read, uint8_t baud, bool polled) {
+    auto r = request<SpiDma>(n, read, baud, polled);
+    r.cs = CsPin::ref();
+    (void)drain();
+    TwoWays t{};
+    Interval iv;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        spi_dma_done = false;
+        iv.start();
+        bool done = SpiDma::start(r);
+        const bool went = !done;
+        uint32_t spins = 0;
+        while (!done) {
+            disable_interrupts();
+            if (spi_dma_done) {
+                enable_interrupts();
+                done = true;
+                break;
+            }
+            Idle::idle();
+            if (++spins > 4'000'000u) {
+                break;
+            }
+        }
+        const BenchSample s = iv.stop();
+        asm volatile("" ::: "memory");
+        t.ok = t.ok && done && SpiDma::status() == spi_ok;
+        t.engined = went;
+        if (run == 0u || s.wall < t.best.wall) {
+            t.best = s;
+        }
+        if (run == 0u || s.busy < t.least_busy) {
+            t.least_busy = s.busy;
+        }
+    }
+    bench_line(serial, op, n, t.best, Ruler::hz(), spi_sck_hz(SysClock::hz, baud) / 8u);
+    print(serial, "  ", read ? "read" : "write", " of ", n, polled ? " polled" : " on the engines",
+          ": the wire ", wire_cycles(n, baud), " cycles, the least busy ", t.least_busy,
+          ", ended spi_ok every run ", t.ok, crlf);
+    return t;
+}
+
+void engines() {
+    if (!SpiDma::init(clock)) {
+        print(serial, "  the engined host did not come up", crlf);
+        return;
+    }
+    spi_dma_live = true;
+    uint32_t e[2] = {};
+    uint32_t f[2] = {};
+    for (uint8_t read = 0; read < 2u; ++read) {
+        const TwoWays a = two_ways(read ? "spi.async.rx" : "spi.async", 64, read != 0u, req_baud, false);
+        const TwoWays b = two_ways(read ? "spi.e.poll.rx" : "spi.e.poll", 64, read != 0u, req_baud, true);
+        const uint32_t wire = wire_cycles(64, req_baud);
+        e[read] = a.least_busy;
+        f[read] = b.best.wall > wire ? b.best.wall - wire : 0u;
+    }
+    // The engines at the wire's fastest: a write of 1024 at 24 and 12 MHz.
+    for (const uint8_t baud : {0, 1}) {
+        (void)two_ways("spi.dma", 1024, false, baud, false);
+    }
+    spi_dma_live = false;
+    SpiDma::release();
+    print(serial, "  E (the engines' least busy): read ", e[1], ", written ", e[0],
+          "; F (the polled rest above the wire): read ", f[1], ", written ", f[0], "; E - F: read ",
+          e[1] > f[1] ? e[1] - f[1] : 0u, ", written ", e[0] > f[0] ? e[0] - f[0] : 0u, crlf);
+}
+
 }  // namespace ee
 
 void te_spi_host() {
@@ -850,6 +946,7 @@ void te_spi_host() {
     ee::poll();
     ee::req<ee::SpiPoll>("spi.req");
     ee::SpiPoll::release();
+    ee::engines();
     ee::CsPin::release();
     ee::DcPin::release();
     bench.verdict("ran", true);
@@ -875,10 +972,10 @@ constexpr UartPads loop_pads{
 
 /// The two shapes: the plain transport (a 4096 ring, so a 4096-byte run is
 /// queued in one call but its last byte), and the transmit engine beside
-/// the interrupt receiver - the Uart's one engine slot (samc21/sercom.hpp),
+/// the interrupt receiver - the Uart's transmit slot (samc21/sercom.hpp),
 /// claimed at init() and given back at release().
 using LoopIrq = Uart<1, loop_pads, 512, 4096>;
-using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine, HotEngine>;
+using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine<0>, NoDmaEngine, HotEngine>;
 
 enum class Live : uint8_t { none, irq, txe };
 volatile Live live = Live::none;
@@ -1031,7 +1128,7 @@ void tx_lines() {
             settle(baud);
             const uint32_t turns0 = Idle::idle_turns();
             const Run r =
-                tx_run<LoopTxE, true>(n, [] { return !DmaTxEngine::busy(); }, ok);
+                tx_run<LoopTxE, true>(n, [] { return !DmaTxEngine<0>::busy(); }, ok);
             const uint32_t idle_turns = Idle::idle_turns() - turns0;
             LoopTxE::release();
             live = Live::none;
@@ -1177,7 +1274,7 @@ void copy_lines() {
                 if (head != 0u) {
                     (void)LoopTxE::write_bulk(std::span<const uint8_t>(bytes_of(max_size), head));
                     uint32_t spins = 0;
-                    while (DmaTxEngine::busy() && spins++ < 4'000'000u) {
+                    while (DmaTxEngine<0>::busy() && spins++ < 4'000'000u) {
                     }
                 }
                 const uint8_t* p = bytes_of(max_size) + (which == 0u ? head : 0u);
@@ -1187,7 +1284,7 @@ void copy_lines() {
                 const uint32_t w = Ruler::now() - t0;
                 enable_interrupts();
                 uint32_t spins = 0;
-                while (DmaTxEngine::busy() && spins++ < 4'000'000u) {
+                while (DmaTxEngine<0>::busy() && spins++ < 4'000'000u) {
                 }
                 LoopTxE::release();
                 live = Live::none;
@@ -1557,15 +1654,24 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
     (void)Serial::isr();
     sercom_meter.leave();
 }
-// Letter u's transmit engine is the one DMA user of this image: its
-// completion is the vector's whole body.
+// Letter u's transmit engine and letter e's engined SPI host take the
+// DMAC's vector in turn, each live alone.
 extern "C" BENCH_PLACEMENT void DMAC_Handler() {
     dmac_meter.enter();
-    uu::LoopTxE::dma_isr();
+    if (ee::spi_dma_live) {
+        if (ee::SpiDma::dma_isr()) {
+            ee::spi_dma_done = true;
+        }
+    } else {
+        (void)uu::LoopTxE::dma_isr();
+    }
     dmac_meter.leave();
 }
 extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
     sercom1_meter.enter();
+    if (ee::spi_dma_live && ee::SpiDma::dma_isr()) {
+        ee::spi_dma_done = true;
+    }
     switch (uu::live) {
         case uu::Live::irq:
             (void)uu::LoopIrq::isr();
@@ -1601,7 +1707,8 @@ int main() {
     bench.letter('m', "memcpy and memset, 1/16/256/4096 bytes", tm_memory);
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
-    bench.letter('e', "the SPI host above the wire: spi.poll, spi.poll.rx, spi.req", te_spi_host);
+    bench.letter('e', "the SPI host above the wire: spi.poll, spi.poll.rx, spi.req, spi.async",
+                 te_spi_host);
     bench.letter('u', "the UART on a loop: uart.tx, uart.rx, uart.edge", tu_uart);
     bench.letter('i', "the I2C host against the peer: i2c.write, i2c.read, i2c.wr, i2c.probe",
                  ti_i2c);

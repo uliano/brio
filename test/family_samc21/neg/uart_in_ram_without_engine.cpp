@@ -1,5 +1,5 @@
 // mcu: samc21e18a samc21g18a samc21j18a
-// The Uart's placement moves ONE path, the transmit engine's completion
+// The Uart's placement moves ONE path, the engines' completions
 // (samc21/sercom.hpp's file header): a port with no engine has nothing it
 // would place, so InRam there is refused rather than accepted and
 // ignored. The per-byte isr() moves to SRAM with the vector the program
@@ -14,4 +14,4 @@ constexpr UartPads pads{
     .rx_pin = {'A', 5, PinFunction::d},
 };
 
-void f() { (void)Uart<0, pads, 64, 256, NoDmaEngine, InRam>::tx_idle(); }
+void f() { (void)Uart<0, pads, 64, 256, NoDmaEngine, NoDmaEngine, InRam>::tx_idle(); }

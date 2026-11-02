@@ -515,7 +515,8 @@ still written - erratum 1.9.2 again (letter k).
 
 Driver gaps:
 - **The DMA request** (EMPTY, 41.6.3): declined - this stratum drives
-  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
+  the DMAC for the serial transports' engines alone, within a budget of
+  two channels ([dmac.md](dmac.md), "The rule").
 
 Implemented but not bench-verified, each with what it waits for:
 - **VREFA** (`DacRef::vrefa`): the pin is PA03 and `claim_vrefa<P>()`

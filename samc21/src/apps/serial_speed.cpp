@@ -87,9 +87,9 @@ constexpr uint32_t rx_ring = 1024;
 constexpr uint32_t tx_ring = 1024;
 
 using Plain = Uart<5, console_pads, rx_ring, tx_ring>;
-// The Uart's one engine slot is the transmit one (samc21/dmac.hpp's
-// DmaTxEngine, channel 0), and transmit is the direction a burst measures.
-using Engined = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine>;
+// The transmit engine (samc21/dmac.hpp's DmaTxEngine, on channel 0): transmit
+// is the direction a burst measures.
+using Engined = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<0>>;
 constexpr Plain plain_serial;
 constexpr Engined engined_serial;
 using Sc5 = Plain::Resource;
@@ -592,8 +592,8 @@ extern "C" void SERCOM5_Handler() {
     }
 }
 
-// The engine claimed by the engined transport's init() is the one user
-// of the DMAC, so its completion is the vector's whole body.
+// The engine claimed by the engined transport's init() is the image's one
+// channel, so its completion is the vector's whole body.
 extern "C" void DMAC_Handler() { Engined::dma_isr(); }
 
 int main() {

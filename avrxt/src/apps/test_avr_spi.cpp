@@ -104,7 +104,7 @@
 // image.
 //
 // build: boards = db48,da48,ea48
-// build: groups = abcdefghij,tklmnop,qrsuvw
+// build: groups = abcdefghij,tklmnopx,qrsuvw
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -3754,6 +3754,99 @@ void tw_pin_wake() {
     (void)link_command_mode();
 }
 
+
+// ---- x - the select's rule, and the sum that would wrap -----------------------
+
+/**
+ * WHEN A REQUEST ENDS THE WIRE HAS ENDED: right after start() returns, the SCK
+ * pad must already rest at the mode's idle level. Modes 0..3, the read shape
+ * (the receive FIFO drained by count) and the write shape, with the select (PE3)
+ * and with a null one, at CLK_PER/128 (a bit 128 cycles, half of it 64) and
+ * CLK_PER/16, eight frames a request, MISO held high by this board's PORT.
+ *
+ * THE BOUND, derived: the burst ends on TXCIF, and an end half a bit early
+ * would leave the last edge 64 cycles after it at CLK_PER/128. The pad is read
+ * after the burst's tail - one to three DATA reads, the select's store, the
+ * return - a few tens of cycles, inside those 64; the instrument is marginal
+ * there and blind at /16. So in modes 2 and 3, whose last edge rises, the SPI's
+ * own SCK event counted on TCB1 is the second witness, with no latency: its
+ * count read at the end and again 1 ms later must agree.
+ *
+ * THE SUM THAT WOULD WRAP: a command of one and 65535 data frames, 65536 in
+ * all, polled at CLK_PER/4 - the ruler must count the wire's 65536 x 32 cycles,
+ * where a sum taken in sixteen bits read the request as empty and returned
+ * spi_ok with nothing on the wire.
+ */
+void tx_select() {
+    print(serial, "x the select's rule (SCK idle when a request ends), and a request of 65536 frames",
+          crlf);
+    quiesce();
+    verdict("engine init on ALT1", Host::init(clock));
+    miso_level(true);
+    Ss::set();
+    Ss::output();
+    uint16_t early_pad = 0, early_edges = 0, rows = 0;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        const SpiMode mode = static_cast<SpiMode>(m);
+        const bool idle = (m & 0x02u) != 0u;
+        for (const SpiClock c : {SpiClock::div128, SpiClock::div16}) {
+            for (uint8_t read = 0; read < 2u; ++read) {
+                for (uint8_t cs = 0; cs < 2u; ++cs) {
+                    quiet();
+                    ChSck::source(S0::SckEvent{});
+                    SckCount::init(ChSck{});
+                    SckCount::reset();
+                    const Host::Request r{cs ? Ss::ref() : PinRef{}, {}, {}, 0, {},
+                                          read ? lend<Lease::reply>(eng_rx) : Borrowed<uint8_t, Lease::reply>{},
+                                          8, {}, c, mode, SpiEngine::polled, 0};
+                    (void)Host::start(r);
+                    const bool sck = Sck::read();
+                    const uint16_t at_end = SckCount::count();
+                    delay_us(clock, 1000);
+                    const uint16_t later = SckCount::count();
+                    T1::disable();
+                    ChSck::off();
+                    ++rows;
+                    const bool pad_ok = sck == idle;
+                    const bool edges_ok = !idle || later == at_end;
+                    if (!pad_ok && c == SpiClock::div128) ++early_pad;
+                    if (!edges_ok) ++early_edges;
+                    if (!pad_ok || !edges_ok) {
+                        print(serial, "    mode ", m, c == SpiClock::div128 ? " /128" : " /16",
+                              read ? " read " : " write", cs ? " cs  " : " null", ": SCK ",
+                              sck ? "high" : "low", ", SCK edges after the end ", later - at_end, crlf);
+                    }
+                }
+            }
+        }
+    }
+    print(serial, "  ", rows, " requests: the pad not idle at the end at /128 ", early_pad,
+          ", an SCK edge after the end (modes 2 and 3) ", early_edges, crlf);
+    verdict("THE SELECT'S RULE: every request of the four modes, read and write, with a select and "
+            "without, ends with SCK idle (/128) and no SCK edge after it (modes 2 and 3, both rates)",
+            early_pad == 0u && early_edges == 0u);
+
+    quiet();
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+    static const uint8_t one[1] = {0x2C};
+    const uint32_t t0 = Ruler::read();
+    const bool sync = Host::start({{}, {}, lend<Lease::reply>(one), 1, {}, {}, 65535u, {},
+                                   SpiClock::div4, SpiMode::mode0, SpiEngine::polled, 0});
+    const uint32_t took = Ruler::read() - t0;
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+    print(serial, "  1 + 65535 frames at CLK_PER/4: ", took, " cycles against the wire's ", 65536UL * 32UL,
+          ", status ", Host::status(), crlf);
+    verdict("cmd_len + len = 65536: all of it on the wire, not an empty request",
+            sync && Host::status() == spi_ok && took >= 65536UL * 32UL);
+    Host::release();
+    miso_level(false);
+    Ss::input();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 void register_tests() {
@@ -3768,6 +3861,7 @@ void register_tests() {
     bench.letter('i', "rebase", ti_rebase);
     bench.letter('j', "engine", tj_engine);
     bench.letter('t', "the untaken read", tt_untaken);
+    bench.letter('x', "the select's rule, and a request of 65536 frames", tx_select);
     bench.second_letter('k', "bring-up", tk_bringup);
     bench.second_letter('l', "client matrix", tl_matrix);
     bench.second_letter('m', "rates and the client ceiling", tm_rates);

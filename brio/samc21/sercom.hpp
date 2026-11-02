@@ -18,12 +18,12 @@
  * main(), after the clock task and before interrupts are enabled
  * globally; init() waits, bounded, for the instance's reset, enable and
  * CTRLB synchronizations and answers false when one did not complete, the
- * rate cannot be made at the clock's rate, or (with the engine) the DMAC
- * block or channel would not reset. isr() is the interrupt
+ * rate cannot be made at the clock's rate, or (with an engine) the DMAC
+ * block or a channel would not reset. isr() is the interrupt
  * body: the program's handler for the instance's one vector calls it and
  * nothing else does, and it runs to completion like every interrupt
- * handler in brio; dma_isr() is the DMAC vector's body, for the transport
- * that holds the transmit engine, and tx_drained() is read by the
+ * handler in brio; dma_isr() is the DMAC vector's body, for a transport
+ * that holds engines, and tx_drained() is read by the
  * program's glue in the vector whose body raised it. The transmit verbs
  * (write_byte(), write_bulk(), tx_room(), and print() over them) and the
  * receive verbs (read_byte(),
@@ -33,11 +33,14 @@
  * handler: each ring has one producer and one consumer, and the interrupt
  * body is the other end of both. Without an engine nothing here masks
  * interrupts (the transmit interrupt is armed by a plain INTENSET store,
- * which cannot race the handler's INTENCLR); with the engine, the
- * engine's claim is taken under the platform's critical section and the
- * channel programmed unmasked (pump_tx()). Nothing in the task waits
- * except init() above and rebase() and set_baud(), main-context verbs
- * that spin, bounded, until the queued bytes have left the wire.
+ * which cannot race the handler's INTENCLR); with an engine, its claim
+ * is taken under the platform's critical section and the channel
+ * programmed unmasked (pump_tx(), rearm_rx()), the enable itself masked
+ * for its two stores (samc21/dmac.hpp). Nothing in the task waits
+ * except init() above, rebase() and set_baud(), main-context verbs
+ * that spin, bounded, until the queued bytes have left the wire, and
+ * release(), which with the engine waits, bounded by that block's wire
+ * time, for the transmit block in flight to end.
  * Storage: the rings are the task's own static arrays; write_bulk()
  * copies the caller's span, which is free again when it returns;
  * read_span() hands out the ring's own bytes, valid until consume()
@@ -53,7 +56,7 @@
  *              the flag verbs, and the one combined interrupt question
  *              this core's single vector has to ask.
  *
- *  Uart<n, pads, rx_size, tx_size, TxEngine, Placement>
+ *  Uart<n, pads, rx_size, tx_size, TxEngine, RxEngine, Placement>
  *              the task - the interrupt-driven full-duplex byte
  *              transport every console sits on: two SPSC rings
  *              (util/ring.hpp, lock-free here: atomic_width is 4),
@@ -166,10 +169,12 @@
  *    and J parts - sercom_autobaud_checks_stop() answers it from the
  *    die's DID.REVISION;
  *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
- *    the write-back): the Uart has one optional engine slot, the
- *    transmit one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
- *    user this stratum admits, on one channel, claimed by one owner at a
- *    time. The receiver is the interrupt receiver, always.
+ *    the write-back): the Uart has two optional engine slots filled by
+ *    samc21/dmac.hpp's DmaTxEngine and DmaRxEngine, each a channel of the
+ *    two an image may hold (docs/samc21/dmac.md, "The rule"). A receive
+ *    engine comes with a transmit engine and never alone, so the pair
+ *    holds the whole budget and no channel of another owner runs beside
+ *    it. No engine in the receive slot is the interrupt receiver.
  *
  * Where the hot paths run from. The flash runs behind two wait states at
  * 48 MHz (DS60001479M table 45-41), and both interrupt bodies are inline
@@ -177,8 +182,8 @@
  * `.fast_text` runs them from SRAM whole, with no call (docs/samc21/
  * platform.md, "A handler in SRAM"). The Uart's placement, its last
  * template parameter (util/placement.hpp), moves one path for a program
- * that keeps the vector in the flash: dma_isr(), the transmit engine's
- * completion with the next block's launch, one flattened instance in
+ * that keeps the vector in the flash: dma_isr(), the engines' completions
+ * with the next blocks' launches, one flattened instance in
  * SRAM under InRam (`.fast_text.brio`, copied with .data) - a call
  * through the linker's long-branch veneer that still comes out a tenth
  * shorter than the body inline in the flash. The per-byte isr() takes no
@@ -1164,7 +1169,29 @@ public:
         else return SERCOM0_DMAC_ID_TX;
     }
 
-    /// The address the transmit engine writes: DATA, whose low byte a
+    /// This instance's DMAC receive trigger: "a character waits in the receive
+    /// buffer" - the same table, SERCOMn_DMAC_ID_RX.
+    static constexpr uint8_t dma_rx_trigger() {
+        if constexpr (n == 0) return SERCOM0_DMAC_ID_RX;
+#if defined(SERCOM1_REGS)
+        else if constexpr (n == 1) return SERCOM1_DMAC_ID_RX;
+#endif
+#if defined(SERCOM2_REGS)
+        else if constexpr (n == 2) return SERCOM2_DMAC_ID_RX;
+#endif
+#if defined(SERCOM3_REGS)
+        else if constexpr (n == 3) return SERCOM3_DMAC_ID_RX;
+#endif
+#if defined(SERCOM4_REGS)
+        else if constexpr (n == 4) return SERCOM4_DMAC_ID_RX;
+#endif
+#if defined(SERCOM5_REGS)
+        else if constexpr (n == 5) return SERCOM5_DMAC_ID_RX;
+#endif
+        else return SERCOM0_DMAC_ID_RX;
+    }
+
+    /// The address the engines write and read: DATA, whose low byte a
     /// byte beat reaches - where an 8-bit frame lives.
     static volatile void* data_address() { return &regs().SERCOM_DATA; }
 
@@ -1574,16 +1601,16 @@ private:
 // =============================================================================
 
 /*
- * Uart<n, pads, rx_size, tx_size, TxEngine, Placement>
+ * Uart<n, pads, rx_size, tx_size, TxEngine, RxEngine, Placement>
  *
  * The interrupt-driven full-duplex byte transport: 8N1 by default, SPSC
  * rings on both sides, ByteSink + ByteSource. It carries the Uart surface
  * every target's console sits on, with ONE combined isr() rather than a
  * per-condition pair, because this core gives the peripheral one vector
- * (see the file header). `TxEngine` is the transmit direction's optional
- * DMA engine (NoDmaEngine below); `Placement` is where the engine's
- * completion runs from (util/placement.hpp; the file header): InFlash,
- * the default, or InRam, which an engined port alone may name.
+ * (see the file header). `TxEngine` and `RxEngine` are the two directions'
+ * optional DMA engines (NoDmaEngine below); `Placement` is where the
+ * engines' completions run from (util/placement.hpp; the file header):
+ * InFlash, the default, or InRam, which an engined port alone may name.
  *
  *  - all state is `static inline` (one set per instantiation, in .bss,
  *    no constructor before main): hardware is touched ONLY by the
@@ -1648,26 +1675,24 @@ private:
 inline constexpr uint32_t uart_copy_crossover = 24;
 
 /**
- * The "no DMA engine" default of the Uart's one optional engine slot.
+ * The "no DMA engine" default of the Uart's and the SPI host's engine slots.
  *
  * It is a TAG, not a base class: `present` is the only thing the task
  * asks about, and it asks with `if constexpr`, so every engine branch -
  * the pump, the completion path, the state they need - disappears from a
  * Uart that does not name one: an engineless image carries none of it.
  *
- * The real engine is samc21/dmac.hpp's DmaTxEngine, and it lives THERE
- * rather than here on purpose: sercom.hpp must not include dmac.hpp, or
- * every program with a serial port would carry the controller. An
- * application that wants the engine includes both headers and names it;
+ * The real engines are samc21/dmac.hpp's DmaTxEngine and DmaRxEngine, and
+ * they live THERE rather than here on purpose: sercom.hpp must not include
+ * dmac.hpp, or every program with a serial port would carry the controller.
+ * An application that wants an engine includes both headers and names it;
  * one that does not, never sees the DMAC at all.
  *
- * ONE SLOT, THE TRANSMIT ONE. Erratum 1.10.4 corrupts the live write-back
- * of channels triggered concurrently, measured on this transport's own
- * pair writing the SERCOM's registers (docs/samc21/dmac.md), so this
- * stratum drives the DMAC for one user on one channel: the bulk direction,
- * the one whose bytes the program produces. The receiver keeps its
- * interrupt, which takes every level of the two-level buffer an entry and
- * holds 3 Mbaud (docs/samc21/sercom.md).
+ * A RECEIVE ENGINE COMES WITH A TRANSMIT ENGINE. A channel is disabled only
+ * at its block's end or when no other channel runs (docs/samc21/dmac.md,
+ * "The rule"), and a receive block on an idle line has no end: only with
+ * the budget's other channel its own can this transport know that nothing
+ * else runs when it lets the channel go.
  */
 struct NoDmaEngine {
     NoDmaEngine() = delete;
@@ -1675,14 +1700,15 @@ struct NoDmaEngine {
 };
 
 template <uint8_t n, UartPads pads, uint32_t rx_size = 64, uint32_t tx_size = 256,
-          typename TxEngine = NoDmaEngine, typename Placement = InFlash>
+          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
+          typename Placement = InFlash>
 class Uart {
     using S = Sercom<n>;
 
     static_assert(HotPlacement<Placement, SamPlatform>,
                   "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam");
     static_assert(std::same_as<Placement, InFlash> || TxEngine::present,
-                  "brio Uart: InRam places the transmit engine's completion, and this port has no "
+                  "brio Uart: InRam places the engines' completions, and this port has no "
                   "engine - the per-byte isr() moves to SRAM with the vector the program places "
                   "in .fast_text (the file header)");
 
@@ -1699,14 +1725,29 @@ class Uart {
     // Without this the engine stays uninstantiated until something first
     // touches it, and a Uart carrying an impossible channel compiled
     // perfectly happily; the family fixture's negative TU says so.
-    static_assert(sizeof(TxEngine) > 0,
-                  "the engine slot must name a complete type: samc21/dmac.hpp's "
-                  "DmaTxEngine, or NoDmaEngine (the default)");
-    // The engine moves a ring's run as ONE block, and BTCNT counts 65535
-    // beats at most (25.6.1.1): an engined transmit ring is no longer.
+    static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
+                  "the engine slots must name a complete type: samc21/dmac.hpp's "
+                  "DmaTxEngine and DmaRxEngine, or NoDmaEngine (the default)");
+    static_assert(!RxEngine::present || TxEngine::present,
+                  "brio Uart: a receive engine comes with a transmit engine, the pair holding "
+                  "both channels of the budget (docs/samc21/dmac.md, \"The rule\"): a receive "
+                  "block on an idle line has no end, and this transport must know no other "
+                  "channel runs when it lets its own go");
+    static_assert([] {
+        if constexpr (RxEngine::present) {
+            return TxEngine::channel != RxEngine::channel;
+        } else {
+            return true;
+        }
+    }(), "brio Uart: the two engines ride two different DMA channels, 0 and 1");
+    // An engine moves a ring's run as ONE block, and BTCNT counts 65535
+    // beats at most (25.6.1.1): an engined ring is no longer.
     static_assert(!TxEngine::present || tx_size <= 65535u,
                   "an engined transmit ring holds at most 65535 bytes: the engine "
                   "moves a run of it as one DMA block, and BTCNT is 16 bits");
+    static_assert(!RxEngine::present || rx_size <= 65535u,
+                  "an engined receive ring holds at most 65535 bytes: the engine "
+                  "fills a run of it as one DMA block, and BTCNT is 16 bits");
 
     using TxPin = Pin<pads.tx_pin.port, pads.tx_pin.pin>;
     using RxPin = Pin<pads.rx_pin.port, pads.rx_pin.pin>;
@@ -1718,7 +1759,9 @@ class Uart {
     // error, an overflow before the character in hand) is reported to the
     // ring (util/ring.hpp's SkipRing), whose consumer's next look skips
     // everything queued, the skip epoch moving between the last run before
-    // the loss and the first after it.
+    // the loss and the first after it. A RECEIVE ENGINE publishes into the
+    // same ring: STATUS is read once a block, an error reported after the
+    // block's publish, so the consumer is handed no run that holds it.
     //
     // BOTH RINGS START ON A WORD BOUNDARY (alignas(4): a Ring opens with
     // its slots, and a SkipRing with its Ring): a run starting at a slot
@@ -1741,6 +1784,13 @@ class Uart {
     /// (has_tx_engine)` branches, so an engineless Uart never odr-uses it
     /// and does not carry the byte.
     static inline volatile uint8_t m_dma_faults = 0;
+    /// The receive engine's block in flight: set under the mask with its
+    /// enable (rearm_rx()), so nobody sees a block on a channel not yet
+    /// started; cleared by whoever retires it, the completion or harvest().
+    static inline volatile bool m_rx_armed = false;
+    /// The receive ring was full at a re-arm: no block runs, so no completion
+    /// comes, and the consumer's release is what starts the next (resume_rx()).
+    static inline volatile bool m_rx_stalled = false;
     static inline uint32_t m_baud = 0;                  // for rebase()
     /// A byte was handed to the transmitter since init(). TXC is clear out
     /// of configure() and only a frame's departure sets it, so a port that
@@ -1759,7 +1809,11 @@ class Uart {
     /// block's completion is where its slots are freed, so the producer
     /// fills one half while the channel drains the other.
     static constexpr uint32_t tx_block_most = tx_size / 2u;
-    /// The engine's owner id (DmaTxEngine::claim()): this SERCOM, plus one.
+    /// The longest run the receive engine fills as one block: half the ring,
+    /// so a consumer told at each half drains one while the channel fills the
+    /// other.
+    static constexpr uint32_t rx_block_most = rx_size / 2u;
+    /// The engines' owner id (samc21/dmac.hpp): this SERCOM, plus one.
     static constexpr uint8_t engine_owner = static_cast<uint8_t>(n + 1u);
 
 public:
@@ -1770,10 +1824,11 @@ public:
     /// occasionally wants (the status flags, DBGCTRL, the teardown).
     using Resource = S;
 
-    /// Whether the transmitter was given the DMA engine. Everything below
-    /// branches on this with `if constexpr`, so a false one costs nothing
-    /// at all - not a test, not a byte of state.
+    /// Whether a direction was given a DMA engine. Everything below branches
+    /// on these with `if constexpr`, so a false one costs nothing at all -
+    /// not a test, not a byte of state.
     static constexpr bool has_tx_engine = TxEngine::present;
+    static constexpr bool has_rx_engine = RxEngine::present;
 
     /// The GCLK generator this task takes its core clock from.
     /// Generator 0 is CLK_MAIN undivided in this stratum (samc21/clock.hpp
@@ -1854,17 +1909,27 @@ public:
 
         S::flush_rx();
 
-        S::enable_rxc_interrupt(true);
-        // WITH THE ENGINE THE DRE INTERRUPT IS NEVER ARMED: the DMA trigger
-        // and the interrupt are the SAME condition, so arming both would
-        // have the channel and the handler both serve one byte. The
-        // engine's claim is the one-user rule (samc21/dmac.hpp): a second
-        // owner's arm() while this one holds it is a panic. Without the
-        // engine, DRE is armed on demand by write_byte().
+        // WITH AN ENGINE ITS INTERRUPT IS NEVER ARMED: the DMA trigger and the
+        // interrupt are the SAME condition, so arming both would have the
+        // channel and the handler both serve one character. The claim is the
+        // budget (samc21/dmac.hpp): a claim that finds its channel held by
+        // another owner is a panic. Without the engine, DRE is armed on demand
+        // by write_byte(), and RXC here.
         if constexpr (has_tx_engine) {
             if (!TxEngine::arm(engine_owner, S::data_address(), S::dma_tx_trigger())) {
                 return false;
             }
+        }
+        if constexpr (has_rx_engine) {
+            if (!RxEngine::arm(engine_owner, S::data_address(), S::dma_rx_trigger())) {
+                TxEngine::release(engine_owner);
+                return false;
+            }
+            m_rx_armed = false;
+            m_rx_stalled = false;
+            rearm_rx();
+        } else {
+            S::enable_rxc_interrupt(true);
         }
 
         Nvic::enable(S::irq());
@@ -1988,36 +2053,136 @@ public:
 
     // ---- the DMA half ------------------------------------------------------
 
-    /// The DMAC's interrupt body, for the transport that holds the engine -
-    /// call from DMAC_Handler():
+    /// The DMAC's interrupt body, for a transport that holds engines - call
+    /// from DMAC_Handler(), beside every other owner of the image:
     ///
     ///     extern "C" void DMAC_Handler() { Serial::dma_isr(); }
     ///
-    /// A completion means the block handed over has gone into DATA, so
-    /// exactly that many bytes are released from the ring and the next
-    /// contiguous run is started. A transfer error (a bus error: the
-    /// silicon disabled the channel, 25.6.2.8) is a block lost - abandoned,
-    /// counted in dma_faults() - and the next run started. Nothing, and
-    /// free, without the engine. The completion and the launch are one
-    /// flattened path of the port's placement (the file header).
-    [[gnu::always_inline]] static void dma_isr() {
+    /// THE RECEIVE CHANNEL FIRST. A filled receive block leaves its channel
+    /// idle until this body's re-arm, and the receiver's two levels and the
+    /// shifter are all that covers the gap: a third character completing
+    /// overflows (31.6.2.6), two frames after the block's last beat. A
+    /// transmit block's end only leaves the line idle a while, so nothing of
+    /// it runs ahead of the re-arm. Both are asked again after each turn, the
+    /// two flags able to rise while the other is served.
+    ///
+    /// On the receive channel a completion means the block filled its run -
+    /// half the ring at most - and this is the engine's edge: the run is
+    /// published and the channel handed the next one here. WHAT HAS NO EDGE is
+    /// a run that stops short of its block's end: this silicon has no idle
+    /// detector and no receiver time-out (31.6: RXC, RXS, RXBRK and the errors
+    /// are the receiver's whole interrupt list), so the tail of a burst waits
+    /// for harvest(), or for more bytes to complete the block.
+    ///
+    /// On the transmit channel a completion means the block handed over has
+    /// gone into DATA, so exactly that many bytes are released from the ring
+    /// and the next contiguous run is started. A transfer error on either (a
+    /// bus error: the silicon disabled the channel, 25.6.2.8) is a block lost -
+    /// abandoned, counted in dma_faults() - and the next run started. The
+    /// completions and the launches are one flattened path of the port's
+    /// placement (the file header).
+    ///
+    /// Returns true when the receive ring went from empty to non-empty, the
+    /// edge isr() answers with, so the same glue posts RxActivity on it. False,
+    /// and free, without an engine.
+    [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_tx_engine) {
-            Hot<Placement>::run([] {
-                while (const uint8_t flags = TxEngine::take_interrupt()) {
-                    if ((flags & TxEngine::flag_error) != 0u) {
-                        if (TxEngine::abandon()) {
-                            m_dma_faults = m_dma_faults + 1;
-                        }
-                    } else if ((flags & TxEngine::flag_complete) != 0u) {
-                        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
-                            TxEngine::complete()));
-                        if (m_tx.empty()) {
-                            m_tx_drained = true;   // the transmit edge: no next run to start
+            bool edge = false;
+            Hot<Placement>::run([&edge] {
+                for (;;) {
+                    uint8_t seen = 0;
+                    if constexpr (has_rx_engine) {
+                        seen = RxEngine::take_interrupt();
+                        if (seen != 0u) {
+                            edge = receive_block_over(seen) || edge;
                         }
                     }
-                    pump_tx();
+                    const uint8_t flags = TxEngine::take_interrupt();
+                    if (flags != 0u) {
+                        if ((flags & TxEngine::flag_error) != 0u) {
+                            if (TxEngine::abandon()) {
+                                m_dma_faults = m_dma_faults + 1;
+                            }
+                        } else if ((flags & TxEngine::flag_complete) != 0u) {
+                            m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
+                                TxEngine::complete()));
+                            if (m_tx.empty()) {
+                                m_tx_drained = true;   // the transmit edge: no next run to start
+                            }
+                        }
+                        pump_tx();
+                    } else if (seen == 0u) {
+                        break;
+                    }
                 }
             });
+            return edge;
+        } else {
+            return false;
+        }
+    }
+
+    /// Ask the receive engine what has arrived, publish it, and hand the
+    /// channel a new run when its block is over.
+    ///
+    /// THE OWNER'S VERB, for what no completion will report: the tail of a run
+    /// that stopped short of its block's end. When to ask is the owner's
+    /// knowledge - a line protocol at its terminator's expected time, a stream
+    /// at its end, a kernel time event for a stream of unknown length. Main
+    /// context; it never waits.
+    ///
+    /// THE READING NEEDS NO SUSPEND: a software suspend of a running channel
+    /// corrupts the other channel's live descriptor (docs/samc21/dmac.md, "The
+    /// rule"), so the count is DmaRxEngine::take_landed()'s, ACTIVE's or the
+    /// write-back's, behind the beats at worst and caught up by the next ask.
+    ///
+    /// THE MASK COVERS THE DECISION: two contexts produce into the ring, this
+    /// verb and the completion's handler, so the reading, the publish and the
+    /// choice of who retires a finished block are one claim under the mask. A
+    /// block found over is retired here, its completion's flag taken with it so
+    /// the handler never sees it; the next run's stores are made unmasked.
+    ///
+    /// WHAT IS TRADED AWAY, and it cannot be given back: per-byte error
+    /// attribution. With the channel consuming RXC nobody reads STATUS per
+    /// character - it is read at each publish, and an error discards what the
+    /// ring holds (the SkipRing) rather than a byte. A protocol with its own
+    /// framing does not care; a console that wants exact attribution takes no
+    /// receive engine.
+    ///
+    /// Returns true when the receive ring went from empty to non-empty, the
+    /// same edge isr() answers with. False, and free, without an engine.
+    static bool harvest() {
+        if constexpr (!has_rx_engine) {
+            return false;
+        } else {
+            bool edge = false;
+            bool retired = false;
+            {
+                typename SamPlatform::CriticalSection cs;
+                if (m_rx_armed) {
+                    const bool was_empty = m_rx.empty();
+                    uint16_t fresh = 0;
+                    if (RxEngine::idle()) {
+                        (void)RxEngine::take_interrupt();
+                        m_rx_armed = false;
+                        retired = true;
+                        fresh = RxEngine::complete();
+                    } else {
+                        fresh = RxEngine::take_landed();
+                    }
+                    if (fresh != 0u) {
+                        m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+                        edge = was_empty;
+                    }
+                    take_status();
+                }
+            }
+            if (retired) {
+                rearm_rx();
+            } else {
+                resume_rx();
+            }
+            return edge;
         }
     }
 
@@ -2058,6 +2223,7 @@ public:
             return false;
         }
         b = *v;
+        resume_rx();
         return true;
     }
 
@@ -2164,6 +2330,7 @@ public:
             m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(take));
             done += take;
         }
+        resume_rx();
         return done;
     }
 
@@ -2178,6 +2345,7 @@ public:
     static void consume(uint32_t count) {
         constexpr uint32_t most = decltype(m_rx)::capacity();
         m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        resume_rx();
     }
 
     // ---- introspection -----------------------------------------------------
@@ -2251,11 +2419,11 @@ public:
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
-    /// Transmit blocks this transport had to throw away - a block the
-    /// silicon stopped running (nudge_blocked_tx()) or a bus error
-    /// (dma_isr()). With one channel in the image neither has a known
-    /// cause; every suite judges this zero. Always 0, and free, without
-    /// the engine.
+    /// Blocks this transport had to throw away - a transmit block the
+    /// silicon stopped running (nudge_blocked_tx()) or a bus error on either
+    /// channel (dma_isr()). Inside the rule (docs/samc21/dmac.md) the one known
+    /// cause is another owner's channel disabled mid-block beside this one;
+    /// every suite judges this zero. Always 0, and free, without the engine.
     static uint8_t dma_faults() {
         if constexpr (has_tx_engine) {
             return m_dma_faults;
@@ -2274,16 +2442,36 @@ public:
         }
     }
 
-    /// Stop the transport and hand everything back: the engine and its
-    /// claim first (a channel still writing DATA of a SERCOM being torn
+    /// Stop the transport and hand everything back: the engines and their
+    /// claims first (a channel still writing DATA of a SERCOM being torn
     /// down is the one teardown order that matters; the claim given back
-    /// is what lets another transport take the engine), then the NVIC
+    /// is what lets another transport take the channel), then the NVIC
     /// line, the peripheral - reset before its clocks are gated, so no
     /// transmit request stands behind it (Sercom::release()) - both
     /// clocks and the two pins.
+    ///
+    /// THE TRANSMIT BLOCK IN FLIGHT ENDS FIRST. A channel is disabled only at
+    /// its block's end or when no other channel runs (docs/samc21/dmac.md, "The
+    /// rule"), and another owner's channel may be running. So this waits for
+    /// the block's own end - the channel disabled by the silicon (25.6.2.6), so
+    /// no vector is needed and it holds under a mask - bounded by the block's
+    /// wire time, and a block that outlives the bound is disabled anyway: a
+    /// transmitter that stopped would otherwise hold the release for ever. A
+    /// receive block has no end on an idle line, and it goes after the transmit
+    /// one, which by then leaves no other channel running: the pair holds the
+    /// whole budget. What the ring still held is dropped. Setup verb, main
+    /// context.
     static void release() {
         if constexpr (has_tx_engine) {
+            uint32_t spins = tx_block_spins(TxEngine::in_flight());
+            while (TxEngine::running() && spins-- != 0u) {
+            }
             TxEngine::release(engine_owner);
+        }
+        if constexpr (has_rx_engine) {
+            RxEngine::release(engine_owner);
+            m_rx_armed = false;
+            m_rx_stalled = false;
         }
         Nvic::disable(S::irq());
         S::release();
@@ -2326,12 +2514,11 @@ private:
      * the abandon itself runs unmasked, a dead channel raising no
      * interrupt that could change its state.
      *
-     * What killed a block that way, measured, was erratum 1.10.4 - a
-     * concurrently triggered second channel corrupting this one's
-     * write-back, which 25.6.2.6 makes the controller's LIVE descriptor -
-     * and an image now holds one channel (samc21/dmac.hpp), so the repair
-     * has no known cause left; it stays because without it a dead block
-     * would leave the transport simply stopped: DmaTxEngine::busy() true
+     * What kills a block that way, measured: another channel disabled
+     * mid-block beside this one, which loses this one's pending trigger
+     * (docs/samc21/dmac.md, "The rule"), and outside the rule erratum 1.10.4,
+     * a third channel corrupting this one's write-back. Without the repair
+     * a dead block would leave the transport simply stopped: busy() true
      * for ever,
      * pump_tx() returns at its first line every time, the ring fills,
      * and print() spins in Ring::push with the board silent. A
@@ -2370,6 +2557,19 @@ private:
     static bool tx_block_dead() {
         typename SamPlatform::CriticalSection cs;
         return TxEngine::busy() && TxEngine::waiting() && transmitter_idle();
+    }
+
+    /// The turns of a one-register poll a transmit block of `count` bytes can
+    /// take on the wire: thirteen bits a frame at most (31.6.2.2's longest,
+    /// nine data bits, parity and two stops) and the bit's core cycles read
+    /// back from BAUD, f_ref / f_baud = 16 x 65536 / (65536 - BAUD) (table
+    /// 30-2, arithmetic at 16x). A poll turn takes several core cycles, so this
+    /// is the block's time with room over it; the other regimes the resource
+    /// offers are faster at one BAUD. Rare path: a division.
+    static uint32_t tx_block_spins(uint32_t count) {
+        const uint32_t room = 65536u - S::baud_reg();
+        const uint32_t cycles_a_bit = room == 0u ? 1048576u : 1048576u / room;
+        return (count + 2u) * 13u * cycles_a_bit;
     }
 
     /**
@@ -2426,6 +2626,101 @@ private:
             // a kick that came after it had started was a second beat
             // into a full DATA (one byte of a block lost, sercom.md).
             (void)TxEngine::launch(run);
+        }
+    }
+
+    /// The receive channel's flags, in the DMAC's vector: a completion
+    /// publishes its run and re-arms, and the re-arm is the race against the
+    /// receiver's two levels (dma_isr()). A harvest() that retired the block
+    /// took its flag with it, so a completion here is always the armed block's.
+    /// A bus error loses what the block held, abandoned and counted. True when
+    /// the ring went from empty to non-empty.
+    [[gnu::always_inline]] static bool receive_block_over(uint8_t flags) {
+        bool edge = false;
+        if ((flags & RxEngine::flag_error) != 0u) {
+            RxEngine::abandon();
+            m_dma_faults = m_dma_faults + 1;
+            m_rx.lost();
+        } else if ((flags & RxEngine::flag_complete) != 0u) {
+            const bool was_empty = m_rx.empty();
+            m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(RxEngine::complete()));
+            edge = was_empty;
+        }
+        m_rx_armed = false;
+        rearm_rx();
+        // After the re-arm, the race being what it is, and after the publish: an
+        // error discards what the ring holds at the consumer's next look, this
+        // run with the rest, so no run that holds it is handed over.
+        take_status();
+        return edge;
+    }
+
+    /// The next contiguous run of FREE space in the receive ring on the channel:
+    /// half the ring at most, the three descriptor stores unmasked, the enable and
+    /// the claim it sets one step under the mask. Only the context that retired
+    /// the last block calls this, or init(), or the consumer resuming a stalled
+    /// engine, so neither the handler nor harvest() touches the slot meanwhile.
+    ///
+    /// The engine writes straight into the ring's slots - memory the SPSC invariant
+    /// has made the producer's alone - and nothing is visible to the consumer until
+    /// a publish. An empty run means the ring is full: the channel is left idle, the
+    /// stall counted in rx_overruns(), and what the line carries beyond the
+    /// receiver's two levels is lost in the hardware, BUFOVF counted and reported at
+    /// the next look at STATUS. Nothing would re-arm it, no block running, so the
+    /// consumer's release does (resume_rx()).
+    [[gnu::always_inline]] static void rearm_rx() {
+        if constexpr (has_rx_engine) {
+            auto room = m_rx.write_span();
+            if (room.empty()) {
+                if (!m_rx_stalled) {
+                    m_rx_overruns = m_rx_overruns + 1;
+                    m_rx_stalled = true;
+                }
+                return;
+            }
+            const uint32_t count =
+                room.size() > rx_block_most ? rx_block_most : static_cast<uint32_t>(room.size());
+            RxEngine::prepare(room.data(), static_cast<uint16_t>(count));
+            typename SamPlatform::CriticalSection cs;
+            m_rx_armed = true;
+            RxEngine::launch();
+        }
+    }
+
+    /// STATUS read once and its receive errors counted and cleared, at the
+    /// engine's granularity, a run and not a byte, the honest resolution this
+    /// mode has. The bits clear by being written (31.8.9); DATA is the channel's
+    /// alone. Reported to the SkipRing.
+    [[gnu::always_inline]] static void take_status() {
+        const uint16_t errors = static_cast<uint16_t>(S::status() & SercomStatus::receive_errors);
+        if (errors != 0u) [[unlikely]] {
+            status_errors(errors);
+        }
+    }
+    [[gnu::noinline, gnu::cold]] static void status_errors(uint16_t errors) {
+        S::clear_status(errors);
+        S::clear_flags(SercomFlag::error);
+        if ((errors & SercomStatus::overflow) != 0u) {
+            m_hw_overruns = m_hw_overruns + 1;
+        }
+        if ((errors & SercomStatus::frame_error) != 0u) {
+            m_frame_errors = m_frame_errors + 1;
+        }
+        if ((errors & SercomStatus::parity_error) != 0u) {
+            m_parity_errors = m_parity_errors + 1;
+        }
+        rx_lost();
+    }
+
+    /// The consumer freed slots: a receive engine left idle on a full ring gets its
+    /// run now. A flag test on the consumer's path, and no mask: a stalled engine has
+    /// no block, so no completion can come and the handler cannot touch it.
+    [[gnu::always_inline]] static void resume_rx() {
+        if constexpr (has_rx_engine) {
+            if (m_rx_stalled) {
+                m_rx_stalled = false;
+                rearm_rx();
+            }
         }
     }
 

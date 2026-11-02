@@ -258,7 +258,7 @@ ACK back first.
 |---|---|---|
 | MB / SB, one interrupt a byte with the clock held | 33.6.2.4, 33.10.6 | THE PUMP, every tenure. One STATUS snapshot a handler, the SYSOP wait inline (one load when the last operation synchronized long ago) |
 | smart mode | 33.6.3.2 | USED, always: a pumped read byte is one DATA load, no command and no SYSOP wait |
-| the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | DECLINED: erratum 1.10.4 ([dmac.md](dmac.md)) - this stratum drives the DMAC for the Uart's transmitter alone |
+| the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | NOT BUILT: the I2C host has no engine slot yet; the DMAC's budget of two channels (erratum 1.10.4, [dmac.md](dmac.md)) admits a write-only data phase beside a console's transmitter, measured, born with the I2C round of this stratum |
 | ADDR.LEN + LENEN | 33.10.9 | DECLINED: its use would be to close a DMA phase; the pump closes a read by smart mode and a write by its last MB, every byte software's anyway. The resource keeps the verb (`I2cm::start_address_len`), its behaviour measured above |
 | quick command (QCEN) | 33.6.3.4 | DECLINED for the probe: an empty request costs one MB either way. On the wire (letter m) it changes a READ alone: SB after the address's acknowledge, nine SCL rises, where a plain read clocks the byte in first (seventeen); a write raises MB at the acknowledge either way |
 | SCLSM = 1 | 33.6.2.4.5 | DECLINED: the engine's decisions are taken before the acknowledge (SCLSM = 0), and erratum 1.17.13 refuses it beside QCEN |
@@ -354,8 +354,7 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   refused-not-slowed rule (a speed the core cannot make, and an address
   outside 0x08..0x77, are answered `i2c_rejected` inside `start()`, the
   synchronous completion, delivered through the arbiter). Every tenure rides the byte pump, one
-  interrupt a byte; there is no DMA phase ([dmac.md](dmac.md), erratum
-  1.10.4). `configuration(speed)` is the resource
+  interrupt a byte; there is no DMA phase (Not covered yet). `configuration(speed)` is the resource
   configuration the engine runs, what a caller that reconfigures the
   resource behind it starts from. `unstick()` - nine open-drain pulses
   and a Stop by hand, which leaves a healthy wire untouched (SDA read
@@ -669,8 +668,11 @@ pads.
 Driver gaps (not built), each with its reason:
 
 - **The DMA phases, on the host or the client, and the host's use of
-  ADDR.LEN**: declined - erratum 1.10.4 ([dmac.md](dmac.md)); the pump
-  closes a read by smart mode.
+  ADDR.LEN**: not built - a write-only data phase on the transmit engine
+  is born with the I2C round of this stratum (its measurement beside a
+  console's transmitter is [dmac.md](dmac.md)'s, "What the rule rests
+  on"), and a read phase is declined there; the pump closes a read by
+  smart mode.
 - **The 4-wire PINOUT** (CTRLA.PINOUT, an external transceiver's
   shape): no user and no transceiver on the bench.
 - **This chip as the bus's target, served from an active object, under

@@ -31,15 +31,10 @@
 //   measured: docs/samc21/sercom.md), so no init() runs with a pad muxed.
 //   Between letters nothing of this board drives a link wire, so the peer
 //   image may be changed at any prompt.
-//   THE SPI HOST. SpiHost<1> with NO DMA ENGINE SLOT: the SERCOM's DMA
-//   requests are offered (32.6.4.1), and the engine is declined - the
-//   DMAC's erratum 1.10.4 corrupts the write-back of concurrently
-//   triggered channels and hung the full-duplex pair in 4 to 8 % of runs
-//   (docs/samc21/dmac.md), so the stratum admits one channel, the UART's
-//   transmit. Asynchronous is DMA (docs/design/spi-bus.md), so the host
-//   runs every request POLLED inside start() and refuses one that is not
-//   (has_dma false): the shared body's requests, asynchronous by default,
-//   are all posted polled here, the body reading has_dma. The polled loop (32.6.2.6.1, a
+//   THE SPI HOST. SpiHost<1> with no DMA engine named: this suite keeps
+//   the host engineless, so it runs every request POLLED inside start()
+//   and refuses one naming the engines (has_dma false): the shared body's
+//   requests are all posted polled here, the body reading has_dma. The polled loop (32.6.2.6.1, a
 //   character ahead: k + 1 written on DRE, k read on RXC) keeps no more
 //   than two characters in flight, and the receive buffer is two levels
 //   deep (32.2, 32.6.2.7): a dispatch above the arbiter that holds the
@@ -71,17 +66,16 @@
 //   THE UART. Uart<1> with TxD on PAD[2] (PA18, TXPO 0x1) and RxD on
 //   PAD[0] (PA16), the crossed pair, its core on generator 0 (the task's
 //   one generator, OSC48M). The receiver is the INTERRUPT receiver into a
-//   SkipRing - the stratum has no receive engine (1.10.4) - whose isr()
+//   SkipRing - this suite names no receive engine - whose isr()
 //   takes every level of the two-level buffer an entry, call-free on a
 //   clean character; LineReader drains its ring in place (read_span() and
 //   consume(), with rx_skips() as the gap epoch). The port is told at every
 //   empty-to-non-empty edge, so no half-lap arithmetic applies. Two
 //   transmitters, two Uart types on the one instance, never live at once:
 //   the interrupt transmitter (DRE fed a byte an entry) for t, v and the
-//   first half of u, and the DMA TRANSMIT ENGINE (DmaTxEngine, channel 0,
-//   the stratum's one DMA user, one block for a ring run) for u's second
-//   half - the family's one engine under preemption, with no second
-//   channel live for 1.10.4 to bite. `LinkPort`, the one port the
+//   first half of u, and the DMA TRANSMIT ENGINE (DmaTxEngine<0>, one block
+//   for a ring run) for u's second half - an engine under preemption, the
+//   only channel of the image. `LinkPort`, the one port the
 //   LineReader reads, is the interrupt transmitter's; u's DMA legs name
 //   their port to the shared body's sink_leg().
 //   THE PRESSURE. TC4's overflow in MATCH FREQUENCY mode (35.6.2.6.1: CC0
@@ -378,7 +372,7 @@ constexpr UartPads link_pads{
 /// window (the file header). The DMA transmitter's port for u's second
 /// half, its receive ring small (the sink echoes nothing).
 using PortIrq = Uart<1, link_pads, 2048, 512>;
-using PortDma = Uart<1, link_pads, 64, 512, DmaTxEngine>;
+using PortDma = Uart<1, link_pads, 64, 512, DmaTxEngine<0>>;
 /// The Uart task owns SERCOM1's vector only while a leg runs; leg_dma
 /// says which of the two ports it is.
 volatile bool link_live = false;
@@ -1123,7 +1117,7 @@ void ti_dark() {
                   !Nvic::enabled(Host::Resource::irq()) && !spi_live && !link_live && !ul::cmd_up &&
                       pad_is_dark<RxdPin>() && pad_is_dark<CsPin>() && pad_is_dark<TxdPin>() &&
                       pad_is_dark<XckPin>());
-    bench.verdict("the DMA transmit engine unclaimed", DmaTxEngine::owner() == 0u);
+    bench.verdict("the DMA transmit engine unclaimed", DmaTxEngine<0>::owner() == 0u);
     bench.verdict("the LED's pad PB23 is not an output", !Pin<'B', 23>::is_output());
     bench.verdict("the ceiling is the Console's and interrupts are enabled",
                   P::ceiling == console_index && P::interrupts_enabled());
@@ -1389,7 +1383,7 @@ extern "C" void SERCOM1_Handler() {
 /// The DMAC's one line: the transmit engine's completion, for the port
 /// that holds its claim.
 extern "C" void DMAC_Handler() {
-    if (brio::DmaTxEngine::owner() != 0u) {
+    if (brio::DmaTxEngine<0>::owner() != 0u) {
         PortDma::dma_isr();
     }
 }
