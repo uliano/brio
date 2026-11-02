@@ -35,32 +35,42 @@ using Bus = brio::SpiHost<0, pins, brio::DmaTxEngine<4, uint16_t>,
 using Spi = brio::SpiBus<Bus, P, 4>;                  // the arbiter AO
 using Cs = brio::Pin<17>;
 
-brio::Dma::init();                                    // before the host binds its engines
-Bus::init(clock, 8'000'000);                          // a ceiling for the whole bus
+if (!brio::Dma::init()) { /* the DMA block did not come out of reset */ }  // before the host binds its engines
+if (!Bus::init(clock, 8'000'000)) { /* the ceiling cannot be made, or the block did not come up */ }
 Cs::output(true);
 
 Bus::Request r{};
 r.cs = Cs::ref();
 r.cmd = brio::lend<brio::Lease::reply>(cmd);  r.cmd_len = 1;
 r.tx = brio::lend<brio::Lease::reply>(pixels); r.len = 64;
-r.clock = brio::SpiClocks::div4;                      // 31.25 MHz at 125
+r.clock = brio::SpiClocks::div4;                      // asks 31.25 MHz; the ceiling makes it 7.8125
 r.mode = brio::SpiMode::mode0;
 r.reply = brio::reply_to<Display, brio::SpiDone>();
 r.engine = brio::SpiEngine::dma;
-brio::post<Spi>(r);                                   // asynchronous
+brio::post<Spi>(r);                                   // to the arbiter; asynchronous
 
 extern "C" void isr_dma_0() {
     if (Bus::dma_isr()) { brio::post<Spi>(brio::TransferDone{Bus::status()}); }
 }
 ```
 
+This is an excerpt of the RP2040's page: it assumes the program's
+platform `P`, its clock object `clock` (clk_peri at 125 MHz; the
+RP2350's page carries the same lines at its 150 MHz), an active object
+`Display` that handles `SpiDone`, the buffers `cmd` and `pixels`, and the
+statements where they belong, the setup in `main()` and the post in a
+handler.
+
 Line by line: `pins` names the clock, transmit and receive pads (no
 select: the select is a GPIO the request names); `Bus` is the family's
 `SpiHost` on instance 0, the engine, with a transmit and a receive DMA
 engine on channels 4 and 5 (half-word engines, the data register's
-width), reporting on the controller's line 0; `Dma::init()` releases the
-DMA controller, which the host's `init()` binds its engines on; `Spi` is
-the arbiter, an active
+width), reporting on the DMA controller's interrupt line 0 (each
+engine's third template argument, left at its default); `Dma::init()`
+releases the DMA controller, which the host's `init()` binds its engines
+on; `init()` answers false when the ceiling cannot be made or the block
+did not come out of reset; `Spi` is the arbiter (on these chips the
+resource is `Pl022<n>`, so the name is free), an active
 object (a component with its own event queue, served one event at a
 time by the kernel, here over the program's platform `P`) that takes
 requests from every active object that uses the bus in arrival order, with room for
@@ -68,8 +78,9 @@ four waiting requests; `Cs` is the device's select pad, driven high
 (idle) before any request. A request names the select, lends a one-byte command and a
 64-byte data buffer (a loan under `Lease::reply`, kernel/borrowed.hpp:
 the arbiter and the engine may use them until the reply), sets the
-rate as a prescaler pair (`div4` is 31.25 MHz at a 125 MHz SSPCLK, and
-the host clamps a request to the bus's ceiling, here 8 MHz), the SPI
+rate as a prescaler pair - `div4` asks 31.25 MHz of a 125 MHz SSPCLK,
+and the host clamps a request to the bus's ceiling, so this one runs at
+the fastest setting under 8 MHz, 7.8125 MHz - the SPI
 mode, and the active object the `SpiDone` reply goes to; it is posted
 to the arbiter, and `post` copies the request into the arbiter's queue,
 so `r` itself may go out of scope - what it lends may not. The request
@@ -294,8 +305,9 @@ ahead of a data phase runs in the loop inside `start()` first, D/C rising
 between the two on the wire. ONE INTERRUPT A REQUEST - every frame that came
 back was sent, so the receive block's completion proves the transmit block's,
 and the host arms its transmit engine to report a bus error and nothing else
-(`arm(data, request, false, Engine::Report::errors)`); the owner then completes
-the transmit block itself. THE BEAT IS THE FRAME: SSPDR is sixteen bits wide,
+(`arm(data, request, false, Engine::Report::errors)`); at the receive block's
+completion the host marks the transmit block complete itself, in the same
+interrupt. THE BEAT IS THE FRAME: SSPDR is sixteen bits wide,
 so the engines' element is `uint8_t` or `uint16_t`, the same on both. Half-word
 engines carry 8-bit frames at a byte beat and 16-bit frames at a half-word
 beat, the Request's byte buffers handed over as runs of the frame - two bytes
@@ -306,10 +318,17 @@ run), and every 16-bit request on byte engines. A command ahead of a data phase
 is not on the engines, so its buffer's alignment does not matter. No other
 refusal can come out of a launch: a null buffer goes to the fixed dummy cell or
 the sink, a phase has at least one frame, the count is a Request's 16 bits
-under every channel's limit, and the transmit channel's claim is free with
-nothing in flight, which is the caller's to promise (util/bus_master.hpp's
-contract). The requests are raised around the engines and dropped at the end of
-each request.
+under every channel's limit, and the transmit engine's claim is free with
+nothing in flight, which is the caller's to promise: the arbiter starts no
+request while one is in flight (util/bus_master.hpp's contract), and the host
+gives the claim back at every end. Unlike the hosts of the families that test
+that claim and refuse the request ([../design/spi-bus.md](../design/spi-bus.md)),
+this one does not ask: a program that binds the same engine type to a
+second transport and leaves it holding the claim breaks the promise, and then
+the transmit engine does not start, no frame is clocked, the receive block
+never completes, and the request ends as one with no completion does -
+`spi_timeout` on a timed bus, a bus busy for ever on an untimed one. The
+requests are raised around the engines and dropped at the end of each request.
 THE LEVELS ARE THE RULE'S (docs/design/dma.md): the receive engine at
 the family's high level - the host's clock does not wait for a starved
 receive channel, and a frame landing on a full receive FIFO is lost
@@ -367,11 +386,14 @@ still off its idle level. BSY, which the register description gives as a frame
 being sent or received (SSPSR: RP2040 4.4.4, RP2350 12.3.5), falls one whole
 SCK period after the frame reached the FIFO, in every mode. Both are measured
 on both RP chips by the suites' letter t, the SCK pad read right after each
-end, at every rung from clk_peri / 65024 to / 2: on the code that took RNE for
-the end, every end in modes 0 and 2 found SCK off its idle level at / 4096 and
-slower, the polled ones at / 1024 and slower too, and every end in modes 1 and
-3 found it idle; BSY came down one period after the end, 64 607 to 64 968
-cycles at / 65024. Below those rungs half a period is shorter than the way from
+end, at every rung from clk_peri / 65024 to / 2, and by a control: the same
+letter over a build of the host that takes RNE for the end. In the control
+every end in modes 0 and 2 found SCK off its idle level at / 4096 and slower,
+the polled ones at / 1024 and slower too, and every end in modes 1 and 3 found
+it idle; BSY came down 64 607 to 64 968 core cycles after the code saw the end
+at / 65024, where one period is 65 024 cycles (clk_sys and SSPCLK run at one
+rate on both chips) and the code sees the end some tens to hundreds of cycles
+after RNE rose. Below those rungs half a period is shorter than the way from
 the end to the read, and the letter cannot see an early end at all.
 
 So with SPH = 0 the host waits for BSY, once a phase and never a frame:
@@ -379,11 +401,16 @@ So with SPH = 0 the host waits for BSY, once a phase and never a frame:
 - on the polled loop's tail, on the request's own budget - a budget that runs
   out there is the stall a polled wait always was: `spi_stalled`, the select
   released, the block reset;
-- in the DMA line's body, after the receive channel's completion, on a bound of
-  one SCK period at the rate in force and a margin of 64 turns, kept beside the
-  control word (`wire_end_for()`) and never computed in the interrupt; its
-  running out ends the request `spi_stalled` with the select released and the
-  block's reset owed to the next `start()`, as a bus error leaves it.
+- in the DMA line's body, after the receive channel's completion, on a bound
+  counted in turns of the wait: as many turns as one SCK period has core
+  cycles at the rate in force, and 64 more for the block's synchronization of
+  BSY to the core's clock. A turn is a read of SSPSR, its test and the count,
+  several core cycles, so the bound lasts several periods where the wait it
+  bounds lasts one; it is kept beside the control word (`wire_end_for()`) and
+  never computed in the interrupt. Its running out - a block that stopped
+  clocking with BSY up - ends the request `spi_stalled` with the select
+  released and the block's reset owed to the next `start()`, as a bus error
+  leaves it.
 
 With SPH = 1 nothing waits: the end is the last edge already. A bus error
 waits for nothing either. A command phase ends the same way, so D/C flips
@@ -456,8 +483,13 @@ polled loop on the same board is the figure beside them).
   BSY to clear, drains the receive FIFO and clears the overrun. Both: the
   width a template parameter, the buffers advancing pointers, no accessor
   call, no interrupt asked of anything, the waits bounded by ONE budget for
-  the whole transaction - one slowest frame per frame and one more, 200 000
-  turns of the wait a frame. Measured on both of the RP2350's cores: the
+  the whole transaction, counted in turns of whichever wait the loop is in:
+  200 000 turns for each frame of the transaction and 200 000 more, so (frames
+  + 1) x 200 000 (saturating at 2^32 - 1 from 21 000 frames). A turn is ten to
+  twelve core cycles on the RP cores (each family's letter g times a stall of
+  2 000 000 turns), so a frame's share is some two million core cycles, about twice the
+  slowest frame (65024 x 16 SSPCLK cycles) where SSPCLK runs at the core's
+  rate, as it does on both RP chips. Measured on both of the RP2350's cores: the
   write shape at the nominal wire (plus the block's gap in modes 0 and 2) at
   clk_peri / 2, where it is taken; the receive shape at the wire at clk_peri
   / 4 and slower and bound by its three accesses a frame at / 2, where it
@@ -475,7 +507,7 @@ polled loop on the same board is the figure beside them).
   polled ahead of an engined data block takes the same path, with no block
   launched. With a null select in the Request the program's own select stands
   through the reset, since the host cannot release what it does not hold, and that
-  caller raises it when `start()` answers. The budget itself is the hold-up, one slowest frame a frame, and
+  caller raises it when `start()` answers. The budget itself is the hold-up, about two slowest frames a frame, and
   each family's document measures it.
 - A BUS ERROR ON A CHANNEL ANSWERS `spi_dma_fault`, what the engines answer, and
   the next request starts on a clean block the same way. `dma_isr()` runs in the
@@ -511,8 +543,8 @@ polled loop on the same board is the figure beside them).
   ahead of it would be one more store and no wait, and it gains nothing. False
   when the block did not come back, and then no register of it is touched.
 - WHAT THE RESET CANNOT DO is open a closed clock gate. On a block whose clock
-  stays off the next polled request stalls too, on its own budget, and an
-  one naming dma goes to the engines and has no completion, `spi_timeout` on a
+  stays off the next polled request stalls too, on its own budget, and one
+  naming dma goes to the engines and has no completion, `spi_timeout` on a
   timed bus and a bus busy for ever on an untimed one. No suite stages a stopped
   clock yet (each family's second list under "Not covered yet").
 - `recover()` STAYS, the verb that also ends a tenure from outside: the select
@@ -565,8 +597,8 @@ polled loop on the same board is the figure beside them).
 - THE HOT PATH'S PLACE IS THE PROGRAM'S, BY A TAG. On a chip that
   executes in place out of a flash behind a cache, a cold transaction
   pays the cache its fill of the host's code - on the RP2350's Cortex-M33
-  some 4540 cycles more than the warm figure for a three-byte request,
-  71 lines of 8 bytes. A section attribute takes a string literal and this file knows
+  some 4900 cycles more than the warm figure for a three-byte request,
+  74 lines of 8 bytes. A section attribute takes a string literal and this file knows
   no family, so it places nothing by itself: `Pl022Host`'s last template
   parameter is util/placement.hpp's tag, and two paths run through its
   `Hot<P>` - `start()` (the polled loops and the engines' launch folded in)
@@ -583,17 +615,20 @@ polled loop on the same board is the figure beside them).
   compile. THE ENGINES' DUMMY CELL IS IN RAM, never a constant: the
   transmit engine reads it once a frame of a read with no out buffer, and
   a constant in a flash executed in place is an XIP read every frame,
-  competing there with the core's own fetches - measured on the RP2040,
+  beside the core's own fetches. Measured on the RP2040 with the host's
+  code in the flash both ways and the cell's place the one difference,
   `test_rp2040_spi` letter d's rate inside an engined block at clk_peri /
-  4 read 1046 and 1052 thousandths of the wire in two passes of ten with
-  the host's code in the flash, 998 to 1007 in ten of ten with the cell
-  in RAM. Both RP families place
+  4 (a read with no out buffer): with the cell a constant in the flash two
+  passes of ten read 1046 and 1052 thousandths of the wire, outside the
+  letter's -1 % to +3 %; with the cell in RAM ten of ten read 998 to 1007.
+  That the two reads contend at the XIP port is inferred from the cure;
+  the rate is measured. Both RP families place
   ([../rp2040/platform.md](../rp2040/platform.md) and
   [../rp2350/platform.md](../rp2350/platform.md), "A handler in SRAM",
   have the numbers: on these cores the placement buys the cold path and
   costs the warm one its call, and a warm path left in the flash pays
   whatever cache sets the link makes it share -
-  [../rp2350/spi.md](../rp2350/spi.md), letter d's item, counts one such
+  [../rp2350/spi.md](../rp2350/spi.md), letter d's item, measures one such
   case).
 
 ## What stays per family

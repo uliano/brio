@@ -236,9 +236,11 @@
  * every mode. Both measured on both RP chips, the SCK pad read right after
  * each end (the suites' letter t). So with SPH = 0 the end waits for BSY, once
  * a phase and never a frame: in the polled loop's tail, on the request's
- * budget, and in the DMA line's body, on a bound of one SCK period at the rate
- * in force and a margin (wire_end_for()), whose running out ends the request
- * spi_stalled, the select released and the block's reset owed. With SPH = 1
+ * budget, and in the DMA line's body, on a bound counted in turns of the wait,
+ * as many as one SCK period has core cycles at the rate in force and a margin
+ * (wire_end_for()), whose running out ends the request spi_stalled, the select
+ * released and the block's reset owed. A turn takes several core cycles, so
+ * the bound outlasts the period it covers. With SPH = 1
  * nothing waits. The vector's wait holds every other interrupt off: up to one
  * SCK period less the vector's own entry, and a single read of SSPSR from the
  * rate at which that entry outlasts it (each family's document has the
@@ -1079,10 +1081,11 @@ public:
 
     /// The DMA line's interrupt body - call it from the line the engines
     /// report on, and from nowhere else. The receive channel's completion
-    /// ends the transaction: it waits for the shifter's end (the file header:
-    /// bounded, at most half a bit and the block's lag, with every other
-    /// interrupt held off meanwhile, and spi_stalled with the reset owed if
-    /// the bound runs out), then the requests go down and the select is
+    /// ends the transaction: in modes 0 and 2 it waits for BSY's fall (the file
+    /// header: up to one SCK period less the vector's own entry, with every
+    /// other interrupt held off meanwhile, on a bound counted in turns
+    /// (wire_end_for()), and spi_stalled with the reset owed if the bound runs
+    /// out), then the requests go down and the select is
     /// released. A bus error on either channel ends it with spi_dma_fault at
     /// once, with no wait: the requests down, the channels put away and the
     /// select released; the block's reset is left to the next start(), and
@@ -1433,12 +1436,14 @@ private:
 
     /// The bound of the vector's wait at the configuration in force, in turns of
     /// the wait, kept beside the control word and never computed in the interrupt:
-    /// zero with SPH = 1, where nothing is waited for, and otherwise one SCK period
-    /// in core cycles and a margin. BSY falls one SCK period after the last frame
-    /// reached the receive FIFO (the file header), and a turn is a load of SSPSR and
-    /// a branch, more than one core cycle on every core, so a bound counted in core
-    /// cycles holds at any rate; the margin covers the block's synchronization of
-    /// BSY to the core's clock, a few SSPCLK cycles.
+    /// zero with SPH = 1, where nothing is waited for, and otherwise one turn for
+    /// each core cycle of one SCK period, and a margin. BSY falls one SCK period
+    /// after the last frame reached the receive FIFO (the file header). A turn is
+    /// a load of SSPSR, its test, the count and the branch back, more than one core
+    /// cycle on every core, so the bound outlasts the period at any rate - by as
+    /// many times as a turn has cycles - and a block still clocking is never cut
+    /// short; the margin, 64 turns, covers the block's synchronization of BSY to
+    /// the core's clock, a few SSPCLK cycles.
     static void wire_end_for() {
         if constexpr (has_engines) {
             if ((applied_word_ & SpiControl0::cpha) != 0u) {
@@ -1482,9 +1487,13 @@ private:
         }
     }
 
-    /// The spin budget of a polled transaction: one slowest frame (65024
-    /// x 16 reference cycles, about 200 000 turns of the wait) per frame
-    /// and one more, saturated.
+    /// The spin budget of a polled transaction, in turns of whichever wait
+    /// the loop is in: 200 000 per frame and 200 000 more, saturated. A turn
+    /// is a status read across the peripheral bus, its test, the count and
+    /// the branch back, ten to twelve core cycles on the RP cores (each
+    /// family's document times a stall), so a frame's share is some two
+    /// million core cycles: about twice the slowest frame, 65024 x 16 SSPCLK
+    /// cycles, where SSPCLK runs at the core's rate, as on both RP chips.
     static uint32_t spin_budget(uint32_t frames) {
         return frames < 21'000u ? 200'000u * (frames + 1u) : 0xFFFF'FFFFu;
     }

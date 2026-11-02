@@ -739,8 +739,8 @@ every timed run). F: every driver InFlash and every vector in the flash
 | path | F | R | V | B |
 |---|---|---|---|---|
 | SPI polled request, a command byte and 2 data bytes (`spi.req`) | 816 / 12046 | 834 / 2881 | 816 / 12046 | 834 / 2881 |
-| SPI on the engines, 16 frames, wall | 1399 to 1585 / 32588 | 1702 / 17884 | 1399 / 21820 | 1420 / 10620 |
-| ... the DMA line's handler | 191 / 8264 | 207 / 4578 | 191 to 226 / 191 | 198 / 198 |
+| SPI on the engines, 16 frames, wall | 1399 to 1586 / 32588 | 1615 to 1985 / 17884 | 1399 to 1585 / 21820 | 1420 to 1606 / 10620 |
+| ... the DMA line's handler | 191 / 8264 | 393 to 394 / 4578 | 191 / 191 | 198 / 198 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 5274 / 16628 | 1826 / 9865 | 823 / 2897 | 1391 / 2964 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1109 / 9738 | 2081 / 6449 | 459 / 2032 | 452 / 2025 |
 | I2C one-byte write at 400 kHz, `start()` | 349 / 12429 | 366 / 5209 | 349 / 15865 | 366 / 5209 |
@@ -755,12 +755,15 @@ What the rows say:
   (`spi.poll` of 256 frames 5738 against 5756). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
   rows: the ops of letter u each run once, after other code). The engined
-  block under R, 1702 against 1399 under F, is such a figure too, its
-  misses not counted.
+  block under R, 1615 to 1985 against 1399 to 1586 under F, its handler 393
+  against 191, reads warm above F as well, and no XIP count was read around
+  it: its cause is not split.
 - COLD IS WHERE IT PAYS, and it pays on every path: a three-byte request
-  12046 cycles from the flash against 2881 with the host InRam (the first
-  after `init()`, `spi.cold`: 142 misses against 41, the caller's); a handler cold from the flash 6000 to
-  8600 cycles, from SRAM what it costs warm.
+  12046 cycles from the flash against 2881 with the host InRam (`spi.req`
+  with letter c's switch on; `spi.cold`, the same request after a flush with
+  the cache's misses read around it, 12140 cycles and 142 misses against
+  2881 and 41, the 41 the caller's); the SPI and I2C handlers cold from the flash 6182 and 8264
+  cycles, from SRAM what they cost warm.
 - THE VECTOR PLACED REACHES WHAT A VECTOR RUNS, and nothing else: the
   handlers read their warm figures cold, but a host's `start()` stays
   where it is. InRam reaches `start()` and halves a handler's cold cost
@@ -772,9 +775,9 @@ What the rows say:
   `start()` 824 bytes without engines and 1572 with them (the engines'
   launch folded in), the DMA line's body 684 (the wait for the end of the
   last frame there); the
-  I2C host's 596 to 1664; the UART's 156 to 740 - the bench's four
-  drivers, in all their types, 10836 bytes (10.6 KB: 3080 the SPI host's,
-  5048 the I2C host's, 2708 the UART's).
+  I2C host's 624 to 1908; the UART's 156 to 740 - the bench's four
+  drivers, in all their types, 11416 bytes (11.1 KB: 3080 the SPI host's,
+  5628 the I2C host's, 2708 the UART's).
 
 So: a program that cannot afford the cold path - a first transaction
 after `init()` on a deadline, a handler that must answer within a frame

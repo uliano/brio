@@ -1129,9 +1129,9 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 679 / 5222 | 688 / 927 | 679 / 5224 | 687 / 926 |
-| SPI on the engines, 16 frames, wall | 1474 to 1873 / 13506 to 13556 | 785 / 3946 | 763 / 8275 | 781 / 1687 |
-| ... the DMA line's handler | 487 to 657 / 4546 | 160 / 1703 | 132 / 132 | 155 / 155 |
+| SPI polled request, a command byte and 2 data bytes | 678 / 5693 | 687 / 922 | 678 / 5693 | 687 / 922 |
+| SPI on the engines, 16 frames, wall | 1688 to 2020 / 13028 | 781 / 3896 | 765 / 7862 | 779 / 1639 |
+| ... the DMA line's handler | 459 to 730 / 4416 | 158 / 1701 | 136 / 136 | 154 / 154 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
 | I2C one-byte write at 400 kHz, `start()` | 182 / 4354 | 189 / 477 | 184 / 4311 | 189 / 477 |
@@ -1140,9 +1140,9 @@ run; F the default, R the drivers InRam, V the vectors placed, B both):
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 656 / 4859 | 660 / 894 | 656 / 4792 | 660 / 827 |
-| SPI on the engines, 16 frames, wall | 828 to 995 / 9680 | 731 / 3871 to 3920 | 719 / 6604 | 729 / 2513 |
-| ... the DMA line's handler | 215 to 382 / 2709 | 126 / 1116 | 106 / 106 | 124 / 124 |
+| SPI polled request, a command byte and 2 data bytes | 656 / 5061 | 660 / 757 | 656 / 4994 | 662 / 829 |
+| SPI on the engines, 16 frames, wall | 882 to 992 / 10143 | 727 / 3928 | 725 / 6948 | 727 / 2457 |
+| ... the DMA line's handler | 103 to 263 / 2857 | 125 / 1180 | 105 / 105 | 125 / 125 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
 | I2C one-byte write at 400 kHz, `start()` | 178 / 4009 | 185 / 1831 | 176 / 3963 | 185 / 1831 |
@@ -1155,19 +1155,21 @@ What the rows say - the RP2040's reading on both halves:
   the call: 4 to 40 cycles under InRam. A warm figure that differs more
   is one image's set conflicts, not the place: the F column's UART and I2C
   handlers miss lines warm that the other three images do not, and so does
-  its engined SPI transaction, whose completion shares seven / six sets
-  with the bench's own wait three lines to a set ([spi.md](spi.md),
-  letter d's item, has the count).
-- COLD it pays on every path, on both cores: a three-byte request 5222
-  cycles from the flash against 927 with the host InRam on the M33, a
-  handler cold from the flash 2000 to 5000 cycles, from SRAM what it
-  costs warm.
+  its engined SPI transaction, whose DMA line's handler reads 459 to 730 /
+  103 to 263 warm from the flash against 136 / 105 with the vector placed
+  ([spi.md](spi.md), letter d's item; which lines share its sets is not
+  counted in this image).
+- COLD it pays on every path, on both cores: a three-byte request 5693
+  cycles from the flash against 922 with the host InRam on the M33, a
+  handler cold from the flash 1669 to 6390 cycles across the table's rows,
+  from SRAM what it costs warm.
 - The vector placed reaches what the vector runs; InRam reaches
   `start()`; BOTH is the image whose cold transaction is closest to its
-  warm one. On Hazard3 the dispatch in front of a placed vector still
-  misses, and a placed body read cold above warm (the DMA line's under B
-  762 against 119) with no call into the flash in its listing - a
-  residue this chapter has not split.
+  warm one. On Hazard3 the crt's dispatch in front of a placed vector
+  stays in the flash and still misses cold; the SPI, UART receiver and
+  I2C handler rows time the body, which reads cold what it reads warm
+  under V and B on both halves, and what the dispatch adds to a cold
+  entry is not split.
 
 ## Not covered yet
 
@@ -1181,8 +1183,8 @@ Driver gaps, each with its reason:
   fit the SRAM it can spare.
 - The Hazard3 dispatch in SRAM: the crt's trap entry, its register save
   and its `meinext` loop run from the flash in front of every vector, a
-  placed one too ("A handler in SRAM"), and the residue measured there on
-  a placed body is not split. A placed copy of the dispatch is born
+  placed one too ("A handler in SRAM"), and what it adds to a cold entry
+  is not split. A placed copy of the dispatch is born
   with a program whose handlers must answer cold within a deadline.
 - The reboot and the causes of a boot: they belong to another chapter -
   [reset.md](reset.md) for the causes and the two reset verbs,
