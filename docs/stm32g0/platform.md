@@ -647,9 +647,8 @@ body, `avrxt/src/apps/rubato_link.hpp`. What it established:
   pass. With the RXFIFO as the write-ahead (no more frames in flight
   than it holds, [spi.md](spi.md)), a held-off loop leaves a gap on the
   bus and never a lost frame: the polled loop packed (8 frames) and
-  frame by frame (5), the short asynchronous request (7 byte frames:
-  on the engines to PCLK/16, polled inside `start()` from PCLK/8, every
-  rung the way the host's count says, read at the DMA vector) and the
+  frame by frame (5), a short request on the engines (7 byte frames,
+  on the engines at every rung, read at the DMA vector) and the
   DMA engines (32) all byte-exact at both ends at every code from
   PCLK/256 to PCLK/8, under every pressure as in the control, and the
   host's OVR flag read clear at every one of the replies (the receive
@@ -800,7 +799,7 @@ wall of 256 frames:
 
 | path | flash | SRAM (`InRam`, the vector in the flash) | SRAM bytes |
 |---|---|---|---|
-| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6199 | 1644 a host's polled transaction, both widths, engined or not |
+| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6862 | 6199 | 1736 a host's polled transaction, both widths, engined or not |
 | the same at PCLK/4 (the wire 8192) | 9230 | 8545 | |
 | SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 11309 | 10038 | |
 | SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4662 | 4477 | |
@@ -857,7 +856,7 @@ console's `isr()` is 324 bytes (its USART2 is a BASIC instance, no FIFO)
 and every image of the stratum's suites with every eligible driver
 `InRam` grows by at least that: `test_stm32_serial`'s fourth image 3396
 to 6236 of 8192, and an image with an SPI host by its polled
-transaction's 1644 bytes besides - which is why
+transaction's 1736 bytes besides - which is why
 `bench_stm32_ram`, every driver placed at once, is not built there.
 
 ## On the STM32G071RB

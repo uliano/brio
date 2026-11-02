@@ -81,8 +81,8 @@
 //   a  the block, WIRELESS: the reserve against the header, the reset
 //      values, the enable protection MEASURED field by field, the
 //      disable procedure, the refusals
-//   b  THE LINK: 8-bit mode 0 both ways, host polled then asynchronous
-//      on its DMA engines, a command block chained to its data block
+//   b  THE LINK: 8-bit mode 0 both ways, host polled then on its DMA
+//      engines, a command in the loop before its data block
 //   c  THE MATRIX: four modes x two bit orders, then every data size
 //      from 4 to 16 bits with a pattern that uses every bit
 //   d  THE RATE LADDER: all eight BR codes, where the link stops and WHY
@@ -96,14 +96,14 @@
 //      mismatch
 //   h  THE ERRATA: ES0548 2.12.1 both ways, 2.12.2 sampled, and OVR with
 //      its clear sequence
-//   i  THE DMA ENGINES: the host's data phase on both, the command
-//      block chained to the data block, the ladder with the client on
-//      raw engines, and the LDMA odd-count rule under 8-bit packing
+//   i  THE DMA ENGINES: the host's data phase on both, a command in the
+//      loop before the data block, the ladder with the client on raw
+//      engines, and the LDMA odd-count rule under 8-bit packing
 //   j  THE KERNEL: SpiBus (= BusMaster) over the engined SpiHost with
-//      the client answering on the wire - ordered replies (asynchronous
-//      on the engines, one polled among them, one a command block
-//      chained to its data block), rejection, the sleep votes, and the
-//      per-bus timeout with recover()
+//      the client answering on the wire - ordered replies (on the
+//      engines, one polled among them, one a command in the loop before
+//      its data block), rejection, the sleep votes, and the per-bus
+//      timeout with recover()
 //   k  I2S: I2S1 master to I2S2 slave on three of the same wires, the
 //      four standards, three data lengths, CHSIDE, the prescaler
 //      arithmetic timed, and UDR on a slave transmitter
@@ -113,13 +113,9 @@
 //   s  THE HOST'S SHAPES, WIRELESS: the transmit-only polled loop, the
 //      packed receive, the frame-by-frame short receive, the half-word
 //      loop, a two-phase request - each judged by the FIFO levels and OVR
-//      after it, with nothing on MISO - THE ASYNCHRONOUS WAY: refused on
-//      the engineless host (the select never falls, CR1 untouched), the
-//      short request's split on the engined one (one frame under the
-//      host's own count completes inside start(), the count rides the
-//      engines with one completion), a command block chained to its data
-//      block and a short command polled before its data block - and THE
-//      RATE ON THE WIRE:
+//      after it, with nothing on MISO - a request naming the engines
+//      refused on the engineless host (the select never falls, CR1
+//      untouched) - and THE RATE ON THE WIRE:
 //      a frame inside a block timed against its SCK periods at the rate
 //      asked, at every BR code on the engines and the polled loop, in
 //      16-bit frames, and under a 1 MHz ceiling at the dynamic clock's
@@ -138,6 +134,15 @@
 //      engined SpiHost with a SECOND CHIP reading the bytes back (letter
 //      j's mix of ways) - the rejection, both sleep votes and the per-bus
 //      timeout with recover()
+//   S  THE ENGINE A REQUEST NAMES against the peer: one frame read and one
+//      written on the engines at rates where the loop costs the core less,
+//      exact at both ends; what the engines cannot carry refused, the
+//      select, the D/C and the block untouched and no edge on SCK; a command
+//      in the loop before its data block, D/C moving between the two
+//      phases, and a command alone on the engines
+//   E  WHEN A REQUEST ENDS THE WIRE HAS ENDED: the SCK pad read right after
+//      the request ended, all four modes, every rate, read and write, both
+//      engines, through a select and through a null one
 //   r  THE ROLES INVERT: this board as the CLIENT on the pads it hosts
 //      with, the peer clocking a bounded burst as the bus host
 //   u  16-BIT FRAMES against the peer (spi_link's extended exchange,
@@ -175,7 +180,7 @@
 // plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghijklmnopqsK,rtuvwxy
+// build: groups = abcdefghijklmnopqsK,rtuvwxySE
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -287,6 +292,9 @@ using Peer = SpiClient<2, client_pins>;
 using HostTx = DmaTxEngine<1, 1, uint16_t>;
 using HostRx = DmaRxEngine<1, 2, uint16_t>;
 using DmaHost = SpiHost<1, host_pins, HostTx, HostRx>;
+/// Letter S's byte engines on the same channels: a 16-bit frame has no beat on
+/// them whatever its buffer, so this host refuses it and never starts one.
+using ByteDmaHost = SpiHost<1, host_pins, DmaTxEngine<1, 1>, DmaRxEngine<1, 2>>;
 // The client's own engines, RAW (SpiClient has no slots - see the
 // report): letter i uses them to take the client's ISR turnaround out of
 // the ladder, which is the whole point of that measurement.
@@ -295,7 +303,7 @@ using PeerRx = DmaRxEngine<1, 4>;
 // The packed pair of the LDMA leg: the SAME channels at half-word width.
 using PeerTx16 = DmaTxEngine<1, 3, uint16_t>;
 
-using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, Host, DmaHost>;
+using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, Host, DmaHost, ByteDmaHost>;
 constexpr SysClock clock;
 static_assert(SysClock::rate_count == 3);
 
@@ -304,10 +312,10 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-// The table holds every letter registered in main(), 26 of them: a
+// The table holds every letter registered in main(), 28 of them: a
 // letter past its capacity is refused (letter() returns false), and the
 // suite does not check the return, so it would be missing in silence.
-TestBench<Serial, 26> bench;
+TestBench<Serial, 28> bench;
 
 using CsPin = Pin<'A', 15>;          ///< the host's chip select, a GPIO
 using ClientNssPin = Pin<'B', 12>;   ///< the client's NSS - and letter e's witness
@@ -436,8 +444,7 @@ void peer_stop() {
 
 volatile bool host_done = false;
 /// The engined host's completions (TransferDone edges) and the receive
-/// channel's block ends under them - a command block chained to its data
-/// block is two blocks and one completion.
+/// channel's block ends under them - one of each, whatever the phases.
 volatile uint16_t dma_completions = 0;
 volatile uint16_t dma_blocks = 0;
 /// Letter K's stopwatch on the completing vector, the ticker's cycles.
@@ -1377,8 +1384,7 @@ void tb_link() {
     bench.verdict("no error flag stands at either end after a clean exchange",
                   (S1::status() & SpiFlag::errors) == 0u && peer_err_seen == 0u);
 
-    // The same, asynchronous: on the engined host's DMA engines (sixteen
-    // frames at PCLK/64 are well past its short-request count).
+    // The same on the engined host's DMA engines.
     Dma<1>::bus_clock(true);
     bench.verdict("the ENGINED host comes up over the same instance and pads",
                   DmaHost::init(clock));
@@ -1396,15 +1402,15 @@ void tb_link() {
                   moved_dma && dma.host_ok && dma.peer_ok && dma_completions == 1u &&
                       dma_blocks == 1u);
 
-    // A command phase in front of the data: three command frames at
-    // PCLK/64 repay a block of their own, chained to the data block.
+    // A command phase in front of the data: the command in the loop, the
+    // data on a block.
     static const uint8_t cmd[3] = {0x9F, 0x01, 0x02};
     fill_link_fixture(n);
     peer_arm({.mode = SpiMode::mode0, .bits = SpiDataSize::bits8}, peer_answers, n);
     dma_completions = 0;
     dma_blocks = 0;
     const bool with_cmd = dma_xfer(tx_buf, rx_buf, 8, SpiClock::div64, false, 3, cmd);
-    bool cmd_ok = with_cmd && peer_rx_n == 11u && dma_completions == 1u && dma_blocks == 2u;
+    bool cmd_ok = with_cmd && peer_rx_n == 11u && dma_completions == 1u && dma_blocks == 1u;
     for (uint16_t i = 0; i < 3u && cmd_ok; ++i) {
         cmd_ok = peer_rx[i] == cmd[i];
     }
@@ -1414,9 +1420,9 @@ void tb_link() {
     print(serial, "  cmd+data: peer got ", peer_rx_n, " frames (3 + 8 expected), blocks ",
           dma_blocks, ", completions ", dma_completions, crlf);
     bench.verdict("a two-phase request is ONE select window: three command "
-                  "frames on a block of their own, then eight data ones on the "
-                  "block the vector chains to it, in order, with the D/C flip "
-                  "between them - two blocks, one completion",
+                  "frames in the loop, then eight data ones on a block, in "
+                  "order, with the D/C flip between them - one block, one "
+                  "completion",
                   cmd_ok);
     dma_host_live = false;
     DmaHost::release();
@@ -2490,8 +2496,7 @@ void ti_dma() {
                   moved && host_ok && peer_ok && DmaHost::status() == spi_ok &&
                       dma_completions == 1u);
 
-    // The command block chained to the data block: two command frames at
-    // PCLK/256 repay a block of their own.
+    // A command before the data block: the command in the loop.
     static const uint8_t cmd[2] = {0x0B, 0x00};
     for (uint16_t i = 0; i < n; ++i) {
         rx_buf[i] = 0xEE;
@@ -2501,16 +2506,15 @@ void ti_dma() {
     dma_blocks = 0;
     const bool with_cmd = dma_xfer(tx_buf, rx_buf, 16, SpiClock::div256, false, 2, cmd);
     bool handover = with_cmd && peer_rx_n == 18u && peer_rx[0] == cmd[0] &&
-                    peer_rx[1] == cmd[1] && dma_blocks == 2u && dma_completions == 1u;
+                    peer_rx[1] == cmd[1] && dma_blocks == 1u && dma_completions == 1u;
     for (uint16_t i = 0; i < 16u && handover; ++i) {
         handover = peer_rx[2u + i] == static_cast<uint16_t>(0x11u + i * 3u);
     }
     print(serial, "  handover: peer got ", peer_rx_n, " frames (2 + 16 expected), blocks ",
           dma_blocks, ", completions ", dma_completions, crlf);
-    bench.verdict("the COMMAND phase on a block of its own and the data block "
-                  "chained to it from the vector - one select window, the D/C "
-                  "flip in the middle, no frame lost or repeated at the seam, "
-                  "two blocks and one completion",
+    bench.verdict("the COMMAND phase in the loop and the data block after it "
+                  "- one select window, the D/C flip in the middle, no frame "
+                  "lost or repeated at the seam, one block and one completion",
                   handover);
 
     // A null tx (dummies from a held cell) and a null rx (a held sink).
@@ -2539,8 +2543,8 @@ void ti_dma() {
     // engines - one completion, the receive block's, and byte-exact both
     // ways with each frame low byte first in the buffers - and then the
     // same request from an ODD address, which the engines cannot carry
-    // (10.4.3: a half-word beat cannot read across one): it runs polled
-    // inside start() whichever way it asked.
+    // (10.4.3: a half-word beat cannot read across one): refused, nothing on
+    // the wire.
     {
         alignas(2) static uint8_t wide_tx[2u * 16u + 2u];
         alignas(2) static uint8_t wide_rx[2u * 16u + 2u];
@@ -2583,6 +2587,17 @@ void ti_dma() {
             while (!inside && !host_done && Ticker::millis() - w0 < 500u) {
             }
             const bool moved = inside || host_done;
+            if (leg == 1u) {
+                // Refused: nothing reached the client, nothing came back.
+                bool untouched = inside && DmaHost::status() == spi_rejected && peer_rx_n == 0u;
+                for (uint16_t i = 0; i < 32u && untouched; ++i) {
+                    untouched = rx[i] == 0xEE;
+                }
+                wide_ok[leg] = untouched;
+                completions[leg][0] = dma_completions;
+                completions[leg][1] = inside ? 1u : 0u;
+                continue;
+            }
             bool ok = moved && peer_rx_n == 16u && DmaHost::status() == spi_ok;
             for (uint16_t i = 0; i < 16u && ok; ++i) {
                 const uint16_t in = static_cast<uint16_t>(rx[2u * i] | (rx[2u * i + 1u] << 8));
@@ -2594,15 +2609,15 @@ void ti_dma() {
             completions[leg][1] = inside ? 1u : 0u;
         }
         print(serial, "  16-bit frames: aligned exact=", wide_ok[0], " (dma completions ",
-              completions[0][0], ", inside start() ", completions[0][1], "), odd address exact=",
+              completions[0][0], ", inside start() ", completions[0][1], "), odd address refused=",
               wide_ok[1], " (dma ", completions[1][0], ", inside start() ", completions[1][1], ")",
               crlf);
         bench.verdict("16-BIT FRAMES ON THE DMA: sixteen half-word beats out and back, "
                       "byte-exact both ways, ONE completion",
                       wide_ok[0] && completions[0][0] == 1u && completions[0][1] == 0u);
-        bench.verdict("and the same asynchronous request from an ODD address runs polled "
-                      "inside start(), exact, with no completion on a channel - the engines "
-                      "cannot carry it, and a refusal would hang on where a buffer sits",
+        bench.verdict("and the same request from an ODD address is refused inside start(), "
+                      "spi_rejected, nothing reaching the client and nothing written back, "
+                      "with no completion on a channel - the engines cannot carry it",
                       wide_ok[1] && completions[1][0] == 0u && completions[1][1] == 1u);
     }
 
@@ -2634,8 +2649,7 @@ void ti_dma() {
         (void)PeerTx::start(std::span<const uint8_t>(peer_tx_dma, 32));
         S2::enable();
 
-        // Asynchronous: thirty-two frames ride the engines at every code
-        // (the host's short-request count is under that at all eight).
+        // On the engines: thirty-two frames at every code.
         const bool ok_move = dma_xfer(tx_buf, rx_buf, 32, rate, false);
         uint32_t sp = 400'000u;
         while (PeerRx::take() == 0u && sp-- != 0u) {
@@ -2770,8 +2784,7 @@ struct Pair {
     bool polled;   ///< the way the second one runs
 };
 
-/// Letter K's window: long enough for the engines at letter K's rate (a read
-/// rides them from 3 frames at PCLK/32, the arithmetic above SpiHostCosts).
+/// Letter K's window.
 constexpr uint16_t way_frames = 32;
 constexpr SpiClock way_rate = SpiClock::div32;
 uint8_t way_tx[way_frames];
@@ -2878,12 +2891,11 @@ private:
             [](auto) { return unhandled(); });
     }
 
-    /// The ways one arbiter runs a request on this host: 0 and 2
-    /// asynchronous on the engines (six frames at either letter's rate are
-    /// past the host's short-request count), 1 POLLED inside start() - the
-    /// synchronous completion the arbiter answers in its own dispatch -
-    /// and 3 asynchronous with its first `cmd_frames` as a command phase
-    /// on a block of its own, chained to the data block from the vector.
+    /// The ways one arbiter runs a request on this host: 0 and 2 on the
+    /// engines, 1 POLLED inside start() - the synchronous completion the
+    /// arbiter answers in its own dispatch - and 3 on the engines with its
+    /// first `cmd_frames` as a command phase, in the loop before the data
+    /// block.
     static DmaHost::Request request(uint8_t i) {
         const bool split = i == 3u;
         return DmaHost::Request{
@@ -3012,7 +3024,7 @@ void tj_kernel() {
     bench.verdict("FOUR TRANSACTIONS QUEUED FROM ONE DISPATCH come back in "
                   "order, every one spi_ok, with the bytes on the wire exactly "
                   "what each request lent - two on the engines, one polled "
-                  "inside start(), one a command block chained to its data block",
+                  "inside start(), one a command in the loop before its data block",
                   wire_ok);
 
     // The rejection.
@@ -3795,61 +3807,7 @@ void ts_shapes() {
                           ftlvl == 0u && frlvl == 0u);
     }
 
-    // The short request's split on the engined host: one frame under the
-    // host's own count completes inside start() as a polled request does,
-    // with no completion on a channel; the count itself rides the engines,
-    // one block and one completion. Three shapes: byte frames read at
-    // PCLK/4, written at PCLK/2, and half-word frames read at PCLK/2.
     Dma<1>::bus_clock(true);
-    const bool engined_host_up = DmaHost::init(clock);
-    dma_host_live = true;
-    struct Split {
-        SpiClock rate;
-        SpiDataSize bits;
-        bool read;
-    };
-    constexpr Split splits[3] = {
-        {SpiClock::div4, SpiDataSize::bits8, true},
-        {SpiClock::div2, SpiDataSize::bits8, false},
-        {SpiClock::div2, SpiDataSize::bits16, true},
-    };
-    bool split_ok = engined_host_up;
-    for (const Split& sp : splits) {
-        const uint16_t edge = DmaHost::async_min_frames(sp.rate, sp.bits, sp.read);
-        uint8_t* const in = sp.read ? shape_rx : nullptr;
-        const ShapeResult under = run_shape(shape_tx, in, static_cast<uint16_t>(edge - 1u), sp.rate,
-                                            sp.bits, true);
-        const ShapeResult at = run_shape(shape_tx, in, edge, sp.rate, sp.bits, true);
-        print(serial, "    the host's count for this shape: ", edge, " frames", crlf);
-        split_ok = split_ok && edge > 1u && shape_clean(under, true) && shape_clean(at, false, 1);
-    }
-    bench.verdict("THE SHORT ASYNCHRONOUS REQUEST RUNS POLLED: one frame under the host's own "
-                  "count (async_min_frames(), the engines' fixed cost against the polled "
-                  "frames at the request's rate) completes inside start() with no completion "
-                  "on a channel, and the count itself rides the engines - one block, one "
-                  "completion - for byte frames read at PCLK/4 and written at PCLK/2 and "
-                  "half-word frames read at PCLK/2; empty FIFOs and no overrun after each",
-                  split_ok);
-
-    // A command phase on the engines: one worth a block of its own (eight
-    // frames at PCLK/64) rides one, the data block chained to it from the
-    // vector - two blocks, one completion; a short one (three frames at
-    // PCLK/16) runs polled inside start() before the data block - one
-    // block, one completion.
-    static const uint8_t long_cmd[8] = {0x2C, 1, 2, 3, 4, 5, 6, 7};
-    const ShapeResult chained = run_shape(shape_tx, shape_rx, 8, SpiClock::div64, SpiDataSize::bits8,
-                                          true, 8, long_cmd);
-    const ShapeResult before = run_shape(shape_tx, shape_rx, 32, SpiClock::div16, SpiDataSize::bits8,
-                                         true, 3, cmd);
-    bench.verdict("A COMMAND PHASE THAT REPAYS A BLOCK RIDES ONE, the data block chained to it "
-                  "from the vector - two blocks, one completion - and a short one runs polled "
-                  "inside start() before the data block - one block, one completion; empty "
-                  "FIFOs after both",
-                  shape_clean(chained, false, 2) && shape_clean(before, false, 1));
-    dma_host_live = false;
-    DmaHost::release();
-    (void)Host::init(clock);
-
     // THE RECEIVE SHAPES UNDER A HANDLER LONGER THAN WHAT THEY KEEP IN
     // FLIGHT: the tick's handler stretched to some 1500 cycles - four
     // byte frames at PCLK/2 are 64 - across a hundred receive runs at
@@ -4323,8 +4281,8 @@ void tq_peer_kernel() {
     bench.verdict("FOUR TRANSACTIONS QUEUED FROM ONE DISPATCH come back in order, "
                   "every one spi_ok, and the bytes on the wire are exactly what "
                   "each request lent - read back by A SECOND BOARD: two on the "
-                  "engines, one polled inside start(), one a command block "
-                  "chained to its data block",
+                  "engines, one polled inside start(), one a command in the "
+                  "loop before its data block",
                   wire_ok && mism == 0u && rep && r.count == total && r.mism == 0u);
 
     // The rejection, the votes and the per-bus timeout need a
@@ -4627,9 +4585,8 @@ void tx_peer_slips() {
 namespace ext {
 
 /// Which of this host's two ways clocks the window: the polled loop, or
-/// the DMA engines (an asynchronous request on the engined host of letter
-/// i, its half-word channels; every window here is past its short-request
-/// count).
+/// the DMA engines (a request naming them on the engined host of letter
+/// i, its half-word channels).
 enum class Path : uint8_t { polled, engines };
 
 const char* path_name(Path p) {
@@ -5948,7 +5905,7 @@ using kl::way_tx;
 enum class Shape : uint8_t {
     write,     ///< polled, nothing read back: the transmit-only loop
     read,      ///< polled, read back: the receive loop
-    command,   ///< asynchronous with a command phase too short for a block: polled before it
+    command,   ///< on the engines with a command phase: the command in the loop before its block
 };
 
 struct Failed {
@@ -6402,6 +6359,567 @@ extern "C" void SysTick_Handler() {
 }
 extern "C" void BRIO_SUITE_CONSOLE_HANDLER() { (void)Serial::isr(); }
 
+// =============================================================================
+// S - THE ENGINE A REQUEST NAMES, against the peer
+// =============================================================================
+//
+// A request naming the engines runs on them at any length. One frame, read and
+// written, at PCLK/4 and PCLK/8: the loop would cost the core less there
+// (docs/stm32g0/spi.md has the arithmetic) and nothing asks. What they cannot
+// carry is refused before the block, the select or the D/C is touched, every
+// witness read: the select's falling edges on its pad, D/C's latch, CR1 and
+// CR2, SCK's edges. A command before data runs in the loop, one block and one
+// completion, with D/C rising on a wire at rest between the two phases - the
+// handler of D/C's own edge finds BSY low, the transmit FIFO empty and SCK at
+// its idle level, and it runs before the data block is launched, the rise
+// being main context's - and a command with no data is the block. (SCK's edges
+// are not counted one by one here: at 64 MHz the handler of an edge outlasts
+// half a bit at every rung.) A polled request of any
+// length stays the loop: letters o, p, u and K run them.
+
+namespace named {
+
+/// PB6, a pad on no recorded wire (the bench's survey): D/C for this letter,
+/// and the select of the one refusal whose select does fall.
+using DcPad = Pin<'B', 6>;
+using DcWatch = ExtInt<DcPad>;
+/// D/C's rise as its handler saw the wire: 0 none yet, 1 at rest, 2 not.
+volatile uint8_t dc_rise = 0;
+
+constexpr uint16_t cap = 40;
+alignas(2) uint8_t tx[cap];
+alignas(2) uint8_t rx[cap];
+
+struct Window {
+    bool accepted = false;
+    bool clocked = false;
+    bool inside = false;
+    uint16_t completions = 0;
+    uint16_t blocks = 0;
+    bool reported = false;
+    spilink::Report r{};
+    uint16_t mism = 0;
+    uint8_t dc_rise = 0;   ///< 0 D/C never rose, 1 on a wire at rest, 2 not
+    bool dc_up = false;
+};
+
+DmaHost::Config link_config() { return {.mosi_speed = peer_mosi_speed}; }
+
+/// One exchange of `cmd_len + len` 8-bit frames commanded of the peer and
+/// clocked on the engined host at `rate`, the first `cmd_len` the command
+/// phase: the peer hears every frame, this end reads the data phase back when
+/// `read`. D/C a real pad parked high, its rise judged by its own handler.
+Window run(uint8_t cmd_len, uint16_t len, SpiClock rate, uint8_t seed, bool read = true) {
+    Window o{};
+    const uint16_t n = static_cast<uint16_t>(cmd_len + len);
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = n;
+    a.ms = 200;
+    a.seed_a = seed;
+    a.seed_b = static_cast<uint8_t>(seed ^ 0x6Cu);
+    a.pattern = spilink::pattern_prbs;
+    o.accepted = peer_act(Op::exchange, a);
+    if (!o.accepted) {
+        return o;
+    }
+    {
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < cap; ++i) {
+            tx[i] = i < n ? out.next() : 0u;
+            rx[i] = 0xEE;
+        }
+    }
+    settle();
+    Dma<1>::bus_clock(true);
+    CsPin::output(true);
+    DcPad::output(true);
+    (void)DmaHost::init(clock, link_config());
+    dma_host_live = true;
+    DmaHost::prime(SpiMode::mode0, rate);
+    CsPin::clear();
+    link_hold();
+    dc_rise = 0;
+    (void)DcWatch::select();
+    (void)DcWatch::configure(ExtiSense::rising);
+    (void)DcWatch::clear();
+    (void)DcWatch::arm(true);
+    Nvic::enable(DcWatch::irq());
+    DmaHost::Request r{};
+    r.cs = {};
+    r.dc = DcPad::ref();
+    if (cmd_len != 0u) {
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
+        r.cmd_len = cmd_len;
+    }
+    if (len != 0u) {
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx + cmd_len));
+        if (read) {
+            r.rx = lend<Lease::reply>(rx + cmd_len);
+        }
+        r.len = len;
+    }
+    r.clock = rate;
+    r.mode = SpiMode::mode0;
+    r.engine = SpiEngine::dma;
+    dma_completions = 0;
+    dma_blocks = 0;
+    host_done = false;
+    const bool done = DmaHost::start(r);
+    o.inside = done;
+    const uint32_t m0 = Ticker::millis();
+    while (!done && !host_done && Ticker::millis() - m0 < 200u) {
+    }
+    o.clocked = done || host_done;
+    o.completions = dma_completions;
+    o.blocks = dma_blocks;
+    o.dc_up = DcPad::read_out();
+    (void)DcWatch::arm(false);
+    Nvic::disable(DcWatch::irq());
+    (void)DcWatch::clear();
+    o.dc_rise = dc_rise;
+    link_hold();
+    CsPin::set();
+    dma_host_live = false;
+    DmaHost::release();
+    DcPad::release();
+    (void)link_command_mode();
+    o.reported = peer_report(o.r);
+    if (read) {
+        spilink::Stream want(a.pattern, a.seed_b);
+        for (uint16_t i = 0; i < n; ++i) {
+            const uint8_t w = want.next();
+            if (i >= cmd_len && rx[i] != w) {
+                ++o.mism;
+            }
+        }
+    }
+    return o;
+}
+
+/// Exact at both ends, and on the engines: not inside start(), one block, one
+/// completion.
+bool clean(const Window& o, uint16_t n) {
+    return o.accepted && o.clocked && o.reported && o.r.count == n && o.r.mism == 0u && o.mism == 0u &&
+           !o.inside && o.completions == 1u && o.blocks == 1u;
+}
+
+void print_window(const char* what, uint16_t n, SpiClock rate, const Window& o) {
+    print(serial, "    ", what, ", ", n, " frames at PCLK/", spi_division(rate), ": inside start() ",
+          o.inside ? 1u : 0u, ", completions ", o.completions, ", blocks ", o.blocks, ", D/C rose ",
+          o.dc_rise == 0u ? "never" : o.dc_rise == 1u ? "at rest" : "ON A MOVING WIRE", ", host mism ", o.mism, ", the peer read ", o.r.count, " mism ",
+          o.r.mism, o.clocked ? "" : " HOST NEVER COMPLETED", crlf);
+}
+
+struct Refusal {
+    bool ended = false;
+    uint8_t status = 0xFFu;
+    uint16_t falls = 0;
+    uint16_t edges = 0;
+    bool regs_same = false;
+    bool dc_low = false;
+    bool select_up = false;
+};
+
+/// One request the host must refuse. The block sits at mode 0, PCLK/16 and 8
+/// bits and the request names mode 3, PCLK/8 and 16 bits; a data phase would
+/// raise the parked D/C.
+template <typename H>
+Refusal refuse(typename H::Request q) {
+    Refusal f{};
+    q.cs = CsPin::ref();
+    q.dc = DcPad::ref();
+    q.clock = SpiClock::div8;
+    q.mode = SpiMode::mode3;
+    q.engine = SpiEngine::dma;
+    H::prime(SpiMode::mode0, SpiClock::div16);
+    DcPad::clear();
+    const uint32_t cr1 = S1::regs().CR1;
+    const uint32_t cr2 = S1::regs().CR2;
+    cs_falls = 0;
+    (void)CsWatch::select();
+    (void)CsWatch::configure(ExtiSense::falling);
+    (void)CsWatch::clear();
+    (void)CsWatch::arm(true);
+    Nvic::enable(CsWatch::irq());
+    way::watch_sck(true);
+    f.ended = H::start(q);
+    f.status = H::status();
+    settle_ms(1);
+    way::watch_sck(false);
+    (void)CsWatch::arm(false);
+    (void)CsWatch::clear();
+    f.falls = cs_falls;
+    f.edges = static_cast<uint16_t>(sck_edges_selected + sck_edges_released);
+    f.regs_same = S1::regs().CR1 == cr1 && S1::regs().CR2 == cr2;
+    f.dc_low = !DcPad::read_out();
+    f.select_up = CsPin::read_out();
+    DcPad::set();
+    return f;
+}
+
+bool refused(const Refusal& f) {
+    return f.ended && f.status == spi_rejected && f.falls == 0u && f.edges == 0u && f.regs_same && f.dc_low &&
+           f.select_up;
+}
+
+void print_refusal(const char* what, const Refusal& f) {
+    print(serial, "    ", what, ": start() ", f.ended ? 1u : 0u, ", status ", f.status, " (spi_rejected ",
+          spi_rejected, "), select falls ", f.falls, ", SCK edges ", f.edges, ", CR1 and CR2 ",
+          f.regs_same ? "untouched" : "MOVED", ", D/C ", f.dc_low ? "untouched" : "MOVED", crlf);
+}
+
+}  // namespace named
+
+void tS_named() {
+    if (!need_peer()) {
+        return;
+    }
+    using named::Window;
+
+    // PROOF ONE. PCLK/4 and /8: a frame's 32 and 64 cycles, under the
+    // engines' fixed cost.
+    bool one_ok = true;
+    uint8_t seed = 0x31;
+    for (const SpiClock rate : {SpiClock::div4, SpiClock::div8}) {
+        const Window read = named::run(0, 1, rate, seed);
+        named::print_window("one frame read", 1, rate, read);
+        const Window written = named::run(0, 1, rate, static_cast<uint8_t>(seed + 7u), false);
+        named::print_window("one frame written", 1, rate, written);
+        one_ok = one_ok && named::clean(read, 1) && named::clean(written, 1);
+        seed = static_cast<uint8_t>(seed + 23u);
+    }
+    bench.verdict("A REQUEST NAMING THE ENGINES RUNS ON THEM AT THE SHORTEST LENGTH: one frame, read and "
+                  "written, at PCLK/4 and PCLK/8 - start() false, dma_isr() the end, one block, one "
+                  "completion, byte-exact at both ends",
+                  one_ok);
+
+    // PROOF TWO. Refused, every witness read; the next request exact.
+    Dma<1>::bus_clock(true);
+    CsPin::output(true);
+    named::DcPad::output(true);
+    (void)DmaHost::init(clock, named::link_config());
+    dma_host_live = true;
+    const auto wide = [](const uint8_t* out, uint8_t* in) {
+        DmaHost::Request q{};
+        q.tx = lend<Lease::reply>(out);
+        q.rx = lend<Lease::reply>(in);
+        q.len = 4;
+        q.bits = SpiDataSize::bits16;
+        return q;
+    };
+    const named::Refusal odd_tx = named::refuse<DmaHost>(wide(named::tx + 1, named::rx));
+    const named::Refusal odd_rx = named::refuse<DmaHost>(wide(named::tx, named::rx + 1));
+    DmaHost::Request lone{};
+    lone.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(named::tx + 1));
+    lone.cmd_len = 4;
+    lone.bits = SpiDataSize::bits16;
+    const named::Refusal odd_cmd = named::refuse<DmaHost>(lone);
+    dma_host_live = false;
+    DmaHost::release();
+    CsPin::output(true);
+    (void)ByteDmaHost::init(clock, ByteDmaHost::Config{.mosi_speed = peer_mosi_speed});
+    ByteDmaHost::Request on_bytes{};
+    on_bytes.tx = lend<Lease::reply>(static_cast<const uint8_t*>(named::tx));
+    on_bytes.rx = lend<Lease::reply>(named::rx);
+    on_bytes.len = 4;
+    on_bytes.bits = SpiDataSize::bits16;
+    const named::Refusal bytes = named::refuse<ByteDmaHost>(on_bytes);
+    ByteDmaHost::release();
+    named::print_refusal("a wide frame out of an odd address", odd_tx);
+    named::print_refusal("a wide frame into an odd address", odd_rx);
+    named::print_refusal("a wide command alone from an odd address", odd_cmd);
+    named::print_refusal("a wide frame on byte engines", bytes);
+    bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED: a wide frame on an odd address either way or as a "
+                  "command alone, a wide frame on byte engines - start() true, spi_rejected, the select never "
+                  "fell, D/C, CR1 and CR2 untouched, no edge on SCK",
+                  named::refused(odd_tx) && named::refused(odd_rx) && named::refused(odd_cmd) &&
+                      named::refused(bytes));
+
+    // A transmit channel a program holds refuses at the launch: the select has
+    // fallen by then, and comes back; nothing is clocked. The select is PB6
+    // here, so the peer's never moves.
+    CsPin::output(true);
+    named::DcPad::output(true);
+    (void)DmaHost::init(clock, named::link_config());
+    dma_host_live = true;
+    DmaHost::prime(SpiMode::mode0, SpiClock::div16);
+    const bool held = HostTx::claim();
+    DmaHost::Request late{};
+    late.cs = named::DcPad::ref();
+    late.tx = lend<Lease::reply>(static_cast<const uint8_t*>(named::tx));
+    late.len = 4;
+    late.clock = SpiClock::div16;
+    late.engine = SpiEngine::dma;
+    way::watch_sck(true);
+    const bool late_ended = DmaHost::start(late);
+    const uint8_t late_status = DmaHost::status();
+    settle_ms(1);
+    way::watch_sck(false);
+    const uint16_t late_edges = static_cast<uint16_t>(sck_edges_selected + sck_edges_released);
+    const bool late_up = named::DcPad::read_out();
+    HostTx::unclaim();
+    print(serial, "    a transmit channel a program holds: claimed ", held ? 1u : 0u, ", start() ",
+          late_ended ? 1u : 0u, ", status ", late_status, ", SCK edges ", late_edges, ", the select back up ",
+          late_up ? 1u : 0u, crlf);
+    bench.verdict("A CHANNEL THAT REFUSES THE BLOCK ENDS THE REQUEST: start() true, spi_rejected, no edge on SCK, "
+                  "the select back up - it does not wait for a completion that will never come",
+                  held && late_ended && late_status == spi_rejected && late_edges == 0u && late_up);
+    dma_host_live = false;
+    DmaHost::release();
+    named::DcPad::release();
+    (void)link_command_mode();
+
+    const Window after = named::run(0, 32, SpiClock::div8, 0x52);
+    named::print_window("the next request", 32, SpiClock::div8, after);
+    bench.verdict("the next request after every refusal is exact at both ends", named::clean(after, 32));
+
+    // PROOF THREE. Sixteen edges a frame: D/C rises at exactly the command's.
+    const Window before = named::run(4, 8, SpiClock::div256, 0x5B);
+    named::print_window("a 4-frame command before 8 data frames", 12, SpiClock::div256, before);
+    const Window one_cmd = named::run(1, 32, SpiClock::div128, 0x6D);
+    named::print_window("a 1-frame command before 32 data frames", 33, SpiClock::div128, one_cmd);
+    bench.verdict("A COMMAND BEFORE DATA RUNS IN THE LOOP AND THE DATA ON THE ENGINES: one block, one completion, D/C "
+                  "rising on a wire at rest between the two phases, exact at both ends",
+                  named::clean(before, 12) && before.dc_rise == 1u && named::clean(one_cmd, 33) &&
+                      one_cmd.dc_rise == 1u);
+    const Window alone = named::run(3, 0, SpiClock::div16, 0x77);
+    named::print_window("a 3-frame command alone", 3, SpiClock::div16, alone);
+    const Window alone_slow = named::run(3, 0, SpiClock::div256, 0x79);
+    named::print_window("a 3-frame command alone", 3, SpiClock::div256, alone_slow);
+    bench.verdict("A COMMAND WITH NO DATA RIDES THE ENGINES AS THE WHOLE REQUEST: one block, one completion, exact at "
+                  "the peer, D/C high when the completion answers, on a wire at rest",
+                  named::clean(alone, 3) && alone.dc_up && alone.dc_rise == 1u && named::clean(alone_slow, 3) &&
+                      alone_slow.dc_up && alone_slow.dc_rise == 1u);
+    bench.verdict("the command channel survives the letter", command(Op::ping));
+}
+
+// =============================================================================
+// E - WHEN A REQUEST ENDS THE WIRE HAS ENDED
+// =============================================================================
+//
+// The SCK pad's input, read right after the request ended - after start()
+// returned for a polled one, masked, in the handler right after dma_isr()
+// returned true for the engines' - must be at the mode's idle level. WHY AN
+// EARLY END CANNOT BE MISSED, AND WHERE: half a bit is 2^code core cycles here
+// (PCLK is HCLK), 128 at /256; from the flag to the pad's read is some 40 core
+// cycles on the polled path and the vector's whole body on the engines' (the
+// figures below), so the instrument sees an early end where the half bit
+// outlasts that, and the control run names the rungs. THE VERDICT IS ONE-SIDED:
+// SCK at its idle level only ever follows the last edge, so a pad read at the
+// active level is an early end and nothing else, and the bound is zero at every
+// rung. PB6 is the select, a pad on no recorded wire; the link's own stays high,
+// so the peer hears none of this.
+
+namespace wire_end {
+
+using Sck = Pin<host_pins.sck.port, host_pins.sck.pin>;
+using Select = Pin<'B', 6>;
+
+volatile bool watching = false;
+volatile bool pad_high = false;
+volatile bool select_up = false;
+
+[[gnu::always_inline]] inline void sampled() {
+    pad_high = Sck::read();
+    select_up = Select::read_out();
+}
+
+enum class Way : uint8_t { polled_read_1, polled_read_8, polled_write, dma_read, dma_write, dma_command, dma_both };
+constexpr uint8_t way_count = 7;
+const char* way_name(uint8_t w) {
+    constexpr const char* names[way_count] = {"polled read, 1 frame",  "polled read, 8 frames", "polled write, 8 frames",
+                                              "dma read, 1 frame",     "dma write, 1 frame",    "dma command alone",
+                                              "dma command then data"};
+    return names[w];
+}
+constexpr bool way_is_dma(uint8_t w) { return w >= static_cast<uint8_t>(Way::dma_read); }
+
+uint8_t out[8];
+uint8_t in[8];
+uint8_t early[way_count][4];
+uint32_t reads = 0;
+uint32_t bad_status = 0;
+uint32_t no_end = 0;
+uint32_t vector_most[2][8];
+uint32_t vector_least[2][8];
+
+DmaHost::Request request(uint8_t w, SpiMode m, SpiClock c, PinRef cs) {
+    DmaHost::Request r{};
+    r.cs = cs;
+    r.clock = c;
+    r.mode = m;
+    r.bits = SpiDataSize::bits8;
+    r.engine = way_is_dma(w) ? SpiEngine::dma : SpiEngine::polled;
+    const uint8_t* const o = out;
+    switch (static_cast<Way>(w)) {
+        case Way::polled_read_1:
+        case Way::dma_read:
+            r.tx = lend<Lease::reply>(o);
+            r.rx = lend<Lease::reply>(in);
+            r.len = 1;
+            break;
+        case Way::polled_read_8:
+            r.tx = lend<Lease::reply>(o);
+            r.rx = lend<Lease::reply>(in);
+            r.len = 8;
+            break;
+        case Way::polled_write:
+            r.tx = lend<Lease::reply>(o);
+            r.len = 8;
+            break;
+        case Way::dma_write:
+            r.tx = lend<Lease::reply>(o);
+            r.len = 1;
+            break;
+        case Way::dma_command:
+            r.cmd = lend<Lease::reply>(o);
+            r.cmd_len = 1;
+            break;
+        case Way::dma_both:
+            r.cmd = lend<Lease::reply>(o);
+            r.cmd_len = 1;
+            r.tx = lend<Lease::reply>(o);
+            r.rx = lend<Lease::reply>(in);
+            r.len = 1;
+            break;
+    }
+    return r;
+}
+
+bool once(uint8_t w, SpiMode m, SpiClock c, PinRef cs, bool& high, bool& up) {
+    const DmaHost::Request r = request(w, m, c, cs);
+    if (!way_is_dma(w)) {
+        {
+            InterruptGuard guard;
+            (void)DmaHost::start(r);
+            high = Sck::read();
+            up = Select::read_out();
+        }
+        return true;
+    }
+    host_done = false;
+    watching = true;
+    const bool inside = DmaHost::start(r);
+    const uint32_t m0 = Ticker::millis();
+    while (!inside && !host_done && Ticker::millis() - m0 < 20u) {
+    }
+    watching = false;
+    high = pad_high;
+    up = select_up;
+    return !inside && host_done;
+}
+
+void sweep() {
+    for (auto& per_way : early) {
+        for (uint8_t& per_mode : per_way) {
+            per_mode = 0;
+        }
+    }
+    for (uint8_t i = 0; i < 2u; ++i) {
+        for (uint8_t k = 0; k < 8u; ++k) {
+            vector_most[i][k] = 0;
+            vector_least[i][k] = UINT32_MAX;
+        }
+    }
+    reads = 0;
+    bad_status = 0;
+    no_end = 0;
+    time_vector = true;
+    for (uint8_t w = 0; w < way_count; ++w) {
+        for (uint8_t mode = 0; mode < 4u; ++mode) {
+            const SpiMode m = static_cast<SpiMode>(mode);
+            const bool idle_high = spi_cpol(m);
+            for (uint8_t code = 0; code < 8u; ++code) {
+                const SpiClock c = static_cast<SpiClock>(code);
+                for (uint8_t rep = 0; rep < 6u; ++rep) {
+                    const PinRef cs = rep < 3u ? Select::ref() : PinRef{};
+                    bool high = idle_high;
+                    bool up = true;
+                    const bool ended = once(w, m, c, cs, high, up);
+                    ++reads;
+                    if (!ended) {
+                        ++no_end;
+                        (void)DmaHost::recover();
+                        continue;
+                    }
+                    if (DmaHost::status() != spi_ok) {
+                        ++bad_status;
+                    }
+                    if (high != idle_high || !up) {
+                        early[w][mode] = static_cast<uint8_t>(early[w][mode] | (1u << code));
+                    }
+                    if (rep != 0u && mode < 2u &&
+                        (w == static_cast<uint8_t>(Way::dma_read) || w == static_cast<uint8_t>(Way::dma_write))) {
+                        const uint32_t v = vector_cycles;
+                        uint32_t& most = vector_most[mode][code];
+                        uint32_t& least = vector_least[mode][code];
+                        most = v > most ? v : most;
+                        least = v < least ? v : least;
+                    }
+                }
+            }
+        }
+    }
+    time_vector = false;
+}
+
+bool report(uint32_t& worst_over) {
+    uint32_t seen = 0;
+    print(serial, "  SPI1: ", reads, " requests ended, ", no_end, " with no end, ", bad_status, " not spi_ok", crlf);
+    for (uint8_t w = 0; w < way_count; ++w) {
+        for (uint8_t mode = 0; mode < 4u; ++mode) {
+            if (early[w][mode] != 0u) {
+                print(serial, "    EARLY: ", way_name(w), ", mode ", mode, ", rungs");
+                for (uint8_t code = 0; code < 8u; ++code) {
+                    if ((early[w][mode] & (1u << code)) != 0u) {
+                        print(serial, " /", 2u << code);
+                        ++seen;
+                    }
+                }
+                print(serial, crlf);
+            }
+        }
+    }
+    worst_over = 0;
+    print(serial, "    the vector, core cycles, read or write, mode 0 then mode 1, least..most:", crlf);
+    for (uint8_t code = 0; code < 8u; ++code) {
+        const uint32_t half = 1u << code;
+        print(serial, "      /", 2u << code, " half a bit ", half, ": ", vector_least[0][code], "..",
+              vector_most[0][code], "  ", vector_least[1][code], "..", vector_most[1][code], crlf);
+        const uint32_t floor = vector_least[1][code];
+        const uint32_t over = vector_most[0][code] > floor + half ? vector_most[0][code] - (floor + half) : 0u;
+        worst_over = over > worst_over ? over : worst_over;
+    }
+    print(serial, "    the longest wait past half a bit, mode 0 over mode 1's least: ", worst_over, " cycles", crlf);
+    return seen == 0u && no_end == 0u && bad_status == 0u;
+}
+
+}  // namespace wire_end
+
+void tE_wire_ended() {
+    using namespace wire_end;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        out[i] = static_cast<uint8_t>(0xA5u ^ (i * 11u));
+    }
+    Select::output(true);
+    CsPin::output(true);
+    Dma<1>::bus_clock(true);
+    (void)DmaHost::init(clock, named::link_config());
+    dma_host_live = true;
+    sweep();
+    dma_host_live = false;
+    uint32_t over = 0;
+    const bool ok = report(over);
+    DmaHost::release();
+    Select::release();
+    bench.verdict("WHEN A REQUEST ENDS THE WIRE HAS ENDED: all four modes, every rate, polled and on the engines, "
+                  "read and write, through a select and a null one - SCK at its idle level every time (the bound is "
+                  "zero: a pad read at the active level is an early end and nothing else)",
+                  ok);
+    (void)link_command_mode();
+}
+
 /// SPI1's line is letter m's alone: no host arms the block's interrupts,
 /// so the sleep letter's bare RXNE is the one thing that raises it, and
 /// the frame is read here and the wake recorded.
@@ -6459,12 +6977,24 @@ extern "C" void EXTI4_15_IRQHandler() {
         (void)CsWatch::clear();
         cs_falls = static_cast<uint16_t>(cs_falls + 1u);
     }
+    if (named::DcWatch::pending()) {
+        (void)named::DcWatch::clear();
+        // Letter S's windows are mode 0: SCK idles low.
+        if (named::dc_rise == 0u) {
+            const bool rest = !S1::busy() && S1::tx_level() == 0u &&
+                              !Pin<host_pins.sck.port, host_pins.sck.pin>::read();
+            named::dc_rise = rest ? 1u : 2u;
+        }
+    }
 }
 
 /// The engined host's body, from either channel's vector; letter K times it.
 void dma_host_vector() {
     const uint32_t t0 = time_vector ? cycles_now() : 0u;
     const bool ended = DmaHost::dma_isr();
+    if (ended && wire_end::watching) {
+        wire_end::sampled();
+    }
     if (ended && time_vector) {
         vector_cycles = cycles_now() - t0;
     }
@@ -6526,8 +7056,8 @@ int main() {
     bench.letter('l', "the dynamic clock: the BR code follows the rate",
                  tl_dynamic);
     bench.letter('m', "an SPI interrupt wakes a WFI in Sleep mode", tm_sleep);
-    bench.letter('s', "the host's shapes, WIRELESS: the two loops in every shape, the "
-                      "asynchronous way refused, split and chained, the rate on the wire",
+    bench.letter('s', "the host's shapes, WIRELESS: the two loops in every shape, a "
+                      "request naming the engines refused with none, the rate on the wire",
                  ts_shapes);
     bench.letter('n', "THE PEER: the spi_link command channel to the peer board",
                  tn_peer_link);
@@ -6548,6 +7078,12 @@ int main() {
                  ty_simplex);
     bench.letter('K', "THE NEXT REQUEST AFTER A STALL OR A TRANSFER ERROR, recover() never called",
                  tK_way_back);
+    bench.letter('S', "THE ENGINE A REQUEST NAMES against the peer: one frame on the engines, "
+                      "the refusals, the command rule",
+                 tS_named);
+    bench.letter('E', "WHEN A REQUEST ENDS THE WIRE HAS ENDED: the SCK pad, every mode and rate, "
+                      "both engines",
+                 tE_wire_ended);
     bench.letter('t', "THE CRCNEXT WINDOW against the peer: the walk, no verdict",
                  tt_crcnext_walk, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "

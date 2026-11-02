@@ -339,9 +339,8 @@ void spi_tasks() {
     e.cmd = lend<Lease::reply>(cmd);
     e.cmd_len = 2;
     e.len = 0;
-    (void)EngineHost::start(e);   // a command alone, on its own block when it repays one
+    (void)EngineHost::start(e);   // a command alone: the whole request on the engines
     static_assert(EngineHost::has_dma);
-    (void)EngineHost::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true);
     (void)EngineHost::dma_isr();
     (void)EngineHost::recover();
     EngineHost::release();
@@ -415,15 +414,14 @@ extern "C" void BRIO_STM32G0_SPI2_HANDLER();
 // the polled transaction ONE instance in `.fast_text.brio`, on both shapes
 // of host. A program's own placed function names `.fast_text` in the SAME
 // translation unit as those COMDAT instances (the section-type trap
-// util/placement.hpp states): this TU is the proof it compiles. The
-// polled loop's costs follow the tag, and the short request's threshold
-// with them. An unknown tag is refused (neg/spi_host_placement_unknown.cpp).
+// util/placement.hpp states): this TU is the proof it compiles. An unknown
+// tag is refused (neg/spi_host_placement_unknown.cpp).
 static_assert(platform_places_fast_text<Stm32g0Platform<>>);
 static_assert(HotPlacement<InRam, Stm32g0Platform<>> && HotPlacement<InFlash, Stm32g0Platform<>>);
 using RamHost = SpiHost<1, host_pins, NoDmaEngine, NoDmaEngine, InRam>;
 using RamEngineHost = SpiHost<1, host_pins, Tx, Rx, InRam>;
 static_assert(RamHost::placed_in_ram && !Host::placed_in_ram);
-static_assert(RamEngineHost::costs.read_turn_bytes < EngineHost::costs.read_turn_bytes);
+static_assert(RamEngineHost::placed_in_ram && !EngineHost::placed_in_ram);
 // The placement moves code, never the Request a device client fills.
 static_assert(sizeof(RamHost::Request) == sizeof(Host::Request));
 

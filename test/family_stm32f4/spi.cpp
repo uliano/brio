@@ -407,8 +407,7 @@ void engined_smoke() {
     r.cmd = Borrowed<const uint8_t, Lease::reply>{c};
     r.cmd_len = 2;
     r.len = 0;
-    (void)EnginedBus::start(r);   // a command alone, on its own block when it repays one
-    (void)EnginedBus::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true);
+    (void)EnginedBus::start(r);   // a command alone: the whole request on the engines
     (void)EnginedBus::dma_isr();
     (void)EnginedBus::status();
     (void)EnginedBus::recover();

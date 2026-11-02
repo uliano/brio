@@ -149,9 +149,8 @@
 //               SPI1 - SCK PA5 (the LED's pad, released after), MISO PA6
 //               floating on its pull-up, MOSI PA7 - DMA2 stream 3 out and
 //               stream 2 in, channel 3: 16 and 256 frames of 8 and of 16
-//               bits at SCK 22.5 and 5.625 MHz, asynchronous - every one
-//               past the host's short-request count, so on the engines -
-//               the thread idling until the completion. THE WIRE is SCK / 8 bytes a
+//               bits at SCK 22.5 and 5.625 MHz, on the engines - the
+//               thread idling until the completion. THE WIRE is SCK / 8 bytes a
 //               second; the line after each says wall minus the wire's
 //               time - the request's fixed cost. Before them, one
 //               DmaTxEngine block start alone on an idle stream. The data
@@ -175,7 +174,7 @@
 //               frame in flight at every rate), the same line after; then
 //               each shape's frame at every code from the two lengths (the
 //               fixed part cancels): the transmit-only turn at /2 and the
-//               receive loop's dead bus, what the short-request rule takes.
+//               receive loop's dead bus.
 //        spi.frame
 //               THE RECEIVE LOOP'S FRAME AGAINST THE WIRE, the table the
 //               driver's document quotes: /4 to /256, 8 and 16 bits, modes
@@ -198,20 +197,19 @@
 //               wire) - and the line after each says wall minus the
 //               wire's cycles: the price of a DCS command.
 //        spi.req.e, spi.poll.e, spi.poll.rx.e
-//               the same short requests, and 256 frames written and read
+//               the same requests, and 256 frames written and read
 //               polled at /2 and /4, over letter d's ENGINED host: a polled
 //               request runs the same loops there, no completion (irq 0).
 //        spi.async, spi.async.rx
-//               THE SHORT REQUEST'S BUDGET on the engined host: 64 frames
-//               of 8 bits at /16, written and read, asynchronous on the
-//               engines and polled (spi.e.poll16 and spi.e.poll64, .rx)
-//               through the same call, so E - F is the least busy of the
-//               first's runs less F, the polled wall's fixed part - the
-//               two polled lengths extrapolated to no frames, the frames'
-//               own time and the receive loop's dead bus falling out, the
-//               ruler's own cycles cancelling: printed for a read and a
-//               write beside the host's constants, with the frame counts
-//               those give.
+//               THE TWO WAYS' FIXED COSTS on the engined host: 64 frames of
+//               8 bits at /16, written and read, on the engines and polled
+//               (spi.e.poll16 and spi.e.poll64, .rx) through the same call:
+//               E is the least busy of the first's runs, F the polled
+//               wall's fixed part - the two polled lengths extrapolated to
+//               no frames, the frames' own time falling out - and E - F,
+//               the ruler's own cycles cancelling, printed for a read and a
+//               write. The page turns them into the length from which the
+//               engines cost the core less, at each rate.
 //
 //   i  THE I2C HOST ABOVE THE WIRE (the STM32F429I-DISC1 and the
 //      Nucleo-F446RE; declined by name elsewhere). On the DISC1: I2C3 on
@@ -1100,7 +1098,7 @@ void td_dma() {
 
 // =============================================================================
 // e - the SPI host above the wire: the polled loop, the refusal, the fixed
-//     cost, the short request's budget
+//     cost, the two ways' fixed costs
 // =============================================================================
 #if defined(STM32F446xx)
 /// One request timed `runs` times, the first run discarded (it applies
@@ -1417,14 +1415,16 @@ void te_spi() {
         }
     }
 
-    // The short request's budget, E - F: the same 64-frame request at /16
-    // asynchronous (on the engines: past the host's count there) and polled
-    // through the same call. F is the polled wall's fixed part: the wall of
+    // The two ways' fixed costs: the same 64-frame request at /16 on the
+    // engines and polled through the same call. E is the engines' least busy;
+    // F is the polled wall's fixed part: the wall of
     // 16 and of 64 frames extrapolated to no frames, (4 x w16 - w64) / 3, so
     // the frames' time and the receive loop's dead bus fall out. The wire's
     // half bit after the last sampling edge stays in it, as it stays in a
     // polled request's wall.
     uint32_t over[2] = {};
+    uint32_t engines[2] = {};
+    uint32_t loop[2] = {};
     for (const bool with_rx : {false, true}) {
         FastSpi::Request r{};
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_out));
@@ -1452,25 +1452,14 @@ void te_spi() {
         const uint32_t fixed = (4u * shorter.best.wall - polled.best.wall) / 3u;
         print(serial, "  the same polled: wall - wire = ", static_cast<int32_t>(polled.best.wall - wire_cycles),
               " cycles, F = ", fixed, " cycles, irq ", polled.best.irq, crlf);
-        over[with_rx ? 1u : 0u] = async.least_busy > fixed ? async.least_busy - fixed : 0u;
+        const uint8_t k = with_rx ? 1u : 0u;
+        engines[k] = async.least_busy;
+        loop[k] = fixed;
+        over[k] = async.least_busy > fixed ? async.least_busy - fixed : 0u;
     }
-    print(serial, "  E - F (the engines' least busy less F): read ", over[1], " (the host's ",
-          FastSpi::async_read_budget_cycles, "), written ", over[0], " (the host's ",
-          FastSpi::async_write_budget_cycles, ")", crlf);
-    print(serial, "  an asynchronous request rides the engines from, SCK /2../256 on this APB2 instance, "
-                  "8-bit read:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', FastSpi::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, true));
-    }
-    print(serial, "; written:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', FastSpi::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, false));
-    }
-    print(serial, "; 16-bit read:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', FastSpi::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits16, true));
-    }
-    print(serial, crlf);
+    print(serial, "  E (the engines' least busy): read ", engines[1], ", written ", engines[0],
+          "; F (the polled wall at no frames): read ", loop[1], ", written ", loop[0], "; E - F: read ", over[1],
+          ", written ", over[0], crlf);
     FastSpi::release();
     ReqCs::release();
     ReqDc::release();
@@ -2572,8 +2561,8 @@ int main() {
     bench.letter('l', "a line printed straight to the console: cold, warm, the transport's runs", tl_line);
     bench.letter('t', "the tick's floor: a second of idle", tt_tick);
     bench.letter('d', "the DMA: copy and fill, a paced transfer, an engined SPI request", td_dma);
-    bench.letter('e', "the SPI host above the wire: polled, refused, a request's fixed cost, the short "
-                      "request's budget",
+    bench.letter('e', "the SPI host above the wire: polled, refused, a request's fixed cost, the two "
+                      "ways' fixed costs",
                  te_spi);
     bench.letter('u', "the serial transport on the single-wire loop: transmit, receive, the edge", tu_uart);
     bench.letter('i', "the I2C host above the wire: tenures, their fixed cost, the STOP's drain", ti_i2c);

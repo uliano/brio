@@ -57,11 +57,10 @@
 //      control's.
 //   p  letter p's ladders through the arbiter, every BR code from PCLK1/256
 //      to PCLK1/2: the POLLED loop (8 frames, one frame in flight at every
-//      rate), THE SHORT ASYNCHRONOUS REQUEST (2 byte frames read: on the
-//      engines to PCLK1/8, polled inside start() at /4 and /2, each rung's
-//      way read at the DMA vector and judged against the host's count),
-//      and the DMA engines (32 frames). The polled loop - a short
-//      asynchronous request's too - runs inside the arbiter's dispatch, so
+//      rate), A SHORT REQUEST ON THE ENGINES (2 byte frames read, each
+//      rung's way read at the DMA vector: the engines at every rung), and
+//      the DMA engines (32 frames). The polled loop runs inside the
+//      arbiter's dispatch, so
 //      a dispatch above the arbiter holds it off for its whole length, and
 //      a 3000-cycle preemption outlasts a frame at /64 and faster. One frame
 //      in flight: the clock waits for the read, so that is a gap on the bus
@@ -267,7 +266,7 @@ bool data_window_dma = false;
 /// At every window's reply: whether a DMA vector posted a completion since
 /// the reply before - the window's own, the windows being one at a time -
 /// latched for the data window (the shared body's sl::xrx is its receive
-/// buffer, and no other window's): which way a short asynchronous request
+/// buffer, and no other window's): which way a short request on the engines
 /// went (letter p).
 void client_replied() {
     const uint32_t now = dma_completions;
@@ -599,16 +598,12 @@ enum class Path : uint8_t { polled, short8, engines };
 const char* path_name(Path p) {
     switch (p) {
         case Path::polled: return "polled loop";
-        case Path::short8: return "asynchronous, 2 frames";
+        case Path::short8: return "on the engines, 2 frames";
         default: return "DMA engines";
     }
 }
 
-/// Does an asynchronous read of `n` byte frames ride the engines at `c`,
-/// on SPI2's bus as it runs (the host's own count)?
-bool rides_engines(SpiClock c, uint16_t n) { return n >= Host::async_min_frames(c, SpiDataSize::bits8, true); }
-
-/// The short request's rungs routed otherwise than the host's count says.
+/// The short window's rungs that did not run on the engines.
 uint8_t misrouted = 0;
 
 /// The polled ladder's rungs that were not exact, over the pass: lost
@@ -633,10 +628,9 @@ bool climb(Path path, uint8_t seed) {
         ++k;
         const sl::Outcome o = sl::run(e);
         const bool ok = sl::exact(e, o);
-        if (path == Path::short8 && data_window_dma != rides_engines(c, e.count)) {
+        if (path == Path::short8 && !data_window_dma) {
             ++misrouted;
-            print(serial, "    the short window at PCLK1/", division(c), " went ",
-                  data_window_dma ? "to the engines" : "polled", " where the host's count says otherwise", crlf);
+            print(serial, "    the short window at PCLK1/", division(c), " did NOT go to the engines", crlf);
         }
         if (!ok) {
             print(serial, "    ", path_name(path), ":", crlf);
@@ -651,11 +645,8 @@ bool climb(Path path, uint8_t seed) {
 }
 
 void tp_ladders() {
-    print(serial, "  the polled loop keeps one frame in flight at every rate; an asynchronous byte read rides "
-          "the engines from ", Host::async_min_frames(SpiClock::div2, SpiDataSize::bits8, true), " frames at /2, ",
-          Host::async_min_frames(SpiClock::div4, SpiDataSize::bits8, true), " at /4, ",
-          Host::async_min_frames(SpiClock::div8, SpiDataSize::bits8, true), " at /8, polled inside start() "
-          "under it", crlf);
+    print(serial, "  the polled loop keeps one frame in flight at every rate; a request naming the engines "
+          "rides them at every length", crlf);
     for (uint8_t p = 0; p < pass_count; ++p) {
         const PassSpec& s = passes[p];
         pass_begin(s);
@@ -680,12 +671,10 @@ void tp_ladders() {
                                      "code, one frame in flight, a preemption longer than a frame a gap on the bus "
                                      "and no frame lost",
                       polled);
-        // The short request's two frames, the same loop wherever they run
-        // polled: judged strictly in every pass, and its way at every rung
-        // the host's count's.
-        bench.verdict(pass_label(s), "THE SHORT ASYNCHRONOUS REQUEST: 2 byte frames byte-exact at every code, "
-                                     "on the engines where the host's count says so and polled inside start() "
-                                     "under it, every rung the way the count says",
+        // The short request's two frames: judged strictly in every pass, and
+        // on the engines at every rung.
+        bench.verdict(pass_label(s), "A SHORT REQUEST ON THE ENGINES: 2 byte frames byte-exact at every code, "
+                                     "every rung on the engines as it named them",
                       short8 && misrouted == 0u);
         bench.verdict(pass_label(s), "THE DMA ENGINES: 32 frames byte-exact at every code to PCLK1/2", engines);
         bench.verdict(pass_label(s), "the command channel survives the ladders", ping);
@@ -1019,7 +1008,7 @@ int main() {
 
     bench.letter('n', "the peer's command channel through the arbiter", tn_peer_link);
     bench.letter('o', "the matrix on the DMA engines: modes, widths, bit orders", to_matrix);
-    bench.letter('p', "the ladders: the polled loop, the short asynchronous request, the engines, every code",
+    bench.letter('p', "the ladders: the polled loop, a short request on the engines, the engines, every code",
                  tp_ladders);
     bench.letter('w', "the arbiter under pressure: three requesters, one bus", tw_arbiter);
     bench.letter('i', "dark: every object idle, nothing lit", ti_dark);

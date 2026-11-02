@@ -150,9 +150,8 @@
 //        spi.dma     SpiHost<1> on its two engines (uint16_t, DMA1 channels
 //                    2 and 3), SPI1 on PB3/PB4/PB5 with nothing wired - MISO
 //                    floats: 64 and 256 frames of 8 bits (`spi.dma`) and of
-//                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, asynchronous -
-//                    every one of them long enough to ride the engines (the
-//                    host's async_min_frames()) - the wall against the wire.
+//                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, on the
+//                    engines - the wall against the wire.
 //   e  THE SPI HOST ABOVE THE WIRE (stm32g0/spi.hpp) on letter d's pads,
 //      MISO floating, each op the best of 8 runs of start() (the Request
 //      built outside the clock, as a client builds it; where the request
@@ -172,7 +171,8 @@
 //                    as `.rx`, in the receive shape (the frames read back
 //                    into a buffer, the answers paced by count); and each
 //                    shape's frame at PCLK/2 from its two lengths (the fixed
-//                    part cancels), the turn the short-request rule takes;
+//                    part cancels), the loop's own turn where it outlasts
+//                    the wire's frame;
 //        refused     an asynchronous request on the same host: start()
 //                    answers at once, spi_rejected, both FIFOs empty and the
 //                    select high - no frame reached the wire (printed, not
@@ -183,15 +183,15 @@
 //                    select on PA15 (two spare pads nothing is wired to),
 //                    at PCLK/16; "the rest" above the wire is the price of
 //                    a command;
-//        spi.async   THE SHORT REQUEST'S BUDGET on letter d's ENGINED host:
-//                    64 frames of 8 bits at PCLK/16, write and read,
-//                    asynchronous on the engines (the DMA vector counted
-//                    apart) and polled (`spi.e.poll`) through the same call,
-//                    so E - F is the least busy of the first's 8 runs (a
-//                    tick in none) less the rest of the second, the ruler's
-//                    own cycles cancelling: printed for a read and a write
-//                    beside the host's constants, with the frame counts
-//                    those give at every code.
+//        spi.async   THE TWO WAYS' FIXED COSTS on letter d's ENGINED host:
+//                    64 frames of 8 bits at PCLK/16, write and read, on the
+//                    engines (the DMA vector counted apart) and polled
+//                    (`spi.e.poll`) through the same call: E is the least
+//                    busy of the first's 8 runs (a tick in none), F the rest
+//                    of the second above the wire, and E - F, the ruler's
+//                    own cycles cancelling, printed for a read and a write.
+//                    The page turns them into the length from which the
+//                    engines cost the core less, at each rate.
 //   f  THE PREFETCH (FLASH_ACR.PRFTEN, RM0444 3.3.5) as a column of its
 //      own: the instrument's three cost lines and letters m, p and t run
 //      TWICE through stm32g0/flash.hpp's FlashAccel::prefetch() - off,
@@ -1128,12 +1128,13 @@ void td_dma() {
 
 // =============================================================================
 // e - the SPI host above the wire: the polled loop, the refusal, a request's
-//     fixed cost, the short request's budget (stm32g0/spi.hpp over
+//     fixed cost, the two ways' fixed costs (stm32g0/spi.hpp over
 //     design/spi-bus.md)
 // =============================================================================
 /// The ENGINELESS host on letter d's pads: its polled loop is what an
-/// engined host runs a short asynchronous request and a command phase
-/// on, and what a host with no engines runs for everything.
+/// engined host runs a polled request and the command phase of a request
+/// naming the engines on, and what a host with no engines runs for
+/// everything.
 using SpiSw = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, HotPlace>;
 /// The select and the D/C of `spi.req`, two spare pads nothing is wired
 /// to: PA15 (the SPI suite's own chip select on this board) and PB6.
@@ -1340,12 +1341,13 @@ void te_host() {
     }
     SpiSw::release();
 
-    // The short request's budget, E - F, on the engined host: the same
-    // 64-frame request asynchronous (on the engines at PCLK/16, the host's
-    // own counts say so) and polled, through the same call.
+    // The two ways' fixed costs on the engined host: the same 64-frame
+    // request on the engines at PCLK/16 and polled, through the same call.
     (void)SpiHw::init(clock);
     spi_live = true;
     uint32_t over[2] = {};
+    uint32_t engines[2] = {};
+    uint32_t loop[2] = {};
     for (uint8_t read = 0; read < 2u; ++read) {
         const HostSample e = run_host<SpiHw>(read != 0u ? "spi.async.rx" : "spi.async",
                                              SpiDataSize::bits8, SpiClock::div16, 16u, false, 64, 0,
@@ -1355,26 +1357,15 @@ void te_host() {
                                              ReqCs::ref(), {}, read != 0u);
         const uint32_t wire = 64u * 8u * 16u;
         const uint32_t rest = f.best.wall > wire ? f.best.wall - wire : 0u;
+        engines[read] = e.least_busy;
+        loop[read] = rest;
         over[read] = e.least_busy > rest ? e.least_busy - rest : 0u;
     }
     spi_live = false;
     SpiHw::release();
-    print(serial, "  E - F (the engines' least busy less the polled rest): read ", over[1],
-          " (the host's ", SpiHw::async_read_budget_cycles, "), written ", over[0], " (the host's ",
-          SpiHw::async_write_budget_cycles, ")", crlf);
-    print(serial, "  an asynchronous request rides the engines from, PCLK/2..PCLK/256, 8-bit read:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, true));
-    }
-    print(serial, "; written:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits8, false));
-    }
-    print(serial, "; 16-bit read:");
-    for (uint8_t c = 0; c < 8u; ++c) {
-        print(serial, ' ', SpiHw::async_min_frames(static_cast<SpiClock>(c), SpiDataSize::bits16, true));
-    }
-    print(serial, crlf);
+    print(serial, "  E (the engines' least busy): read ", engines[1], ", written ", engines[0],
+          "; F (the polled rest above the wire): read ", loop[1], ", written ", loop[0], "; E - F: read ",
+          over[1], ", written ", over[0], crlf);
     bench.verdict("ran", true);
 }
 
@@ -2280,7 +2271,7 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy and fill, a paced block, the engined SPI host", td_dma);
     bench.letter('e', "the SPI host above the wire: polled, refused, a request's fixed cost, "
-                      "the short request's budget",
+                      "the two ways' fixed costs",
                  te_host);
     bench.letter('f', "the prefetch: the costs, m, p and t with PRFTEN off, then on", tf_prefetch);
     bench.letter('u', "the serial transport on USART1's own loop: tx, rx, the edge", tu_uart);
