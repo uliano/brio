@@ -142,18 +142,31 @@
  * the two peripherals' requests on each, so an image gives those two
  * channels to one block or the other and the compiler checks nothing
  * between them - which is why release() pulses
- * the block's reset line (docs/design/dma.md's release contract). With
- * engines a plain write of three bytes or more runs on the transmit
- * engine (two ride EVT8_1's entry) and ends on BTF, which the event line
- * carries anyway, with the channel's count read at zero: the transmit
- * engine is armed for its errors alone and a write takes no DMA
- * interrupt. A read phase of two bytes or more runs on the receive engine
- * under CTLR2.LAST, which makes the controller NACK the last byte a block
- * takes (15.9.2), and ends on the block's completion. A one-byte read
- * stays on the pump (EVT6_1's ACK-before-ADDR has no DMA form), and so
- * does the write half of a write-then-read: its repeated START wants the
- * TxE of the last byte, which a block armed for its errors alone does not
- * report.
+ * the block's reset line (docs/design/dma.md's release contract).
+ *
+ * Which mechanism moves a request's data is the program's to name, per
+ * request (Request::engine, util/i2c_bus.hpp's I2cEngine): `interrupt`,
+ * the default, moves every byte from the event vector - the first two of
+ * a write in the entry that clears ADDR (below) - and touches no channel;
+ * `dma` puts every data half on the engines at any length, the bytes
+ * written on the transmit block and the bytes read on the receive block,
+ * and asks for engines bound, or start() answers i2c_rejected with nothing
+ * on the wire. The address, the repeated START and the end stay the event
+ * vector's either way. No half is beyond the engines on this block: the
+ * chapter sets no length on DMAEN's requests (15.9.2), a read of two bytes
+ * or more has CTLR2.LAST NACK the block's last byte, and a read of one has
+ * its NACK prepared before the address and its STOP set right after
+ * ADDR's clear (EVT6_1, figure 15-4), as the pump's has, the channel
+ * moving the byte alone. The transmit block's completion interrupt hands
+ * its half back to the event vector, DMAEN down: a plain write then ends
+ * on BTF with the channel's count at zero, and a write before a read
+ * requests its repeated START on the TxE of its last byte, the buffer line
+ * raised for it - never together with DMAEN, since both answer the same
+ * TxE (15.9.2) and the entry would race the channel for DATAR. The
+ * receive block's completion ends a read. Which engine costs the core less at which length, and what a
+ * working channel costs a program that would sleep (idle() does not sleep
+ * while one works, qingke/platform.hpp), is docs/ch32x035/i2c.md's
+ * guidance; nothing here reads it.
  *
  * BUSY is the wire (15.9.7: "low level present in SDA or SCL"), still
  * updated with PE clear, and a tenure that ends without the peripheral
@@ -749,7 +762,16 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * engine, and the arbiter replies with status() for it.
  *
  * The engine slots: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
- * neither (the file header says what each carries).
+ * neither (the file header says what each carries), and dma_isr() bound
+ * to both channels' vectors.
+ *
+ * A launch the transmit engine refuses - its claim held by another owner
+ * of DmaTxEngine<6>, the one refusal a write half of 1 to 255 bytes can
+ * meet - is found in the ADDR entry, before ADDR is cleared and with SCL
+ * held: that half runs on the pump instead and the request completes. The
+ * receive engine takes no claim and refuses only an empty run, one past
+ * 65535 elements or one off its beat, none of which a read half of 1 to
+ * 255 bytes is.
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine, typename Placement = InFlash>
@@ -785,7 +807,11 @@ public:
 
     using Resource = S;
     static constexpr I2cPins pin_pads = pins;
-    static constexpr bool has_engines = TxEngine::present;
+    /// Are DMA engines bound (both slots name one)? A Request naming
+    /// `I2cEngine::dma` on a host where this is false is answered
+    /// i2c_rejected by start(); a program that depends on the engines may
+    /// static_assert it instead.
+    static constexpr bool has_dma = TxEngine::present;
 
     struct Request {
         /// The 7-bit client address, unshifted: 0x08 to 0x77
@@ -802,8 +828,16 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         I2cSpeed speed = I2cSpeed::standard_100k;
+        /// Which mechanism moves the data halves (util/i2c_bus.hpp):
+        /// `interrupt`, the default, the event vector at any length; `dma`
+        /// the engines at any length, answered i2c_rejected with nothing on
+        /// the wire where has_dma is false. The byte sits in the padding
+        /// after `speed`: the Request is 28 bytes with it and without it.
+        I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(sizeof(Request) == 28u,
+                  "the engine field must stay in the padding after the speed");
 
     // ---- lifecycle ----------------------------------------------------------
 
@@ -853,15 +887,16 @@ public:
         (void)S::remap(pins.remap);
         S::enable();
         S::ack(false);
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             // Both at high (DmaPriority's rule): the host does not overrun.
             // A byte its receive channel has not taken leaves RxNE up and
             // the next one in the shifter, BTF, and SCL held low until DATAR
             // is read; a byte its transmit channel has not written holds SCL
             // the same way - a starved channel stretches the bus and loses
-            // nothing (15.6). The transmit engine arms for its ERRORS alone:
-            // BTF on the event line ends a plain write (the file header).
-            TxEngine::arm(S::data_address(), TxEngine::flag_error, DmaPriority::high);
+            // nothing (15.6). Both interrupt on completion and on error: the
+            // transmit block's completion hands a write half back to the
+            // event vector (the file header), the receive block's ends a read.
+            TxEngine::arm(S::data_address(), DmaPriority::high);
             RxEngine::arm(S::data_address(), DmaPriority::high);
         }
         // The pads go to the peripheral only now, open drain by themselves
@@ -906,11 +941,13 @@ public:
     /// Begin a tenure (I2cBus calls it from main context). False whenever
     /// the wire moves: the tenure completes on the event vector and a
     /// TransferDone{status()} follows. True only for the one refusal that
-    /// moves nothing - a speed the clock cannot produce, or an address
-    /// outside 0x08..0x77 (i2c_address_in_range), answered i2c_rejected
-    /// through status() - the I2cHost contract (docs/design/i2c-bus.md).
+    /// moves nothing - a speed the clock cannot produce, an address outside
+    /// 0x08..0x77 (i2c_address_in_range), or `I2cEngine::dma` on a host
+    /// with no engines bound, answered i2c_rejected through status() - the
+    /// I2cHost contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
-        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr)) {
+        if (!speed_ok(r.speed) || !i2c_address_in_range(r.addr) ||
+            (!has_dma && r.engine == I2cEngine::dma)) {
             t_.status = i2c_rejected;
             t_.phase = Phase::idle;
             return true;
@@ -924,6 +961,9 @@ public:
         t_.rx = r.rx.get();
         t_.rx_len = r.rx_len;
         t_.rx_left = r.rx_len;
+        if constexpr (has_dma) {
+            t_.dma = r.engine == I2cEngine::dma;   // read only where engines are bound
+        }
         t_.status = i2c_ok;
         t_.phase = (r.tx_len == 0u && r.rx_len != 0u) ? Phase::start_rx : Phase::start_tx;
         // The last tenure's STOP may still be on its way out: STOP stands in
@@ -1070,13 +1110,14 @@ private:
                     S::stop();
                     return finish(i2c_ok);
                 }
-                if constexpr (has_engines) {
-                    // A plain write of three bytes or more on the transmit
-                    // engine; the write half of a write-then-read stays on
-                    // the pump (the file header).
-                    if (t_.rx_len == 0u && t_.tx_left >= dma_min_write) {
+                if constexpr (has_dma) {
+                    // The write half on the transmit engine, the channel
+                    // started before DMAEN raises its request. A launch the
+                    // engine refuses (its claim held elsewhere, the class
+                    // comment) leaves DMAEN down and the half to the pump
+                    // below - ADDR not yet cleared, SCL still held.
+                    if (t_.dma && TxEngine::start(std::span<const uint8_t>(t_.tx, t_.tx_left))) {
                         S::control2(t_.freq, idle_enables | i2c_itevten | i2c_dmaen);
-                        (void)TxEngine::start(std::span<const uint8_t>(t_.tx, t_.tx_left));
                         (void)S::status2();
                         t_.phase = Phase::tx_dma;
                         return false;
@@ -1155,20 +1196,21 @@ public:
         } else {
             S::stop();   // BERR in master mode: 15.5.1 leaves the abort to the user code
         }
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             put_engines_away();
         }
         return finish(st);
     }
 
     /// The DMA channels' interrupt body - call from BOTH channels'
-    /// vectors. The receive block completing ends a read phase (STOP after
-    /// it); the transmit channel interrupts on an error alone (BTF on the
-    /// event vector ends a write). A transfer error ends the tenure with
-    /// i2c_dma_fault. INTFR is read once for both. True when the tenure
-    /// just completed.
+    /// vectors. The transmit block completing hands its half back to the
+    /// event vector (the file header); the receive block completing ends a
+    /// read phase, STOP after it unless a one-byte read set it at ADDR. A
+    /// transfer error ends the tenure with i2c_dma_fault. INTFR is read
+    /// once for both. True when the tenure just completed. It masks nothing
+    /// and waits for nothing.
     [[gnu::always_inline]] static bool dma_isr() {
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             const uint32_t intfr = RxEngine::block_flags();
             const uint8_t tx = TxEngine::service(intfr);
             const uint8_t rx = RxEngine::service(intfr);
@@ -1177,10 +1219,25 @@ public:
                 S::stop();
                 return finish(i2c_dma_fault);
             }
+            if ((tx & TxEngine::flag_complete) != 0u && t_.phase == Phase::tx_dma) {
+                // The last byte is in DATAR: DMAEN down, then the pump's end
+                // in one store - a plain write's BTF on the event line, or, a
+                // read to follow, the TxE of the last byte on the buffer line,
+                // where the repeated START is requested (transmit_step()).
+                (void)TxEngine::complete();
+                t_.tx_left = 0;
+                t_.phase = Phase::tx;
+                S::control2(t_.freq, idle_enables | i2c_itevten |
+                                         (t_.rx_len != 0u ? i2c_itbufen : uint16_t{0}));
+            }
             if ((rx & RxEngine::flag_complete) != 0u && t_.phase == Phase::rx_dma) {
-                // The block's last byte NACKed under LAST; the STOP now, and
-                // the DMA requests down with the vectors in finish()'s store.
-                S::stop();
+                // The block's last byte NACKed - by LAST, or for a single
+                // byte by ACK cleared before the address, its STOP already
+                // standing. The DMA requests go down with the vectors in
+                // finish()'s store.
+                if (t_.rx_len != 1u) {
+                    S::stop();
+                }
                 return finish(i2c_ok);
             }
         }
@@ -1254,7 +1311,7 @@ public:
     static bool recover() {
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             put_engines_away();
         }
         t_.phase = Phase::idle;
@@ -1281,7 +1338,7 @@ public:
      * leave nothing whatever the block holds.
      */
     static void release() {
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             TxEngine::stop();
             RxEngine::stop();
         }
@@ -1320,11 +1377,6 @@ private:
     /// alone. A tenure adds the event vector, and inside it the buffer
     /// vector or the DMA requests (control2(), one store each time).
     static constexpr uint16_t idle_enables = i2c_iterren;
-
-    /// The shortest plain write the transmit engine carries: EVT8_1's
-    /// entry takes two bytes with no interrupt (first_bytes()), where an
-    /// engine adds its block start.
-    static constexpr uint8_t dma_min_write = 3;
 
     /// How many STAR1 reads the entry that cleared ADDR spends waiting for
     /// TxE before it leaves the byte to the buffer vector. Enough on this
@@ -1365,8 +1417,9 @@ private:
      * always was; anything of it ends the tenure: i2c_bus_error, the STOP
      * requested, and the event, buffer and DMA enables down in finish()'s
      * one CTLR2 store. No engine block is in flight in an address phase -
-     * the transmit block starts at a plain write's ADDR and the receive
-     * block at the read's - so there is nothing to put away.
+     * the transmit block starts at the write's ADDR and has ended before a
+     * repeated START is requested, the receive block starts at the read's
+     * ADDR - so there is nothing to put away.
      *
      * THE CASE IT EXISTS FOR IS ADD10. This machine has no addressing
      * mode of its own as a controller: the byte written at SB decides,
@@ -1494,17 +1547,21 @@ private:
     }
 
     /**
-     * The engine's plain write on the event vector: BTF, the last byte's
-     * end. BTF proves the block's end only with the channel's count at
-     * zero: under a live channel the count is long at zero by then - the
-     * channel refills DATAR within a few bus cycles of each TxE, a byte
-     * time ahead of BTF - and a count still standing is a channel that
-     * stopped serving (a request another peripheral left held on the
-     * channel's OR, docs/design/dma.md): the tenure ends i2c_dma_fault, its
-     * STOP requested. One CNTR load on the one BTF entry of a write.
+     * BTF on the event vector while the transmit block's completion has not
+     * been served: that vector is late, or the channel stopped serving.
+     * BTF with the channel's count at zero is the first - every byte
+     * written, the last one out - and the half ends here as the pump's
+     * would on a late TxE: the repeated START for a read to follow
+     * (request_restart() takes DMAEN down in its store), STOP otherwise
+     * (finish()'s store); the completion, served later, finds the phase
+     * moved on. A count still standing is a channel that stopped serving,
+     * since a live one refills DATAR within a few bus cycles of each TxE, a
+     * byte time ahead of BTF (a request another peripheral left held on the
+     * channel's OR stops it, docs/design/dma.md): the tenure ends
+     * i2c_dma_fault, its STOP requested. One CNTR load on that entry.
      */
     [[gnu::always_inline]] static bool transmit_dma_step(uint16_t s1) {
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             if ((s1 & i2c_btf) == 0u) {
                 return false;
             }
@@ -1514,6 +1571,10 @@ private:
                 return finish(i2c_dma_fault);
             }
             (void)TxEngine::complete();
+            if (t_.rx_len != 0u) {
+                request_restart();
+                return false;
+            }
             S::stop();   // EVT8_2; DMAEN goes down in finish()'s store
             return finish(i2c_ok);
         } else {
@@ -1537,17 +1598,24 @@ private:
     /// EVT6 on a read: the procedure by count. STAR1 was read by the entry,
     /// so STAR2 alone clears ADDR.
     [[gnu::always_inline]] static bool begin_receive() {
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             if (dma_serves_rx()) {
-                // LAST: the block's last byte is NACKed. The event vector goes
-                // down for the block: dma_isr() ends the phase and the event
-                // vector has nothing to serve in it - and over a channel that
-                // does not serve its request RxNE and BTF would stand and
-                // re-enter it for ever, the thread and the bus's timeout
-                // starved. The error vector stays.
-                S::control2(t_.freq, idle_enables | i2c_dmaen | i2c_last);
+                // LAST for two bytes or more: the block's last byte is
+                // NACKed; a single byte's NACK is ACK, cleared before the
+                // address (prime_receive()), and its STOP follows ADDR's
+                // clear (EVT6_1). The event vector goes down for the block:
+                // dma_isr() ends the phase and the event vector has nothing
+                // to serve in it - and over a channel that does not serve its
+                // request RxNE and BTF would stand and re-enter it for ever,
+                // the thread and the bus's timeout starved. The error vector
+                // stays. The launch cannot refuse (the class comment).
+                S::control2(t_.freq, idle_enables | i2c_dmaen |
+                                         (t_.rx_len != 1u ? i2c_last : uint16_t{0}));
                 (void)RxEngine::start(std::span<uint8_t>(t_.rx, t_.rx_len));
                 (void)S::status2();
+                if (t_.rx_len == 1u) {
+                    S::stop();
+                }
                 t_.phase = Phase::rx_dma;
                 return false;
             }
@@ -1625,18 +1693,28 @@ private:
         return finish(i2c_ok);
     }
 
+    /// Does the receive engine carry this tenure's read half? Under
+    /// `I2cEngine::dma`, at any length (the file header).
     static bool dma_serves_rx() {
-        if constexpr (has_engines) {
-            return t_.rx_len >= 2u;
+        if constexpr (has_dma) {
+            return t_.dma;
         } else {
             return false;
         }
     }
+    /// The block this tenure has in flight thrown away, and the
+    /// controller's requests dropped: only the phase's own block, since a
+    /// write half that fell back to the pump left the transmit engine to
+    /// whoever holds its claim (the class comment). The binding stands: the
+    /// next start() needs no arm().
     static void put_engines_away() {
-        if constexpr (has_engines) {
+        if constexpr (has_dma) {
             S::dma(false, false);
-            (void)TxEngine::abandon();
-            RxEngine::stop();   // the binding stands: the next start() needs no arm()
+            if (t_.phase == Phase::tx_dma) {
+                (void)TxEngine::abandon();
+            } else if (t_.phase == Phase::rx_dma) {
+                RxEngine::stop();
+            }
         }
     }
 
@@ -1700,6 +1778,7 @@ private:
         uint8_t rx_left;
         uint8_t addr;
         uint8_t freq;         ///< CTLR2.FREQ in force
+        bool dma;             ///< the request named I2cEngine::dma (written where engines are bound)
         /// Written by the vectors and read by the thread: volatile, or a
         /// thread that polls a completion flag and then reads status() may
         /// be handed the value start() stored before the tenure (measured:
@@ -1708,7 +1787,7 @@ private:
         volatile uint8_t status;
         volatile Phase phase;
     };
-    static inline Tenure t_{nullptr, nullptr, 0, 0, 0, 0, 0, i2c_ok, Phase::idle};
+    static inline Tenure t_{nullptr, nullptr, 0, 0, 0, 0, 0, false, i2c_ok, Phase::idle};
     // The configuration.
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cDuty duty_ = I2cDuty::ratio_2;

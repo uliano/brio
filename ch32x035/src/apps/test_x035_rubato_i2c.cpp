@@ -33,12 +33,13 @@
 //   FIFO; the first two bytes of a pumped write loaded in the entry that
 //   clears ADDR; a write's end at BTF; the repeated START of a
 //   write-then-read requested on the last written byte's TxE; a refused
-//   last byte closed by a void write from the repeated START's SB; a plain
-//   write of three bytes or more and a read of two or more on the engines
-//   (the write ending on BTF with the channel's count at zero and no DMA
-//   interrupt, the read on channel 7's completion under LAST), a one-byte
-//   read and the write half of a write-then-read on the pump (EVT6_1 has no
-//   DMA form; the repeated START wants the last byte's TxE). start() waits,
+//   last byte closed by a void write from the repeated START's SB; under
+//   I2cEngine::dma every half on the engines (a write's block completing on
+//   channel 6 and handing the half back to the event vector, which ends it
+//   at BTF or requests the repeated START on the last byte's TxE; a read on
+//   channel 7's completion, under LAST from two bytes), under
+//   I2cEngine::interrupt every byte on the event vector. Which a request
+//   names is this suite's choice by its shape (Host, below). start() waits,
 //   bounded, for the last STOP to leave CTLR1 (stop_drain_us 5 ms) and for
 //   BUSY (bus_free_us 100 us), each a count of delay_us(1) turns, takes
 //   SWRST for a BUSY standing over an idle wire (unwedges()), and stores
@@ -128,8 +129,8 @@
 //      refusal), after the deadline the next tenure i2c_ok, and the peer's
 //      address count the one that implies.
 //   w  three requesters of three priorities at 400 kHz: the Client's
-//      write-then-reads of 1+6 (the read half on the engines), Minor's
-//      writes of two (the pump: under the engine's three), Pressure's
+//      write-then-reads of 1+6 (both halves on the engines), Minor's
+//      writes of two (the interrupt, by their shape), Pressure's
 //      probes: in order, i2c_ok, nothing rejected, no timeout, the peer's
 //      tallies exact.
 //   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
@@ -254,7 +255,21 @@ using ConsoleUsart = Usart<2>;
 using H = I2c<1>;
 using TxEngine = DmaTxEngine<6>;
 using RxEngine = DmaRxEngine<7>;
-using Host = I2cHost<1, i2c1_default_pins, TxEngine, RxEngine>;
+using EngineHost = I2cHost<1, i2c1_default_pins, TxEngine, RxEngine>;
+/// THE ENGINE EACH REQUEST NAMES (Request::engine; the host chooses
+/// nothing): the shared body writes no engine, so this suite names it by
+/// the request's shape - the engines for a read of two bytes or more or a
+/// write of three or more, every half of such a request on them, the
+/// interrupt otherwise. Letter o's table thus runs both mechanisms, a 1 + 2
+/// and a 2 + 8 carry their write half on the transmit engine, and letter w's
+/// three requesters meet on both. Every other verb is the host's own.
+struct Host : EngineHost {
+    static bool start(const Request& r) {
+        Request named = r;
+        named.engine = r.rx_len >= 2u || r.tx_len >= 3u ? I2cEngine::dma : I2cEngine::interrupt;
+        return EngineHost::start(named);
+    }
+};
 using TxChannel = DmaChannel<6>;
 using RxChannel = DmaChannel<7>;
 using SclPin = Pin<'C', 16>;
@@ -295,30 +310,28 @@ struct Shape {
     const char* path;
 };
 struct I2cTraits {
-    /// Letter o's table, each shape with the path this host takes: a plain
-    /// write of three bytes or more and a read of two or more on the
-    /// engines (the driver's dma_min_write, 3, private: the entry that
-    /// clears ADDR loads two bytes with no interrupt, where an engine adds
-    /// its block start; dma_serves_rx() from two), a one-byte read and a
-    /// write half before a read on the pump. Ends on a plain write (the
-    /// shared body's counted serve).
+    /// Letter o's table, each shape with the path the engine its request
+    /// names takes (Host above): the engines for a read of two bytes or
+    /// more or a write of three or more, both halves of such a request on
+    /// them, the interrupt otherwise. Ends on a plain write (the shared
+    /// body's counted serve).
     static constexpr Shape shapes[] = {
-        {0, 0, "the probe: SB, ADDR, the STOP in the ADDR entry"},
-        {0, 1, "pump: EVT6_1, the STOP at ADDR, the byte at RxNE"},
-        {0, 2, "engines: channel 7 under LAST, its completion the end"},
-        {0, 3, "engines"},
-        {0, 8, "engines"},
-        {0, 32, "engines"},
-        {1, 1, "pump both halves: the byte in the ADDR entry, Sr on its TxE, EVT6_1"},
-        {1, 2, "pump write (Sr on the last byte's TxE), engine read"},
-        {2, 8, "pump write, engine read"},
-        {1, 0, "pump: the byte in the ADDR entry, BTF the end"},
-        {2, 0, "pump: both bytes in the ADDR entry, BTF the end"},
-        {3, 0, "engines: channel 6, BTF with its count at zero, no DMA interrupt"},
-        {8, 0, "engines"},
-        {32, 0, "engines"},
+        {0, 0, "interrupt, the probe: SB, ADDR, the STOP in the ADDR entry"},
+        {0, 1, "interrupt: EVT6_1, the STOP at ADDR, the byte at RxNE"},
+        {0, 2, "dma: channel 7 under LAST, its completion the end"},
+        {0, 3, "dma"},
+        {0, 8, "dma"},
+        {0, 32, "dma"},
+        {1, 1, "interrupt both halves: the byte in the ADDR entry, Sr on its TxE, EVT6_1"},
+        {1, 2, "dma both halves: channel 6's completion, Sr on the last byte's TxE, then channel 7"},
+        {2, 8, "dma both halves"},
+        {1, 0, "interrupt: the byte in the ADDR entry, BTF the end"},
+        {2, 0, "interrupt: both bytes in the ADDR entry, BTF the end"},
+        {3, 0, "dma: channel 6, its completion, then BTF with its count at zero"},
+        {8, 0, "dma"},
+        {32, 0, "dma"},
     };
-    static_assert(Host::has_engines, "the table names engine paths");
+    static_assert(Host::has_dma, "the table names engine paths");
     /// The CH32V006 peer's holds inside the stretched tenures (its
     /// run_serve): one at the address match and one before each byte it
     /// takes or gives. A read of 8: the address and all eight gives fall
@@ -620,8 +633,9 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
 }
 
 // The engines' two channels: a read block's completion on channel 7 ends
-// its tenure, a transfer error on either ends it i2c_dma_fault; the
-// transmit channel interrupts on an error alone (BTF ends a write).
+// its tenure, a transfer error on either ends it i2c_dma_fault; a write
+// block's completion on channel 6 hands its half back to the event vector,
+// which ends it (BTF, or the repeated START on the last byte's TxE).
 [[gnu::always_inline]] inline void host_dma() {
     if (Host::dma_isr()) {
         done_from_dma = true;

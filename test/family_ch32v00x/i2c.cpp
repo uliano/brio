@@ -27,8 +27,12 @@ using Host = I2cHost<1>;
 using HostDma = I2cHost<1, i2c1_default_pins, DmaTxEngine<6>, DmaRxEngine<7>>;
 using Client = I2cClient<1>;
 
-static_assert(!Host::has_engines && HostDma::has_engines);
+static_assert(!Host::has_dma && HostDma::has_dma);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
+// The engine field in the padding after the speed, defaulting to the
+// interrupt: an all-zero Request names nothing and gets the pump.
+static_assert(sizeof(Host::Request) == 28u && sizeof(HostDma::Request) == 28u);
+static_assert(Host::Request{}.engine == I2cEngine::interrupt);
 
 using PlainBus = I2cBus<Host, P, 4>;
 using TimedBus = I2cBus<HostDma, P, 2, BusPassThrough, 50>;
@@ -69,6 +73,8 @@ void host_verbs(uint8_t* buf) {
     r.rx = Borrowed<uint8_t, Lease::reply>{buf + 8};
     r.rx_len = 4;
     r.speed = I2cSpeed::fast_400k;
+    (void)H::start(r);
+    r.engine = I2cEngine::dma;   // the engines, or i2c_rejected on an engineless host
     (void)H::start(r);
     (void)H::isr();
     (void)H::error_isr();

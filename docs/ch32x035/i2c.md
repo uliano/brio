@@ -134,7 +134,8 @@ all) against the desk's CH32V006K8U6 running its `twi_peer`.
 - **The DMA requests are channels 6 (transmit) and 7 (receive)**, figure
   9-1 - ORs the I2C shares with USART2's receive and transmit - and
   CTLR2.LAST makes the controller NACK the last byte a receive block
-  takes (15.9.2).
+  takes (15.9.2). The chapter has no DMA section: CTLR2's DMAEN and LAST
+  are all it says, with no length named.
 - **A START into a held SDA is not refused - it goes out, and the address
   loses.** With the peer holding SDA low, a START set by a block that saw
   the line taken raised SB 20 us later at 100 kHz, MSL and BUSY up, and
@@ -177,7 +178,7 @@ What the chapter gives a controller's transfer, and what the engine takes:
 | START set while the last written byte shifts (15.9.1) | yes, for a write-then-read | a polled CH32 target loses the last written byte when the repeated START comes after BTF ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)); the desk's CH32V006 is one, and took every byte in this order (measured) |
 | START cleared by the user code, a requested start withdrawn (15.9.1) | declined | behind a refused last byte the controller generates the repeated START all the same and the withdrawal races it (lost on the CH32V006 and the CH32V203); the refusal is closed from the Sr's SB with a void write instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.9.1) | yes | the chapter's procedures by count |
-| DMAEN with LAST (15.9.2), channels 6 and 7 (figure 9-1) | yes, the engine slots | a plain write of three bytes or more and a read of two or more; a write ends on BTF with the channel's count at zero, so the transmit engine arms for its errors alone and a write takes no DMA interrupt; a one-byte read stays on the pump (EVT6_1 has no DMA form), and so does a write half before a read (its repeated START wants the last byte's TxE) |
+| DMAEN with LAST (15.9.2), channels 6 and 7 (figure 9-1) | yes, when the request names `I2cEngine::dma` | every data half at any length: a read of two or more under LAST, a read of one with its NACK and STOP set in the ADDR entry (EVT6_1, the channel moving the byte); each block's completion interrupt is taken, the transmit block's handing its half back to the event vector with DMAEN down - never with ITBUFEN, since both answer the same TxE - so BTF ends a plain write and the TxE of the last byte requests a write-then-read's repeated START |
 | SWRST (15.9.1) | yes | `recover()`, and `start()` for a BUSY standing over an idle wire, the chapter's own case |
 | PEC (15.8), 10-bit addresses as a host (15.3), ENARP | declined | no Request shape asks for them ("Not covered yet") |
 | the USB pads' pull modes (8.3.2.4) | declined | they do not act under the alternate function (measured) |
@@ -212,10 +213,11 @@ default, or `InRam`);
   `error_isr()` the error vector's (a NACK is `i2c_nack_addr` or
   `i2c_nack_data` by the phase it landed in, ARLO `i2c_arb_lost`, the
   rest `i2c_bus_error`); `dma_isr()` both channels', INTFR read once. A
-  speed the clock cannot produce, and an address outside 0x08..0x77 (the
+  speed the clock cannot produce, an address outside 0x08..0x77 (the
   general call and the 10-bit prefixes among them,
-  [../design/i2c-bus.md](../design/i2c-bus.md)), are answered
-  `i2c_rejected` inside `start()`. An address-phase entry of the event
+  [../design/i2c-bus.md](../design/i2c-bus.md)), and a request naming
+  `I2cEngine::dma` on a host with no engines bound (`has_dma` false) are
+  answered `i2c_rejected` inside `start()`. An address-phase entry of the event
   vector that finds ADD10, SB or BTF where it waits for ADDR ends the
   tenure `i2c_bus_error` - the STOP, then a DATAR store that clears ADD10
   - instead of re-entering for ever. `start()` waits, bounded, for the last tenure's STOP to leave
@@ -230,6 +232,15 @@ default, or `InRam`);
   the engine's phase, for a sleep site. The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the
   host stretches SCL behind a starved channel and loses nothing, 15.6).
+  Which mechanism moves a request's data is the request's `engine` field
+  (util/i2c_bus.hpp's `I2cEngine`): `interrupt`, the default - a request
+  that names nothing gets it -, moves every byte from the event vector,
+  the first two of a write in the ADDR entry, and touches no channel;
+  `dma` puts every data half on the engines at any length. A launch the
+  transmit engine refuses - its claim held by another owner of
+  `DmaTxEngine<6>` - is found in the ADDR entry with SCL held, and that
+  half runs on the pump, the request completing; an error puts away only
+  the block the tenure has in flight, so that claim stays its owner's.
 - `I2cClient<1, pins>`: `init(clock, addresses, I2cClientOptions)` - a
   polled client with `.interrupts = false` -, the polled surface
   (`addressed()`, `answer_address()` returning the direction,
@@ -261,8 +272,37 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
 }
 ```
 
-On the engines, `I2cHost<1, i2c1_default_pins, DmaTxEngine<6>,
-DmaRxEngine<7>>` and both channels' vectors calling `dma_isr()`. The
+A request that asks for the DMA engines, an excerpt over the setup
+above with the host given its two engines and their vectors bound (the
+program includes ch32x035/dma.hpp as well):
+
+```cpp
+using Bus = brio::I2cHost<1, brio::i2c1_default_pins, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>>;
+static_assert(Bus::has_dma);
+
+Bus::Request r{};
+r.addr = 0x50;
+r.tx = brio::lend<brio::Lease::reply>(page); r.tx_len = 34;   // address word + 32 data bytes
+r.rx = brio::lend<brio::Lease::reply>(static_cast<uint8_t*>(nullptr)); r.rx_len = 0;
+r.speed = brio::I2cSpeed::fast_400k;
+r.engine = brio::I2cEngine::dma;
+r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+brio::post<I2c>(r);
+
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
+    if (Bus::dma_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
+    if (Bus::dma_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+`engine` left out is `I2cEngine::interrupt`, the event vector's pump at
+any length; `I2cEngine::dma` on a host declared without engines is
+answered `i2c_rejected` with nothing on the wire. A wrong choice costs
+time or energy and never correctness: which one costs the core less at
+which length, and what a working channel costs a program that would
+sleep, is "Which engine to name" below. The
 event pump in SRAM is either the host's `InRam`, its last parameter, or
 the vector placed by the program with the host as it is - the faster of
 the two (Bench findings, "The host's cost"):
@@ -283,8 +323,8 @@ board's PB3, which the suite drives high from its boot - PC17 is the
 board's boot pin, and a pull-up to the supply would send every power-up
 into WCH's loader. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
-channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
-52 verdicts, green.
+channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
+53 verdicts, green.
 
 - **The lot probe** answered PRESENT: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -305,14 +345,39 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   never above the rate asked by more than 2 %, within a quarter below
   it): an 8-byte write on the pump at about 94 kHz for 100 and 336 kHz for
   400, on the engines a 16-byte write and read at 97 kHz and a 16-byte
-  read at 363 kHz. Past the chapter, CKCFGR's fast-mode CCR at 16 (1 MHz
+  read at 359 kHz. Past the chapter, CKCFGR's fast-mode CCR at 16 (1 MHz
   asked) carried an 8-byte write and read byte-exact at about 700 kHz -
   measured, and no speed of the engine's: 15.1 names two.
-- **The engines**: a 16-byte write and read, a write-then-read, a
-  two-byte read under LAST and a 16-byte read at 400 kHz byte-exact, the
-  peer accounting all 59 bytes, no transfer fault; no DMA interrupt for a
-  write and one per engined read; a write three event entries (SB, ADDR,
-  BTF), a read two.
+- **The engines** (letter g, every request naming `I2cEngine::dma`): a
+  16-byte write and read, a write-then-read, a two-byte read under LAST,
+  a one-byte read and a 16-byte read at 400 kHz byte-exact, the peer
+  accounting all 59 bytes, no transfer fault; one completion interrupt a
+  block, the write's handing its half back to the event vector; a write
+  three event entries (SB, ADDR, BTF), a read two.
+- **The engine a request names** (letter n, ten runs and three of its
+  image's `z`, every verdict green): `dma` at one byte - a one-byte
+  write, a one-byte read and a 1 + 1, every half on the engines, one
+  completion a block, no fault; a read of one byte rides the receive
+  block with its NACK prepared before the address and its STOP set in
+  the ADDR entry, LAST clear. `interrupt` at sixteen bytes on the host
+  with engines bound: no DMA entry, both channels' configuration word and
+  count as `init()` left them, 17 event entries each way. With
+  `DmaTxEngine<6>`'s claim held, a write of 4 under `dma` completed on the
+  pump with no channel 6 entry and a 2 + 2 with its read half on the
+  receive block, the claim still its holder's; given back, the next write
+  rode the engine. `dma` on the host with no engines: `i2c_rejected`
+  inside `start()`, the vector never entered, nothing on the wire. Under
+  `dma` an address nobody answers is `i2c_nack_addr` writing and reading,
+  a NACK on the third of six bytes written `i2c_nack_data` with channel 6
+  put away and one fault counted, and the next write whole; letter `r`
+  carries the repeated START and its refused last byte under `dma`, letter
+  `j` a lost arbitration (`i2c_arb_lost`, no transmit block started or
+  thrown away, ten runs). The same letter over this engine's previous
+  version, the `engine` field carried and read by nothing, failed all
+  five rows: a one-byte write and a one-byte read on the pump, the request
+  naming the interrupt still on the channels, the write under a held
+  claim never answered and the claim taken by the recovery, `dma` on the
+  engineless host put on the wire, three faults for one data NACK.
 - **The kernel**: four tenures through `I2cBus` answered in order with
   the NACK in its place, a full queue's rejection, both sleep votes; a
   tenure into an SDA the peer holds answered `i2c_arb_lost` at once and a
@@ -341,8 +406,9 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 55 and
   byte's TxE: one to four bytes written then four read, at 100 and 400
   kHz, pump and engines - the CH32V006, a polled CH32 target, took every
   written byte (its count and sum) and every read byte was its pattern;
-  the pump's tenures took 7, 8, 9 and 10 event entries, the engines' 4 to
-  7. The last written byte refused: `i2c_nack_data`, CTLR1 back to PE
+  the pump's tenures took 7, 8, 9 and 10 event entries; under
+  `I2cEngine::dma`, both halves on the engines, five event entries and
+  one completion of each block, whatever the length written. The last written byte refused: `i2c_nack_data`, CTLR1 back to PE
   alone and MSL clear within a millisecond, and the next tenure - a probe
   of the same address - completed on the wire; it is `i2c_nack_addr`
   because a CH32 target keeps its acknowledge down after a refused byte
@@ -488,17 +554,17 @@ the same vector:
 
 | tenure | the pump from the flash: rest, entries, cycles an entry | from SRAM: rest, cycles an entry | the engines: rest, entries + DMA |
 |---|---|---|---|
-| write 1 | 1312, 3, 239 | 1052, 158 | - |
-| write 2 | 1282, 3, 251 | - | - |
-| write 16 | 1294, 17, 218 | 1010, 146 | 1218, 3 + 0 |
-| write 255 | 1276, 256, 205 | 1035, 140 | 1232, 3 + 0 |
-| read 1 | 1312, 3, 242 | 1169, 162 | - |
-| read 2 | 1398, 3, 261 | 1175, 165 | - |
-| read 16 | 1710, 17, 253 | 1272, 157 | 1182, 2 + 1 |
-| read 255 | - | - | 1176, 2 + 1 |
-| register read 1 + 1 | 2124, 5, 249 | - | - |
-| register read 1 + 4 | 2458, 7, 271 | 1947, 166 | 1790, 4 + 1 |
-| probe | 1002, 2, 211 | 865, 146 | - |
+| write 1 | 1312, 3, 238 | 1049, 160 | 1256, 3 + 1 |
+| write 2 | 1314, 3, 251 | - | 1250, 3 + 1 |
+| write 16 | 1306, 17, 227 | 1023, 148 | 1254, 3 + 1 |
+| write 255 | 1316, 256, 217 | 1029, 143 | 1284, 3 + 1 |
+| read 1 | 1344, 3, 247 | 1154, 164 | 1332, 2 + 1 |
+| read 2 | 1406, 3, 267 | 1127, 168 | 1294, 2 + 1 |
+| read 16 | 1746, 17, 265 | 1343, 160 | 1290, 2 + 1 |
+| read 255 | 1756, 256, 257 | - | 1284, 2 + 1 |
+| register read 1 + 1 | 2108, 5, 257 | - | 1964, 5 + 2 |
+| register read 1 + 4 | 2490, 7, 278 | 1908, 172 | 1986, 5 + 2 |
+| probe | 1070, 2, 221 | 869, 150 | - |
 
 - **`start()` is 304 to 324 cycles** on the ticker's ruler, the bounded
   waits' first looks included; the listing of a minimal glue (one host,
@@ -531,19 +597,62 @@ the same vector:
   with the same entries and the wire's own time does not move, since SCL
   stretches behind a late entry and the rate is the bus's: the placement
   buys core time, not the wire.
-- **The engines** carry a 255-byte write or read in three event entries
-  and none or one DMA interrupt, the write at 1004 thousandths of its
-  wire, the core in the vector 627 cycles of 282 320.
+- **The engines** carry a 255-byte write in three event entries and a
+  read in two, each with one DMA interrupt (its body 151 to 183 cycles
+  between the stamps), the write at 1004 thousandths of its wire, the
+  core in the event vector 631 cycles of 282 372. A write's block
+  completion is the price of carrying a write half before a read: the
+  write's DMA entry, which a block armed for its errors alone did not
+  take.
 - **No vector re-entered after a completion edge**: the event line is the
   tenure's.
 - **Against the EVT** (read, not run: no vendor build for this series on
   the desk): WCH's examples are polled - `I2C_CheckEvent` loops of two
   status loads and a compare around every step, the CPU the bus's for the
   whole tenure (282 000 cycles for a 255-byte write at 400 kHz, where this
-  pump spends some 47 000 of them in its vector and the engines 648), CCR
+  pump spends some 56 000 of them in its vector and the engines some 800),
+  CCR
   rounded down, and the DMA example's channel 6 at VeryHigh and
   re-initialised whole - DMA_DeInit and DMA_Init - for every block, where
   the engine stores five words.
+
+### Which engine to name
+
+A wrong choice costs time or energy, never correctness, and the host
+chooses nothing: the program names the engine of each request. What
+each costs the core, from letter x at both speeds: a tenure's cycles
+between the stamps (`start()`, the event entries and the DMA entries)
+and the trip of every entry outside them, 70 cycles under the hardware
+prologue ([platform.md](platform.md), the interrupt round trip); `b` the
+pump's cycles a byte, the slope between its 16- and 255-byte tenures;
+`F` its fixed part, its 16-byte tenure less sixteen `b`; `E` the
+engines' cost of a one-byte tenure, which does not grow with the
+length. The engines cost the core fewer cycles from the smallest N with
+E <= F + N x b:
+
+| at | write: b, F, E | the engines from | read: b, F, E | the engines from |
+|---|---|---|---|---|
+| 400 kHz | 286, 819, 1394 | 3 bytes ((1394 - 819) / 286 = 2.0) | 327, 807, 1291 | 2 bytes ((1291 - 807) / 327 = 1.5) |
+| 100 kHz | 287, 807, 1426 | 3 bytes ((1426 - 807) / 287 = 2.2) | 327, 807, 1211 | 2 bytes ((1211 - 807) / 327 = 1.2) |
+
+Measured as such at 400 kHz, with the trips: a write of one byte costs
+the pump 1273 cycles and the engines 1394, of two 1301 and 1382 (the
+entry that clears ADDR loads both, so a second byte costs the pump no
+entry), of sixteen 5395 and 1398; a read of one 1293 and 1291, of two
+1349 and 1251. So: the engines from three bytes written and two read;
+under that the interrupt. Against the wire: the pump spends 286 cycles
+of a 1098-cycle byte at 400 kHz (a quarter of the core) and 287 of a byte
+of at least 4320 cycles at 100 kHz (CCR 240, twice, nine times: a
+fifteenth); the engines spend none a byte.
+
+THE ENERGY: on this series the Sleep stalls the DMA (RM 2.3.2, measured,
+[dma.md](dma.md)), so `idle()` does not sleep while a channel works
+([../../brio/qingke/platform.hpp](../../brio/qingke/platform.hpp)): a
+half on the engines keeps the core awake for its wire time - the receive
+block for the whole read, the transmit block until its last byte is in
+DATAR - where the pump would sleep between its entries. `dma` buys core
+cycles at the price of a sleep. Nothing in the code reads this
+guidance.
 
 ### The stack under the preemptive kernel (`test_x035_rubato_i2c`)
 
@@ -552,7 +661,9 @@ Measured by `test_x035_rubato_i2c` and its twin `test_x035_rubato_i2c_flash`
 runs it from SRAM, [platform.md](platform.md), "The scheduler's place"):
 `util/i2c_bus.hpp`'s arbiter (pending depth 4, the per-bus timeout at
 20 ms) over the engined `I2cHost<1>` on PC16/PC17 (channels 6 and 7) inside
-Rubato, against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
+Rubato - each request naming its engine by its shape, the engines for a
+read of two bytes or more or a write of three or more and the interrupt
+otherwise - against the same CH32V006K8U6 `twi_peer`, while TIM2 posts to the
 pack's highest object every 97, 193 or 389 us and its dispatch spins 300
 or 3000 cycles - at 97 us x 3000, 64 % of the core. Every letter runs once
 with TIM2 silent and six times under it. Key `z` (202 verdicts) ran three
@@ -581,20 +692,22 @@ seven times a pass in `p`, `q` and `w` - a preemption after the START
 store that outlasted the START's way onto the wire, the tenure then the
 vector's from its first bit.
 
-**Every shape on both paths, under every pressure as in the control.**
-Letter `o`, at 400 kHz against one serve counted to its last byte: the
-probe, reads of 1 (the pump) and of 2, 3, 8 and 32 (channel 7 under
-LAST), write-then-reads of 1+1 (both halves the pump), 1+2 and 2+8 (the
-write half the pump, the read the engine), writes of 1 and 2 (the pump,
-both bytes loaded in the ADDR entry) and of 3, 8 and 32 (channel 6, BTF
-the end) - every one `i2c_ok`, every read byte-exact, the peer's count,
-sum and address matches exact. A shape's post-to-reply under pressure is
-the control's plus at most one dispatch and the path behind it: the
-32-byte write 805 us silent and at most 953 pressed with the scheduler
-path in SRAM, 817 and at most 1060 with it in the flash; the probe 70 and
-at most 274, 82 and at most 382. Letter `p`: a read of 16, a 1+4 and a
-write of 16 byte-exact at 100 and 400 kHz (the write of 16 in 1593 and
-438 us silent against the wire's 1530 and 382), and the peer's commanded
+**Every shape on both mechanisms, under every pressure as in the
+control.** Letter `o`, at 400 kHz against one serve counted to its last
+byte: the probe, reads of 1 (the interrupt) and of 2, 3, 8 and 32
+(channel 7 under LAST), write-then-reads of 1+1 (both halves the
+interrupt), 1+2 and 2+8 (both halves on the engines, the write half
+handed back by channel 6's completion for the repeated START), writes of
+1 and 2 (the interrupt, both bytes loaded in the ADDR entry) and of 3, 8
+and 32 (channel 6, its completion, then BTF) - every one `i2c_ok`, every
+read byte-exact, the peer's count, sum and address matches exact. A
+shape's post-to-reply under pressure is the control's plus at most one
+dispatch and the path behind it: the 32-byte write 813 to 814 us silent
+and at most 966 pressed with the scheduler path in SRAM, 827 to 828 and
+at most 1160 with it in the flash; the probe 79 and at most 211, 92 and
+at most 578. Letter `p`: a read of 16, a 1+4 and a write of 16
+byte-exact at 100 and 400 kHz (the write of 16 in 1602 and 447 us silent
+against the wire's 1530 and 382), and the peer's commanded
 stretch of 1000 us a byte priced from below - a read of 8 in 9260 to 9504
 us against its nine holds, a write of 8 in 7660 to 8132 us against its
 seven (the peer one byte late: the hold before each byte it takes
@@ -621,12 +734,12 @@ follow).
 
 **The arbiter with three requesters of three priorities.** Letter `w`,
 at 400 kHz: the requester above the arbiter's twenty write-then-reads of
-1+6 (the read half on channel 7), two outstanding; the one below it ten
-writes of two bytes (the pump); Pressure's eight probes in a pressure
+1+6 (both halves on the engines), two outstanding; the one below it ten
+writes of two bytes (the interrupt); Pressure's eight probes in a pressure
 pass - every reply `i2c_ok`, to its own requester, in its order (slot k
 complete and k + 1 untouched at reply k), nothing rejected, the timeout
 never firing, the peer's count, sum and address matches exact; the
-letter in 6.8 to 12.7 ms with the scheduler path in SRAM and 7.2 to 20.8
+letter in 7.1 to 14.6 ms with the scheduler path in SRAM and 7.6 to 27.4
 with it in the flash.
 
 **The held wire: `i2c_arb_lost` at the speed in force and at another.**
@@ -699,9 +812,9 @@ console's DMA enables clear and TIM1's gate shut (the other requesters
 ORed into channels 6 and 7), BUSY and MSL clear, both lines high, PB3
 driven high. `unwedges()` stayed 0 and the receive engine counted no
 fault in every run. The transmit engine's fault count rises by one at
-every tenure an error ends - a NACK on the address included -, since the
-error path's `put_engines_away()` calls `abandon()` whatever the engine
-held: a count of error-ended tenures, not of transmit tails.
+every tenure an error ends while its block is in flight - a NACK on a
+byte the engine is writing - and at no other: the error path puts away
+only the block the tenure's phase holds.
 
 **Where the code runs.** With the scheduler path in SRAM, `activate()` is
 1874 bytes there, with the dispatches of Pressure, the requester below the
@@ -753,8 +866,9 @@ Implemented but not bench-verified, each with what would measure it:
 - **The USB_IOEN refusal**: nothing in the stratum sets the bit; the USB
   controller's driver, when it is born, is what would set it and see
   `init()` refuse.
-- **The last byte of a read when the wait for its RxNE runs out.** On a
-  host with no engines, a read of three or more bytes sets STOP at its
+- **The last byte of a read when the wait for its RxNE runs out.** On the
+  pump (a host with no engines, or a request naming the interrupt), a
+  read of three or more bytes sets STOP at its
   second BTF, reads byte N-1 and waits for byte N's RxNE with a bound of
   100 000 polls whose answer is discarded: when the bound runs out, DATAR
   is read regardless and the tenure reported `i2c_ok` with what it holds

@@ -166,7 +166,7 @@ engines do with each:
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
 | circular mode | the receive engine's circular shape (`arm_ring()`) | a byte transport's receive ring: the channel writes the whole storage lap after lap, its count the producer index of util/ring.hpp's `HardwareRing`, the completion a lap counted by `lap()` (the transport's vector); a transfer engine's block has an end, and a circular player waits for its first block-stream user |
 | the half-transfer flag | no | no engine acts on a midpoint before a stream does |
-| the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it), the I2C host's (BTF proves it) |
+| the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it); the I2C host arms both of its blocks for completion, the transmit block's handing its half back to the event vector ([i2c.md](i2c.md)) |
 | one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR once |
 | the priorities | yes | an argument of `arm()`, and the level is the peripheral's ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); strict - the level, then the lower channel number (8.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one (figure 8-1): there is no trigger register beside it |
@@ -389,9 +389,11 @@ and i and letter d's writes measured on the CH32V006K8U6:
   the PC6-PC7 jumper (`test_ch32_spi` letter d: 16-bit frames in
   half-word beats with no SPI interrupt, an odd buffer's 16-bit request
   run polled inside `start()`, and ONE DMA interrupt a transaction, the transmit
-  channel armed for its errors alone) and the I2C host's against an
-  STM32G0 peer on the CH32V006K8U6 (`test_ch32_i2c` letter g: a write
-  ended by BTF with no interrupt from its channel, one a read).
+  channel armed for its errors alone) and the I2C host's against the
+  CH32X035 peer on the CH32V006K8U6 (`test_ch32_i2c` letters g and n:
+  one completion interrupt a block, the write's handing its half back to
+  the event vector, and none at all for a request that names the
+  interrupt).
 - **The console's transmit engine at the rate asked** (letter e, timed
   on the ticker's cycle count from the first byte handed over to
   `tx_idle()`): 272 frames at 115200 in 1001 thousandths of their wire
