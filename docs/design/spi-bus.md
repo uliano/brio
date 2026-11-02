@@ -362,8 +362,8 @@ inside `start()`, and the arbiter replies with whatever the engine's
 
   What it costs on a one-deep register is the loop's turn: the bus idles
   from the frame's end until the next write, every frame. The longest idle
-  measured, in core cycles a frame: 68 on the STM32F446RE at 180 MHz (the
-  lines run at /4 to /256, the 68 on SPI2 in mode 1), 30 on the
+  measured, in core cycles a frame: 72 on the STM32F446RE at 180 MHz (the
+  lines run at /4 to /256, the 72 on SPI2 in mode 1), 30 on the
   CH32V203C8T6 and 32 on the CH32V303VCT6 at 144 MHz, 38 on the
   CH32V006K8U6 and 22 on the CH32V003F4P6 at 48 MHz, 44 on the
   CH32X035F8U6 from the flash and 18 from SRAM. On the STM32F446RE's SPI1 in
