@@ -91,6 +91,13 @@ TestBench<Serial, 12> bench;
 
 using I2 = I2s<2>;
 using I3 = I2s<3>;
+/// The image's two DMA slots, letter g's channels programmed by hand: SPI2's
+/// transmit request and SPI3's receive one, the I2S faces raising the
+/// SPI's requests (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<I2::dma_tx_slot.controller, I2::dma_tx_slot.channel>,
+                        DmaOwner<DmaPeriph::spi, 2, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<I3::dma_rx_slot.controller, I3::dma_rx_slot.channel>,
+                        DmaOwner<DmaPeriph::spi, 3, DmaSignal::rx>>);
 
 /// The two columns: WS, CK and SD of each, MCK left unnamed.
 constexpr I2sPins pins2 = i2s_default_pins<2>;

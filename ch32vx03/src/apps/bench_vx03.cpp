@@ -22,8 +22,9 @@
 // skeleton's four letters in one, the engines in the second and the SPI
 // host in the third. ON THE CH32V203C8 the whole is within a few hundred bytes of the
 // part's 60 KB, so it is two images there too (the groups.v203c8 line):
-// the skeleton with the engines and the SPI host, then the serial
-// transport and the I2C host. Whole on the CH32V303.
+// the skeleton with the engines, the SPI host and the serial transport,
+// then the I2C host - two letters that could share no image anyway (the
+// groups line's comment). Whole on the CH32V303, where letter u declines.
 //
 // NO KERNEL. The suite's shape: a prompt loop over the console, which
 // here sleeps through BenchIdle<P, Ruler>::idle() when no byte is
@@ -58,8 +59,8 @@
 //   usart1_handler   USART1's ISR body, on the full Ruler: this handler
 //                    may straddle a restart, where the position alone
 //                    would go back by a period.
-// and letter d's four, each on the full Ruler: dma1_channel1_handler (the
-// copy engine), dma1_channel7_handler (TIM4's update, the paced block),
+// and letter d's four, each on the full Ruler: dma1_channel4_handler (the
+// copy engine), dma1_channel5_handler (TIM1's update, the paced block),
 // dma1_channel2_handler and dma1_channel3_handler (SPI1's receive and
 // transmit engines - the second armed for a transfer error alone; the SPI
 // host arms no interrupt of the block, so spi1_handler is unbound). SPI1's
@@ -149,7 +150,7 @@
 //      the core spins on the completion and busy is wall by construction;
 //      what the operation costs the CPU is the launch and the isr, printed
 //      on the note line before each bench line.
-//        copy, fill  DmaCopyEngine on DMA1's channel 1, 16, 256 and 4096
+//        copy, fill  DmaCopyEngine on DMA1's channel 4, 16, 256 and 4096
 //                    bytes handed over as words, from start() to the
 //                    completion's interrupt; the note line gives the
 //                    launch alone (copy() called to copy() returned - at
@@ -160,8 +161,8 @@
 //                    Then the data judged, and a word copy, a byte copy and
 //                    a half-word fill back to back judged byte for byte -
 //                    each block starting with a width the last had not.
-//        paced       256 words from a table into ONE cell on TIM4's update
-//                    request (DMA1's channel 7), one every 1440 cycles
+//        paced       256 words from a table into ONE cell on TIM1's update
+//                    request (DMA1's channel 5), one every 1440 cycles
 //                    (100 kHz), the completion's interrupt the edge; then
 //                    the same run WATCHED under the mask, the core stamping
 //                    each fall of the count on the STK's position (one
@@ -307,9 +308,9 @@
 //      32-bit instruction - what tells the two dies' handlers apart.
 //
 // build: boards = v203c6,v203c8,v303vc
-// On the CH32V203C8 letters u and i sit in different images: letter i run
-// after letter u in one session stalls at its first tenure (each passes
-// alone), not yet explained - benchmark.md lists it.
+// On the CH32V203C8 letters u and i sit in different images: USART2's
+// engines and I2C1's ride DMA1's channels 6 and 7 both, and a channel has
+// one owner in an image (docs/design/dma.md, "The ownership rule").
 // build: groups = rmpt,d,e
 // build: groups.v203c8 = rmptdeu,i
 // build: monitor_speed = 115200
@@ -808,8 +809,8 @@ void tt_tick() {
 // ---------------------------------------------------------------------------
 // d - the DMA engines
 // ---------------------------------------------------------------------------
-Meter copy_meter;    // dma1_channel1_handler: the copy engine
-Meter paced_meter;   // dma1_channel7_handler: TIM4's update
+Meter copy_meter;    // dma1_channel4_handler: the copy engine
+Meter paced_meter;   // dma1_channel5_handler: TIM1's update
 Meter spi_rx_meter;  // dma1_channel2_handler: SPI1's receive engine
 Meter spi_tx_meter;  // dma1_channel3_handler: SPI1's transmit engine (errors alone)
 
@@ -822,8 +823,15 @@ BenchCounters dma_counters() {
     return bench_counters<Plat>(copy_meter, paced_meter, spi_rx_meter, spi_tx_meter);
 }
 
-// ---- copy and fill: DmaCopyEngine on DMA1's first channel -----------------
-using Copier = DmaCopyEngine<1, 1>;
+// ---- copy and fill: DmaCopyEngine on DMA1's fourth channel ----------------
+/// THE IMAGE'S SLOTS (docs/design/dma.md, "The ownership rule"): every
+/// channel has one owner for the whole image. Channel 4 is the copy's -
+/// its requests (SPI2's receive, USART1's transmit, I2C2's transmit, TIM1's
+/// fourth compare, TIM4's second) are none this app raises; channel 1 is the
+/// fourth port's transmit on the CH32V203 (letter u's stimulus), channels 2
+/// and 3 SPI1's, 6 and 7 USART2's under letter u and I2C1's under letter i,
+/// each in its own image, and 5 TIM1's update, the pace below.
+using Copier = DmaCopyEngine<1, 4>;
 volatile bool copy_done = false;
 uint32_t fill_cell = 0;
 
@@ -846,10 +854,13 @@ bool copy_start(void* dst, const void* src, uint32_t bytes, bool fill) {
     }
 }
 
-// ---- paced: TIM4's update request on DMA1's channel 7 ----------------------
-using PacedTx = DmaTxEngine<1, DmaRequestOf<DmaRequest::tim4_up>::channel, uint32_t>;
-using PacedCh = DmaChannel<1, DmaRequestOf<DmaRequest::tim4_up>::channel>;
-using Pacer = Tim<4>;
+// ---- paced: TIM1's update request on DMA1's channel 5 ----------------------
+using PacedRow = DmaRequestOf<DmaRequest::tim1_up>;
+using PacedTx = DmaTxEngine<PacedRow::controller, PacedRow::channel, uint32_t>;
+using PacedCh = DmaChannel<PacedRow::controller, PacedRow::channel>;
+using Pacer = Tim<1>;
+static_assert(dma_claim<DmaSlotId<PacedRow::controller, PacedRow::channel>,
+                        DmaOwner<DmaPeriph::tim, 1, DmaSignal::update>>);
 volatile bool paced_done = false;
 volatile uint32_t paced_cell = 0;
 
@@ -956,7 +967,7 @@ void copy_report(const char* op, bool fill) {
 }
 
 // ---- paced -----------------------------------------------------------------
-constexpr uint32_t paced_period = 1440;   // TIM4 at HCLK, an update every 10 us
+constexpr uint32_t paced_period = 1440;   // TIM1 at HCLK, an update every 10 us
 constexpr uint16_t paced_items = 256;
 /// The table is the first kilobyte of buffer_a, written after the copies
 /// have judged it: the 32 KB parts have 10 KB of SRAM, and this app
@@ -969,12 +980,9 @@ void pacer_start() {
     Pacer::interrupts(tim_ude, true);
     Pacer::enable(true);
 }
-/// The pacer RELEASED, not only stopped: an update request it raised is
-/// held through CEN and UDE cleared until the channel acknowledges it or
-/// the timer is reset (docs/ch32vx03/dma.md, "A released requester"), and
-/// channel 7 is I2C1's receive channel and USART2's transmit one too.
-/// Tim::release() pulses the reset before the gate; pacer_start()'s init()
-/// opens it again.
+/// The pacer released, not only stopped: its gate closed, and
+/// pacer_start()'s init() brings it up again. Channel 5 is TIM1's update's
+/// for the whole image, so nothing else meets a request it left standing.
 void pacer_stop() { Pacer::release(); }
 
 void paced_report() {
@@ -1004,7 +1012,7 @@ void paced_report() {
     // Items moved at 4 bytes: the wire is the pace's own, 4 bytes a period.
     const uint32_t wire_pace = 4u * (Ruler::hz() / paced_period);
     print(serial, "  paced: ", paced_items, " words at one a ", paced_period,
-          " cycles (TIM4's update, 100 kHz) into one cell: ", ok ? "" : "REFUSED ", "launch ",
+          " cycles (TIM1's update, 100 kHz) into one cell: ", ok ? "" : "REFUSED ", "launch ",
           launch, ", wall ", wall, " for ", due, " due, cell=", hex(paced_cell), ", ", ticks,
           " ticks in the wall", crlf);
     bench_line(serial, "paced", 4u * paced_items, s, Ruler::hz(), wire_pace);
@@ -1702,8 +1710,16 @@ constexpr uint16_t loop_ring = 512;
 using LoopTxEngine = DmaTxEngine<1, 7>;
 using LoopRxEngine = DmaRxEngine<1, 6>;
 using LoopIrq = Uart<2, Plat, loop_ring, loop_ring>;
-using LoopTxe = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, NoDmaEngine>;
-using LoopDma = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, LoopRxEngine>;
+/// The two engined shapes are formed only in an image that carries letter
+/// u (loop_carried, below): each claims USART2's channels for the whole
+/// image (docs/design/dma.md, "The ownership rule"), and letter i's I2C
+/// host claims the same two channels for I2C1 - so the two letters live in
+/// different images, and an alias that hangs on `on` keeps the one an
+/// image does not carry from being formed at all.
+template <bool on>
+using LoopTxeOf = Uart<on ? 2 : 2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, NoDmaEngine>;
+template <bool on>
+using LoopDmaOf = Uart<on ? 2 : 2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, LoopRxEngine>;
 using LoopRes = Usart<2>;
 
 /// Whether the part has the fourth port the pair needs and a board that
@@ -1715,6 +1731,10 @@ using LoopRes = Usart<2>;
 /// declines the letter by name.
 constexpr bool v303_bench = device::device_class == DeviceClass::v30x_d8;
 constexpr bool uart_pair_part = device::has_usart(4u) && !v303_bench;
+/// Letter u is formed only in an image that carries it, on a part with the
+/// pair: elsewhere no loop shape with an engine is referenced and its rings
+/// - three kilobytes and a half - are not in the image.
+constexpr bool loop_carried = uart_pair_part && test_letter_carried('u');
 
 /// The stimulus side of the pair, formed only where the fourth port
 /// exists: every name depends on `on`, so a part without UART4 never
@@ -1747,15 +1767,17 @@ BenchCounters loop_counters() {
 
 /// Give USART2 back; the owner forgotten after the release, whose stopped
 /// streams may still raise a flag their vector serves.
-template <bool on = uart_pair_part>
+template <bool on = loop_carried>
 void loop_down() {
-    const uint8_t was = loop_owner;
-    if (was == 1u) {
-        LoopIrq::release();
-    } else if (was == 2u) {
-        LoopTxe::release();
-    } else if (was == 3u) {
-        LoopDma::release();
+    if constexpr (on) {
+        const uint8_t was = loop_owner;
+        if (was == 1u) {
+            LoopIrq::release();
+        } else if (was == 2u) {
+            LoopTxeOf<on>::release();
+        } else if (was == 3u) {
+            LoopDmaOf<on>::release();
+        }
     }
     loop_owner = 0;
     if constexpr (on) {
@@ -1945,10 +1967,12 @@ BenchSample loop_edge_after(uint32_t& late) {
     return bench_sample(at - t_tc, c0, c1);
 }
 
-template <bool on = uart_pair_part>
+template <bool on = loop_carried>
 void tu_uart() {
     if constexpr (on) {
         using Stim = typename StimSide<on>::Port;
+        using LoopTxe = LoopTxeOf<on>;
+        using LoopDma = LoopDmaOf<on>;
         bool all_up = true;
         for (const uint32_t baud : loop_rates) {
             all_up = loop_up<LoopIrq>(1, baud, false) && all_up;
@@ -2733,9 +2757,7 @@ template <bool on = i2c_carried>
     }
 }
 /// Letter u's USART2 vectors, formed only in an image that carries the
-/// letter on a part with the pair: elsewhere no loop shape is referenced
-/// and its rings - three kilobytes and a half - are not in the image.
-constexpr bool loop_carried = uart_pair_part && test_letter_carried('u');
+/// letter on a part with the pair (loop_carried, above).
 template <bool on = loop_carried>
 [[gnu::always_inline]] inline void loop_usart_vector() {
     if constexpr (on) {
@@ -2744,9 +2766,9 @@ template <bool on = loop_carried>
         if (loop_owner == 1u) {
             edge = LoopIrq::isr();
         } else if (loop_owner == 2u) {
-            edge = LoopTxe::isr();
+            edge = LoopTxeOf<on>::isr();
         } else if (loop_owner == 3u) {
-            edge = LoopDma::isr();
+            edge = LoopDmaOf<on>::isr();
         }
         if (edge) {
             loop_edge_at = Ruler::now();
@@ -2763,9 +2785,9 @@ template <bool on = loop_carried>
         if (loop_owner >= 2u) {
             loop_dma_meter.enter();
             if (loop_owner == 2u) {
-                (void)LoopTxe::dma_isr();
+                (void)LoopTxeOf<on>::dma_isr();
             } else {
-                (void)LoopDma::dma_isr();
+                (void)LoopDmaOf<on>::dma_isr();
             }
             loop_dma_meter.leave();
             return true;
@@ -2779,7 +2801,7 @@ template <bool on = loop_carried>
 [[gnu::always_inline]] inline void loop_rx_dma_vector() {
     if constexpr (on) {
         loop_dma_meter.enter();
-        if (loop_owner == 3u && LoopDma::dma_isr()) {
+        if (loop_owner == 3u && LoopDmaOf<on>::dma_isr()) {
             loop_edge_at = Ruler::now();
             loop_edge = true;
         }
@@ -2836,13 +2858,19 @@ BRIO_CH32_LEAF_VECTOR(usart1_handler) {
     usart_meter.leave();
 }
 
-BRIO_CH32_VECTOR(dma1_channel1_handler) {
-    if (stim_dma_vector<1, 1>()) {   // letter u's stimulus: not metered, one a burst
-        return;
-    }
+/// Letter u's stimulus on the CH32V203: not metered, one a burst.
+BRIO_CH32_VECTOR(dma1_channel1_handler) { (void)stim_dma_vector<1, 1>(); }
+
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
     copy_meter.enter();
     copy_vector();
     copy_meter.leave();
+}
+
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
+    paced_meter.enter();
+    paced_vector();
+    paced_meter.leave();
 }
 
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
@@ -2856,12 +2884,7 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
         i2c_dma_meter.leave();
         return;
     }
-    if (loop_tx_dma_vector()) {
-        return;
-    }
-    paced_meter.enter();
-    paced_vector();
-    paced_meter.leave();
+    (void)loop_tx_dma_vector();
 }
 
 /// USART2's receive channel under letter u: the circular ring's laps and

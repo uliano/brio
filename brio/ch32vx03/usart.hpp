@@ -1311,6 +1311,11 @@ struct Uart {
                   "9 and 11)");
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "the two engines of a Uart must not share a DMA channel");
+    // Each engine's slot is this instance's request's for the whole image
+    // (docs/design/dma.md, "The ownership rule"): another owner on either
+    // channel does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::usart, instance, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::usart, instance, DmaSignal::rx>>());
     static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
                   "brio Uart: rx_priority ranks the receive engine's channel - this port has no "
                   "receive engine");

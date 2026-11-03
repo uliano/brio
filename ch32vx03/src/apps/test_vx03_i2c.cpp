@@ -56,9 +56,7 @@
 //    verdict claimed) when three command retries fail: a suite that
 //    hangs on an absent instrument is worse than one that says so.
 //
-// THE PADS. PB6 and PB7 - and, in letter p alone, USART2's PA2 (its
-// transmitter) and PA3 (its receiver), claimed by that letter's
-// transport and released at its end. NEVER TOUCHED: PA9/PA10 (the
+// THE PADS. PB6 and PB7. NEVER TOUCHED: PA9/PA10 (the
 // console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
 // PC14/PC15 and the crystal's pins, PB10..PB15 (the pair's serial and SPI
 // links on the CH32V203, the SPI2-SPI3 jumpers on the CH32V303), the rest
@@ -123,13 +121,6 @@
 //      each core a write of sixteen through the pump and the engines timed
 //      on the core's counter against the rate CCR makes, PB1 another rate
 //      at each
-//   p  THE HAND-OVER ON CHANNEL 7, the OR of USART2's transmit request and
-//      I2C1's receive one: USART2's transport with its transmit engine
-//      run and released, then I2C1's DMA read of sixteen from the peer
-//      judged byte-exact, both owners timed against the rate asked; and
-//      the mirror - I2C1's DMA read abandoned with RxNE standing under
-//      DMAEN and the host released, then USART2's run judged out whole in
-//      its wire time at 115200 on the core's counter
 //   q  A CHANNEL THAT DOES NOT SERVE, staged by a request held on it by a
 //      peripheral gated without its reset (TIM3's on channel 6, USART2's
 //      on 7): a DMA write answered i2c_dma_fault with the far target short
@@ -162,8 +153,8 @@
 // fits the family's smallest chip"). The CH32V203C8 builds two images of
 // its own (the groups.v203c8 line); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = ab,cd,ef,gh,ijkr,ln,o,pq
-// build: groups.v203c8 = abcdefgh,ijklnopqr
+// build: groups = ab,cd,ef,gh,ijkr,ln,o,q
+// build: groups.v203c8 = abcdefgh,ijklnoqr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -3283,23 +3274,20 @@ void to_refusal() {
 }
 
 // ---------------------------------------------------------------------------
-// p - the hand-over on channel 7; q - a channel that does not serve
+// q - a channel that does not serve
 // ---------------------------------------------------------------------------
 
-/// THE OTHER OWNER OF CHANNEL 7. Table 11-5 wires USART2's transmit
-/// request and I2C1's receive request to the same channel of DMA1 - an OR
-/// - so USART2's transport with its transmit engine there is what letter
-/// p hands the channel to and takes it from. USART2's pads (PA2, PA3) are
-/// claimed by that transport for the letter and released at its end.
-constexpr uint8_t shared_channel = DmaRequestOf<DmaRequest::usart2_tx>::channel;
-static_assert(shared_channel == DmaRequestOf<DmaRequest::i2c1_rx>::channel,
+/// I2C1's two channels, read by letter q. Channel 7 is also where table
+/// 11-5 wires USART2's transmit request, channel 6 TIM3's first compare:
+/// letter q stages a request of each by register, with no channel given
+/// to it - the image gives both channels to I2C1 alone (docs/design/dma.md,
+/// "The ownership rule"; test/family_ch32vx03/neg/ refuses USART2's
+/// transport with its transmit engine beside the I2C host's engines).
+static_assert(DmaRequestOf<DmaRequest::usart2_tx>::channel == DmaRequestOf<DmaRequest::i2c1_rx>::channel,
               "table 11-5: USART2's transmit request and I2C1's receive request share a "
               "channel");
-using Handed = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<1, shared_channel>>;
-using SharedCh = DmaChannel<1, shared_channel>;
+using Ch7 = DmaChannel<1, DmaRequestOf<DmaRequest::i2c1_rx>::channel>;
 using Ch6 = DmaChannel<1, DmaRequestOf<DmaRequest::i2c1_tx>::channel>;
-/// True while channel 7's vector and USART2's are that transport's.
-volatile bool handed_live = false;
 
 /// A REQUEST HELD ON A CHANNEL BY A PERIPHERAL WHOSE CLOCK IS GATED - the
 /// state a release that does not pulse its block's reset leaves
@@ -3339,31 +3327,6 @@ void hold_channel6() {
 }
 void free_channel6() { Holder6::reset(); }
 
-/// A run out through USART2's transmit engine, waited for: true when the
-/// port drained it within `budget_ms`; `took` what it took in core cycles,
-/// from the queue to tx_idle() - the last stop bit's end.
-bool handed_run(const uint8_t* run, uint16_t n, uint32_t budget_ms, uint32_t& took) {
-    const uint32_t c0 = Ticker::cycles();
-    (void)Handed::write_bulk(std::span<const uint8_t>(run, n));
-    const uint32_t t0 = Ticker::millis();
-    while (!Handed::tx_idle() && Ticker::millis() - t0 < budget_ms) {
-    }
-    took = Ticker::cycles() - c0;
-    return Handed::tx_idle();
-}
-
-/// A run's time in thousandths of its wire: `n` 8N1 frames at 115200,
-/// the rate both of letter p's runs ask, and one more - the idle frame TE
-/// sends before the first byte after an init (18.2), which both runs follow.
-uint32_t handed_permille(uint32_t cycles, uint16_t n) {
-    const uint64_t wire = 10ULL * (n + 1u) * SysClock::hz / 115200u;
-    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * cycles / wire);
-}
-
-/// What both of letter p's directions send through USART2.
-constexpr uint8_t handed_note[] = "channel 7 is the OR of USART2's and I2C1's requests";
-constexpr uint16_t handed_len = sizeof(handed_note) - 1u;
-
 /// One DMA read of `n` from the far target, waited out.
 uint8_t engined_read(uint8_t n, I2cSpeed speed, uint32_t& cycles) {
     for (uint8_t i = 0; i < n; ++i) {
@@ -3373,120 +3336,6 @@ uint8_t engined_read(uint8_t n, I2cSpeed speed, uint32_t& cycles) {
     const uint8_t st = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, n, speed);
     cycles = Ticker::cycles() - c0;
     return st;
-}
-
-void tp_handover() {
-    if (!need_peer()) {
-        return;
-    }
-
-    // THE OUTGOING OWNER: USART2's transport with its transmit engine, a
-    // run out through channel 7, then released. With DMAT set and the
-    // transmitter idle its request stands on the channel the moment the
-    // run is out - at init() already.
-    host_ready();
-    handed_live = true;
-    const bool up = Handed::init(clock, 115200);
-    uint32_t took = 0;
-    const bool sent = handed_run(handed_note, handed_len, 20, took);
-    Handed::release();
-    handed_live = false;
-
-    // THE INCOMING OWNER: I2C1's DMA host, a read of sixteen on the same
-    // channel from the far target.
-    const PeerServe s = arm_serve(0x27);
-    dma_host_up();
-    host_stormed = false;
-    uint32_t rd_cycles = 0;
-    const uint8_t rd = s.armed ? engined_read(16, I2cSpeed::fast_400k, rd_cycles) : no_answer;
-    const uint32_t rd_pm = scl_permille(rd_cycles, 9u * 17u, I2cSpeed::fast_400k, SysClock::hz);
-    bool rd_exact = rd == i2c_ok;
-    for (uint8_t i = 0; i < 16u && rd_exact; ++i) {
-        rd_exact = rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, 0x27, i);
-    }
-    const uint16_t left7 = SharedCh::remaining();
-    dma_host_down();
-    PeerServe got = s;
-    (void)collect_serve(got);
-    print(serial, "  USART2's run of ", handed_len, sent ? " sent" : " NOT SENT",
-          " and the port released; then I2C1's DMA read of 16 on channel ", shared_channel,
-          ": status ", rd, rd_exact ? ", byte-exact" : ", NOT exact", ", the channel's count ",
-          left7, host_stormed ? ", the event vector STORMED" : "", crlf);
-    print(serial, "  in thousandths of the rate asked: USART2's run ",
-          handed_permille(took, handed_len), " of its wire at 115200, the read's SCL ", rd_pm,
-          " of 400 kHz", crlf);
-    bench.verdict("THE HAND-OVER: USART2's transmit engine released, then I2C1's DMA read of "
-                  "sixteen bytes from another chip on the same channel 7, byte-exact - the "
-                  "port's release() left no request held on the channel's OR",
-                  up && sent && rd_exact && left7 == 0u);
-    bench.verdict("and both owners run at the rate asked: USART2's run in its wire time at "
-                  "115200, -1 % to +3 %, and the read's SCL inside the mean-rate bracket "
-                  "letter o derives",
-                  handed_permille(took, handed_len) >= 990u &&
-                      handed_permille(took, handed_len) <= 1030u &&
-                      mean_rate_ok(rd_pm, I2cSpeed::fast_400k, SysClock::hz,
-                                   Host::scl_hz(I2cSpeed::fast_400k)));
-
-    // THE MIRROR: I2C1's read abandoned mid-block with RxNE standing under
-    // DMAEN - its channel stopped under it, the far target serving on until
-    // the data register and the shifter both hold a byte - and the host
-    // released. I2C1's block is not touched again until USART2 has run, its
-    // reset being what the question is about.
-    Usart<2>::reset();
-    const PeerServe m = arm_serve(0x51);
-    dma_host_up();
-    DmaHost::Request r{};
-    r.addr = twilink::dut_addr;
-    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
-    r.tx_len = 0;
-    r.rx = lend<Lease::reply>(rx_buf);
-    r.rx_len = 32;
-    r.speed = I2cSpeed::standard_100k;
-    r.engine = I2cEngine::dma;
-    host_done = false;
-    host_isr_entries = 0;
-    if (m.armed) {
-        (void)DmaHost::start(r);
-    }
-    // A millisecond into the block - some ten bytes at 100 kHz - the channel
-    // is stopped under it: the next byte lands in DATAR and the one after it
-    // in the shifter, BTF holding the clock.
-    settle_ms(1);
-    DmaRxEngine<1, shared_channel>::stop();
-    settle_ms(3);
-    const uint16_t star1 = H::status1();
-    const uint16_t ctlr2 = H::regs().CTLR2;
-    const bool standing = (star1 & i2c_rxne) != 0u && (ctlr2 & i2c_dmaen) != 0u;
-    dma_host_live = false;
-    DmaHost::release();
-
-    handed_live = true;
-    const bool up2 = Handed::init(clock, 115200);
-    uint32_t took2 = 0;
-    const bool mirrored = handed_run(handed_note, handed_len, 20, took2);
-    const uint16_t faults = Handed::dma_faults();
-    Handed::release();
-    handed_live = false;
-    // The far target was left mid-byte by the released host: the wire is
-    // clocked free before the command channel needs it.
-    (void)Host::init(clock);
-    (void)Host::unstick();
-    settle_ms(350);   // past the serve's deadline: the peer is back
-    host_ready();
-    // 52 frames of ten bits at 115200 baud: 4.5 ms on the wire.
-    const uint32_t pm2 = handed_permille(took2, handed_len);
-    print(serial, "  I2C1's read stopped under its block (STAR1 ", hex(star1), ", CTLR2 ",
-          hex(ctlr2), "), the host released; then USART2's run of ", handed_len, " on channel ",
-          shared_channel, ": ", mirrored ? "out" : "NOT OUT", " in ", pm2,
-          " thousandths of its wire time, the channel's count ", SharedCh::remaining(),
-          ", faults ", faults, crlf);
-    bench.verdict("THE MIRROR: I2C1's DMA read abandoned with RxNE standing under DMAEN and "
-                  "the host released, then USART2's transmit engine on channel 7 sends its "
-                  "whole run in its wire time at 115200, -1 % to +3 % on the core's counter - "
-                  "the host's release() left no request held",
-                  m.armed && standing && up2 && mirrored && pm2 >= 990u && pm2 <= 1030u &&
-                      faults == 0u);
-    bench.verdict("the command channel is back", command(Op::ping));
 }
 
 void tq_dead_channel() {
@@ -3568,7 +3417,7 @@ void tq_dead_channel() {
     print(serial, "  a DMA read of 16 over channel 7 held by USART2: status ", rd,
           rd == no_answer ? " (no answer: the caller's 50 ms bound)" : "", ", the event vector ",
           entries, " entries", stormed ? " - STORMED, silenced by the suite" : "",
-          ", the channel's count ", SharedCh::remaining(), crlf);
+          ", the channel's count ", Ch7::remaining(), crlf);
     bench.verdict("A READ OVER A CHANNEL THAT DOES NOT SERVE leaves the thread running: the "
                   "event vector entered for the START and the address alone, no storm, "
                   "and the tenure answered by the caller's bound and recover()",
@@ -3678,16 +3527,10 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 }
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
     ch7_entries = ch7_entries + 1u;
-    if (handed_live) {
-        (void)Handed::dma_isr();
-        return;
-    }
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
-// USART2's: letter p's transport, its interrupt receiver idle.
-BRIO_CH32_LEAF_VECTOR(usart2_handler) { (void)Handed::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -3730,9 +3573,6 @@ int main() {
                  tn_unstick);
     bench.letter('o', "THE REFUSED LAST BYTE from the peer's target, the core at 96, 48 and 8 MHz",
                  to_refusal);
-    bench.letter('p', "THE HAND-OVER on channel 7: USART2 released, then I2C1's DMA read; "
-                      "and the mirror",
-                 tp_handover);
     bench.letter('q', "a channel that does not serve: a DMA write answered i2c_dma_fault, a "
                       "DMA read with the event vector quiet",
                  tq_dead_channel);

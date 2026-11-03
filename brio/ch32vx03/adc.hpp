@@ -1259,6 +1259,9 @@ public:
                       "on the CH32V303, on DMA2's channel 5); an engine on any other slot would "
                       "never see a conversion (DmaRequestOf<DmaRequest::adc1> is how to spell "
                       "it)");
+        // The slot is this converter's request's for the whole image
+        // (docs/design/dma.md, "The ownership rule").
+        static_assert(dma_engine_claim<Engine, DmaOwner<DmaPeriph::adc, n, DmaSignal::rx>>());
         // VERY_HIGH (DmaPriority's rule): RDATAR holds one conversion and
         // this converter has no overrun flag, so the next end of conversion
         // writes over a sample a starved channel has not taken, unseen.

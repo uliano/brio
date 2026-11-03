@@ -194,6 +194,9 @@ using Timed = Ch32vx03TimedSleepSite<P, SysClock>;
 /// its pull-up's count is used here - letter c attaches it.
 using Usb = std::conditional_t<device::has_usbd, Usbd<>, Usbfs<>>;
 using Copier = DmaChannel<1, 1>;
+/// Its slot is a memory-to-memory block's for the whole image, under the
+/// channel's copy tag (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<1, 1>, DmaCopyOwner<1, 1>>);
 
 /// The RTC's tick, and the prescaler under it: the site's own, because
 /// the site is what programmed the block.
@@ -1014,6 +1017,7 @@ void te_kernel() {
 template <uint8_t controller>
 void second_controller_refused() {
     using Copier2 = DmaChannel<controller, 1>;
+    static_assert(dma_claim<DmaSlotId<controller, 1>, DmaCopyOwner<controller, 1>>);
     Dma<controller>::open();
     Copier2::stop();
     const uint8_t quiet = P::bus_masters_active();

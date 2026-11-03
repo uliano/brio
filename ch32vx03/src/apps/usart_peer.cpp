@@ -194,6 +194,12 @@ struct PeerLink {
     static constexpr DmaSlot rx_slot = DmaRequestOf<rx_req>::slot;
     using TxEdges = DmaTxEngine<tx_slot.controller, tx_slot.channel, uint16_t>;
     using RxEdges = DmaTxEngine<rx_slot.controller, rx_slot.channel, uint16_t>;
+    // The two slots are the timer's third and fourth compare requests',
+    // for the whole image (docs/design/dma.md, "The ownership rule").
+    static_assert(dma_claim<DmaSlotId<tx_slot.controller, tx_slot.channel>,
+                            DmaOwner<DmaPeriph::tim, t, DmaSignal::compare3>>);
+    static_assert(dma_claim<DmaSlotId<rx_slot.controller, rx_slot.channel>,
+                            DmaOwner<DmaPeriph::tim, t, DmaSignal::compare4>>);
 };
 
 /// The part's link (the header): UART4's second column where the part is

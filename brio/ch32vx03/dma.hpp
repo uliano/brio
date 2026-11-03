@@ -1567,6 +1567,11 @@ private:
  * without one, by `busy()` asking the flag. One owner: the busy flag is
  * tested and set without a mask.
  */
+/// The owner of a copy engine's slot: no request paces a copy, so the tag
+/// names the channel the copy runs on (util/dma_owner.hpp's tag owner).
+template <uint8_t c, uint8_t ch>
+struct DmaCopyOwner {};
+
 template <uint8_t c, uint8_t ch>
 class DmaCopyEngine {
     static_assert(c == 1u || c == 2u,
@@ -1577,6 +1582,11 @@ class DmaCopyEngine {
     static_assert(dma_channel_exists(c, ch),
                   "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
                   "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
+    // No request paces a copy, so the engine owns its channel for the whole
+    // image through its tag (docs/design/dma.md, "The ownership rule"): a
+    // transport, a paced engine or a program's tag on the same channel does
+    // not compile.
+    static_assert(dma_claim<DmaSlotId<c, ch>, DmaCopyOwner<c, ch>>);
     using Channel = DmaChannel<c, ch>;
     using B = DmaBinding<c, ch>;
 

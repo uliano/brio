@@ -908,6 +908,12 @@ class I2cHost {
         }
     }(), "brio I2cHost: on this family the channel IS the request (RM table 11-5) - I2C1 "
          "transmits on DMA channel 6 and receives on 7, I2C2 on 4 and 5");
+    // Each engine's slot is this instance's request's for the whole image
+    // (docs/design/dma.md, "The ownership rule"): another owner on either
+    // channel - USART2's on 6 and 7, USART1's or SPI2's on 4 and 5 - does
+    // not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::rx>>());
     static_assert(i2c_pins_valid(n, pins),
                   "brio I2cHost: these I2C pads are not a bus on this part - SCL and SDA must "
                   "both be named, distinct and BONDED, and the remap code must be a column "

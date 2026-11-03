@@ -183,11 +183,17 @@ CH32V203RB, and the CH32V30x_D8 for the four CH32V303 parts. Driver:
 [brio/ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp), with the request
 table, the slot a request lands in and the empty slot's tag in
 [brio/ch32vx03/dma_engine.hpp](../../brio/ch32vx03/dma_engine.hpp).
-Reference suite: `test_vx03_dma` (a suite's letter is one command key of
-its console and the group of verdicts it runs; `z` is the key that runs
-the suite's single-board letters, and on the CH32V303 `y` the two-board
-ones against the far board); the engines' costs are letter d of the
-bench app `bench_vx03` ([../design/benchmark.md](../design/benchmark.md)).
+Reference suites, three because a channel has one owner in an image ("One
+owner a channel" below): `test_vx03_dma`, every channel memory to memory
+(the widths, the sleep, the transfer error, the priorities, the
+vectors, the 64 KB rule); `test_vx03_dma_paced`, the timers' requests;
+and `test_vx03_dma_serial`, the USARTs' requests and the engines a
+transport takes (a suite's letter is one command key of its console and
+the group of verdicts it runs, each letter's name kept across the three;
+`z` is the key that runs a suite's single-board letters, and on the
+CH32V303 `y` the two-board ones against the far board). The engines'
+costs are letter d of the bench app `bench_vx03`
+([../design/benchmark.md](../design/benchmark.md)).
 The receive engine's circular shape is the producer of
 [util/ring.hpp](../../brio/util/ring.hpp)'s `HardwareRing`
 ([../design/ring.md](../design/ring.md)).
@@ -283,8 +289,7 @@ left nothing for a timer-paced block on channels 2 and 3 - and neither
 does SPI2's on DMA1's channels 4 and 5 nor, on the CH32V303VCT6, SPI3's on
 DMA2's 1 and 2: a transmit request over TXE and a receive request over a
 standing RXNE, each let go by `SpiHost::release()` with no reset, left a
-clean paced staircase to the next owner on both parts (`test_vx03_dma`
-letter s). UART4's transmit request on DMA2's channel 5 is held without
+clean paced staircase to the next owner on both parts. UART4's transmit request on DMA2's channel 5 is held without
 its reset - one stray item, the channel stalled - and let go with it, the
 USARTs' rule on the second controller. A USART's transmit request is TXE
 under TE: staged with UE and DMAT alone, nothing is held. So a transport's
@@ -398,7 +403,7 @@ bears on what a block costs is used or declined here with its reason:
   request): used by `DmaCopyEngine`.
 - **The trigger sources**: a channel's own peripheral rows (table 11-5 -
   no multiplexer) and nothing else; a timer's update request is the pace
-  of a paced block (TIM4's on DMA1's seventh channel, measured below), and
+  of a paced block (TIM1's on DMA1's fifth channel, measured below), and
   memory to memory is the software trigger.
 - **The gate**, DMA1EN and DMA2EN: opened once, when an engine is armed,
   never on the block path. Nothing in this stratum closes it again.
@@ -517,9 +522,106 @@ itself - `DmaRequest`, one enumerator per row of tables 11-2 to 11-6,
 empty slot where the part has not got the peripheral),
 `dma_request_present`, and `DmaRequestOf<r>` with its
 `slot`, `controller` and `channel`, the compile-time form that refuses a
-request this part cannot raise. A driver with an engine slot includes
-this file alone, so a program with a console does not carry the
-controller.
+request this part cannot raise; and `dma_engine_claim`, the claim a
+transport makes for the engine in each of its slots (the next section).
+A driver with an engine slot includes this file alone, so a program
+with a console does not carry the controller.
+
+### One owner a channel
+
+A channel belongs to one owner for the whole life of an image, and on
+this family the compiler checks it ([design/dma.md](../design/dma.md),
+"The ownership rule"). The slot is the controller and the channel,
+`DmaSlotId<c, ch>` - DMA1 is 1 and the CH32V303's DMA2 is 2, so DMA1's
+fifth channel and DMA2's fifth are two slots - and its owner is the
+peripheral request the channel serves, `DmaOwner<kind, instance,
+signal>` (USART2's transmit is `DmaOwner<DmaPeriph::usart, 2,
+DmaSignal::tx>`, TIM1's update `DmaOwner<DmaPeriph::tim, 1,
+DmaSignal::update>`), or a tag for a channel no request paces.
+
+Who claims:
+
+- **A transport claims its own slots.** `Uart`, `SpiHost` and `I2cHost`
+  claim each engine's slot for their instance's request in their class
+  body, the I2S face of an SPI raising the SPI's requests; `Adc`'s and
+  `Dac`'s stream verbs (`claim_stream()`, `claim_dual_stream()`) claim
+  the converter's slot where they are called. A program that names the
+  engines in a transport's slots has nothing more to write.
+- **A copy claims its channel under the channel's copy tag.**
+  `DmaCopyEngine<c, ch>` claims its slot for `DmaCopyOwner<c, ch>`, and
+  a block memory to memory programmed by hand on the same channel claims
+  the same tag: both are a copy on that channel.
+- **A program claims what it programs by hand.** An engine used without
+  a transport - a block paced by a timer, the client side of a link - and
+  a `DmaChannel<c, ch>` a program loads itself are claimed by the
+  program, beside the type, for the request that paces the channel or
+  under a tag of its own, one tag a channel:
+
+  ```cpp
+  using Row = brio::DmaRequestOf<brio::DmaRequest::tim1_up>;
+  using Paced = brio::DmaTxEngine<Row::controller, Row::channel, uint32_t>;
+  static_assert(brio::dma_claim<brio::DmaSlotId<Row::controller, Row::channel>,
+                                brio::DmaOwner<brio::DmaPeriph::tim, 1, brio::DmaSignal::update>>);
+  ```
+
+  Nothing checks that a program wrote this claim: an engine or a channel
+  carries no owner of its own, so one the program forgets to claim is
+  invisible to the check.
+
+A second owner on a claimed channel does not compile: a USART2 transport
+with its transmit engine beside an I2C1 host with its engines reads, at
+the second one's line,
+`ambiguating new declaration of 'constexpr brio::DmaOwner<brio::DmaPeriph::i2c, 1, brio::DmaSignal::rx> brio::dma_owner_of(DmaSlotId<1, 7>)'`
+with USART2's transmit named on the note under it. The claim's other
+direction - one request on two channels - never fires for a transport
+here, each request being wired to one channel and the transport
+refusing any other; it fires for a program's tag claimed on two
+channels. The claims add no byte and no cycle to an image.
+
+The rule leaves no channel to share, so the request tables (RM tables
+11-5 and 11-6, and for the CH32V303 tables 11-2, 11-3 and 11-4), which
+OR several peripherals' requests onto each channel, force the choice of
+an instance wherever two peripherals a program wants on DMA sit on one
+channel. The choices the tables force (a peripheral on DMA, and what
+that leaves off DMA):
+
+| on DMA | forbids on DMA | the channels, and where |
+|---|---|---|
+| I2C1, either direction | USART2 with both engines | I2C1's transmit is USART2's receive channel (DMA1's 6), its receive USART2's transmit channel (7); every part with both |
+| SPI1 | USART3 | DMA1's 2 and 3; the CH32V203C8 and RB and every CH32V303 (the smaller parts have no USART3) |
+| SPI2 | USART1, I2C2 | DMA1's 4 and 5; the parts with SPI2 |
+| ADC1 | the fourth port's transmit | DMA1's 1; the CH32V203C8 and RB, where UART4 is DMA1's |
+| DAC1 | UART4's receive | DMA2's 3; the CH32V303RC and VC, the parts with UART4 |
+| DAC2 | UART5's transmit, the SDIO | DMA2's 4; the CH32V303RC and VC, the parts with UART5 and the SDIO |
+| SPI3 | UART5's receive | DMA2's 2; the CH32V303RC and VC |
+| ADC2, on a lot that has its request | UART4's transmit | DMA2's 5; the CH32V303 (table 11-3's note 1 gives the row to some lots only) |
+
+So a console on USART1 with both engines leaves SPI1 for a display on
+DMA and a console on USART3 leaves SPI2; and a program that wants I2C1
+on DMA keeps its console off USART2. A timer's request is never the
+forced one: every part has a free timer event for a pace, and only a
+stream bound to one timer is held to that timer's channels (TIM1 reaches
+DMA1's 2 to 6, TIM2 1, 2, 5 and 7, TIM3 2, 3 and 6, TIM4 1, 4, 5 and 7;
+on the CH32V303 TIM5 and TIM8 DMA2's 1 to 5, TIM6 its 3, TIM7 its 4,
+TIM9 and TIM10 its 6 to 11; on the CH32V203RB TIM5 DMA1's 1, 3, 6, 7 and
+8).
+
+Some parts cannot put every use a program might want on DMA at once,
+whatever the instances. Written here with the uses as a console with
+both engines, a second UART with both engines, an SPI host's two
+engines (or its transmit alone), an I2C transmit, one converter stream
+and one timer pace:
+
+| part | the uses that cannot all be on DMA | why |
+|---|---|---|
+| CH32V203C6, F8, G6, G8, K6, K8 | a console, a second UART and an I2C transmit; or a console, a second UART, an SPI host, a converter stream and a timer pace | USART1 and USART2 are the only UARTs, and USART2's channels are I2C1's; eight requests for seven channels, the eighth serving the absent UART4's receive alone (table 11-5) |
+| CH32V203C8 | a console, a second UART, an SPI host, a converter stream and a timer pace, or an I2C transmit in the pace's place | channel 8 serves UART4's receive and nothing else (table 11-5) |
+| CH32V203RB | a console, a second UART, an SPI host, a converter stream and an I2C transmit | as the C8, TIM5's update on channel 8 rescuing the pace (table 11-6) |
+| CH32V303CB, RB | a console, a second UART, an SPI host and an I2C transmit; on a lot without ADC2's request also a console, a second UART, an SPI host, a converter stream and a timer pace | USART1 to USART3 the only UARTs, each on an SPI's or an I2C's channels; DMA1 has seven channels (tables 11-2 and 11-3, table 11-3's note 1) |
+
+The CH32V203F6 offers one UART and no I2C, and the CH32V303RC and VC
+have room for all of them at once (UART5 as the second UART, a TIM9 or
+TIM10 event as the pace).
 
 ### The block
 
@@ -714,6 +816,8 @@ The same block on the raw channel, polled:
 
 ```cpp
 using Channel = brio::DmaChannel<1, 1>;
+// A copy programmed by hand: the channel's copy tag owns it.
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 1>, brio::DmaCopyOwner<1, 1>>);
 
 Channel::stop();                      // EN stays set after a block: clear it first
 (void)Channel::load(brio::DmaTransfer{
@@ -737,6 +841,8 @@ engine of the timer's update slot:
 ```cpp
 using Row = brio::DmaRequestOf<brio::DmaRequest::tim4_up>;
 using Paced = brio::DmaTxEngine<Row::controller, Row::channel, uint32_t>;
+static_assert(brio::dma_claim<brio::DmaSlotId<Row::controller, Row::channel>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 4, brio::DmaSignal::update>>);
 (void)Paced::arm(&cell, brio::DmaPriority::high);
 (void)Paced::start(std::span<const uint32_t>(table, 256));
 brio::Tim<4>::interrupts(brio::tim_ude, true);   // the request, then the count
@@ -750,6 +856,8 @@ moving one sample of another timer's counter per period:
 ```cpp
 using Row = brio::DmaRequestOf<brio::DmaRequest::tim2_up>;
 using Sampler = brio::DmaChannel<Row::controller, Row::channel>;
+static_assert(brio::dma_claim<brio::DmaSlotId<Row::controller, Row::channel>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 2, brio::DmaSignal::update>>);
 
 (void)Sampler::load(brio::DmaTransfer{
     .peripheral = brio::Tim<3>::cnt_address(), .memory = buffer, .count = 16,
@@ -766,6 +874,8 @@ over the same storage:
 ```cpp
 using Row = brio::DmaRequestOf<brio::DmaRequest::tim2_up>;
 using Sampler = brio::DmaRxEngine<Row::controller, Row::channel>;
+static_assert(brio::dma_claim<brio::DmaSlotId<Row::controller, Row::channel>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 2, brio::DmaSignal::update>>);
 alignas(4) uint16_t samples[256];                // a power of two: the view's mask
 using Samples = brio::HardwareRing<samples, Sampler>;
 
@@ -816,19 +926,21 @@ block's reset line, the one act that withdraws a request already raised.
 
 ## Bench findings
 
-`test_vx03_dma` measures at 144 MHz, the source of every copy a
+The three suites measure at 144 MHz, the source of every copy a
 four-kilobyte pattern in the image itself and the core's own counter the
-ruler. On the CH32V203C8T6 the thirteen letters of a part with one
-controller run with the board bare but for the core board's crossed pair
-to the fourth port (PB0 to PA3, which letters q and r take): **57
-verdicts in `z`**. On the CH32V303VCT6 DMA2's five single-board letters
-run beside DMA1's with the far board dark: **67 verdicts in `z`**; that
-board's crossed pair is retired (UART4's default pads PC10/PC11 are the
-desk pair's SPI link), and its letters n, q and r are the two-board key
-`y` against the far chip's usart_peer - UART4 on its second column,
-PB0/PB1, its engines DMA2's channels 5 and 3: **11 verdicts**. Where one
-number is given below it is both parts'; where they differ each is
-named.
+ruler; letters a, c, d, f, h, i, j and m are `test_vx03_dma`'s, b, e, o,
+k and l `test_vx03_dma_paced`'s, and g, p, q, r and n
+`test_vx03_dma_serial`'s. On the CH32V203C8T6 the letters of a part with
+one controller run with the board bare but for the core board's crossed
+pair to the fourth port (PB0 to PA3, which letters q and r take): **24,
+13 and 23 verdicts in `z`**. On the CH32V303VCT6 DMA2's single-board
+letters run beside DMA1's with the far board dark: **35, 18 and 14
+verdicts in `z`**; that board's crossed pair is retired (UART4's default
+pads PC10/PC11 are the desk pair's SPI link), and its letters n, q and r
+are the two-board key `y` against the far chip's usart_peer - UART4 on
+its second column, PB0/PB1, its engines DMA2's channels 5 and 3: **11
+verdicts**. Where one number is given below it is both parts'; where
+they differ each is named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
   kilobytes copied flash to RAM take 24809 cycles as 4096 bytes, 12530
@@ -931,9 +1043,10 @@ named.
   2, 3 and 4 - the rows of table 11-3, 503 or 504 ... 8003 or 8004.
 - **Both block engines run on DMA2**, each serviced from that
   controller's own handler: the loop engine played eight laps of eight
-  compares into TIM5 in 12801 us for 12800 asked, with no fault, and the
-  ping-pong engine filled four blocks of eight samples of a counter
-  taken 200 us apart (204, 404 ... 1604), with no overrun.
+  compares into TIM5 on TIM5's update (channel 2) in 12800 us for 12800
+  asked, with no fault, and the ping-pong engine, on TIM8's update
+  (channel 1), filled four blocks of eight samples of a counter taken 200
+  us apart (201, 401 ... 1601), with no overrun.
 - **The 64 KB rule on the CH32V303VCT6**: DMA1 refused the span across
   0x0801 0000 and took its lower half; DMA2 moved the whole span byte for
   byte; and with the refusal bypassed DMA1 delivered the WRAP described
@@ -1016,28 +1129,26 @@ named.
   enabled with DMAR set made a later TIM6 staircase on the same DMA2
   channel move all sixteen items at once (the section above); with the
   port released, the staircase ran at the timer's pace again.
-- **A released requester hands over clean, and a held request is
-  answered** (`test_vx03_i2c` letters p and q, `test_vx03_dma` letter p,
-  on the CH32V303VCT6 and the CH32V203C8T6 alike): USART2's transmit
-  engine run and released, then I2C1's DMA read of sixteen on channel 7,
-  byte-exact with the channel's count at zero; I2C1's read stopped with
-  RxNE and BTF standing under DMAEN (STAR1 0x44, CTLR2 0x1930) and the
-  host released, then USART2's run of 51 bytes out on channel 7 in its
-  4 ms of wire. Built over releases that clear DMAT, DMAR, UE or PE and
-  close the gate with no reset, and over an I2C host and a USART receive
-  engine that end a write on any BTF, keep the event vector up through a
-  read block and leave a stalled ring's wait armed, the same images fail
-  on the CH32V303VCT6: the I2C read
-  takes its one stray item and stalls (count 15 of 16), the USART2 run
-  stalls after one byte (count 50 of 51), the write over the dead channel
-  6 reports `i2c_ok` with one byte of 32 at the target, and the read and
-  the receive ring over a dead channel storm their vectors (60001 and
-  100001 entries before the suites' guards silence them).
-  A TIMER'S COMPARE REQUEST IS HELD THE SAME WAY: TIM3's channel 1 compare
-  with CC1DE, matched once and its gate closed without a reset, moved one
-  item of an I2C1 write on channel 6 and stalled it (count 31 of 32, the
-  target holding one byte); TIM3's reset line, pulsed with the gate
-  closed, let it go and the same write landed whole.
+- **A held request is answered** (`test_vx03_i2c` letter q,
+  `test_vx03_dma_serial` letter p, on the CH32V303VCT6 and the
+  CH32V203C8T6 alike): a request another peripheral raised on a
+  transport's channel and kept behind its closed gate - staged by
+  register, the channel given to no one else - meets each transport
+  without a storm. TIM3's channel 1 compare with CC1DE, matched once and
+  its gate closed without a reset, moved one item of an I2C1 write on
+  channel 6 and stalled it (count 31 of 32, the target holding one byte),
+  the write answered `i2c_dma_fault`; a read over channel 7 held by
+  USART2's transmit request entered the event vector for the START and
+  the address alone, the tenure answered by the caller's bound and
+  `recover()`; USART2's receive ring over channel 6 held by TIM3 gave the
+  channel up within its bound, one DMA fault and no storm. With the
+  holder's reset line pulsed, gate closed, each was let go and the same
+  write, read and burst landed whole. Built over an I2C host and a USART
+  receive engine that end a write on any BTF, keep the event vector up
+  through a read block and leave a stalled ring's wait armed, the same
+  stagings reported `i2c_ok` with one byte of 32 at the target and stormed
+  their vectors (60001 and 100001 entries before the suites' guards
+  silenced them).
 - **THE PRIORITY RULE ON THE BENCH** (letter q, both parts): 16 KB at 1
   Mbaud and 64 KB at 4.5 Mbaud poured into a ring of 512 while a 2 KB copy
   ran back to back on a lower channel at the copy engine's default level
@@ -1077,9 +1188,9 @@ the bus contract's and the same in both.
 
 | operation | BEFORE | AFTER |
 |---|---|---|
-| copy, 4096 bytes as 1024 words: wall | 6504 | 6385 |
-| copy: launch, completion's handler, fixed cost | 208, 94, 360 | 113, 79, 241 |
-| paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 84, 80 |
+| copy, 4096 bytes as 1024 words: wall | 6504 | 6392 |
+| copy: launch, completion's handler, fixed cost | 208, 94, 360 | 118, 86, 248 |
+| paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 82, 82 |
 | SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 379, 1, 145, 571 |
 | SPI1 engined write at /16: fixed cost | 926 | 561 |
 | SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 582 |
@@ -1092,9 +1203,9 @@ the bus contract's and the same in both.
   runtime's memcpy does the same 4096 bytes in about 3130 cycles, half the
   DMA's time ([../design/benchmark.md](../design/benchmark.md)): the
   engine frees the core, it does not outrun it.
-- **The fixed cost of a copy is 241 cycles** of wall above the moving, of
+- **The fixed cost of a copy is 248 cycles** of wall above the moving, of
   which the instrument is 107 (the stopwatch and the vector's stamp pair):
-  134 cycles of the engine's own - the launch, five stores and the
+  141 cycles of the engine's own - the launch, five stores and the
   ledger's count, and the completion's handler.
 - **THE SPI TRANSACTION'S FIXED COST went from 1087 to 514 cycles**, one
   interrupt where there were two, and one idle turn per wake. Less the
@@ -1111,9 +1222,9 @@ the bus contract's and the same in both.
   are the buffer's, judged with no wire by the SPI's own transmit CRC
   ([spi.md](spi.md)).
 - **The pace holds to the cycle**: the 256 words of a 1440-cycle pace
-  arrived 1434 to 1446 cycles apart, watched by the core under the mask on
+  arrived 1436 to 1447 cycles apart, watched by the core under the mask on
   the counter's position - the watching loop's own turn is the spread -
-  and the whole block took 369004 cycles for 368640 due, the first
+  and the whole block took 368974 cycles for 368640 due, the first
   update's period and the completion's latency the difference.
 - **A ONE-FRAME ENGINED SPI REQUEST WEDGED THE NEXT, before the rework.**
   The transaction completed inside the launch - the receive channel took
@@ -1159,7 +1270,7 @@ Implemented but not bench-verified, each with what would measure it:
   and a timer stream in the copy's place, each judged on the ring's bytes
   and overrun count.
 - **UART4's receive request on DMA2's channel 3**: its transmit request
-  is measured held on channel 5 (letter s); the receive side wants a
+  is measured held on channel 5; the receive side wants a
   frame on its pad, and both of that port's columns are the desk pair's
   wires - the far chip's frame, the port released without its reset and
   a TIM6 staircase on channel 3 after it, is what would measure it.

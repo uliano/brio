@@ -162,6 +162,12 @@ struct PeerLink {
     static constexpr DmaSlot tx_slot = Raw::dma_tx_slot;
     using Tx = DmaTxEngine<tx_slot.controller, tx_slot.channel, uint16_t>;
     using Rx = DmaRxEngine<rx_slot.controller, rx_slot.channel, uint16_t>;
+    // The client's two slots are its instance's requests', for the whole
+    // image (docs/design/dma.md, "The ownership rule").
+    static_assert(dma_claim<DmaSlotId<tx_slot.controller, tx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, n, DmaSignal::tx>>);
+    static_assert(dma_claim<DmaSlotId<rx_slot.controller, rx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, n, DmaSignal::rx>>);
 };
 
 /// The part's link: SPI3's second column where the part has SPI3, SPI2's

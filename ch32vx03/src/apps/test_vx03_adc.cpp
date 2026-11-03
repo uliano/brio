@@ -229,6 +229,17 @@ constexpr uint16_t tear_items = 64;
 constexpr uint16_t tear_source[tear_items] = {};
 volatile uint16_t tear_dest[tear_items];
 
+/// THE IMAGE'S DMA SLOTS, one owner each for the whole image
+/// (docs/design/dma.md, "The ownership rule"): ADC1's request on its own
+/// channel - the block stream and the channel programmed by hand alike,
+/// Adc::claim_stream() making the same claim - and letter d's tear
+/// window, a block memory to memory, on channel 2 under that channel's
+/// copy tag. ADC2's request is claimed where letter n names it.
+static_assert(dma_claim<DmaSlotId<DmaRequestOf<DmaRequest::adc1>::controller,
+                                  DmaRequestOf<DmaRequest::adc1>::channel>,
+                        DmaOwner<DmaPeriph::adc, 1, DmaSignal::rx>>);
+static_assert(dma_claim<DmaSlotId<1, 2>, DmaCopyOwner<1, 2>>);
+
 /// What the consumer keeps of every block and every sample it is lent.
 volatile uint16_t blocks_seen = 0;
 volatile uint16_t block_first[block_elements];
@@ -1301,6 +1312,8 @@ template <uint8_t n = 1>
 uint32_t time_conversions(uint8_t ch, uint16_t count) {
     using A = Adc<n>;
     using Ch = DmaChannel<A::dma_slot.controller, A::dma_slot.channel>;
+    static_assert(dma_claim<DmaSlotId<A::dma_slot.controller, A::dma_slot.channel>,
+                            DmaOwner<DmaPeriph::adc, n, DmaSignal::rx>>);
     Ch::stop();
     (void)Ch::load(DmaTransfer{
         .peripheral = A::data_address(),
@@ -2166,6 +2179,8 @@ void tn_adc2_dma() {
     if constexpr (on) {
         using A = Adc<n>;
         using Ch = DmaChannel<A::dma_slot.controller, A::dma_slot.channel>;
+        static_assert(dma_claim<DmaSlotId<A::dma_slot.controller, A::dma_slot.channel>,
+                                DmaOwner<DmaPeriph::adc, n, DmaSignal::rx>>);
         all_off();
         drive_levels();
         // THE DIE IS ASKED FIRST. The request is a lot's (table 11-3's

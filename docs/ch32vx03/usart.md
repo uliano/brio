@@ -1039,7 +1039,7 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   cycles at the three rates). Its clear of IDLE is `USART_GetITStatus`
   then `USART_ReceiveData` - a read of DATAR while the channel it has
   just re-armed owns it.
-- **A receive channel that never takes the frame** (`test_vx03_dma`
+- **A receive channel that never takes the frame** (`test_vx03_dma_serial`
   letter p, both parts): USART2's ring armed over channel 6 with TIM3's
   compare request held there by a gate closed without a reset, the
   channel's enable moving one item (count 127 of 128) and then nothing;
@@ -1047,7 +1047,7 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   entry and the 255 of the wait - gave the channel up with one DMA fault
   counted, and the thread ran on; with TIM3's reset pulsed the consumer's
   next look started the ring again and ten frames arrived whole.
-- **An overrun at a message's tail** (`test_vx03_dma` letter r, both
+- **An overrun at a message's tail** (`test_vx03_dma_serial` letter r, both
   parts: on the CH32V203C8T6 USART2's ring fed by the fourth port at 1
   Mbaud, on the CH32V303VCT6 UART4's ring on DMA2 fed by the far chip's
   usart_peer, the copy on DMA2's channel 1): a 2 KB copy at
@@ -1073,7 +1073,7 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   go, and the ring then held the frame: the request a frame raises
   outlives a CPU read of its data, so the byte is not lost, and only its
   error flags go with the clear.
-- **The ring against a copy** (`test_vx03_dma` letter q, both parts): 16
+- **The ring against a copy** (`test_vx03_dma_serial` letter q, both parts): 16
   KB at 1 Mbaud and 64 KB at 4.5 Mbaud poured into a ring of 512 while a 2
   KB copy ran back to back on a lower channel at the copy engine's default
   level - on the CH32V203C8T6 the fourth port into USART2's ring on DMA1's
@@ -1086,7 +1086,7 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   8 KB at 1 Mbaud, about a thousand bytes of 8192 delivered, and the
   vector entered 145 to 155 thousand times in 85 ms, a starved channel
   re-entering it back to back.
-- **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
+- **The receive ring** is `test_vx03_dma_serial`'s letter g, with no wire: the
   channel circular over the storage from `init()`, a burst across the
   storage's end delivered whole with nobody reading, a lap the consumer
   missed counted once and skipped, a held run refused at its release

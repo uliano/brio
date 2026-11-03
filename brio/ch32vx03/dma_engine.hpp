@@ -70,6 +70,16 @@
  * own, served from its peripheral's interrupt - here a transport) asks
  * the tag about, with `if constexpr`, so every engine branch disappears
  * from a driver that does not name one.
+ *
+ * The last piece is the claim, `dma_engine_claim`: the type that binds an
+ * engine's slot to the request it serves gives the slot to that request
+ * through util/dma_owner.hpp, so a second owner on a slot, or a second slot
+ * for a request, does not compile (docs/design/dma.md, "The ownership
+ * rule"). On this family the second half never fires for a transport -
+ * each request is wired to one slot, and the transport refuses any other -
+ * and the first is the one that bites: a channel ORs several peripherals'
+ * requests (11.2.3), and two of them given one channel in one image is the
+ * error.
  */
 
 #pragma once
@@ -77,6 +87,7 @@
 #include <stdint.h>
 
 #include "ch32vx03/device.hpp"
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -119,6 +130,19 @@ template <typename Tx, typename Rx>
 constexpr bool dma_engines_distinct() {
     if constexpr (Tx::present && Rx::present) {
         return dma_engine_slot<Tx>() != dma_engine_slot<Rx>();
+    } else {
+        return true;
+    }
+}
+
+/// The claim a transport makes in its class body for each engine slot: the
+/// engine's slot, `DmaSlotId<controller, channel>`, given to `Owner`, the
+/// request the transport serves on it; nothing for an empty slot. A
+/// compile-time constant, true where it compiles (util/dma_owner.hpp).
+template <typename Engine, typename Owner>
+consteval bool dma_engine_claim() {
+    if constexpr (Engine::present) {
+        return dma_claim<DmaSlotId<Engine::controller, Engine::channel>, Owner>;
     } else {
         return true;
     }

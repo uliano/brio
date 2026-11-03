@@ -1175,6 +1175,9 @@ void tl_fpu_trip() {
 volatile uint32_t dma_src_word = 0xA5A5'5A5Au;
 volatile uint32_t dma_dst_word = 0;
 using SleepDma = DmaChannel<1, 1>;
+/// Its slot is a memory-to-memory block's for the whole image, under the
+/// channel's copy tag (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<1, 1>, DmaCopyOwner<1, 1>>);
 
 DmaTransfer sleep_block() {
     return DmaTransfer{.peripheral = &dma_src_word,

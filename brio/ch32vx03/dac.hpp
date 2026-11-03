@@ -659,6 +659,9 @@ public:
                       "request on DMA2's channel 3 and DAC2 on DMA2's channel 4, and an engine "
                       "anywhere else would never see a trigger "
                       "(DmaRequestOf<DmaRequest::dac1> is how to spell it)");
+        // The slot is this channel's request's for the whole image
+        // (docs/design/dma.md, "The ownership rule").
+        static_assert(dma_engine_claim<Engine, DmaOwner<DmaPeriph::dac, ch, DmaSignal::tx>>());
         static_assert(sizeof(typename Engine::element) == dac_format_bytes(format),
                       "brio Dac: the element type is the beat - a 12-bit holding register takes "
                       "a half-word and the 8-bit one a byte");
@@ -682,6 +685,8 @@ public:
         static_assert(dma_engine_slot<Engine>() == dac_dma_slot(1),
                       "brio Dac: a dual stream rides DAC1's request, DMA2's channel 3 (RM table "
                       "11-3)");
+        // DAC1's request owns the slot, as claim_stream<1>() claims it.
+        static_assert(dma_engine_claim<Engine, DmaOwner<DmaPeriph::dac, 1, DmaSignal::tx>>());
         static_assert(sizeof(typename Engine::element) == dac_dual_format_bytes(format),
                       "brio Dac: a dual 12-bit holding register takes a word, the dual 8-bit one "
                       "a half-word");

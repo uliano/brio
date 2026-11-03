@@ -1258,6 +1258,11 @@ class SpiHost {
                   "brio SpiHost: on this family the channel IS the request (RM tables 11-2 to "
                   "11-5) - SPI1 receives on DMA1's channel 2, SPI2 on DMA1's 4 and SPI3 on "
                   "DMA2's 1, and an engine on any other slot would move nothing");
+    // Each engine's slot is this instance's request's for the whole image
+    // (docs/design/dma.md, "The ownership rule"): another owner on either
+    // channel does not compile. The I2S face raises the same two requests.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::rx>>());
     static_assert(spi_pins_valid(n, pins),
                   "brio SpiHost: these SPI pads are not a link on this part - SCK is required, "
                   "no two signals may name the same pad, the remap code must be a column the "

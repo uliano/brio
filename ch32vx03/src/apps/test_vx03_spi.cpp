@@ -1700,6 +1700,16 @@ BlockResult block_run(SpiClock rate, bool high_speed) {
     using HostRx = DmaChannel<H::dma_rx_slot.controller, H::dma_rx_slot.channel>;
     using ClientTx = DmaChannel<C::dma_tx_slot.controller, C::dma_tx_slot.channel>;
     using ClientRx = DmaChannel<C::dma_rx_slot.controller, C::dma_rx_slot.channel>;
+    // Each channel programmed here is its own instance's request's, as the
+    // instance's transport claims it (docs/design/dma.md, "The ownership rule").
+    static_assert(dma_claim<DmaSlotId<H::dma_tx_slot.controller, H::dma_tx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, H::number, DmaSignal::tx>>);
+    static_assert(dma_claim<DmaSlotId<H::dma_rx_slot.controller, H::dma_rx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, H::number, DmaSignal::rx>>);
+    static_assert(dma_claim<DmaSlotId<C::dma_tx_slot.controller, C::dma_tx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, C::number, DmaSignal::tx>>);
+    static_assert(dma_claim<DmaSlotId<C::dma_rx_slot.controller, C::dma_rx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, C::number, DmaSignal::rx>>);
     constexpr bool wide = sizeof(Elem) == 2u;
     constexpr DmaWidth w = wide ? DmaWidth::half : DmaWidth::byte;
     constexpr SpiDataSize bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
@@ -1797,6 +1807,10 @@ BlockResult spi1_top_run(SpiClock rate, bool high_speed, bool mode2 = false) {
     using C = typename L::S2;
     using ClientTx = DmaChannel<C::dma_tx_slot.controller, C::dma_tx_slot.channel>;
     using ClientRx = DmaChannel<C::dma_rx_slot.controller, C::dma_rx_slot.channel>;
+    static_assert(dma_claim<DmaSlotId<C::dma_tx_slot.controller, C::dma_tx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, C::number, DmaSignal::tx>>);
+    static_assert(dma_claim<DmaSlotId<C::dma_rx_slot.controller, C::dma_rx_slot.channel>,
+                            DmaOwner<DmaPeriph::spi, C::number, DmaSignal::rx>>);
     constexpr uint16_t n = B::count;
     for (uint16_t i = 0; i < n; ++i) {
         B::host_out[i] = static_cast<uint8_t>(0x5Au + i * 0x0Bu);
