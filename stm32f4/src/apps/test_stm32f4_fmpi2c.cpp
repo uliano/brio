@@ -653,6 +653,14 @@ void te_scan() {
 /// period between two of them - which is the bit period, every software
 /// sequence of the chapter only ever lengthening one. The pad is an
 /// open-drain alternate function, so its input buffer reads the wire.
+///
+/// THE PERIOD IS READ ON THE FIRST EIGHT RISING EDGES AND NO LATER ONES: the
+/// address and direction bits of a tenure that has raised no event yet. The
+/// ninth rise is where the block samples the acknowledge, and its NACK entry
+/// (some 230 cycles) lands right there: it dated that rise late, or at 400 kHz
+/// covered SCL's whole high phase so that the rise went unseen, one run of the
+/// letter in ten, a period read 12 to 16 per cent long on a wire that had
+/// nothing wrong. Every rising edge is still counted in `edges`.
 struct SclReading {
     uint32_t edges = 0;
     uint32_t shortest = 0;   ///< the shortest gap between two rising edges, in core cycles
@@ -664,7 +672,12 @@ struct SclReading {
     uint32_t poll = 0;
     /// The gaps `average` is the mean of: the edges the loop dated, less one.
     uint32_t gaps = 1;
+    /// A tick's entry landed between the first dated edge and the last.
+    bool ticked = false;
 };
+
+/// The rising edges a period is dated over, SclReading's reason beside it.
+constexpr uint32_t scl_dated_edges = 8u;
 
 template <typename Pad = SclPad>
 SclReading count_scl() {
@@ -675,7 +688,8 @@ SclReading count_scl() {
     uint32_t total = 0;
     uint32_t turns = 0;
     uint32_t turns_at_last = 0;
-    uint32_t dated = 0;   ///< the edges the loop dated, the last pass's left out
+    uint32_t dated = 0;   ///< the edges the loop dated, at most scl_dated_edges
+    uint32_t tick_at_first = 0;
     // IDR read here and not through Pad::read(), which gcc takes out of line
     // once this file calls it often enough: a call in the loop takes a turn from
     // 26 cycles to 46, past SCL's high phase at Fm+ on this wire, and an edge
@@ -700,17 +714,24 @@ SclReading count_scl() {
             ++turns;
         }
         if (now && !prev) {
-            const uint32_t d = since(last_val, v, period);
-            if (r.edges != 0u) {
-                total += d;
-                if (d < shortest) {
-                    shortest = d;
+            if (dated < scl_dated_edges) {
+                const uint32_t d = since(last_val, v, period);
+                if (r.edges != 0u) {
+                    total += d;
+                    if (d < shortest) {
+                        shortest = d;
+                    }
+                } else {
+                    tick_at_first = Ticker::ticks();
+                }
+                last_val = v;
+                ++dated;
+                turns_at_last = turns;
+                if (dated == scl_dated_edges) {
+                    r.ticked = Ticker::ticks() != tick_at_first;
                 }
             }
-            last_val = v;
             ++r.edges;
-            dated = r.edges;
-            turns_at_last = turns;
         }
         prev = now;
     }
@@ -727,9 +748,8 @@ SclReading count_scl() {
 /// entry, lands inside a clock count and dates its last edge late (one run of
 /// the Fm+ row in 43 read 210 cycles of mean gap for 179). The longest line
 /// here takes 30 ms; the bound is its double and more. The tick stays on: its
-/// entry on a last edge is about 100 cycles in the 180000 of a tick, one run in
-/// 1800, and the told row's slack holds about 64 of them (four per cent over
-/// eight gaps of 180 cycles), so that is the rate left.
+/// entry inside a count is reported by `ticked`, and the told row takes such a
+/// count again.
 void console_quiet() {
     const uint32_t t0 = Ticker::ticks();
     while (!Serial::tx_idle() && Ticker::ticks() - t0 < 100u) {
@@ -871,7 +891,14 @@ void tf_speeds() {
             continue;
         }
         Host::fast_plus_drive(true);
-        const SclReading r = timed_probe(0x42, s);
+        // The tick's window is seven gaps in a tick of 180000 cycles: 7 per cent
+        // of the counts at 100 kHz, under 1 at 1 MHz. Three tries, a lengthened
+        // count judged only after the third, one count in some three thousand
+        // at 100 kHz, where the bound's four per cent holds a tick's entry.
+        SclReading r = timed_probe(0x42, s);
+        for (uint8_t again = 0; r.ticked && again != 2u; ++again) {
+            r = timed_probe(0x42, s);
+        }
         Host::fast_plus_drive(false);
         const uint32_t mean_hz = r.average == 0u ? 0u : SysClock::hz / r.average;
         const uint32_t want = fmpi2c_speed_hz(s);

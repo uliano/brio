@@ -554,26 +554,30 @@ counted rise late. Letter `f`, the mean rate on the pad:
 
 | kernel | speed | stated (the ceiling) | measured | tSYNC measured |
 |--------|-------|----------------------|----------|----------------|
-| APB1 45 MHz | Sm | 99557 Hz | 97826 Hz | 267 ns |
-| APB1 45 MHz | Fm | 394736 Hz | 367346 Hz | 278 ns |
-| APB1 45 MHz | Fm+ | 1000000 Hz | 857142 Hz | 256 ns |
-| SYSCLK 180 MHz | Sm | 98955 Hz | 97560 Hz | 167 ns |
-| SYSCLK 180 MHz | Fm | 396475 Hz | 330882 Hz | 523 ns |
-| SYSCLK 180 MHz | Fm+ | 1000000 Hz | 765957 Hz | 328 ns |
-| HSI 16 MHz | Sm | 98765 Hz | 98522 Hz | 275 ns |
-| HSI 16 MHz | Fm | 400000 Hz | 378151 Hz | 394 ns |
+| APB1 45 MHz | Sm | 99557 Hz | 97826 to 97879 Hz | 261 to 267 ns |
+| APB1 45 MHz | Fm | 394736 Hz | 368098 Hz | 272 ns |
+| APB1 45 MHz | Fm+ | 1000000 Hz | 845070 to 849056 Hz | 267 to 273 ns |
+| SYSCLK 180 MHz | Sm | 98955 Hz | 97402 to 97560 Hz | 167 to 183 ns |
+| SYSCLK 180 MHz | Fm | 396475 Hz | 371134 to 375000 Hz | 167 to 195 ns |
+| SYSCLK 180 MHz | Fm+ | 1000000 Hz | 865384 Hz | 178 ns |
+| HSI 16 MHz | Sm | 98765 Hz | 98360 to 98576 Hz | 269 to 291 ns |
+| HSI 16 MHz | Fm | 400000 Hz | 375000 to 378151 Hz | 394 to 416 ns |
 
-Not one row runs above the speed asked. The APB1 delays STATED to
-`init()` give 99722, 403587 and 1000000 Hz on the pad (1805, 446 and 180
-core cycles of mean gap) against the 99557, 398230 and 1000000 the
+Not one row runs above the speed asked. The letter reads the period on the
+first eight rising edges of the probe, the address and direction bits: the
+ninth is where the block raises its NACK, and that entry, some 230 cycles,
+would date the rise late or hide it. Sixty runs of the letter read the same
+but for the ranges above. The APB1 delays STATED to
+`init()` give 99502, 392156 and 1011235 Hz on the pad (1809, 459 and 178
+core cycles of mean gap) against the 99557, 394736 and 1000000 the
 arithmetic states - the period formula with the wire's own tSYNC, to the
 prescaler's resolution and to the instrument's. A turn of the loop that
-counts the edges is 40 to 43 core cycles at 180 MHz (the letter measures
-it: the cycles between the first and the last edge over the turns between
-them), each edge is dated to within one turn, so a mean of eight gaps is
-good to about five cycles - three per cent at Fm+, where the last row read
-178 to 181 cycles from one image to the next at the same TIMINGR. The
-letter allows exactly that above the speed and no more. A word solved against
+counts the edges is 31 to 35 core cycles at 180 MHz (the letter measures
+it: the cycles between the first and the last dated edge over the turns
+between them), each edge is dated to within one turn, so a mean of seven
+gaps is good to about six cycles - three per cent at Fm+, where the last
+row's 178 cycles lie. The letter allows exactly that above the speed and no
+more, and takes a count again when a tick's entry landed inside it. A word solved against
 the manual's budgets runs this wire FAST - 107.4 kHz, 497 kHz and 1.36
 MHz on APB1, past fast mode's 400 kHz ceiling - which is why the default
 is the floor.
