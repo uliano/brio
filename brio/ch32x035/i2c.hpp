@@ -764,14 +764,12 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * neither (the file header says what each carries), and dma_isr() bound
  * to both channels' vectors.
  *
- * A launch the transmit engine refuses is found in the ADDR entry, before
- * ADDR is cleared and with SCL held: that half runs on the pump instead and
- * the request completes. The one refusal a write half of 1 to 255 bytes can
- * meet is the engine's run-time claim() already taken, and the channel having
- * one owner, only code that calls claim() on this host's own engine takes it:
- * no correct program reaches this path. The receive engine has no claim() and
- * refuses only an empty run, one past 65535 elements or one off its beat, none
- * of which a read half of 1 to 255 bytes is.
+ * Neither launch can refuse. Each engine refuses only an empty run, one past
+ * 65535 elements or one off its beat, none of which a half of 1 to 255 bytes
+ * is. The host's own engines take no run-time claim: the channels are this
+ * host's alone, checked when the program is compiled (arm()'s owner), and it
+ * runs one tenure at a time, so busy() of the transmit engine stays false
+ * across its blocks.
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine, typename Placement = InFlash>
@@ -1116,11 +1114,11 @@ private:
                 }
                 if constexpr (has_dma) {
                     // The write half on the transmit engine, the channel
-                    // started before DMAEN raises its request. A launch the
-                    // engine refuses (the class comment) leaves DMAEN down and
-                    // the half to the pump below - ADDR not yet cleared, SCL
-                    // still held.
-                    if (t_.dma && TxEngine::start(std::span<const uint8_t>(t_.tx, t_.tx_left))) {
+                    // started before DMAEN raises its request, ADDR not yet
+                    // cleared and SCL still held. The launch cannot refuse
+                    // (the class comment).
+                    if (t_.dma) {
+                        (void)TxEngine::launch(std::span<const uint8_t>(t_.tx, t_.tx_left));
                         S::control2(t_.freq, idle_enables | i2c_itevten | i2c_dmaen);
                         (void)S::status2();
                         t_.phase = Phase::tx_dma;
@@ -1707,10 +1705,10 @@ private:
         }
     }
     /// The block this tenure has in flight thrown away, and the
-    /// controller's requests dropped: only the phase's own block, since a
-    /// write half that fell back to the pump has none on the transmit engine
-    /// (the class comment). The binding stands: the next start() needs no
-    /// arm().
+    /// controller's requests dropped: only the phase's own block, since an
+    /// error behind a write's completion finds no block on the transmit
+    /// engine and must count no fault. The binding stands: the next start()
+    /// needs no arm().
     static void put_engines_away() {
         if constexpr (has_dma) {
             S::dma(false, false);

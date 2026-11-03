@@ -134,7 +134,10 @@
  * mask over `claim()` alone and launches outside it: a claimed channel
  * cannot complete under the programmer's feet, because it is not
  * running. `start()` is the two together, for an owner with no handler
- * to race.
+ * to race. An owner that needs no run-time claim at all, its channel its
+ * own by arm() and one block at a time by its own construction, calls
+ * `launch()` alone: the I2C host does, and busy() then stays false across
+ * its blocks.
  *
  * `DmaCopyEngine<ch, Elem>` is the memory-to-memory shape: `copy(dst,
  * src, n)` and `fill(dst, cell, n)` (the source a fixed cell in memory),
@@ -639,10 +642,12 @@ public:
     /// Give a claim back unused.
     [[gnu::always_inline]] static void unclaim() { busy_ = false; }
 
-    /// Program a CLAIMED engine with the run (the caller's, and it stays
-    /// put until complete() reports the block), the beat its element's
-    /// width. False - and the claim given back - for an empty run, one
-    /// over 65535 elements, or one off its beat's boundary (8.3.6).
+    /// Program the engine with the run (the caller's, and it stays put
+    /// until complete() reports the block), the beat its element's width:
+    /// an engine claim() took, or one whose owner knows nothing of its own
+    /// is in flight (the file header). False - and any claim given back -
+    /// for an empty run, one over 65535 elements, or one off its beat's
+    /// boundary (8.3.6).
     template <typename T>
     static bool launch(std::span<const T> run) {
         static_assert(dma_beat_fits<T, Elem>, "a beat wider than this binding's widest (its Elem)");

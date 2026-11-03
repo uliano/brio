@@ -185,7 +185,9 @@ defaults - with eight channels:
   kept, the PFIC line - and a block writes its five stores. The beat is
   the run's element, `Elem` the widest the binding allows. The transmit
   engine is busy from its `claim()` to `complete()`; `launch(run)`
-  programs a claimed engine outside the caller's mask; `start(run)` is
+  programs a claimed engine outside the caller's mask, or the engine of an
+  owner with no use for a run-time claim, whose blocks `busy()` then does
+  not see (the I2C host, one tenure at a time); `start(run)` is
   the two together; `start_fixed(cell, n)` sends `n` copies of one
   element. The receive engine's `start(run)`, `start_discard(cell, n)`,
   `take()`, `full()`, `capacity()`, `idle()`; its circular shape,

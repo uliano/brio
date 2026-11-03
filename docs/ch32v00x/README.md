@@ -178,8 +178,8 @@ its whole image comes within a few per cent of that part's 40 KB or
 8 KB, which the benchmark skeleton does. `brio flash <board>
 test_ch32_tim-2` names an image, and the bare name is refused there
 with the list. Four images stay under 5 % of that flash, each holding one letter, so
-regrouping has nothing left to do: the I2C suite's letter r (1.2 % left) and
-letter g (3.5 %), the SPI suite's letters b (4.1 %) and d (4.9 %). The rule and its reasons are
+regrouping has nothing left to do: the I2C suite's letter r (1.3 % left) and
+letter g (3.6 %), the SPI suite's letters b (4.1 %) and d (4.9 %). The rule and its reasons are
 [../design/overview.md](../design/overview.md), "A suite's image fits
 the family's smallest chip"; the mechanism is `util/testbench.hpp` and
 `ch32v00x/CMakeLists.txt`'s discovery.

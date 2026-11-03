@@ -266,12 +266,10 @@ takes** - the inventory the costs below are read against:
   stopped serving, which ends the tenure `i2c_dma_fault` - this host's
   own status, declared in its header beyond the four wire codes of
   util/i2c_bus.hpp - with its STOP; a read ends on the receive block's
-  completion. A launch the transmit engine refuses is found in the ADDR entry with
-  SCL held, and that half runs on the pump, the request completing: it
-  takes the engine's run-time `claim()` already taken, which with one owner
-  a channel only code calling `claim()` on this host's own engine does, and
-  no correct program reaches it. An error puts away only the block the
-  tenure has in flight. `dma_isr()` reads the controller's one flag
+  completion. Neither engine's launch can refuse a half of 1 to 255 bytes,
+  and the host takes no run-time claim of its engines: the channels are its
+  own when the program compiles, and it runs one tenure at a time. An error
+  puts away only the block the tenure has in flight. `dma_isr()` reads the controller's one flag
   register once for both channels. Both engines arm at high, the
   transmit level of [../design/dma.md](../design/dma.md)'s rule: the host
   does not overrun - a byte a starved channel has not moved leaves BTF
@@ -366,7 +364,7 @@ to the desk. What needs no peer:
   fixed one.
 - **CKCFGR and FREQ take a write with PE set**: no enable lock.
 - **Against the CH32X035** the whole suite holds: 48 verdicts in the
-  first image, 46 in the second and 5 in the third, the four receive
+  first image, 46 in the second and 4 in the third, the four receive
   procedures, the vocabulary, the repeated START acknowledged and
   refused, the engines, the kernel letter, the two hosts and the raw
   sequences, each on the first `z` after its flash. Letter `d` there: a write to 0x7A and one to
@@ -392,8 +390,8 @@ to the desk. What needs no peer:
 - **The cost of the two guarantees.** On the CH32V003 every
   `test_ch32_i2c` group image grew 128 to 140 bytes with them (two host
   instantiations an image, each with its `unserved()`, 32 and 36 bytes,
-  and its check in `start()`): the groups `ai` and `r` now leave 4.7 and
-  4.5 % of the 15 KB. The stray branch adds nothing to a tenure's path:
+  and its check in `start()`): the groups `ai` and `r` leave 12.8 and
+  1.3 % of the 15 KB. The stray branch adds nothing to a tenure's path:
   `unserved()` is called only from an address-phase entry that found no
   ADDR, below the switch.
 - **THE RATE ASKED, on the wire** (a tenure timed on the ticker's
@@ -422,7 +420,19 @@ over two runs.
   STOP: aimed at 0x6B this host lost to the CH32X035's 0x2C and reported
   `i2c_arb_lost`, the peer's controller keeping the bus; aimed at 0x11 it
   kept the bus (`i2c_nack_addr`, nobody there) and the peer reported the
-  loss. A START set into the peer's live tenure is held (the silicon's
+  loss. The two STARTs are set microseconds apart and not at once, and one
+  set after the other has reached the wire waits for that tenure's STOP:
+  the wire then carries two tenures, each a NACK on its address, and nothing
+  is arbitrated. The letter tells such a round from a race by this board's
+  time to its answer (at most 145 us alone on the wire, 114 to 117 measured;
+  at least 176 behind another tenure) and by a low SCL after its own STOP,
+  repeats it up to five attempts and prints how many missed; a race that
+  happened and came out wrong still fails. No round missed in 276 over 92
+  runs; with the suite's time stamp moved from after the STOP to before it,
+  one of 121 did, this board's tenure first and the peer's behind it, and
+  the next attempt raced and lost. Staged, with this board's START 30 us late or the peer's 40 us late,
+  all 15 rounds read as missed and the verdicts failed. A START set into the
+  peer's live tenure is held (the silicon's
   findings above); through the engine, `start()`'s bounded BUSY wait met
   the peer's STOP and returned 93 to 96 us after the call, its own probe of
   nobody `i2c_nack_addr` and the peer's tenure undisturbed.
@@ -517,7 +527,7 @@ acknowledged tenure pays nothing for it.
 
 ### The engine a request names (`test_ch32_i2c` letter n)
 
-Five rows against the CH32X035's counting serve, each judged by its
+Four rows against the CH32X035's counting serve, each judged by its
 statuses, its bytes, the peer's count and sum and the DMA vectors'
 entries, ten runs of the letter and three of its image's `z`, every
 verdict green:
@@ -533,11 +543,6 @@ verdict green:
   vector entered, both channels' configuration word and count as
   `init()` left them, 19 event entries for the write and 17 for the
   read.
-- **A launch the transmit engine refuses**, which only the suite's own
-  `claim()` on the host's engine stages: with it taken, a write of 4 under
-  `dma` completed `i2c_ok` on the pump with no channel 6 entry, a 2 + 2
-  completed with its read half on the receive block, the engine still taken
-  after both; given back, the next write rode the engine.
 - **`dma` on the host with no engines**: `i2c_rejected` inside `start()`,
   the vector never entered, MSL clear, the peer seeing only the request
   that followed.
@@ -561,22 +566,21 @@ E <= F + N x b:
 
 | at | write: b, F, E | the engines from | read: b, F, E | the engines from |
 |---|---|---|---|---|
-| 400 kHz | 291 to 292, 1067 to 1071, 1609 | 2 bytes ((1609 - 1071) / 291 = 1.8) | 323 to 325, 903 to 911, 1521 | 2 bytes ((1521 - 911) / 323 = 1.9) |
-| 100 kHz | 304 to 306, 1011 to 1528, 1748 | 1 to 3 bytes, by the run | 337 to 339, 851 to 1404, 1660 | 1 to 3 bytes, by the run |
+| 400 kHz | 291, 1067, 1598 | 2 bytes ((1598 - 1067) / 291 = 1.8) | 323 to 325, 899 to 907, 1519 | 2 bytes ((1519 - 907) / 323 = 1.9) |
+| 100 kHz | 304 to 306, 1015 to 2010, 1598 or 1737 | 0 to 2 bytes, by the run | 337 or 338, 1209 to 1213, 1658 | 2 bytes |
 
-Each row is the range over seven runs of the letter. At 400 kHz the
+Each row is the range over three runs of the letter. At 400 kHz the
 arithmetic holds still. At 100 kHz the pump's four-byte tenure, from
 which F is taken, lasts some 490 us, and in some runs the best of eight
 still holds one of the tick's entries (seven entries or eight for the
-write, five or six for the read): F moves by up to 550 cycles between
-runs and the count with it, so at that speed the small lengths are read
-directly instead. Measured as such, a one-byte write costs the pump 1513
-busy cycles at 400 kHz and the engines 1609, a two-byte write 1661 and
-1609 (at 100 kHz 1652 and 1748, 2023 and 1748); a read of one 1410 and
-1521 (1549 and 1660), of two 1449 and 1503 in most runs (1449 and 1642),
-the pump's two-byte procedure taking one entry for both bytes, and of
-four 2203 and 1497 at
-400 kHz. So: the engines from two bytes written and three read; under
+write): F moves by up to 1000 cycles between runs and the count with it,
+so at that speed the small lengths are read directly instead. Measured
+as such, a one-byte write costs the pump 1509 busy cycles at 400 kHz and
+the engines 1598, a two-byte write 1657 and 1598 (at 100 kHz 1648 and
+1737, 2019 and 1737); a read of one 1406 and 1519 (1545 and 1658), of two
+1445 and 1501 (1807 and 1640), the pump's two-byte procedure taking one
+entry for both bytes where no tick falls in it, and of four 2199 and
+1495 at 400 kHz. So: the engines from two bytes written and three read; under
 that the interrupt. Against the wire: the pump spends 291 cycles of a 1098-cycle
 byte at 400 kHz (a quarter of the core) and 305 of a 4338-cycle byte at
 100 kHz (a fourteenth); the engines spend none a byte.
@@ -602,7 +606,7 @@ lines left down) and drops the byte it was asked beyond a closing NACK
 with `flush()`; its host action is the instance's role switch, writing
 (`arb`) or reading (`host_read`, the extended repertoire), and its
 `counters` answer what a report has no field for. Against the
-CH32X035's `test_x035_i2c` - every one of its 107 verdicts, over its two
+CH32X035's `test_x035_i2c` - every one of its 112 verdicts, over its two
 images - it answered
 108 commands with no nak and no vector entered while it was polled, and
 showed the habits of this block as a target, each measured from the far
@@ -673,12 +677,12 @@ its wall ending once the STOP has gone out. At 400 kHz:
 
 | tenure | the rest (cycles), entries | the EVT, polled (busy = wall) |
 |---|---|---|
-| write 1 | 1394, 4 | 780 |
-| write 16 | 1394, 19 | 797 |
-| read 1 | 1251, 3 | 707 |
-| read 16 | 1546, 17 | 741 |
-| register read 1 + 1 | 2016, 7 | 1221 |
-| probe answered | 951, 2 | 572 |
+| write 1 | 1390, 4 | 780 |
+| write 16 | 1390, 19 | 797 |
+| read 1 | 1132 to 1235, 3 or 4 | 707 |
+| read 16 | 1516 to 1542, 17 | 741 |
+| register read 1 + 1 | 1961 to 2025, 7 | 1221 |
+| probe answered | 947, 2 | 572 |
 | write 255 through the engine, x | 1.00 | 1.00 |
 
 (An entry count is the I2C's two vectors, channels 6 and 7 and the tick:
@@ -695,18 +699,19 @@ a tenure longer than a tick period may hold one of the tick's.)
   of them the stamps'), one a byte being this silicon's.
 - **The engines** take a 255-byte write in four entries (SB, ADDR, the
   transmit block's completion and BTF) and a read in three (SB, ADDR and
-  the receive block's completion), at x 1.00, the core busy 3 086 and
-  2 612 to 2 835 cycles of 282 429 and 282 503 (the tick's entries inside
+  the receive block's completion), at x 1.00, the core busy 3 075 and
+  2 833 cycles of 282 418 and 282 501 (the tick's entries inside
   them); their fixed cost is under the pump's for a write of any length
-  (1219 cycles against 1394) and for a read of four bytes or more (1293
-  against 1520 to 1546), and over it for a read of one or two (1287 and
-  1299 against 1200 to 1252 and 1230 to 1256). The transmit block's
+  (1208 cycles against 1390) and for a read of four bytes or more (1291
+  against 1516 to 1542), and over it for a read of one or two (1285 and
+  1297 against 1132 to 1235 and 1212 to 1226). The transmit block's
   completion entry is the price of carrying a write half before a read:
   it hands the half back to the event vector for the BTF or the TxE that
   ends it.
 - **The register read** (one byte written, the repeated START on its
-  TxE, one read) takes seven entries and 2016 cycles of fixed cost on the
-  pump; under `dma`, both halves on the engines, seven entries and 1867.
+  TxE, one read) takes seven entries and 1961 to 2025 cycles of fixed cost on the
+  pump; under `dma`, both halves on the engines, seven entries and 1855 or
+  1856.
 - **The pump takes no placement**: measured in the same letter through
   a twin host whose event pump was an instance in SRAM behind the same
   vector in the flash, an entry of a 255-byte write took 161 cycles
@@ -718,11 +723,11 @@ a tenure longer than a tick period may hold one of the tick's.)
   no placement parameter on this family and a program that wants the
   pump from SRAM places its event vector.
 - **Against the EVT** the comparison is between two contracts: the
-  polled loop's fixed cost is 379 to 805 cycles under this engine's
+  polled loop's fixed cost is 375 to 804 cycles under this engine's
   (no vector entry, no idle turn, no instrument stamp inside it) and its
   CPU is the bus's for the whole tenure - 281 972 cycles for a 255-byte
   write at 400 kHz, where this engine's pump keeps the core busy for
-  75 388 to 75 581 of them and its engines for 3 086.
+  75 325 to 75 385 of them and its engines for 3 075.
 
 ## Not covered yet
 

@@ -220,7 +220,9 @@ of one channel to another: there is nothing more to use or decline.
   that flag's test-and-set and nothing else, the one step a transport whose
   completion handler starts the next block takes under its mask;
   `launch(run)` programs an engine `claim()` took, outside the mask (a
-  refused run gives it back); `unclaim()` gives it back unused;
+  refused run gives it back), or the engine of an owner with no use for a
+  run-time claim, whose blocks `busy()` then does not see (the I2C host, one
+  tenure at a time); `unclaim()` gives it back unused;
   `start(run)` is the two together, for a caller with no handler to
   race, false on a busy engine; `start_fixed(cell, n)` takes the engine
   and sends `n` copies of one element, what a full-duplex bus clocks a

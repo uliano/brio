@@ -237,12 +237,11 @@ default, or `InRam`);
   (util/i2c_bus.hpp's `I2cEngine`): `interrupt`, the default - a request
   that names nothing gets it -, moves every byte from the event vector,
   the first two of a write in the ADDR entry, and touches no channel;
-  `dma` puts every data half on the engines at any length. A launch the
-  transmit engine refuses is found in the ADDR entry with SCL held, and that
-  half runs on the pump, the request completing: it takes the engine's
-  run-time `claim()` already taken, which with one owner a channel only code
-  calling `claim()` on this host's own engine does, and no correct program
-  reaches it. An error puts away only the block the tenure has in flight.
+  `dma` puts every data half on the engines at any length. Neither engine's
+  launch can refuse a half of 1 to 255 bytes, and the host takes no run-time
+  claim of its engines: the channels are its own when the program compiles,
+  and it runs one tenure at a time. An error puts away only the block the
+  tenure has in flight.
 - `I2cClient<1, pins>`: `init(clock, addresses, I2cClientOptions)` - a
   polled client with `.interrupts = false` -, the polled surface
   (`addressed()`, `answer_address()` returning the direction,
@@ -325,7 +324,7 @@ board's PB3, which the suite drives high from its boot - PC17 is the
 board's boot pin, and a pull-up to the supply would send every power-up
 into WCH's loader. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
-channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
+channel, the stuck BUSY, the vectors' client, the cost): `z` is 59 and
 53 verdicts, green.
 
 - **The lot probe** answered PRESENT: FREQ, CKCFGR and OADDR1 hold what
@@ -363,11 +362,7 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
   block with its NACK prepared before the address and its STOP set in
   the ADDR entry, LAST clear. `interrupt` at sixteen bytes on the host
   with engines bound: no DMA entry, both channels' configuration word and
-  count as `init()` left them, 17 event entries each way. With
-  `DmaTxEngine<6>` taken by the suite's own `claim()`, a write of 4 under
-  `dma` completed on the pump with no channel 6 entry and a 2 + 2 with its
-  read half on the receive block, the engine still taken; given back, the
-  next write rode the engine. `dma` on the host with no engines: `i2c_rejected`
+  count as `init()` left them, 17 event entries each way. `dma` on the host with no engines: `i2c_rejected`
   inside `start()`, the vector never entered, nothing on the wire. Under
   `dma` an address nobody answers is `i2c_nack_addr` writing and reading,
   a NACK on the third of six bytes written `i2c_nack_data` with channel 6
@@ -385,7 +380,17 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
 - **Arbitration in both directions**: two controllers' STARTs released by
   one STOP - this host aimed at 0x6B lost to the peer's 0x2C and reported
   `i2c_arb_lost`; aimed at 0x11 it kept the bus (`i2c_nack_addr`, nobody
-  there) and the peer reported the loss. **As the peer's client**, polled,
+  there) and the peer reported the loss. The two STARTs are set microseconds
+  apart and not at once, and one set after the other has reached the wire
+  waits for that tenure's STOP: the wire then carries two tenures, each a
+  NACK on its address, and nothing is arbitrated. The letter tells such a
+  round from a race by this board's time to its answer (at most 145 us alone
+  on the wire, 96 measured; at least 176 behind another tenure) and by a low
+  SCL after its own STOP, repeats it up to five attempts and prints how many
+  missed; a race that happened and came out wrong still fails. No round
+  missed in 339 over 113 runs. Staged, with this board's START 30 us late or
+  the peer's 40 us late, all 15 rounds read as missed and the verdicts
+  failed. **As the peer's client**, polled,
   this board answered its own address in a write tenure and took six bytes
   byte-exact, ending on the STOP; read twice six bytes back to back by the
   peer's controller (twi_link's `host_read`), it served each run
@@ -499,8 +504,8 @@ command mode and every action included. Its target is polled
 with `flush()`; its host action is the instance's role switch, writing
 (`arb`) or reading (`host_read`); `hold_sda` pulls the line down with a
 push-pull output over a clear bit, this series having no open-drain GPIO.
-Against the CH32V006's `test_ch32_i2c` - its 93 verdicts over the suite's
-two images on that part - it answered 111 commands with no nak and no
+Against the CH32V006's `test_ch32_i2c` - its 98 verdicts over the suite's
+three images on that part - it answered 111 commands with no nak and no
 vector entered while it was polled, and showed this block's habits as a
 target, each measured from the far end:
 
@@ -551,39 +556,41 @@ the same vector:
 
 | tenure | the pump from the flash: rest, entries, cycles an entry | from SRAM: rest, cycles an entry | the engines: rest, entries + DMA |
 |---|---|---|---|
-| write 1 | 1312, 3, 238 | 1049, 160 | 1256, 3 + 1 |
-| write 2 | 1314, 3, 251 | - | 1250, 3 + 1 |
-| write 16 | 1306, 17, 227 | 1023, 148 | 1254, 3 + 1 |
-| write 255 | 1316, 256, 217 | 1029, 143 | 1284, 3 + 1 |
-| read 1 | 1344, 3, 247 | 1154, 164 | 1332, 2 + 1 |
-| read 2 | 1406, 3, 267 | 1127, 168 | 1294, 2 + 1 |
-| read 16 | 1746, 17, 265 | 1343, 160 | 1290, 2 + 1 |
-| read 255 | 1756, 256, 257 | - | 1284, 2 + 1 |
-| register read 1 + 1 | 2108, 5, 257 | - | 1964, 5 + 2 |
-| register read 1 + 4 | 2490, 7, 278 | 1908, 172 | 1986, 5 + 2 |
-| probe | 1070, 2, 221 | 869, 150 | - |
+| write 1 | 1324 to 1332, 3, 242 to 245 | 1058 to 1080, 163 | 1244, 3 + 1 |
+| write 2 | 1310 to 1318, 3, 254 to 257 | - | 1242, 3 + 1 |
+| write 16 | 1322, 17, 224 | 1028 to 1041, 149 or 150 | 1254 to 1262, 3 + 1 |
+| write 255 | 1324, 256, 213 | 1022 to 1040, 145 | 1276 to 1280, 3 + 1 |
+| read 1 | 1356, 3, 254 | 1089 to 1138, 164 or 165 | 1272 to 1280, 2 + 1 |
+| read 2 | 1394, 3, 267 | 1093 to 1139, 168 to 170 | 1314 to 1334, 2 + 1 |
+| read 16 | 1754, 17, 257 | 1337 to 1370, 160 to 162 | 1298 to 1338, 2 + 1 |
+| read 255 | 1744 to 1752, 256, 245 | - | 1300, 2 + 1 |
+| register read 1 + 1 | 2112, 5, 259 | - | 1948 to 1972, 5 + 2 |
+| register read 1 + 4 | 2482 to 2498, 7, 275 to 277 | 1832 to 1860, 168 to 170 | 1990 to 1998, 5 + 2 |
+| probe | 1062, 2, 223 | 869 or 872, 150 or 152 | - |
 
-- **`start()` is 332 to 348 cycles** on the ticker's ruler for every
-  shape on the pump and the engines but one, and 404 to 412 for the
+Each figure is the range over three runs of the letter.
+
+- **`start()` is 344 to 352 cycles** on the ticker's ruler for every
+  shape on the pump and the engines but one, and 412 to 420 for the
   engined read of one byte, the bounded waits' first looks included; the listing of a minimal glue (one host,
   `-Os`) has it at 173 instructions, two calls into `delay_us` that run
   only when a wait is not met at once.
-- **The pump's entry is 217 cycles a byte from the flash** over the
+- **The pump's entry is 213 cycles a byte from the flash** over the
   255-byte write, of a 1098-cycle byte at 400 kHz - a fifth of the core - for some 340
   instructions in the whole event body, a leaf, the tenure's fields one
   base address: a byte's path is a few dozen instructions from the flash
   behind two wait states at 48 MHz, this core's fetch (the DMA
   controller's own 6 cycles an item from SRAM against 11.5 from the
-  flash, [dma.md](dma.md)). The longest entry over every shape is 337
+  flash, [dma.md](dma.md)). The longest entry over every shape is 341
   cycles, the suite's stamps and its switch among the hosts included - the family's
   longest handler with every driver in the flash ([platform.md](platform.md)
   places it among the handlers), a hold of main context beside any polled
   loop.
 - **The pump in SRAM, two ways, and only if the program wants the core**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
-  for a plain host, flattened, a leaf): 143 cycles an entry over
-  the 255-byte write and 160 to 163 over the 16-byte read, the longest
-  195 to 203, behind the suite's vector in the flash. A program that places the vector
+  for a plain host, flattened, a leaf): 145 cycles an entry over
+  the 255-byte write and 160 to 162 over the 16-byte read, the longest
+  197 to 207, behind the suite's vector in the flash. A program that places the vector
   (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
   the default host's inline body with it: measured in a variant of the
   suite, 79 and 94 cycles - a fourteenth of the core at 400 kHz - and an
@@ -596,7 +603,7 @@ the same vector:
   stretches behind a late entry and the rate is the bus's: the placement
   buys core time, not the wire.
 - **The engines** carry a 255-byte write in three event entries and a
-  read in two, each with one DMA interrupt (its body 151 to 191 cycles
+  read in two, each with one DMA interrupt (its body 151 to 183 cycles
   between the stamps), the write at 1004 to 1012 thousandths of its wire, the
   core in the event vector 615 to 631 cycles of some 282 350. The
   write's DMA entry, its block's completion, is the price of carrying a
@@ -631,17 +638,19 @@ E <= F + N x b:
 
 | at | write: b, F, E | the engines from | read: b, F, E | the engines from |
 |---|---|---|---|---|
-| 400 kHz | 286, 819, 1394 | 3 bytes ((1394 - 819) / 286 = 2.0) | 327, 807, 1291 | 2 bytes ((1291 - 807) / 327 = 1.5) |
-| 100 kHz | 287, 807, 1426 | 3 bytes ((1426 - 807) / 287 = 2.2) | 327, 807, 1211 | 2 bytes ((1211 - 807) / 327 = 1.2) |
+| 400 kHz | 282, 835, 1386 | 2 bytes ((1386 - 835) / 282 = 1.95) | 314, 883, 1291 to 1299 | 2 bytes ((1299 - 883) / 314 = 1.3) |
+| 100 kHz | 282, 843 or 851, 1402 to 1410 | 2 or 3 bytes, by the run ((1410 - 843) / 282 = 2.01) | 314, 879 to 883, 1243 to 1255 | 2 bytes ((1255 - 879) / 314 = 1.2) |
 
-Measured as such at 400 kHz, with the trips: a write of one byte costs
-the pump 1273 cycles and the engines 1394, of two 1301 and 1382 (the
-entry that clears ADDR loads both, so a second byte costs the pump no
-entry), of sixteen 5395 and 1398; a read of one 1293 and 1291, of two
-1349 and 1251. So: the engines from three bytes written and two read;
-under that the interrupt. Against the wire: the pump spends 286 cycles
-of a 1098-cycle byte at 400 kHz (a quarter of the core) and 287 of a byte
-of at least 4320 cycles at 100 kHz (CCR 240, twice, nine times: a
+The arithmetic counts a byte the same at every length, and a write's first
+two bytes cost the pump less: the entry that clears ADDR loads both, so a
+second byte costs it no entry. Measured as such at 400 kHz, with the trips:
+a write of one byte costs the pump 1289 to 1297 cycles and the engines 1386,
+of two 1317 to 1325 and 1382, of sixteen 5347 and 1382 to 1386; a read of
+one 1317 and 1291 to 1299, of two 1357 and 1267 to 1287. So: the engines
+from three bytes written, where the arithmetic's two still favours the pump,
+and two read; under that the interrupt. Against the wire: the pump spends
+282 cycles of a 1098-cycle byte at 400 kHz (a quarter of the core) and 282
+of a byte of at least 4320 cycles at 100 kHz (CCR 240, twice, nine times: a
 fifteenth); the engines spend none a byte.
 
 THE ENERGY: on this series the Sleep stalls the DMA - measured, against
@@ -679,21 +688,22 @@ them), this peer's answers to a refusal stated in the suite's
 STOP and for BUSY, then stores START last: a dispatch above the arbiter
 that lands in it delays the START, a gap between tenures, and every byte
 decision after it is the vectors'. Letter `x` counts it on 400 writes of
-16 bytes on the engines: `start()` takes 584 cycles with TIM2 silent (598
-in the twin, `start()` in the flash in both images), and the figure holds
-the suite's own naming of the engine in front of the host's `start()` -
-the Request copied whole, a call of the runtime's `memcpy` in the release
-listing, and its engine field set - which the host's own 332 to 348
-cycles in `test_x035_i2c` ("The host's cost" above) leave out. Under 97
-us x 3000 the interrupt landed inside it 352 to 363 times in three runs
-of the default image and 308 to 316 in three of the twin, against the 50
-or 51 that ticks independent of the tenures would give: the tenure cycle
-locks to the pressure's period in both images, at a phase inside
-`start()`. MSL was never set at such a landing in `x`. In the letters of
-`z` it was in the twin alone - once or twice in a pass of `w` in every
-run and once in a pass of `q`, never in five runs of the default image -
-a preemption after the START store that outlasted the START's way onto
-the wire, the tenure then the vector's from its first bit.
+16 bytes on the engines: `start()` takes 400 or 401 cycles with TIM2 silent,
+in the default image and in the twin alike, `start()` in the flash in both.
+The figure holds the suite's own naming of the engine in front of the host's
+`start()`, 23 instructions from the flash that copy the Request field by
+field, its engine set, and those are the 52 to 57 cycles over the host's own
+344 to 348 for the same write in `test_x035_i2c` ("The host's cost" above).
+Under 97 us x 3000 the interrupt landed inside it 150 to 152 times in three
+runs of the default image and 227 to 232 in three of the twin, against the
+34 that ticks independent of the tenures would give: the tenure cycle locks
+to the pressure's period in both images, at a phase inside `start()`. MSL
+stood at such a landing in one of the three runs of `x` on the default image
+(once) and in two of the three on the twin (once and twice); in `z`, in one
+pass of `o` in one run of three on the default image and in passes of `w` in
+two runs of three on the twin (three landings in each) - a preemption after
+the START store that outlasted the START's way onto the wire, the tenure
+then the vector's from its first bit.
 
 **Every shape on both mechanisms, under every pressure as in the
 control.** Letter `o`, at 400 kHz against one serve counted to its last

@@ -265,9 +265,17 @@ using EngineHost = I2cHost<1, i2c1_default_pins, TxEngine, RxEngine>;
 /// three requesters meet on both. Every other verb is the host's own.
 struct Host : EngineHost {
     static bool start(const Request& r) {
-        Request named = r;
-        named.engine = r.rx_len >= 2u || r.tx_len >= 3u ? I2cEngine::dma : I2cEngine::interrupt;
-        return EngineHost::start(named);
+        // Field by field, not `Request named = r`: that copy is a call to the
+        // runtime's memcpy, which letter x would count inside start().
+        return EngineHost::start(Request{
+            .addr = r.addr,
+            .tx = r.tx,
+            .tx_len = r.tx_len,
+            .rx = r.rx,
+            .rx_len = r.rx_len,
+            .reply = r.reply,
+            .speed = r.speed,
+            .engine = r.rx_len >= 2u || r.tx_len >= 3u ? I2cEngine::dma : I2cEngine::interrupt});
     }
 };
 using TxChannel = DmaChannel<6>;
@@ -431,7 +439,7 @@ const char* host_dark() {
     if ((c2 & (i2c_itevten | i2c_itbufen | i2c_dmaen | i2c_last)) != 0u || (c2 & i2c_iterren) == 0u) {
         return "the host's enables are not at rest (the error vector alone, DMAEN and LAST clear)";
     }
-    if (TxEngine::busy() || !channel_at_rest<TxChannel>() || !channel_at_rest<RxChannel>()) {
+    if (!channel_at_rest<TxChannel>() || !channel_at_rest<RxChannel>()) {
         return "a DMA channel of the host's still has items to move";
     }
     // The release contract: no request held on channels 6 and 7's ORs.
