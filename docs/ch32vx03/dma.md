@@ -10,12 +10,12 @@ DMA only through a transport (a driver that moves a peripheral's data
 in runs, a run being a contiguous span of elements handed over in one
 call: the serial port's `Uart`, the `SpiHost`, the `I2cHost`). Each
 transport takes a transmit engine and a receive engine as two of its
-template parameters, its two engine slots, `NoDmaEngine` when a slot is
-empty; the program names the engines there, binds the channels' vectors
+template parameters, its engine parameters, `NoDmaEngine` when it takes
+none; the program names the engines there, binds the channels' vectors
 to the transport's `dma_isr()`, and the transport does the rest
 ([usart.md](usart.md), [spi.md](spi.md), [i2c.md](i2c.md)).
 
-This page covers what lies under those slots and what a program may use
+This page covers what lies under those parameters and what a program may use
 directly. `Dma<c>` is a controller, 1 or 2; `DmaChannel<c, ch>` one
 channel of it; `DmaRequestOf<r>` names a peripheral's request and
 answers the controller and the channel the silicon wires to it. Over a
@@ -75,8 +75,8 @@ after the binding run in `main()` once interrupts are enabled, or in an
 active object's handler (an active object is a component of a brio
 program with its own event queue, served one event at a time by the
 kernel, [docs/learn/introduction.md](../learn/introduction.md)); the
-engine has one owner, its busy flag tested and set without a mask, so
-`fill()`, `copy()` and `busy()` are called from one context.
+engine's busy flag is tested and set without a mask, so `fill()`, `copy()`
+and `busy()` are called from one context.
 
 What decides correctness even there:
 
@@ -132,16 +132,18 @@ What decides correctness even there:
 The engines compute nothing from the clock's rate, so the order against
 the clock task does not decide a copy's correctness; the figures below
 are at 144 MHz. Two more facts decide correctness. A channel has one
-owner for the whole image, checked when the program is compiled ("One
-owner a channel" below). And a request that a USART, an I2C or a timer
-raised and no channel took (measured on USART2, UART4, I2C1, TIM1, TIM3
-and TIM4) is held until the controller acknowledges it or the
-peripheral's reset line is pulsed, whatever its DMA bit says (an SPI's,
-measured on all three instances, is not), so every transport's `init()`
-pulses its block's reset before it arms an engine and its `release()`
-closes the gate and pulses nothing: without that pulse the channel's next
-enable moves one stray item ("A released requester keeps the request it
-raised" below).
+owner for the whole image: the compiler checks every claim, the transports
+write theirs, and a channel a program programs by hand is checked only if
+the program writes its claim ("One owner a channel" below). And a request
+that a USART, an I2C or a timer raised and no channel took (measured on
+USART2, UART4, I2C1, TIM1, TIM3 and TIM4) is held until the controller
+acknowledges it or the peripheral's reset line is pulsed, whatever its DMA
+bit says (an SPI's, measured on all three instances, is not), so every
+transport's `init()` pulses its block's reset before it arms an engine and
+its `release()` pulses nothing. Without that pulse the channel's next
+enable moves one stray item on a USART's or a timer's request, and an I2C1
+read never reaches its channel ("A released requester keeps the request
+it raised" below).
 
 The rest of this page, in order: the documents of record; what the
 silicon does (the channel as the request, a channel's registers, the
@@ -149,7 +151,7 @@ silicon does (the channel as the request, a channel's registers, the
 the flags, the vectors and the gates, and the starvation of every bus
 master but the core, asleep and awake); the types and verbs (the
 request table, the block, the channel, the engines, the block engines,
-a transport's two slots); how to use it (the copy engine, the raw
+a transport's two engine parameters); how to use it (the copy engine, the raw
 channel polled and on its interrupt, a paced block, a request named
 rather than numbered, a ring read behind its channel, a console on both
 engines); the bench findings, with the engines' costs; and what is not
@@ -251,8 +253,9 @@ each peripheral's own DMA bit - so a peripheral left with its DMA bit set
 drives any transfer loaded on its channel. Measured on the CH32V303VCT6:
 a UART4 receiver left running with DMAR set held its request standing on
 DMA2's channel 3, and a transfer programmed there for TIM6's update moved
-all sixteen of its items in a few microseconds instead of one a period.
-Stopping a channel does not withdraw a request, and neither does turning
+all sixteen of its items in a few microseconds instead of one a period (a
+staging of two owners, no suite reproducing it: "A released requester"
+below). Stopping a channel does not withdraw a request, and neither does turning
 the peripheral off.
 
 A released requester keeps the request it raised. A peripheral's DMA
@@ -263,55 +266,58 @@ gating its clock freezes it on the channel's OR. 11.2.3 says only that a
 channel's requests are switched on and off by each peripheral's own DMA
 bit, and RM0008 13.3.1 - the STM32F1's controller, this one's lineage -
 that a peripheral releases its request on the acknowledge; "switched off"
-measures as no new request. The next owner's first enable then moves one
-item on the held request - from or to whatever PADDR now names - and the
-channel waits for the request to fall: a requester still clocked drops it
-(one stray item, then the new owner's stream), a gated one never does
-(the channel stalls after that item), and a level that stays up raises it
-again at once (the block runs to its end on the stray). Measured on the
-CH32V303VCT6 and the CH32V203C8T6 with USART2, I2C1 and TIM4 on DMA1's
-channels 6 and 7: a USART2 merely initialized with DMAT and released
-stalls the next I2C1 read on channel 7 after one item - the I2C's own
-address byte, read out of its data register before any data had come -
-and so does one whose DMAT and DMAR were cleared before the gate, or
-cleared after it with the clock opened again; one released with its
-reset pulsed, before the gate or after it, hands over clean, and a reset
-pulsed during the stall releases it at once; an I2C1 tenure (one
-request's hold on the bus, START to STOP) abandoned with RxNE standing
-under DMAEN stalls the next USART2 transmit on the same channel after
-one byte unless the I2C's reset or its SWRST is pulsed; and a TIM4
-stopped with UDE cleared but kept clocked hands the next owner one
-stray item. The channel itself is neither wedged nor
-marked: a memory-to-memory block on it runs whole through a frozen
-request, and a USART2 whose channel was never enabled holds one as well.
-SPI1's request does not outlive its release - an engined write abandoned
-with TXE standing under TXDMAEN, SPE then cleared and the gate closed,
-left nothing for a timer-paced block on channels 2 and 3 - and neither
-does SPI2's on DMA1's channels 4 and 5 nor, on the CH32V303VCT6, SPI3's on
-DMA2's 1 and 2: a transmit request over TXE and a receive request over a
-standing RXNE, each let go by `SpiHost::release()` with no reset, left a
-clean paced staircase to the next owner on both parts. UART4's transmit request on DMA2's channel 5 is held without
-its reset - one stray item, the channel stalled - and let go with it, the
-USARTs' rule on the second controller. A USART's transmit request is TXE
-under TE: staged with UE and DMAT alone, nothing is held. Those
-measurements staged the request on a channel a second owner then used,
-which the ownership rule now refuses ("One owner a channel" below); under
-that rule the one that can meet a request held across a release is the
-same owner initialized again. Measured so on both parts: a USART2 receive
-request left under DMAR by a frame no channel took, a TIM1 update request
-left under UDE and an I2C1 receive request left under DMAEN, each released
-with its enable set and its gate closed. With no reset at the next
-`init()` the ring holds the stale frame ahead of the next burst, the
-paced block moves one item before its pace and an I2C read storms its
-event vector and never launches (the control in "The same owner over its own held request" below).
+measures as no new request. A channel's next enable moves one item on the
+held request - from or to whatever PADDR names - and then waits for the
+request to fall: a requester still clocked drops it (one stray item, then
+the stream), a gated one never does (the channel stalls after that item),
+and a level that stays up raises it again at once (the block runs to its
+end on the stray). The channel itself is neither wedged nor marked: a
+memory-to-memory block on it runs whole through a frozen request, and a
+USART2 whose channel was never enabled holds one as well.
+
+The measurements behind that paragraph staged a second owner on the
+channel. The ownership rule now refuses such a staging ("One owner a
+channel" below) and no suite reproduces it, so they stand as measured
+facts of the silicon and cannot be re-run here. On both parts, with
+USART2, I2C1 and TIM4 on DMA1's channels 6 and 7:
+
+- A USART2 initialized with DMAT and released stalled an I2C1 read on
+  channel 7 after one item, the I2C's own address byte. So did one whose
+  DMAT and DMAR were cleared before the gate, or after it with the clock
+  opened again. One released with its reset pulsed, before the gate or
+  after it, did not, and a reset pulsed during the stall ended it.
+- An I2C1 tenure (one request's hold on the bus, START to STOP) abandoned
+  with RxNE standing under DMAEN stalled a USART2 transmit on the same
+  channel after one byte, unless the I2C's reset or its SWRST was pulsed.
+- A TIM4 stopped with UDE cleared but kept clocked left one stray item.
+- SPI1's, SPI2's and, on the CH32V303VCT6, SPI3's requests do not outlive
+  a release: a transmit request over TXE and a receive request over a
+  standing RXNE, each let go by `SpiHost::release()` with no reset, left a
+  timer-paced block on those channels a clean staircase.
+- UART4's transmit request on DMA2's channel 5 is held without its reset,
+  one stray item and the channel stalled, and let go with it.
+- A USART's transmit request is TXE under TE: staged with UE and DMAT
+  alone, nothing is held.
+
+Under the ownership rule the one that can meet a request held across a
+release is the same owner initialized again. Measured so on both parts: a
+USART2 receive request left under DMAR by a frame no channel took, a TIM1
+update request left under UDE and an I2C1 receive request left under
+DMAEN, each released with its enable set and its gate closed. With no
+reset at the next `init()` the ring holds the stale frame ahead of the
+next burst, the paced block moves one item before its pace and an I2C
+read storms its event vector and never launches (the control in "The same
+owner over its own held request" below).
 
 So the contract on this family is the one
 [design/dma.md](../design/dma.md) states, "The release contract": every
 transport's `init()` - `Uart`'s, `SpiHost`'s and `SpiClient`'s,
 `I2cHost`'s and `I2cClient`'s, `Adc`'s, `Dac`'s and `Tim`'s - opens the
 gate and pulses the block's reset before it writes a register of its own
-or arms a channel, and its `release()` closes the gate, gives its pads
-back and closes its interrupt line, pulsing no reset.
+or arms a channel, and no `release()` pulses a reset. Every `release()`
+closes the gate. The first five also give their pads back and close their
+interrupt line; `Adc`'s closes its line, and the pads of an `Adc`, a `Dac`
+and a `Tim` are the program's own.
 
 ### A channel
 
@@ -422,7 +428,7 @@ bears on what a block costs is used or declined here with its reason:
   channel's four; an engine's ISR body reads INTFR once and masks it with
   the engine's own armed word - not a second read of CFGR.
 - **The interrupts**: one vector a channel, each engine arming only what
-  its owner needs - the SPI host's transmit engine its error alone, the
+  its user needs - the SPI host's transmit engine its error alone, the
   receive block's completion proving the transmit's.
 - **The priorities**: an argument of each engine's `arm()`, and the level
   is the peripheral's ([../design/dma.md](../design/dma.md)): the arbiter
@@ -534,15 +540,15 @@ empty slot where the part has not got the peripheral),
 `dma_request_present`, and `DmaRequestOf<r>` with its
 `slot`, `controller` and `channel`, the compile-time form that refuses a
 request this part cannot raise; and `dma_engine_claim`, the claim a
-transport makes for the engine in each of its slots (the next section).
-A driver with an engine slot includes this file alone, so a program
+transport makes for each engine it takes (the next section).
+A driver with an engine parameter includes this file alone, so a program
 with a console does not carry the controller.
 
 ### One owner a channel
 
 A channel belongs to one owner for the whole life of an image, and on
-this family the compiler checks it ([design/dma.md](../design/dma.md),
-"The ownership rule"). The slot is the controller and the channel,
+this family the compiler checks every claim written
+([design/dma.md](../design/dma.md), "The ownership rule"). The slot is the controller and the channel,
 `DmaSlotId<c, ch>` - DMA1 is 1 and the CH32V303's DMA2 is 2, so DMA1's
 fifth channel and DMA2's fifth are two slots - and its owner is the
 peripheral request the channel serves, `DmaOwner<kind, instance,
@@ -557,7 +563,7 @@ Who claims:
   body, the I2S face of an SPI raising the SPI's requests; `Adc`'s and
   `Dac`'s stream verbs (`claim_stream()`, `claim_dual_stream()`) claim
   the converter's slot where they are called. A program that names the
-  engines in a transport's slots has nothing more to write.
+  engines in a transport's parameters has nothing more to write.
 - **A copy claims its channel under the channel's copy tag.**
   `DmaCopyEngine<c, ch>` claims its slot for `DmaCopyOwner<c, ch>`, and
   a block memory to memory programmed by hand on the same channel claims
@@ -605,23 +611,24 @@ that leaves off DMA):
 | DAC1 | UART4's receive | DMA2's 3; the CH32V303RC and VC, the parts with UART4 |
 | DAC2 | UART5's transmit, the SDIO | DMA2's 4; the CH32V303RC and VC, the parts with UART5 and the SDIO |
 | SPI3 | UART5's receive | DMA2's 2; the CH32V303RC and VC |
-| ADC2, on a lot that has its request | UART4's transmit | DMA2's 5; the CH32V303 (table 11-3's note 1 gives the row to some lots only) |
+| ADC2, on a lot that has its request | UART4's transmit | DMA2's 5; the CH32V303RC and VC, the parts with UART4 (table 11-3's note 1 gives the row to some lots only) |
 
 So a console on USART1 with both engines leaves SPI1 for a display on
 DMA and a console on USART3 leaves SPI2; and a program that wants I2C1
-on DMA keeps its console off USART2. A timer's request is never the
-forced one: every part has a free timer event for a pace, and only a
-stream bound to one timer is held to that timer's channels (TIM1 reaches
-DMA1's 2 to 6, TIM2 1, 2, 5 and 7, TIM3 2, 3 and 6, TIM4 1, 4, 5 and 7;
-on the CH32V303 TIM5 and TIM8 DMA2's 1 to 5, TIM6 its 3, TIM7 its 4,
+on DMA keeps its console off USART2. Against any one other use a timer's
+request is never the forced one: a free timer event remains for a pace,
+short of the full sets in the table below, and only a stream bound to one
+timer is held to that timer's channels (TIM1 reaches DMA1's 2 to 6, TIM2
+1, 2, 5 and 7, TIM3 2, 3 and 6, TIM4 1, 4, 5 and 7; on the CH32V303 TIM5
+DMA2's 1, 2, 4 and 5, TIM8 its 1, 2, 3 and 5, TIM6 its 3, TIM7 its 4,
 TIM9 and TIM10 its 6 to 11; on the CH32V203RB TIM5 DMA1's 1, 3, 6, 7 and
 8).
 
 Some parts cannot put every use a program might want on DMA at once,
 whatever the instances. Written here with the uses as a console with
 both engines, a second UART with both engines, an SPI host's two
-engines (or its transmit alone), an I2C transmit, one converter stream
-and one timer pace:
+engines (the host takes both or neither), an I2C transmit, one converter
+stream and one timer pace:
 
 | part | the uses that cannot all be on DMA | why |
 |---|---|---|
@@ -699,7 +706,7 @@ a transport racing its own completion handler masks) and `launch()` (the
 programming of a claimed engine, which gives the claim back when it
 refuses), `unclaim()`, `start_fixed(cell, n)` for a full-duplex bus
 clocking a read, `complete()` (the channel stopped and how many elements
-the block carried, so the owner releases exactly that much of its ring),
+the block carried, so the transport releases exactly that much of its ring),
 `kick()`, `abandon()`, `faults()`, `busy()`, `in_flight()`, `progress()`.
 `DmaRxEngine<c, ch, Elem>` fills from one register in two shapes on one
 binding. The one-shot shape fills a run and stops - a bounded block, the
@@ -724,7 +731,7 @@ zero, the binding's five stores; `remaining()` (CNTR, one load) and
 the engine util/ring.hpp's `RingCounter`, so
 `HardwareRing<storage, DmaRxEngine<c, ch, Elem>>` is the ring's
 consumer half; and `bounded_to_64k` says whether the channel is held to
-the 64 KB rule, so an owner can align the storage to its own size there
+the 64 KB rule, so a program can align the storage to its own size there
 and no placement can be refused. Nothing re-arms a ring: the one way it
 stops by itself is a transfer error, which `idle()` reports and
 `start()` answers. Both engines publish `present`, `controller`,
@@ -768,7 +775,7 @@ number. On the CH32V303 the player has the peripheral it was written
 for: the DAC, whose two requests are DMA2's channels 3 and 4
 ([dac.md](dac.md)).
 
-### The transport's two slots
+### The transport's two engine parameters
 
 [brio/ch32vx03/usart.hpp](../../brio/ch32vx03/usart.hpp)'s `Uart` takes
 a transmit engine and a receive engine as two of its template
@@ -784,20 +791,19 @@ block's data phase on them ([spi.md](spi.md)) and `I2cHost` a tenure's
 priorities above): the Uart's receive ring at very_high unless its
 `UartOptions::rx_priority` says otherwise, its transmit at high.
 `dma_isr()` is the ISR body of whichever channels
-the transport owns - on the receive channel a completion is a lap,
+the transport holds - on the receive channel a completion is a lap,
 counted, and the lap's half and full marks are the receive edge, its true
 answer the edge `isr()` gives -, `harvest()` the same edge asked from the
 consumer's side and the ring's restart after an error
 ([usart.md](usart.md)), and `dma_faults()` counts the
-blocks thrown away. The mask covers the claim: the transport's block
-start holds its guard over the transmit engine's `claim()` alone - eight
-instructions, against the whole channel load before (the listing in the
-bench findings) - and programs the claimed channel unmasked, no block
-being in flight that could complete under it. An engine is refused on any slot but the instance's
+blocks thrown away. A block's start masks interrupts only around the
+transmit engine's run-time `claim()` verb, the busy flag's test-and-set of
+eight instructions, and programs the channel unmasked, no block being in
+flight that could complete under it. An engine is refused on any slot but the instance's
 own, controller and channel, which the request table answers; each
 resource publishes its two slots as `dma_tx_slot` and `dma_rx_slot`.
-Without an engine every branch is compiled out and `init()` does not so
-much as touch CTLR3.
+Without an engine every branch is compiled out: `init()`'s reset leaves
+CTLR3 zero and nothing writes it, a half duplex, RTS or CTS option apart.
 
 The receive edge comes from the vectors - the USART's idle line and a
 burst's first frame, the channel's lap marks - and the CPU never reads
@@ -955,13 +961,14 @@ verdicts**. Where one number is given below it is both parts'; where
 they differ each is named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
-  kilobytes copied flash to RAM take 24809 cycles as 4096 bytes, 12530
-  as 2048 half-words and 6392 as 1024 words on the CH32V203C8T6 - 6.05,
-  6.11 and 6.24 cycles an item - and 24933, 12649 and 6495 on the
-  CH32V303VCT6's DMA1 - 6.08, 6.17 and 6.34. At 144 MHz that is 23.8,
-  47.1 and 92.3 megabytes a second, and every byte of all three arrived.
-- **The half flag rose with 2049 of 4096 moved** on the CH32V203C8T6 and
-  2050 on the CH32V303VCT6, which is 11.2.1's own rule read back; INTFR
+  kilobytes copied flash to RAM take 24809 to 24811 cycles as 4096 bytes,
+  12535 to 12536 as 2048 half-words and 6395 as 1024 words on the
+  CH32V203C8T6 - 6.05, 6.12 and 6.24 cycles an item - and 24917, 12635 to
+  12641 and 6491 to 6500 on the CH32V303VCT6's DMA1 - 6.08, 6.17 and 6.34.
+  At 144 MHz the first part's are 23.8, 47.1 and 92.2 megabytes a second,
+  and every byte of all three arrived.
+- **The half flag rose with 2050 of 4096 moved** on the CH32V203C8T6 and
+  2049 on the CH32V303VCT6, which is 11.2.1's own rule read back; INTFR
   stood at 0x7 (the global, complete and half bits of the channel) and
   one write to INTFCR took all four down.
 - **Unequal widths move as table 11-1 draws them** (letter a): the nine
@@ -1007,7 +1014,7 @@ they differ each is named.
 - **A circular channel reloads its count and its addresses by itself.**
   Eight compares poured into a timer by its own update request, four
   laps: four half flags and four complete ones, the count seen stepping
-  down twenty-eight times, the channel still enabled at the end and the
+  down 28 to 30 times, the channel still enabled at the end and the
   last value of the run standing in the timer's register. Thirty-two
   updates of 200 us took 6400 us, so the REQUEST and not the bus paces
   the channel.
@@ -1023,36 +1030,37 @@ they differ each is named.
   priorities equal the lower number takes the bus outright.** Two
   channels of equal work: the one that started SECOND and asked for the
   very-high priority completed first. With both at medium and the higher
-  channel given the head start, channel 1 finished at 3106 cycles and
-  channel 2 at 6151 on the CH32V203C8T6, and at 3056 and 6044 on the
+  channel given the head start, channel 1 finished at 3086 cycles and
+  channel 2 at 6107 on the CH32V203C8T6, and at 3054 and 6060 to 6061 on the
   CH32V303VCT6 - channel 1 running at full rate and channel 2 getting
   what was left.
-- **THE SLEEP, MEASURED IN BRIO'S OWN CODE.** Four kilobytes that take
-  172 us awake moved 4 bytes across one `idle()` and 76 across ten on
-  the CH32V203C8T6 - seven a wake at the 1 kHz tick - and 22 and 124 on
-  the CH32V303VCT6's DMA1, twelve a wake; then each block finished, byte
-  for byte, the moment the core stayed awake. The vendor's own rig put
-  the CH32V203's figure at nine to twelve bytes at the entry and eleven a
-  wake; this platform's idle is a WFE-shaped `wfi` and its wake handler
-  is smaller, which is the difference. Either way the conclusion is the
-  same: the clocks run and the bus matrix serves the core alone.
+- **THE SLEEP, MEASURED IN BRIO'S OWN CODE** (letter c, three runs a part,
+  identical). Four kilobytes that take 172 us awake moved 12 bytes across
+  one `idle()` and 131 across ten on the CH32V203C8T6, 13 a wake at the
+  1 kHz tick, and 18 and 145 on the CH32V303VCT6's DMA1, 14 a wake; then
+  each block finished, byte for byte, the moment the core stayed awake.
+  The vendor's own library, in a rig no suite here reproduces, moved nine
+  to twelve bytes at the entry and eleven a wake on the CH32V203. Both
+  say the same: the clocks run and the bus matrix serves the core alone.
+  What sets the bytes a wake is not measured ("Not covered yet").
 - **AND THE CH32V303's SECOND CONTROLLER STARVES THE SAME WAY**: the same
-  four kilobytes on DMA2's first channel took 172 us awake and moved 23
-  bytes across one `idle()` and 120 across ten, then finished awake byte
-  for byte.
+  four kilobytes on DMA2's first channel took 172 us awake and moved 20
+  bytes across one `idle()` and 147 across ten, 14 a wake, then finished
+  awake byte for byte.
 - **All the vectors are the channels' own**: eight on the CH32V203C8T6,
   the eighth on that device class's tail, and on the CH32V303VCT6 DMA1's
   seven and DMA2's eleven - eighteen blocks, eighteen bodies, each
   running exactly once and each seeing its own armed flag and nothing
   else, the four channels of the extended register included.
 - **DMA2's eleven channels copy out of flash as DMA1's do.** A kilobyte
-  memory to memory on each, byte for byte, in 1731 to 1780 cycles:
+  memory to memory on each, byte for byte, in 1747 to 1802 cycles:
   channels 1 to 7 reporting in DMA2_INTFR at 4 x (channel - 1), channels
   8 to 11 in DMA2_EXTEM_INTFR at 4 x (channel - 8), and INTFR's top
   nibble clear while those four ran.
 - **DMA2's timer requests**: TIM5's, TIM6's and TIM7's updates each drew
   the same staircase of another timer's counter through DMA2's channels
-  2, 3 and 4 - the rows of table 11-3, 503 or 504 ... 8003 or 8004.
+  2, 3 and 4 - the rows of table 11-3, 503 ... 8003 for TIM5 and 502 ...
+  8002 for the other two.
 - **Both block engines run on DMA2**, each serviced from that
   controller's own handler: the loop engine played eight laps of eight
   compares into TIM5 on TIM5's update (channel 2) in 12800 us for 12800
@@ -1064,7 +1072,7 @@ they differ each is named.
   byte; and with the refusal bypassed DMA1 delivered the WRAP described
   above.
 - **The transmit engine needs no listener**: twenty-six bytes left the
-  ring in one block at 115200 baud, `tx_idle()` true 2177 us after the
+  ring in one block at 115200 baud, `tx_idle()` true 2348 to 2349 us after the
   run was queued, with no fault counted, on a pad with nothing attached.
 - **THE STREAMS RUN AT THE RATE ASKED, on the core's counter.** A sender
   and the ring it feeds both divide PB1 by one arithmetic, so the
@@ -1080,8 +1088,8 @@ they differ each is named.
   (letters q and r), where on the CH32V303VCT6 the sender is the far chip,
   which STATES its rate - its PCLK1 over its divisor on its crystal, 0 ppm
   at both; the ring port's own transmit engine through letter q's
-  transport, 1024 frames: 1000 at 1 Mbaud on both parts and 1002 to 1003
-  at 4.5 Mbaud on the CH32V203C8T6, 1005 to 1006 on the CH32V303VCT6 -
+  transport, 1024 frames: 1000 at 1 Mbaud on both parts and 1001 at 4.5
+  Mbaud on the CH32V203C8T6, 1002 on the CH32V303VCT6 -
   that transport's transmit ring is 64 bytes, so the run goes out in
   sixteen or more blocks, each started by the last one's completion
   vector, and the frames over are what that restart costs a block (not
@@ -1116,11 +1124,11 @@ they differ each is named.
   copying TIM3's counter into a ring of 256 half-words, read behind the
   channel through `HardwareRing` with every element judged against the
   one before it. At one update every 288 cycles, 131072 elements across
-  512 laps in 230427 looks, every step the pace's, nothing skipped,
+  512 laps in 231656 to 231657 looks, every step the pace's, nothing skipped,
   nothing torn - so no count ever ran ahead of its store - and the
   producer's position from `laps()` and the count, 131072, equal to the
   updates the pace made in the consumer's time. At one every 48 cycles,
-  three million a second, 131076 elements in 21222 looks, the same. A
+  three million a second, 131072 to 131074 elements in 22957 looks, the same. A
   consumer stalling a lap and a half every 4096 elements lost exactly
   that: seven stalls, seven overruns counted and skipped, every step
   between them the pace's; four runs held across a lap and a half were
@@ -1128,11 +1136,11 @@ they differ each is named.
   count reached 256 again at every wrap and never went above it, and at
   the fast pace a read could land on zero, between a lap's last
   decrement and the reload. On the CH32V303VCT6: 131072 elements in
-  270997 looks at the slow pace and 131074 in 27249 at the fast one,
-  every step the pace's, nothing skipped or torn, the position 131073
-  against 131072 updates; seven stalls and seven overruns; four held
-  runs refused; the count never above 256, and zero read once in
-  100000 across 98 laps in one run and never in another.
+  247383 to 247825 looks at the slow pace and 131072 to 131073 in 27203 to
+  27238 at the fast one, every step the pace's, nothing skipped or torn,
+  the position within one of the 131072 updates; seven stalls and seven
+  overruns; four held runs refused; the count never above 256, and zero
+  read one or two times in 100000 across 98 laps.
 - **UART4'S ENGINES ON DMA2 ANSWER REAL REQUESTS** (letter n, the
   CH32V303VCT6): fifty-eight bytes out of the transmit engine on channel
   5, echoed by the far chip and back in through the receive engine on
@@ -1141,8 +1149,8 @@ they differ each is named.
   enabled with DMAR set made a later TIM6 staircase on the same DMA2
   channel move all sixteen items at once (the section above); with the
   port's block reset, the staircase ran at the timer's pace again. A
-  staging of two owners, which the check now refuses; what it shows is why
-  a channel has one.
+  staging of two owners, which the check now refuses and no suite
+  reproduces: a measured fact of the silicon, and why a channel has one.
 - **A held request is answered** (`test_vx03_i2c` letter q,
   `test_vx03_dma_serial` letter p, on the CH32V303VCT6 and the
   CH32V203C8T6 alike): a request another peripheral raised on a
@@ -1157,12 +1165,7 @@ they differ each is named.
   `recover()`; USART2's receive ring over channel 6 held by TIM3 gave the
   channel up within its bound, one DMA fault and no storm. With the
   holder's reset line pulsed, gate closed, each was let go and the same
-  write, read and burst landed whole. Built over an I2C host and a USART
-  receive engine that end a write on any BTF, keep the event vector up
-  through a read block and leave a stalled ring's wait armed, the same
-  stagings reported `i2c_ok` with one byte of 32 at the target and stormed
-  their vectors (60001 and 100001 entries before the suites' guards
-  silenced them).
+  write, read and burst landed whole.
 - **THE SAME OWNER OVER ITS OWN HELD REQUEST** (`test_vx03_dma_serial`
   letter s and `test_vx03_i2c` letter s, on the CH32V303VCT6 and the
   CH32V203C8T6 alike, ten runs each): the case the reset at `init()`
@@ -1225,10 +1228,10 @@ the bus contract's and the same in both.
 
 | operation | BEFORE | AFTER |
 |---|---|---|
-| copy, 4096 bytes as 1024 words: wall | 6504 | 6392 |
-| copy: launch, completion's handler, fixed cost | 208, 94, 360 | 118, 86, 248 |
-| paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 82, 82 |
-| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 329, 1, 147, 514 |
+| copy, 4096 bytes as 1024 words: wall | 6504 | 6389 |
+| copy: launch, completion's handler, fixed cost | 208, 94, 360 | 112, 84, 245 |
+| paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 82, 81 |
+| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 329, 1, 144, 514 |
 | SPI1 engined write at /16: fixed cost | 926 | 506 |
 | SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 523 |
 | bus masters still counted after the SPI requests | 1 | 0 |
@@ -1240,9 +1243,9 @@ the bus contract's and the same in both.
   runtime's memcpy does the same 4096 bytes in about 3130 cycles, half the
   DMA's time ([../design/benchmark.md](../design/benchmark.md)): the
   engine frees the core, it does not outrun it.
-- **The fixed cost of a copy is 248 cycles** of wall above the moving, of
+- **The fixed cost of a copy is 245 cycles** of wall above the moving, of
   which the instrument is 107 (the stopwatch and the vector's stamp pair):
-  141 cycles of the engine's own - the launch, five stores and the
+  138 cycles of the engine's own - the launch, five stores and the
   ledger's count, and the completion's handler.
 - **THE SPI TRANSACTION'S FIXED COST went from 1087 to 514 cycles**, one
   interrupt where there were two, and one idle turn per wake. Less the
@@ -1261,7 +1264,7 @@ the bus contract's and the same in both.
 - **The pace holds to the cycle**: the 256 words of a 1440-cycle pace
   arrived 1436 to 1447 cycles apart, watched by the core under the mask on
   the counter's position - the watching loop's own turn is the spread -
-  and the whole block took 368974 cycles for 368640 due, the first
+  and the whole block took 368973 cycles for 368640 due, the first
   update's period and the completion's latency the difference.
 - **A ONE-FRAME ENGINED SPI REQUEST WEDGED THE NEXT, before the rework.**
   The transaction completed inside the launch - the receive channel took
@@ -1306,6 +1309,12 @@ Implemented but not bench-verified, each with what would measure it:
   115200 with a copy block of 4 KB, and letter q with SPI2's two engines
   and a timer stream in the copy's place, each judged on the ring's bytes
   and overrun count.
+- **What sets the bytes a sleep moves.** Letter c reads 13 and 14 bytes a
+  wake on the two parts, and a vendor's-library rig read eleven on the
+  CH32V203; the difference is not explained, and nothing here says how much
+  of it is the wake handler's length, the wake latency or the item in
+  flight. What would measure it is letter c with a wake handler of stated
+  lengths, beside the vendor's rig rebuilt on the same die.
 - **The reset at `init()` on the transports letter s does not stage**:
   the ADC's and the DAC's streams, and UART4's two requests on DMA2, keep
   the contract by reading, no run having left a request standing over

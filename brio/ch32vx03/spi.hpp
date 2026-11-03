@@ -1628,12 +1628,14 @@ public:
     /// included: the verb a timed SpiBus calls on a transaction that never
     /// answered (spi_timeout), and a program's with the bus idle. Nothing
     /// needs it after spi_stalled or spi_dma_fault, which leave the next
-    /// start() a clean block by themselves. The select released FIRST, the
-    /// engines put away and re-claimed, then reset_block(). Main context;
-    /// it waits, bounded, for the drain. False when a bounded wait ran out or
-    /// the block's gate is closed.
+    /// start() a clean block by themselves. The select released FIRST, so a
+    /// frame still leaving is never read under a D/C it was not sent with, then
+    /// the D/C a command alone holds low, the engines put away, then
+    /// reset_block(). Main context; it waits, bounded, for the drain. False
+    /// when a bounded wait ran out or the block's gate is closed.
     static bool recover() {
         t_.cs.set();
+        t_.dc.set();   // the end of a request, however it ended: both high
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             arm_engines();
@@ -2006,10 +2008,11 @@ private:
     /// no polls; and on a block that never moves it ends after that many polls
     /// - 16 frames of 8 bits at /64 on SPI1 (PCLK2 = HCLK) are 16640 polls, a
     /// few cycles each. The shift stops at 15, where the longest request still
-    /// fits a word (65790 frames): it stops there only on a bus at an eighth of
-    /// HCLK or slower at /256 and 16-bit frames, whose frame is at most 65536
-    /// core cycles against 32768 polls of five instructions each, still past
-    /// the wire's time.
+    /// fits a word (65790 frames). That takes something off only at /256 with
+    /// 16-bit frames on a bus at an eighth of HCLK, and on one at a sixteenth at
+    /// /256 or at /128 with 16-bit frames: a frame there is at most 65536 core
+    /// cycles against 32768 polls of five instructions each, still past the
+    /// wire's time.
     static void take_budget() {
         const uint32_t code = (static_cast<uint32_t>(ctlr1_) & spi_br_mask) >> spi_br_shift;
         const uint32_t bits_shift = (ctlr1_ & spi_dff) != 0u ? 4u : 3u;

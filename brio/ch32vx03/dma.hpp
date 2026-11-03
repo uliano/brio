@@ -118,7 +118,8 @@
  * turning the peripheral off: a request once raised by a USART, an I2C or
  * a timer is held until the channel acknowledges it or the peripheral's
  * reset line is pulsed, and a gated clock freezes it on the OR, where the
- * channel's next enable moves one stray item and stalls behind it
+ * channel's next enable moves one stray item and stalls behind it on a
+ * USART's or a timer's, and an I2C1 read over its own never launches
  * (measured on both series, docs/ch32vx03/dma.md; an SPI's request,
  * measured on all three instances, does not outlive its release). A
  * channel has one owner for the whole image (docs/design/dma.md, "The

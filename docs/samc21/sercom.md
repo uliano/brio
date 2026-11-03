@@ -554,10 +554,10 @@ The engines are a policy, not a feature of the task:
   asked for.** The receive engine writes straight into the ring's free
   run, and nothing is visible to the consumer until a publish: at a
   block's completion, in the DMAC's handler, which publishes the run and
-  hands the channel the next one; or at `harvest()`, the owner's verb,
+  hands the channel the next one; or at `harvest()`, the consumer's verb,
   which publishes what has landed of a block still filling - this silicon
   has no idle-line flag and no receiver time-out, so the tail of a burst
-  shorter than the block waits for the owner to ask (a line protocol at
+  shorter than the block waits for the consumer to ask (a line protocol at
   its terminator's expected time, a stream at its end, a time event).
   `harvest()` reads the count with no suspend (dmac.md's rule forbids
   one), the decision of who retires a finished block under the mask and
@@ -577,7 +577,7 @@ The engines are a policy, not a feature of the task:
   pending re-arm. Measured on the loop through PA18 (`test_samc_uart`
   letter u): the pair exact at 115200 (8 KB), 1 Mbaud and 3 Mbaud (16 KB
   each), no overrun, skip or fault, in ten runs; and for ten minutes at
-  1 Mbaud beside the console on its interrupt, 59,999,732 bytes exact
+  1 Mbaud beside the console on its interrupt, 59,999,738 bytes exact
   (letter 2). At 3 Mbaud two frames are 320 core cycles: with the receive
   completion served after the transmit one, one byte was lost in each
   1 KB block.

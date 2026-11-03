@@ -53,7 +53,7 @@
  * them, under every arbitration and quality-of-service setting the
  * controller offers.
  *
- * The budget, and how it is enforced: by the compiler, whole. An engine's
+ * The budget, and how it is enforced. The number is structure: an engine's
  * number is 0 or 1 and any other does not compile, so the section tables hold
  * two entries. Each of the two has one owner for the whole image, the
  * peripheral request it serves (docs/design/dma.md, "The ownership rule"):
@@ -65,7 +65,9 @@
  * engines at most and no channel ever changes hands: two transport types of
  * one SERCOM over the same request are one owner and may take the channel in
  * turn, nobody else may. Nothing of it runs: the claim is a declaration the
- * compiler checks, and the engines below keep no record of an owner.
+ * compiler checks, and the engines below keep no record of an owner. A program
+ * that reaches past a transport to DmaChannel or a bare engine makes no claim
+ * unless it writes one (util/dma_owner.hpp): that use is the program's to keep.
  *
  * What is not offered, and what a driver here never does. No channel is
  * suspended: a software suspend of a running channel corrupts the OTHER

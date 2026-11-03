@@ -5239,7 +5239,7 @@ int main() {
     bench.letter('a', "the baud generator's arithmetic", ta_baud);
     bench.letter('b', "every frame format, written and read back", tb_format);
     bench.letter('c', "the transmit ring's contract under pressure", tc_ring);
-    bench.letter('d', "the transmit engine's facts and its claim", td_engine);
+    bench.letter('d', "the transmit engine's facts", td_engine);
     bench.letter('g', "the resource's regimes and its directions, on the loop", tg_resource);
 
     bench.letter('e', "echo, plain transport (host)", te_plain_echo, false);

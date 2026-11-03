@@ -6,15 +6,16 @@ chip's DMA controller can be trusted. The driver offers two engines,
 `DmaTxEngine<ch>` and `DmaRxEngine<ch>`, each a channel that moves a
 run of bytes between memory and one peripheral's DATA register, one
 byte per request of the peripheral, with no interrupt per byte. A
-program never calls them: it names them in a transport's template
+program does not call them: it names them in a transport's template
 arguments - `samc21/sercom.hpp`'s `Uart` ([sercom.md](sercom.md)),
 `samc21/spi.hpp`'s `SpiHost` ([spi.md](spi.md)) and `samc21/i2c.hpp`'s
 `I2cHost`, the transmit engine alone ([i2c.md](i2c.md)) - and binds the
 DMAC's one interrupt vector to those transports. The prerequisite that decides
 correctness is a budget: AT MOST TWO CHANNELS IN AN IMAGE, because this
 silicon corrupts its transfers when three run at once (erratum 1.10.4,
-"The rule" below), and each of the two has one owner for the whole image,
-which the compiler checks.
+"The rule" below), and each of the two has one owner for the whole image.
+The compiler checks that for every transport that names an engine ("One
+owner a channel" below).
 
 The smallest use is a console whose transmitter runs on the engine, the
 receiver on its interrupt:
@@ -33,8 +34,8 @@ extern "C" void DMAC_Handler() { (void)Serial::dma_isr(); }   // the transmit bl
 
 Line by line: `Serial` is the console's Uart (instance 5, the pads of
 sercom.md's console, a 64-byte receive ring and a 256-byte transmit
-ring) with the transmit engine on channel 0 in its transmit slot; the
-receive slot stays at its default, no engine. The program reaches the
+ring) with the transmit engine on channel 0; the receive engine stays at
+its default, none. The program reaches the
 engine by including `samc21/dmac.hpp` beside `samc21/sercom.hpp`. The
 SERCOM's handler stays the receiver's, posting `RxActivity` to the
 program's line-assembling active object (an active object is a
@@ -47,7 +48,7 @@ never raises, so the cast discards it. The program calls the engine
 nowhere else: `Serial::init()` arms it and `print` feeds it through the
 ring.
 
-What decides correctness even there. The budget is the board file's to
+What decides correctness even there. The budget is the program's to
 spend: the engines named across the whole image hold two channels at
 most, numbered 0 and 1, and a third number does not compile. Each channel
 belongs to one peripheral request for the whole image - here SERCOM5's
@@ -189,14 +190,15 @@ the rule is written for them.
    suspend (the live count or the write-back as it stands) or at the
    block's completion edge; a channel is disabled only at its block's
    completion or when no other channel runs.
-3. **The budget is spent by the board file, and the compiler keeps it.**
-   Each engine is one channel, a full-duplex pair two, armed at its
+3. **The budget is spent by the transports a program names, and the
+   compiler keeps it.** Each engine is one channel, a full-duplex pair two, armed at its
    transport's `init()` and held until `release()`. An engine names
    channel 0 or 1 and nothing else, so no image can make a third channel
    run; and each channel has one owner for the whole image, the request
-   its transport serves, so a third engined transport of an image names a
-   channel another request owns and does not compile. A channel never
-   changes hands.
+   its transport serves, so a third request on DMA names a channel another
+   request owns and does not compile. A channel never changes owner; the
+   owner being the request, two transport types of one request may take it
+   in turn ("One owner a channel" below).
 4. **Nothing else of the controller is offered:** no linked descriptors,
    no event-triggered channel, no memory-to-memory copy, no converter or
    timer stream, no CRC through the data port. Each is declined in "Not
@@ -208,7 +210,7 @@ the ownership claim of [../design/dma.md](../design/dma.md), "The
 ownership rule", made when the program is compiled ("One owner a
 channel", below): nothing of it runs, and the engines keep no record of
 an owner. Sentence 2 is the absence of a suspend verb anywhere in the stratum, a
-receive engine that comes only with its transmit engine (so its owner
+receive engine that comes only with its transmit engine (so its transport
 knows no other channel runs when it lets the receive channel go:
 `neg/uart_receive_engine_alone.cpp`), a `release()` that waits for the
 transmit block in flight to end, and the paths that can still break it,
@@ -228,17 +230,17 @@ body of each transport that names an engine (`Uart`, `SpiHost`,
 counts wherever the program uses the transport type, and it binds both
 ways:
 
-- a second request on a channel does not compile - the console's Uart on
-  SERCOM5 and a display's SPI host on SERCOM1 both naming channel 0:
+- a second request on a channel does not compile - the Uarts of SERCOM0
+  and SERCOM1 both naming channel 0:
   `ambiguating new declaration of 'constexpr brio::DmaOwner<brio::DmaPeriph::sercom, 1, brio::DmaSignal::tx> brio::dma_owner_of(DmaSlotId<0, 0>)'`,
-  its note naming SERCOM5's owner (`neg/dma_two_owners_on_one_slot.cpp`);
+  its note naming SERCOM0's owner (`neg/dma_two_owners_on_one_slot.cpp`);
 - one request on both channels does not compile either - two transport
   types of SERCOM0 naming its transmit engine on channel 0 and on
   channel 1: `ambiguating new declaration of 'constexpr brio::DmaSlotId<0, 1> brio::dma_slot_of(DmaOwner<brio::DmaPeriph::sercom, 0, brio::DmaSignal::tx>)'`
   against `DmaSlotId<0, 0>` (`neg/dma_one_request_on_two_slots.cpp`);
-- and with two channel numbers, a third engined transport is always one
-  of the two (`neg/dma_third_engine_in_an_image.cpp`): the budget of two
-  is the compiler's, whole.
+- and with two channel numbers, a third request always lands on a channel
+  another owns and does not compile
+  (`neg/dma_third_engine_in_an_image.cpp`).
 
 What passes is one request served by several transport types: a Uart
 and an SPI host on SERCOM1 naming the same transmit channel, or two SPI
@@ -246,6 +248,12 @@ host types of one SERCOM (a pair and a write-only host), take that
 channel in turn, each releasing before the next one's `init()` - one
 owner, the request, whatever the transport. A claim adds no byte to the
 image and no cycle (util/dma_owner.hpp).
+
+What the check does not see is a program that reaches past a transport.
+`DmaChannel<ch>` and the bare engines are public and claim nothing, so such
+a program keeps the rule itself and writes the claim beside the type
+([../design/dma.md](../design/dma.md), "The ownership rule"). No use on
+this page needs it.
 
 What the map leaves to choose is nothing but the count. Any trigger
 reaches any channel (CHCTRLB.TRIGSRC, 25.8.19), so no two requests
@@ -259,7 +267,7 @@ image may hold, and it forces these choices:
 | a console's transmit and an SPI host that reads | the SPI pair alone, the console on its interrupt | an SPI host reads only on its pair |
 | a console's transmit beside a display's writes | both: console TX on one channel, SPI TX on the other | the display's shape, two channels |
 | a console's transmit beside an I2C device's writes | both: console TX and I2C TX | two channels |
-| a third DMA transport of any kind | none: it runs on its interrupt or polled | the budget |
+| a third request on DMA, of any kind | none: it runs on its interrupt or polled | the budget |
 
 The unavoidable groups, then, are every set of three engines on this
 family's three parts alike (the E, G and J packages share the DMAC and
@@ -311,9 +319,9 @@ either end, blocks abandoned, console lines lost or broken):
 |---|---|---|---|---:|
 | the display's: the SPI host's transmit engine beside the console's | SPI TX on 1, console TX on 0 | 600 s | 1357 windows of 256 frames at 2 MHz exact at an AVR64EA48 client, 5428 blocks of 1024 at 12 MHz on the loop-back, 600 console lines (`test_samc_spi` letter o) | 0 |
 | the SPI pair, the console on its interrupt | SPI TX on 0, RX on 1 | 600 s | 15,790 windows of 16 frames both ways at 2 MHz with the client, 63,160 reads of 1024 at 12 MHz on the loop-back, every byte checked (letter p) | 0 |
-| the Uart pair | Uart TX on 0, RX on 1 | 600 s | 59,999,732 bytes at 1 Mbaud on a loop through the pad, every byte checked, beside the console on its interrupt (`test_samc_uart` letter 2) | 0 |
+| the Uart pair | Uart TX on 0, RX on 1 | 600 s | 59,999,738 bytes at 1 Mbaud on a loop through the pad, every byte checked, beside the console on its interrupt (`test_samc_uart` letter 2) | 0 |
 | a console alone | Uart TX on 0 | 600 s | 87,863 marked lines read whole by the host (letter 3) | 0 |
-| the I2C host's writes beside the console's | I2C TX on 1, console TX on 0 | 600 s | 135,131 writes of 1..254 bytes at 400 kHz and 1 MHz exact at an AVR64EA48 client, 1195 of them NACKed mid-block and abandoned, 135,131 console lines read whole by the host (`test_samc_i2c` letter s) | 0 |
+| the I2C host's writes beside the console's | I2C TX on 1, console TX on 0 | 600 s | 134,744 writes of 1..254 bytes at 400 kHz and 1 MHz exact at an AVR64EA48 client, 1192 of them NACKed mid-block and abandoned, 134,744 console lines read whole by the host (`test_samc_i2c` letter s) | 0 |
 
 ## The rule's exceptions
 
@@ -329,9 +337,9 @@ block the wire ended early:
   host's transmit channel disabled a pseudo-random 0..150 us into a
   256-frame block beside a Uart's transmit engine streaming at 1 Mbaud,
   its receiver judging every byte (`test_samc_spi` letter q): no lost
-  trigger, no byte lost or repeated, no block abandoned, in 25,000
-  disables as written and 25,000 with the SPI's request withdrawn first
-  (below 1.2e-4 a disable at 95 % in each of the two, against the 0.7 % a receive channel
+  trigger, no byte lost or repeated, no block abandoned, in 20,000
+  disables as written and 20,000 with the SPI's request withdrawn first
+  (below 1.5e-4 a disable at 95 % in each of the two, against the 0.7 % a receive channel
   disabled under a running transmit channel lost). What can happen beyond
   that bound is the measured kind: the running channel's pending trigger
   lost, its block stalled until the Uart's dead-block repair abandons it
@@ -356,7 +364,7 @@ block the wire ended early:
   never answered). The SERCOM raises no transmit request after the end,
   so the channel waits enabled with no beat in flight, and the host
   abandons it - the act of the Uart's dead-block repair. Measured beside
-  the console's transmit channel running (`test_samc_i2c` letter s): 1195
+  the console's transmit channel running (`test_samc_i2c` letter s): 1192
   such abandonments, the console's channel enabled at 93 % of the writes'
   starts, no console block lost, stalled or repeated and every line read
   whole by the host (below 2.6e-3 a disable at 95 %).
@@ -378,13 +386,13 @@ the silicon has already disabled.
   and 3 enabled), the last one released takes it down; a channel between
   them touches itself alone.
 - **`sercom_dma_claimed<Engine, n, signal>()`** (`samc21/sercom.hpp`) -
-  the claim a transport makes in its class body for each engine slot:
+  the claim a transport makes in its class body for each engine it takes:
   the engine's channel to SERCOM `n`'s `signal` request ("One owner a
-  channel"); true, and nothing claimed, for an empty slot.
+  channel"); true, and nothing claimed, where it takes none.
 - **`DmaChannel<ch>`** - one channel, what both engines do on it:
   `arm(trigger, level, completion)`, `release()`, `take()` (the
   channel reset and configured whatever its state), `enabled()`,
-  `waiting()` (enabled, nothing pending, no beat moving; when its owner
+  `waiting()` (enabled, nothing pending, no beat moving; when its transport
   has also read the channel's trigger standing, that is a dead block),
   `priority()`
   (the level read back, nothing when CTRL leaves it disabled),
@@ -398,18 +406,18 @@ the silicon has already disabled.
   needs none, a handler here running to completion.
 - **`DmaTxEngine<ch>`** - a channel draining bytes into a peripheral's
   DATA, at level 2: `arm(data, trigger, completion)`, `release()`; for
-  an owner that starts blocks from two contexts,
+  a transport that starts blocks from two contexts,
   `reserve()` (a test-and-set its caller masks) then `launch(run)` (three
   stores into the slot and the enable, false for an empty run or one past
   65535 bytes) or `cancel()`; `start(run)` both; `start_run(p, count)` and
-  `start_fixed(cell, count)` for an owner that starts from one context and
+  `start_fixed(cell, count)` for a transport that starts from one context and
   has checked the count (the second the SPI host's dummies, the source
   held still); `complete()` (the bytes the block carried), `in_flight()`,
   `busy()`, `running()`, `waiting()`, `abandon()` (the channel reset and
   re-armed, the block's tail lost, counted in `faults()`).
 - **`DmaRxEngine<ch>`** - a channel filling bytes from a peripheral's
   DATA, at level 3: `arm`, `release`, `prepare(run, count)` then
-  `launch()` (the enable alone, for an owner whose critical section
+  `launch()` (the enable alone, for a transport whose critical section
   covers it),
   `start(run, count)`, `idle()`, `take_landed()` (what landed since the
   last take, through `observe()`), `complete()` (what the block's end
@@ -489,8 +497,9 @@ const bool up = Bus::init(clock);   // armed again for the same owner; false: th
   Uart's transmit engine on SERCOM1's loop through the pad, PA18, at
   1 Mbaud): the engine's trigger standing - its last block over, the
   channel disabled by the block's end (25.6.2.6), DRE up behind it - then
-  the transport released three ways, then the same Uart initialized
-  again over the same channel, its one owner.
+  the transport released three ways (disabled and gated, gated with ENABLE
+  set, and by its `release()`), then the same Uart initialized again over
+  the same channel, its one owner.
   - **The channel keeps no request.** DATA filled by hand behind the
     engine's last block - the first character straight to the idle
     shifter, so DRE fell and rose again with the channel disabled, the
@@ -501,11 +510,11 @@ const bool up = Bus::init(clock);   // armed again for the same owner; false: th
     configuration standing (0x40210004).
   - **A gated clock holds a request left standing.** Gated with ENABLE
     set: INTFLAG reads 0x03 (DRE and TXC) behind the gate, CTRLA
-    0x40210006. A channel
-    bound by hand to that trigger took ONE stray beat - the first byte of
-    its block - and waited, enabled, for a rise that cannot come; and the
-    same channel bound to no trigger (TRIGSRC 0) moved nothing, the
-    engine's `arm()` resetting the channel (25.6.2.2).
+    0x40210006. Measured by hand and no longer in the letter, so a fact of
+    the silicon no suite reproduces: a channel bound to that trigger took
+    ONE stray beat, the first byte of its block, and waited, enabled, for
+    a rise that cannot come; bound to no trigger (TRIGSRC 0) it moved
+    nothing.
   - **`release()` disables and gates and resets nothing**: the instance
     reads DRE clear behind the gate, its configuration standing, as the
     disable above.
@@ -558,7 +567,7 @@ Driver gaps:
   borrower requests on the lent channels at 115200, 1 Mbaud and 3 Mbaud,
   636 MB on the loop: no fault (below 5.7e-5 a hand-over, 2.0e-4 an idle
   disable, at 95 %). A receive hand-over at the edge waits for its block
-  to fill, which on an idle line is for ever, so the owner then takes the
+  to fill, which on an idle line is for ever, so the protocol then took the
   other safe moment (the transmit channel idle, the receive channel
   disabled mid-block with its count exact); a transmit hand-over waits
   for its block to drain (10 ms for 1 KB at 1 Mbaud, 88 ms at 115200);
@@ -574,7 +583,7 @@ Driver gaps:
   receive engine without its transmit engine, an SPI receive engine
   without its transmit engine (the refusals above; a Uart receive channel
   alone beside another owner measured no descriptor fault in 30 minutes,
-  and is not offered so that no owner disables a running receive channel
+  and is not offered so that no transport disables a running receive channel
   beside another's), an I2C read phase on the receive engine (not
   measured beside another channel, so not offered: a read runs on the I2C
   host's interrupt), a converter or timer stream (and so no `util/block_stream.hpp`

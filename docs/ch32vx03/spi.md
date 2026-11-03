@@ -662,7 +662,8 @@ channel"), and an engineless host has nothing in flight to ask about.
 ways to run a request"](../design/spi-bus.md)). The host chooses nothing
 and reads no cost at run time; `start()` tests `r.engine` once, the
 request's fields read where they lie, and a polled request pays that test
-and, on a host with engines, the busy check's load and branch.
+and, on a host with engines, the load and branch of the busy check and of
+the owed reset's test.
 
 - **Polled** (`SpiEngine::polled`): the loops below inside `start()`, at every
   length and on every host, whoever called `start()` spinning for the whole
@@ -712,7 +713,9 @@ frame's end in all four modes ("No FIFO" above). So the host adds no wait
 for it, and letter s stands as the verdict ("Bench findings"). At every end,
 ok or failed, the D/C and the select are high: a stalled command phase, on
 either engine, raises the D/C and then the select before the block's reset,
-and a block that faults raises both in the channel's vector (letter f).
+a block that faults raises both in the channel's vector, and `recover()`
+over a request a timed arbiter gave up on raises the select and then the D/C
+(letter f).
 
 The polled loops tell two shapes apart by the in buffer. A write (no in
 buffer, and every command phase) writes ahead at every rate: the loop
@@ -742,7 +745,7 @@ as the `status` field of its `SpiDone`:
 | `spi_rejected` | the arbiter's FIFO was full, or a request naming the engines that they cannot carry, or on a host with none, or any request while a block of the host's own is in flight | nothing on the wire | the program: a full FIFO, or a block in flight, may be tried again once it has ended; a refusal never as it stands - `static_assert(Bus::has_dma)`, aligned buffers, or `SpiEngine::polled` for that request |
 | `spi_stalled` | a polled flag never came within the budget | D/C and select released, then the block reset and put back to the applied mode, rate and width, before `start()` returns | nobody: the next request starts on a clean block. A closed gate is the exception below |
 | `spi_dma_fault` | a channel reported a transfer error | requests down, both channels put away, D/C and select released, a reset owed, which the next `start()` or `prime()` pays before anything else | nobody: the arbiter answers and goes on, and the next request starts on a clean block |
-| `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()` | the program judges the device |
+| `spi_timeout` | a timed arbiter's limit passed with no completion | the arbiter has already called `recover()`: select and D/C released, the engines put away, the block reset | the program judges the device |
 
 **After `spi_stalled` or `spi_dma_fault` the program calls nothing**, in direct
 use or under the arbiter: the host does it, because it exists in both and
@@ -762,7 +765,7 @@ counted in polls of STATR of at least a core cycle each. So it never runs out be
 twice its own time; and since a poll measures 9 to 12 cycles, it holds the core
 for some twenty times the wire's time when nothing moves, 184 000 cycles (1.3 ms
 at 144 MHz) for sixteen frames at /64 of SPI1 on the CH32V203C8T6 (letter f
-below). The reset adds at most some 560 cycles to
+below). The reset adds at most some 580 cycles to
 that (letter f), and the `disable()` in it spends nothing on a stalled block: it
 waits only when SPE reads back set, and every stall staged here reads it clear.
 
@@ -844,10 +847,10 @@ the arithmetic. At 144 MHz, ten runs a part, cycles:
 
 | figure | CH32V203C8T6 (V4B) | CH32V303VCT6 (V4F) |
 |---|---|---|
-| E, SPI1, a read / a write | 601 / 608 | 656 to 665 / 656 to 658 |
-| F, SPI1, a read / a write (at /4) | 296 / 317 | 259 to 261 / 264 to 279 |
-| E, SPI2, a read / a write | 551 / 556 to 561 | 594 to 604 / 577 to 579 |
-| F, SPI2, a read / a write (at /4) | 259 / 291 | 231 / 231 to 239 |
+| E, SPI1, a read / a write | 601 / 608 | 669 to 685 / 645 to 664 |
+| F, SPI1, a read / a write (at /4) | 296 / 317 | 256 / 265 to 268 |
+| E, SPI2, a read / a write | 551 / 557 to 561 | 596 to 611 / 572 to 582 |
+| F, SPI2, a read / a write (at /4) | 259 to 261 / 291 to 293 | 225 / 225 to 229 |
 
 N, the frames from which the engines cost the core fewer cycles, byte
 frames, a read / a write (letter g measures byte frames alone; 16-bit
@@ -856,17 +859,17 @@ the wire sets the frame, halving the byte figure would not give theirs):
 
 | code | SPI1, V4B | SPI1, V4F | SPI2, V4B | SPI2, V4F |
 |---|---|---|---|---|
-| /2 | 11 / 19 | 12 to 13 / 24 to 25 | 6 / 9 | 7 / 11 |
-| /4 | 6 / 10 | 10 / 12 to 13 | 4 / 5 | 5 / 6 |
-| /8 | 4 / 5 | 5 to 6 / 6 to 7 | 2 / 3 | 3 / 3 |
-| /16 | 3 / 3 | 3 / 4 | 2 / 2 | 2 / 2 |
+| /2 | 11 / 19 | 13 to 14 / 23 to 25 | 6 / 9 | 7 to 8 / 11 |
+| /4 | 6 / 10 | 10 to 11 / 12 to 13 | 4 / 5 | 5 / 6 |
+| /8 | 4 / 5 | 6 / 6 to 7 | 2 / 3 | 3 / 3 |
+| /16 | 3 / 3 | 3 / 3 to 4 | 2 / 2 | 2 / 2 |
 | /32 | 2 / 2 | 2 / 2 | 1 / 1 | 1 / 1 |
 | /64, /128, /256 | 1 / 1 | 1 / 1 | 1 / 1 | 1 / 1 |
 
 In words: on SPI1, whose bus is HCLK, a single frame costs the core more
 polled than on the engines at /64 and slower on both cores, while at /2 a
-read repays the engines from 11 frames on the CH32V203 and 12 or 13 on the
-CH32V303 and a write from 19 and 24 or 25; on SPI2, whose bus is half of HCLK
+read repays the engines from 11 frames on the CH32V203 and 13 or 14 on the
+CH32V303 and a write from 19 and 23 to 25; on SPI2, whose bus is half of HCLK
 and whose frames are twice as long in core cycles at a code, a single
 frame at /32 and slower. The table is SPI1's and SPI2's; SPI3 shares
 SPI2's bus and is not in it. The arithmetic is advice: nothing in the code
@@ -878,8 +881,8 @@ longer by its DMA vector, a naked trampoline over a handler that saves
 the f-registers ([platform.md](platform.md)); its loops are the quicker by
 a few cycles. A loop's figures move by a few cycles with where the image
 places it (on the CH32V203C8T6 `bench_vx03`'s letter e reads the receive
-loop's frame on SPI1 at /4 in 8-bit frames 19 cycles over the wire, letter g
-10; on the CH32V303VCT6 both read 14).
+loop's frame on SPI1 at /4 in 8-bit frames 10 cycles over the wire and
+`test_vx03_spi`'s letter g 19; on the CH32V303VCT6 14 and 10 to 11).
 
 ### The client
 
@@ -1097,17 +1100,17 @@ other's `spi_peer` - in the one after it.
   moves them too: on the CH32V203C8T6 the same loop on SPI1 at /4 in 8-bit
   frames reads 10 cycles here and 19 in `test_vx03_spi`'s image (letter g). A POLLED REQUEST OF THREE BYTES - a
   command and two data, the D/C scripted, the select and the D/C on two
-  pads - costs 240 cycles above its wire time at /16 (the stopwatch's 28
-  inside), one byte 182, sixteen 232: the price of a DCS command. Of the four pin
+  pads - costs 232 cycles above its wire time at /16 (the stopwatch's 28
+  inside), one byte 184, sixteen 224: the price of a DCS command. Of the four pin
   edges each is one BSHR or BCR store inline through `PinRef::set/clear`
   (pin.hpp forces the two verbs inline; as calls they cost the 3-byte
   request 25 cycles more, measured). On the CH32V303VCT6 - the V4F, the
   image built under ilp32f, the same letter on the evaluation board's
   SPI1 pads with MISO undriven - the shapes land where the
   CH32V203C8T6's do: the polled write of 256 frames at 32, 128, 64 and
-  256 cycles a frame; the polled receive at 43 and 145 cycles a frame in 8-bit frames (1.34 and 1.13 times the wire's frame), 79 and 277 in 16-bit ones (1.23 and 1.08); the polled request of three
-  bytes 211 to 214 cycles above its wire time at /16, one byte 164 to 174, sixteen
-  214 to 218; every line ended with status 0 and no overrun standing.
+  256 cycles a frame; the polled receive at 46 and 150 cycles a frame in 8-bit frames (1.44 and 1.17 times the wire's frame), 86 and 276 in 16-bit ones (1.34 and 1.08); the polled request of three
+  bytes 213 cycles above its wire time at /16, one byte 171, sixteen
+  210; every line ended with status 0 and no overrun standing.
 - **THE BEAT IS THE FRAME, on the strap** (letter c, ten runs): sixteen
   16-bit frames over half-word aligned buffers ride both engines as
   half-words - byte-exact through the loop, ONE channel interrupt for the
@@ -1180,8 +1183,8 @@ other's `spi_peer` - in the one after it.
 - **A POLLED WAIT THAT RUNS OUT ends `spi_stalled`** (letter f, both
   parts): a polled write of 16 frames started with SPI1's gate closed
   under the engine - every STATR load reading zero, so TXE never comes -
-  returned `spi_stalled` after 183948 to 183974 cycles on the CH32V203C8T6
-  and 167266 to 167308 on the CH32V303VCT6, over the budget's 16640
+  returned `spi_stalled` after 183949 to 183975 cycles on the CH32V203C8T6
+  and 167268 to 167305 on the CH32V303VCT6, over the budget's 16640
   spins (16 frames of 8 bits at /64 of PB2, twice over, and 256): 11 and 10
   cycles a spin of a loop of five
   instructions, and 12 and 9 in other layouts of the same loop (the STATR load, the bit test, the budget's decrement and
@@ -1193,23 +1196,26 @@ other's `spi_peer` - in the one after it.
   parts, ten runs a part): a command phase stalled on the polled engine and in
   front of a data block on the engines, each `spi_stalled` inside `start()`,
   and a data block faulted behind its command phase, `spi_dma_fault` in the
-  channel's vector. The select and the D/C are read by their output latches,
-  cleared before the request, so each set latch is the host's own store.
+  channel's vector; and `recover()` over a command alone in flight, both
+  latches read low under the block and high after. The select and the D/C are
+  read by their output latches, cleared before the request, so each set latch
+  is the host's own store. The control, `recover()` with its D/C store taken
+  out, fails that verdict in three runs a part.
 - **THE ONE BUSY CHECK** (letter g, both parts, ten runs a part): sixteen frames
   at /256 on the engines, 32768 cycles of wire, and behind them a request naming
   the engines and one naming the loop, in mode 3 and at /8: each `spi_rejected`
   with `start()` true, the select's and D/C's latches and CTLR1 unmoved, the
   block in flight going on to its own `spi_ok`, and the next read exact.
 - **THE NEXT REQUEST WITH NOTHING CALLED, AFTER A STALL** (letter f, no
-  wire, and letter r, the far client's judgement; fifteen runs a part of
-  each). The stage is one a reset cures: the block's enable taken down under
+  wire, ten runs a part, and letter r, the far client's judgement, three
+  runs a part). The stage is one a reset cures: the block's enable taken down under
   the host with the request's own word primed, so `start()` writes nothing on
   the way in (a changed word's disable and enable would raise SPE and cure it).
   On letter f, two frames left standing with RXNE and OVR up and MISO held high
   by its port; then a polled write of 16 frames, a polled read of 16, or a
   command phase run polled before a data block, MISO held low. Every one ended
-  `spi_stalled` in 6341 to 201276 cycles on the CH32V203C8T6 and 5388 to
-  167877 on the CH32V303VCT6, by the frames' budget, the select's latch high, and on `start()`'s
+  `spi_stalled` in 6341 to 201277 cycles on the CH32V203C8T6 and 5381 to
+  167876 on the CH32V303VCT6, by the frames' budget, the select's latch high, and on `start()`'s
   return CTLR1 held the applied word with SPE up in modes 0, 2 and 3, STATR read
   TXE alone and SCK stood at the mode's idle level. The next polled read and the
   next read on the engines each read all zeros: no frame left
@@ -1217,10 +1223,10 @@ other's `spi_peer` - in the one after it.
   in each of the four modes and in a command phase, each followed by a polled
   and by an engined window of 32 frames at /64 (/8 behind the command phase), both
   ends exact.
-  The reset itself, `recover()`'s whole call on an idle block, is 556 cycles
-  on the CH32V203C8T6 and 537 to 540 on the CH32V303VCT6.
-- **A REAL TRANSFER ERROR, AND THE NEXT REQUEST** (letters f and r, fifteen
-  runs a part). A channel is refused at the top of the SRAM region, 0x2FFF F000,
+  The reset itself, `recover()`'s whole call on an idle block, is 575 cycles
+  on the CH32V203C8T6 and 551 to 554 on the CH32V303VCT6.
+- **A REAL TRANSFER ERROR, AND THE NEXT REQUEST** (letter f ten runs a part,
+  letter r three). A channel is refused at the top of the SRAM region, 0x2FFF F000,
   read or written ([dma.md](dma.md)), and on a read past the memory it can reach:
   a block whose out buffer ends at the last byte below 0x2000 5000 on the
   CH32V203C8T6, or below 0x0807 8000 on the CH32V303VCT6, runs 16 frames and is
@@ -1234,7 +1240,7 @@ other's `spi_peer` - in the one after it.
   On letter r, on the pair's instance, the same three, then a window exact at both
   ends, twelve windows of twelve on SPI2 (DMA1) on the CH32V203C8T6 and SPI3 (DMA2)
   on the CH32V303VCT6.
-- **QUEUED BEHIND A FAILURE THROUGH `SpiBus`** (letter r, fifteen runs a part):
+- **QUEUED BEHIND A FAILURE THROUGH `SpiBus`** (letter r, three runs a part):
   one client posting two requests from one dispatch, the first staged to stall
   or to fault mid-block, the second a window with its select in the Request. The
   replies came in order, `spi_stalled` or `spi_dma_fault` and then `spi_ok`, the

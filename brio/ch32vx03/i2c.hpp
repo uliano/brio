@@ -875,13 +875,14 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * the request completes. Both launches happen in the entry that takes
  * ADDR, before ADDR is cleared and with SCL held (19.3's note 1), so
  * nothing has moved yet: the channel is started first and DMAEN raised
- * only when it took the block. The transmit engine refuses a half whose
- * claim another owner of the same DmaTxEngine holds, and - on the
- * CH32V303's DMA1, ch32vx03/dma.hpp's 64 KB rule - a run across a 64 KB
- * boundary, which a written half kept in flash can be; the receive engine
- * takes no claim and refuses only that crossing, which a read half in
- * SRAM meets on a CH32V303RC or VC whose option bytes give it 96 or 128
- * KB of SRAM (RM 32.4.6, FLASH_OBR's split). A read of two bytes that
+ * only when it took the block. The transmit engine refuses a half while a
+ * block of its own is in flight (its run-time claim() verb, the busy flag's
+ * test-and-set; a correct program meets it only by holding this host's engine
+ * by hand), and - on the CH32V303's DMA1, ch32vx03/dma.hpp's 64 KB rule - a run
+ * across a 64 KB boundary, which a written half kept in flash can be; the
+ * receive engine has no such verb and refuses only that crossing, which a
+ * read half in SRAM meets on a CH32V303RC or VC whose option bytes give it 96
+ * or 128 KB of SRAM (RM 32.4.6, FLASH_OBR's split). A read of two bytes that
  * falls back has its POS set before ADDR's clear, which 19.12.1's note
  * asks ("before receiving"); a read of one or of three or more is primed
  * for both paths alike.

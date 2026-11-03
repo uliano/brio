@@ -13,7 +13,7 @@ same field names on every target, so a device client reads unchanged on
 any of them. Each request names how it runs
 ([design/spi-bus.md](../design/spi-bus.md), "Two ways to run a
 request"): `SpiEngine::polled`, the loop, inside the call that starts it;
-or `SpiEngine::dma`, the DMA engines the board file names in the host's
+or `SpiEngine::dma`, the DMA engines the program names in the host's
 template arguments ([dmac.md](dmac.md), its budget of two channels),
 the call returning with the wire running and an interrupt ending it -
 but for a refusal and a command loop that stalls, which end inside the
@@ -662,7 +662,7 @@ the two spans:
   TXC stood at the handler's end, the shifter run dry under it, the next
   write cleared it (32.8.6) and the tail waited for the last character's:
   the peer's receive run counted 64 exact and ended complete, the select
-  held to the last. Ten runs of k, every one so.
+  held to the last. Three runs of k on this image, every one so.
 - A REQUEST'S END (letter s, no wire and no peer). The D/C on a real pad
   (PB23), read after the end, the select on a spy group in SRAM: a command
   stalled on a clockless SERCOM, polled with data behind it, polled alone
@@ -786,21 +786,21 @@ the two spans:
   frames, best of 8, three runs): E, the engines' least busy cycles of
   the core - `start()`, the one TXC vector, and the turns of the loop
   the bench waits in (interrupts masked while it tests the end, the
-  core asleep between two tests) - 999 written and 979 read from the
-  flash (897 and 865 with the vectors and the loops in SRAM); F, the
-  polled request's rest above the wire, 457 to 458 and 374 (423 and 346
-  to 351); E - F, 541 to 542 written and 605 read (474 and 514 to 519).
+  core asleep between two tests) - 1007 written and 978 read from the
+  flash (910 and 873 with the vectors and the loops in SRAM); F, the
+  polled request's rest above the wire, 467 to 469 and 391 (447 and 371);
+  E - F, 538 to 540 written and 587 read (463 and 502).
   The engines' wall carries the vector's latency, x 1.13 of the wire at
   64 frames and x 1.03 at 1024 frames at 12 MHz. A polled request holds
   the core for its frames' wire time - or the loop's turn where that is
-  longer: about 27 cycles a frame written at 24 MHz (letter f), 41 read
+  longer: about 27 cycles a frame written at 24 MHz (letter f), 43 read
   at 12 MHz - so the engines cost the core fewer cycles from the length
   (E - F) / frame:
 
   | SCK (BAUD) | frame, core cycles | engines cheaper, written | read |
   |---|---:|---:|---:|
-  | 24 MHz (0) | 16 (the loop's 27) | 21 frames | - (beyond the receiver) |
-  | 12 MHz (1) | 32 (read: the loop's 41) | 17 | 15 |
+  | 24 MHz (0) | 16 (the loop's 27) | 20 frames | - (beyond the receiver) |
+  | 12 MHz (1) | 32 (read: the loop's 43) | 17 | 14 |
   | 6 MHz (3) | 64 | 9 | 10 |
   | 3 MHz (7) | 128 | 5 | 5 |
   | 1.5 MHz (15) | 256 | 3 | 3 |
@@ -809,7 +809,7 @@ the two spans:
 
   Guidance, which nothing in the code reads: at 3 MHz and slower a
   request of five frames or more costs the core less on the engines, at
-  12 MHz from about sixteen and at 24 MHz from about twenty written;
+  12 MHz from 14 read and 17 written and at 24 MHz from about twenty written;
   below that the loop is cheaper, and a wrong choice costs time, never
   correctness.
 - THE WRITE AT 24 MHz (letter r, the transmit engine alone on the

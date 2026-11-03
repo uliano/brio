@@ -837,13 +837,13 @@ the engine's abandonments.
 - **Ten minutes beside the console's engine** (letter s, not in `z`): the
   console on channel 0 printing one numbered line a write, the I2C writes
   on channel 1 at 400 kHz and 1 MHz in turn, 1 to 254 bytes each named
-  `dma`, every eighth batch a write the peer NACKs mid-block: 135,131
-  writes, 17,219,298 bytes, 1195 of them NACKed mid-block, each abandoned
+  `dma`, every eighth batch a write the peer NACKs mid-block: 134,744
+  writes, 17,171,759 bytes, 1192 of them NACKed mid-block, each abandoned
   beside the console's running channel; the console's channel enabled at
   93 % of the writes' starts. Every status the expected one, no tenure
   unfinished, every peer report exact (count, sum, first, matches,
   STOPs), no channel left enabled, only the NACKs' blocks abandoned and
-  none of the console's, and the host read all 135,131 lines whole (a
+  none of the console's, and the host read all 134,744 lines whole (a
   sequence with no gap and a CRC on each). At 95 %: below 2.3e-5 faults
   a write, and below 2.6e-3 lost triggers a mid-block abandonment beside
   the console's channel.

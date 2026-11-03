@@ -4006,6 +4006,36 @@ bool dc_after_fault(uint8_t& status) {
     return ended && status == spi_dma_fault && high;
 }
 
+/// recover() over a command alone on the engines, which holds the D/C low for
+/// its whole block: 16 frames at /256 of PB2, 32768 HCLK cycles of wire against
+/// the few a read of two latches takes, so the block is in flight when they are
+/// read. True when both latches read clear in flight and set after recover().
+bool dc_after_recover() {
+    (void)Dma1::init(clock);
+    Dma1::prime(SpiMode::mode0, SpiClock::div256);
+    Dma<1>::open();
+    dma_host_live = true;
+    ThirdPad::clear();
+    EndDc::clear();
+    Dma1::Request r{};
+    r.cs = ThirdPad::ref();
+    r.dc = EndDc::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.cmd_len = 16;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div256;
+    r.engine = SpiEngine::dma;
+    host_done = false;
+    const bool went = !Dma1::start(r);
+    const bool low = !ThirdPad::read_out() && !EndDc::read_out();
+    const bool in_flight = Dma1::busy();
+    (void)Dma1::recover();
+    const bool high = ThirdPad::read_out() && EndDc::read_out();
+    dma_host_live = false;
+    Dma1::release();
+    return went && low && in_flight && high;
+}
+
 void tf_stalled_txe() {
     third_pad_idle();
     // ---- spi_stalled: the polled wait that runs out ----
@@ -4064,14 +4094,19 @@ void tf_stalled_txe() {
     const bool end_polled = dc_after_stall<Host1>(SpiEngine::polled, st_polled);
     const bool end_engined = dc_after_stall<Dma1>(SpiEngine::dma, st_engined);
     const bool end_fault = dc_after_fault(st_fault);
+    const bool end_recover = dc_after_recover();
     print(serial, "  a command phase stalled: polled ", st_polled, end_polled ? ", D/C and select high" : ", NOT BOTH HIGH",
           "; ahead of a dma block ", st_engined, end_engined ? ", D/C and select high" : ", NOT BOTH HIGH",
           "; a dma block faulted behind its command phase ", st_fault,
-          end_fault ? ", D/C and select high" : ", NOT BOTH HIGH", crlf);
+          end_fault ? ", D/C and select high" : ", NOT BOTH HIGH", "; recover() over a command alone in flight",
+          end_recover ? ", D/C and select high" : ", NOT LOW THEN HIGH", crlf);
     bench.verdict("A FAILED REQUEST ENDS WITH THE D/C AND THE SELECT HIGH: a command phase stalled on the polled "
                   "engine and in front of a dma block (spi_stalled), and a dma block faulted behind its command "
                   "phase (spi_dma_fault)",
                   end_polled && end_engined && end_fault);
+    bench.verdict("... AND SO DOES recover() over a command alone in flight, the case a timed arbiter's spi_timeout "
+                  "meets: both latches low while the block runs, both high after",
+                  end_recover);
     ThirdPad::release();
     EndDc::release();
     third_pad_idle();

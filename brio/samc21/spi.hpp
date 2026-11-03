@@ -1097,7 +1097,7 @@ public:
  * clean end, a stall in either phase on either engine, a transfer error, and
  * recover() over a request in flight. A refused or empty request moves neither.
  *
- * EVERY BOUND IS A TIME, derived from the clocks when the rate is applied
+ * THE BOUNDS OF A REQUEST ON THE WIRE ARE TIMES, derived from the clocks when the rate is applied
  * (docs/design/spi-bus.md, "Every bound is a time"). A frame is 16 x (BAUD + 1)
  * core cycles on the wire (SCK = f_ref / 2 (BAUD + 1), table 30-2, on generator 0
  * f_ref the core's own rate, which is what lets the count ignore the rate). A polled transaction's budget is at least
@@ -1107,7 +1107,10 @@ public:
  * eight cycles at the least, some sixteen measured from the flash): a turn only runs while the wire is moving, a handler over the loop
  * spends none of it, and a stalled SERCOM holds the loop for the budget's time
  * or longer. release()'s wait on a block in flight is that block's wire time and
- * two frames, by the same count.
+ * two frames, by the same count. What waits on no wire keeps a fixed count:
+ * Spi::reset()'s 65535 turns for a synchronization, 44 ms when a stopped clock
+ * never completes it (docs/samc21/spi.md), and the vector's 64 turns for a
+ * receive beat, hundreds of core cycles against a beat's few.
  *
  * THE RECEIVE BUFFER IS NOT FLUSHED AT EVERY START. Every character a
  * receive shape of the loop writes is read back by it, so nothing stands
@@ -1563,8 +1566,8 @@ public:
     /// the wire; a block that outlives the bound is disabled anyway.
     static void release() {
         if constexpr (has_engines) {
-            // The block's wire time and two frames (the class comment: every bound
-            // is a time), a turn here a masked select and load, far over four cycles.
+            // The block's wire time and two frames (the class comment), a turn here
+            // a masked select and load, far over four cycles.
             uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * turns_a_frame_ / 2u;
             while (TxEngine::running() && spins-- != 0u) {
             }

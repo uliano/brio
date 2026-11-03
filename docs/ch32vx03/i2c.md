@@ -471,11 +471,13 @@ last byte went into the shifter, where the repeated START is requested.
 A half the engine refuses to launch stays on the event vector, and the
 request completes. Both launches are made in the entry that takes ADDR,
 SCL held until ADDR's clear (19.3's note 1), so nothing has moved when
-the refusal is known. The transmit engine refuses a block when another
-owner of the same `DmaTxEngine` holds its claim, and - on the CH32V303,
+the refusal is known. The transmit engine refuses a block while one of its
+own is in flight (its run-time `claim()` verb, the busy flag's test-and-set;
+a correct program meets it only by holding the host's engine by hand), and
+- on the CH32V303,
 whose DMA1 keeps a transfer inside one 64 KB page on the lots
 [dma.md](dma.md) describes - a run across a 64 KB boundary, which a
-written half kept in flash can be. The receive engine takes no claim
+written half kept in flash can be. The receive engine has no such verb
 and refuses only that crossing, which a read half in SRAM meets on a
 CH32V303RC or VC whose option bytes give it 96 or 128 KB of SRAM (the
 split FLASH_OBR reports, RM 32.4.6); a read of
@@ -665,10 +667,9 @@ makes both speeds exact - each against the other running `twi_peer` (the
 peer's PLL on its 8 MHz crystal): I2C1 to I2C1 on PB6/PB7, a 2.2 kOhm
 pull-up on each line to the CH32V203C8T6 board's 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
-letter both ways, ten runs of `z` in each direction with no failure,
-and ten of letter `d` each way since its counted serve (96 verdicts on
-the CH32V303VCT6's one image, 58 and 37 in the CH32V203C8T6's two, and
-ten each way of letters `d` and `l` since the reserved addresses).
+letter both ways, three runs of `z` in each direction with no failure (96
+verdicts on the CH32V303VCT6's one image, 58 and 37 in the CH32V203C8T6's
+two).
 TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad
 that carries it, with no scope and no wire. The figures below are the
@@ -804,8 +805,8 @@ they differ.
   entry, every byte exact at both ends; under `interrupt` a write of 32
   and a read of 32 through the engined host leave both sentinels standing
   and enter neither channel's vector. A write of 8 under `dma` with the
-  transmit engine's claim held elsewhere completes on the event vector,
-  exact, the channel untouched; on the CH32V303VCT6 so does a write of 16
+  busy flag held by the suite through the engine's `claim()` verb completes
+  on the event vector, exact, the channel untouched; on the CH32V303VCT6 so does a write of 16
   from flash across 0x0801 0000, which DMA1 refuses there. `dma` on the
   plain host is answered `i2c_rejected` inside `start()`, the far target
   counting no address match, and the same write on the default completes

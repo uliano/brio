@@ -217,7 +217,7 @@ count while it is working:
   controller's ledger, which every verb that sets or clears EN goes
   through, every engine's and every task's included
   ([dma.md](dma.md)) - and EN stays set when a
-  non-circular block completes here, so a channel its owner has not taken
+  non-circular block completes here, so a channel nothing has taken
   down still counts, which is what the registers say too;
 - a USB controller - the CH32V203's device controller or the
   host/device controller of either part - from its pull-up to its

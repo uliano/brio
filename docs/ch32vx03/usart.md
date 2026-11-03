@@ -917,7 +917,7 @@ default pads and the console untouched on USART1: 64 verdicts in `z` on
 the CH32V203C8T6 with the crossed pair strapped and 44 on the
 CH32V303VCT6 (its letter p that series' own), the far board dark; and the
 two-board key `y` against the far chip's usart_peer (the pair's section
-above): 67 verdicts on the CH32V203C8T6, 80 on the CH32V303VCT6 with its
+above): 72 verdicts on the CH32V203C8T6, 85 on the CH32V303VCT6 with its
 letters n and o. Almost every
 letter needs no wire, and three facts of this silicon are why: the
 receive pad is a bit-banged transmitter (an input follows its own pull,
@@ -1026,7 +1026,7 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   reading STATR once, CNTR twice and writing CTLR1 and CTLR3, the
   first-frame one CNTR alone and the same two writes; the edge lands
   13497 cycles after the last stop bit at 115200 (1.0 frame), 1705 at 1
-  Mbaud (1.1) and 497 at 4.5 Mbaud (1.5), where the BEFORE - the owner
+  Mbaud (1.1) and 497 at 4.5 Mbaud (1.5), where the BEFORE - the program
   asking `harvest()` once a tick - was 50424, 120624 and 124450. A burst
   of 16 at 1 Mbaud is read in 1.11 of its wire time (6.37 before). The
   interrupt receiver is one entry a byte, about 150 cycles each. Transmit
