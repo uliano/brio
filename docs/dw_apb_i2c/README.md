@@ -369,9 +369,12 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   the handler's read of `IC_INTR_STAT` and its read of `IC_STATUS`
   passed for its own STOP - on the RP2040, a control build whose STOP
   test omits the read below ended an engined read inside a window held
-  by hand `i2c_ok` in three runs of `test_rp2040_i2c`'s key `z` out of
-  three, and the same letter run alone `i2c_arb_lost` three times of
-  three - so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and a standing
+  by hand `i2c_ok` with the host's code cold in the XIP cache
+  (the letter run first after a boot, four boots of four) and in six runs
+  of `test_rp2040_i2c`'s key `z` out of six, and `i2c_arb_lost` with that
+  code just run (the letter run again, or right after an engined read:
+  twelve of twelve) - so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and
+  a standing
   TX_ABRT leaves the tenure to the abort's own entry. The test is one
   mask and one compare in the handler's STOP path, and one register read
   more where it passes (5 to 8 cycles measured on both chips).

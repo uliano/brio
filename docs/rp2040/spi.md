@@ -438,17 +438,17 @@ desk partner's peer (the last group below).
   - THE RECEIVE SHAPE UNDER A LONG HANDLER: 100 receive requests of 256
     frames on the loop-back at each of the three rates with the tick's
     handler stretched to 1500 cycles - eight frames being 128, 256 and
-    1024 cycles - **100 exact and 0 overruns at every rate**, with 15, 14 or 15
-    and 32 or 33 of the stretched ticks landing inside the requests (three
-    runs).
+    1024 cycles - **100 exact and 0 overruns at every rate**, with 14 or
+    15, 14 or 15 and 32 or 33 of the stretched ticks landing inside the
+    requests (ten runs).
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
     7.8125 MHz): wall less the wire's cycles **308 for one byte, 432 for
-    three, 750 for sixteen**, of which the block's mode-0 gap is 24 / 72 /
-    384, the wait for the end of each phase's last frame one SCK period, 16
-    cycles a phase, and the phase boundary's drain (the data
-    frames wait for the command frame to come back whole and its last edge,
-    so D/C flips on the wire) one frame's latency.
+    three, 750 for sixteen** (746 in one run of ten), of which the block's
+    mode-0 gap is 24 / 72 / 384, the wait for the end of each phase's last
+    frame one SCK period, 16 cycles a phase, and the phase boundary's drain
+    (the data frames wait for the command frame to come back whole and its
+    last edge, so D/C flips on the wire) one frame's latency.
 - **WHICH ENGINE COSTS THE CORE LESS** (`test_rp2040_spi` letter f; the IP
   stratum's page, "Which engine costs the core less", has the arithmetic).
   Nothing in the host reads these figures: they are the programmer's guidance.
@@ -560,19 +560,22 @@ desk partner's peer (the last group below).
   loop-back, the half-word engines on channels 4 and 5, the core asleep
   in the idle path between the start and the completion, the best of
   four: 16 8-bit frames at 31.25 MHz take **1399 cycles, 709 of them
-  busy** in eight runs of ten (1583 to 1586 and 893 to 896 in the other
-  two, a warm figure from the flash no XIP count has split) - the DMA line's handler 191 of those with the meter's
+  busy** in seven runs of ten (1582 to 1584 and 892 to 894 in the other
+  three, a warm figure from the flash no XIP count has split) - the DMA
+  line's handler 191 of those (374 in one of the three) with the meter's
   stamps, its wait for the end of the last frame one read of SSPSR at this
   rate - and the transaction's **fixed cost, the wall less its frames' nominal
   wire, is 887 cycles (7.1 us), of which 96 the block's mode-0 gap**: 791, 749
   at 3.906 MHz and 800 for 16-bit frames. Inside the
   block the engines run at the wire with the block's gap, by the
   difference of 16 and 256 frames: **38.00 cycles a byte at 31.25 MHz**
-  (32 of bits and 6 of gap) in six runs of ten (37.2 to 38.4 in the other
-  four, two of them the runs whose 16 frames read high), 304.00 at 3.906 MHz
-  (256 and 48), 35.00 a byte in 16-bit frames (64 and 6 a frame) - 256
-  frames at 1.28 and 1.20 times the nominal wire's time, 4096 16-bit frames
-  at 1.10 with the transaction's one interrupt.
+  (32 of bits and 6 of gap) in seven runs of ten (37.2 to 37.6 in the
+  other three, the runs whose 16 frames read high), 304.00 at 3.906 MHz
+  (256 and 48) in five runs of ten (304.4 to 304.8 in the other five),
+  35.00 a byte in 16-bit frames (64 and 6 a frame) in seven of ten (34.8
+  to 35.4 in the other three) - 256 frames at 1.28 to 1.29 and 1.19 to
+  1.20 times the nominal wire's time, 4096 16-bit frames at 1.09 with
+  the transaction's one interrupt.
 - THE RATE ASKED, which a loop cannot tell (`test_rp2040_spi` letter d,
   a frame inside an engined block timed by the difference of a 2048- and
   a 256-frame block on the engines, neither buffer named): 1000, 999 to
@@ -581,31 +584,30 @@ desk partner's peer (the last group below).
   gap - and 999 of sixteen at / 16 in 16-bit frames, each against
   clk_peri over the divisor asked, over fifteen runs; and no polled rate of
   letter c faster than its wire.
-- **WHERE THE HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE, and the
-  choice is about the COLD request.** `SpiHost`'s last template parameter
-  is util/placement.hpp's tag: `InFlash`, the default, leaves `start()`
-  and the DMA line's body in the flash (the body inline in the app's
-  vector), `InRam` makes each ONE flattened instance in
-  `.fast_text.brio`, copied to SRAM with `.data` - the engines' own verbs
-  and the launch folded in, so an engined transaction's driver code is in
-  SRAM whole ([platform.md](platform.md), "A handler in SRAM", has the
-  table and the rule). `bench_rp2040` letter e's `spi.cold` is the
-  instrument for the request: `spi.req`'s three-byte polled request
-  after every line of the XIP cache is flushed (`Xip::flush()`), under
-  the mask, the cache's misses (accesses less hits) read around it -
-  **12140 cycles and 142 misses with the host in the flash, 2881 and 41
-  with it InRam, against 821 to 913 and 834 warm**; the 41 are the caller's
-  (the ruler's reads, the call site, the veneer). Warm the two read the
-  same but for the veneer, 13 cycles a request here and 18 in `spi.req`'s
-  line - in four runs of six with the host in the flash; the other two read 912 and 913
-  with no miss counted, a difference not split. The engined block cold
-  (letter d after letter c, 16 frames at 31.25 MHz, warm 1399 to 1586) splits the
-  same way: 32588 cycles from the flash, 17884 with the host InRam, 21820
-  with the vectors placed, 10620 with both - the host's code some 14700 of
-  the difference, the vectors' some 10800, the caller's the rest. THE
-  SRAM IT COSTS under InRam: `start()` 824 bytes without engines and 1572
-  with them, the engines' launch folded in, the DMA line's body 684. Every
-  call across the boundary goes through
+- **WHERE THE HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE, and the choice
+  is about the COLD request.** `SpiHost`'s last template parameter is
+  util/placement.hpp's tag: `InFlash`, the default, leaves `start()` and
+  the DMA line's body in the flash (the body inline in the app's vector),
+  `InRam` makes each ONE flattened instance in `.fast_text.brio`, copied
+  to SRAM with `.data` - the engines' own verbs and the launch folded in,
+  so an engined transaction's driver code is in SRAM whole
+  ([platform.md](platform.md), "A handler in SRAM", has the table and the
+  rule). `bench_rp2040` letter e's `spi.cold` is the instrument for the
+  request: `spi.req`'s three-byte polled request after every line of the
+  XIP cache is flushed (`Xip::flush()`), under the mask, the cache's
+  misses (accesses less hits) read around it - **12140 cycles and 142
+  misses with the host in the flash, 2881 and 41 with it InRam, against
+  821 and 834 warm**; the 41 are the caller's (the ruler's reads, the call
+  site, the veneer). Warm the two read the same but for the veneer, 13
+  cycles a request here and 18 in `spi.req`'s line - in nine runs of ten
+  with the host in the flash; the tenth read 1379 with two misses. The
+  engined block cold (letter d after letter c, 16 frames at 31.25 MHz,
+  warm 1399 to 1584) splits the same way: 32588 cycles from the flash,
+  17884 with the host InRam, 21820 with the vectors placed, 10620 with
+  both - the host's code some 14700 of the difference, the vectors' some
+  10800, the caller's the rest. THE SRAM IT COSTS under InRam: `start()`
+  824 bytes without engines and 1572 with them, the engines' launch folded
+  in, the DMA line's body 684. Every call across the boundary goes through
   a veneer (a push, a literal load, a move into ip, a pop, a `bx`): the
   Cortex-M0+'s `bl` reaches 16 MB, and the SRAM lies 256 MB from the
   flash.

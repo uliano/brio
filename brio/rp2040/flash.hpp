@@ -68,10 +68,17 @@
  * into its run through the window. Every operation flushes the cache on
  * its way back ('FC'), so a cached read after it shows the new bytes.
  * `read()`, `address()`, `in_window()` and the `Xip` readbacks are plain
- * loads from any context; `Xip::flush()` holds the bus until the flush is
- * done. Storage: `program()`'s source and `command()`'s `rx` are the
- * caller's, used during the call only, and must lie outside the window;
- * `command()` copies `tx` to the stack first, so it may live anywhere.
+ * loads from any context. `Xip::flush()` may be called from any context
+ * on either core and runs from SRAM: it masks interrupts on the calling
+ * core over one uncached read of the chip and the write that starts the
+ * flush (about 110 cycles), then holds the bus until the flush is done
+ * (just over 1024 cycles), and its caller owes it a flash no other
+ * master reads meanwhile - the other core not executing from it, no DMA
+ * channel reading the window - which nothing here checks (its own
+ * comment says why). Storage: `program()`'s source and `command()`'s
+ * `rx` are the caller's, used during the call only, and must lie outside
+ * the window; `command()` copies `tx` to the stack first, so it may live
+ * anywhere.
  *
  * The window of the operation. While the SSI is out of XIP mode there
  * is no flash: a fetch from 0x1000_0000 hangs or faults. So every
@@ -359,11 +366,75 @@ struct Xip {
     }
     static bool faults_on_bad_write() { return (ctrl() & XIP_CTRL_ERR_BADWRITE_BITS) != 0u; }
 
-    /// Every line invalidated; a read of FLUSH holds the bus until it is
-    /// done, which is how this waits.
+    /// Every line of the cache invalidated (2.6.3.2), so the next access
+    /// to any address of the window misses and is fetched from the chip:
+    /// for a program that changed the flash behind the cache's back, or
+    /// that wants a path measured cold. `Flash`'s operations need no call
+    /// of it: each flushes on its way back.
+    ///
+    /// Context: setup, an active object or a handler, on either core. It
+    /// waits, and it masks interrupts on the calling core for part of the
+    /// call (PRIMASK saved and restored, so a masked caller stays masked).
+    ///
+    /// What it does, in order. The routine runs from SRAM (it is placed in
+    /// `.ram_text.brio`, never inlined or cloned - the COMDAT rule the
+    /// flash engine's functions follow above - so a caller in the flash
+    /// reaches it through a veneer the linker adds). With interrupts
+    /// masked it reads one word through the alias that bypasses the cache
+    /// (`xip_nocache_noalloc_base`) and then writes FLUSH; it unmasks, and
+    /// a read of FLUSH holds the bus until the flush has ended (the FLUSH
+    /// register's description, 2.6.3.6 table 156) - just over 1024
+    /// clk_sys cycles, one per set (2.6.3.2). The masked part is seven
+    /// instructions, that one read of the chip among them: about 110
+    /// cycles at 125 MHz with the second stage's SSI clock at clk_sys / 4
+    /// (the read and the write together measured at 101), plus the rest
+    /// of a line fill when one is already under way.
+    /// The wait that follows is unmasked, but the core is stalled on the
+    /// one load and takes an interrupt only between instructions, so a
+    /// handler that becomes pending meanwhile starts once the flush ends.
+    /// A caller in the flash then refetches every line it runs: the call
+    /// and its return cost the misses on top of the flush
+    /// (docs/rp2040/flash.md has the figures).
+    ///
+    /// THE CALLER'S DUTY, which this verb neither checks nor can check: no
+    /// other master reads the flash during the call. The other core is not
+    /// executing from the flash (it runs from SRAM or waits parked), and
+    /// no DMA channel reads the window - a transmit engine pouring a
+    /// constant that lives in the flash counts.
+    ///
+    /// Why it is built this way, three statements kept apart:
+    ///
+    ///  - Measured on the RP2040 B2: with this routine in the flash, a
+    ///    flush left one word of the cache's data memory that the next fill
+    ///    of the same set did not overwrite - the line filled after it held
+    ///    the routine's own `bx lr; nop` word in place of its own, at the
+    ///    same word position - and a core executing that line returned
+    ///    through a stale link register (a HardFault, or the bootrom's
+    ///    fault loop). The same program with the routine as it is here ran
+    ///    ten runs of ten to its end on two images, no stale line left.
+    ///  - Inferred, not established: a line fill started by the routine's
+    ///    own fetch, still in flight when FLUSH is written, keeps that word
+    ///    in its slot. From this inference come the SRAM placement, the
+    ///    read through the bypass alias - taken to complete only after any
+    ///    fill under way has - and the mask over the read and the write,
+    ///    so that no handler fetched from the flash starts a fill between
+    ///    them. From it too comes the duty above: a fill another master
+    ///    starts is the same hazard, and it is not measured. Synthetic
+    ///    probes that flush from the flash and refill the set did not
+    ///    reproduce the stale word outside the bench's own sequence.
+    ///  - The datasheet: 2.6.3.2 calls a flush while another master reads
+    ///    the flash (the other core executing from it) a safe operation,
+    ///    that master stalled until the flush ends, and its errata
+    ///    (Appendix B) list nothing for the flush.
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void flush() {
+        const uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        const uint32_t drained = reg_at(xip_nocache_noalloc_base, 0u);
         reg_at(XIP_CTRL_BASE, XIP_FLUSH_OFFSET) = 1u;
+        __set_PRIMASK(primask);
         const uint32_t done = reg_at(XIP_CTRL_BASE, XIP_FLUSH_OFFSET);
+        (void)drained;
         (void)done;
     }
     static bool flush_ready() { return (stat() & XIP_STAT_FLUSH_READY_BITS) != 0u; }

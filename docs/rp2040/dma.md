@@ -363,12 +363,14 @@ travelled by DMA):
 - THE ENGINES MEASURED ON THE WEACT RP2040: `test_rp2040_dma` 37 pass
   whole (the binding and the two-store block, the beat per block, the
   claim, the copy engine at three widths); `bench_rp2040` letter d - a
-  copy of 16 bytes wall 442 and busy 279 cycles with a 79-cycle
-  handler, and an engined SPI request of 16 frames at 31.25 MHz wall
-  1459 with ONE interrupt, a fixed cost of 947 cycles (7.6 us) of which
+  copy of 16 bytes wall 472 and busy 314 cycles with a 110-cycle
+  handler in ten runs of ten, and an engined SPI request of 16 frames at
+  31.25 MHz wall 1399 with ONE interrupt in seven runs of ten (1582 to
+  1584 in the other three), a fixed cost of 887 cycles (7.1 us) of which
   96 the block's mode-0 gap; inside the block the engines run at the
   wire plus that gap, 38.00 cycles a byte at 31.25 MHz and 304.00 at
-  3.906 MHz, 35.00 a byte in 16-bit frames.
+  3.906 MHz, 35.00 a byte in 16-bit frames, each in five to seven runs
+  of ten ([spi.md](spi.md) has the other runs).
 - THE LINE AT THE RATE ASKED, which a loop alone cannot tell (both ends
   share one divisor): 1024 frames through the transmit engine leave in
   1010 to 1016 thousandths of their wire time at 3 Mbaud (letter i), and

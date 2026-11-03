@@ -734,36 +734,35 @@ it:
 the two images a define gives between them; cycles at 125 MHz, each
 cell WARM / COLD - cold read by letter c, the XIP cache flushed before
 every timed run). F: every driver InFlash and every vector in the flash
-(the default); R: the drivers InRam; V: the vectors placed; B: both. The
-I2C rows are letter i's, each the least of three runs; the F image's
-cold runs fault in the engined reads at 100 kHz and the B image's at
-400 kHz or before (below), so the F image's cold `start()` and handler
-are read at 100 kHz - the same cycles at every speed, as R and V show -
-and B's cold wall is read in the two runs that reached it, 54810 in
-both.
+(the default); R: the drivers InRam; V: the vectors placed; B: both.
+Each cell is the range over three runs or more where the runs spread
+(ten warm on F, thirteen on B, six on R; letter i ten times cold on F
+and twenty on B); the I2C rows are letter i's, each the least of its
+runs.
 
 | path | F | R | V | B |
 |---|---|---|---|---|
 | SPI polled request, a command byte and 2 data bytes (`spi.req`) | 816 / 12046 | 834 / 2881 | 816 / 12046 | 834 / 2881 |
-| SPI on the engines, 16 frames, wall | 1399 to 1586 / 32588 | 1615 to 1985 / 17884 | 1399 to 1585 / 21820 | 1420 to 1606 / 10620 |
-| ... the DMA line's handler | 191 / 8264 | 393 to 394 / 4578 | 191 / 191 | 198 / 198 |
-| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 5274 / 16628 | 1826 / 9865 | 823 / 2897 | 1391 / 2964 |
-| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1109 / 9738 | 2081 / 6449 | 459 / 2032 | 452 / 2025 |
+| SPI on the engines, 16 frames, wall | 1399 to 1584 / 32588 | 1429 to 1800 / 17884 | 1399 / 21820 | 1420 to 1607 / 10620 |
+| ... the DMA line's handler | 191 to 374 / 8264 | 207 to 577 / 4578 | 191 / 191 | 198 / 198 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1575 to 1913 / 14076 | 886 to 1533 / 8151 to 9759 | 805 to 840 / 1271 | 877 to 912 / 1342 to 2950 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 4513 to 6091 / 8682 to 9798 | 1778 to 3173 / 6239 to 7077 | 390 to 425 / 2090 to 2930 | 645 to 1446 / 2218 to 2774 |
 | I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5504 | 362 / 12640 | 379 / 5504 |
 | ... its longest handler entry | 164 / 6382 | 201 / 3174 | 164 / 164 | 192 / 192 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 49547 / faults | 49603 / 61326 | 49547 / 61850 | 49594 / 54810 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 49547 / 72966 | 49603 / 61326 | 49547 / 61850 | 49594 / 54810 |
 
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
   a polled request 18 cycles dearer under InRam, an I2C entry 28 to 37 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
-  (`spi.poll` of 256 frames 5738 against 5756). A warm figure that
+  (`spi.poll` of 256 frames 5739 against 5757). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
   rows: the ops of letter u each run once, after other code). The engined
-  block under R, 1615 to 1985 against 1399 to 1586 under F, its handler 393
-  against 191, reads warm above F as well, and no XIP count was read around
-  it: its cause is not split.
+  block's wall spreads warm on every image but V (1399 to 1584 under F,
+  1429 to 1800 under R, 1420 to 1607 under B), and its handler wherever
+  the vector stays in the flash (191 to 374 under F, 207 to 577 under R);
+  no XIP count was read around it, so the spread's cause is not split.
 - COLD IS WHERE IT PAYS, and it pays on every path: a three-byte request
   12046 cycles from the flash against 2881 with the host InRam (`spi.req`
   with letter c's switch on; `spi.cold`, the same request after a flush with
@@ -777,15 +776,18 @@ What the rows say:
   veneer still miss). BOTH is the image that runs a cold transaction
   closest to a warm one; what it still fetches is the caller's code, the
   idle path and the tick.
-- THE COLD I2C LETTER FAULTS ON TWO IMAGES: letter i under letter c's
-  switch ends in a HardFault inside its engined reads on the F image in
-  five runs of five, at 100 kHz, and on the B image in four runs of
-  four, at 100 kHz or 400 kHz - never in a warm run (five on each
-  image) nor on R and V (three cold runs each).
-  On the F image the fault's stacked return address is the letter's
-  receive buffer, or the core is found in the bootrom's fault loop; the
-  cause is not found, and the F image's cold engined wall is not
-  measured (Not covered yet).
+- THE COLD COLUMN RESTS ON A FLUSH THAT RUNS FROM SRAM. Letter c's
+  switch empties the cache through `Xip::flush()`, which runs from SRAM
+  and reads the flash past the cache before it writes FLUSH
+  ([flash.md](flash.md), "Bench findings"). Executed from the flash, the
+  flush left one stale word in the cache - the flush routine's own
+  `bx lr` in the first line filled after it in that word's set - and
+  letter i faulted in its engined reads on F and B, where that line fell
+  in the engined host's `start()` or in the letter's own code. With the
+  flush in SRAM, letter i under the switch runs to its end in ten runs of
+  ten on F and twenty of twenty on B, every line printed and every byte
+  read the peer's: the engined 16-byte read at 400 kHz cold 72966 to
+  74366 cycles on F and 54810 in every run on B.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
   `start()` 824 bytes without engines and 1572 with them (the engines'
   launch folded in), the DMA line's body 684 (the wait for the end of the
@@ -815,11 +817,14 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The I2C host's engined reads cold on the default bench image and on
-  the image with both placements: `bench_rp2040` letter i under letter
-  c's switch HardFaults in its engined group ("A handler in SRAM"), so
-  those two images' cold engined figures are not measured. The fault
-  found and the letter run cold to its end would measure them.
+- Another master reading the flash while `Xip::flush()` runs - core 1
+  executing out of the flash, a DMA channel reading the window: the
+  flush's caller owes the flash to no other master ([flash.md](flash.md),
+  "How to use it"), a duty drawn from the stale word's inferred cause
+  where the datasheet calls such a flush safe (2.6.3.2). A letter that
+  flushes from core 0 while core 1 runs a loop out of the flash, or while
+  a transmit engine pours a constant from the window, and then compares
+  the cached alias with the bypass alias over the image, would measure it.
 
 - `in_handler()` on this core: IPSR is the architecture's (ARMv6-M ARM
   B1.4.2) and the same read is measured on the STM32F4's Cortex-M4

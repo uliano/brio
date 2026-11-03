@@ -119,8 +119,15 @@ the mask stays.
   program's own `.ram_text` function compiles beside it - the stage
   re-entered on the way back.
 - `Xip`: `enabled` / `enable`, `power_down` / `powered_down`,
-  `fault_on_bad_write` / `faults_on_bad_write`, `flush` (waits),
-  `flush_ready`, `hits` / `accesses` / `reset_counters`.
+  `fault_on_bad_write` / `faults_on_bad_write`, `flush`, `flush_ready`,
+  `hits` / `accesses` / `reset_counters`. `flush` invalidates every
+  line and waits for the end; it runs from SRAM (`.ram_text.brio`, a
+  caller in the flash reaching it through the linker's veneer), masks
+  interrupts on the calling core over one uncached read of the chip and
+  the write that starts the flush - about 110 cycles at 125 MHz -, then
+  holds the bus until the flush is done, just over 1024 cycles (2.6.3.2),
+  and owes the caller's flash to no other master meanwhile ("How to use
+  it").
 - `QspiFlashPartition`: the constant lines - `storage_base` (the top
   64 KB of the chip, where the linker's `flash` region stops),
   `journal_base` (the top 16 KB), `heap_end`, `storage_end`, the
@@ -155,6 +162,18 @@ channel may read the window. A sector erase is the longest window an
 ordinary save opens, when the journal collects; `save_reserved()`
 never erases.
 
+A flush of the cache (`Xip::flush()`, for a program that changed the
+flash behind the cache or that measures a path cold) asks the same of
+the application for its own length, about 1100 cycles: **no other
+master reads the flash while it runs - the other core not executing
+from it, no DMA channel reading the window, a transmit engine pouring a
+constant that lives in the flash included.** Nothing checks it, and
+nothing can. The datasheet calls such a flush safe (2.6.3.2); the duty
+rests on the stale word the bench findings describe and on its inferred
+cause, not on a measurement of the other master. The flush may be called
+from any context; a handler that becomes pending during it starts when
+it ends, since the core waits on one stalled load.
+
 ## Bench findings
 
 The reference suite is `test_rp2040_flash`, green on the Pico (a
@@ -187,6 +206,39 @@ but their timings, which is the point of the bootrom's engine.
   4092 hits cold and 5114 warm, and the first word misses again after
   a flush; a page read through the cache and then programmed reads
   its new bytes through the cache (the operation's own flush).
+- THE FLUSH, FROM SRAM. With `Xip::flush()` executing from the flash
+  (the write of FLUSH, its read and the return among the cached lines),
+  an engined I2C transaction measured cold after every flush faulted -
+  ten cold runs of ten on one image, five of six on another, never warm.
+  The cache kept ONE stale word, the same in each of eleven dumps of one
+  layout - the line filled first after the flush in the set of the flush
+  routine's own `bx lr; nop` word held that word in place of its own, at
+  the same word position, while the alias that bypasses the cache read
+  the flash right - and a core executing it returned through a stale
+  link register (an INVSTATE HardFault, or the bootrom's fault loop);
+  the other image's stale line was another, in the set of its own flush
+  routine's word. With the routine in SRAM and the bypass read under the
+  mask before the write, the same transaction runs to its end in ten
+  runs of ten on one image and twenty of twenty on the other, no stale
+  line found after; the routine in SRAM with no bypass read, masked or
+  not, ran eight of eight clean, the mask alone in the flash faulted one
+  run of four, and the flash routine with its own lines fetched first
+  and a bypass read before the write six of six clean. That a line fill
+  started by the routine's own fetch and still in flight when FLUSH is
+  written keeps that word is an inference, not established: probes that
+  flush from the flash and refill the set did not reproduce the stale
+  word outside that sequence. The datasheet calls a flush while
+  executing from the flash safe and lists no erratum for it. THE COST,
+  at 125 MHz on the WeAct board (the second stage's SSI clock at clk_sys
+  / 4): in SRAM eleven instructions and a literal, 32 bytes, and in the
+  flash the five-instruction veneer, 16 bytes; the masked part (seven
+  instructions, the uncached read among them) reads 101 cycles for the
+  read and the write together on the core's SysTick cycle count, the
+  same in 192 of 192 calls, and the wait on the FLUSH read that follows
+  1023 (a read of the count included); a call from code in the flash
+  returns 2944 to 3040 cycles after it was made, the refills of the
+  caller's own lines included. `test_rp2040_flash` flushes three times
+  around its cache walk and is green in three runs of three.
 - THE HEAP mounts empty on virgin flash, allocates a 300-byte block
   in its share (two cells), re-mounts with it surviving and reads it
   back exact.
@@ -225,11 +277,11 @@ but their timings, which is the point of the bootrom's engine.
 
 Driver gaps, each with its reason:
 
-- A lockout of the other core and of the DMA for the window: nothing
-  here parks core 1 or checks the channels; the application keeps
-  them off the flash (the SDK's `flash_safe_execute` is the shape a
-  portable one would take, born with the first program that writes
-  flash while core 1 runs).
+- A lockout of the other core and of the DMA for the window and for a
+  flush: nothing here parks core 1 or checks the channels; the
+  application keeps them off the flash (the SDK's `flash_safe_execute`
+  is the shape a portable one would take, born with the first program
+  that writes flash while core 1 runs).
 - The SFDP table (5Ah) and the chip's other registers (the second and
   third status registers, the quad-enable bit): `command()` carries
   any of them, the stage already sets what execute-in-place needs;

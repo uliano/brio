@@ -1530,9 +1530,14 @@ private:
     /// the machine. So a tenure whose START waited for another node's STOP
     /// and then lost the arbitration, its abort raised between this
     /// handler's read of IC_INTR_STAT and the read of IC_STATUS here, would
-    /// pass for its own STOP - measured on the RP2040 with the host's code
-    /// cold in the XIP cache: an engined read aimed at a higher address
-    /// than the other host's, inside a window held by hand, ended i2c_ok.
+    /// pass for its own STOP - measured on the RP2040 with a control build
+    /// without the read below: an engined read aimed at a higher address
+    /// than the other host's, inside a window held by hand, ended i2c_ok
+    /// with the host's code cold in the XIP cache (the letter run first
+    /// after a boot, four boots of four) and inside test_rp2040_i2c's full
+    /// key (six runs of six, the cache's state there not counted), and
+    /// ended i2c_arb_lost with that code just run (the letter run again,
+    /// or right after an engined read: twelve runs of twelve).
     /// TX_ABRT stands until the handler reads it away, so IC_RAW_INTR_STAT
     /// read AFTER IC_STATUS closes the race: an abort before the status
     /// read shows there, and one after it found the FIFO or the machine

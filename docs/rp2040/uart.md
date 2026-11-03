@@ -357,22 +357,24 @@ extern "C" void isr_uart0() {
   same PL011 r1p5 ([../rp2350/uart.md](../rp2350/uart.md)): the direct
   write into an idle FIFO, the transmit interrupt armed only behind a
   full FIFO - `test_rp2040_serial` 32 pass whole, a 4096-byte print 501
-  interrupts at x 0.99 of the wire and 256 bytes 31 (`bench_rp2040`
+  to 502 interrupts at x 0.99 of the wire and 256 bytes 30 (`bench_rp2040`
   letter p).
 
 - THE RECEIVE SIDE AND ITS EDGE (`bench_rp2040` letter u, UART1 under
-  LBE at 125 MHz, the meter's stamps inside `isr`): 256 bytes through the
-  interrupt receiver in 16 level entries and the time-out's, 12882
-  cycles at 115200 and 11659 at 1 Mbaud - 46 a byte, moving by up to 4
-  a byte between two runs of one image with the XIP cache - where the level
-  read with a flag test before every character took 16510 and 15500 (60
-  a byte); the receive engine 390 cycles for the same 256, two
-  completions. The edge from the burst's last stop bit (BUSY falling):
-  the time-out's 3.2 frames at 115200, and at 1 Mbaud 1.6 to 2.7 frames
-  from run to run (measured, not dissected); under the engine
+  LBE at 125 MHz, the meter's stamps inside `isr`, ten runs): 256 bytes
+  through the interrupt receiver in 16 entries of its vector, which takes
+  10016 to 10663 cycles at 115200 and 10000 to 10183 at 1 Mbaud - 39 to
+  42 a byte, moving between runs of one image with the XIP cache; the
+  receive engine 1179 to 1742 cycles for the same 256, two completions.
+  The edge from the burst's last stop bit (BUSY falling): the time-out's
+  3.2 frames at 115200 (3.15 to 3.18); at 1 Mbaud the burst arrives on
+  ONE edge, which the letter reads between 1.16 and 0.07 frames before
+  BUSY falls - the stamp of that fall is taken by the loop that drains
+  the ring, so it can come late (not dissected). Under the engine
   `UARTRIS.RTRIS` never rose (17 bytes and ten frames of silence: the
   FIFO empty, every byte moved), so the engine's burst edge is its
-  owner's poll - 2.4 frames at 115200 to 43 at 1 Mbaud on a 1 ms tick.
+  owner's poll - 0.2 to 10.2 frames at 115200 and 6.6 to 55 at 1 Mbaud
+  on a 1 ms tick.
 - THE MASKED WINDOW OF `harvest()` (the same letter, the ruler read
   around the one call, best of 8; the ruler's own `stopwatch` floor, 41
   cycles, is inside each figure): 151 cycles with nothing landed - the
@@ -382,12 +384,13 @@ extern "C" void isr_uart0() {
   window: about 1.8 us at 125 MHz at the longest, the whole verb being a
   straight line with no loop and no spin
   ([../pl011/README.md](../pl011/README.md), "The engine slots"). For
-  scale, the interrupt receiver's own entry for a FIFO level costs 46
-  cycles a byte, 16 bytes a level.
-- THE TRANSMIT SIDE through the same letter: 4096 bytes in 145 refills
-  at 25 cycles a byte (27 before), wire-bound (x 1.00) to UARTCLK / 16 =
-  7.8125 Mbaud; through the transmit engine in 40 to 47 blocks, about 3
-  cycles a byte, wire-bound too.
+  scale, the interrupt receiver's own entry for a FIFO level costs 39 to
+  42 cycles a byte, 16 bytes a level.
+- THE TRANSMIT SIDE through the same letter: 4096 bytes in 146 entries
+  of the transmitter's vector (127 to 128 at UARTCLK / 16), 22 to 23
+  cycles a byte, wire-bound (x 1.00) to UARTCLK / 16 = 7.8125 Mbaud;
+  through the transmit engine in 40 to 47 blocks, 3 to 5 cycles a byte,
+  wire-bound too (x 1.00 to 1.01).
 - `tx_idle()` ON THE PAD (`test_rp2040_serial` letter t, eight frames of
   0xFF at 9600 on GP4 with the loop-back off, the pad read through SIO):
   true 0 us from the last stop bit's end, a bit being 104 us; under the
@@ -405,8 +408,8 @@ extern "C" void isr_uart0() {
   and loop in a scratch program: 58 cycles a byte reading characters
   already in the FIFO and 53 writing into an empty one, every cycle of
   the wire's time the CPU's. This transport's interrupt receiver costs
-  46 a byte and its transmitter 25, and the core is free between
-  entries.
+  39 to 42 a byte and its transmitter 22 to 23, and the core is free
+  between entries.
 
 ## Not covered yet
 
@@ -431,14 +434,15 @@ Implemented but not bench-verified, each with what would measure it:
   STM32F4 USART page](../stm32f4/usart.md), letter h); a letter that
   writes a run with interrupts masked, reads the room under the mask and
   the edge after the wire time would measure them here.
-- Why a burst of 17 at 1 Mbaud is told 1.6 to 2.7 frames after its last
-  stop bit, under the 32 bit periods of the time-out (letter u; the
-  M33 and Hazard3 read 3.26 on the same source) - where a lone byte's
-  time-out is 32 bit periods from its stop bit at every rung (letter
-  c), so the shortfall is the burst's, not the rate's: the entries timed
-  against the RX pad would place each one.
+- Where a burst of 17 at 1 Mbaud is told: letter u reads its one edge
+  between 1.16 and 0.07 frames before BUSY falls, where the M33 and
+  Hazard3 read 3.26 frames after on the same source and a lone byte's
+  time-out is 32 bit periods from its stop bit at every rung (letter c);
+  the stamp of BUSY's fall shares its loop with the drain, so the reading
+  may be the instrument's. The edge and the last stop bit timed against
+  the RX pad would place each one.
 - The 7 to 19 us from a masked time-out's line unmasked to the byte in
   the program's hands (letter c), some 900 to 2400 cycles where the
-  receive path costs 46 a byte in a burst: the vector's entry and the
+  receive path costs 39 to 42 a byte in a burst: the vector's entry and the
   copy timed warm and cold on the meter (`bench_rp2040` letter u's
   instrument) would split it.
