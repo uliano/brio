@@ -2202,11 +2202,14 @@ void free_compare_request() {
 /// cell, request-paced (MEM2MEM clear), asked by nothing - any item it moves
 /// is a request still standing on the channel's OR. Its count read 300 us
 /// after the enable (a held request is taken within a few bus cycles).
+/// Programmed by hand in the name of the channel's owner in this image, the
+/// I2C's request on it (one owner a channel, util/dma_owner.hpp): the timers
+/// program no channel, they raise a request on its OR.
 volatile uint8_t sink_cell = 0;
 template <uint8_t ch>
 uint16_t next_owner_moves() {
     static const uint8_t four[4] = {1, 2, 3, 4};
-    using C = DmaChannel<ch>;
+    using C = DmaChannel<ch, DmaOwner<DmaPeriph::i2c, 1, ch == 6u ? DmaSignal::tx : DmaSignal::rx>>;
     C::stop();
     (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
                                  .config = {.direction = DmaDirection::memory_to_peripheral,

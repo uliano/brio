@@ -34,7 +34,7 @@
 //      console would not see a divisor a few per cent off
 //   f  the console's receive engine: what the ring holds is what was
 //      typed - this letter asks for a line and echoes it
-//   g  the copy engine on channel 7: copy and fill at the three beats
+//   g  the copy engine on channel 6: copy and fill at the three beats
 //      exact, polled and by its own interrupt, its refusals - a
 //      half-word run off its boundary (RM 8.3.6), a count of zero or
 //      over CNTR's, a block on a busy engine - and abandon()
@@ -85,8 +85,10 @@ constexpr Serial serial;
 
 // The channel the memory-to-memory letters use: 1, the ADC's, idle here.
 using Copier = DmaChannel<1>;
-// The copy engine's: 7, I2C1's and USART2's receive, idle here.
-using CopyEngine = DmaCopyEngine<7>;
+// The copy engine's: 6, I2C1's and USART2's transmit, idle here - and not
+// letter i's channel 7, which that letter programs by hand: one owner a
+// channel (util/dma_owner.hpp).
+using CopyEngine = DmaCopyEngine<6>;
 
 TestBench<Serial> bench;
 
@@ -468,7 +470,7 @@ void tg_copy_engine() {
     const bool stopped = CopyEngine::abandon();
     const bool idle_after = !CopyEngine::busy() && !CopyEngine::abandon();
     print(serial, "  abandon(): started ", long_started, ", stopped ", stopped, ", CNTR left ",
-          DmaChannel<7>::count(), crlf);
+          DmaChannel<6>::count(), crlf);
     bench.verdict("abandon() stops a running block and frees the engine; a second one finds nothing",
                   long_started && idle_after);
     bench.verdict("no transfer fault, polled", CopyEngine::faults() == 0u);
@@ -657,7 +659,7 @@ BRIO_CH32_VECTOR(dma1_channel4_handler) {
     (void)Serial::dma_isr();
 }
 BRIO_CH32_VECTOR(dma1_channel5_handler) { (void)Serial::dma_isr(); }
-BRIO_CH32_VECTOR(dma1_channel7_handler) {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (CopyEngine::isr() != 0u) {
         engine_completions = engine_completions + 1u;
     }

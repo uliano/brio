@@ -2735,6 +2735,12 @@ twilink::Params serve_params(uint16_t count, uint16_t ms, uint8_t seed) {
     return a;
 }
 
+// I2C1's two requests: the owners of channels 6 and 7 in this image (one
+// owner a channel, util/dma_owner.hpp) - the engined host claims them, and the
+// next owner below programs either channel by hand in their name. The timers
+// program no channel: they raise a request on its OR.
+using I2cTxOwner = DmaOwner<DmaPeriph::i2c, 1, DmaSignal::tx>;
+using I2cRxOwner = DmaOwner<DmaPeriph::i2c, 1, DmaSignal::rx>;
 using DeadTx = Tim<1>;   ///< its channel 3's compare request: DMA channel 6
 using DeadRx = Tim<2>;   ///< its channel 2's compare request: DMA channel 7
 constexpr uint8_t dead_tx_ch = 2;
@@ -2800,8 +2806,8 @@ void tp_dead_channel() {
         return;
     }
     // THE CONTROL: nothing raised on either channel.
-    const uint16_t control6 = held::next_owner_moves<6>(clock);
-    const uint16_t control7 = held::next_owner_moves<7>(clock);
+    const uint16_t control6 = held::next_owner_moves<6, I2cTxOwner>(clock);
+    const uint16_t control7 = held::next_owner_moves<7, I2cRxOwner>(clock);
 
     // 1. THE DEAD TRANSMIT CHANNEL. The hold proved first by a next owner
     // (which takes the one stray item and leaves the channel dead), then a
@@ -2809,7 +2815,7 @@ void tp_dead_channel() {
     // and nothing more, BTF comes with the count standing, and the engine
     // must answer i2c_dma_fault - never i2c_ok over a short write.
     held::hold_compare_request<DeadTx>(dead_tx_ch, clock);
-    const uint16_t held6 = held::next_owner_moves<6>(clock);
+    const uint16_t held6 = held::next_owner_moves<6, I2cTxOwner>(clock);
     held::free_compare_request<DeadTx>();
     const uint8_t dws = dead_write();
     const uint32_t dw_entries = host_isr_entries;
@@ -2913,7 +2919,7 @@ void tp_dead_channel() {
             DmaHost::release();
         }
         held::free_compare_request<DeadRx>();
-        moved[way] = held::next_owner_moves<7>(clock);
+        moved[way] = held::next_owner_moves<7, I2cRxOwner>(clock);
         H::bus_clock(true);
         H::reset();
         DmaHost::release();

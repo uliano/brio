@@ -4,6 +4,11 @@
 // the Uart's two engine slots in every combination - instantiation
 // only, no main(), no hardware.
 //
+// One owner a channel (util/dma_owner.hpp): every use of a channel here
+// that is not the Uart's names the fixture's owner of that channel,
+// `Fix<ch>`, and the hand-programmed channels 4 and 5 name the Uart's
+// own requests, the owners its engines claim those channels for.
+//
 // The vocabulary's compile-time arithmetic is re-stated here (the
 // vector per channel, the flag nibble, the width of an element, the
 // one config the chapter forbids, the configuration word and the
@@ -23,6 +28,12 @@ using namespace brio;
 
 using P = Ch32v00xPlatform<>;
 using SysClock = Clock<ClockSource::pll, 48'000'000>;
+
+/// The fixture's owner of channel `ch`: one tag a channel.
+template <uint8_t ch>
+struct Fix {};
+using Usart1Tx = DmaOwner<DmaPeriph::usart, 1, DmaSignal::tx>;
+using Usart1Rx = DmaOwner<DmaPeriph::usart, 1, DmaSignal::rx>;
 
 // ---- the vocabulary --------------------------------------------------------
 static_assert(dma_channel_count == 7);
@@ -56,9 +67,9 @@ static_assert(dma_engines_distinct<NoDmaEngine, NoDmaEngine>() &&
               !dma_engines_distinct<DmaTxEngine<4>, DmaRxEngine<4>>());
 
 // ---- every channel's verbs -------------------------------------------------
-template <uint8_t ch>
+template <uint8_t ch, typename Owner>
 void channel_verbs(uint8_t* buf) {
-    using C = DmaChannel<ch>;
+    using C = DmaChannel<ch, Owner>;
     static_assert(C::number == ch);
     static_assert(C::irq() == dma_channel_irq(ch));
     Dma::open();
@@ -94,13 +105,13 @@ void channel_verbs(uint8_t* buf) {
 
 void all_channels() {
     static uint8_t buf[16];
-    channel_verbs<1>(buf);
-    channel_verbs<2>(buf);
-    channel_verbs<3>(buf);
-    channel_verbs<4>(buf);
-    channel_verbs<5>(buf);
-    channel_verbs<6>(buf);
-    channel_verbs<7>(buf);
+    channel_verbs<1, Fix<1>>(buf);
+    channel_verbs<2, Fix<2>>(buf);
+    channel_verbs<3, Fix<3>>(buf);
+    channel_verbs<4, Usart1Tx>(buf);
+    channel_verbs<5, Usart1Rx>(buf);
+    channel_verbs<6, Fix<6>>(buf);
+    channel_verbs<7, Fix<7>>(buf);
 }
 
 // ---- the engines at the three widest beats --------------------------------
@@ -126,9 +137,9 @@ void engines(volatile uint32_t* reg, uint8_t* r8, uint16_t* r16, uint32_t* r32) 
     static_assert(std::same_as<typename Tx::element, Elem>);
     static_assert(Tx::flag_complete == DmaFlag::complete && Tx::flag_error == DmaFlag::error);
 
-    Tx::arm(reg, Tx::flag_error, DmaPriority::high);
-    Tx::arm(reg, DmaPriority::medium);
-    Tx::arm(reg);
+    Tx::template arm<Fix<ch>>(reg, Tx::flag_error, DmaPriority::high);
+    Tx::template arm<Fix<ch>>(reg, DmaPriority::medium);
+    Tx::template arm<Fix<ch>>(reg);
     if (Tx::claim()) {
         (void)Tx::launch(std::span<const uint8_t>(r8, 8));
     }
@@ -148,9 +159,9 @@ void engines(volatile uint32_t* reg, uint8_t* r8, uint16_t* r16, uint32_t* r32) 
     Tx::clear_faults();
     Tx::stop();
 
-    Rx::arm(reg);
-    Rx::arm(reg, DmaPriority::low);
-    Rx::arm(reg, Rx::flag_complete | Rx::flag_error, DmaPriority::very_high);
+    Rx::template arm<Fix<ch>>(reg);
+    Rx::template arm<Fix<ch>>(reg, DmaPriority::low);
+    Rx::template arm<Fix<ch>>(reg, Rx::flag_complete | Rx::flag_error, DmaPriority::very_high);
     (void)Rx::idle();
     (void)Rx::service(Rx::block_flags());
     (void)Rx::take();
@@ -182,8 +193,8 @@ void copier() {
     static uint16_t b16[16];
     static uint32_t b32[16];
     static const uint32_t cell = 0x5A5A5A5Au;
-    C::arm();
-    C::arm(DmaPriority::high, false);
+    C::template arm<Fix<ch>>();
+    C::template arm<Fix<ch>>(DmaPriority::high, false);
     (void)C::copy(b8, b8 + 8, 8u);
     (void)C::fill(b8, reinterpret_cast<const uint8_t*>(&cell), 16u);
     if constexpr (sizeof(Elem) >= 2u) {
@@ -202,7 +213,7 @@ void copier() {
 
 void all_copiers() {
     copier<1, uint32_t>();
-    copier<4, uint16_t>();
+    copier<3, uint16_t>();
     copier<7, uint8_t>();
 }
 

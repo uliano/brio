@@ -57,11 +57,14 @@ void free_compare_request() {
 /// cell, request-paced (MEM2MEM clear), asked by nothing - any item it moves
 /// is a request still standing on the channel's OR. Its count read 300 us
 /// after the enable (a held request is taken within a few bus cycles).
+/// `Owner` is the channel's owner in the image (one owner a channel,
+/// util/dma_owner.hpp): the request whose transport binds the channel, the
+/// block programmed by hand in its name.
 inline volatile uint8_t sink_cell = 0;
-template <uint8_t ch, typename Clk>
+template <uint8_t ch, typename Owner, typename Clk>
 uint16_t next_owner_moves(Clk clock) {
     static const uint8_t four[4] = {1, 2, 3, 4};
-    using C = brio::DmaChannel<ch>;
+    using C = brio::DmaChannel<ch, Owner>;
     C::stop();
     (void)C::prepare(brio::DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
                                        .config = {.direction = brio::DmaDirection::memory_to_peripheral,

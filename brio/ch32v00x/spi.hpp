@@ -738,6 +738,10 @@ template <uint8_t n, SpiPins pins = spi1_default_pins, typename TxEngine = NoDma
           typename RxEngine = NoDmaEngine, typename Placement = InFlash>
 class SpiHost {
     using S = Spi<n>;
+    /// The requests the engines serve, the owners they claim their channels
+    /// for (dma_engine.hpp's file header).
+    using TxOwner = DmaOwner<DmaPeriph::spi, n, DmaSignal::tx>;
+    using RxOwner = DmaOwner<DmaPeriph::spi, n, DmaSignal::rx>;
 
     static_assert(HotPlacement<Placement, Ch32v00xPlatform<>>,
                   "brio SpiHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
@@ -881,8 +885,8 @@ public:
             // channel the transmit one outran would find the next frame on
             // top of its last (OVR, 16.2.7); a transmit channel that waits
             // only stops the host's clock between two frames.
-            TxEngine::arm(S::data_address(), TxEngine::flag_error, DmaPriority::high);
-            RxEngine::arm(S::data_address(), DmaPriority::very_high);
+            TxEngine::template arm<TxOwner>(S::data_address(), TxEngine::flag_error, DmaPriority::high);
+            RxEngine::template arm<RxOwner>(S::data_address(), DmaPriority::very_high);
         }
         // The pads go to the peripheral only now, with the registers
         // already holding the idle polarity: a pad handed over first

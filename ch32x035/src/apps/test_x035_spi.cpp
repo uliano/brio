@@ -46,6 +46,8 @@
 //      loop then the data on the engines, and a command alone on them; THE
 //      REFUSALS, each one the engines cannot carry answered spi_rejected before
 //      anything moves, and the next requests
+//   j  THE ENGINES OF BYTES, wireless, in an image of its own: 16-bit frames
+//      on a host whose engines are of uint8_t refused before anything moves
 //   g  WHEN A REQUEST ENDS, THE WIRE HAS ENDED, wireless: the SCK pad against
 //      the mode's idle level at the flag the end is read from and right after
 //      start() or dma_isr() answered, all four modes, /256 and /64, read and
@@ -132,16 +134,20 @@
 // that drives a link pad from a sagging rail refuses every letter and
 // says so.
 //
-// THE SUITE IS TWO IMAGES (design/overview.md, "A suite's image fits the
+// THE SUITE IS THREE IMAGES (design/overview.md, "A suite's image fits the
 // family's smallest chip"): whole it comes within the 5 % of the 62 KB
 // every part of the series has, so test_x035_spi-1 carries the wireless
 // letters and test_x035_spi-2 the two-board ones (`y`) and the slip
-// statistics.
+// statistics; test_x035_spi-3 carries letter j alone, the engines of bytes,
+// whose binding of channels 2 and 3 is the only one of its image that is
+// armed.
 // build: boards = x035f8
-// build: groups = abcdefsgi,nopkqrvmwxht
+// build: groups = abcdefsgi,nopkqrvmwxht,j
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include <span>
 #include <variant>
@@ -180,6 +186,11 @@ using Serial = Uart<2, P>;
 constexpr Serial serial;
 
 using S = Spi<1>;
+// SPI1's two requests: the owners of channels 2 and 3 in this image (one
+// owner a channel, util/dma_owner.hpp) - the engined hosts claim them, and a
+// letter that arms an engine or programs either channel by hand names them.
+using Spi1Tx = DmaOwner<DmaPeriph::spi, 1, DmaSignal::tx>;
+using Spi1Rx = DmaOwner<DmaPeriph::spi, 1, DmaSignal::rx>;
 // THE SUITE OPTS INTO SRAM for its two hosts (util/placement.hpp's InRam):
 // its loop verdicts are the wire's. Their FLASH TWINS - the default a
 // program gets, the same instance and engines - are letter b's other
@@ -1143,8 +1154,8 @@ void ti_engine_rules() {
 
     // WHAT THE ENGINES CANNOT CARRY IS REFUSED, before the block, the select or the
     // D/C is touched (refused()): 16-bit frames with the out buffer, the in buffer
-    // or a command alone off the half-word boundary (9.3.6), 16-bit frames on engines
-    // of bytes, and a transmit engine another owner holds, whose claim would refuse
+    // or a command alone off the half-word boundary (9.3.6), and a transmit engine
+    // another owner holds, whose claim would refuse
     // the launch and leave the receive block waiting for ever. A command in front
     // of a data phase runs in the loop, from any address: that one is not refused.
     constexpr SpiDataSize wide = SpiDataSize::bits16;
@@ -1160,23 +1171,42 @@ void ti_engine_rules() {
     const uint8_t next_polled = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 8, SpiClock::div16, wide, true);
     const uint8_t next_engines = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 8, SpiClock::div16, wide, false);
     DmaHost::release();
-    using ByteHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
-    (void)ByteHost::init(clock);
-    const bool on_bytes = refused<ByteHost>(nullptr, 0, tx_buf, rx_buf, 8, wide);
-    ByteHost::release();
     host_ready();
     print(serial, "  refused: odd out ", odd_out ? "yes" : "NO", ", odd in ", odd_in ? "yes" : "NO", ", odd command alone ",
-          odd_command ? "yes" : "NO", ", engines of bytes ", on_bytes ? "yes" : "NO", ", a held transmit engine ",
+          odd_command ? "yes" : "NO", ", a held transmit engine ",
           held ? "yes" : "NO", "; an odd command before aligned data ", odd_command_with_data, " (", odd_command_entries,
           " interrupt); then polled ", next_polled, ", on the engines ", next_engines, crlf);
     bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED: 16-bit frames off the half-word boundary, out, in or a "
-                  "command alone, on engines of bytes, and over a held transmit engine: spi_rejected at once, select "
+                  "command alone, and over a held transmit engine: spi_rejected at once, select "
                   "and D/C never touched, the control word, SCK and the block as they were",
-                  odd_out && odd_in && odd_command && on_bytes && claimed && held);
+                  odd_out && odd_in && odd_command && claimed && held);
     bench.verdict("AND THE NEXT REQUESTS RUN: an odd command before aligned data in the loop (one interrupt), then "
                   "polled and on the engines, each spi_ok",
                   odd_command_with_data == spi_ok && odd_command_entries == 1u && next_polled == spi_ok &&
                       next_engines == spi_ok);
+}
+
+// ===========================================================================
+// j - the engines of bytes
+// ===========================================================================
+//
+// THE BYTE-BOUND BINDING: a host whose engines are of uint8_t carries 8-bit
+// frames alone, and a request in 16-bit frames naming them is refused before
+// anything moves. Its own image: the suite's host takes engines of uint16_t,
+// which carry both widths, and a channel is bound by one engine type an
+// image (one owner a channel, util/dma_owner.hpp; the engine's bookkeeping is
+// its type's).
+
+void tj_byte_engines() {
+    using ByteHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
+    (void)ByteHost::init(clock);
+    const bool on_bytes = refused<ByteHost>(nullptr, 0, tx_buf, rx_buf, 8, SpiDataSize::bits16);
+    ByteHost::release();
+    host_ready();
+    print(serial, "  16-bit frames on engines of bytes: refused ", on_bytes ? "yes" : "NO", crlf);
+    bench.verdict("16-BIT FRAMES ON ENGINES OF BYTES ARE REFUSED: spi_rejected at once, select and D/C never "
+                  "touched, the control word, SCK and the block as they were",
+                  on_bytes);
 }
 
 // ===========================================================================
@@ -2042,11 +2072,14 @@ void free_compare_request() {
 /// cell, request-paced, asked by nothing - any item it moves is a request
 /// still standing on the channel's OR. Its count read 300 us after the
 /// enable.
+/// Programmed by hand in the name of the channel's owner in this image,
+/// SPI1's request on it (one owner a channel, util/dma_owner.hpp): the timers
+/// program no channel, they raise a request on its OR.
 volatile uint8_t sink_cell = 0;
 template <uint8_t ch>
 uint16_t next_owner_moves() {
     static const uint8_t four[4] = {1, 2, 3, 4};
-    using C = DmaChannel<ch>;
+    using C = DmaChannel<ch, std::conditional_t<ch == 2u, Spi1Rx, Spi1Tx>>;
     C::stop();
     (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
                                  .config = {.direction = DmaDirection::memory_to_peripheral,
@@ -2465,7 +2498,7 @@ void tf_faults() {
     for (uint8_t way = 0; way < 4u; ++way) {
         dma_ready<FlashDmaHost>();
         FlashDmaHost::prime(SpiMode::mode0, SpiClock::div16);
-        DmaChannel<3>::stop();
+        DmaChannel<3, Spi1Tx>::stop();
         S::dma_requests(true, false);
         (void)delay_us(clock, 20);
         if (way == 1u) {
@@ -4430,8 +4463,8 @@ void tw_waveforms() {
         {
             using HTx = DmaTxEngine<3, uint16_t>;
             using HRx = DmaRxEngine<2, uint16_t>;
-            HTx::arm(S::data_address(), 0u, DmaPriority::high);
-            HRx::arm(S::data_address(), 0u, DmaPriority::very_high);
+            HTx::arm<Spi1Tx>(S::data_address(), 0u, DmaPriority::high);
+            HRx::arm<Spi1Rx>(S::data_address(), 0u, DmaPriority::very_high);
             fill_pattern(tx_buf, 8, 0x11);
             (void)HRx::start(std::span<uint8_t>(rx_buf, 8));
             (void)HTx::start(std::span<const uint8_t>(tx_buf, 8));
@@ -4550,8 +4583,8 @@ void tw_waveforms() {
         SckPin::input();
         MosiPin::input();
         MisoPin::function();
-        CTx::arm(S::data_address(), 0u, DmaPriority::high);
-        CRx::arm(S::data_address(), 0u, DmaPriority::very_high);
+        CTx::arm<Spi1Tx>(S::data_address(), 0u, DmaPriority::high);
+        CRx::arm<Spi1Rx>(S::data_address(), 0u, DmaPriority::very_high);
         for (uint8_t i = 0; i < 4u; ++i) {
             ctx[i] = 0x5A;
         }
@@ -4761,6 +4794,7 @@ int main() {
     bench.letter('c', "the refusals", tc_refusals);
     bench.letter('i', "THE ENGINE A REQUEST NAMES, wireless: one frame on the engines, the command rule, the refusals",
                  ti_engine_rules);
+    bench.letter('j', "the engines of bytes, wireless: 16-bit frames refused", tj_byte_engines);
     bench.letter('g', "WHEN A REQUEST ENDS THE WIRE HAS ENDED, wireless: SCK against its idle level at the flag and "
                       "after the request, both engines, both placements", tg_wire_end);
     bench.letter('s', "the /2 frame and the core's share of the bus: twenty runs polled in SRAM and waited "

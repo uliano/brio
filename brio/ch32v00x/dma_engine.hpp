@@ -24,6 +24,23 @@
  * Nothing here runs at run time: every name is a type, a constant or a
  * constexpr function, so there is no context to respect.
  *
+ * Who owns a channel. One owner a channel for the whole image
+ * (docs/design/dma.md, "The ownership rule"), checked when the program is
+ * compiled by util/dma_owner.hpp, the channel's key `DmaSlotId<1, ch>`
+ * (this family's one controller is the manual's DMA1). The claim is made
+ * by whatever programs the channel, at the moment it does: an engine's
+ * `arm()` (or `arm_ring()`) claims the channel for the owner it is handed,
+ * and a `DmaChannel<ch>` verb that programs the channel claims it for that
+ * channel's owner. A transport hands its engines its request,
+ * `DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>` for USART2's transmit; a
+ * program that arms an engine itself, or programs a channel by hand,
+ * claims it for the tags below unless it names the request it serves. So a
+ * channel two of them would program - the console's transmit engine and a
+ * copy on channel 4, USART2's and the I2C host's engines on channel 6 - is
+ * a compile error naming the channel and both owners. On this family each
+ * request is wired to one channel (table 8-2), so the claim's other half,
+ * one channel a request, never fires.
+ *
  * Why a header of its own: a driver with an engine slot must not include
  * dma.hpp, or every program with a console would carry the controller;
  * an application that wants an engine includes both headers and names
@@ -37,6 +54,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -87,5 +106,14 @@ constexpr bool dma_engines_distinct() {
  * reason beside the call.
  */
 enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 };
+
+/// The owners of a channel no request is named for (the file header), one
+/// tag a channel and a kind of user: `DmaChannel<ch>`'s verbs that program
+/// it, a `DmaCopyEngine` on it, a transmit or a receive engine a program
+/// arms itself. Two of them on one channel are two owners, refused.
+template <uint8_t ch> struct DmaHandOwner {};
+template <uint8_t ch> struct DmaCopyOwner {};
+template <uint8_t ch> struct DmaTxOwner {};
+template <uint8_t ch> struct DmaRxOwner {};
 
 } // namespace brio

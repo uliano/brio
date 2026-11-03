@@ -847,6 +847,10 @@ struct Uart {
     Uart() = default;   // a tag instance: constexpr Uart<1, P> serial;
 
     using Resource = Usart<instance>;
+    /// The requests this port's engines serve, the owners its engines claim
+    /// their channels for (dma_engine.hpp's file header).
+    using TxOwner = DmaOwner<DmaPeriph::usart, instance, DmaSignal::tx>;
+    using RxOwner = DmaOwner<DmaPeriph::usart, instance, DmaSignal::rx>;
 
     static constexpr uint8_t number = instance;
     static constexpr uint8_t remap_code = remap;
@@ -965,7 +969,7 @@ struct Uart {
             // marks the edge of a stream with no silence - at the options'
             // level, very_high unless the program says otherwise
             // (UartOptions::rx_priority).
-            if (!RxEngine::arm_ring(&regs().DATAR, RxRing::storage, true, opts.rx_priority)) {
+            if (!RxEngine::template arm_ring<RxOwner>(&regs().DATAR, RxRing::storage, true, opts.rx_priority)) {
                 return false;
             }
         }
@@ -973,7 +977,7 @@ struct Uart {
             // HIGH, a level below the receive rings: a transmit channel
             // that waits leaves the line idle a while (TXE stands, 14.8.1)
             // and loses nothing.
-            TxEngine::arm(&regs().DATAR, DmaPriority::high);
+            TxEngine::template arm<TxOwner>(&regs().DATAR, DmaPriority::high);
         }
 
         Pfic::enable(usart_irq_for(instance));
@@ -1606,7 +1610,7 @@ private:
         if constexpr (has_rx_engine) {
             if (RxEngine::idle() || m_rx_given_up) {
                 m_rx_given_up = false;
-                (void)RxEngine::arm_ring(&regs().DATAR, RxRing::storage, true, opts.rx_priority);
+                (void)RxEngine::template arm_ring<RxOwner>(&regs().DATAR, RxRing::storage, true, opts.rx_priority);
                 m_rx.clear();
                 m_rx_lost = m_rx_lost + 1u;   // the unread bytes went with the stopped lap
                 typename P::CriticalSection cs;

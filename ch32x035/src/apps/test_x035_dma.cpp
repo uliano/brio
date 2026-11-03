@@ -112,6 +112,13 @@ using CopyEngine = DmaCopyEngine<5>;
 // USART3's transmit request lands on channel 2: the paced loads' engine.
 using U3 = Usart<3>;
 using Paced = DmaTxEngine<2>;
+// One owner a channel (util/dma_owner.hpp): channel 2 is USART3's transmit
+// request's in this image - the paced engine's and every block the letters
+// program there by hand -, channel 5 the copy engine's, letter c's block on
+// it programmed by hand in the copy's name. The other channels a letter
+// programs by hand are the hand tag's.
+using U3Tx = DmaOwner<DmaPeriph::usart, 3, DmaSignal::tx>;
+using Ch2 = DmaChannel<2, U3Tx>;
 
 uint32_t dma_gate_at_boot = 0;   // RCC_AHBPCENR before the console opened anything
 
@@ -302,9 +309,9 @@ void tb_copies() {
 // ---------------------------------------------------------------------------
 // c - the vectors
 // ---------------------------------------------------------------------------
-template <uint8_t ch>
+template <uint8_t ch, typename Owner = DmaHandOwner<ch>>
 bool one_vector() {
-    using C = DmaChannel<ch>;
+    using C = DmaChannel<ch, Owner>;
     const uint32_t before = vector_hits[ch];
     C::stop();
     (void)C::prepare(DmaTransfer{.peripheral = src8, .memory = dst8, .count = 16,
@@ -323,10 +330,10 @@ void tc_vectors() {
     role2 = Role::count;
     role5 = Role::count;
     const bool v1 = one_vector<1>();
-    const bool v2 = one_vector<2>();
+    const bool v2 = one_vector<2, U3Tx>();
     const bool v3 = one_vector<3>();
     const bool v4 = one_vector<4>();
-    const bool v5 = one_vector<5>();
+    const bool v5 = one_vector<5, DmaCopyOwner<5>>();
     const bool v8 = one_vector<8>();
     print(serial, "  handlers: ch1 ", v1, " ch2 ", v2, " ch3 ", v3, " ch4 ", v4, " ch5 ", v5, " ch8 ", v8,
           " (6 and 7: the console's engines)", crlf);
@@ -595,7 +602,7 @@ void th_circular() {
     laps = 0;
     half_laps = 0;
     static const uint8_t lap4[4] = {0x11, 0x22, 0x33, 0x44};
-    using C = DmaChannel<2>;
+    using C = Ch2;
     C::stop();
     (void)C::prepare(DmaTransfer{.peripheral = &U3::regs().DATAR, .memory = const_cast<uint8_t*>(lap4), .count = 4,
                                  .config = {.direction = DmaDirection::memory_to_peripheral, .circular = true,
@@ -634,7 +641,7 @@ void th_circular() {
 volatile uint8_t sink_cell = 0;
 uint16_t next_owner_moves() {
     static const uint8_t four[4] = {1, 2, 3, 4};
-    using C = DmaChannel<2>;
+    using C = Ch2;
     C::stop();
     (void)C::prepare(DmaTransfer{.peripheral = &sink_cell, .memory = const_cast<uint8_t*>(four), .count = 4,
                                  .config = {.direction = DmaDirection::memory_to_peripheral,
@@ -649,7 +656,7 @@ uint16_t next_owner_moves() {
 /// USART3 brought up with DMAT and TXE standing: its request raised on
 /// channel 2 with no channel enabled to take it.
 void raise_request() {
-    DmaChannel<2>::stop();
+    Ch2::stop();
     pacer_open(115'200);
     U3::dma_transmit(true);
     (void)delay_us(clock, 50);
@@ -701,7 +708,7 @@ void ti_held_request() {
     } else {
         print(serial, "  -> this die withdraws a raised request on every release measured", crlf);
     }
-    DmaChannel<2>::stop();
+    Ch2::stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -820,7 +827,7 @@ void raw_sleep() {
 template <typename Wait>
 uint32_t paced_permille(Wait wait) {
     role2 = Role::paced;
-    Paced::arm(&U3::regs().DATAR);
+    Paced::arm<U3Tx>(&U3::regs().DATAR);
     pacer_open(1'000'000);
     U3::dma_transmit(true);
     paced_done = false;
@@ -993,7 +1000,7 @@ void tm_bench() {
     // Paced: 1024 bytes into USART3's DATAR at 1 Mbaud - one byte a frame of
     // ten bits, 100 000 B/s.
     role2 = Role::paced;
-    Paced::arm(&U3::regs().DATAR);
+    Paced::arm<U3Tx>(&U3::regs().DATAR);
     pacer_open(1'000'000);
     U3::dma_transmit(true);
     console_drain();

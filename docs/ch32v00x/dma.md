@@ -254,9 +254,77 @@ of one channel to another: there is nothing more to use or decline.
   the ISR body that frees it from the vector; `faults()`. Elem
   defaults to uint32_t.
 - [brio/ch32v00x/dma_engine.hpp](../../brio/ch32v00x/dma_engine.hpp)
-  is the `NoDmaEngine` tag of an empty slot, `dma_engine_channel()`
-  and the one rule that two engines of one transport must not name the
-  same channel.
+  is the `NoDmaEngine` tag of an empty slot, `dma_engine_channel()`,
+  the one rule that two engines of one transport must not name the
+  same channel, and the owner tags below.
+
+### One owner a channel
+
+A channel has one owner for the whole image
+([../design/dma.md](../design/dma.md), "The ownership rule"), and the
+compiler checks it ([brio/util/dma_owner.hpp](../../brio/util/dma_owner.hpp)).
+On this family a slot is a channel of the one controller, the manual's
+DMA1: its key is `DmaSlotId<1, ch>`, ch from 1 to 7. The claim is made by
+whatever programs the channel, when it does:
+
+- an engine's `arm()` (and the receive engine's `arm_ring()`) claims its
+  channel for the owner it is handed as a template argument. A transport
+  hands its request: the `Uart` on USART2 arms its transmit engine for
+  `DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>`, the SPI host for
+  SPI1's two requests, the I2C host for I2C1's two;
+- an engine a program arms itself claims its channel for that engine
+  kind's tag unless the program names the request it serves:
+  `DmaTxOwner<ch>` or `DmaRxOwner<ch>` by default, so a block paced by
+  TIM2's channel 2 compare is armed as
+  `Paced::arm<brio::DmaOwner<brio::DmaPeriph::tim, 2, brio::DmaSignal::compare2>>(&cell)`;
+  the copy engine claims `DmaCopyOwner<ch>`;
+- the `DmaChannel<ch, Owner>` verbs that program a channel - `enable()`,
+  `configure()`, the count, the two addresses, `prepare()`, `load()`,
+  `arm()`, `stop()` - claim it for `Owner`, by default the hand tag
+  `DmaHandOwner<ch>`. The verbs that read a channel, clear its flags or
+  serve its vector claim nothing. A program that programs by hand a
+  channel its own transport binds names the transport's request as
+  `Owner`.
+
+Two owners on one channel do not compile, the error naming
+`DmaSlotId<1, ch>` and both owners: the console's transmit engine and a
+copy engine on channel 4, USART2's transmit engine and the I2C host's
+on channel 6, a channel a receive ring runs on programmed by hand. The
+claim's other half, one channel a request, cannot fire here: table 8-2
+wires each request to one channel, and every transport refuses an engine
+on any other. A claim emits nothing and costs no cycle.
+
+What the request map forces. Each channel ORs a fixed handful of
+requests (table 8-2 of both manuals), so giving one request its channel
+takes it from every other request of that row:
+
+| a request on its channel | takes the channel from |
+|---|---|
+| I2C1's transmit (6) | USART2's transmit, TIM1's channel 3 |
+| I2C1's receive (7) | USART2's receive, TIM2's channels 2 and 4 |
+| SPI1's receive (2) | TIM1's channel 1, TIM2's update |
+| SPI1's transmit (3) | TIM1's channel 2 |
+| USART1's transmit (4) | TIM1's channel 4, trigger and commutation, TIM3's channel 4 |
+| USART1's receive (5) | TIM1's update, TIM2's channel 1 |
+| the ADC (1) | TIM2's channel 3, TIM3's channel 3 |
+
+So on the CH32V006 an I2C host on DMA in either direction leaves USART2
+without that direction's engine, and a serial port with both engines
+next to it is USART1. A timer that paces a block needs an event whose
+channel nothing else of the image takes: TIM1's update shares channel 5
+with the console's receive, TIM2's channel 2 compare on channel 7 does
+not when no I2C or USART2 receive engine runs. (TIM3's two rows are the
+CH32V006's and CH32V007's, table 8-2's note 2; the CH32V003 has no TIM3
+and no USART2.)
+
+What no choice of instance separates, on the CH32V006 (the CH32V003,
+with one USART, has no such group among a console, an SPI host, an ADC
+stream, a timer-paced block and an I2C host's transmit): a console with
+both engines, a second serial port with both engines and an I2C host on
+DMA - USART2 takes channels 6 and 7, the only ones I2C1 reaches; and,
+by count alone, a console with both engines, an SPI host with both, an
+ADC stream, a timer-paced block and a second serial port with both - eight
+requests for seven channels.
 
 What a block costs, counted in the release listings of the CH32V006
 images - the instructions on the path and the bus accesses - beside

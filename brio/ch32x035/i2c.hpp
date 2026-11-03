@@ -777,6 +777,10 @@ template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDma
           typename RxEngine = NoDmaEngine, typename Placement = InFlash>
 class I2cHost {
     using S = I2c<n>;
+    /// The requests the engines serve, the owners they claim their channels
+    /// for (dma_engine.hpp's file header).
+    using TxOwner = DmaOwner<DmaPeriph::i2c, n, DmaSignal::tx>;
+    using RxOwner = DmaOwner<DmaPeriph::i2c, n, DmaSignal::rx>;
 
     static_assert(HotPlacement<Placement, Ch32x035Platform<>>,
                   "brio I2cHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
@@ -896,8 +900,8 @@ public:
             // nothing (15.6). Both interrupt on completion and on error: the
             // transmit block's completion hands a write half back to the
             // event vector (the file header), the receive block's ends a read.
-            TxEngine::arm(S::data_address(), DmaPriority::high);
-            RxEngine::arm(S::data_address(), DmaPriority::high);
+            TxEngine::template arm<TxOwner>(S::data_address(), DmaPriority::high);
+            RxEngine::template arm<RxOwner>(S::data_address(), DmaPriority::high);
         }
         // The pads go to the peripheral only now, open drain by themselves
         // (8.2.8): the wire's pull-ups own the idle level.

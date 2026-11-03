@@ -307,8 +307,17 @@ struct Dma {
  * enabled, because CFGR's fields, CNTR and the two addresses are
  * read-only then (RM 9.2.1's note): a store the silicon ignores would be a
  * lie the code told itself.
+ *
+ * The verbs that program the channel - enable(), configure(), the count
+ * and the two addresses, prepare(), load(), arm(), stop() - claim it for
+ * `Owner` (ch32x035/dma_engine.hpp's file header): by default the tag of a
+ * channel programmed by hand, so a channel an engine of the same image
+ * owns cannot also be programmed through here; a program that programs by
+ * hand a channel its own transport binds names the transport's request.
+ * The verbs that read it, clear its flags or serve its vector claim
+ * nothing, and the engines reach the registers through regs() alone.
  */
-template <uint8_t ch>
+template <uint8_t ch, typename Owner = DmaHandOwner<ch>>
 class DmaChannel {
     static_assert(ch >= 1 && ch <= dma_channel_count, "the CH32X035 DMA has channels 1..8");
 
@@ -326,6 +335,7 @@ public:
     /// Enable or disable. Disabling a running channel abandons the block
     /// where it stands; CNTR then holds what was left.
     static void enable(bool on) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         Dma::open();
         if (on) { regs().CFGR |= dma_cfgr_en; } else { regs().CFGR &= ~dma_cfgr_en; }
     }
@@ -333,6 +343,7 @@ public:
     /// Everything but the addresses and the count. Refused while enabled,
     /// and for a config the chapter forbids.
     static bool configure(const DmaChannelConfig& c) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         Dma::open();
         if (enabled() || !dma_channel_config_valid(c)) {
             return false;
@@ -342,6 +353,7 @@ public:
     }
 
     static bool set_count(uint16_t count) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         if (enabled() || count == 0u) {
             return false;
         }
@@ -352,15 +364,18 @@ public:
     static uint16_t count() { return static_cast<uint16_t>(regs().CNTR); }
 
     static void set_peripheral(volatile void* address) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         regs().PADDR = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(address));
     }
     static void set_memory(volatile void* address) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         regs().MADDR = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(address));
     }
 
     /// Program the whole transfer and start it. Refused while enabled or
     /// for an invalid transfer; the flags are cleared on the way in.
     static bool load(const DmaTransfer& t) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         if (!prepare(t)) {
             return false;
         }
@@ -372,6 +387,7 @@ public:
     /// what dma_transfer_valid() refuses, for an end that is not aligned
     /// to its width (9.3.5, 9.3.6).
     static bool prepare(const DmaTransfer& t) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         Dma::open();
         if (enabled() || !dma_transfer_valid(t) ||
             !dma_aligned(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t.peripheral)),
@@ -395,6 +411,7 @@ public:
 
     /// Arm the channel's interrupts (the PFIC line is the caller's).
     static void arm(uint32_t mask, bool on) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         const uint32_t bits = mask & dma_cfgr_irqs;   // an enable's position is its flag's
         if (on) { regs().CFGR |= bits; } else { regs().CFGR &= ~bits; }
     }
@@ -422,6 +439,7 @@ public:
     /// Stop and clear everything of the channel's: EN off, the config
     /// zeroed, the flags cleared.
     static void stop() {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         Dma::open();
         regs().CFGR = 0;
         clear(DmaFlag::all);
@@ -568,10 +586,14 @@ public:
      * `high` by default: a peripheral a transmit channel feeds waits for
      * it, or holds its last value, where a starved receive overruns
      * (DmaPriority's rule). The gate and the PFIC line are opened here,
-     * once.
+     * once. It claims the channel for `Owner` when the program is compiled
+     * (dma_engine.hpp's file header): the request a transport hands, or
+     * this kind's tag for an engine a program arms itself.
      */
+    template <typename Owner = DmaTxOwner<ch>>
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
                     DmaPriority priority = DmaPriority::high) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         armed_ = interrupts & dma_cfgr_irqs;
         word_ = dma_cfgr_dir | dma_cfgr_priority(priority) | armed_;
         busy_ = false;
@@ -579,8 +601,9 @@ public:
         Line::bind(dma_address_of(data));
     }
     /// Both interrupts, at `priority`.
+    template <typename Owner = DmaTxOwner<ch>>
     static void arm(volatile void* data, DmaPriority priority) {
-        arm(data, DmaFlag::complete | DmaFlag::error, priority);
+        arm<Owner>(data, DmaFlag::complete | DmaFlag::error, priority);
     }
 
     /// The claim: true when the engine was idle and is now the caller's. A
@@ -729,19 +752,22 @@ public:
     }
     [[gnu::always_inline]] static uint32_t block_flags() { return Dma::flags(); }
 
-    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms),
+    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms and claim),
     /// `very_high` by default: a peripheral a receive channel empties
     /// overruns when the channel is starved (DmaPriority's rule).
+    template <typename Owner = DmaRxOwner<ch>>
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
                     DmaPriority priority = DmaPriority::very_high) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         armed_ = interrupts & dma_cfgr_irqs;
         word_ = dma_cfgr_priority(priority) | armed_;
         capacity_ = 0;
         taken_ = 0;
         Line::bind(dma_address_of(data));
     }
+    template <typename Owner = DmaRxOwner<ch>>
     static void arm(volatile void* data, DmaPriority priority) {
-        arm(data, DmaFlag::complete | DmaFlag::error, priority);
+        arm<Owner>(data, DmaFlag::complete | DmaFlag::error, priority);
     }
 
     /// Not running: stopped, never started, or halted by a transfer error
@@ -805,7 +831,8 @@ public:
     }
 
     /**
-     * The circular binding, which is also its start (the class header):
+     * The circular binding, which is also its start (the class header),
+     * claiming the channel for `Owner` as arm() does:
      * `storage` the caller's whole ring, its element the beat, its length
      * the count every lap reloads. False, and nothing started, for a
      * storage off its beat's boundary. Calling it again restarts the ring
@@ -813,9 +840,10 @@ public:
      * over the same storage is clear()ed. `very_high` by default, the
      * one-shot shape's level.
      */
-    template <typename T, size_t N>
+    template <typename Owner = DmaRxOwner<ch>, typename T, size_t N>
     static bool arm_ring(volatile void* data, T (&storage)[N], bool half_mark = false,
                          DmaPriority priority = DmaPriority::very_high) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         static_assert(dma_beat_fits<T, Elem>, "a beat wider than this binding's widest (its Elem)");
         static_assert(N >= 2u && N <= 0xFFFFu,
                       "brio DmaRxEngine: a ring of 2..65535 items - CNTR is sixteen bits (9.3.4)");
@@ -899,8 +927,11 @@ public:
     /// interrupt the line stays disabled and busy() is the witness. `low`
     /// by default: a copy asks for the bus without a pause, and a
     /// request-paced channel it outranked would move nothing until its
-    /// block ended (DmaPriority's rule).
+    /// block ended (DmaPriority's rule). It claims the channel for `Owner`,
+    /// the copy's tag unless named.
+    template <typename Owner = DmaCopyOwner<ch>>
     static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
+        static_assert(dma_claim<DmaSlotId<1, ch>, Owner>);
         armed_ = interrupt ? (DmaFlag::complete | DmaFlag::error) : 0u;
         word_ = dma_cfgr_mem2mem | dma_cfgr_minc | dma_cfgr_priority(priority) | armed_;
         busy_ = false;

@@ -200,7 +200,76 @@ defaults - with eight channels:
   and the request table - `DmaRequest`, `dma_request_channel()` per part,
   `DmaRequestOf<r>` refusing a peripheral the part has not got, and the
   USARTs' channels read out of it, which the `Uart` checks its engines
-  against at compile time.
+  against at compile time; and the owner tags below.
+
+### One owner a channel
+
+A channel has one owner for the whole image
+([design/dma.md](../design/dma.md), "The ownership rule"), and the
+compiler checks it ([brio/util/dma_owner.hpp](../../brio/util/dma_owner.hpp)).
+On this series a slot is a channel of the one controller, the manual's
+DMA1: its key is `DmaSlotId<1, ch>`, ch from 1 to 8. The claim is made by
+whatever programs the channel, when it does:
+
+- an engine's `arm()` (and the receive engine's `arm_ring()`) claims its
+  channel for the owner it is handed as a template argument. A transport
+  hands its request: the `Uart` on USART2 arms its transmit engine for
+  `DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>`, the SPI host for SPI1's
+  two requests, the I2C host for I2C1's two;
+- an engine a program arms itself claims its channel for that engine
+  kind's tag unless the program names the request it serves:
+  `DmaTxOwner<ch>` or `DmaRxOwner<ch>` by default, so a block paced by
+  USART3's transmitter is armed as
+  `Paced::arm<brio::DmaOwner<brio::DmaPeriph::usart, 3, brio::DmaSignal::tx>>(&reg)`;
+  the copy engine claims `DmaCopyOwner<ch>`;
+- the `DmaChannel<ch, Owner>` verbs that program a channel - `enable()`,
+  `configure()`, the count, the two addresses, `prepare()`, `load()`,
+  `arm()`, `stop()` - claim it for `Owner`, by default the hand tag
+  `DmaHandOwner<ch>`. The verbs that read a channel, clear its flags or
+  serve its vector claim nothing. A program that programs by hand a
+  channel another use of the same image owns names that owner.
+
+Two owners on one channel do not compile, the error naming
+`DmaSlotId<1, ch>` and both owners: USART2's receive engine and the I2C
+host's transmit engine on channel 6, a copy engine on the console's
+channel 7, a channel the SPI host's receive engine binds programmed by
+hand. The claim's other half, one channel a request, cannot fire here:
+figure 9-1 wires each request to one channel, and every transport refuses
+an engine on any other. A claim emits nothing and costs no cycle.
+
+What the request map forces (RM 9.2.3, figure 9-1 and the table under
+it). Giving one request its channel takes it from every other request of
+that row:
+
+| a request on its channel | takes the channel from |
+|---|---|
+| SPI1's receive (2) | USART3's transmit, TIM1's channel 1, TIM2's update |
+| SPI1's transmit (3) | USART3's receive, TIM1's channel 2 |
+| I2C1's transmit (6) | USART2's receive, TIM1's channel 3 |
+| I2C1's receive (7) | USART2's transmit, TIM2's channels 2 and 4 |
+| the ADC (1) | USART4's transmit, TIM2's channel 3 |
+| USART1's transmit (4), receive (5) | TIM1's channel 4, trigger and commutation; TIM1's update, TIM2's channel 1 |
+| USART4's receive (8) | TIM2's trigger and commutation |
+
+So the SPI host on DMA forbids USART3 on DMA, the I2C host on DMA forbids
+USART2 the engine on the channel it shares, and a converter stream forbids
+USART4's transmit engine. On the 20-pin parts, which offer no USART1, the
+console's instance decides: a console on USART2 with both engines leaves
+the I2C host without DMA, one on USART3 leaves the SPI host without it, one
+on USART4 (the CH32X035F8U6 alone) takes the converter's channel.
+
+What no choice of instance separates, by part (a console and a second
+serial port each with both engines, an SPI host's transmit, an I2C host's
+transmit, a converter stream):
+
+| part | groups no placement serves at once |
+|---|---|
+| CH32X035F7P6 (USART2 and USART3) | console, SPI transmit, I2C transmit; console, SPI transmit, second port; console, second port, I2C transmit; SPI transmit, second port, I2C transmit |
+| CH32X035F8U6 (and USART4) | console, SPI transmit, converter, I2C transmit; console, SPI transmit, converter, second port; console, SPI transmit, second port, I2C transmit; console, converter, second port, I2C transmit |
+| CH32X035C8, CH32X035G8R, CH32X035G8U, CH32X035R8, CH32X033F8 (all four USARTs) | console, SPI transmit, converter, second port, I2C transmit |
+
+(Brio has no converter driver on this series yet; the rows are the
+silicon's.)
 
 What a block costs, counted in the release listings of `test_x035_usart`
 (USART4 on channels 1 and 8) beside the WCH examples' restart of a

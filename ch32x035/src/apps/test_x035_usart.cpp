@@ -151,6 +151,10 @@ using EnginedLow = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngin
 /// Letter q's ring with NO transmit engine: the receive channel's ring
 /// beside the interrupt transmitter, which serves TXE from the same vector.
 using RingOnly = Uart<4, P, 512, 256, UartFormat{}, NoDmaEngine, DmaRxEngine<8>>;
+// USART4's receive request, the owner of channel 8 in this image (one owner
+// a channel, util/dma_owner.hpp): the ports' receive engines claim it, and
+// the letters that arm an engine or program the channel by hand there name it.
+using U4Rx = DmaOwner<DmaPeriph::usart, 4, DmaSignal::rx>;
 /// Which transport owns USART4 and its two channels: the vectors serve it.
 enum class U4Owner : uint8_t { irq, engined, engined_flash, engined_low, ring_only };
 volatile U4Owner u4_owner = U4Owner::irq;
@@ -1679,7 +1683,7 @@ ClearCase clear_case(bool status_between) {
     static uint8_t got[2];
     got[0] = 0;
     got[1] = 0;
-    Rx8::arm(&U4::regs().DATAR, 0u);
+    Rx8::arm<U4Rx>(&U4::regs().DATAR, 0u);
     (void)Rx8::start(std::span<uint8_t>(got, 2));
     U4::dma_receive(true);
     const uint32_t t0 = Ticker::ticks();
@@ -1833,7 +1837,9 @@ void tr_priority_load() {
 
 volatile uint32_t starve_src = 0x5A5A5A5Au;
 volatile uint32_t starve_dst = 0;
-using Starve = DmaChannel<5>;
+// A copy by hand on channel 5, in the name of the copy engine that owns the
+// channel in this image (CopyLoad; one owner a channel, util/dma_owner.hpp).
+using Starve = DmaChannel<5, DmaCopyOwner<5>>;
 
 void starve_start(uint16_t items) {
     Starve::stop();
@@ -2007,7 +2013,7 @@ struct IdleGroups {
 
 IdleGroups idle_groups(uint8_t per_group, uint8_t groups) {
     IdleGroups ig{};
-    using Rx8 = DmaChannel<8>;
+    using Rx8 = DmaChannel<8, U4Rx>;
     link::Cfg c{};
     c.rate = 115200;
     link::Params a{};

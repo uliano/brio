@@ -129,9 +129,12 @@
 //                    an item, from the difference of the two larger sizes,
 //                    and the FIXED COST a block (wall at 16 bytes less
 //                    that slope's share), which is the engine's number.
-//        paced       DmaTxEngine<5, uint32_t> pouring 256 words of the
-//                    buffer into ONE word cell at TIM1's update request
-//                    (table 8-2: channel 5), TIM1 at 10 kHz: irq, isr and
+//        paced       DmaTxEngine<7, uint32_t> pouring 256 words of the
+//                    buffer into ONE word cell at TIM2's channel 2 compare
+//                    request (table 8-2: channel 7, which no other letter
+//                    here programs - TIM1's update shares channel 5 with
+//                    the console's receive engine of letter u, and a
+//                    channel has one owner), TIM2 at 10 kHz: irq, isr and
 //                    busy of a block the CPU only launches and is told
 //                    the end of. Then the same block with the core polling
 //                    CNTR and stamping every decrement on the ruler: the
@@ -789,8 +792,10 @@ void tt_tick() {
 // d - the DMA: copy and fill, a paced block
 // ---------------------------------------------------------------------------
 using Copier = DmaCopyEngine<1>;               // word beats at most
-using Paced = DmaTxEngine<5, uint32_t>;        // TIM1's update request (table 8-2)
-using PaceTimer = Tim<1>;
+using Paced = DmaTxEngine<7, uint32_t>;        // TIM2's channel 2 compare request (table 8-2)
+using PaceTimer = Tim<2>;
+using PaceOwner = DmaOwner<DmaPeriph::tim, 2, DmaSignal::compare2>;
+constexpr uint8_t pace_compare = 1;            // TIM2's channel 2, 0-based
 
 constexpr uint32_t pace_hz = 10'000;
 constexpr uint32_t pace_period = SysClock::hz / pace_hz;   // 4800 HCLK cycles
@@ -882,17 +887,19 @@ void block_lines(const char* name, uint32_t big) {
     block_note(name, 16, s16.wall, 256, s256.wall, big, sbig.wall);
 }
 
-/// TIM1 at the pace, its update request armed: the paced block's clock.
+/// TIM2 at the pace, its channel 2 compare request armed - a match at the
+/// count of 0, once a period: the paced block's clock.
 void pace_start() {
     PaceTimer::init();
     (void)PaceTimer::configure({.prescaler = 0, .period = static_cast<uint16_t>(pace_period - 1u)});
-    PaceTimer::interrupts(PaceTimer::update_dma, true);
+    (void)PaceTimer::set_compare(pace_compare, 0);
+    PaceTimer::interrupts(PaceTimer::compare_dma(pace_compare), true);
     PaceTimer::enable(true);
 }
 
 void pace_stop() {
     PaceTimer::enable(false);
-    PaceTimer::interrupts(PaceTimer::update_dma, false);
+    PaceTimer::interrupts(PaceTimer::compare_dma(pace_compare), false);
 }
 
 constexpr uint16_t paced_words = 256;
@@ -923,7 +930,7 @@ void paced_lines() {
         uint16_t last = paced_words;
         uint32_t at = 0;
         while (last != 0u) {
-            const uint16_t now = DmaChannel<5>::count();
+            const uint16_t now = DmaChannel<7>::count();
             ++turns;
             if (now != last) {
                 const uint32_t t = stk()->CNT;
@@ -938,7 +945,7 @@ void paced_lines() {
         }
         pace_stop();
         (void)Paced::complete();
-        DmaChannel<5>::clear(DmaFlag::all);   // the completion the masked handler never took
+        DmaChannel<7>::clear(DmaFlag::all);   // the completion the masked handler never took
     }
     print(serial, "  paced, polled: intervals ", least, "..", most, " cycles against a period of ", pace_period,
           ", jitter ", most - least, " cycles; ", turns, " poll turns over ", paced_words,
@@ -948,7 +955,7 @@ void paced_lines() {
 void td_dma() {
     if (!dma_ready) {
         Copier::arm(DmaPriority::high);
-        Paced::arm(&pace_cell);
+        Paced::arm<PaceOwner>(&pace_cell);
         dma_ready = true;
     }
     for (uint32_t i = 0; i < ram_bytes; ++i) {
@@ -1889,6 +1896,9 @@ BRIO_CH32_VECTOR(dma1_channel5_handler) {
             return;
         }
     }
+}
+
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if constexpr (brio::test_letter_carried('d')) {
         paced_meter.enter();
         const uint8_t f = Paced::service();

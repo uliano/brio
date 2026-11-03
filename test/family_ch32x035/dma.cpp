@@ -6,6 +6,8 @@
 // template, so a part without the instance never forms it).
 #include <stddef.h>
 
+#include <type_traits>
+
 #include "ch32x035/clock.hpp"
 #include "ch32x035/dma.hpp"
 #include "ch32x035/platform.hpp"
@@ -17,6 +19,25 @@ using namespace brio;
 
 using P = Ch32x035Platform<>;
 using SysClock = Clock<ClockSource::internal, 48'000'000>;
+
+// One owner a channel (util/dma_owner.hpp): a channel a USART's engines
+// bind below is programmed by hand for that USART's request, the others
+// for the fixture's owner of the channel, `Fix<ch>`, which the engines and
+// the copies on them name too.
+template <uint8_t ch>
+struct Fix {};
+template <uint8_t ch>
+using HandOwner = std::conditional_t<
+    ch == 1, DmaOwner<DmaPeriph::usart, 4, DmaSignal::tx>,
+    std::conditional_t<
+        ch == 4, DmaOwner<DmaPeriph::usart, 1, DmaSignal::tx>,
+        std::conditional_t<
+            ch == 5, DmaOwner<DmaPeriph::usart, 1, DmaSignal::rx>,
+            std::conditional_t<
+                ch == 6, DmaOwner<DmaPeriph::usart, 2, DmaSignal::rx>,
+                std::conditional_t<ch == 7, DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>,
+                                   std::conditional_t<ch == 8, DmaOwner<DmaPeriph::usart, 4, DmaSignal::rx>,
+                                                      Fix<ch>>>>>>>;
 
 // ---- the map (table 9-2) ------------------------------------------------------
 static_assert(offsetof(DmaRegs, INTFR) == 0x00 && offsetof(DmaRegs, INTFCR) == 0x04);
@@ -63,7 +84,7 @@ static_assert(DmaRequestOf<DmaRequest::usart2_tx>::channel == 7);
 // ---- the channel's one-shot verbs, every channel ---------------------------------
 template <uint8_t ch>
 void channel_verbs() {
-    using C = DmaChannel<ch>;
+    using C = DmaChannel<ch, HandOwner<ch>>;
     static uint32_t a[4];
     static uint32_t b[4];
     C::stop();
@@ -93,8 +114,8 @@ void every_channel() {
 // ---- the engines, every beat ----------------------------------------------------
 using Tx = DmaTxEngine<3, uint16_t>;
 using Rx = DmaRxEngine<2, uint16_t>;
-using Copy = DmaCopyEngine<5>;
-using Copy8 = DmaCopyEngine<8, uint8_t>;
+using Copy = DmaCopyEngine<3>;
+using Copy8 = DmaCopyEngine<2, uint8_t>;
 static_assert(Tx::present && Tx::channel == 3 && Tx::width == DmaWidth::half);
 static_assert(Rx::present && Rx::channel == 2 && dma_engines_distinct<Tx, Rx>());
 static_assert(!dma_engines_distinct<DmaTxEngine<4>, DmaRxEngine<4>>());
@@ -108,9 +129,9 @@ void engine_verbs() {
     static const uint16_t b16[4] = {1, 2, 3, 4};
     static uint16_t in16[4];
     static uint8_t in8[4];
-    Tx::arm(&data_register);
-    Tx::arm(&data_register, DmaFlag::error, DmaPriority::medium);
-    Tx::arm(&data_register, DmaPriority::very_high);
+    Tx::arm<Fix<3>>(&data_register);
+    Tx::arm<Fix<3>>(&data_register, DmaFlag::error, DmaPriority::medium);
+    Tx::arm<Fix<3>>(&data_register, DmaPriority::very_high);
     (void)Tx::start(std::span<const uint8_t>(b8));
     (void)Tx::start(std::span<const uint16_t>(b16));
     (void)Tx::claim();
@@ -128,8 +149,8 @@ void engine_verbs() {
     Tx::clear_faults();
     Tx::stop();
 
-    Rx::arm(&data_register);
-    Rx::arm(&data_register, DmaPriority::high);
+    Rx::arm<Fix<2>>(&data_register);
+    Rx::arm<Fix<2>>(&data_register, DmaPriority::high);
     (void)Rx::start(std::span<uint16_t>(in16));
     (void)Rx::start(std::span<uint8_t>(in8));
     (void)Rx::start_discard(&in16[0], 4);
@@ -142,15 +163,15 @@ void engine_verbs() {
     (void)Rx::abandon();
     (void)Rx::faults();
     Rx::stop();
-    (void)Rx::arm_ring(&data_register, ring8, true, DmaPriority::very_high);
+    (void)Rx::arm_ring<Fix<2>>(&data_register, ring8, true, DmaPriority::very_high);
     (void)Rx::remaining();
     (void)Rx::laps();
     Rx::lap();
 
     static uint32_t w[8];
     static const uint32_t cell = 7;
-    Copy::arm();
-    Copy::arm(DmaPriority::high, false);
+    Copy::arm<Fix<3>>();
+    Copy::arm<Fix<3>>(DmaPriority::high, false);
     (void)Copy::copy(w, w + 4, 4);
     (void)Copy::copy(reinterpret_cast<uint8_t*>(w), reinterpret_cast<const uint8_t*>(w + 4), 16);
     (void)Copy::fill(w, &cell, 8);
@@ -158,7 +179,7 @@ void engine_verbs() {
     (void)Copy::abandon();
     (void)Copy::isr();
     (void)Copy::faults();
-    Copy8::arm(DmaPriority::low);
+    Copy8::arm<Fix<2>>(DmaPriority::low);
     (void)Copy8::copy(in8, b8, 4);
 }
 

@@ -40,6 +40,23 @@
  * does not name one - and an engine reaches the driver only through its
  * own published names (start, service, block_flags, the flag names),
  * never the controller's.
+ *
+ * Who owns a channel. One owner a channel for the whole image
+ * (docs/design/dma.md, "The ownership rule"), checked when the program is
+ * compiled by util/dma_owner.hpp, the channel's key `DmaSlotId<1, ch>`
+ * (the manual names this series' one controller DMA1). The claim is made
+ * by whatever programs the channel, at the moment it does: an engine's
+ * `arm()` (or `arm_ring()`) claims the channel for the owner it is handed,
+ * and a `DmaChannel<ch>` verb that programs the channel claims it for that
+ * channel's owner. A transport hands its engines its request,
+ * `DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>` for USART2's transmit; a
+ * program that arms an engine itself, or programs a channel by hand,
+ * claims it for the tags below unless it names the request it serves. So a
+ * channel two of them would program - USART2's receive engine and the I2C
+ * host's transmit engine on channel 6, a copy on a transport's channel -
+ * is a compile error naming the channel and both owners. Each request is
+ * wired to one channel here (the table below), so the claim's other half,
+ * one channel a request, never fires.
  */
 
 #pragma once
@@ -47,6 +64,7 @@
 #include <stdint.h>
 
 #include "ch32x035/device.hpp"
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -98,6 +116,15 @@ constexpr bool dma_engines_distinct() {
  * with its chapter's reason beside the call.
  */
 enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 };
+
+/// The owners of a channel no request is named for (the file header), one
+/// tag a channel and a kind of user: `DmaChannel<ch>`'s verbs that program
+/// it, a `DmaCopyEngine` on it, a transmit or a receive engine a program
+/// arms itself. Two of them on one channel are two owners, refused.
+template <uint8_t ch> struct DmaHandOwner {};
+template <uint8_t ch> struct DmaCopyOwner {};
+template <uint8_t ch> struct DmaTxOwner {};
+template <uint8_t ch> struct DmaRxOwner {};
 
 // ---- the request table (RM 9.2.3) ---------------------------------------------
 

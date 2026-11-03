@@ -218,6 +218,11 @@ using T2 = Tim<2>;
 constexpr UartOptions wire_opts{.half_duplex = true};
 using WireUart = Uart<2, P, 64, 64, NoDmaEngine, NoDmaEngine, column, wire_opts>;
 using DmaUart = Uart<2, P, 256, 256, DmaTxEngine<6>, DmaRxEngine<7>, column>;
+// USART2's two requests: the owners of channels 6 and 7 in this image (one
+// owner a channel, util/dma_owner.hpp) - DmaUart's engines claim them, and a
+// letter that programs either channel by hand names them too.
+using U2Tx = DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>;
+using U2Rx = DmaOwner<DmaPeriph::usart, 2, DmaSignal::rx>;
 constexpr UartOptions flow_opts{.rts = true, .cts = true};
 using FlowUart = Uart<2, P, 64, 64, NoDmaEngine, NoDmaEngine, column, flow_opts>;
 
@@ -1962,8 +1967,8 @@ void tu_overrun_tail() {
 /// it: the transmit request by DMAT over a standing TXE, the receive one by
 /// DMAR and a frame banged in (RXNE then stands; the frame is 1 ms).
 void raise_u2_request(bool transmit) {
-    DmaChannel<6>::stop();
-    DmaChannel<7>::stop();
+    DmaChannel<6, U2Tx>::stop();
+    DmaChannel<7, U2Rx>::stop();
     (void)resource_up({}, 9600);
     if (transmit) {
         U2::dma_transmit(true);
@@ -1977,39 +1982,39 @@ void raise_u2_request(bool transmit) {
 }
 
 /// The four ways of letting go, then the next owner of the request's channel.
-template <uint8_t ch>
+template <uint8_t ch, typename Owner>
 void release_ways(bool transmit, uint16_t (&moved)[5]) {
     // The control: the block reset and gated, no request ever raised.
     all_off();
-    moved[0] = held::next_owner_moves<ch>(clock);
+    moved[0] = held::next_owner_moves<ch, Owner>(clock);
     // 1. The request bit cleared, the block clocked and enabled.
     raise_u2_request(transmit);
     if (transmit) { U2::dma_transmit(false); } else { U2::dma_receive(false); }
-    moved[1] = held::next_owner_moves<ch>(clock);
+    moved[1] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
     // 2. UE, TE, RE and the request bit cleared, the clock on.
     raise_u2_request(transmit);
     U2::regs().CTLR3 = 0;
     U2::regs().CTLR1 = 0;
-    moved[2] = held::next_owner_moves<ch>(clock);
+    moved[2] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
     // 3. The gate closed with the request bit set, no reset.
     raise_u2_request(transmit);
     U2::bus_clock(false);
-    moved[3] = held::next_owner_moves<ch>(clock);
+    moved[3] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
     // 4. The transport's release(): the reset line, then the gate.
     raise_u2_request(transmit);
     PlainUart::release();
-    moved[4] = held::next_owner_moves<ch>(clock);
+    moved[4] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
 }
 
 void tm_released_request() {
     uint16_t tx[5] = {};
     uint16_t rx[5] = {};
-    release_ways<6>(true, tx);
-    release_ways<7>(false, rx);
+    release_ways<6, U2Tx>(true, tx);
+    release_ways<7, U2Rx>(false, rx);
     print(serial, "  the next owner moved (of 4) - control, request bit cleared, UE/TE/RE cleared, the gate closed, "
                   "release():", crlf, "    channel 6 after USART2's transmit request: ", tx[0], " ", tx[1], " ", tx[2],
           " ", tx[3], " ", tx[4], crlf, "    channel 7 after its receive request: ", rx[0], " ", rx[1], " ", rx[2], " ",
@@ -2141,7 +2146,7 @@ struct WindowCase {
 WindowCase clear_window(bool cpu_reads) {
     static const uint8_t fill_cell = 0x3Cu;
     static uint8_t ring[4];
-    using Rx7 = DmaChannel<7>;
+    using Rx7 = DmaChannel<7, U2Rx>;
     all_off();
     (void)resource_up({}, storm_baud);
     Starver::arm(DmaPriority::very_high, false);

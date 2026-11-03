@@ -593,6 +593,10 @@ template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDma
           typename RxEngine = NoDmaEngine>
 class I2cHost {
     using S = I2c<n>;
+    /// The requests the engines serve, the owners they claim their channels
+    /// for (dma_engine.hpp's file header).
+    using TxOwner = DmaOwner<DmaPeriph::i2c, n, DmaSignal::tx>;
+    using RxOwner = DmaOwner<DmaPeriph::i2c, n, DmaSignal::rx>;
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -696,8 +700,8 @@ public:
             // overrun - a byte a starved channel has not moved leaves BTF
             // up and SCL held low until it is, stretching the bus and
             // losing nothing (15.3's notes).
-            TxEngine::arm(S::data_address(), DmaPriority::high);
-            RxEngine::arm(S::data_address(), DmaPriority::high);
+            TxEngine::template arm<TxOwner>(S::data_address(), DmaPriority::high);
+            RxEngine::template arm<RxOwner>(S::data_address(), DmaPriority::high);
         }
         // The pads go to the peripheral only now. OPEN DRAIN is the
         // definition of the bus: the pull-ups own the idle level.

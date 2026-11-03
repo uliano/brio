@@ -43,6 +43,8 @@
 //      loop then the data on the engines, and a command alone on them; THE
 //      REFUSALS, each one the engines cannot carry answered spi_rejected before
 //      anything moves, and the next requests
+//   j  THE ENGINES OF BYTES, wireless, in an image of its own: 16-bit frames
+//      on a host whose engines are of uint8_t refused before anything moves
 //   b  THE ENGINES against the peer: the four modes at 8 and 16 bits, sixteen
 //      frames each, both directions judged, one DMA interrupt a transaction;
 //      a command phase in the loop inside start() then the data block, at two
@@ -111,15 +113,17 @@
 //   x  (outside z) the slip statistics: each mode ten times
 //
 // build: boards = v006k8,v003f4
-// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v,t,w,i
-// build: groups.v006k8 = abcdhi,gefv,knopqrmxs,tw
+// build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v,t,w,i,j
+// build: groups.v006k8 = abcdhi,gefv,knopqrmxs,tw,j
 // (on the CH32V006 the suite whole passes the 40 KB of program flash, so it
-// builds as four images there: the block, the engines against the peer, the
+// builds as five images there: the block, the engines against the peer, the
 // polled path and the stalled exit; the rate on the wire with the host's
 // costs, the CRC, the kernel and OVR's clear; the command channel, the matrix,
 // the ladder, the handler beside the polled loop, the kernel against the
-// peer, the client, MODF and the two statistics letters; and the next request
-// after a failure with the end of the wire)
+// peer, the client, MODF and the two statistics letters; the next request
+// after a failure with the end of the wire; and the engines of bytes, letter
+// j, whose binding of channels 2 and 3 is the only one of its image that is
+// armed)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1113,8 +1117,8 @@ void ti_engine_rules() {
 
     // WHAT THE ENGINES CANNOT CARRY IS REFUSED, before the block, the select or the
     // D/C is touched (refused()): 16-bit frames with the out buffer, the in buffer
-    // or a command alone off the half-word boundary (8.3.6), 16-bit frames on engines
-    // of bytes, and a transmit engine another owner holds, whose claim would refuse
+    // or a command alone off the half-word boundary (8.3.6), and a transmit engine
+    // another owner holds, whose claim would refuse
     // the launch and leave the receive block waiting for ever. A command in front
     // of a data phase runs in the loop, from any address: that one is not refused.
     constexpr SpiDataSize wide = SpiDataSize::bits16;
@@ -1130,23 +1134,42 @@ void ti_engine_rules() {
     const uint8_t next_polled = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 8, SpiClock::div16, wide, true);
     const uint8_t next_engines = dma_xfer(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 8, SpiClock::div16, wide, false);
     dma_done();
-    using ByteHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
-    (void)ByteHost::init(clock);
-    const bool on_bytes = refused<ByteHost>(nullptr, 0, tx_buf, rx_buf, 8, wide);
-    ByteHost::release();
     host_ready();
     print(serial, "  refused: odd out ", odd_out ? "yes" : "NO", ", odd in ", odd_in ? "yes" : "NO", ", odd command alone ",
-          odd_command ? "yes" : "NO", ", engines of bytes ", on_bytes ? "yes" : "NO", ", a held transmit engine ",
+          odd_command ? "yes" : "NO", ", a held transmit engine ",
           held ? "yes" : "NO", "; an odd command before aligned data ", odd_command_with_data, " (", odd_command_entries,
           " interrupt); then polled ", next_polled, ", on the engines ", next_engines, crlf);
     bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED: 16-bit frames off the half-word boundary, out, in or a "
-                  "command alone, on engines of bytes, and over a held transmit engine: spi_rejected at once, select "
+                  "command alone, and over a held transmit engine: spi_rejected at once, select "
                   "and D/C never touched, the control word, SCK and the block as they were",
-                  odd_out && odd_in && odd_command && on_bytes && claimed && held);
+                  odd_out && odd_in && odd_command && claimed && held);
     bench.verdict("AND THE NEXT REQUESTS RUN: an odd command before aligned data in the loop (one interrupt), then "
                   "polled and on the engines, each spi_ok",
                   odd_command_with_data == spi_ok && odd_command_entries == 1u && next_polled == spi_ok &&
                       next_engines == spi_ok);
+}
+
+// ===========================================================================
+// j - the engines of bytes
+// ===========================================================================
+//
+// THE BYTE-BOUND BINDING: a host whose engines are of uint8_t carries 8-bit
+// frames alone, and a request in 16-bit frames naming them is refused before
+// anything moves. Its own image: the suite's host takes engines of uint16_t,
+// which carry both widths, and a channel is bound by one engine type an
+// image (one owner a channel, util/dma_owner.hpp; the engine's bookkeeping is
+// its type's).
+
+void tj_byte_engines() {
+    using ByteHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
+    (void)ByteHost::init(clock);
+    const bool on_bytes = refused<ByteHost>(nullptr, 0, tx_buf, rx_buf, 8, SpiDataSize::bits16);
+    ByteHost::release();
+    host_ready();
+    print(serial, "  16-bit frames on engines of bytes: refused ", on_bytes ? "yes" : "NO", crlf);
+    bench.verdict("16-BIT FRAMES ON ENGINES OF BYTES ARE REFUSED: spi_rejected at once, select and D/C never "
+                  "touched, the control word, SCK and the block as they were",
+                  on_bytes);
 }
 
 // ===========================================================================
@@ -3834,6 +3857,7 @@ int main() {
                       "the enable protection measured", ta_block);
     bench.letter('i', "THE ENGINE A REQUEST NAMES, wireless: one frame on the engines, the command rule, the refusals",
                  ti_engine_rules);
+    bench.letter('j', "the engines of bytes, wireless: 16-bit frames refused", tj_byte_engines);
     bench.letter('b', "THE ENGINES against the peer: four modes, 8 and 16 bits, a command in the loop, a command "
                       "alone, one frame", tb_async);
     bench.letter('c', "the polled path at every rate, timed", tc_rates);
