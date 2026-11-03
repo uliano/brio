@@ -515,6 +515,7 @@ void to_ring() {
     // stopped; start() is the store that puts it in CFGR.
     const uint32_t before_start = RingRxChannel::regs().CFGR;
     RingView::clear();
+    RingView::clear_overruns();   // the letter's own stalls, a run before in this session
     const bool started = RingRx::start();
     const DmaChannelConfig cfg = RingRxChannel::configuration();
     const uint32_t irqs = RingRxChannel::armed();

@@ -422,8 +422,10 @@ has not got returns false and writes nothing, except a channel verb on
 a basic timer, which does not compile: the registers it would write are
 not there.
 
-- **The block**: `init()` (gate on, then the reset pulse), `release()`,
-  `bus_clock()`, `reset()`, `regs()`.
+- **The block**: `init()` (gate on, then the reset pulse), `release()`
+  (the counter stopped and the gate closed, no reset pulse, so a DMA
+  request the timer raised stays frozen until the next `init()` withdraws
+  it, [dma.md](dma.md)), `bus_clock()`, `reset()`, `regs()`.
 - **The pads**: `remap(code)` writes the column and `remap()` reads it
   back; `channel_pad(code, ch)`, `complementary_pad(code, ch)`,
   `etr_pad(code)` and `break_pad(code)` name the pads of a column, and

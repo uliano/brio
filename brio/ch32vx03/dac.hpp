@@ -380,9 +380,12 @@ public:
         reset();
     }
 
+    /// Both channels off and the gate closed, with no reset pulse: a
+    /// request a stream left standing is the next init()'s to withdraw, the
+    /// reset there coming first (docs/design/dma.md, "The release
+    /// contract").
     static void release() {
         regs().CTLR = 0;
-        reset();
         bus_clock(false);
     }
 

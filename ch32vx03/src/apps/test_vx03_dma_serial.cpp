@@ -108,6 +108,13 @@
 //      UART4's ring on DMA2, the copy on DMA2's channel 1 started when 28
 //      have landed, and the staged frame's copy started on its start bit's
 //      fall, seen on the pad
+//   s  THE SAME OWNER OVER THE REQUEST ITS RELEASE LEFT STANDING
+//      (docs/design/dma.md's release contract): USART2's receive request
+//      raised over a banged frame with the ring's channel stopped, the
+//      port released and initialized again, a burst after it landing whole
+//      with nothing before it; and TIM1's update request raised with
+//      channel 5 disabled, the timer released, its own paced block moving
+//      nothing before the pace
 // and on the CH32V303 alone, the second controller:
 //   n  UART4'S ENGINES ON DMA2 (the second key): a run out of the transmit
 //      engine on channel 5 round the far chip's echo and back through the
@@ -117,6 +124,7 @@
 //      receiver left running keeps its request on its channel
 //
 // build: boards = v203c6,v203c8,v303vc
+// build: groups = gp,qrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -734,8 +742,8 @@ volatile uint32_t ring_budget = ring_entry_budget;
 /// (docs/ch32vx03/dma.md, "A released requester") - made at the register
 /// level, on purpose: TIM3's channel 1 compare with CC1DE (table 11-5's
 /// TIM3_CH1 row, USART2's receive channel), one match, the counter
-/// stopped and the gate closed. No pad. all_off()'s release of the timer
-/// - its reset line - lets it go.
+/// stopped and the gate closed. No pad. TIM3's reset line, which the
+/// letter pulses after its measurement, lets it go.
 void hold_channel6() {
     static_assert(DmaRequestOf<DmaRequest::tim3_ch1>::channel ==
                       DmaRequestOf<DmaRequest::usart2_rx>::channel,
@@ -832,6 +840,192 @@ void tp_dead_ring() {
 
     Loop::release();
     uart_mode = false;
+    all_off();
+}
+
+// ===========================================================================
+// s - the same owner over the request its release left standing
+// ===========================================================================
+//
+// docs/design/dma.md's release contract on this family: release() gates the
+// block and pulses no reset, so a request the block raised and no channel
+// took stays frozen on the channel's OR behind the closed gate; the channel
+// being that request's alone for the whole image, the one that can meet it
+// is the same owner initialized again, and its init() starts from the
+// block's reset, before an engine is armed.
+
+/// TIM1's update request, the second owner measured: DMA1's channel 5 for
+/// the whole image (table 11-5; table 11-2 on the CH32V303).
+using HeldPacer = Tim<1>;
+using HeldRow = DmaRequestOf<DmaRequest::tim1_up>;
+static_assert(dma_claim<DmaSlotId<HeldRow::controller, HeldRow::channel>,
+                        DmaOwner<DmaPeriph::tim, 1, DmaSignal::update>>);
+
+/// The pad's rest around a burst: two frames at bang_baud are 174 us, so a
+/// frame the receiver started on the pad's way high is over by then.
+constexpr uint32_t pull_settle_us = 200;
+
+/// The paced block's landing ground: sixteen half-word samples.
+alignas(4) uint16_t work[16];
+constexpr uint16_t sample_count = 16;
+
+/// What a paced block made of its channel.
+struct Paced {
+    bool armed = false;
+    uint16_t early = 0;   ///< items moved before the pacer ran: a held request's stray
+    uint16_t left = 0;    ///< CNTR after sixteen periods and two more
+    uint16_t steps = 0;   ///< consecutive samples one period apart
+};
+
+/// SIXTEEN SAMPLES OF THE RULER (TIM3 at 1 MHz) on DMA `c`'s channel `ch`,
+/// paced by timer `tn` - its update (cc < 0), or its channel cc's compare
+/// - once every 500 us. A request held on the channel's OR moves one item
+/// at the enable: `early` is read 100 us after it, the pacer still
+/// stopped. A held level its gated owner never drops stalls the channel
+/// after that item: `left` is read after eighteen periods. A clean channel
+/// moves nothing early, ends at zero and takes fifteen steps of 500 +- 5
+/// (the pacer and the ruler divide one timer clock: a step is exact but
+/// for the sample's own bus wait).
+template <uint8_t c, uint8_t ch, uint8_t tn, int8_t cc>
+Paced paced_block() {
+    using Ch = DmaChannel<c, ch>;
+    using T = Tim<tn>;
+    Paced p{};
+    Ruler::init();
+    (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 0xFFFF});
+    Ruler::enable(true);
+    T::init();
+    (void)T::configure(TimConfig{.prescaler = static_cast<uint16_t>(T::clock_hz(clock) / 1'000'000u - 1u),
+                                 .period = 499});
+    if constexpr (cc >= 0) {
+        (void)T::output_channel(static_cast<uint8_t>(cc),
+                                TimChannelConfig{.mode = TimOutputMode::frozen, .compare = 250, .preload = false,
+                                                 .enable = false});
+        T::interrupts(T::compare_dma(static_cast<uint8_t>(cc)), true);
+    } else {
+        T::interrupts(tim_ude, true);
+    }
+    for (uint16_t i = 0; i < sample_count; ++i) {
+        work[i] = 0;
+    }
+    Ch::stop();
+    p.armed = Ch::load(DmaTransfer{
+        .peripheral = Ruler::cnt_address(),
+        .memory = work,
+        .count = sample_count,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .circular = false,
+                   .memory_to_memory = false,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half,
+                   .priority = DmaPriority::high},
+    });
+    wait_us(100);
+    p.early = static_cast<uint16_t>(sample_count - Ch::remaining());
+    T::enable(true);
+    wait_us(18u * 500u);
+    p.left = Ch::remaining();
+    T::enable(false);
+    Ch::stop();
+    for (uint16_t i = 1; i < sample_count; ++i) {
+        const uint16_t step = static_cast<uint16_t>(work[i] - work[i - 1u]);
+        if (step >= 495u && step <= 505u) {
+            ++p.steps;
+        }
+    }
+    T::release();
+    Ruler::release();
+    return p;
+}
+
+/// The paced block's reading as one line, and whether it was clean.
+bool paced_line(const char* what, const Paced& p) {
+    const bool clean = p.armed && p.early == 0u && p.left == 0u && p.steps == sample_count - 1u;
+    print(serial, "  ", what, ": ", p.early, " item(s) before the pacer, ", p.left, " left after it, ", p.steps,
+          " steps of a period", clean ? " - clean" : (p.early != 0u ? " - A HELD REQUEST" : " - NOT CLEAN"), crlf);
+    return clean;
+}
+
+void ts_same_owner() {
+    all_off();
+    need_jumper();
+    if (jumper) {
+        print(serial, "  the jumper PA2-PA3 is in place: USART2's transmitter drives the pad this letter "
+                      "bangs, so its half is not staged",
+              crlf);
+    } else {
+        // USART2'S RECEIVE REQUEST LEFT STANDING: the ring's channel stopped
+        // and the port's vector masked, one frame banged into the receive
+        // pad - RXNE up under DMAR, the request raised and nothing taking it
+        // - then release(), DMAR left set and the gate closed over it. The
+        // pad is pulled high before every init() and rests past two frames
+        // before every burst, so the receiver frames no edge but the bangs'.
+        uart_mode = true;
+        RxPad::input(PinPull::up);
+        wait_us(pull_settle_us);
+        const bool up = Loop::init(clock, bang_baud);
+        RxPad::input(PinPull::up);
+        wait_us(pull_settle_us);
+        bool junk = true;
+        (void)read_all(source_first_bytes(), 0, junk);
+        LoopRx::stop();
+        Pfic::disable(Irq::usart2);
+        static const uint8_t stale[1] = {0xA5};
+        bang(stale, 1);
+        const uint16_t statr = Usart<2>::regs().STATR;
+        const uint16_t ctlr3 = Usart<2>::regs().CTLR3;
+        const bool raised = (statr & usart_rxne) != 0u && (ctlr3 & usart_dmar) != 0u;
+        Loop::release();
+        RxPad::input(PinPull::up);
+        wait_us(pull_settle_us);
+        // THE SAME OWNER AGAIN: init() pulses the reset first, then arms the
+        // ring; a burst of sixteen banged after it is all the ring may hold,
+        // nothing drained between.
+        const bool again = Loop::init(clock, bang_baud);
+        RxPad::input(PinPull::up);
+        wait_us(pull_settle_us);
+        const uint32_t before = Loop::rx_pending();
+        const uint8_t* src = source_first_bytes() + 300;
+        bang(src, 16);
+        uint8_t first = 0;
+        const bool any = Loop::read_span().size() != 0u;
+        if (any) {
+            first = Loop::read_span()[0];
+        }
+        bool in_order = false;
+        const uint16_t got = read_all(src, 16, in_order);
+        const uint16_t faults = Loop::dma_faults();
+        print(serial, "  USART2's ring: a frame left under DMAR with the channel stopped (", raised ? "raised" : "NOT RAISED",
+              ", STATR ", hex(statr), ", CTLR3 ", hex(ctlr3), "), the port released and initialized again: ", before,
+              " byte(s) in the ring; then 16 banged, ", got, " byte(s), the first ", hex(first), " of the burst's ",
+              hex(src[0]), in_order ? ", the burst's own in order" : ", NOT the burst", ", faults ", faults, crlf);
+        bench.verdict("THE SAME OWNER OVER ITS OWN HELD REQUEST, USART2's receive: released with RXNE standing "
+                      "under DMAR and the gate closed, initialized again - its reset first - the ring holds the "
+                      "sixteen bytes banged after it and nothing before them",
+                      up && raised && again && before == 0u && got == 16u && in_order && faults == 0u);
+        Loop::release();
+        uart_mode = false;
+    }
+
+    // TIM1'S UPDATE REQUEST LEFT STANDING: UDE set and the counter run
+    // through a few updates with channel 5 disabled, then release(), UDE
+    // left set and the gate closed over the request; then the same owner's
+    // paced block, whose init() starts from the timer's reset.
+    HeldPacer::init();
+    (void)HeldPacer::configure(TimConfig{
+        .prescaler = static_cast<uint16_t>(HeldPacer::clock_hz(clock) / 1'000'000u - 1u), .period = 99});
+    HeldPacer::interrupts(tim_ude, true);
+    HeldPacer::enable(true);
+    wait_us(500);
+    HeldPacer::release();
+    const Paced p = paced_block<HeldRow::controller, HeldRow::channel, 1, -1>();
+    const bool clean = paced_line("TIM1's update left standing under UDE, released, then its own paced block", p);
+    bench.verdict("THE SAME OWNER OVER ITS OWN HELD REQUEST, TIM1's update: released with the request raised and "
+                  "UDE set, its next paced block - init()'s reset first - moves nothing before the pace and "
+                  "sixteen samples a period apart",
+                  clean);
     all_off();
 }
 
@@ -2403,6 +2597,8 @@ int main() {
         bench.letter('q', "the priority rule: an unpaced copy beside the receive ring", tq_priority<>);
         bench.letter('r', "an overrun at a message's tail: no storm, counted once", tr_overrun_tail<>);
     }
+    bench.letter('s', "the same owner over the request its release left standing: USART2's, TIM1's",
+                 ts_same_owner);
     register_far_letters();
 
     if (serial_ok) {

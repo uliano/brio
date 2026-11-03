@@ -85,16 +85,19 @@
  * release(), bit_order(), pad_speed(s), prime() and claim_nss_pad() are
  * setup verbs as well, main context or one active object, none guarded;
  * release(), and bit_order() and prime() when they move CTLR1, drain
- * the block first with Spi::disable()'s bounded waits (200 000 polls
- * each) and discard their answer. start() is the arbiter's, from its
+ * the block first with Spi::disable()'s bounded waits (Spi::wait_polls
+ * each, derived from the slowest frame the chapter allows) and discard
+ * their answer. start() is the arbiter's, from its
  * dispatch in main context, or the program's for a polled request on a
  * bus no arbiter owns. A request names the engine that runs it
  * (`Request::engine`, docs/design/spi-bus.md, "Two ways to run a
  * request"), and the host does what it says, at any length. SpiEngine::polled
  * runs an explicit loop, whatever engines the host names, and completes
  * inside start(), spinning under one spin budget for the transaction
- * (polled_budget(): a budget that runs out ends spi_stalled, the select
- * released and the block reset before start() returns); it depends on no
+ * (take_budget(): twice the request's wire time at the rate applied, in
+ * polls of at least a core cycle each; a budget that runs out ends
+ * spi_stalled, the select and the D/C released and the block reset before
+ * start() returns); it depends on no
  * interrupt vector and needs no engines, so it runs with global interrupts
  * masked as it does with them enabled. SpiEngine::dma runs on the DMA
  * engines: start() launches them and returns false, and the receive
@@ -103,7 +106,9 @@
  * with spi_rejected before the block, the select or the D/C is touched:
  * any request on a host with no engines; on a host with them, 16-bit frames
  * from an odd address or over engines of uint8_t, a run across 64 KB on the
- * CH32V303's DMA1, a transmit channel another block holds (SpiHost below).
+ * CH32V303's DMA1 (SpiHost below). And a host with engines refuses any
+ * request while a block of its own is still on them - the one busy check,
+ * made first, the same way whichever engine the request names.
  * One part of a dma request runs in a loop inside start(): a command phase
  * with a data phase behind it. Inside start() the
  * chip-select setup time is a busy wait, and a request that changes the
@@ -239,6 +244,7 @@
 
 #include <stdint.h>
 
+#include <bit>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -1052,12 +1058,21 @@ private:
         }
     }
 
+    /// The bound of wait_until(), derived from the slowest frame the chapter
+    /// allows: sixteen bits at BR's /256 are 4096 cycles of the block's
+    /// bus, and the slowest bus is HCLK over sixteen (RCC's PPRE fields),
+    /// so 65536 core cycles; twice that, counted in polls of at least one
+    /// core cycle each, so a wait the wire can end never ends before it -
+    /// about 0.9 ms at 144 MHz for the polls alone, a few times that where
+    /// a poll takes a few cycles.
+    static constexpr uint32_t wait_polls = 2u * 16u * 256u * 16u;
+
     /// A bounded wait: true when the condition came, false when the
     /// budget ran out (a bus whose clock never runs must not hang the
-    /// kernel; the budget is generous against the slowest frame).
+    /// kernel): wait_polls polls.
     template <typename Pred>
     static bool wait_until(Pred pred) {
-        for (uint32_t spins = 200'000u; spins != 0u; --spins) {
+        for (uint32_t spins = wait_polls; spins != 0u; --spins) {
             if (pred()) {
                 return true;
             }
@@ -1077,10 +1092,11 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // The two other codes this host answers are the vocabulary's
 // (util/spi_bus.hpp). spi_stalled: a polled frame's flag never came within
 // the transaction's one spin budget - a clock that stopped, a block that is
-// dead; the select is released and the block reset and reconfigured before
-// start() returns. spi_rejected: a request naming SpiEngine::dma that the
-// engines cannot run or on a host with none, refused before anything reaches
-// the wire.
+// dead; the select and the D/C are released and the block reset and
+// reconfigured before start() returns. spi_rejected: a request naming
+// SpiEngine::dma that the engines cannot run or on a host with none, or any
+// request while this host's own block is still on the engines, refused
+// before anything reaches the wire.
 
 /**
  * SpiHost<n, pins, TxEngine, RxEngine>
@@ -1408,6 +1424,10 @@ public:
                                      : std::optional<SpiClock>{};
         floor_code_ = ceiling_ ? static_cast<uint8_t>(*ceiling_) : uint8_t{0};
         cs_rate_ = delay_rate(hz);
+        // HCLK over this instance's bus, a power of two (RCC's PPRE): the
+        // shift the polled budget turns bus cycles into core cycles with.
+        pclk_shift_ = static_cast<uint8_t>(std::countr_zero(hz / pclk_hz_));
+        take_budget();
     }
 
     /// The BR code that produces at most `hz` of SCK on this instance's
@@ -1484,7 +1504,9 @@ public:
     /// here, in word stores.
     ///
     /// The arbiter's call, from its dispatch, or the program's for a
-    /// polled request on a bus no arbiter owns. A polled request spins here
+    /// polled request on a bus no arbiter owns. A request that finds a block
+    /// of this host's own still on the engines is refused first, spi_rejected,
+    /// before anything moves. A polled request spins here
     /// for the whole transaction under one spin budget (spi_stalled when it
     /// runs out, the select released and the block reset before the return),
     /// depending on no vector and masking nothing, and so does a command
@@ -1503,8 +1525,22 @@ public:
                 status_ = spi_rejected;
                 return true;
             }
-        } else if (reset_owed_) [[unlikely]] {
-            (void)reset_block();
+        } else {
+            // THE ONE BUSY CHECK (docs/design/spi-bus.md, "One busy check,
+            // before anything moves"): this host's own block still on the
+            // engines refuses the request, whichever engine it names, before
+            // the select, the D/C or the block moves. An engineless host has
+            // nothing in flight here: a polled request completes inside
+            // start(). The channels are this host's alone for the whole image
+            // (docs/design/dma.md, "The ownership rule"), so no other owner's
+            // block is a case.
+            if (dma_active_) [[unlikely]] {
+                status_ = spi_rejected;
+                return true;
+            }
+            if (reset_owed_) [[unlikely]] {
+                (void)reset_block();
+            }
         }
         status_ = spi_ok;
         if ((static_cast<uint32_t>(r.cmd_len) + r.len) == 0u) {
@@ -1606,11 +1642,11 @@ public:
         return reset_block();
     }
 
-    /// SPE cleared and the gate closed, with NO reset pulse - unlike the
-    /// USART's and the I2C host's release(): a request this block raised
-    /// does not outlive SPE (measured on SPI1: a write abandoned with TXE
-    /// standing under TXDMAEN, released so, left nothing on channel 3 for
-    /// the next owner - docs/ch32vx03/dma.md, "A released requester").
+    /// SPE cleared and the gate closed, with no reset pulse, as every
+    /// transport's release() on this family: init() starts from the block's
+    /// reset (docs/design/dma.md, "The release contract"). This block's
+    /// requests do not outlive SPE anyway (measured on all three instances,
+    /// docs/ch32vx03/dma.md, "A released requester").
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();
@@ -1728,17 +1764,14 @@ private:
      *    either buffer: the frame is ONE 16-bit access, and an odd address
      *    would be rounded down by the controller in silence (11.3.6);
      *  - a span across 64 KB in either buffer on the CH32V303's DMA1 (11.2.3's
-     *    note (1), measured as a wrap: dma.hpp's header);
-     *  - a transmit channel whose block is in flight: its claim is the one
-     *    test-and-set the engines have, and it holds for any owner of that
-     *    slot. The receive engine has no claim; a new run takes its channel.
+     *    note (1), measured as a wrap: dma.hpp's header).
      *
-     * What launch_beats() cannot be refused: an empty run or one past CNTR
-     * (the count is a uint16_t and start() has left no empty request), a null
-     * run (a null buffer is the engine's own cell). So its answers are
-     * discarded with nothing left to say, for a host that holds its slots in
-     * main context; a handler claiming the transmit channel between this test
-     * and the launch is not covered (docs/ch32vx03/spi.md).
+     * A block of this host's own still in flight is start()'s one busy check,
+     * made before this; no other owner holds these channels (the class's
+     * claims). What launch_beats() cannot be refused: an empty run or one
+     * past CNTR (the count is a uint16_t and start() has left no empty
+     * request), a null run (a null buffer is the engine's own cell). So its
+     * answers are discarded with nothing left to say.
      */
     [[gnu::always_inline]] static bool engines_carry(bool wide, const uint8_t* out, const uint8_t* in,
                                                      uint16_t count) {
@@ -1754,7 +1787,7 @@ private:
                     return false;
                 }
             }
-            return !TxEngine::busy() && !crosses_64k(out, count, wide) && !crosses_64k(in, count, wide);
+            return !crosses_64k(out, count, wide) && !crosses_64k(in, count, wide);
         } else {
             (void)wide;
             (void)out;
@@ -1847,8 +1880,10 @@ private:
     static void finish_dma(uint8_t st) {
         if constexpr (has_engines) {
             S::dma_requests(false, false);
+            // The tenure's own answer, always: a request the busy check
+            // refused behind it answered spi_rejected in the same word.
+            status_ = st;
             if (st != spi_ok) {
-                status_ = st;
                 reset_owed_ = true;
                 (void)TxEngine::abandon();
                 RxEngine::stop();
@@ -1928,6 +1963,7 @@ private:
     static void take_words() {
         ctlr1_ = spi_ctlr1_of(applied_);
         base_ = static_cast<uint16_t>(ctlr1_ & ~ctlr1_request_mask);
+        take_budget();
     }
 
     /// CTLR1 for this request's mode, rate code and width over the
@@ -1949,6 +1985,7 @@ private:
     }
     static void reapply(uint16_t want) {
         ctlr1_ = want;
+        take_budget();
         applied_.mode = static_cast<SpiMode>(want & 3u);
         applied_.clock = static_cast<SpiClock>((want & spi_br_mask) >> spi_br_shift);
         applied_.bits = (want & spi_dff) != 0u ? SpiDataSize::bits16 : SpiDataSize::bits8;
@@ -1959,11 +1996,29 @@ private:
 
     // ---- the polled loops ---------------------------------------------------
 
-    /// Polls for one transaction: the slowest frame is 256 x 16 bus cycles
-    /// over a bus at half of HCLK, and a poll is a handful of cycles; the
-    /// budget scales with the frames and leaves room for the interrupts
-    /// that land in it.
-    static uint32_t polled_budget(uint32_t frames) { return 100'000u + 2'048u * frames; }
+    /// THE POLLED BUDGET, derived from the clocks whenever a rate is applied
+    /// and kept as a shift, so a request pays one shift of its frames: a frame
+    /// is 8 or 16 bits (DFF) of 2^(BR + 1) bus cycles each, and a bus cycle
+    /// 2^pclk_shift_ core cycles (rebase()); the budget is twice the request's
+    /// frames in core cycles, plus 256, counted in polls of STATR, each at
+    /// least one core cycle. So it never runs out before the wire has had
+    /// twice its own time, a handler that lands in the loop costing time and
+    /// no polls; and on a block that never moves it ends after that many polls
+    /// - 16 frames of 8 bits at /64 on SPI1 (PCLK2 = HCLK) are 16640 polls, a
+    /// few cycles each. The shift stops at 15, where the longest request still
+    /// fits a word (65790 frames): it stops there only on a bus at an eighth of
+    /// HCLK or slower at /256 and 16-bit frames, whose frame is at most 65536
+    /// core cycles against 32768 polls of five instructions each, still past
+    /// the wire's time.
+    static void take_budget() {
+        const uint32_t code = (static_cast<uint32_t>(ctlr1_) & spi_br_mask) >> spi_br_shift;
+        const uint32_t bits_shift = (ctlr1_ & spi_dff) != 0u ? 4u : 3u;
+        const uint32_t shift = bits_shift + code + 1u + pclk_shift_ + 1u;
+        budget_shift_ = static_cast<uint8_t>(shift < 15u ? shift : 15u);
+    }
+    [[gnu::always_inline]] static uint32_t polled_budget(uint32_t frames) {
+        return (frames << budget_shift_) + 256u;
+    }
 
     static uint8_t poll_write_phase(const uint8_t* tx, uint16_t frames, bool wide, uint32_t& budget) {
         return wide ? poll_write<true>(tx, frames, budget) : poll_write<false>(tx, frames, budget);
@@ -2091,6 +2146,8 @@ private:
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<SpiClock> ceiling_{};
     static inline DelayRate cs_rate_{};
+    static inline uint8_t pclk_shift_ = 0;   ///< log2(HCLK / this bus), rebase()
+    static inline uint8_t budget_shift_ = 0; ///< take_budget(): the polled budget's shift
     static inline PinSpeed pad_speed_ = PinSpeed::fast;
 };
 

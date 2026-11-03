@@ -1055,12 +1055,13 @@ public:
         reset();
     }
 
-    /// Counter stopped, outputs off, pads NOT touched (a pad is the
-    /// caller's claim - TimPad::release() is its release), block reset
-    /// and its gate closed.
+    /// Counter stopped and the gate closed; the pads NOT touched (a pad is
+    /// the caller's claim - TimPad::release() is its release) and no reset
+    /// pulse: a DMA request the timer raised stays frozen on its channel
+    /// behind the closed gate, and the next init() - whose reset comes first
+    /// - withdraws it (docs/design/dma.md, "The release contract").
     static void release() {
         enable(false);
-        reset();
         bus_clock(false);
     }
 

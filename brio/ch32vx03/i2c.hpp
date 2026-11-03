@@ -1474,13 +1474,13 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
-        // THE RESET LINE BEFORE THE GATE, as recover()'s SWRST: a request
-        // DMAEN raised is held through DMAEN and PE cleared - a tenure
-        // abandoned mid-block leaves one - and a gated clock freezes it on
-        // the channel's OR, where it stalls the next owner of channel 6 or
-        // 7 after one item (measured on both series, docs/ch32vx03/dma.md,
-        // "A released requester").
-        S::reset();
+        // NO RESET HERE: a request DMAEN raised is held through DMAEN and PE
+        // cleared - a tenure abandoned mid-block leaves one - and the gate
+        // closed below freezes it on the channel's OR. The channels are this
+        // instance's requests' for the whole image (docs/design/dma.md, "The
+        // ownership rule"), so only this host's own next init() meets it,
+        // and that init() pulses the block's reset before anything else
+        // (docs/design/dma.md, "The release contract").
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();

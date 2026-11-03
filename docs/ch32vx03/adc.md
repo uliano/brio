@@ -96,7 +96,10 @@ What decides correctness even there:
   no buffer does not take it off, and `input_buffer()` reads back what
   the silicon kept.
 
-Beyond the smallest use: the two converters share one vector, entry 34
+Beyond the smallest use: `init()` pulses the converter's reset first and
+`release()` powers it down and closes its gate with no pulse, so a DMA
+request a stream left standing is the next `init()`'s to withdraw
+([dma.md](dma.md)). The two converters share one vector, entry 34
 of the table (`Adc<n>::irq()`), and every `release()` of either
 converter disables that line in the PFIC, and so does every `init()`
 past its first checks (an `init()` refused for its configuration, a DMA

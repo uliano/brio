@@ -87,7 +87,9 @@
 //      receive-only host and how it is stopped, the I2S register where
 //      the part has no I2S
 //   f  A POLLED WAIT THAT RUNS OUT (spi_stalled within its budget), what a
-//      closed gate leaves; THE NEXT REQUEST WITH NOTHING CALLED, after a stall
+//      closed gate leaves; THE END OF A FAILED REQUEST, the D/C and the
+//      select high after a stalled command phase on either engine and a
+//      faulted block; THE NEXT REQUEST WITH NOTHING CALLED, after a stall
 //      and after a real transfer error, with no wire: MISO held by its port at
 //      a level the failed request did not see, so a frame left over shows; and
 //      the transmit interrupt feeding a host's stream
@@ -96,9 +98,10 @@
 //      the D/C untouched) and run by the same host polled; on the engined host
 //      ONE FRAME on the engines at the fastest rates, read and written; what
 //      the engines cannot carry refused - 16-bit frames from an odd address or
-//      over engines of uint8_t, a transmit channel another block holds, on the
-//      CH32V303's DMA1 a run across 64 KB - the select, the D/C and the block
-//      unmoved and the next request exact; THE COMMAND RULE, D/C's edge
+//      over engines of uint8_t, on the CH32V303's DMA1 a run across 64 KB, and
+//      either engine's request behind a block of the host's own in flight (the
+//      one busy check) - the select, the D/C and the block unmoved and the next
+//      request exact; THE COMMAND RULE, D/C's edge
 //      captured by a timer against the count of SCK edges on both engines; a
 //      long polled read in the loop on the engined host with no channel
 //      interrupt, and under a mask; then WHAT EACH ENGINE COSTS THE CORE - E
@@ -3774,7 +3777,9 @@ void stall_then(NextTally& t, SpiMode mode, SpiClock rate, bool read, bool comma
         r.len = 16;
         r.engine = SpiEngine::polled;
     }
-    const uint32_t spins = 100'000u + 2'048u * (command ? 1u : 16u);   // SpiHost's polled_budget()
+    // SpiHost's polled budget for this request, by its own arithmetic: its
+    // frames of 8 bits at this rate of PB2 (HCLK), twice over, plus 256 polls.
+    const uint32_t spins = 2u * (command ? 1u : 16u) * 8u * spi_division(rate) * (SysClock::hz / SysClock::pclk2_hz) + 256u;
     const uint32_t t0 = cycles_now();
     const bool sync = H::start(r);
     const uint32_t wall = cycles_now() - t0;
@@ -3933,6 +3938,74 @@ void next_request_with_nothing_called() {
     third_pad_idle();
 }
 
+/// The D/C letter f's failed requests carry: PA15, the pad letter g's D/C is
+/// too, left an input - only its output latch is read.
+using EndDc = Pin<'A', 15>;
+
+/// THE END OF A FAILED REQUEST: host `H` primed, a request with a command
+/// phase of two frames ahead of eight data frames on engine `e`, SPI1's gate
+/// closed under it so the command phase stalls; the select (PA8, the strap
+/// node's third pad, left an input) and the D/C (PA15, left an input) by
+/// their output latches, cleared before the request - a latch read back set
+/// is the host's own store. True when the request ended spi_stalled inside
+/// start() with both latches set.
+template <typename H>
+bool dc_after_stall(SpiEngine e, uint8_t& status) {
+    (void)H::init(clock);
+    H::prime(SpiMode::mode0, SpiClock::div64);
+    ThirdPad::clear();
+    EndDc::clear();
+    typename H::Request r{};
+    r.cs = ThirdPad::ref();
+    r.dc = EndDc::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.cmd_len = 2;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf + 2));
+    r.len = 8;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div64;
+    r.engine = e;
+    S1::bus_clock(false);
+    const bool sync = H::start(r);
+    status = H::status();
+    const bool high = ThirdPad::read_out() && EndDc::read_out();
+    S1::bus_clock(true);
+    H::release();
+    return sync && status == spi_stalled && high;
+}
+
+/// The same request on the engines with its data block's receive side at
+/// refused_address: the command phase runs in the loop, the block faults,
+/// and the receive channel's vector ends the request spi_dma_fault. True
+/// when it did, with both latches set after.
+bool dc_after_fault(uint8_t& status) {
+    (void)Dma1::init(clock);
+    Dma1::prime(SpiMode::mode0, SpiClock::div64);
+    Dma<1>::open();
+    dma_host_live = true;
+    ThirdPad::clear();
+    EndDc::clear();
+    Dma1::Request r{};
+    r.cs = ThirdPad::ref();
+    r.dc = EndDc::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.cmd_len = 2;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf + 2));
+    r.rx = lend<Lease::reply>(reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(refused_address)));
+    r.len = 8;
+    r.mode = SpiMode::mode0;
+    r.clock = SpiClock::div64;
+    r.engine = SpiEngine::dma;
+    host_done = false;
+    const bool went = !Dma1::start(r);
+    const bool ended = went && done_within_ms(5);
+    status = Dma1::status();
+    const bool high = ThirdPad::read_out() && EndDc::read_out();
+    dma_host_live = false;
+    Dma1::release();
+    return ended && status == spi_dma_fault && high;
+}
+
 void tf_stalled_txe() {
     third_pad_idle();
     // ---- spi_stalled: the polled wait that runs out ----
@@ -3961,7 +4034,9 @@ void tf_stalled_txe() {
     const uint32_t wall_again = cycles_now() - t_again;
     const uint8_t st_again = Host1::status();
     S1::bus_clock(true);
-    const uint32_t spins = 100'000u + 2'048u * frames;   // SpiHost's polled_budget(16)
+    // SpiHost's polled budget for this request, by its own arithmetic: 16
+    // frames of 8 bits at /64 of PB2 (HCLK), twice over, plus 256 polls.
+    const uint32_t spins = 2u * frames * 8u * 64u * (SysClock::hz / SysClock::pclk2_hz) + 256u;
     // The gate open again: the same request runs to its end.
     const bool sync2 = Host1::start(r);
     const uint8_t st2 = Host1::status();
@@ -3981,6 +4056,25 @@ void tf_stalled_txe() {
                   "runs spi_ok",
                   sync2 && st2 == spi_ok);
     Host1::release();
+
+    // ---- THE END OF A FAILED REQUEST: the D/C and the select high ----
+    uint8_t st_polled = no_answer;
+    uint8_t st_engined = no_answer;
+    uint8_t st_fault = no_answer;
+    const bool end_polled = dc_after_stall<Host1>(SpiEngine::polled, st_polled);
+    const bool end_engined = dc_after_stall<Dma1>(SpiEngine::dma, st_engined);
+    const bool end_fault = dc_after_fault(st_fault);
+    print(serial, "  a command phase stalled: polled ", st_polled, end_polled ? ", D/C and select high" : ", NOT BOTH HIGH",
+          "; ahead of a dma block ", st_engined, end_engined ? ", D/C and select high" : ", NOT BOTH HIGH",
+          "; a dma block faulted behind its command phase ", st_fault,
+          end_fault ? ", D/C and select high" : ", NOT BOTH HIGH", crlf);
+    bench.verdict("A FAILED REQUEST ENDS WITH THE D/C AND THE SELECT HIGH: a command phase stalled on the polled "
+                  "engine and in front of a dma block (spi_stalled), and a dma block faulted behind its command "
+                  "phase (spi_dma_fault)",
+                  end_polled && end_engined && end_fault);
+    ThirdPad::release();
+    EndDc::release();
+    third_pad_idle();
 
     next_request_with_nothing_called();
 
@@ -4474,18 +4568,46 @@ void tg_two_ways() {
     q.cmd_len = 8;
     refusals = refused_untouched<Dma1>("16-bit frames, a command alone at an odd address", q) && refusals;
     nexts = next_exact() && nexts;
-    // The one test-and-set the engines have: a transmit channel another
-    // block holds, its claim taken by hand. The same engine type is the slot.
-    using Tx1 = DmaTxEngine<1, S1::dma_tx_channel>;
+    // THE ONE BUSY CHECK, the host's own block in flight (docs/design/spi-bus.md,
+    // "One busy check, before anything moves"): sixteen frames at /256, 32768
+    // cycles of wire, on the engines; a request naming either engine started
+    // behind it is refused with the select's and the D/C's latches and CTLR1
+    // unmoved, and the block goes on to its end, spi_ok.
     q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
     q.cmd_len = 0;
     q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
     q.rx = lend<Lease::reply>(rx_buf);
     q.len = 16;
     q.bits = SpiDataSize::bits8;
-    const bool claimed = Tx1::claim();
-    refusals = refused_untouched<Dma1>("the transmit channel claimed", q) && claimed && refusals;
-    Tx1::unclaim();
+    Dma1::Request running{};
+    running.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    running.rx = lend<Lease::reply>(rx_buf);
+    running.len = 16;
+    running.mode = SpiMode::mode0;
+    running.clock = SpiClock::div256;
+    running.engine = SpiEngine::dma;
+    Dma1::prime(SpiMode::mode0, SpiClock::div256);
+    host_done = false;
+    const bool went = !Dma1::start(running);
+    ThirdPad::clear();
+    DcPad::clear();
+    const uint16_t running_word = S1::regs().CTLR1;
+    const bool refused_dma = Dma1::start(q);
+    const uint8_t st_refused_dma = Dma1::status();
+    q.engine = SpiEngine::polled;
+    const bool refused_polled = Dma1::start(q);
+    const uint8_t st_refused_polled = Dma1::status();
+    q.engine = SpiEngine::dma;
+    const bool still = Dma1::busy() && !ThirdPad::read_out() && !DcPad::read_out() &&
+                       S1::regs().CTLR1 == running_word;
+    const bool ended = done_within_ms(5);
+    const uint8_t st_running = Dma1::status();
+    const bool busy_refused = went && refused_dma && st_refused_dma == spi_rejected && refused_polled &&
+                              st_refused_polled == spi_rejected && still && ended && st_running == spi_ok;
+    print(serial, "    a block of the host's own in flight: a dma request ", st_refused_dma, ", a polled one ",
+          st_refused_polled, ", the latches and CTLR1 ", still ? "unmoved" : "MOVED", ", the block's own end ", st_running,
+          crlf);
+    refusals = busy_refused && refusals;
     nexts = next_exact() && nexts;
     // On the CH32V303's DMA1 a span across 64 KB (11.2.3's note (1)). The real
     // run is in flash across 0x0801 0000, which the VC's array carries past the

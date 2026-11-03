@@ -757,10 +757,13 @@ public:
         return true;
     }
 
+    /// The converter powered down and its gate closed, with no reset pulse:
+    /// a request its stream left standing is this converter's own next
+    /// init()'s to withdraw, the reset there coming first
+    /// (docs/design/dma.md, "The release contract").
     static void release() {
         Pfic::disable(irq());
         regs().CTLR2 = regs().CTLR2 & ~adc_adon;
-        reset();
         bus_clock(false);
     }
 

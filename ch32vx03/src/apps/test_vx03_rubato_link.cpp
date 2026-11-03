@@ -61,9 +61,9 @@
 //   requester"): a USART's DMA request, once raised, is held until the
 //   channel answers it or the block's reset line is pulsed - so every hand
 //   between the polled command channel and the Uart task goes through a
-//   reset: Uart::release() pulses it before the gate, the command path's
-//   open() pulses it before it programs the port, and task_up() pulses it
-//   before the Uart task's init(), the TX pad parked high across it. The
+//   reset: Uart::init() pulses it first, the command path's open() pulses
+//   it before it programs the port, and task_up() pulses it before the Uart
+//   task's init(), the TX pad parked high across it. The
 //   SPI host's requests do not outlive SPE (the same section), and its
 //   engines drop both requests at every transaction's end. Letter i reads
 //   every channel the image uses disabled and every request enable clear.
@@ -447,8 +447,8 @@ bool task_up(uint32_t rate) {
 }
 
 /// The transport's release(): the vector off, both engines stopped, the
-/// block's reset pulsed BEFORE its gate closes (usart.hpp, the release
-/// contract), the pads released.
+/// gate closed, the pads released; the next init() starts from the block's
+/// reset (usart.hpp, the release contract).
 void task_down() {
     LinkPort::release();
     link_live = false;

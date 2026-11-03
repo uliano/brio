@@ -1059,10 +1059,11 @@ established:
   paced and the blasted legs passed and the streamed one failed in every
   pass, the control included: the far receiver counted 10 to 15 framing
   errors a leg and 25 to 27 lines a leg came back corrupt.
-- **The DMA release contract holds at every hand-over.** Each leg moves
-  the link port from the polled command channel to the Uart task and
-  back through the block's reset line ([dma.md](dma.md), "A released
-  requester"): 35 hand-overs a run of `y` with both engines bound, 210
+- **The DMA release contract holds at every change of driver.** Each leg
+  moves the link port from the polled command channel to the Uart task
+  and back through the block's reset line ([dma.md](dma.md), "A released
+  requester"), the same USART's requests on the same channels: 35 changes
+  a run of `y` with both engines bound, 210
   over the six runs, every leg byte-exact from its first block on;
   and letter `i` read, in every run, both link channels and both SPI
   channels disabled, the SPI's request enables clear and TIM2's DMA

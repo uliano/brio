@@ -1340,9 +1340,12 @@ struct Uart {
     /**
      * Open the port at `baud` in the given frame (8N1 by default), with
      * the receive interrupt armed and the instance's line enabled in the
-     * PFIC. From main(), after the clock task's init() - the divisor is
-     * the rate the clock type claims for this instance's bus over `baud`
-     * - and before interrupts are enabled; nothing here waits.
+     * PFIC, starting from the block's reset: the gate opened and the
+     * reset line pulsed before a register is written or an engine armed
+     * (docs/design/dma.md, "The release contract"). From main(), after the
+     * clock task's init() - the divisor is the rate the clock type claims
+     * for this instance's bus over `baud` - and before interrupts are
+     * enabled; nothing here waits.
      *
      * Returns false when the divisor comes out below the smallest the
      * chapter allows (16, i.e. one whole peripheral-clock period per bit
@@ -1376,7 +1379,18 @@ struct Uart {
             }
         }
 
+        // THE BLOCK FROM ITS RESET, the gate opened first (docs/design/dma.md,
+        // "The release contract"): a DMA request this block raised and nobody
+        // took is held until the channel acknowledges it or the block is
+        // reset - clearing DMAT, DMAR or UE does not withdraw it, a gated
+        // clock freezes it on the channel's OR - and the next enable of the
+        // channel would move one stray item on it (docs/ch32vx03/dma.md, "A
+        // released requester"). The pulse withdraws whatever a release, a
+        // program or a debugger left, before a register of this port is
+        // written and before an engine is armed; two read-modify-writes of
+        // the bus's reset register.
         Resource::bus_clock(true);
+        Resource::reset();
 
         // The column, only where it is not the reset one: AFIO's reset
         // value already selects code 0, and USART1 carries this board's
@@ -1417,12 +1431,12 @@ struct Uart {
         m_noise_errors = 0;
         m_parity_errors = 0;
 
-        // CTLR3 IS TOUCHED ONLY BY A PORT THAT HAS SOMETHING TO PUT IN
-        // IT: with no engine and no option there is nothing of this
-        // transport's there, and whatever a program stored itself stays.
+        // CTLR3 IS WRITTEN ONLY BY A PORT THAT HAS SOMETHING TO PUT IN IT:
+        // the reset above left it zero, and with no engine and no option
+        // zero is this transport's word.
         if constexpr (has_tx_engine || has_rx_engine || opts.half_duplex || opts.rts || opts.cts) {
             m_dma_faults = 0;
-            uint16_t ctlr3 = regs().CTLR3;
+            uint16_t ctlr3 = 0;
             if constexpr (has_tx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmat); }
             if constexpr (has_rx_engine) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_dmar); }
             if constexpr (opts.half_duplex) { ctlr3 = static_cast<uint16_t>(ctlr3 | usart_hdsel); }
@@ -1950,19 +1964,18 @@ struct Uart {
     }
 
     /// Stop the port and park its pads: the vector off, the engines
-    /// stopped, UE clear, the block's reset pulsed, the bus clock closed,
-    /// the pins released. A setup verb, main context; what the rings held
-    /// no longer goes out, and is cleared by the next init().
+    /// stopped, UE clear, the bus clock closed, the pins released - and no
+    /// reset pulse. A setup verb, main context; what the rings held no
+    /// longer goes out, and is cleared by the next init().
     ///
-    /// THE RESET LINE BEFORE THE GATE. A DMA request this block has raised
-    /// is HELD until the channel acknowledges it or the block is reset -
-    /// clearing DMAT, DMAR or UE does not withdraw it, and a gated clock
-    /// freezes it on the channel's OR, where the next owner's first enable
-    /// moves one item on it and the channel then stalls (measured on both
-    /// series, docs/ch32vx03/dma.md, "A released requester"). A transmit
-    /// request stands from init() on with an engine, DMAT meeting an idle
-    /// transmitter, so every engined port leaves one; the pulse takes it
-    /// with CTLR3, two read-modify-writes of the bus's reset register.
+    /// A REQUEST LEFT STANDING IS THE NEXT INIT()'S. A transmit request
+    /// stands from init() on with an engine (DMAT meeting an idle
+    /// transmitter), a receive request over a frame the channel did not
+    /// take, and the gate closed here freezes either on the channel's OR.
+    /// The channel is this request's for the whole image
+    /// (docs/design/dma.md, "The ownership rule"), so only this port's own
+    /// next init() meets it, and that init() pulses the block's reset before
+    /// it arms an engine (docs/design/dma.md, "The release contract").
     static void release() {
         Pfic::disable(usart_irq_for(instance));
         if constexpr (has_tx_engine) {
@@ -1972,7 +1985,6 @@ struct Uart {
             RxEngine::stop();
         }
         Resource::enable(false);
-        Resource::reset();
         Resource::bus_clock(false);
         Tx::release();
         if constexpr (!opts.half_duplex) {

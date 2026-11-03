@@ -393,13 +393,19 @@ the transmit engine's claim alone - the busy flag's test-and-set, eight
 instructions - and programs the claimed channel, four stores, unmasked:
 no block is in flight that could complete under it ([dma.md](dma.md)).
 
-`release()` pulses the block's reset before it gates the clock: a
-transmit request is raised as soon as DMAT meets an idle transmitter -
-at `init()` already, with an engine - and is held through DMAT, DMAR and
-UE cleared. Left standing, it would be served by the next owner of
-USART2's channels (I2C1's, TIM4's, TIM2's) as one stray item, or stall
-it ([dma.md](dma.md), "A released requester"); the pulse is two
-read-modify-writes of the bus's reset register, at release only.
+`init()` starts from the block's reset, the gate opened and the line
+pulsed before a register is written or an engine armed, two
+read-modify-writes of the bus's reset register; `release()` stops the
+engines, clears UE, closes the gate and gives the pads back, with no
+pulse. A transmit request is raised as soon as DMAT meets an idle
+transmitter - at `init()` already, with an engine - and a receive request
+over a frame the channel did not take, and either is held through DMAT,
+DMAR and UE cleared and frozen by the closed gate. A channel has one owner
+for the whole image, so the one that can meet it is this port initialized
+again, and the reset is what withdraws it: without the pulse the next ring
+held the stale frame ahead of its burst, measured on USART2 ([dma.md](dma.md),
+"The same owner over its own held request"). A program that keeps its own
+bits in CTLR3 writes them after `init()`.
 
 The receive engine runs a ring, not runs. It is armed in its circular
 shape over the whole receive ring's storage, from `init()` to

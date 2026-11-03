@@ -498,14 +498,14 @@ byte of a write of 255, the count standing at 254 at that BTF). A
 write-then-read's repeated START is requested on the TxE the completion
 arms.
 
-`release()` pulses the reset line before the gate, as `recover()`'s
-SWRST does: a request raised under DMAEN is held through DMAEN and PE
-cleared, and a tenure abandoned mid-block leaves one - measured, it
-stalled the next USART2 transmit on channel 7 after one byte
-([dma.md](dma.md), "A released requester"). A release after a completed
-tenure leaves none (the completion drops DMAEN before a further request
-can rise), so the hazard is the release of an abandoned or stalled
-tenure - the state a timeout leaves.
+`release()` closes the gate and pulses no reset; `init()` opens it and
+pulses the line first. A request raised under DMAEN is held through DMAEN
+and PE cleared, and a tenure abandoned mid-block leaves one. The channels
+are I2C1's for the whole image, so the one that can meet it is this host
+initialized again, and the pulse withdraws it: without it the next read stormed the event vector and never launched (letter s, [dma.md](dma.md), "The same owner over its own
+held request"). A release after a completed tenure leaves none (the
+completion drops DMAEN before a further request can rise), so the hazard is
+the release of an abandoned or stalled tenure - the state a timeout leaves.
 
 ### How many instances a part has
 
@@ -666,8 +666,8 @@ peer's PLL on its 8 MHz crystal): I2C1 to I2C1 on PB6/PB7, a 2.2 kOhm
 pull-up on each line to the CH32V203C8T6 board's 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
 letter both ways, ten runs of `z` in each direction with no failure,
-and ten of letter `d` each way since its counted serve (91 verdicts on
-the CH32V303VCT6's one image, 53 and 38 in the CH32V203C8T6's two, and
+and ten of letter `d` each way since its counted serve (96 verdicts on
+the CH32V303VCT6's one image, 58 and 37 in the CH32V203C8T6's two, and
 ten each way of letters `d` and `l` since the reserved addresses).
 TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad

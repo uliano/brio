@@ -131,16 +131,17 @@ What decides correctness even there:
 
 The engines compute nothing from the clock's rate, so the order against
 the clock task does not decide a copy's correctness; the figures below
-are at 144 MHz. One more fact, for a program that hands a channel from
-one peripheral to another: a request that a USART, an I2C or a timer
-raised and no channel took (measured on USART2, UART4, I2C1, TIM3 and
-TIM4) is held until the controller acknowledges it or the peripheral's
-reset line is pulsed, whatever its DMA bit says (an SPI's, measured on
-all three instances, is not), so a transport's `release()` pulses its
-block's reset before it closes the gate where its block holds a
-request; otherwise the next owner's channel moves one
-stray item and, behind a closed gate, stalls ("A released requester
-keeps the request it raised" below).
+are at 144 MHz. Two more facts decide correctness. A channel has one
+owner for the whole image, checked when the program is compiled ("One
+owner a channel" below). And a request that a USART, an I2C or a timer
+raised and no channel took (measured on USART2, UART4, I2C1, TIM1, TIM3
+and TIM4) is held until the controller acknowledges it or the
+peripheral's reset line is pulsed, whatever its DMA bit says (an SPI's,
+measured on all three instances, is not), so every transport's `init()`
+pulses its block's reset before it arms an engine and its `release()`
+closes the gate and pulses nothing: without that pulse the channel's next
+enable moves one stray item ("A released requester keeps the request it
+raised" below).
 
 The rest of this page, in order: the documents of record; what the
 silicon does (the channel as the request, a channel's registers, the
@@ -292,15 +293,25 @@ standing RXNE, each let go by `SpiHost::release()` with no reset, left a
 clean paced staircase to the next owner on both parts. UART4's transmit request on DMA2's channel 5 is held without
 its reset - one stray item, the channel stalled - and let go with it, the
 USARTs' rule on the second controller. A USART's transmit request is TXE
-under TE: staged with UE and DMAT alone, nothing is held. So a transport's
-`release()` pulses its block's reset before the gate where its block
-holds a request - the USART's and the I2C host's; the timers', the ADC's
-and the DAC's reset their blocks there already, and the SPI's, on the
-measurement of all three instances, does not need to -
-and the incoming side needs nothing beyond its engine's `arm()`: the
-outgoing owner's release is the whole of the hand-over, because the
-incoming one cannot tell which requester holds the line and its own
-enable is what consumes the held request.
+under TE: staged with UE and DMAT alone, nothing is held. Those
+measurements staged the request on a channel a second owner then used,
+which the ownership rule now refuses ("One owner a channel" below); under
+that rule the one that can meet a request held across a release is the
+same owner initialized again. Measured so on both parts: a USART2 receive
+request left under DMAR by a frame no channel took, a TIM1 update request
+left under UDE and an I2C1 receive request left under DMAEN, each released
+with its enable set and its gate closed. With no reset at the next
+`init()` the ring holds the stale frame ahead of the next burst, the
+paced block moves one item before its pace and an I2C read storms its
+event vector and never launches (the control in "The same owner over its own held request" below).
+
+So the contract on this family is the one
+[design/dma.md](../design/dma.md) states, "The release contract": every
+transport's `init()` - `Uart`'s, `SpiHost`'s and `SpiClient`'s,
+`I2cHost`'s and `I2cClient`'s, `Adc`'s, `Dac`'s and `Tim`'s - opens the
+gate and pulses the block's reset before it writes a register of its own
+or arms a channel, and its `release()` closes the gate, gives its pads
+back and closes its interrupt line, pulsing no reset.
 
 ### A channel
 
@@ -920,21 +931,22 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
 The CH32V303's UART4 is the same spelling, and the table puts both of
 its engines on DMA2 - the handlers are then `dma2_channel5_handler` and
 `dma2_channel3_handler`. With an engine on each side the port arms no
-interrupt of its own, and `release()` is what takes its requests away
-from the two channels when the port is done with them - through the
-block's reset line, the one act that withdraws a request already raised.
+interrupt of its own. `release()` stops both channels and closes the gate
+over whatever request stands, and the port's next `init()` withdraws it
+through the block's reset line, the one act that does, before it arms an
+engine.
 
 ## Bench findings
 
 The three suites measure at 144 MHz, the source of every copy a
 four-kilobyte pattern in the image itself and the core's own counter the
 ruler; letters a, c, d, f, h, i, j and m are `test_vx03_dma`'s, b, e, o,
-k and l `test_vx03_dma_paced`'s, and g, p, q, r and n
+k and l `test_vx03_dma_paced`'s, and g, p, q, r, s and n
 `test_vx03_dma_serial`'s. On the CH32V203C8T6 the letters of a part with
 one controller run with the board bare but for the core board's crossed
 pair to the fourth port (PB0 to PA3, which letters q and r take): **24,
-13 and 23 verdicts in `z`**. On the CH32V303VCT6 DMA2's single-board
-letters run beside DMA1's with the far board dark: **35, 18 and 14
+13 and 25 verdicts in `z`**. On the CH32V303VCT6 DMA2's single-board
+letters run beside DMA1's with the far board dark: **35, 18 and 16
 verdicts in `z`**; that board's crossed pair is retired (UART4's default
 pads PC10/PC11 are the desk pair's SPI link), and its letters n, q and r
 are the two-board key `y` against the far chip's usart_peer - UART4 on
@@ -1128,7 +1140,9 @@ they differ each is named.
 - **A standing request serves the wrong transfer**: a UART4 receiver left
   enabled with DMAR set made a later TIM6 staircase on the same DMA2
   channel move all sixteen items at once (the section above); with the
-  port released, the staircase ran at the timer's pace again.
+  port's block reset, the staircase ran at the timer's pace again. A
+  staging of two owners, which the check now refuses; what it shows is why
+  a channel has one.
 - **A held request is answered** (`test_vx03_i2c` letter q,
   `test_vx03_dma_serial` letter p, on the CH32V303VCT6 and the
   CH32V203C8T6 alike): a request another peripheral raised on a
@@ -1149,6 +1163,29 @@ they differ each is named.
   stagings reported `i2c_ok` with one byte of 32 at the target and stormed
   their vectors (60001 and 100001 entries before the suites' guards
   silenced them).
+- **THE SAME OWNER OVER ITS OWN HELD REQUEST** (`test_vx03_dma_serial`
+  letter s and `test_vx03_i2c` letter s, on the CH32V303VCT6 and the
+  CH32V203C8T6 alike, ten runs each): the case the reset at `init()`
+  answers, each owner released with its DMA enable left set and its gate
+  closed. USART2's ring with its channel stopped and one frame banged
+  into the pad (STATR 0xE0, RXNE standing, CTLR3 0xC1, DMAR set), the port
+  released and initialized again: nothing in the ring, then the sixteen
+  bytes banged after it, the burst's own in order. TIM1's update raised
+  through 100 us periods with channel 5 disabled, the timer released: its
+  own paced block moved nothing before the pace and sixteen samples a
+  period apart, its count at zero. I2C1's read stopped under its block
+  (STAR1 0x44, RxNE and BTF; CTLR2 0x1930, DMAEN) and the host released:
+  the same host initialized again read sixteen consecutive values on
+  channel 7, its count at zero. The CONTROL, these images built with the
+  pulse taken out of the three `init()`s, three runs each on both parts,
+  shows each request: the ring holds the stale 0xA5 before a byte is
+  banged and 17 bytes after the burst, the paced block moves one item
+  before the pace and has fourteen steps of a period, and the I2C read never
+  reaches its channel: the event vector storms, STAR1 reading SB alone,
+  until the suite's guard silences it at 60001 entries, SCL and SDA low,
+  channel 7 still holding the abandoned block's count of 23. The SPI's `init()` pulses
+  as well; its request does not outlive its release, so no such control
+  exists there ("A released requester" above).
 - **THE PRIORITY RULE ON THE BENCH** (letter q, both parts): 16 KB at 1
   Mbaud and 64 KB at 4.5 Mbaud poured into a ring of 512 while a 2 KB copy
   ran back to back on a lower channel at the copy engine's default level
@@ -1191,9 +1228,9 @@ the bus contract's and the same in both.
 | copy, 4096 bytes as 1024 words: wall | 6504 | 6392 |
 | copy: launch, completion's handler, fixed cost | 208, 94, 360 | 118, 86, 248 |
 | paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 82, 82 |
-| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 379, 1, 145, 571 |
-| SPI1 engined write at /16: fixed cost | 926 | 561 |
-| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 582 |
+| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 329, 1, 147, 514 |
+| SPI1 engined write at /16: fixed cost | 926 | 506 |
+| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 523 |
 | bus masters still counted after the SPI requests | 1 | 0 |
 
 - **Six cycles an item, by the difference of two sizes**: (wall at 4096
@@ -1216,7 +1253,7 @@ the bus contract's and the same in both.
   cost is the wire's: 256 frames at /4 are 8192 cycles of SCK and the
   block adds nothing per frame.
 - **A 16-bit frame is one 16-bit access**: a 256-frame write of half-words
-  takes 16966 cycles for 16384 of wire, with one interrupt, where an
+  takes 16907 cycles for 16384 of wire, with one interrupt, where an
   interrupt a frame took 52545 and 256 interrupts (x 3.20 to 1.03 at /4)
   - and the frames
   are the buffer's, judged with no wire by the SPI's own transmit CRC
@@ -1269,11 +1306,15 @@ Implemented but not bench-verified, each with what would measure it:
   115200 with a copy block of 4 KB, and letter q with SPI2's two engines
   and a timer stream in the copy's place, each judged on the ring's bytes
   and overrun count.
-- **UART4's receive request on DMA2's channel 3**: its transmit request
-  is measured held on channel 5; the receive side wants a
-  frame on its pad, and both of that port's columns are the desk pair's
-  wires - the far chip's frame, the port released without its reset and
-  a TIM6 staircase on channel 3 after it, is what would measure it.
+- **The reset at `init()` on the transports letter s does not stage**:
+  the ADC's and the DAC's streams, and UART4's two requests on DMA2, keep
+  the contract by reading, no run having left a request standing over
+  them. UART4's transmit request is measured held on channel 5; its receive
+  side wants a frame on its pad, both of that port's columns being the desk
+  pair's wires. What would measure them is letter s's stage on each:
+  a converter released with DMA set and a conversion unread, a DAC with its
+  trigger pending, and on UART4 the far chip's frame, each initialized again
+  and its next block read back.
 - **The CH32V203's serial round trip on one pair of pads.** The engines
   themselves carry a wire's data in the two bus chapters - sixteen bytes
   each way through SPI2's pair and a tenure's shapes through I2C1's,

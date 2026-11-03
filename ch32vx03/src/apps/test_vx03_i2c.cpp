@@ -128,6 +128,11 @@
 //      START and the address alone, the tenure answered by the caller's
 //      bound and recover(); each again with the request let go by the
 //      holder's reset line, whole
+//   s  THE SAME OWNER OVER THE REQUEST ITS RELEASE LEFT STANDING
+//      (docs/design/dma.md's release contract): I2C1's DMA read abandoned
+//      with RxNE standing under DMAEN and the host released, then the same
+//      host initialized again and a DMA read of sixteen from the same serve
+//      judged in step, channel 7's count at zero
 // and by name only, not in z, against the peer:
 //   r  THE LATE REPEATED START: a write of one to four bytes and a
 //      one-byte read with the repeated START requested AFTER BTF, the
@@ -153,8 +158,8 @@
 // fits the family's smallest chip"). The CH32V203C8 builds two images of
 // its own (the groups.v203c8 line); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = ab,cd,ef,gh,ijkr,ln,o,q
-// build: groups.v203c8 = abcdefgh,ijklnoqr
+// build: groups = ab,cd,ef,gh,ijkr,ln,o,qs
+// build: groups.v203c8 = abcdefgh,ijklnoqrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -3445,6 +3450,85 @@ void tq_dead_channel() {
     bench.verdict("the command channel is back", command(Op::ping));
 }
 
+// ---------------------------------------------------------------------------
+// s - the same owner over the request its release left standing
+// ---------------------------------------------------------------------------
+
+/// docs/design/dma.md's release contract on this family: release() gates the
+/// block and pulses no reset, so a request DMAEN raised over RxNE and no
+/// channel took stays frozen on channel 7's OR behind the closed gate; the
+/// channel being I2C1's receive request's alone for the whole image, the one
+/// that can meet it is the same host initialized again, and its init()
+/// starts from the block's reset. One serve of the far target's covers both
+/// reads, so no other host type touches I2C1 between the release and the
+/// read that judges it: the counting pattern goes on from tenure to tenure,
+/// and the read is judged as sixteen consecutive values - a stray item from
+/// the abandoned read would stand first, out of step.
+void ts_same_owner() {
+    if (!need_peer()) {
+        return;
+    }
+    const PeerServe m = arm_serve(0x51);
+    dma_host_up();
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 0;
+    r.rx = lend<Lease::reply>(rx_buf);
+    r.rx_len = 32;
+    r.speed = I2cSpeed::standard_100k;
+    r.engine = I2cEngine::dma;
+    host_done = false;
+    host_isr_entries = 0;
+    if (m.armed) {
+        (void)DmaHost::start(r);
+    }
+    // A millisecond into the block - some ten bytes at 100 kHz - the channel
+    // is stopped under it: the next byte lands in DATAR and the one after it
+    // in the shifter, BTF holding the clock, RxNE standing under DMAEN.
+    settle_ms(1);
+    DmaRxEngine<1, Ch7::number>::stop();
+    settle_ms(3);
+    const uint16_t star1 = H::status1();
+    const uint16_t ctlr2 = H::regs().CTLR2;
+    const bool standing = (star1 & i2c_rxne) != 0u && (ctlr2 & i2c_dmaen) != 0u;
+    dma_host_live = false;
+    DmaHost::release();
+    settle_ms(1);
+
+    // THE SAME HOST AGAIN: init() pulses the reset first; the far target,
+    // left mid-byte, is clocked free; then a read of sixteen on the engines
+    // from the same serve.
+    dma_host_live = true;
+    const bool again = DmaHost::init(clock);
+    (void)DmaHost::unstick();
+    for (uint8_t i = 0; i < 16u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    host_done = false;
+    host_isr_entries = 0;
+    host_stormed = false;
+    const uint8_t rd = m.armed ? dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::standard_100k)
+                               : no_answer;
+    const uint16_t left7 = Ch7::remaining();
+    bool in_step = rd == i2c_ok;
+    for (uint8_t i = 1; i < 16u && in_step; ++i) {
+        in_step = rx_buf[i] == static_cast<uint8_t>(rx_buf[i - 1u] + 1u);
+    }
+    dma_host_down();
+    PeerServe got = m;
+    (void)collect_serve(got);
+    print(serial, "  I2C1's read stopped under its block (STAR1 ", hex(star1), ", CTLR2 ", hex(ctlr2),
+          "), the host released and initialized again; then a DMA read of 16: status ", rd,
+          in_step ? ", sixteen consecutive values from " : ", OUT OF STEP from ", hex(rx_buf[0]),
+          ", the channel's count ", left7, host_stormed ? ", the event vector STORMED" : "", crlf);
+    bench.verdict("THE SAME OWNER OVER ITS OWN HELD REQUEST, I2C1's receive: a DMA read abandoned with RxNE "
+                  "standing under DMAEN and the host released, the same host initialized again - its reset "
+                  "first - reads sixteen bytes in step on channel 7, its count at zero",
+                  m.armed && standing && again && in_step && left7 == 0u && !host_stormed);
+    bench.verdict("the command channel is back", command(Op::ping));
+}
+
 // ===========================================================================
 // the banner
 // ===========================================================================
@@ -3576,6 +3660,9 @@ int main() {
     bench.letter('q', "a channel that does not serve: a DMA write answered i2c_dma_fault, a "
                       "DMA read with the event vector quiet",
                  tq_dead_channel);
+    bench.letter('s', "the same owner over the request its release left standing: I2C1's DMA read "
+                      "abandoned, the host released and initialized again",
+                 ts_same_owner);
     bench.letter('r', "THE LATE REPEATED START against the peer: the START after BTF by hand, "
                       "the target's tally printed and nothing judged",
                  tr_late_start, false);

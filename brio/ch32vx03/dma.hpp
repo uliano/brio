@@ -118,12 +118,14 @@
  * turning the peripheral off: a request once raised by a USART, an I2C or
  * a timer is held until the channel acknowledges it or the peripheral's
  * reset line is pulsed, and a gated clock freezes it on the OR, where the
- * next owner's first enable moves one stray item and stalls behind it
+ * channel's next enable moves one stray item and stalls behind it
  * (measured on both series, docs/ch32vx03/dma.md; an SPI's request,
  * measured on all three instances, does not outlive its release). A
- * peripheral that is done with a channel and would hold a request is
- * reset - the USART's and the I2C host's release() pulse the line before
- * the gate, and the SPI host's release() pulses none (spi.hpp).
+ * channel has one owner for the whole image (docs/design/dma.md, "The
+ * ownership rule"), so the one that can meet a request held across a
+ * release is the same owner initialized again: every transport's init()
+ * pulses its block's reset before it arms an engine, and its release()
+ * closes the gate and pulses nothing.
  *
  * What a channel is. A configuration word (CFGR: direction, circular,
  * memory-to-memory, the two increments, the two widths, the priority,

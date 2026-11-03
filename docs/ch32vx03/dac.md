@@ -289,7 +289,9 @@ Refused on a part without the DAC.
 `Dac`, a monostate - one block on every part that has one - spelled
 `DacUnit<has>` inside a template that must compile on both series. The
 block: `init()` (the gate and the reset line, both channels off) and
-`release()`, `bus_clock()`, `reset()`. A channel, 1 or 2: `configure(ch,
+`release()` (both channels off and the gate closed, no reset pulse: a
+request a stream left standing is the next `init()`'s to withdraw,
+[dma.md](dma.md)), `bus_clock()`, `reset()`. A channel, 1 or 2: `configure(ch,
 config)` and the compile-time `configure<ch, config>()` whose refusals
 are static_asserts, `configuration(ch)` reading it back, `enable(ch,
 on)` / `enabled(ch)`, `wave(ch, w)` for the generator alone and
