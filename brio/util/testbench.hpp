@@ -314,8 +314,10 @@ public:
      *
      * False when the table is full, when the key is already taken, or
      * when it collides with the all-key. Registration happens once at
-     * startup, so a false return is a programming error the app can
-     * report - it is not a runtime condition to recover from. A key
+     * startup, so a false return is a programming error, not a runtime
+     * condition to recover from. An app need not read it: every all-key run
+     * then fails one verdict that says so, so a letter that was lost cannot
+     * pass unnoticed. A key
      * this image does not carry (test_letter_carried) is accepted and
      * not registered: the decision is at the call site, always inlined,
      * so the test's address is never taken in that image.
@@ -423,6 +425,7 @@ public:
                 t.pass = static_cast<uint16_t>(t.pass + passed_);
                 t.fail = static_cast<uint16_t>(t.fail + failed_);
             }
+            report_refused(t);
             if constexpr (through_writer) {
                 all_line(t);
             } else {
@@ -442,6 +445,7 @@ public:
                     t.pass = static_cast<uint16_t>(t.pass + passed_);
                     t.fail = static_cast<uint16_t>(t.fail + failed_);
                 }
+                report_refused(t);
                 if constexpr (through_writer) {
                     all_line(t);
                 } else {
@@ -533,20 +537,29 @@ private:
     }
 
     bool register_letter(char key, const char* title, TestFn fn, bool in_all) {
-        if (count_ == max_letters || fn == nullptr) {
-            return false;
-        }
-        if (is_all_key(key) || find(key) != nullptr) {
-            return false;
-        }
+        const bool taken = find(key) != nullptr || is_all_key(key);
+        bool refused = count_ == max_letters || fn == nullptr || taken;
         if constexpr (has_second_set) {
-            if (is_key(second_all_key, key) || is_all_key(second_all_key)) {
-                return false;
-            }
+            refused = refused || is_key(second_all_key, key) || is_all_key(second_all_key);
+        }
+        if (refused) {
+            refused_ = true;
+            return false;
         }
         letters_[count_] = Entry{key, title, fn, in_all};
         ++count_;
         return true;
+    }
+
+    /// An all-key run fails a verdict when registration refused a letter:
+    /// nothing else would show that one is missing. It reuses verdict(), which
+    /// every image already carries, so the smallest images pay few bytes.
+    void report_refused(Totals& t) {
+        if (refused_) {
+            failed_ = 0;
+            verdict("a letter was refused at registration: see letter()", false);
+            t.fail = static_cast<uint16_t>(t.fail + failed_);
+        }
     }
 
     void count_verdict(bool ok) {
@@ -596,6 +609,7 @@ private:
 
     Entry letters_[max_letters]{};
     uint8_t count_ = 0;
+    bool refused_ = false;
     uint16_t passed_ = 0;
     uint16_t failed_ = 0;
     char all_key_ = 'z';

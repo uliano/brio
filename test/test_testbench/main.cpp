@@ -246,6 +246,37 @@ TEST_CASE("a refused registration leaves the original letter running") {
     CHECK(contains(Capture::text, "-- the first thing\r\n"));
 }
 
+TEST_CASE("a letter registration refused fails every all-key run, and says so") {
+    Capture::clear();
+    order.clear();
+    brio::TestBench<Capture, 2> small;
+    REQUIRE(small.letter('a', "one", ta));
+    REQUIRE(small.letter('b', "two", tb));
+    CHECK(!small.letter('c', "three", tc));       // the table is full
+    CHECK(!small.letter('a', "again", tb));       // the key is taken
+
+    // By name nothing changes: the letter's own verdicts are its own.
+    const auto one = small.handle('a');
+    REQUIRE(one.has_value());
+    CHECK(one->fail == 0);
+
+    Capture::clear();
+    const auto all = small.handle('z');
+    REQUIRE(all.has_value());
+    CHECK(contains(Capture::text, "  FAIL  a letter was refused at registration"));
+    CHECK(all->fail == 1);
+    CHECK(contains(Capture::text, " fail\r\n"));
+}
+
+TEST_CASE("a bench that refused nothing prints no such line") {
+    Capture::clear();
+    order.clear();
+    Bench b = make();
+    active = &b;
+    (void)b.handle('z');
+    CHECK(!contains(Capture::text, "refused at registration"));
+}
+
 TEST_CASE("the menu lists every letter and marks the ones the all-key skips") {
     Capture::clear();
     Bench b = make();
@@ -318,12 +349,15 @@ TEST_CASE("a suite may name its own all-key") {
     brio::TestBench<Capture> b{'y'};
     active = &b;
     REQUIRE(b.letter('a', "the first thing", ta));
-    CHECK(!b.letter('y', "the all-key", tb));
     CHECK(b.letter('z', "an ordinary z now", tb));
 
     (void)b.handle('y');
     CHECK(order == "ab");                     // ta then tb, in registration order
     CHECK(contains(Capture::text, "ALL: 4 pass, 1 fail\r\n"));
+
+    // The all-key itself is refused as a letter, like any other refusal.
+    brio::TestBench<Capture> refused{'y'};
+    CHECK(!refused.letter('y', "the all-key", tb));
 }
 
 // ---- the second set ----------------------------------------------------------
@@ -503,7 +537,6 @@ TEST_CASE("a second set past 32 registered letters runs its late letters under i
     for (; i < 40; ++i) {
         REQUIRE(b.second_letter(keys[i], "second", tw_second));
     }
-    CHECK(!b.second_letter('Y', "the table is full", tw_second));
     CHECK(b.letter_count() == 40);
 
     const auto t2 = b.handle('y');
