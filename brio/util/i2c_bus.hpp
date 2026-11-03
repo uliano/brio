@@ -59,9 +59,9 @@ inline constexpr uint8_t i2c_timeout = bus_timeout;
 
 /// The 7-bit addresses a Request may name: 0x08 to 0x77, the range the
 /// I2C specification leaves to devices (NXP UM10204 3.1.12). The sixteen
-/// outside it are reserved: 0x00 is the general call, 0x01 to 0x07 are
-/// the START byte, CBUS, other bus formats, Hs-mode codes and a future
-/// purpose, 0x78 to 0x7B are the first byte of a 10-bit address, and
+/// outside it are reserved: 0x00 is the general call and, with the read
+/// bit, the START byte; 0x01 is CBUS, 0x02 other bus formats, 0x03 a future
+/// purpose and 0x04 to 0x07 the Hs-mode codes; 0x78 to 0x7B are the first byte of a 10-bit address, and
 /// 0x7C to 0x7F the device ID and a future purpose. Every host's start()
 /// asks this one function and answers an address outside the range
 /// i2c_rejected at once, nothing on the wire - the path a speed the

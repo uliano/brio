@@ -581,22 +581,22 @@ period:
 
 | tenure | wire | measured | x |
 |---|---|---|---|
-| 1-byte write, 100 kHz | 3819 | 4236 | 1.11 |
-| 255-byte write, 100 kHz | 463305 | 481967 | 1.04 |
-| 255-byte read, Smart, 100 kHz | 463305 | 481857 | 1.04 |
-| 1 + 1 register read, 100 kHz | 7638 | 8548 | 1.12 |
-| 1-byte write, 400 kHz | 1045 | 1451 | 1.39 |
-| 255-byte write, 400 kHz | 126775 | 153292 | 1.21 |
-| 255-byte read, Smart, 400 kHz | 126775 | 155757 | 1.23 |
-| 1 + 1 register read, 400 kHz | 2090 | 2793 | 1.34 |
-| 1-byte write, Fm+ | 399 | 808 | 2.03 |
-| 255-byte write, Fm+ | 48405 | 77327 | 1.60 |
-| 255-byte read, Smart, Fm+ | 48405 | 83038 | 1.72 |
+| 1-byte write, 100 kHz | 3819 | 4260 | 1.12 |
+| 255-byte write, 100 kHz | 463305 | 480481 | 1.04 |
+| 255-byte read, Smart, 100 kHz | 463305 | 482229 | 1.04 |
+| 1 + 1 register read, 100 kHz | 7638 | 8602 | 1.13 |
+| 1-byte write, 400 kHz | 1045 | 1457 | 1.39 |
+| 255-byte write, 400 kHz | 126775 | 153685 | 1.21 |
+| 255-byte read, Smart, 400 kHz | 126775 | 155655 | 1.23 |
+| 1 + 1 register read, 400 kHz | 2090 | 2766 | 1.32 |
+| 1-byte write, Fm+ | 399 | 814 | 2.04 |
+| 255-byte write, Fm+ | 48405 | 77370 | 1.60 |
+| 255-byte read, Smart, Fm+ | 48405 | 83040 | 1.72 |
 | 1 + 1 register read, Fm+ | 798 | 1507 | 1.89 |
 
 The cycles above the wire are the DB's to within an eighth - the same
-core and the same handlers: a 255-byte write at 400 kHz carries 26517
-above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28922 against
+core and the same handlers: a 255-byte write at 400 kHz carries 26910
+above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28965 against
 28033. A long write is wire-bound at 100 kHz and the two
 handlers on one core cost a fifth at 400 kHz and three fifths at Fm+,
 as on the DB. The client runs SDASETUP at eight clocks here, the
