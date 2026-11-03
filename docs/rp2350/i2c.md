@@ -353,8 +353,8 @@ with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
 costs core cycles, never correctness. The core cycles each costs,
 `bench_rp2350` letter i's `i2c.cost` lines (start() and the vectors, the
 least of five, the host and its vector in the flash, the same at the
-three speeds and in three runs but where a range is given), at 150 MHz,
-Cortex-M33 / Hazard3:
+three speeds and in five runs of five but where a cell says otherwise), at
+150 MHz, Cortex-M33 / Hazard3:
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
@@ -364,7 +364,7 @@ Cortex-M33 / Hazard3:
 | write of | 1 | 2 | 3 | 8 | 13 | 14 | 16 | 17 | 32 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `interrupt` | 310 / 299 | 320 / 309 | 330 / 319 | 380 / 369 | 430 / 419 | 440 / 429 | 460 / 449 | 593 / 553 | 880 / 796 | 1752 / 1516 | 6974 / 5827 |
-| `dma` | 316 / 304 | 326 / 314 | 497 / 509 | 433 / 409 | 433 / 409 | 433 / 409 | 433 / 409 | 433 or 516 / 409 or 475 | 516 / 475 | 516 / 475 | 516 / 475 |
+| `dma` | 316 / 304 | 326 / 314 | 497 / 509 | 433 / 409 | 433 / 409 | 433 / 409 | 433 / 409 | 433 / 409; 516 / 475 at 100 kHz | 516 / 475 | 516 / 475 | 516 / 475 |
 
 For a read, the pump, the interrupt-driven engine, costs F + b x n, F 127 / 156 cycles and b 39.0 / 35.3 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
@@ -380,8 +380,8 @@ For a write, `start()` alone writes up to sixteen entries with the block's one
 interrupt at the STOP, so the pump costs 300 / 289 cycles and 10 a byte, and its
 second entry comes at seventeen; the channel costs E, 433 / 409 for a write of
 eight to sixteen bytes and 516 / 475 from thirty-two, whatever the length (the
-third entry is the same TX_EMPTY as a read's; at seventeen it comes or not,
-as the FIFO stands at the block's end). So, by the inequality of the design
+third entry is the same TX_EMPTY as a read's; at seventeen it comes at 100 kHz
+and not at the two faster speeds, as the FIFO stands at the block's end). So, by the inequality of the design
 page (E - F <= N x b, here 133 / 120 over 10), `dma` costs the core fewer
 cycles from **fourteen bytes** on the Cortex-M33 and **thirteen** on Hazard3,
 level at twelve there. A write of one or two is the pump's under either value,
@@ -391,9 +391,9 @@ eight, in `start()`: a block of one or two beats ends before `start()` returns, 
 the DMA line's entry and return fall inside `start()`'s span (inferred from
 those lengths, not counted apart; a read of three and four shows the same 64 /
 100). What the channel buys past the break-even is the core free on a long
-write: a write of 255 at 400 kHz keeps the core busy 17 383 / 7020 cycles on the
-interrupt and 2112 / 882 on the channel, 31 entries against 3, its longest host
-entry 102 / 74 cycles, at the same wall time (x 1.00). The energy side: under either
+write: a write of 255 at 400 kHz keeps the core busy 17 235 to 17 603 / 7020 to
+7062 cycles on the interrupt and 1964 to 2112 / 882 on the channel, 31 entries
+against 3, its longest host entry 102 / 74 cycles, at the same wall time (x 1.00). The energy side: under either
 value the core waits in its sleep instruction between entries, and the
 chip's SLEEP state asks in addition that the DMA have no outstanding
 transfer on any channel (6.5.2), which a `dma` tenure's channels hold for
@@ -505,45 +505,56 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   in SRAM (the V image of [platform.md](platform.md), "A handler in SRAM",
   `BENCH_VECTORS_IN_SRAM` in bench_rp2350.cpp), nothing of the far end on
   this core; the wire's time at the SCL
-  period measured (378.7 cycles at 400 kHz against the counts' 375: the
-  pull-ups' rise, 24 to 26 ns a period at every speed). Each line of the
-  letter is the best of five; each figure below the least of three runs,
+  period measured (378.9 or 379.0 cycles at 400 kHz against the counts' 375:
+  the pull-ups' rise, 26 or 27 ns a period at every speed). Each line of the
+  letter is the best of five; each figure below its range over five runs,
   clk_sys cycles at 150 MHz, Cortex-M33 / Hazard3:
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 7752 / 7761 (x 1.05) | 1 | 96 / 71 | 532 / 327 | 404 / 413 |
-  | write of 255 | 873 647 / 873 527 (x 1.00) | 31 | 6055 / 5404 | 17 142 / 7312 | 406 / 415 |
-  | read of 16 | 58 975 / 58 981 (x 1.00) | 2 | 358 / 326 | 1325 / 772 | 491 / 503 |
-  | read of 255 | 873 588 / 873 480 (x 1.00) | 32 | 8556 / 8541 | 22 395 / 10 467 | 346 / 357 |
-  | register read, 1 + 1 | 15 149 / 15 151 (x 1.03) | 1 | 132 / 103 | 648 / 396 | 453 / 456 |
-  | read of 255 on the engines | 873 478 / 873 438 (x 1.00) | 3 | 343 / 265 | 2264 / 922 | 237 / 245 |
+  | write of 1 | 7757 / 7764 (x 1.05) | 1 | 96 / 70 | 680 / 371 | 405 / 412 |
+  | write of 255 | 874 145 to 874 149 / 874 154 to 874 157 (x 1.00) | 31 | 6178 / 5196 | 17 358 to 17 506 / 7038 to 7122 | 404 to 406 / 411 to 414 |
+  | read of 16 | 59 028 or 59 029 / 59 030 to 59 032 (x 1.00) | 2 | 375 / 328 | 1358 to 1506 / 776 to 818 | 511 or 512 / 513 to 515 |
+  | read of 255 | 874 233 to 874 247 / 874 243 to 874 248 (x 1.00) | 32 | 9109 / 8573 | 23 470 / 10 501 to 10 543 | 494 to 503 / 497 to 506 |
+  | register read, 1 + 1 | 15 158 to 15 160 / 15 162 or 15 163 (x 1.03) | 1 | 133 / 102 | 650 to 798 / 401 | 453 to 455 / 457 or 458 |
+  | read of 255 on the engines | 874 163 to 874 170 / 874 171 to 874 185 (x 1.00) | 3 | 333 / 266 | 2242 to 2351 / 923 to 965 | 424 to 426 / 430 to 441 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
-  read is one every eight bytes. The address and the speed stay in the
+  read is one every eight bytes. The write of 1's busy holds one idle turn more
+  than the tenure's own, a tick's wake, in the run that read the shortest wall in
+  all five: it reads 532 / 329 at 1 MHz, and the same step of 148 / 42 cycles in
+  the busy column, the handler's unmoved, comes and goes at other lengths (letter
+  r's `window` line reads such a turn at 150 / 42 cycles, its handler taken out). The
+  long tenures' walls agree within some fifteen cycles over these five runs, but
+  other sessions' 255-byte tenures have read up to some 700 cycles shorter, three
+  tenths of a cycle a period, reads against writes as well, so a long read's
+  fixed cost is known less well than the table's range says (254 to 506 across
+  sessions). The host's code is not what moves them: two images of the host and
+  two of the peer that differ in the write path read alike within one session;
+  what moves them is not established. The address and the speed stay in the
   block between tenures, so a one-byte write's fixed cost is the same at
-  400 kHz and 1 MHz (404 to 406 on the M33, 413 to 415 on Hazard3); at
-  100 kHz it reads higher, 572 or 573 / 469 to 575, and what the excess is
+  400 kHz and 1 MHz (405 on the M33, 411 or 412 on Hazard3); at
+  100 kHz it reads 571 / 410 to 575, and what the excess is
   is not split. The disable, IC_TAR and enable that a new address still
-  pays costs about 1650 / 1680 to 1780 cycles more at 100 kHz, 210 to
-  230 / 240 at 400 kHz and 92 to 94 / 104 to 107 at 1 MHz - the disable
+  pays costs 1563 to 1653 / 1671 to 1836 cycles more at 100 kHz, 226 /
+  238 or 239 at 400 kHz and 91 / 103 to 105 at 1 MHz - the disable
   waits on the block's own shutdown, which follows the bus timing. The
-  longest host entry is 282 / 285 cycles, a 255-byte read's. With the
+  longest host entry is 301 / 288 cycles, a 255-byte read's. With the
   vector in the flash too (`bench_rp2350`, the default image) the
-  one-byte write's fixed cost reads 400 to 404 / 522 to 524 and its
-  handler 96 / 180, a 255-byte write 31 interrupts on both halves at
-  400 kHz. **WARM, THE PLACEMENT MATTERS ON HAZARD3 ALONE**: the one-STOP
-  handler reads the same 96 cycles on the Cortex-M33 from the flash and
-  from SRAM, and 180 against 71 on Hazard3, whose tenure misses the XIP
-  cache twice even warm from the flash image (the letter's count over the
-  tenure; which lines, not counted). COLD, it matters on both:
-  the same handler after every line of the XIP cache is invalidated reads
-  2848 / 1649 cycles from the flash and 96 / 71 placed. Where it runs is
-  the program's: the vector it binds, and `I2cHost`'s placement tag for
-  `start()` and the bodies ([platform.md](platform.md), "A handler in
-  SRAM", has the one-byte write's longest entry WARM / COLD: 96 / 2848 on
-  the M33 and 180 / 1649 on Hazard3 with both in the flash, 119 / 119
-  and 80 / 80 with both placed). `bench_rp2350` runs the handler from
+  one-byte write's fixed cost reads 403 / 411 and its
+  handler 96 / 70, a 255-byte write 31 interrupts on both halves at
+  400 kHz. **WARM, THE VECTOR'S PLACEMENT MOVES NOTHING IN THIS IMAGE**: the
+  one-STOP handler reads the same 96 / 70 cycles from the flash and from SRAM,
+  with no XIP miss over the Cortex-M33's tenure and one over Hazard3's in
+  both images (the letter's count; which line, not counted). That is this
+  layout's: a warm figure from the flash holds whatever set conflicts the
+  image's code makes ([platform.md](platform.md), "A handler in SRAM"). COLD, it
+  matters on both: the same handler after every line of the XIP cache is
+  invalidated reads 2880 / 1649 cycles from the flash and 96 / 70 placed.
+  Where it runs is the program's: the vector it binds, and `I2cHost`'s placement
+  tag for `start()` and the bodies; the one-byte write's longest entry WARM /
+  COLD reads 96 / 2880 on the M33 and 70 / 1649 on Hazard3 with both in the
+  flash, 119 / 119 and 80 / 80 with both placed. `bench_rp2350` runs the handler from
   the flash, `bench_rp2350_ram` from SRAM.
 - THE VENDOR'S TENURE ON THE SAME WIRE: the pico-sdk 2.3.1's polled
   `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
@@ -554,17 +565,16 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   SCL period measures the same (378.9 cycles at 400 kHz on both). At
   400 kHz, fixed cost, the SDK against the default image (the table's
   V image in brackets), Cortex-M33 / Hazard3: a one-byte write 362 / 354
-  against 400 / 522 (404 / 413), a 255-byte write 366 / 357 against
-  400 / 525, a 16-byte read 767 / 853 against 485 / 509, a 255-byte
-  read 13 675 / 15 203 (x 1.02) against 301 / 385 (x 1.00), a register
-  read of 1 + 1 -16 / -45 against 449 / 566; a refused address 348 / 317
-  against 559 / 591. The one-byte write's gap is within a fifth on the
-  M33 from either image (11 and 12 %) and on Hazard3 against the V image
-  (17 %): what the SDK does not do - no interrupt, no wake from the idle
-  loop; Hazard3's default image adds some 110 cycles more, its handler's
-  difference between the flash and SRAM (the bullet above). For it the
-  SDK holds the core the whole wire, busy 7714 / 7706 cycles against
-  527 / 436 from the default image. Its short reads' fixed cost is
+  against 403 / 411 (405 / 412), a 255-byte write 366 / 357 against
+  403 / 411 or 412, a 16-byte read 767 / 853 against 505 to 508 / 513 or 514, a
+  255-byte read 13 675 / 15 203 (x 1.02) against 493 to 499 / 501 to 506
+  (x 1.00), a register read of 1 + 1 -16 / -45 against 451 or 452 / 456; a
+  refused address 348 / 317 against 563 / 592. The one-byte write's gap is
+  within a fifth from either image (11 and 12 % on the M33, 16 % on Hazard3):
+  what the SDK does not do - no interrupt, no wake from the idle loop. For it
+  the SDK holds the core the whole wire, busy 7714 / 7706 cycles against
+  677 / 329 from the default image (529 on the M33 at 1 MHz, the step above not
+  in it). Its short reads' fixed cost is
   below zero because `i2c_read_blocking` returns at the last byte,
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,

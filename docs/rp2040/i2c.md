@@ -311,10 +311,11 @@ with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
 costs core cycles, never correctness, so the choice is the program's by
 what it knows: the length, and what else the core must do meanwhile.
 The core cycles each costs, letter i's `i2c.cost` lines (start() and
-the vectors, the least of five) at 400 kHz over three runs of the letter,
+the vectors, the least of five) at 400 kHz over five runs of the letter,
 a range where the XIP cache spreads them, at 125 MHz - the same at
 100 kHz and 1 MHz but for the `dma` row from the flash, which the cache
-spreads (below); the rows "the host in SRAM" from
+spreads (below), and one run's 1430 for an `interrupt` read of 16 at
+100 kHz; the rows "the host in SRAM" from
 `bench_rp2040_ram`, whose host is `InRam` and whose vectors are placed
 ([platform.md](platform.md), "A handler in SRAM"), the rows "from the
 flash" from `bench_rp2040`, the default image:
@@ -323,8 +324,8 @@ flash" from `bench_rp2040`, the default image:
 |---|---|---|---|---|---|---|---|---|
 | `interrupt`, the host in SRAM | 694 | 712 | 738 | 868 | 1110 | 1292 | 4256 | 16 062 |
 | `dma`, the host in SRAM | 725 | 729 | 1094 | 993 | 1001 | 1001 | 1198 | 1198 |
-| `interrupt`, from the flash | 663 | 681 | 707 | 837 | 1062 | 1244 | 4119 | 15 541 |
-| `dma`, from the flash | 699 | 703 | 1042 | 942 | 952 | 952 to 1416 | 1130 to 1591 | 1409 to 1499 |
+| `interrupt`, from the flash | 663 to 848 | 681 | 707 | 837 | 1062 | 1244 | 4119 | 15 541 |
+| `dma`, from the flash | 699 | 703 | 1042 | 942 | 952 | 952 to 1138 | 1407 to 1500 | 1591 to 1683 |
 
 The pump costs F + b x n with F about 300 cycles and b about 60 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
@@ -332,12 +333,12 @@ about 1000 cycles from SRAM for a read of nine to sixteen bytes, with
 1094 at three and 1198 from sixty-four (a third entry, the transmit
 block's end finding no room for the STOP entry). So `dma` costs the core
 fewer cycles from **nine bytes** with the host placed in SRAM (the
-pump's second entry), and from the flash from nine at 1 MHz in three runs
-of three and at 400 kHz in two of three, but from sixteen to sixty-four
-at 100 kHz and from sixty-four in the third at 400 kHz, where the
-engined path's lines miss the XIP cache by turns (E 1136 to 1416 there);
-a read of
-one or two costs the same within forty cycles either way, and one of
+pump's second entry), and from the flash from nine at 400 kHz and 1 MHz
+in five runs of five, but at 100 kHz from sixteen in three runs and from
+sixty-four in two, where the engined path's lines miss the XIP cache by
+turns (E 1134 to 1414 there); a read of
+one or two costs the same within forty cycles either way (the 848 above is
+one run of five, its other four 663), and one of
 three to eight costs the engines a second entry (the transmit block's
 end). A write costs the same under either value. The energy side: under
 either value the core waits in its sleep instruction between entries,
@@ -501,9 +502,9 @@ client finding below is measured from both sides. The cost figures are
   out of the flash - the flushed read reproduces it - and the late
   handler finding room for the STOP entry is why one entry stands for
   two. The placement takes part of it away: `bench_rp2040` letter i's
-  16-byte engined read at 400 kHz reads 49 547 cycles warm from the
-  default image, and cold 61 326 with the hosts InRam, 61 850 with the
-  vectors placed, 54 810 with both and 72 966 to 74 366 from the
+  16-byte engined read at 400 kHz reads 49 553 to 49 644 cycles warm from the
+  default image, and cold 61 326 to 61 422 with the hosts InRam, 61 750 to
+  64 166 with the vectors placed, 54 810 with both and 71 946 to 73 838 from the
   default image ([platform.md](platform.md), "A handler in SRAM"). The
   letter judges the second read.
 - TX_EMPTY IS MASKED BEFORE THE PUSH ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
@@ -515,27 +516,34 @@ client finding below is measured from both sides. The cost figures are
 - THE HOST'S COST, `bench_rp2040` letter i against the peer's client,
   the host's vector in the flash (the default image, warm), nothing of
   the far end on this core. Each line of the letter is the best of
-  five, and each figure here the least of ten runs (the long reads'
-  fixed cost spreads to 960 and 954 with the XIP cache); the fixed cost
-  is wall less the wire's time, in clk_sys cycles at 125 MHz:
+  five, and each figure here its range over five runs; the fixed cost is
+  wall less the wire's time, in clk_sys cycles at 125 MHz:
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 6857 (x 1.11) | 1 | 164 | 748 | 725 |
-  | write of 255 | 729 318 (x 1.00) | 31 | 8907 | 15 182 | 710 |
-  | read of 16 | 49 665 (x 1.01) | 2 | 590 | 1586 | 862 |
-  | read of 255 | 729 457 (x 1.00) | 32 | 13 064 | 19 513 | 847 |
-  | register read, 1 + 1 | 13 051 (x 1.06) | 1 | 219 | 858 | 787 |
-  | read of 255 under `dma` | 729 262 (x 1.00) | 3 | 624 | 2393 | 558 |
+  | write of 1 | 6862 (x 1.11) | 1 | 169 | 753 | 732 |
+  | write of 255 | 729 232 (x 1.00) | 31 | 9123 | 15 213 | 728 |
+  | read of 16 | 49 668 or 49 669 (x 1.01) | 2 | 598 to 784 | 1503 to 1689 | 878 or 879 |
+  | read of 255 | 729 370 (x 1.00) | 32 | 13 222 | 19 249 to 19 395 | 866 |
+  | register read, 1 + 1 | 13 055 (x 1.06) | 1 | 223 | 862 | 795 |
+  | read of 255 under `dma` | 729 268 to 729 452 (x 1.00) | 3 | 701 to 890 | 2614 to 3082 | 764 to 948 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
-  read is one every eight bytes. The fixed cost is the same at the three
-  speeds (726, 725, 726 for a one-byte write) because the address and
+  read is one every eight bytes. A spread in the handler's column is the
+  XIP cache's; a step of 146 cycles in the busy column with the handler's
+  unmoved is a tick's wake landing in the run (inferred from its size and from
+  its coming and going at other lengths). The letter's vector holds both of its
+  hosts' bodies in one function, so a handler figure here holds that function's
+  register allocation, which a change in the other host's body can move by a few
+  cycles an entry. The fixed cost is the same at the three
+  speeds (732 at each for a one-byte write) because the address and
   the speed stay in the block between tenures: the cycle of disable,
   IC_TAR and enable, which a new address still pays (`i2c.write.readdr`),
-  costs 953 to 957 cycles more at 100 kHz, 175 at 400 kHz and 62 at 1 MHz - the
+  costs 953 to 957 cycles more at 100 kHz, 175 at 400 kHz and 15 to 62 at 1 MHz - the
   disable waits on the block's own shutdown, which follows the bus
-  timing. The longest host entry is 428 cycles, a 255-byte read's. Cold,
+  timing. The longest host entry of a warm tenure is 433 cycles, a 255-byte
+  read's, at the three speeds; the XIP cache's misses put a 16-byte read's at
+  321 to 463 and a write-then-read of 1 + 16's at 345 to 531 at 400 kHz. Cold,
   the same one-byte write's `start()` reads 12640 cycles and its entry
   6382 with both in the flash ([platform.md](platform.md), "A handler in
   SRAM").
@@ -547,13 +555,13 @@ client finding below is measured from both sides. The cost figures are
   brio's counts written over its own, so the SCL period measures the
   same (316.0 cycles at 400 kHz, letter i's too). At 400 kHz,
   fixed cost, the SDK against brio's default image: a one-byte write 398
-  against 725, a 255-byte write 388 against 710, a 16-byte read 1053
-  against 862, a 255-byte read 16 442 (x 1.02) against 847 (x 1.00), a
-  register read of 1 + 1 66 against 787; a refused address 383 against
-  826. THE WRITE'S GAP, some 330 cycles (4.8 % of a one-byte write's
+  against 732, a 255-byte write 388 against 728, a 16-byte read 1053
+  against 878 or 879, a 255-byte read 16 442 (x 1.02) against 866 (x 1.00), a
+  register read of 1 + 1 66 against 795; a refused address 383 against
+  829. THE WRITE'S GAP, some 330 cycles (4.9 % of a one-byte write's
   wall), is what the SDK does not do: it takes no interrupt and no wake
   from the idle loop - and holds the core for the whole wire, busy 6528
-  cycles against 748. Its short reads' fixed cost is near zero because
+  cycles against 753. Its short reads' fixed cost is near zero because
   `i2c_read_blocking` returns at the last byte, before the NACK and the
   STOP are on the wire; its long read keeps one read command in flight,
   the bus held a loop turn every byte, where the pump pours them by the
@@ -643,7 +651,7 @@ already answered. This host requires the state machine idle beside the
 FIFO empty, and the probe ends on its own STOP, `i2c_nack_addr`, in 78
 pressed passes of 78. The test is one mask and one compare in the
 handler's STOP path, and the read of a standing abort beside it one
-register read more - the one-STOP handler 164 cycles in the cost table
+register read more - the one-STOP handler 169 cycles in the cost table
 above ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), STOP_DET).
 
 **Every shape, and three requesters, under every pressure as in the

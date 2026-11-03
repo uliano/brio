@@ -574,9 +574,9 @@ is the host's interrupt moving the data byte by byte.
 | CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core; [the CH32V203/CH32V303 I2C page](../ch32vx03/i2c.md)) | 752, three interrupts | 1363 to 1395, five | 1.00 through the pump (256 interrupts, 92 cycles a byte) and the engine (4, the core kept awake: 500 k busy against the pump's 43 k) | 256 through the pump (99 cycles a byte), 3 through the engines | 721 | not run on this board | 186 to 190 |
 | CH32V006K8U6 (48 MHz; the CH32X035F8U6's `twi_peer`; [the CH32V00x I2C page](../ch32v00x/i2c.md)) | 1390, four interrupts | 1961 to 2025 through the pump | 1.00 through the pump (264 interrupts) and the engine (10) | 262 through the pump, 9 through the engine | 1509 | WCH's polled master, its library having no interrupt-driven tenure: 780 and 1221 fixed, the core held the whole tenure | not taken |
 | STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 374.4 kHz on the desk's wire; [the STM32G0 I2C page](../stm32g0/i2c.md)) | 1059 to 1060, one interrupt | 1671, two interrupts | 1.00 through the pump (255 interrupts, 127 cycles a byte net of the meter's stamps, against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1454 | HAL v1.4.7: 1362 and 2289 fixed | 505, an engined write to an absent address |
-| RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires; [the RP2040 I2C page](../rp2040/i2c.md)) | 725, the same at 100 kHz and 1 MHz | 787 | 1.00, 31 | 32, 13 064 | 748 | the pico-sdk 2.3.1's polled loop: 398 fixed on a one-byte write, the core held the whole tenure (6528 busy) | 428, a 255-byte read's; 478 in one run's engined 255-byte read at 100 kHz |
-| RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`; [the RP2350 I2C page](../rp2350/i2c.md)) | 400 to 403, the same at 100 kHz and 1 MHz | 449 to 452 | 1.00, 31 | 32, 8557 | 527 | the pico-sdk: 362 fixed (7714 busy) | 282 at 400 kHz; up to 439 at the other rungs |
-| RP2350, Hazard3 (150 MHz; the same; [the RP2350 I2C page](../rp2350/i2c.md)) | 524, the same at 100 kHz and 1 MHz | 566 to 569 | 1.00, 31 | 32, 8619 | 436 | the pico-sdk: 354 fixed (7706 busy) | 394, a 255-byte read's; 410 in one run's 255-byte write at 100 kHz |
+| RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires; [the RP2040 I2C page](../rp2040/i2c.md)) | 732, the same at 100 kHz and 1 MHz | 795 | 1.00, 31 | 32, 13 222 | 753 | the pico-sdk 2.3.1's polled loop: 398 fixed on a one-byte write, the core held the whole tenure (6528 busy) | 433, a 255-byte read's; up to 531 in a register read of 1 + 16 at 400 kHz |
+| RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`; [the RP2350 I2C page](../rp2350/i2c.md)) | 403, the same at 1 MHz; 401 to 461 at 100 kHz | 451 or 452 | 1.00, 31 | 32, 9016 to 9126 | 677, a tick's wake inside it; 529 at 1 MHz | the pico-sdk: 362 fixed (7714 busy) | 298 to 408 at 400 kHz, a 255-byte read's; up to 682 in a register read of 1 + 16; up to 518 at 100 kHz |
+| RP2350, Hazard3 (150 MHz; the same; [the RP2350 I2C page](../rp2350/i2c.md)) | 411, the same at 1 MHz; 409 to 519 at 100 kHz | 456 | 1.00, 31 | 32, 8509 | 329 | the pico-sdk: 354 fixed (7706 busy) | 284, a 255-byte read's, at the three speeds; up to 279 in a 255-byte write at 100 kHz |
 
 What the rows say:
 
@@ -591,8 +591,8 @@ What the rows say:
   FIFO ahead and runs on the other chip, so nothing of it is in the
   figures. The host's entries run from the flash here, so a figure moves
   with the XIP cache's misses, which the letter counts: the Hazard3's
-  one-byte write spends 84 cycles more in its one entry than the
-  Cortex-M33's, two misses counted in its tenure against none.
+  one-byte write counts one miss in its tenure and the Cortex-M33's
+  none, and its one entry still reads the shorter, 70 cycles against 96.
 - On the F1 lineage's event machine (the STM32F4, the CH32V203, the
   CH32V303, the CH32V006) one interrupt a byte is the silicon's, and
   the tenure's fixed cost is the engine's: the event interrupt raised

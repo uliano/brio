@@ -1126,8 +1126,10 @@ program either places the vector it binds or gives `SpiHost`, `Uart` or
 each architecture; cycles at 150 MHz, each cell WARM / COLD, cold read by
 letter c, every line of the XIP cache invalidated before every timed
 run; F the default, R the drivers InRam, V the vectors placed, B both;
-the I2C rows are letter i's, each the least of three runs, a range where
-the runs spread):
+the I2C rows are letter i's, each the least of five runs on F, V and B
+and of three on R, a range where the runs spread; the R column's come
+from another session, and a wall moves between sessions, so its walls
+are not to be read against the others to the cycle):
 
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
@@ -1136,9 +1138,9 @@ the runs spread):
 | ... the DMA line's handler | 459 to 730 / 4416 | 158 / 1701 | 136 / 136 | 154 / 154 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
-| I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 189 / 537 | 184 / 4291 | 187 / 535 |
-| ... its longest handler entry | 96 / 2848 | 123 / 1094 | 96 / 96 | 119 / 119 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58896 / 67732 | 58911 / 61416 | 58903 / 62934 | 58915 / 59527 |
+| I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 189 / 537 | 185 / 4291 | 188 / 536 |
+| ... its longest handler entry | 96 / 2880 | 123 / 1094 | 96 / 96 | 119 / 119 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58938 / 67742 | 58911 / 61416 | 58941 / 63544 | 58966 / 59580 |
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
@@ -1147,18 +1149,17 @@ the runs spread):
 | ... the DMA line's handler | 103 to 263 / 2857 | 125 / 1180 | 105 / 105 | 125 / 125 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
-| I2C one-byte write at 400 kHz, `start()` | 185 / 4086 | 191 / 1782 to 3989 | 185 / 4034 | 194 / 1785 |
-| ... its longest handler entry | 180 / 1649 | 80 / 545 | 71 / 71 | 80 / 80 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58907 / 64979 | 58916 / 61853 | 58899 / 62574 | 58911 / 60671 |
+| I2C one-byte write at 400 kHz, `start()` | 188 / 4138 | 191 / 1782 to 3989 | 188 / 4153 | 192 / 1782 |
+| ... its longest handler entry | 70 / 1649 | 80 / 545 | 70 / 70 | 80 / 80 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58951 / 64980 | 58916 / 61853 | 58955 / 62552 | 58971 / 60723 |
 
 What the rows say - the RP2040's reading on both halves:
 
 - WARM, the placement buys nothing on a path the cache holds and costs
   the call: 4 to 40 cycles under InRam. A warm figure that differs more
   is one image's set conflicts, not the place: the F column's UART
-  handlers, and its I2C handler on Hazard3 (180 cycles against 71 to 80,
-  two XIP misses a tenure), miss lines warm that the other three images
-  do not, and so does
+  handlers miss lines warm that the other three images do not, and so
+  does
   its engined SPI transaction, whose DMA line's handler reads 459 to 730 /
   103 to 263 warm from the flash against 136 / 105 with the vector placed
   ([spi.md](spi.md), letter d's item; which lines share its sets is not

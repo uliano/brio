@@ -748,7 +748,7 @@ runs.
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1575 to 1913 / 14076 | 886 to 1533 / 8151 to 9759 | 805 to 840 / 1271 | 877 to 912 / 1342 to 2950 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 4513 to 6091 / 8682 to 9798 | 1778 to 3173 / 6239 to 7077 | 390 to 425 / 2090 to 2930 | 645 to 1446 / 2218 to 2774 |
 | I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5504 | 362 / 12640 | 379 / 5504 |
-| ... its longest handler entry | 164 / 6382 | 201 / 3174 | 164 / 164 | 192 / 192 |
+| ... its longest handler entry | 169 / 6382 | 201 / 3174 | 169 / 169 | 192 / 192 |
 | I2C 16-byte read on the engines at 400 kHz, wall | 49547 / 72966 | 49603 / 61326 | 49547 / 61850 | 49594 / 54810 |
 
 What the rows say:
