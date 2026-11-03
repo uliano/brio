@@ -12,27 +12,33 @@ drivers use: an engine is one channel bound once to its peripheral and
 then fed a block at a time - a run, a contiguous stretch of elements
 handed over in one call - and a transport (a driver such as the UART's
 `Uart`, which moves bytes for `print` and the serial services) names its
-engines as template arguments in two slots, one for transmit and one for
-receive, `NoDmaEngine` when it wants none. `DmaCopyEngine` copies and
+engines in two template arguments, its engine parameters, one for transmit
+and one for receive, `NoDmaEngine` when it wants none. `DmaCopyEngine` copies and
 fills memory. The block, the channels and the engines are monostates -
 types with no objects, all of whose functions and state are static; what
 is passed to them and read back from them - `DmaTransfer`,
 `DmaChannelConfig`, `DmaSniffConfig`, `DmaError`, `DmaProgress` and the
 like - are ordinary values.
 
-The smallest use, a copy of 1024 words polled to its end, is an excerpt
-of the first block under "How to use it" below:
+The smallest use, a copy of 1024 words polled to its end; an excerpt, the tag
+and the claim at namespace scope, the rest in a function, `src` and `dst` the
+program's:
 
 ```cpp
-brio::Dma::init();                                        // once
+struct CopyTag {};
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 4>, CopyTag>);
 using C = brio::DmaChannel<4>;
-C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}});
+
+if (!brio::Dma::init()) { /* the block did not come out of reset */ }    // once
+if (!C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}})) { /* refused */ }
 while (C::busy()) {}
 ```
 
-Line by line: `Dma::init()` takes the block through the subsystem reset
-controller, every channel at its reset state; `C` names channel 4;
-`load()` writes the source, the destination, the count in items (here
+Line by line: the `static_assert` claims channel 4 for the program's tag, so a
+second owner on it does not compile ("One owner a channel" below); `C` names the
+channel; `Dma::init()` takes the block through the subsystem reset
+controller, every channel at its reset state, and answers false when it did not
+come back; `load()` writes the source, the destination, the count in items (here
 1024 words, 4096 bytes) and the configuration (the word width, both
 addresses stepping forward by default, no request, so as fast as the
 bus allows) and starts the channel with the last of those writes; and
@@ -45,7 +51,7 @@ every channel at work. The two buffers belong to the transfer from
 destination untouched until then, which nothing checks. `load()` answers
 false and starts nothing for a channel still BUSY, a count of zero or
 past 2^28 - 1, or an end not aligned to the width (the DMA does not
-enforce alignment); the example discards that answer. **A channel has one
+enforce alignment). **A channel has one
 owner for the whole image and a peripheral request one channel**, which the
 compiler checks for what claims them ("One owner a channel" below); an engine
 holds its channel from its `arm()` to its `stop()`, and a channel verb that
@@ -63,9 +69,9 @@ giving a normal channel its fair share beside up to three HIGH ones
 The page is long because the controller is. In order: the documents of
 record; what the silicon does, the RP2040's block and the six things
 that are not; the engines, item by item against the controller's
-offer, with the claim and what a block start costs; the types and
+offer, with the run-time `claim()` and what a block start costs; the types and
 verbs; how to use it, from a bare copy to a transport with an engine in
-each slot; the bench findings; and what is not covered.
+each parameter; the bench findings; and what is not covered.
 
 ## Documents of record
 
@@ -80,8 +86,8 @@ the pacing timers, the sniffer, the abort and the debug registers,
 controller), 3.2 (the interrupt lines); Appendix E, RP2350-E5 and
 RP2350-E8. The driver: `brio/rp2350/dma.hpp` (the block, a channel, a
 line, a timer, the sniffer, the read-only MPU view, the three engines)
-with the request numbers in `dma_engine.hpp` beside the empty slot's
-tag. The engines' users are the transports the IP strata drive with
+with the request numbers in `dma_engine.hpp` beside `NoDmaEngine`, the
+empty parameter's tag. The engines' users are the transports the IP strata drive with
 them - the PL011's ([../pl011/README.md](../pl011/README.md)), the PL022
 host's data phase ([spi.md](spi.md)), the DW_apb_i2c host's read phase
 ([i2c.md](i2c.md)) - and the PIO, PWM and ADC chapters. The reference
@@ -248,7 +254,7 @@ choice in it answers an item of the controller's own offer:
   misuse, not a transport's path - is answered by binding it again.
 - **Declined, each for its reason.** The count modes and RING_SIZE (a
   self-re-arming circular receive): the transports' receive is a run
-  re-armed by its owner, and the circular shape over the ring's own
+  re-armed by the transport, and the circular shape over the ring's own
   storage would come with its ring (`docs/design/ring.md`). CHAIN_TO and
   MULTI_CHAN_TRIGGER: the engined SPI host launches its two channels in
   an order of its own, the receive channel first (`brio/pl022/spi.hpp`),
@@ -271,21 +277,21 @@ choice in it answers an item of the controller's own offer:
   purpose, because a starved channel there leaves the receive FIFO full,
   the block holds SCL, and the bus slows with nothing lost.
 
-**The claim.** A transmit engine's owner may start blocks from two
-contexts - a transport's thread and its completion on the line - and "is the
-channel mine" is the one decision they race for: `claim()` is its
-test-and-set, taken under the owner's mask; `launch()` programs a
-claimed channel with the mask down, because a channel that has not
-started cannot complete under its loader; `unclaim()` gives a claim back
-with nothing sent; `start()` is `claim()` then `launch()` for an owner
-with one context. Before the trigger store a compiler fence
+**The run-time `claim()`.** A transport may start blocks on its transmit engine from
+two contexts - its thread and its completion on the line - and "is this channel free
+to start a block" is the one decision they race for. The engine's `claim()` verb, no
+relation of the compile-time claim below, is its test-and-set, taken under the
+transport's mask; `launch()` programs the channel with the mask down once `claim()`
+has answered true, because a channel that has not started cannot complete under its
+loader; `unclaim()` gives it back with nothing sent; `start()` is `claim()` then
+`launch()` for a user with one context. Before the trigger store a compiler fence
 (`dma_handoff_fence`) keeps the block's bookkeeping and its data above
 it; both cores issue their accesses in program order, so no barrier
 instruction is owed.
 
 **What a block start costs**, counted in the release listings (the PL011
 transport's `pump_tx`, the console of `test_rp2350_dma`): on the
-Cortex-M33 7 instructions under the mask - the claim - and about 30
+Cortex-M33 7 instructions under the mask - `claim()` - and about 30
 after it with two stores to the controller; on Hazard3 7 under the mask
 and about 25 after it. The PL022 host's launch of a data phase is a
 receive start and a transmit start: about 70 instructions and six
@@ -296,9 +302,9 @@ BUSY).
 
 A DMA channel has one owner for the whole image, and a peripheral request
 one channel ([design/dma.md](../design/dma.md), "The ownership rule"). The
-compiler checks both, through `util/dma_owner.hpp`: the slot is the channel,
-`DmaSlotId<0, ch>` (this controller is not numbered, so the first number is
-zero), and each engine publishes it as `dma_slot`.
+compiler checks both, through `util/dma_owner.hpp`. What it calls a DMA slot is
+the channel, `DmaSlotId<0, ch>` (this controller is not numbered, so the first
+number is zero), and the transmit and receive engines publish it as `dma_slot`.
 
 On this chip a request is a field any channel takes, handed at `arm()` (DREQ
 numbers, table 1254), so an engine's type does not know its owner and cannot claim
@@ -307,7 +313,7 @@ for itself. Whoever hands it the request does:
 - **A transport claims when its type is instantiated.** `Uart<n, ...>` claims
   each engine's channel for `DmaOwner<DmaPeriph::uart, n, DmaSignal::tx>` or
   `rx`, `SpiHost<n, ...>` for `DmaPeriph::spi`, `I2cHost<n, ...>` for
-  `DmaPeriph::i2c`; a slot left at `NoDmaEngine` claims nothing. A program writes
+  `DmaPeriph::i2c`; an engine parameter left at `NoDmaEngine` claims nothing. A program writes
   nothing for these. Two transport types over one instance's request on one
   channel are one owner and pass, whatever their element types and lines.
 - **`DmaCopyEngine<ch>` claims its channel for a tag of its own**,
@@ -340,18 +346,30 @@ with UART1's transmit on the note under it. A second channel for a request does
 not compile either, which is this chip's own rule ("Multiple channels must not be connected to the same DREQ", 12.6.4.2): the
 same transmit on channel 6 after channel 2 reads
 `ambiguating new declaration of 'constexpr brio::DmaSlotId<0, 6> brio::dma_slot_of(DmaOwner<brio::DmaPeriph::uart, 1, brio::DmaSignal::tx>)'`
-against the old declaration's `DmaSlotId<0, 2>`. Handing a channel from one
-peripheral to another as the program runs is the same refusal; the fixtures
+against the old declaration's `DmaSlotId<0, 2>`. A program cannot hand a channel
+from one peripheral to another as it runs: where both are claimed, that is the same
+refusal, and where they are not, the programmer's duty above. The fixtures
 `test/family_rp2350/neg/dma_*` hold each shape. The claims add no byte and no cycle.
+
+**What a release leaves.** `release()` on a UART, SPI or I2C transport stops its
+engines, takes its interrupt line down, gives the pads back and holds the block in
+reset, and the ADC's stops and holds it too. Its `init()` takes the block through
+that reset before it binds a channel, so a request the block raised before the
+release does not reach the next run ([design/dma.md](../design/dma.md), "The release
+contract"; [../rp2040/dma.md](../rp2040/dma.md), letter r). A PWM slice and a PIO
+state machine have no reset of their own, the block's being every slice's and every
+machine's: a stop releases them, and the next trigger of a channel drops a slice's
+banked credits.
 
 **The map forces no choice here.** Any request reaches any channel, so nothing
 is chosen for a program but the channel numbers, and the only limit is their
-count: sixteen channels, against the nine a program uses with a console and a second
-UART with both engines each, an SPI host's two, an I2C host's transmit, one ADC
-stream and one paced stream. The one narrower fact is the DREQ rule above: a
-converter's or a state machine's one request stays on one channel, so a program that
-reads it at two widths uses one engine at the wider beat and gives the narrower
-letter a narrower run (a run's beat is at most the engine's element). No part of this
+count: sixteen channels, against the ten a program uses with a console and a second
+UART with both engines each, an SPI host's two, an I2C host's two (`I2cHost` takes
+both engines or neither), one ADC stream and one paced stream. The one narrower fact
+is the DREQ rule above: a converter's or a state machine's one request stays on one
+channel, so a program that reads it at two widths uses one engine at the wider beat
+and hands it a run of the narrower element where it wants the narrower width (a run's
+beat is at most the engine's element). No part of this
 family has a forced instance or an unavoidable group.
 
 ## Types and verbs
@@ -409,7 +427,7 @@ family has a forced instance or an unavoidable group.
   a transmit engine), `start` over a pointer and a count or a span of `uint8_t`,
   `uint16_t` or `uint32_t` no wider than `Elem`, `start_fixed` /
   `start_discard` (one cell, its own beat), and on the transmit engine
-  the claim: `claim()`, `unclaim()`, `launch` / `launch_fixed`;
+  the run-time test-and-set: `claim()`, `unclaim()`, `launch` / `launch_fixed`;
   `service()` (this channel's status on its line, cleared and handed back
   as `flag_complete` / `flag_error`; no half event on this controller),
   `complete()`, `busy()` / `idle()`, `take()` (beats, from TRANS_COUNT,
@@ -426,22 +444,28 @@ family has a forced instance or an unavoidable group.
   place - `busy()`, `errors()` / `clear_errors()`, `remaining()`,
   `abandon()` (the abort polled to its end, the channel bound again),
   `service()`, `stop()`.
-- In `uart.hpp`'s transport: the two slots, `dma_isr()` (the line's ISR
+- In `uart.hpp`'s transport: the two engine parameters, `dma_isr()` (the line's ISR
   body), `harvest()` (the receive verb), `dma_faults()`.
 
 ## How to use it
 
-A copy, and a paced one:
+Each block below is an excerpt on a channel of its own, claimed for one owner, so
+all of them can live in one image; one channel does not take these jobs in turn. They
+assume `Dma::init()` has run, and the program supplies the buffers, the registers and
+`clock`. A program has one `isr_dma_0`, so where two blocks show it, its body holds both.
+
+The copy of the first example, then a table poured into a register at one word a
+microsecond, on channel 5 under pacing timer 0's request:
 
 ```cpp
-brio::Dma::init();                                        // once
-using C = brio::DmaChannel<4>;
-C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}});
-while (C::busy()) {}
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 5>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 0, brio::DmaSignal::update>>);
+using Table = brio::DmaChannel<5>;
 
 brio::DmaTimer<0>::set(1, 150);                           // one request a microsecond at 150 MHz
-C::load({.read = table, .write = &pwm_level, .count = 1000,
-         .config = {.write_step = brio::DmaStep::fixed, .treq = brio::DmaTimer<0>::dreq()}});
+if (!Table::load({.read = table, .write = &pwm_level, .count = 1000,
+                  .config = {.write_step = brio::DmaStep::fixed,
+                             .treq = brio::DmaTimer<0>::dreq()}})) { /* refused */ }
 ```
 
 A ring that re-arms itself, which is this chip's own: the count reloads
@@ -449,55 +473,65 @@ at every zero, the read address wraps inside its window, and the
 interrupt marks each lap.
 
 ```cpp
-C::route(1, true);
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 7>,
+                              brio::DmaOwner<brio::DmaPeriph::uart, 0, brio::DmaSignal::tx>>);
+using Ring = brio::DmaChannel<7>;
+
+Ring::route(1, true);
 brio::DmaLine<1>::enable();
-C::load({.read = buffer, .write = &fifo, .count = 64,
-         .mode = brio::DmaCountMode::trigger_self,
-         .config = {.ring_bits = 6, .write_step = brio::DmaStep::fixed,
-                    .treq = brio::Dreq::uart1_tx}});
-// ... and it is stopped by clearing EN in the handler, or by C::abort().
+if (!Ring::load({.read = buffer, .write = &fifo, .count = 64,
+                 .mode = brio::DmaCountMode::trigger_self,
+                 .config = {.write_step = brio::DmaStep::fixed, .ring_bits = 6,
+                            .treq = brio::Dreq::uart0_tx}})) { /* refused */ }
+// ... and it is stopped by clearing EN in the handler, or by Ring::abort().
 ```
 
-A completion on a line, and a checksum:
+A checksum of a load, with its completion on a line:
 
 ```cpp
-extern "C" void isr_dma_0() {
-    if (C::pending(0)) { C::clear_pending(0); /* ... */ }
-}
-C::route(0, true);
-brio::DmaLine<0>::enable();
+struct SumTag {};
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 6>, SumTag>);
+using Sum = brio::DmaChannel<6>;
 
-brio::DmaSniffer::start(4, {.calc = brio::DmaSniffCalc::crc16}, 0xFFFF);
-C::load({.read = buf, .write = sink, .count = n,
-         .config = {.write_step = brio::DmaStep::fixed, .sniff = true}});
+extern "C" void isr_dma_0() {
+    if (Sum::pending(0)) { Sum::clear_pending(0); /* ... */ }
+}
+Sum::route(0, true);
+brio::DmaLine<0>::enable();
+brio::DmaSniffer::start(6, {.calc = brio::DmaSniffCalc::crc16}, 0xFFFF);
+if (!Sum::load({.read = buf, .write = &sink, .count = n,
+                .config = {.write_step = brio::DmaStep::fixed, .sniff = true}})) { /* refused */ }
 ```
 
-A transport with an engine in each slot:
+A transport with an engine in each parameter; the transport claims both channels:
 
 ```cpp
 using Link = brio::Uart<1, pins, 1024, 1024, brio::DmaTxEngine<2>, brio::DmaRxEngine<3>>;
-extern "C" void isr_dma_0() { (void)Link::dma_isr(); }
+extern "C" void isr_dma_0() { (void)Link::dma_isr(); }    // true on a published run: this program polls harvest()
 ...
-Link::init(clock, 3'000'000);
-(void)Link::write_bulk(block);        // one DMA block per contiguous run of the ring
-(void)Link::harvest();                // what arrived, published; a run re-armed
+if (!Link::init(clock, 3'000'000)) { /* the rate cannot be made, or the block did not come up */ }
+const uint32_t queued = Link::write_bulk(block);          // one DMA block per contiguous run of the ring
+(void)Link::harvest();                                    // what arrived, published; a run re-armed
 ```
 
-A copy and a fill, polled, and a table poured into one cell at a timer's
-pace with its completion on line 0:
+A copy and a fill, polled, on an engine that claims its own channel, and a table poured
+into one cell at pacing timer 1's pace with its completion on line 0, on an engine the
+program claims since it hands the request over:
 
 ```cpp
 using Copy = brio::DmaCopyEngine<8>;
 Copy::arm(brio::DmaReport::errors);                   // polled: on no line
-(void)Copy::copy(dst_words, src_words, 1024);         // 1024 words, one a clock
+if (!Copy::copy(dst_words, src_words, 1024)) { /* refused */ }        // 1024 words, one a clock
 while (Copy::busy()) {}
 static const uint16_t pixel = 0xF800;
-(void)Copy::fill(framebuffer, &pixel, 320u * 480u);   // half-words from one cell
+if (!Copy::fill(framebuffer, &pixel, 320u * 480u)) { /* refused */ }  // half-words from one cell
 
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 9>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 1, brio::DmaSignal::update>>);
 using Paced = brio::DmaTxEngine<9, uint32_t>;
-brio::DmaTimer<0>::set(1, 150);                       // a request a microsecond at 150 MHz
-Paced::arm(&cell, brio::DmaTimer<0>::dreq());
-(void)Paced::start(table, 256);
+brio::DmaTimer<1>::set(1, 150);                       // a request a microsecond at 150 MHz
+Paced::arm(&cell, brio::DmaTimer<1>::dreq());
+if (!Paced::start(table, 256)) { /* refused */ }
 extern "C" void isr_dma_0() {
     if ((Paced::service() & Paced::flag_complete) != 0u) { (void)Paced::complete(); }
 }
@@ -514,9 +548,9 @@ brio::Dma::abort(brio::DmaChannel<4>::bit | brio::DmaChannel<5>::bit);
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_dma`
-reports **73 pass, 0 fail** in its z on the Cortex-M33 pair and on the Hazard3
+reports **70 pass, 0 fail** in its z on the Cortex-M33 pair and on the Hazard3
 pair, from one source - and every verdict of it was printed THROUGH a
-DMA engine, the console's transport naming one in its transmit slot.
+DMA engine, the console's transport naming one as its transmit engine.
 
 - **Sixteen channels and four lines, as the silicon says.** N_CHANNELS
   reads 16, a channel out of reset reads its reset word, and a
@@ -560,7 +594,7 @@ DMA engine, the console's transport naming one in its transmit slot.
   READ_ERROR both, WRITE_ERROR clear - its line's handler entered once
   and nothing written to the destination.
 - **THE ENGINES ON A TRANSPORT.** 4096 bytes through UART1's own
-  loop-back at 3 Mbaud, one engine in each slot, arrive **exact in 13 697
+  loop-back at 3 Mbaud, one engine in each parameter, arrive **exact in 13 697
   to 13 702 us** on both halves - the wire's own time for 4096 bytes of
   10 bits at 3 Mbaud is 13.65 ms - with **18 to 22** line-0 interrupts
   for the whole of it, the console's own blocks among them; the same run
@@ -587,7 +621,7 @@ DMA engine, the console's transport naming one in its transmit slot.
   in turn into one cell of RAM by one engine leave it reading 0x00000044,
   0x00007788 and 0xDDEEFF01 - each beat wrote its own lanes - and a
   half-word run one byte off its beat, an empty run and a count past the
-  28 bits are refused with the claim given back.
+  28 bits are refused with `claim()` given back.
 - **ERRORS ALONE.** Under `DmaReport::errors` a clean block raises
   nothing - not one entry of its line's handler - and a block reading
   the SIO window raises the channel's interrupt all the same, served as

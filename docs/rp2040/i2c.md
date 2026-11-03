@@ -236,11 +236,11 @@ enable in this chip's IC_CON: the unstick is by hand.
   it took, 0 for a healthy wire, 0xFF for one that stays low),
   `recover()` (the block reset and reconfigured), `release()`, and the
   two levels the pump runs at, `tx_level` and `rx_level` (half a FIFO
-  each). The pump writes a run into the room the transmit FIFO has and
+  each). The pump is the interrupt-driven engine: it writes a run into the room the transmit FIFO has and
   refills on TX_EMPTY at its half, takes eight bytes an interrupt on
   RX_FULL and the tail at the STOP, and ends EVERY tenure on its
   STOP_DET (or on the abort); the address and the speed go into the
-  block only when they move. The engine slots take a
+  block only when they move. The engine parameters take a
   `DmaTxEngine<ch, uint16_t>` and a `DmaRxEngine<ch>` on any two
   channels, both or neither, and serve the READ phase of a request that
   names `dma`, at any length: the bytes collected by a receive engine
@@ -418,14 +418,14 @@ client finding below is measured from both sides. The cost figures are
   write-then-read of 2 + 32, a deaf client on an engined read, and eight
   255-byte reads at 1 MHz byte-exact with TX_OVER never raised. THE
   SHORTEST READS under `dma`, one byte and two: on the receive engine,
-  its run the length and every byte of it moved, the transmit engine
-  never claimed, one host entry, no DMA line entry. Writes of 1 and 32
+  its run the length and every byte of it moved, the transmit engine's
+  `claim()` never taken, one host entry, no DMA line entry. Writes of 1 and 32
   under `dma` (the half the engines cannot carry) complete on the
   interrupt, no DMA line entry, the 32 in three host entries, the peer's
   count and sum exact. `interrupt` at 64 bytes on the engined host
   touches no channel - no DMA line entry, the receive run and its
   channel's write address unchanged - in eight host entries. A 40-byte
-  read under `dma` with the transmit engine already claimed
+  read under `dma` with the transmit engine's `claim()` already held
   (by the letter itself) completes exact, its commands the pump's in four
   host entries, every byte the receive engine's. A write-then-read of
   6 + 16 under `dma` whose third written byte the client refuses - the

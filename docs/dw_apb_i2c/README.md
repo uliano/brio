@@ -145,13 +145,13 @@ the concept below.
   `i2c_con_of`, `I2cCmd`, `i2c_write_entry`, `i2c_read_entry`,
   `i2c_status_of_abort`, `i2c_dma_fault`), the resource
   `DwApbI2cBlock<Chip, n>`, the engine `DwApbI2cHost<Chip, n, pins,
-  ...>` with its two optional DMA slots, its two ISR bodies and its
+  ...>` with its two optional DMA engine parameters, its two ISR bodies and its
   hand-driven unstick, and `DwApbI2cClient<Chip, n, pins>` with
   `I2cClientEvent`. The host claims each engine's channel for this instance's
-  request when its type is instantiated (`util/dma_owner.hpp`, through the slot the
+  request when its type is instantiated (`util/dma_owner.hpp`, through the DMA slot the
   family's engine publishes as `dma_slot`): a second owner on either channel, or this
   request on a second one, does not compile. An engine of a chip with no DMA
-  controller behind it, the simulated block's, publishes no slot and claims nothing.
+  controller behind it, the simulated block's, publishes no DMA slot and claims nothing.
 - Not here, by design: which pads carry the two lines and under which
   function, how the block is taken out of reset, which interrupt
   controller owns the line and what it calls it, which rate of the
@@ -200,7 +200,7 @@ request:
 | `regs<i>()` | where instance i's block sits |
 | `irq<i>()` | its interrupt line |
 | `reset<i>()`, `released<i>()`, `hold<i>()` | the block from its reset state, whether it is out, and back into it: a reset controller on one family, a clock gate on another. A command under way with no STOP holds the block enabled for ever, so the family's reset is the engine's one way out and `recover()` is built on it |
-| `tx_request<i>()`, `rx_request<i>()` | the two requests the engine hands its DMA slots |
+| `tx_request<i>()`, `rx_request<i>()` | the two requests the host hands its DMA engines |
 
 The verbs over a register, over the pads and over time:
 
@@ -244,8 +244,8 @@ which is also what makes the host suite below possible.
 
 The pin table and its function code; the pad configuration; the reset or
 clock gate; the interrupt line and its controller; the crt's handler name
-an app binds; the DMA request numbers and the engine types that fill the
-slots; which rate is ic_clk; the FIFO depth; the microsecond ruler;
+an app binds; the DMA request numbers and the engine types the host's
+parameters take; which rate is ic_clk; the FIFO depth; the microsecond ruler;
 whether the family can run code from SRAM (its traits'
 `places_fast_text`, true when its linker script copies the
 `.fast_text` sections into SRAM before `main()`: the host's last
@@ -258,7 +258,7 @@ which lands in SRAM, under `InRam`;
 has what it buys); and
 the public names - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>`
 and `I2cClient<n, pins>`, the family's aliases of the three templates
-here, with the family's own defaults for the empty engine slots and the
+here, with the family's own defaults for the empty engine parameters and the
 placement. An
 application that says `brio::I2cHost<0, pins>` has no idea this stratum
 exists, which is the point.
@@ -284,7 +284,7 @@ pulses as a test asks - and a ruler that counts microseconds instead of
 waiting. It is compiled twice: by the host suite `test_dw_apb_i2c`, and
 by a family's compile check (`test/family_rp2040/dw_apb_i2c_ip.cpp`),
 which names every verb of the resource, of the engine and of the client
-with both engine slots empty and both filled. A driver that needed a
+with both engine parameters empty and both filled. A driver that needed a
 silicon would fail one of the two. The negative TUs beside it stage a
 traits type with one member taken away and require the concept to refuse
 it by name.
@@ -296,8 +296,9 @@ uses - and what a bench cannot stage at all: a block that will not
 disable (answered `i2c_bus_error` instead of waited on), an abort of
 every reason, the engines' hand-over in the middle of a read phase, the
 path each value of a request's `engine` takes (a short read on the
-receive engine alone, a write that stays on the pump, `dma` refused on a
-host without engines, a claim already standing on the transmit engine), and a
+receive engine alone, a write that stays on the pump - the interrupt-driven engine,
+which moves the bytes from the block's interrupt -, `dma` refused on a
+host without engines, a run-time `claim()` already held on the transmit engine), and a
 client that releases SDA on the n-th pulse of the unstick.
 
 What the fake does NOT model is the FIFOs: nothing moves an entry out of
@@ -436,7 +437,7 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   on a host with no engines bound (`has_dma` false) is answered
   `i2c_rejected` inside `start()`, nothing on the wire, as an address
   outside the range is. The request names it in one field,
-  `r.engine = brio::I2cEngine::dma;`, on a host whose two engine slots
+  `r.engine = brio::I2cEngine::dma;`, on a host whose two engine parameters
   are filled (each family's "How to use it" has the host type and the
   vector). A wrong choice costs core cycles, never correctness: each
   family's document gives the measured cost of both, and the length
@@ -464,8 +465,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   A bus error on either channel ends the tenure `i2c_dma_fault` in
   `dma_isr()`, the block's abort asked and the channels stopped: the
   stratum's own status, beyond the four wire codes util/i2c_bus.hpp
-  defines. The transmit engine is CLAIMED when the read half
-  starts, its one launch step that can fail: a claim already standing on it,
+  defines. The host takes the transmit engine's run-time `claim()` when the read half
+  starts, its one launch step that can fail: a `claim()` already held,
   a program's own since the channel has no other owner, is not overridden, and
   the pump writes the commands on TX_EMPTY (about
   one entry for each eight), the receive engine still collects, and the

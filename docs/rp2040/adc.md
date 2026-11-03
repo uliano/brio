@@ -140,8 +140,8 @@ block (FCS.OVER stays), where a plain write does.
   selected; the block out of reset; EN; READY waited for),
   `clock_hz`, `enable`, `ready` / `wait_ready`, `temperature_sensor`,
   `release` (the block HELD in reset: a converter merely disabled with
-  DREQ_EN set keeps its sample in the FIFO and requests it - the next
-  owner's channel reads it, letter r); the sampler's
+  DREQ_EN set keeps its sample in the FIFO and requests it - a DMA channel
+  bound on the request reads it, letter r); the sampler's
   surface `select(input)` / `select_input`,
   `selected()` (AINSEL as it stands, moved by the round-robin),
   `selected_input()` (the last select), `input_code`, `start()`

@@ -975,7 +975,7 @@ void tr_released_requester() {
         contract = static_cast<uint8_t>(contract + (moved_stopped == 0u && moved_running == 8u && took >= 70u && took <= 100u ? 1u : 0u));
         live = static_cast<uint8_t>(live + (moved_live >= 1u ? 1u : 0u));
     }
-    bench.verdict("A S1249PED SLICE AND A S1249PED CHANNEL LEAVE THE SAME OWNER NOTHING: credits banked and left, the trigger "
+    bench.verdict("A STOPPED SLICE AND A STOPPED CHANNEL LEAVE THE SAME OWNER NOTHING: credits banked and left, the trigger "
                   "drops them - no item moves until the slice runs, then exactly its run at one a period, four of four",
                   banked_seen >= 1u && contract == 4u);
     bench.verdict("THE CONTROL: with the slice running the same run moves at once, four of four - the detector sees a request",

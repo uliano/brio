@@ -135,7 +135,7 @@ group of verdicts it runs; `z` is the key that runs every letter but
 
 This page says what is the RP2350's. What the block itself does - the
 command FIFO, the counts and their floors, the single TX_ABRT, the
-client's clock stretch, the engine slots - is the IP stratum's page and
+client's clock stretch, the engine parameters - is the IP stratum's page and
 is not restated here.
 
 ## What the silicon does
@@ -253,7 +253,7 @@ stratum adds:
   (12.2.1.2).
 - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>` and
   `I2cClient<n, pins>` - the public names, this chip's aliases of the
-  three IP templates, with `NoDmaEngine` in both slots and `InFlash` by
+  three IP templates, with `NoDmaEngine` in both engine parameters and `InFlash` by
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM"). The host's `Request` carries the engine it runs
   on, `engine`, `I2cEngine::interrupt` by default or `I2cEngine::dma`,
@@ -328,7 +328,7 @@ Cortex-M33 / Hazard3:
 | `interrupt` | 375 / 346 | 385 / 360 | 403 / 379 | 493 / 474 | 622 / 578 | 748 / 711 | 2600 / 2359 | 9950 / 8916 |
 | `dma` | 390 / 349 | 390 / 353 | 604 / 578 to 687 | 540 / 475 | 543 / 478 | 543 / 478 | 629 / 549 | 629 / 549 |
 
-The pump costs F + b x n, F 132 / 162 cycles and b 38.5 / 34.3 a byte,
+The pump, the interrupt-driven engine, costs F + b x n, F 132 / 162 cycles and b 38.5 / 34.3 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
 543 / 478 for a read of nine to sixteen bytes, 604 / 578 to 687 at three and
 629 / 549 from sixty-four (a third entry, the transmit block's end
@@ -517,13 +517,13 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   each):
   the shortest reads under `dma`, one byte and two, on the receive
   engine, its run the length and every byte of it moved, the transmit
-  engine never claimed, one host entry and no DMA line entry; writes of
+  engine's `claim()` never taken, one host entry and no DMA line entry; writes of
   1 and 32 under `dma` (the half the engines cannot carry) complete on
   the interrupt, no DMA line entry, the 32 in three host entries, the
   peer's count and sum exact; `interrupt` at 64 bytes on the engined
   host touches no channel - no DMA line entry, the receive run and its
   channel's write address unchanged - in eight host entries; a 40-byte
-  read under `dma` with the transmit engine already claimed
+  read under `dma` with the transmit engine's `claim()` already held
   (by the letter itself) completes exact, its commands the pump's in four
   host entries, every byte the receive engine's; a write-then-read of
   6 + 16 under `dma` whose third written byte the client refuses, the
@@ -615,15 +615,17 @@ not seen on this chip: none in twelve pressed passes on the Cortex-M33
 of a build whose STOP test lacked the state machine's idle, and none in
 156 on the two halves with it (thirteen runs of `z` each).
 
-**The probe after a refusal races the peer, and the peer's cold cache was the cause.**
+**The probe after a refusal races the peer, and the SRAM placement of the peer's path cures it.**
 Letter `q`'s control pass writes six bytes to a peer refusing the third, then probes it at
 once: the peer refuses by disabling its client once the second byte is taken, and enables
 it again once the block reports the disable done, after the host's STOP. With that end of
 the refusal in the RP2040 peer's flash, on the Cortex-M33 the probe met the client still
-disabled in the first run after both boards were flashed, answered `i2c_nack_addr`: six
-first runs of six on this measurement's images, and in none of the later runs. With the
-same path in SRAM (`twi_peer`'s `refusal_end()`, the peer's image the only one that moves),
-twelve first runs of twelve are clean, and three later runs of three. The host's side of the
+disabled in the first run after both boards were flashed, answered `i2c_nack_addr`: nine
+first runs of nine, and in none of nine later runs. That build is no longer in the tree, so
+this is a measured fact, not a letter. With the same path in SRAM (`twi_peer`'s
+`refusal_end()`), as the peer is today, thirteen first runs of thirteen are clean, and six
+later runs of six. A cold cache in the peer is inferred from that cure and that only the
+first run meets it; no log reads the cache. The host's side of the
 race is its abort: a tenure on the interrupt touches no channel at its abort, so the probe
 follows sooner. Hazard3 and the RP2040 as the host never met it. The verdict judges the peer's
 recovery and was not loosened.

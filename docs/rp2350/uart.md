@@ -118,7 +118,7 @@ two the host drives, `y` and `w`, which run by name.
 This page says what is the RP2350's. What the block itself does - the
 fractional divider, the disabled-write rule, the transmit interrupt that
 is an edge latched until cleared and the transmit policy built on it,
-the per-entry error flags, the engine slots - is the IP stratum's page
+the per-entry error flags, the engine parameters - is the IP stratum's page
 and is not restated here; the measurement that settled the transmit
 interrupt was made on this chip and is below.
 
@@ -196,7 +196,7 @@ the register bit layouts, the resource's and the transport's verbs) is in
   engine at normal; the Uart takes no level option ([dma.md](dma.md)).
 - `Pl011<n>` and `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine,
   RxEngine, Placement>` - the public names, this chip's aliases of the
-  two IP templates, with `NoDmaEngine` in both slots and `InFlash` by
+  two IP templates, with `NoDmaEngine` in both engine parameters and `InFlash` by
   default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
   "A handler in SRAM").
 
@@ -384,7 +384,7 @@ a number is given for each.
   and one count each of three episodes, the vector quiet after them
   ([../pl011/README.md](../pl011/README.md)).
 - THE TWO DMA ENGINE SLOTS are measured in [dma.md](dma.md), whose suite
-  puts an engine in each slot of the second instance under the loop-back
+  puts an engine in each parameter of the second instance under the loop-back
   (4096 bytes at 3 Mbaud exact) and runs its own console's transmitter on
   one: the block start there is the engine's CLAIM alone under the mask
   and the block programmed after it

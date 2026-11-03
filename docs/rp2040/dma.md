@@ -1,9 +1,9 @@
 # DMA (RP2040)
 
 This document is for two readers. Most programs meet the DMA through a
-driver: the UART, SPI and I2C transports each have two engine slots,
-and a DMA engine named in a slot moves that driver's data while the
-core does something else ([uart.md](uart.md), [spi.md](spi.md),
+driver: the UART, SPI and I2C transports each take two engine parameters,
+template arguments that name a transmit and a receive engine, and a DMA engine
+named there moves that driver's data while the core does something else ([uart.md](uart.md), [spi.md](spi.md),
 [i2c.md](i2c.md); [design/dma.md](../design/dma.md) is the contract
 the engines keep). The other reader drives the controller directly: a
 memory copy, a table poured into a register at a timer's pace, a
@@ -14,17 +14,23 @@ timer, `DmaSniffer` the checksum unit, and the engines - `DmaTxEngine`,
 `DmaRxEngine` and `DmaCopyEngine`, a channel bound once to its job and
 started block by block.
 
-The smallest use, a copy, from "How to use it" below:
+The smallest use, a copy; an excerpt, the tag and the claim at namespace scope, the
+rest in a function, `src` and `dst` the program's:
 
 ```cpp
-brio::Dma::init();                                        // once
+struct CopyTag {};
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 4>, CopyTag>);
 using C = brio::DmaChannel<4>;
-C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}});
+
+if (!brio::Dma::init()) { /* the block did not come out of reset */ }    // once
+if (!C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}})) { /* refused */ }
 while (C::busy()) {}
 ```
 
-Line by line: `Dma::init()` releases the controller from reset, once
-per program; `C` names channel 4; `load()` programs the transfer - the
+Line by line: the `static_assert` claims channel 4 for the program's tag, so a
+second owner on it does not compile ("One owner a channel" below); `C` names the
+channel; `Dma::init()` releases the controller from reset, once per program, and
+answers false when it did not come out; `load()` programs the transfer - the
 two addresses, the count in items, the width of an item - and starts
 it, here 1024 words from `src` to `dst` as fast as the bus allows (no
 request is named); the loop waits for the channel to finish. `load()`
@@ -64,7 +70,7 @@ and the abort, 2.5.7 the registers), 4.2.5 (the UART's DMA interface);
 Appendix B, RP2040-E12 and E13. The driver: `brio/rp2040/dma.hpp`
 (the block, a channel, a line, a timer, the sniffer, the transfer
 engines and the copy engine) with the request numbers in
-`dma_engine.hpp` beside the empty slot's tag; the transfer engines'
+`dma_engine.hpp` beside `NoDmaEngine`, the empty parameter's tag; the transfer engines'
 users are the UART's, the SPI's and the I2C's transports (the IP
 strata `brio/pl011/`, `brio/pl022/`, `brio/dw_apb_i2c/`) and the ADC,
 PIO and PWM suites. The reference suite: `test_rp2040_dma`, whose
@@ -152,9 +158,9 @@ p, below), and the Uart takes no level option.
 
 A DMA channel has one owner for the whole image, and a peripheral request
 one channel ([design/dma.md](../design/dma.md), "The ownership rule"). The
-compiler checks both, through `util/dma_owner.hpp`: the slot is the channel,
-`DmaSlotId<0, ch>` (this controller is not numbered, so the first number is
-zero), and each engine publishes it as `dma_slot`.
+compiler checks both, through `util/dma_owner.hpp`. What it calls a DMA slot is
+the channel, `DmaSlotId<0, ch>` (this controller is not numbered, so the first
+number is zero), and the transmit and receive engines publish it as `dma_slot`.
 
 On this chip a request is a field any channel takes, handed at `arm()` (DREQ
 numbers, table 119), so an engine's type does not know its owner and cannot claim
@@ -163,7 +169,7 @@ for itself. Whoever hands it the request does:
 - **A transport claims when its type is instantiated.** `Uart<n, ...>` claims
   each engine's channel for `DmaOwner<DmaPeriph::uart, n, DmaSignal::tx>` or
   `rx`, `SpiHost<n, ...>` for `DmaPeriph::spi`, `I2cHost<n, ...>` for
-  `DmaPeriph::i2c`; a slot left at `NoDmaEngine` claims nothing. A program writes
+  `DmaPeriph::i2c`; an engine parameter left at `NoDmaEngine` claims nothing. A program writes
   nothing for these. Two transport types over one instance's request on one
   channel are one owner and pass, whatever their element types and lines.
 - **`DmaCopyEngine<ch>` claims its channel for a tag of its own**,
@@ -196,18 +202,29 @@ with UART1's transmit on the note under it. A second channel for a request does
 not compile either, which is this chip's own rule ("multiple channels should not be connected to the same DREQ", 2.5.3.2): the
 same transmit on channel 6 after channel 2 reads
 `ambiguating new declaration of 'constexpr brio::DmaSlotId<0, 6> brio::dma_slot_of(DmaOwner<brio::DmaPeriph::uart, 1, brio::DmaSignal::tx>)'`
-against the old declaration's `DmaSlotId<0, 2>`. Handing a channel from one
-peripheral to another as the program runs is the same refusal; the fixtures
+against the old declaration's `DmaSlotId<0, 2>`. A program cannot hand a channel
+from one peripheral to another as it runs: where both are claimed, that is the same
+refusal, and where they are not, the programmer's duty above. The fixtures
 `test/family_rp2040/neg/dma_*` hold each shape. The claims add no byte and no cycle.
+
+**What a release leaves.** `release()` on a UART, SPI or I2C transport stops its
+engines, takes its interrupt line down, gives the pads back and holds the block in
+reset, and the ADC's stops and holds it too. Its `init()` takes the block through
+that reset before it binds a channel, so a request the block raised before the
+release does not reach the next run ([design/dma.md](../design/dma.md), "The release
+contract"; letter r below measures it). A PWM slice and a PIO state machine have no
+reset of their own, the block's being every slice's and every machine's: a stop
+releases them, and the next trigger of a channel drops a slice's banked credits.
 
 **The map forces no choice here.** Any request reaches any channel, so nothing
 is chosen for a program but the channel numbers, and the only limit is their
-count: twelve channels, against the nine a program uses with a console and a second
-UART with both engines each, an SPI host's two, an I2C host's transmit, one ADC
-stream and one paced stream. The one narrower fact is the DREQ rule above: a
-converter's or a state machine's one request stays on one channel, so a program that
-reads it at two widths uses one engine at the wider beat and gives the narrower
-letter a narrower run (a run's beat is at most the engine's element). No part of this
+count: twelve channels, against the ten a program uses with a console and a second
+UART with both engines each, an SPI host's two, an I2C host's two (`I2cHost` takes
+both engines or neither), one ADC stream and one paced stream. The one narrower fact
+is the DREQ rule above: a converter's or a state machine's one request stays on one
+channel, so a program that reads it at two widths uses one engine at the wider beat
+and hands it a run of the narrower element where it wants the narrower width (a run's
+beat is at most the engine's element). No part of this
 family has a forced instance or an unavoidable group.
 
 ## Types and verbs
@@ -252,15 +269,16 @@ family has a forced instance or an unavoidable group.
   transports' engines. `Elem` is the WIDEST beat the binding allows
   (the data register's width): a run of `uint8_t`, `uint16_t` or
   `uint32_t` up to it is legal, a wider one a compile error, one whose
-  address is not aligned to its beat refused at run time (the caller
-  runs it another way: a transport's interrupt engine, the SPI host's
-  polled loop). `arm(data, dreq, high_priority, report)` binds once,
+  address is not aligned to its beat refused at run time, nothing moved
+  (the SPI host tests the alignment first and answers `spi_rejected`:
+  [spi.md](spi.md)). `arm(data, dreq, high_priority, report)` binds once,
   `high_priority` true by default on a receive engine and false on a
   transmit engine;
-  `Report` names `DmaReport` through the engine. Transmit: `claim()`
-  (the test-and-set a transport takes under its mask), `unclaim()`,
-  `launch(run)` / `launch_fixed(cell, n)` on a claimed channel,
-  `start(run)` / `start_fixed(cell, n)` = claim and launch, a run being
+  `Report` names `DmaReport` through the engine. Transmit: the run-time verb
+  `claim()` (a test-and-set for "is this channel free to start a block", which a
+  transport takes under its mask, and no relation of the compile-time claim above),
+  `unclaim()`, `launch(run)` / `launch_fixed(cell, n)` once `claim()` has answered true,
+  `start(run)` / `start_fixed(cell, n)` = `claim()` and `launch()`, a run being
   a span or a pointer and a count; `complete()` (the beats the block
   carried), `busy()` (claimed or running), `in_flight()`,
   `progress()`. Receive: `start(run)`, `start_discard(cell, n)`,
@@ -279,52 +297,62 @@ family has a forced instance or an unavoidable group.
   `stop()`. A block over a running one, an empty one and a misaligned
   one are refused.
 - In the transports (`uart.hpp`, `spi.hpp`, `i2c.hpp` over the IP
-  strata): the slots, `dma_isr()` (the line's ISR body), the UART's
+  strata): the engine parameters, `dma_isr()` (the line's ISR body), the UART's
   `harvest()` and `dma_faults()`.
 
 What a block costs, counted in the release listing (Cortex-M0+
 timings, one path, the CTRL word unchanged): a transmit block start
-from a transport - the claim, the ring's run, the block - 51
+from a transport - `claim()`, the ring's run, the block - 51
 instructions and about 100 cycles with TWO stores to the DMA block,
-the mask held over the claim alone (six instructions, about 10
+the mask held over `claim()` alone (six instructions, about 10
 cycles); a receive run 27 instructions, about 60 cycles, one read
 (BUSY) and three stores (the credit clear, the address, the count);
 an SPI data phase on two engines 89 instructions, about 180 cycles,
 and ONE DMA interrupt for the transaction - the block start alone: a
-whole engined request of 16 frames at 31.25 MHz costs 947 cycles over
+whole engined request of 16 frames at 31.25 MHz costs 904 cycles over
 the wire, the host's start(), the completion and the block's mode-0
-gap on top of this launch ([spi.md](spi.md)); a copy 25 instructions,
+gap on top of this launch (bench findings below, [spi.md](spi.md)); a copy 25 instructions,
 about 40 cycles, one read and three stores.
 
 ## How to use it
 
-A copy, and a paced one:
+Each block below is an excerpt on a channel of its own, claimed for one owner, so
+all of them can live in one image; one channel does not take these jobs in turn. They
+assume `Dma::init()` has run, and the program supplies the buffers, the register and
+`clock`. A program has one `isr_dma_0`, so where two blocks show it, its body holds both.
+
+The copy of the first example, then a table poured into a register at one word a
+microsecond, on channel 5 under pacing timer 0's request:
 
 ```cpp
-brio::Dma::init();                                        // once
-using C = brio::DmaChannel<4>;
-C::load({.read = src, .write = dst, .count = 1024, .config = {.size = brio::DmaSize::word}});
-while (C::busy()) {}
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 5>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 0, brio::DmaSignal::update>>);
+using Paced = brio::DmaChannel<5>;
 
 brio::DmaTimer<0>::set(1, 125);                           // one request a microsecond at 125 MHz
-C::load({.read = table, .write = &pwm_level, .count = 1000,
-         .config = {.incr_write = false, .treq = brio::DmaTimer<0>::dreq()}});
+if (!Paced::load({.read = table, .write = &pwm_level, .count = 1000,
+                  .config = {.incr_write = false, .treq = brio::DmaTimer<0>::dreq()}})) { /* refused */ }
 ```
 
-A completion on a line, and a checksum:
+A checksum of a load, with its completion on a line:
 
 ```cpp
-extern "C" void isr_dma_0() {
-    if (C::pending(0)) { C::clear_pending(0); /* ... */ }
-}
-C::route(0, true);
-brio::DmaLine<0>::enable();
+struct SumTag {};
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 6>, SumTag>);
+using Sum = brio::DmaChannel<6>;
 
-brio::DmaSniffer::start(4, {.calc = brio::DmaSniffCalc::crc16}, 0xFFFF);
-C::load({.read = buf, .write = sink, .count = n, .config = {.incr_write = false, .sniff = true}});
+extern "C" void isr_dma_0() {
+    if (Sum::pending(0)) { Sum::clear_pending(0); /* ... */ }
+}
+Sum::route(0, true);
+brio::DmaLine<0>::enable();
+brio::DmaSniffer::start(6, {.calc = brio::DmaSniffCalc::crc16}, 0xFFFF);
+if (!Sum::load({.read = buf, .write = &sink, .count = n,
+                .config = {.incr_write = false, .sniff = true}})) { /* refused */ }
 ```
 
-Copy and fill on one channel, the beat the element type:
+Copy and fill on one channel, the beat the element type. The engine claims its own
+channel:
 
 ```cpp
 using Copier = brio::DmaCopyEngine<8>;
@@ -332,34 +360,39 @@ Copier::arm();                                            // the completion on l
 extern "C" void isr_dma_0() {
     if ((Copier::service() & Copier::flag_complete) != 0u) { /* done */ }
 }
-(void)Copier::copy(framebuffer_words, tile_words, 1024u);         // 4 KB as words
-(void)Copier::fill(framebuffer_halves, &background, 320u * 480u); // one 16-bit cell
+if (!Copier::copy(framebuffer_words, tile_words, 1024u)) { /* refused */ }  // 4 KB as words
+// ... and when that block has ended, one 16-bit cell:
+if (!Copier::fill(framebuffer_halves, &background, 320u * 480u)) { /* refused */ }
 ```
 
-A table into one register at a timer's pace - a transmit engine whose
-request is the timer's:
+A table into one register at a timer's pace through an engine: a transmit engine
+whose request is pacing timer 1's, which the program claims since it hands the
+request over:
 
 ```cpp
+static_assert(brio::dma_claim<brio::DmaSlotId<0, 9>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 1, brio::DmaSignal::update>>);
 using Wave = brio::DmaTxEngine<9, uint32_t>;
-Wave::arm(&pwm_level, brio::DmaTimer<0>::dreq());
-brio::DmaTimer<0>::set(1, 400);                           // a word every 400 clk_sys cycles
-(void)Wave::start(std::span<const uint32_t>(table));
+
+Wave::arm(&pwm_level, brio::DmaTimer<1>::dreq());
+brio::DmaTimer<1>::set(1, 400);                           // a word every 400 clk_sys cycles
+if (!Wave::start(std::span<const uint32_t>(table))) { /* refused */ }
 ```
 
-A transport with an engine in each slot:
+A transport with an engine in each parameter; the transport claims both channels:
 
 ```cpp
 using Link = brio::Uart<1, pins, 1024, 1024, brio::DmaTxEngine<2>, brio::DmaRxEngine<3>>;
-extern "C" void isr_dma_0() { (void)Link::dma_isr(); }
+extern "C" void isr_dma_0() { (void)Link::dma_isr(); }    // true on a published run: this program polls harvest()
 ...
-Link::init(clock, 3'000'000);
-(void)Link::write_bulk(block);        // one DMA block per contiguous run of the ring
-(void)Link::harvest();                // what arrived, published; a run re-armed
+if (!Link::init(clock, 3'000'000)) { /* the rate cannot be made, or the block did not come up */ }
+const uint32_t queued = Link::write_bulk(block);          // one DMA block per contiguous run of the ring
+(void)Link::harvest();                                    // what arrived, published; a run re-armed
 ```
 
 ## Bench findings
 
-All from `test_rp2040_dma`, green on the Pico and the WeAct board,
+All from `test_rp2040_dma` on the WeAct board, 52 verdicts in its `z`,
 with the console itself on a transmit engine (every line below
 travelled by DMA):
 
@@ -404,7 +437,7 @@ travelled by DMA):
   NVIC never enabled DMA_IRQ_1), and the report crosses back through
   the inbox. Ten runs of the suite's z.
 - THE ENGINES: 4096 bytes through UART1's loop-back at 3 Mbaud with an
-  engine in each slot, harvested by the loop, byte-exact in 13.8 ms
+  engine in each parameter, harvested by the loop, byte-exact in 13.8 ms
   (the wire's 13.65) with 22 to 23 interrupts on the line. A burst of
   2064 bytes four times the console's ring leaves in 47 blocks of its
   engine, the transport idle after, no fault.
@@ -423,16 +456,16 @@ travelled by DMA):
   every run (a level request re-pulses for every byte still waiting,
   so nothing is lost).
 
-- THE ENGINES MEASURED ON THE WEACT RP2040: `test_rp2040_dma` 37 pass
-  whole (the binding and the two-store block, the beat per block, the
-  claim, the copy engine at three widths); `bench_rp2040` letter d - a
+- THE ENGINES MEASURED ON THE WEACT RP2040: `test_rp2040_dma` judges the
+  binding and the two-store block, the beat per block, the run-time
+  `claim()`, the copy engine at three widths; `bench_rp2040` letter d - a
   copy of 16 bytes wall 472 and busy 314 cycles with a 110-cycle
   handler in ten runs of ten, and an engined SPI request of 16 frames at
-  31.25 MHz wall 1399 with ONE interrupt in seven runs of ten (1582 to
-  1584 in the other three), a fixed cost of 887 cycles (7.1 us) of which
-  96 the block's mode-0 gap; inside the block the engines run at the
+  31.25 MHz wall 1416 with ONE interrupt in four runs of ten (a second, the tick's,
+  in a fifth; 1507 to 1975 in the other five), a fixed cost of 904 cycles (7.2 us) of
+  which 96 the block's mode-0 gap; inside the block the engines run at the
   wire plus that gap, 38.00 cycles a byte at 31.25 MHz and 304.00 at
-  3.906 MHz, 35.00 a byte in 16-bit frames, each in five to seven runs
+  3.906 MHz, 35.00 a byte in 16-bit frames, each in four to seven runs
   of ten ([spi.md](spi.md) has the other runs).
 - THE LINE AT THE RATE ASKED, which a loop alone cannot tell (both ends
   share one divisor): 1024 frames through the transmit engine leave in

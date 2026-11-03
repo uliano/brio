@@ -558,7 +558,8 @@ flash endurance: `h`, `i` and `w`.
   RP2040's flush left a line whose first word read wrong through the cache
   ([../rp2040/flash.md](../rp2040/flash.md), "Bench findings"), so the same was
   looked for here, on both architectures, around the benchmark's letters d, e, u
-  and i with every line invalidated before each timed operation. A TORN LINE, half
+  and i, most runs with every line invalidated before each timed operation and the warm
+  ones (224 of the 848 snapshots and 80 of the 588 below) only around letter e's. A TORN LINE, half
   a line from another line: the data memory read by pinning every line, on the
   default image, the image with the hot paths in SRAM and two more placements -
   none in 848 snapshots, 1 736 704 lines judged. This chip fills a whole line (the

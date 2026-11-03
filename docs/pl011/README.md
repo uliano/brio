@@ -74,7 +74,7 @@ until the transmit ring has taken every byte
 The page goes on with what the stratum is for, the document of record,
 what lives here, what a family owes (the traits type member by member),
 the include contract, what stays per family, the transmit side, the
-receive side, the engine slots, the host suite that proves the file
+receive side, the engine parameters, the host suite that proves the file
 knows no chip, and what is not covered.
 
 ## What the stratum is
@@ -124,12 +124,12 @@ manual either, which is exactly why they are the concept below.
   `Pl011Transport<Chip, n, pins, ...>` with its two ring buffers, its
   error counters (each saturating at its top: a count that wrapped would
   read as a few errors after a storm of them), its two optional DMA engine
-  slots and its two ISR bodies. The transport claims each engine's channel for
+  parameters and its two ISR bodies. The transport claims each engine's channel for
   this instance's request when its type is instantiated (`util/dma_owner.hpp`,
-  through the slot the family's engine publishes as `dma_slot`): a second owner on
+  through the DMA slot the family's engine publishes as `dma_slot`): a second owner on
   either channel, or this request on a second one, does not compile, and two
   transport types over one request on one channel are one owner. An engine of a chip
-  with no DMA controller behind it, the simulated PL011's, publishes no slot and
+  with no DMA controller behind it, the simulated PL011's, publishes no DMA slot and
   claims nothing.
 - Not here, by design: which pads carry the signals and under which
   function, how the block is taken out of reset, which interrupt
@@ -201,7 +201,7 @@ none:
 ## The include contract
 
 `pl011/uart.hpp` includes `kernel/platform.hpp`, `util/clock.hpp`,
-`util/dma_owner.hpp`, `util/placement.hpp` and `util/ring.hpp`, and nothing else: no vendor header, no family header,
+`util/dma_owner.hpp`, `util/placement.hpp`, `util/ring.hpp` and `util/stream.hpp`, and nothing else: no vendor header, no family header,
 no device include. It may therefore be included anywhere, in any order,
 and a family's `uart.hpp` includes it beside its own headers. Apps and
 family drivers keep including the family's header, never this one - the
@@ -216,7 +216,7 @@ which is also what makes the host suite below possible.
 
 The pin table and its function code; the reset or clock gate; the
 interrupt line and its controller; the crt's handler name an app binds;
-the DMA request numbers and the engine types that fill the slots; which
+the DMA request numbers and the engine types the parameters take; which
 rate is UARTCLK; the FIFO depth; whether the family places `.fast_text`
 (its platform's `places_fast_text`: the transport's last template
 parameter is util/placement.hpp's tag, and `isr()` and `dma_isr()` run
@@ -226,7 +226,7 @@ under `InRam`; [../rp2040/platform.md](../rp2040/platform.md), "A
 handler in SRAM", has what it buys); and the public names - `Pl011<n>` and
 `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>`, the family's
 aliases of the two templates here, with the family's own defaults for
-the ring sizes and the empty engine slots. An application that says
+the ring sizes and the empty engine parameters. An application that says
 `brio::Uart<0, console_pins>` has no idea this stratum exists, which is
 the point.
 
@@ -396,18 +396,18 @@ what it holds at the look after a drop): through the interrupt receiver
 60 bytes intact and in order, four BE; through the engine all 60 in
 order with the four zeros among them, four BE.
 
-## The engine slots
+## The engine parameters
 
-With a family's DMA engine in the transmit slot the handler never
+With a family's DMA engine named as the transmit engine the handler never
 touches the transmit FIFO: the transport queues into its ring and starts
 a block over the ring's contiguous run, and the block's completion on the
 DMA line releases exactly that run and starts the next. Two contexts
 start blocks - the thread that queued and the completion - and THE
-MASK COVERS THE CLAIM AND NOTHING ELSE: under the family's guard
-`pump_tx()` takes the engine's `claim()`, its test-and-set; with the mask
-down it reads the run and `launch()`es it, or gives the claim back with
-`unclaim()` when the run is empty. The claim comes first because a
-claimed engine has no block in flight, so nothing consumes the ring or
+MASK COVERS THE TEST-AND-SET AND NOTHING ELSE: under the family's guard
+`pump_tx()` takes the engine's run-time `claim()`, which says the channel is free to
+start a block; with the mask down it reads the run and `launch()`es it, or gives
+it back with `unclaim()` when the run is empty. `claim()` comes first because an
+engine that has answered it true has no block in flight, so nothing consumes the ring or
 starts another block under the loader, and the run read after it never
 holds bytes an ended block already sent. A receive engine fills the
 ring's free run and is re-armed when it has ended, by the line's handler
@@ -451,7 +451,7 @@ compiled twice - by the host suite `test_pl011`, which judges the exact
 words a bring-up leaves in the block and the ORDER of the acts that make
 it, and by a family's compile check (`test/family_rp2040/pl011_ip.cpp`),
 which names every verb of the resource and of the transport with both
-engine slots empty and both filled. A driver that needed a silicon would
+engine parameters empty and both filled. A driver that needed a silicon would
 fail one of the two. The negative TUs beside it stage a traits type with
 one member taken away and require the concept to refuse it by name.
 

@@ -808,8 +808,17 @@ bool stage_stall(bool stand) {
 /// stands when its budget runs out and the transmit FIFO fills. The budget is
 /// (9 + 2) frames at a 64-read share at /2, 704 reads of the status register.
 template <typename H>
-uint8_t stalled_write() {
-    return xfer<H>(nullptr, 0, tx_buf, nullptr, 9, SpiMode::mode0, SpiClocks::div2, SpiDataSize::bits8, true);
+uint8_t stalled_write(uint16_t frames = 9) {
+    return xfer<H>(nullptr, 0, tx_buf, nullptr, frames, SpiMode::mode0, SpiClocks::div2, SpiDataSize::bits8, true);
+}
+
+/// One stall of a polled write of `frames`, staged and timed, in microseconds.
+template <typename H>
+uint32_t timed_stall(uint16_t frames) {
+    (void)stage_stall<H>(true);
+    const uint32_t t0 = us_now();
+    (void)stalled_write<H>(frames);
+    return us_now() - t0;
 }
 
 /// `rx_buf` cleared and `frames` of a pattern in `tx_buf`: what the next request
@@ -885,7 +894,7 @@ DmaHost::Request request(const uint8_t* tx, uint8_t* rx, uint16_t len, SpiMode m
 }
 
 /// The two requests through the kernel, and both replies in, as far as 1 s will
-/// wait: the first may be a stall of some 250 ms and the second has 64 frames
+/// wait: the first may be a stall of some 200 us and the second has 64 frames
 /// to go, so 1 s is what only a lost reply spends.
 bool run(const DmaHost::Request& one, const DmaHost::Request& two) {
     Client::first = one;
@@ -943,6 +952,14 @@ void tg_stall() {
                   "block reset and enabled, the frames that stood in its two FIFOs gone",
                   stood && st == spi_stalled && st != spi_dma_fault && released && clean && enabled);
     bench.verdict("and the next polled request, with no recover(), is exact", st_after == spi_ok && exact_after);
+    // What one read of the status register costs in the loop that spends the budget:
+    // two warm stalls, 9 and 64 frames, each spending its budget on the ninth frame's
+    // wait, (64 - 9) shares of 64 reads apart, printed and not judged.
+    (void)timed_stall<Host>(9);
+    const uint32_t short_stall = timed_stall<Host>(9);
+    const uint32_t long_stall = timed_stall<Host>(64);
+    print(serial, "  warm, 704 reads in ", short_stall, " us and 4224 in ", long_stall, " us: 3520 reads in ",
+          long_stall - short_stall, " us", crlf);
     Host::release();
 
     // The same on the host with engines, the next request each way.

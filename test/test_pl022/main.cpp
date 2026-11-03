@@ -909,6 +909,14 @@ TEST_CASE("recover(), init() and release() each clear a reset that is owed") {
     Engined::release();
     REQUIRE(Engined::init(clock));
     next_pays_nothing();
+
+    // A host released with a request still on the engines: init() ends that
+    // request, and the busy check does not refuse the next one for it.
+    CHECK_FALSE(Engined::start(r));
+    Engined::release();
+    REQUIRE(Engined::init(clock));
+    CHECK(Engined::status() == spi_ok);
+    next_pays_nothing();
 }
 
 namespace {

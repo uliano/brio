@@ -164,7 +164,7 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-TestBench<Serial, 19> bench;
+TestBench<Serial, 21> bench;
 
 // SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
 // no wire is on those pads.

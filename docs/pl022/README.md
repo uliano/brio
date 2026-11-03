@@ -23,10 +23,10 @@ read, so that they know the chip without including any of its headers:
 | the host suite | `SimPl022` | `brio/host/sim_pl022.hpp` | none: the suite names the templates itself |
 
 On both chips the traits give two instances, 8-frame FIFOs and SSPCLK
-as `clk_peri` (the clock type's `pclk_hz`). The smallest use, a
-host on two DMA channels under the bus arbiter on the RP2040 as its own
-document spells it (an excerpt of [../rp2040/spi.md](../rp2040/spi.md),
-"How to use it"):
+as `clk_peri` (the clock type's `pclk_hz`). Here is a host on two DMA
+channels under the bus arbiter on the RP2040, as its own document spells it (an
+excerpt of [../rp2040/spi.md](../rp2040/spi.md), "How to use it"); a polled host is
+smaller still, with no engines, no `Dma::init()` and no vector:
 
 ```cpp
 constexpr brio::SpiPins pins{.sck = 18, .tx = 19, .rx = 16};
@@ -133,7 +133,7 @@ order:
 2. a request with nothing to move completes on the spot, `spi_ok`;
 3. what the engines cannot carry is `spi_rejected` before the block, the
    select or the D/C is touched: 16-bit frames on byte engines, and 16-bit
-   frames with a buffer that is not aligned to a half-word ("The engine slots");
+   frames with a buffer that is not aligned to a half-word ("The engine parameters");
 4. a command phase ahead of a data phase runs in the loop inside `start()`,
    then the data phase on the engines - one fixed rule, whatever the
    command's length - and a stall in that loop ends the request as a polled
@@ -146,13 +146,13 @@ and false only when the engines have it. A wrong choice of engine costs
 time, never correctness: when a request ends, on either engine, its wire
 has ended ("When a request ends, the wire has ended" below). Which engine
 costs the core less at which length is measured on each family's cores and
-stated in its document as guidance; nothing in the host reads it. The slots
-are empty by default (`NoDmaEngine` on both RP chips). The host arms no
+stated in its document as guidance; nothing in the host reads it. The engine
+parameters are empty by default (`NoDmaEngine` on both RP chips). The host arms no
 source of the block's own interrupt line: that vector is a client's.
 
 The page goes on with what the stratum is for, the documents of record,
 what lives here, what a family owes (the traits type member by member),
-the include contract, the engine slots, which engine costs the core less,
+the include contract, the engine parameters, which engine costs the core less,
 the wire's end, the host above the wire (its cost and shape, measured),
 what stays per family, the host suite that proves the file knows no chip,
 and what is not covered.
@@ -213,7 +213,7 @@ every family that drives an SPI. This file takes them.
   `SpiInterrupt`, `SpiDmaControl`), the engine's own status code
   `spi_dma_fault`, the resource `Pl022Ssp<Chip, n>`, the
   host engine `Pl022Host<Chip, n, pins, TxEngine, RxEngine>` with its
-  Request, its two optional DMA engine slots and its one interrupt body
+  Request, its two optional DMA engine parameters and its one interrupt body
   (the DMA line's), and the client `Pl022Client<Chip, n, pins>`.
 - Not here, by design: which pads carry the signals and under which
   function, how the block is taken out of reset, which interrupt
@@ -305,14 +305,14 @@ the framework default (`brio/.clangd`, the host test project's database)
 is the right one, because this file really does compile on the host -
 which is also what makes the host suite below possible.
 
-## The engine slots
+## The engine parameters
 
-A transmit and a receive engine, both or neither, and with them what
-`SpiEngine::dma` runs on (`has_dma`). The host claims each engine's channel for this
+Two template arguments, a transmit and a receive engine, both or neither, and with
+them what `SpiEngine::dma` runs on (`has_dma`). The host claims each engine's channel for this
 instance's request when its type is instantiated (`util/dma_owner.hpp`, through the
-slot the family's engine publishes as `dma_slot`), so a second owner on either channel,
+DMA slot the family's engine publishes as `dma_slot`), so a second owner on either channel,
 or this request on a second one, does not compile; an engine of a chip with no DMA
-controller behind it, the simulated PL022's, publishes no slot and claims nothing. A
+controller behind it, the simulated PL022's, publishes no DMA slot and claims nothing. A
 request on them moves as one block each
 way - its data phase, or a command with no data phase after it - and a command
 ahead of a data phase runs in the loop inside `start()` first, D/C rising
@@ -332,16 +332,12 @@ run), and every 16-bit request on byte engines. A command ahead of a data phase
 is not on the engines, so its buffer's alignment does not matter. No other
 refusal can come out of a launch: a null buffer goes to the fixed dummy cell or
 the sink, a phase has at least one frame, the count is a Request's 16 bits
-under every channel's limit, and the transmit engine's claim is free with
-nothing in flight, which is the caller's to promise: the arbiter starts no
-request while one is in flight (util/bus_master.hpp's contract), and the host
-gives the claim back at every end. Unlike the hosts of the families that test
-that claim and refuse the request ([../design/spi-bus.md](../design/spi-bus.md)),
-this one does not ask: a program that binds the same engine type to a
-second transport and leaves it holding the claim breaks the promise, and then
-the transmit engine does not start, no frame is clocked, the receive block
-never completes, and the request ends as one with no completion does -
-`spi_timeout` on a timed bus, a bus busy for ever on an untimed one. The
+under every channel's limit, and the transmit engine's run-time `claim()`, the
+test-and-set its `start()` takes, is free: the busy check refuses a request in
+flight and every end gives it back. A correct program does not hold it. One that
+called `claim()` itself on this host's engine would stop the transmit engine from
+starting, and the request would end as one with no completion does, `spi_timeout` on
+a timed bus and a bus busy for ever on an untimed one. The
 requests are raised around the engines and dropped at the end of each request.
 THE LEVELS ARE THE RULE'S (docs/design/dma.md): the receive engine at
 the family's high level - the host's clock does not wait for a starved
@@ -421,9 +417,10 @@ So with SPH = 0 the host waits for BSY, once a phase and never a frame:
   block's synchronization of BSY to the core's clock, in core cycles, counted in
   reads of SSPSR of at least a core cycle each. So the bound is a time no shorter
   than what it covers, on any core and whatever the compiler emitted, and a block
-  still clocking is never cut short; a read costs some ten core cycles as compiled,
-  so a bound that runs out holds the interrupt up to about ten times that time. Its
-  running out - a block that stopped clocking with BSY up - ends the request
+  still clocking is never cut short. A read costs 11 or 12 core cycles in the polled
+  loop as compiled (below), and this wait is a loop of the same shape, so a bound that
+  runs out would hold the interrupt about twelve times that time; no letter stages
+  it. Its running out - a block that stopped clocking with BSY up - ends the request
   `spi_stalled` with the select and the D/C released and the block's reset owed to the
   next `start()`, as a bus error leaves it.
 
@@ -456,9 +453,9 @@ polled loop on the same board is the figure beside them).
   drives; the buffers are the channels' by then.
 - The request is laid out with nothing padded but the tail: the four words
   first (the two out buffers, the in buffer, the reply), then the two
-  half-words (the length, the prescaler pair), then the bytes - fields of
-  27 bytes and one of tail padding, 28 where the family's `PinRef` is one
-  byte, where the field order of the other strata cost 36 with nine of
+  half-words (the length, the prescaler pair), then the bytes. Where the family's
+  `PinRef` is one byte that is 27 bytes of fields and one of tail padding, 28 in
+  all; the field order of the other strata would take 36, nine of them
   padding. The names are the other strata's and do not move; the order is
   this file's.
 - `apply()` IS ONE COMPARE. The prescaler pair, the mode and the width
@@ -502,15 +499,19 @@ polled loop on the same board is the figure beside them).
   (`wire_end_for()`, `budget_for()`). A frame's share is the power of two at or above
   twice the frame's time on the wire, its bits and two more for the block's gap with
   SPH = 0, in core cycles, and the budget is (frames + 2) shares, counted in reads of
-  SSPSR of at least a core cycle each, so it runs out no sooner than twice the
+  SSPSR of at least a core cycle each. So it runs out no sooner than twice the
   request's wire time, on any core and whatever the compiler emitted, and a handler
-  that holds the loop off spends none of it. A read costs ten or so core cycles as
-  compiled (each family's letter g times a stall), so a stall holds the core some
-  twenty-five to sixty times the request's wire time, the most on a request of a few
-  frames: the bound scales
+  that holds the loop off spends none of it. What a stall then holds the core depends on
+  what a read really costs, measured in the loop as compiled by each family's letter g:
+  12 core cycles on the Cortex-M0+ and the Cortex-M33, 11 on Hazard3. A share is 2.5 to 5
+  times an 8-bit frame's wire cycles and 2.25 to 4.5 times a 16-bit frame's, by the
+  divisor. So at 12 cycles a read a long request stalls for 30 to 60 times its wire
+  time in 8-bit frames and 27 to 54 times in 16-bit frames, in modes 1 and 3 (the gap
+  lengthens the wire in modes 0 and 2, so those read less), and a short one for
+  (frames + 2) / frames of that: 1.2 times at nine frames, 3 times at one. The bound scales
   with the request instead of with the slowest frame the block can make. It saturates
-  at 2^32 - 1 reads, past which a request longer than about 4.5 minutes on the wire at
-  125 MHz could stall with its block still clocking. Measured on both of the RP2350's cores: the
+  at 2^32 - 1 reads, which on the wire only a polled request of some 45 000 16-bit
+  frames or more at clk_peri / 65024 outlasts. Measured on both of the RP2350's cores: the
   write shape at the nominal wire (plus the block's gap in modes 0 and 2) at
   clk_peri / 2, where it is taken; the receive shape at the wire at clk_peri
   / 4 and slower and bound by its three accesses a frame at / 2, where it
@@ -536,9 +537,10 @@ polled loop on the same board is the figure beside them).
   interrupt, which decides and does not work: it drops the requests, puts both
   channels away and binds them again, releases the select and the D/C and leaves the
   reset owed, a flag. It disables, resets and configures nothing. The next `start()`
-  tests that flag before anything else, one load and one branch a request on a
-  host with engines and nothing on a host with none, and pays the reset first,
-  whichever way the request runs. `prime()` tests and pays it the same way, because
+  the host does not refuse tests that flag before it touches anything, one load and one
+  branch a request on a host with engines and nothing on a host with none, and pays the
+  reset first, whichever way the request runs; a refused request moves nothing and
+  leaves the reset owed. `prime()` tests and pays it the same way, because
   a caller that frames the select by hand primes, lowers the select and only then
   calls `start()`: a reset paid there would run under a low select, what stood in the
   FIFOs shifting in front of a device listening and, in modes 2 and 3, SCK moving.
@@ -570,13 +572,20 @@ polled loop on the same board is the figure beside them).
   timed bus and a bus busy for ever on an untimed one. No suite stages a stopped
   clock yet (each family's second list under "Not covered yet").
 - `recover()` STAYS, the verb that also ends a tenure from outside: the select
-  released, the engines put away and bound again, then the same reset, and its
+  and the D/C released, the engines put away and bound again, then the same reset, and its
   answer. The timed arbiter calls it when a request on the engines goes unanswered
   and on nothing else, and a program may with the bus idle. No verb says the
   engines are idle, and `recover()` under a request on them takes it away, its
   completion never coming, so a program calls it when it knows: every request it
   has posted answered, on a bus with one client. Neither a stall nor a bus error
   asks for it.
+- `release()` AND `init()`, THE RELEASE CONTRACT ([../design/dma.md](../design/dma.md)):
+  `release()` stops both engines, takes the line down, disables the block, gives the
+  pads back and holds the block in reset. `init()` takes it through that reset before it
+  binds the engines, and a request left on them ends there, so nothing of the last
+  run reaches the next (each family's letter u measures the worst release, frames
+  standing and the DMA enables set; a program that waits for `SpiDone` first has none of
+  that to clear).
 - THE BLOCK'S OWN INTERRUPT LINE IS DECLINED BY THE HOST. Four sources
   on one line (RXIM at the receive FIFO's half, RTIM a frame waiting
   with no clock for 32 bit periods, TXIM, RORIM) are what a per-frame
@@ -657,13 +666,13 @@ polled loop on the same board is the figure beside them).
 
 The pin table and its function code; the reset or clock gate; the
 interrupt line and its controller; the crt's handler name an app binds;
-the DMA request numbers and the engine types that fill the slots; which
+the DMA request numbers and the engine types the parameters take; which
 rate is SSPCLK; the FIFO depth; the run-time pin type and the busy-wait;
 what SOD does to a pad on that silicon; whether the family places
 `.fast_text` (its traits' `places_fast_text`, the item above); and the public names -
 `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine, Placement>` and `SpiClient<n,
 pins>`, the family's aliases of the three templates here, with the
-family's own defaults for the empty engine slots and the placement. An
+family's own defaults for the empty engine parameters and the placement. An
 application that
 says `brio::SpiHost<0, pins>` has no idea this stratum exists, which is
 the point.
@@ -692,7 +701,7 @@ either through the arbiter - and the ORDER of the acts of a bring-up
 and of a stall, the select released before the block's reset,
 and by a family's compile check (`test/family_rp2040/pl022_ip.cpp`),
 which names every verb of the resource, of the host with both engine
-slots empty and both filled, and of the client. A driver that needed a
+parameters empty and both filled, and of the client. A driver that needed a
 silicon would fail one of the two. The negative TUs beside it stage a
 traits type with one member taken away and require the concept to refuse
 it by name.
@@ -721,6 +730,6 @@ document.
   of them, but `SpiDataSize` is the two widths the other strata's
   Request speaks (`docs/design/spi-bus.md`). A device with a 12-bit
   frame is the first user.
-- A client on the DMA engines: the slots are the host's, and a client
+- A client on the DMA engines: the engine parameters are the host's, and a client
   answers from its own interrupt. A client that streams is born with a
   program that needs one.

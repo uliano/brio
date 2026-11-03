@@ -176,11 +176,11 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   [../pl011/README.md](../pl011/README.md)), `clear_errors`; each counter
   holds at its top rather than wrapping. The receive engine arms at
   HIGH_PRIORITY and the transmit engine at normal, and the Uart takes no
-  level option ([dma.md](dma.md)). The two engine slots take `dma.hpp`'s
+  level option ([dma.md](dma.md)). The two engine parameters take `dma.hpp`'s
   `DmaTxEngine` / `DmaRxEngine` ([dma.md](dma.md)): with a transmit
   engine the ring's runs leave as DMA blocks and `dma_isr()` (the
   line's ISR body) releases each and starts the next - a block start
-  masks the engine's claim alone (six instructions, about 10 cycles,
+  masks the engine's `claim()` alone (six instructions, about 10 cycles,
   counted in the listing) and programs the channel with the mask down,
   two stores to the DMA block a block; with a receive
   engine the run is filled straight from UARTDR, a run that fills is
@@ -321,7 +321,7 @@ extern "C" void isr_uart0() {
   still carries every frame (eight start bits for eight frames) - the
   IP's findings ([../pl011/README.md](../pl011/README.md)).
 - THE ENGINES (`test_rp2040_dma`): 4096 bytes through the loop-back
-  at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts;
+  at 3 Mbaud with an engine in each parameter, byte-exact, 22 interrupts;
   the two traps of a receive engine - a break taken at enable over a
   low pad, and the request credits that outlive a completed run - are
   the transport's business now ([dma.md](dma.md)).
@@ -384,7 +384,7 @@ extern "C" void isr_uart0() {
   completion, publishes the run and re-arms the channel inside the
   window: about 1.8 us at 125 MHz at the longest, the whole verb being a
   straight line with no loop and no spin
-  ([../pl011/README.md](../pl011/README.md), "The engine slots"). For
+  ([../pl011/README.md](../pl011/README.md), "The engine parameters"). For
   scale, the interrupt receiver's own entry for a FIFO level costs 39 to
   42 cycles a byte, 16 bytes a level.
 - THE TRANSMIT SIDE through the same letter: 4096 bytes in 146 entries

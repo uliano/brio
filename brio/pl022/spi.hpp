@@ -253,8 +253,9 @@
  * AT ITS END, OK OR FAILED, A REQUEST LEAVES THE SELECT HIGH AND THE D/C HIGH
  * (docs/design/spi-bus.md), a null one of either being nobody's to raise: a
  * stall in a command phase, polled or ahead of a block on the engines, and a bus
- * error or a stall on the engines raise the D/C as a clean end does. Only the
- * failed paths pay the store; a clean request has raised it already.
+ * error or a stall on the engines raise the D/C as a clean end does. On the
+ * polled path only a failed request pays that store, a clean one having raised
+ * it already; the engines' one exit, finish_dma(), stores it at every end.
  *
  * After a stall or a bus error the next request starts on a clean block,
  * whoever called it, and the program calls nothing: this type does it
@@ -1040,6 +1041,7 @@ public:
             TxEngine::arm(S::data_address(), S::dreq_tx, false, TxEngine::Report::errors);
             arm_rx_engine();
             reset_owed_ = false;
+            dma_active_ = false;   // a request left on the engines ended with the reset above
         }
         // The pads go to the peripheral with the registers already
         // holding the idle polarity, then SSE: a pad handed over first
@@ -1366,9 +1368,9 @@ private:
     /// in buffer lands in the sink. No engine here can answer false: a pointer
     /// is non-null on the branch that hands it over and aligned by carriable(),
     /// `count` is above zero (start() returned on an empty request and runs no
-    /// empty phase) and under every channel's count, and the transmit channel's
-    /// claim is free with nothing in flight, which is the caller's to promise
-    /// (util/bus_master.hpp's contract; finish_dma() and recover() give it back).
+    /// empty phase) and under every channel's count, and the transmit engine's
+    /// run-time claim() is free: the busy check refuses a request in flight, and
+    /// finish_dma() and recover() give it back.
     template <typename F>
     [[gnu::always_inline]] static void launch_frames(const uint8_t* out, uint8_t* in, uint16_t count) {
         if (in != nullptr) {
@@ -1483,9 +1485,9 @@ private:
     /// they are spent; a count of reads of SSPSR, which take at least a core cycle
     /// each, so a bound is a time no shorter than the one it covers on any core and
     /// whatever the compiler emitted, and never a number of a loop's turns chosen by
-    /// hand. A read of the block's status takes some ten core cycles in the loops as
-    /// compiled on both RP chips (letter g of their suites times one), so a bound
-    /// that runs out spends up to about ten times its figure below.
+    /// hand. A read of the block's status takes 11 or 12 core cycles in the polled loop
+    /// as compiled on both RP chips (letter g of their suites times 3520 of them), so a
+    /// bound that runs out spends about twelve times its figure below.
     ///
     /// The vector's wait, zero with SPH = 1 where nothing is waited for: one SCK
     /// period, by which BSY falls after the last frame reached the receive FIFO
@@ -1552,12 +1554,12 @@ private:
     /// wait the loop is in, shared by all its frames: each frame's share and two more
     /// (the share is wire_end_for()'s, derived from the clocks at the rate applied),
     /// so a budget that runs out has read for at least twice the request's whole time
-    /// on the wire, as core cycles, and by the read's ten or so core cycles some
-    /// twenty-five to sixty times it, the most on a request of a few frames. A handler that holds the loop off spends none of it.
-    /// One load, a shift and a compare a request, nothing a frame. It saturates at
-    /// 2^32 - 1 reads, where a request's wire time reaches a quarter of that in core
-    /// cycles and more: at the reads' own ten cycles a request longer than about
-    /// 4.5 minutes on the wire at 125 MHz could stall with its block still clocking.
+    /// on the wire, as core cycles. At the 12 core cycles a read costs (docs/pl022/README.md)
+    /// that is 30 to 60 times a long request's wire time in 8-bit frames, 27 to 54 in
+    /// 16-bit frames, and (frames + 2) / frames of that on a short one. A handler that
+    /// holds the loop off spends none of it. One load, a shift and a compare a request,
+    /// nothing a frame. It saturates at 2^32 - 1 reads, which on the wire only a request
+    /// of some 45 000 16-bit frames or more at the slowest rate outlasts.
     [[gnu::always_inline]] static uint32_t budget_for(uint32_t frames) {
         const uint8_t shift = budget_shift_;
         return frames < (0xFFFF'FFFFu >> shift) - 2u ? (frames + 2u) << shift : 0xFFFF'FFFFu;
