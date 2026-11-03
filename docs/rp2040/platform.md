@@ -734,7 +734,13 @@ it:
 the two images a define gives between them; cycles at 125 MHz, each
 cell WARM / COLD - cold read by letter c, the XIP cache flushed before
 every timed run). F: every driver InFlash and every vector in the flash
-(the default); R: the drivers InRam; V: the vectors placed; B: both.
+(the default); R: the drivers InRam; V: the vectors placed; B: both. The
+I2C rows are letter i's, each the least of three runs; the F image's
+cold runs fault in the engined reads at 100 kHz and the B image's at
+400 kHz or before (below), so the F image's cold `start()` and handler
+are read at 100 kHz - the same cycles at every speed, as R and V show -
+and B's cold wall is read in the two runs that reached it, 54810 in
+both.
 
 | path | F | R | V | B |
 |---|---|---|---|---|
@@ -743,14 +749,14 @@ every timed run). F: every driver InFlash and every vector in the flash
 | ... the DMA line's handler | 191 / 8264 | 393 to 394 / 4578 | 191 / 191 | 198 / 198 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 5274 / 16628 | 1826 / 9865 | 823 / 2897 | 1391 / 2964 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1109 / 9738 | 2081 / 6449 | 459 / 2032 | 452 / 2025 |
-| I2C one-byte write at 400 kHz, `start()` | 349 / 12429 | 366 / 5209 | 349 / 15865 | 366 / 5209 |
-| ... its longest handler entry | 155 / 6182 | 190 / 3162 | 155 / 155 | 181 / 181 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 49498 / 69460 | 49553 / 63504 | 49499 / 60096 | 49544 / 54576 |
+| I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5504 | 362 / 12640 | 379 / 5504 |
+| ... its longest handler entry | 164 / 6382 | 201 / 3174 | 164 / 164 | 192 / 192 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 49547 / faults | 49603 / 61326 | 49547 / 61850 | 49594 / 54810 |
 
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
-  a polled request 18 cycles dearer under InRam, an I2C entry 26-35 - the cache serves a warm path at the SRAM's pace,
+  a polled request 18 cycles dearer under InRam, an I2C entry 28 to 37 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
   (`spi.poll` of 256 frames 5738 against 5756). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
@@ -762,7 +768,7 @@ What the rows say:
   12046 cycles from the flash against 2881 with the host InRam (`spi.req`
   with letter c's switch on; `spi.cold`, the same request after a flush with
   the cache's misses read around it, 12140 cycles and 142 misses against
-  2881 and 41, the 41 the caller's); the SPI and I2C handlers cold from the flash 6182 and 8264
+  2881 and 41, the 41 the caller's); the I2C and SPI handlers cold from the flash 6382 and 8264
   cycles, from SRAM what they cost warm.
 - THE VECTOR PLACED REACHES WHAT A VECTOR RUNS, and nothing else: the
   handlers read their warm figures cold, but a host's `start()` stays
@@ -771,6 +777,15 @@ What the rows say:
   veneer still miss). BOTH is the image that runs a cold transaction
   closest to a warm one; what it still fetches is the caller's code, the
   idle path and the tick.
+- THE COLD I2C LETTER FAULTS ON TWO IMAGES: letter i under letter c's
+  switch ends in a HardFault inside its engined reads on the F image in
+  five runs of five, at 100 kHz, and on the B image in four runs of
+  four, at 100 kHz or 400 kHz - never in a warm run (five on each
+  image) nor on R and V (three cold runs each).
+  On the F image the fault's stacked return address is the letter's
+  receive buffer, or the core is found in the bootrom's fault loop; the
+  cause is not found, and the F image's cold engined wall is not
+  measured (Not covered yet).
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
   `start()` 824 bytes without engines and 1572 with them (the engines'
   launch folded in), the DMA line's body 684 (the wait for the end of the
@@ -799,6 +814,12 @@ Driver gaps, each with its reason:
   use it").
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The I2C host's engined reads cold on the default bench image and on
+  the image with both placements: `bench_rp2040` letter i under letter
+  c's switch HardFaults in its engined group ("A handler in SRAM"), so
+  those two images' cold engined figures are not measured. The fault
+  found and the letter run cold to its end would measure them.
 
 - `in_handler()` on this core: IPSR is the architecture's (ARMv6-M ARM
   B1.4.2) and the same read is measured on the STM32F4's Cortex-M4

@@ -80,10 +80,14 @@ type claims for ic_clk. The bus vocabulary itself (the Request, the
 reply, the status codes) is [../design/i2c-bus.md](../design/i2c-bus.md)'s;
 what an active object is and how a program lists them is the learning
 route's ([../learn/introduction.md](../learn/introduction.md)). Every
-transaction that moves the wire completes on the interrupt: the host has
-no polled path, and a refusal that moves nothing (a speed the clock
-cannot produce, or an address outside 0x08..0x77 that no host may name,
-[../design/i2c-bus.md](../design/i2c-bus.md)) is answered at once.
+transaction that moves the wire completes in an interrupt handler - the
+I2C line's, or the DMA line's when an engine faults: the host has no
+polled path. What moves nothing is answered at once, inside `start()`:
+`i2c_rejected` for a speed the clock cannot produce, for an address
+outside 0x08..0x77 that no host may name
+([../design/i2c-bus.md](../design/i2c-bus.md)) and for a request naming
+the DMA engines on a host that has none bound; `i2c_bus_error` for a
+block that will not disable to take a new address.
 
 The page goes on with what the stratum is for, the document of record,
 what lives here, what a family owes (the traits type member by member),
@@ -237,11 +241,14 @@ The pin table and its function code; the pad configuration; the reset or
 clock gate; the interrupt line and its controller; the crt's handler name
 an app binds; the DMA request numbers and the engine types that fill the
 slots; which rate is ic_clk; the FIFO depth; the microsecond ruler;
-whether the family places `.fast_text` (its traits' `places_fast_text`:
-the host's last template parameter is util/placement.hpp's tag, and
-`start()`, `isr()` and `dma_isr()` run their bodies through `Hot<P>` -
-where they were under `InFlash`, the default, one flattened instance
-each in `.fast_text.brio` under `InRam`;
+whether the family can run code from SRAM (its traits'
+`places_fast_text`, true when its linker script copies the
+`.fast_text` sections into SRAM before `main()`: the host's last
+template parameter is util/placement.hpp's tag, `InFlash` by default or
+`InRam`, and `start()`, `isr()` and `dma_isr()` run their bodies
+through that header's `Hot<P>` - inline where they are called under
+`InFlash`, one out-of-line copy each in the section `.fast_text.brio`,
+which lands in SRAM, under `InRam`;
 [../rp2040/platform.md](../rp2040/platform.md), "A handler in SRAM",
 has what it buys); and
 the public names - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>`
@@ -313,22 +320,23 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   the other eight the wire's slack. TX_EMPTY is armed only while entries
   remain and, on a read, only while fewer than half a FIFO of read
   commands are out. THE HANDLER MASKS IT BEFORE IT PUSHES and arms it
-  again only when room is still wanted: the level is the FIFO's, an entry
-  pushed into an empty FIFO that the block takes at once lowers and raises
-  it again while the handler runs, and with the source still armed the
-  line was pending again when the handler returned - one more entry, which
-  found nothing
-  - measured on the RP2040, a third host entry reading IC_INTR_STAT zero
-  on test_rp2040_i2c letter g's second engined read after every boot,
-  which reading the mask back after the store did not cure. Two stores on
-  an entry that keeps TX_EMPTY armed, none added to one that does not.
+  again only when room is still wanted. The reason: TX_EMPTY is a level
+  of the FIFO, and an entry pushed into an empty FIFO that the block
+  takes at once lowers it and raises it again while the handler runs. A
+  handler that pushed with the source still armed left the line pending
+  when it returned, and the block entered once more for nothing - on the
+  RP2040, a third host entry reading IC_INTR_STAT zero on
+  test_rp2040_i2c letter g's second engined read after every boot, which
+  reading the mask back after the store did not cure. The cost: two
+  stores on an entry that keeps TX_EMPTY armed, none on one that does
+  not.
 - **The receive threshold (`IC_RX_TL`, RX_FULL) and its level
   (`IC_RXFLR`)** - used at half the FIFO, written once at `init()`: a
   long read takes eight bytes an interrupt (one level read, then loads)
   and pours the commands their room leaves in the same entry, so the
-  bytes coming back pace the refill and a 255-byte read is 32 interrupts
-  where one a byte was 285. RX_FULL is masked once half a FIFO or less is
-  owed: the tail is the STOP's. A deeper level (three quarters: TX_TL 4,
+  bytes coming back pace the refill and a 255-byte read is 32
+  interrupts, one for each eight bytes received and the STOP's. RX_FULL
+  is masked once half a FIFO or less is owed: the tail is the STOP's. A deeper level (three quarters: TX_TL 4,
   RX_TL 11) was measured too, on the RP2040 - 21 and 22 interrupts for
   255 bytes, about a sixth fewer handler cycles - and declined: its
   longest entry grows by a fifth (the latency every other vector waits
@@ -346,8 +354,9 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   clear, one read at the STOP), its own STOP following its last entry and
   leaving that machine in IDLE. Without the FIFO's test a two-byte write
   to an absent address, written inside a window another node held, ended
-  `i2c_ok` on that window's STOP before it had clocked a bit (measured on
-  the RP pair). Without the machine's, a tenure of ONE entry - the probe,
+  `i2c_ok` on that window's STOP before it had clocked a bit (measured
+  between the WeAct RP2040 and the WeAct RP2350B, each the other's peer).
+  Without the machine's, a tenure of ONE entry - the probe,
   a one-byte read or write - fails the same way whenever its vector comes
   a little late: the block takes the waiting entry the moment the other
   STOP frees the bus, so the FIFO reads empty while that entry's START is
@@ -358,9 +367,11 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   rest too, flushing the FIFOs and idling the machine: a tenure whose
   START waited for another node's STOP and lost the arbitration between
   the handler's read of `IC_INTR_STAT` and its read of `IC_STATUS`
-  passed for its own STOP - an engined read inside a window held by hand
-  ended `i2c_ok` in three runs of three on the RP2040, its code cold -
-  so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and a standing
+  passed for its own STOP - on the RP2040, a control build whose STOP
+  test omits the read below ended an engined read inside a window held
+  by hand `i2c_ok` in three runs of `test_rp2040_i2c`'s key `z` out of
+  three, and the same letter run alone `i2c_arb_lost` three times of
+  three - so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and a standing
   TX_ABRT leaves the tenure to the abort's own entry. The test is one
   mask and one compare in the handler's STOP path, and one register read
   more where it passes (5 to 8 cycles measured on both chips).
@@ -369,17 +380,19 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   too (the block's own rule), so a handler that comes late stretches the
   bus and loses nothing. So does a thread held off inside `start()`:
   `start()` writes its first entry before the rest, so the tenure is on
-  the wire while the fill goes on, and a fill held off after its k-th
-  entry leaves the block the address and k bytes, (1 + k) byte times,
-  before it needs the next. A hold-off longer than that empties the
-  command FIFO with no STOP in it and the block holds SCL until the fill
-  resumes - a stretch inside the tenure, the bytes unchanged. Two byte
+  the wire while the fill goes on. Held off after its k-th entry, the
+  fill has left the block k entries to clock behind the address: the
+  address byte and k data bytes, (1 + k) byte times of nine SCL periods
+  each, before the block needs entry k + 1. A hold-off longer than that
+  empties the command FIFO with no STOP in it and the block holds SCL
+  until the fill resumes - a stretch inside the tenure, the bytes
+  unchanged. Two byte
   times are 45 us at 400 kHz and 18 us at 1 MHz, so a preempting dispatch
   of 3000 cycles (some 23 to 28 us with its road on these chips)
-  stretched no tenure at 400 kHz and, at 1 MHz, 9 and 13 in 4000 writes
-  on the RP2040 and on the RP2350's Cortex-M33 - by the arithmetic, fills
-  preempted after their first entry or two (measured under the
-  preemptive kernel, [../rp2040/i2c.md](../rp2040/i2c.md) and
+  stretched no tenure at 400 kHz on either chip and, at 1 MHz, 122 in
+  5200 writes on the RP2040, where the RP2350's preemptions all but never
+  landed inside `start()` (measured under the preemptive kernel,
+  [../rp2040/i2c.md](../rp2040/i2c.md) and
   [../rp2350/i2c.md](../rp2350/i2c.md)). The client takes it as a field
   (`hold_when_rx_full`, on by default); off, the block still acknowledges
   every byte, keeps a FIFO's worth and loses the rest, RX_OVER raised
@@ -414,9 +427,14 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   section, and what the RP2350 offers against it - the gap below). `dma`
   on a host with no engines bound (`has_dma` false) is answered
   `i2c_rejected` inside `start()`, nothing on the wire, as an address
-  outside the range is. A wrong choice costs core cycles, never
-  correctness; each family's document gives the measured cost of both
-  and the length from which `dma` costs the core less.
+  outside the range is. The request names it in one field,
+  `r.engine = brio::I2cEngine::dma;`, on a host whose two engine slots
+  are filled (each family's "How to use it" has the host type and the
+  vector). A wrong choice costs core cycles, never correctness: each
+  family's document gives the measured cost of both, and the length
+  from which `dma` costs the core less - a read of nine bytes on the
+  RP2040 with the host in SRAM and on both halves of the RP2350, the
+  pump's second entry.
 - **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
   `IC_DMA_RDLR`)** - used for the read phase under `dma`, watermarks at
   their reset value (single transfers, the chapter's advice); BOTH
@@ -425,12 +443,20 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   transmit FIFO empty and a starved receive channel leaves the receive
   FIFO full, and the block holds SCL either way
   (`RX_FIFO_FULL_HLD_CTRL`, set by `I2cConfig`'s default) - the bus
-  slows, nothing is lost; the receive engine is armed to report a bus
-  error alone and the STOP ends its tenure, so an engined read of three
-  bytes or more is two interrupts - the transmit block's end, which
-  hands the pump the STOP entry, and the STOP; three when the block's end
-  finds no room for that entry and TX_EMPTY brings it - and a shorter one
-  is one, the STOP. The transmit engine is CLAIMED when the read half
+  slows, nothing is lost. The receive engine is armed to report a bus
+  error alone, and the STOP ends its tenure. So a read alone under
+  `dma` costs these interrupts, a write half before it adding the
+  pump's own:
+  - a read of one or two bytes: one, the STOP;
+  - a read of three bytes or more: two - the transmit block's end, which
+    hands the pump the STOP entry, and the STOP;
+  - the same, when the block's end finds no room in the FIFO for that
+    entry: three, TX_EMPTY bringing it.
+
+  A bus error on either channel ends the tenure `i2c_dma_fault` in
+  `dma_isr()`, the block's abort asked and the channels stopped: the
+  stratum's own status, beyond the four wire codes util/i2c_bus.hpp
+  defines. The transmit engine is CLAIMED when the read half
   starts, its one launch step that can fail: a channel another owner
   holds is not taken, the pump writes the commands on TX_EMPTY (about
   one entry for each eight), the receive engine still collects, and the
