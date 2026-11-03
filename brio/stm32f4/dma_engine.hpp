@@ -8,7 +8,11 @@
  * meets it as a default template argument it never spells: `Uart<1,
  * console_pins>` has `NoDmaEngine` in both slots, and naming
  * `stm32f4/dma.hpp`'s `DmaTxEngine` / `DmaRxEngine` there instead is what
- * puts a transport on DMA (docs/stm32f4/dma.md). Nothing here runs code:
+ * puts a transport on DMA (docs/stm32f4/dma.md). Beside them the claim
+ * (dma_engine_claim): a transport gives each engine's STREAM to the
+ * request it serves through util/dma_owner.hpp, so a second owner on a
+ * stream, or a second stream for a request, does not compile
+ * (docs/design/dma.md, "The ownership rule"). Nothing here runs code:
  * these are types and constants, read at compile time.
  *
  * It is a tag, not a base class: `present` is the only thing a task asks
@@ -27,6 +31,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -89,5 +95,20 @@ enum class DmaInterrupts : uint8_t { completion, errors_only, none };
 /// 10.5.6). Here and not in dma.hpp, because a driver with an engine slot
 /// cuts its runs to it without including the controller.
 inline constexpr uint32_t dma_max_items = 0xFFFFu;
+
+/// The claim a transport makes in its class body for each engine slot:
+/// the engine's STREAM, `DmaSlotId<controller, stream>`, given to `Owner`,
+/// the request the transport routes to it; nothing for an empty slot. The
+/// key is the stream and never the CHSEL cell: two cells of one stream
+/// cannot run at once (RM0090 10.3.3), so they are one slot. A
+/// compile-time constant, true where it compiles.
+template <typename Engine, typename Owner>
+consteval bool dma_engine_claim() {
+    if constexpr (Engine::present) {
+        return dma_claim<DmaSlotId<Engine::controller, Engine::stream>, Owner>;
+    } else {
+        return true;
+    }
+}
 
 } // namespace brio

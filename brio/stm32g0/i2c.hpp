@@ -1986,6 +1986,11 @@ class I2cHost {
                   "have to hand over to the byte pump mid-transfer");
     static_assert(i2c_engines_distinct<TxEngine, RxEngine>(),
                   "brio I2cHost: the two engines must ride two different DMA channels");
+    // Each engine's channel is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either channel, or this request on another channel, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::rx>>());
     static_assert(i2c_pins_valid(pins),
                   "brio I2cHost: these I2C pads are not a bus - SCL and SDA must both be "
                   "real pads of this device and no two signals may name the same pin");

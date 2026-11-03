@@ -14,8 +14,13 @@
  * that wants an engine includes stm32g0/dma.hpp as well and names the
  * channel; one that does not never sees the controller at all.
  *
- * Nothing here runs in a context of its own: the tag and the two
- * enumerations are compile-time vocabulary, and dma_beat_aligned() is a
+ * The fourth piece is the claim (dma_engine_claim): an owner gives an
+ * engine's channel to the request it serves through util/dma_owner.hpp,
+ * so a second owner on a channel, or a second channel for a request, does
+ * not compile (docs/design/dma.md, "The ownership rule").
+ *
+ * Nothing here runs in a context of its own: the tag, the two
+ * enumerations and the claim are compile-time vocabulary, and dma_beat_aligned() is a
  * pure test of an address, callable from anywhere, that waits for
  * nothing and masks nothing.
  *
@@ -40,6 +45,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -103,6 +110,21 @@ enum class DmaIrq : uint8_t {
 /// aligned - the test is about addresses, the null is the caller's.
 inline bool dma_beat_aligned(const volatile void* p, uint8_t bytes) {
     return (reinterpret_cast<uintptr_t>(p) & static_cast<uintptr_t>(bytes - 1u)) == 0u;
+}
+
+/// The claim a transport makes in its class body for each engine slot:
+/// the engine's channel, `DmaSlotId<controller, channel>`, given to
+/// `Owner`, the request the transport routes to it (RM0444 11.4.4: one
+/// request id a channel); nothing for an empty slot. The request id the
+/// DMAMUX routes is the owner's business, not the key's. A compile-time
+/// constant, true where it compiles.
+template <typename Engine, typename Owner>
+consteval bool dma_engine_claim() {
+    if constexpr (Engine::present) {
+        return dma_claim<DmaSlotId<Engine::controller, Engine::channel>, Owner>;
+    } else {
+        return true;
+    }
 }
 
 } // namespace brio

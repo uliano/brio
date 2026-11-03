@@ -300,8 +300,12 @@ using ByteDmaHost = SpiHost<1, host_pins, DmaTxEngine<1, 1>, DmaRxEngine<1, 2>>;
 // the ladder, which is the whole point of that measurement.
 using PeerTx = DmaTxEngine<1, 3>;
 using PeerRx = DmaRxEngine<1, 4>;
-// The packed pair of the LDMA leg: the SAME channels at half-word width.
-using PeerTx16 = DmaTxEngine<1, 3, uint16_t>;
+// Armed by hand on SPI2's two requests: the suite claims both channels for
+// them (util/dma_owner.hpp). The LDMA leg's packed transmit is SPI1's
+// request, so it rides SPI1's own transmit engine, HostTx - one owner, one
+// channel (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<1, 3>, DmaOwner<DmaPeriph::spi, 2, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<1, 4>, DmaOwner<DmaPeriph::spi, 2, DmaSignal::rx>>);
 
 using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, Host, DmaHost, ByteDmaHost>;
 constexpr SysClock clock;
@@ -2719,10 +2723,12 @@ void ti_dma() {
                                       .last_dma_transmit_odd = odd_declared});
         Pin<'B', 3>::function(PinFunction::af0, {.speed = PinSpeed::very_high});
         Pin<'B', 5>::function(PinFunction::af0, {.speed = PinSpeed::very_high});
-        PeerTx16::arm(S1::data_address(), S1::dma_tx_request());
+        // Armed for its errors alone: the leg polls the client's count, and
+        // the channel's vector belongs to the engined host's bookkeeping.
+        HostTx::arm(S1::data_address(), S1::dma_tx_request(), DmaPriority::high, DmaIrq::error_only);
         CsPin::clear();
         S1::enable();
-        (void)PeerTx16::start(std::span<const uint16_t>(packed, 3));   // 5 or 6 frames
+        (void)HostTx::start(std::span<const uint16_t>(packed, 3));   // 5 or 6 frames
         uint32_t sp = 2'000'000u;
         while (peer_rx_n < 5u && sp-- != 0u) {
         }
@@ -2735,8 +2741,8 @@ void ti_dma() {
         }
         seen[leg] = peer_rx_n;
         const uint32_t sr = S1::status();
-        const uint16_t in_flight = PeerTx16::in_flight();
-        PeerTx16::stop();
+        const uint16_t in_flight = HostTx::in_flight();
+        HostTx::stop();
         (void)S1::disable();
         CsPin::set();
         print(serial, "    LDMA_TX ", odd_declared ? 1 : 0, ": client saw ",
@@ -6640,16 +6646,18 @@ void tS_named() {
     // fallen by then, and comes back; nothing is clocked. The select is PB6
     // here, so the peer's never moves.
     CsPin::output(true);
-    named::DcPad::output(true);
+    named::DcPad::output(false);
     (void)DmaHost::init(clock, named::link_config());
     dma_host_live = true;
     DmaHost::prime(SpiMode::mode0, SpiClock::div16);
     const bool held = HostTx::claim();
     DmaHost::Request late{};
-    late.cs = named::DcPad::ref();
+    late.cs = CsPin::ref();
+    late.dc = named::DcPad::ref();
     late.tx = lend<Lease::reply>(static_cast<const uint8_t*>(named::tx));
     late.len = 4;
-    late.clock = SpiClock::div16;
+    late.clock = SpiClock::div8;
+    late.mode = SpiMode::mode3;
     late.engine = SpiEngine::dma;
     way::watch_sck(true);
     const bool late_ended = DmaHost::start(late);

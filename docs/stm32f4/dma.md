@@ -74,7 +74,9 @@ RM0090 Rev 22 ch. 10, and its twins RM0390 Rev 6 ch. 9
 and RM0383 Rev 4 ch. 9 - one IP, three manuals, identical register by
 register. What differs between them is the request mapping: RM0090's
 tables 43 and 44, RM0390's 28 and 29, RM0383's 27 and 28 are three
-different tables. Errata: neither ES0206 Rev 24 nor ES0298 Rev 8 has a DMA
+different tables, and RM0386 Rev 6's 29 and 30 (F469/F479) and RM0368
+Rev 5's 28 and 29 (F401) two more, read for the forced choices ("One
+owner a stream"). Errata: neither ES0206 Rev 24 nor ES0298 Rev 8 has a DMA
 section at all (their items with "DMA" in the title are the DAC's request
 behaviour, that chapter's business); ES0287 Rev 6 has one item about this
 controller, 2.2.11, quoted below. ES0206 2.2.7 / ES0298 2.2.7, the delay
@@ -87,8 +89,8 @@ facts no header carries keyed on the device-select define). Bench suite:
 ring against copies on its own controller (a letter is one command key
 of the suite's console and the group of verdicts it runs, `z` the key
 that runs them all). Family fixture
-`test/family_stm32f4/dma.cpp` plus six negatives under `brio check
-stm32f4`.
+`test/family_stm32f4/dma.cpp` plus nine negatives under `brio check
+stm32f4`, three of them the ownership check's.
 
 ## What the silicon does
 
@@ -388,6 +390,67 @@ way `stm32f4/pin.hpp`'s port clock is: a caller cannot forget it, and a
 program that configures no stream pays for none of it. `Dma<n>::init()` is
 for the case where the block is wanted before any stream is.
 
+## One owner a stream
+
+The ownership rule ([design/dma.md](../design/dma.md), "The ownership
+rule") on this controller. A slot is a STREAM, `DmaSlotId<c, s>`: DMA1's
+or DMA2's stream 0 to 7, never the channel cell CHSEL picks on it - two
+cells of one stream cannot run at once (RM0090 10.3.3), so they are one
+slot, and USART1's transmit (DMA2 stream 7, cell 4) and QUADSPI (stream 7,
+cell 3) are two owners of one stream. Who claims, all at compile time
+through `util/dma_owner.hpp`, at no byte and no cycle:
+
+- **a transport, for the engines in its slots**: `Uart` claims its
+  streams for the instance's transmit and receive (`DmaOwner<DmaPeriph::
+  usart, n, ...>`, the UARTs under the same kind), `SpiHost`, `I2cHost`
+  and `FmpI2cHost` theirs, in the class body - so a second owner on a
+  stream, whatever its cell, or a request on a second stream through a
+  second transport type (SPI1's transmit has streams 3 and 5 of DMA2)
+  does not compile. One host used at two element widths, or one
+  peripheral under two transport types, is one owner and compiles;
+- **`DmaCopyEngine<2, s>`, for itself**: no request paces a copy, so the
+  engine claims its stream for its own tag, `DmaCopyOwner<2, s>`;
+- **the program, for every engine it arms itself and every stream it
+  drives through `DmaStream`**: an engine filled into no transport - a
+  converter's or a DAC's stream ([adc.md](adc.md), [dac.md](dac.md)), a
+  paced transfer - is claimed beside its name with `dma_engine_claim<E,
+  Owner>()`, the same helper the transports use, and a stream driven by
+  hand takes a tag of the program's own, any empty class, one tag a
+  stream (the examples below).
+
+What the map leaves to choose is the cell, and with it the instance: each
+request is wired to one or two (stream, cell) pairs, so two requests
+whose every cell lies on one stream exclude each other, and only another
+instance separates them. The choices that forces, read off RM0090 tables
+43 and 44 (the F405 class without the rows of their note 1, the F42x/F43x
+with them), RM0390 tables 28 and 29 (F446), RM0383 tables 27 and 28
+(F411), RM0368 tables 28 and 29 (F401) and RM0386 tables 29 and 30
+(F469/F479) - a pair where one request has a second cell is not listed,
+the cell separating them:
+
+| parts | stream | on DMA, this ... | ... forbids |
+|---|---|---|---|
+| F405 class, F42x/F43x, F446, F469/F479 | DMA1 S5 | DAC channel 1 | USART2's receive (on the F446, FMPI2C1's transmit too) |
+| F405 class, F42x/F43x, F446, F469/F479 | DMA1 S6 | DAC channel 2 | USART2's transmit (F42x/F43x, F469/F479: UART8's receive too; F446: SPDIFRX's control flow) |
+| F405 class, F42x/F43x, F446, F469/F479 | DMA1 S4 | SPI2's transmit | I2C3's transmit and UART4's transmit |
+| every part with I2C2 and UART5 | DMA1 S7 | I2C2's transmit | UART5's transmit |
+| F405 class, F42x/F43x, F469/F479 | DMA1 S2 | I2C3's receive | UART4's receive |
+| F446 | DMA1 S2 | FMPI2C1's receive | UART4's receive |
+| F42x/F43x, F469/F479 | DMA1 S0, S1, S3, S6 | UART8's transmit; UART7's transmit; UART7's receive; UART8's receive | UART5's receive; USART3's receive; SPI2's receive; USART2's transmit |
+| F446, F469/F479 | DMA2 S7 | QUADSPI | USART1's transmit (USART6's has S6 and S7) |
+| F446 | DMA1 S1 | SPDIFRX's data | USART3's receive |
+| F415, F417, F437, F439, F479 | DMA2 S5, S6, S7 | CRYP's output; CRYP's input; HASH's input | SPI6's transmit; SPI6's receive; USART1's transmit |
+
+The SPDIFRX, CRYP and HASH rows are silicon no driver here takes an
+engine for. Counted over the uses most programs combine - a console UART
+with both engines, an SPI host's two, one converter stream, one DAC
+stream, one timer-paced stream, a second UART with both engines and an
+I2C host's transmit - every class with a manual on the desk places them
+all at once (sixteen streams and two cells a request leave room), so no
+group is unavoidable on this family; the one pair no choice separates is
+the F479's QUADSPI and HASH's input, both wired to DMA2's stream 7 alone
+(RM0386 table 30).
+
 ## How to use it
 
 **A copy and a fill** - memory to memory on a DMA2 stream, polled:
@@ -407,6 +470,8 @@ general and validating `load()`:
 
 ```cpp
 using Copy = brio::DmaStream<2, 0>;
+struct CopyHand {};                    // the stream is programmed by hand: a tag owns it
+static_assert(brio::dma_claim<brio::DmaSlotId<2, 0>, CopyHand>);
 brio::DmaTransfer t{};
 t.peripheral = source;                 // SxPAR is the SOURCE here
 t.memory = destination;
@@ -455,6 +520,8 @@ shape under any peripheral, read through the view whose producer it is:
 
 ```cpp
 using Rx = brio::DmaRxEngine<2, 2, 4>;          // USART1's receive cell
+static_assert(brio::dma_engine_claim<Rx, brio::DmaOwner<brio::DmaPeriph::usart, 1,
+                                                        brio::DmaSignal::rx>>());
 static uint8_t ring[256];                       // a power of two, one lap
 using Bytes = brio::HardwareRing<ring, Rx>;     // remaining() and laps() are the producer
 extern "C" void DMA2_Stream2_IRQHandler() { (void)Rx::service_ring(); }   // a lap counted
@@ -475,6 +542,8 @@ whose manual was not read.
 in the CPU's path between laps:
 
 ```cpp
+static_assert(brio::dma_claim<brio::DmaSlotId<2, 7>,
+                              brio::DmaOwner<brio::DmaPeriph::usart, 1, brio::DmaSignal::tx>>);
 brio::DmaTransfer t{};
 t.peripheral = brio::Usart<1>::data_address();
 t.memory = const_cast<char*>(table);
@@ -815,10 +884,13 @@ Driver gaps, each with its reason:
   somebody has to keep. The paced transfer of `bench_stm32f4` names
   TIM1_UP's cell (DMA2 stream 5, channel 6, the same in the three tables)
   by hand.
-- **The part classes whose manual is not on the desk** (F401, F410, F412,
-  F413/F423) have no request table and an engine on them is refused,
-  exactly as a clock above the reset rate is: RM0368, RM0401, RM0402 and
-  RM0430 would each add one entry.
+- **The part classes with no request table in the reserve** (F401, F410,
+  F412, F413/F423) refuse an engine, exactly as a clock above the reset
+  rate is refused. The F401's manual, RM0368 Rev 5, is on the desk and its
+  request map read (tables 28 and 29, the forced choices above): its entry
+  is not written because no board here carries the part to run it on.
+  RM0401, RM0402 and RM0430 are not on the desk; each would add one
+  entry.
 - **The block-stream engines** (`util/block_stream.hpp`'s `BlockPlayer` and
   `BlockSource`, which the STM32G0 and the CH32Vx03 have as
   `DmaLoopEngine` / `DmaPingPongEngine`) are not built here. This

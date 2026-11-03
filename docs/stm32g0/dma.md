@@ -25,10 +25,10 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 }
 ```
 
-What decides correctness even there. A channel belongs to one engine
-(a transport handed two engines on one channel is refused at compile
-time; two engines a program names itself are its own to keep apart),
-and `arm()`
+What decides correctness even there. A channel belongs to one owner,
+the request it serves, for the whole image, and a second owner on it
+does not compile ("One owner a channel", below - the copy above claims
+its channel itself); and `arm()`
 runs once before the first block: it opens the clock, routes the
 request and keeps the channel's control word, which the register
 cannot hold between blocks. The channel's vector is the program's to
@@ -59,8 +59,8 @@ one command key of the suite's console and the group of verdicts it
 runs, `z` the key that runs them all; letters `p`, `q`, `u` and `w`
 outside `z` need `brio stress`); the engines' cost is
 `bench_stm32`'s letter `d`. Family fixture
-`test/family_stm32g0/dma.cpp` plus ten negatives under
-`brio check stm32g0`.
+`test/family_stm32g0/dma.cpp` plus its negatives under
+`brio check stm32g0` (`dma*.cpp`), three of them the ownership check's.
 
 ## What the silicon does
 
@@ -343,10 +343,14 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 // or, armed with brio::DmaIrq::error_only: while (!Copy::poll()) {}
 ```
 
-A waveform played for ever, with the CPU out of the path:
+A waveform played for ever, with the CPU out of the path - an engine a
+program arms itself, so the program claims its channel for the request
+it hands (below, "One owner a channel"):
 
 ```cpp
 using Player = brio::DmaLoopEngine<1, 1, uint32_t>;
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 1>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 2, brio::DmaSignal::update>>);
 Player::arm(Tim2::ccr_address(0), Tim2::dma_update_request());
 Tim2::interrupts(Tim2::update_dma, true);
 Player::start(duty_table, 8);          // and that is all: CIRC does the rest
@@ -359,6 +363,8 @@ A sampled stream into a `BlockRelay`:
 
 ```cpp
 using Source = brio::DmaPingPongEngine<1, 4, uint32_t>;
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 4>,
+                              brio::DmaOwner<brio::DmaPeriph::tim, 3, brio::DmaSignal::update>>);
 using Relay  = brio::BlockRelay<brio::Stm32g0Platform<>, Subs, Source>;
 Source::arm(&TIM2->CNT, Tim3::dma_update_request());
 Source::start(buffer_a, buffer_b, 32);
@@ -388,6 +394,8 @@ A receive ring any peripheral fills, read in place:
 ```cpp
 uint8_t rx_ring[256];
 using Rx   = brio::DmaRxEngine<1, 5>;
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 5>,
+                              brio::DmaOwner<brio::DmaPeriph::usart, 3, brio::DmaSignal::rx>>);
 using View = brio::HardwareRing<rx_ring, Rx>;
 Rx::arm(brio::Usart<3>::rx_data_address(), brio::Usart<3>::dma_rx_request(), rx_ring);
 Rx::start();
@@ -395,6 +403,55 @@ Rx::start();
 const auto run = View::read_span();   // the bytes where the channel wrote them
 const bool intact = View::consume(static_cast<uint32_t>(run.size()));
 ```
+
+## One owner a channel
+
+The ownership rule ([design/dma.md](../design/dma.md), "The ownership
+rule") on this controller. A slot is a channel, `DmaSlotId<c, ch>`: DMA1's
+or, on the G0B0/G0B1/G0C1 class, DMA2's, numbered from one as the silicon
+numbers it. The request id the DMAMUX routes to the channel is the
+owner's, never part of the key: one request id on two channels is the
+other half of the check, which RM0444 11.4.4's caution allows only for
+"two connected DMA channels ... not simultaneously active" - in-turn use,
+which the rule forbids anyway. Who claims, all at compile time through
+`util/dma_owner.hpp`, at no byte and no cycle:
+
+- **a transport, for the engines in its slots**: `Uart` and `LpUart` claim
+  their channels for the instance's transmit and receive
+  (`DmaOwner<DmaPeriph::usart, n, ...>`, `lpuart` for an LPUART),
+  `SpiHost` and `I2cHost` for theirs, in the class body, so a second owner
+  on either channel, or the same request on another channel through a
+  second transport type, does not compile. One host used at two element
+  widths, or one peripheral under two transport types, is one owner and
+  compiles;
+- **`DmaCopyEngine<n, ch>`, for itself**: no request paces a copy, so the
+  engine claims its channel for its own tag, `DmaCopyOwner<n, ch>`;
+- **the program, for every engine it arms itself and every channel it
+  programs through `DmaChannel`**: `DmaTxEngine`, `DmaRxEngine`,
+  `DmaLoopEngine` and `DmaPingPongEngine` learn their request at `arm()`,
+  at run time, so they claim nothing; a program that arms one names the
+  request in a claim beside it (the examples above), and one that programs
+  a channel by hand names a tag of its own, any empty class, one tag a
+  channel.
+
+What the map leaves to choose is the count alone: the DMAMUX routes any
+request to any channel (11.3.2, table 54), so no instance excludes
+another and no choice is forced; the only conflict is more requests than
+channels (10.3.1, table 49). Counted over the uses most programs combine -
+a console UART with both engines, an SPI host's two (or its transmit
+alone), one converter stream, one DAC stream, one timer-paced stream, a
+second UART with both engines - the groups that cannot all be on DMA at
+once:
+
+| part | channels | what does not fit at once |
+|---|---|---|
+| STM32G030, G031, G041 | 5 | the console's two, the SPI host's two, the converter and a paced stream: six for five (with the host's transmit alone they take all five) |
+| STM32G050, G070 | 7 | the console's two, the SPI host's two, the converter, a paced stream and a second UART's two: eight for seven |
+| STM32G051, G061, G071, G081 | 7 | the console's two, the SPI host's two or its transmit alone, the converter, the DAC, a paced stream and a second UART's two |
+| STM32G0B0, G0B1, G0C1 | 12 | none of these: the set takes ten |
+
+No choice of instances changes a row, the map being free: what a program
+on a five-channel part gives up is a stream, never an instance.
 
 ## The block stream
 
@@ -498,7 +555,7 @@ FIRST** (`test_stm32_dma` letters `p` and `q`, outside `z`, with `brio
 stress` as the sender). The alternation above is between a memory-to-
 memory channel and ANY other requester, so a single copy of any length
 never starved USART2's receive ring (16 KB copies, 127 character times at
-921600, lost nothing). Two copies launched together on channels 1 and 2
+921600, lost nothing). Two copies launched together on channels 4 and 5
 alternate with EACH OTHER, and a ring on channel 7 at their level waits
 for the pair: 2.6 character times at 115200 with 2 KB copies, 4.3 to 22
 at 921600 with 256 B to 2 KB ones. At the ring's default `very_high` the

@@ -244,6 +244,10 @@ PinSpeed miso_class(uint8_t mode) {
 /// access widths), the span's element choosing.
 using PeerTx = DmaTxEngine<1, 1, uint16_t>;
 using PeerRx = DmaRxEngine<1, 2, uint16_t>;
+// Armed by hand on SPI1's two requests: the peer claims both channels for
+// them (util/dma_owner.hpp).
+static_assert(dma_claim<DmaSlotId<1, 1>, DmaOwner<DmaPeriph::spi, 1, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<1, 2>, DmaOwner<DmaPeriph::spi, 1, DmaSignal::rx>>);
 bool dma_ok = false;
 
 bool trace = false;

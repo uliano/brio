@@ -549,6 +549,9 @@ struct Usart {
     Usart() = delete;
 
     static constexpr uint8_t index = n;
+    /// The kind a DMA claim names this instance's requests by
+    /// (util/dma_owner.hpp): USARTn's transmit is DmaOwner<usart, n, tx>.
+    static constexpr DmaPeriph dma_periph = DmaPeriph::usart;
     static constexpr bool has_clock_select = usart_has_clock_select(n);
 
     /// Table 183's FULL/BASIC split, the compile-time half (the reserve
@@ -1740,6 +1743,11 @@ class UartTask {
     static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA "
                   "channels: a channel moves data in one direction only");
+    // Each engine's channel is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either channel, or this request on another channel, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<S::dma_periph, S::index, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<S::dma_periph, S::index, DmaSignal::rx>>());
     static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
                   "brio Uart: rx_priority ranks the receive engine's channel - this port "
                   "has no receive engine");

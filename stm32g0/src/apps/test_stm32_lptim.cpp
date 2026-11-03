@@ -210,6 +210,10 @@ using C1 = Comp<1>;
 
 using Dma1 = Dma<1>;
 using EdgeCh = DmaChannel<1, 1>;
+/// The channel this suite programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct EdgeHand {};
+static_assert(dma_claim<DmaSlotId<1, 1>, EdgeHand>);
 using Gen0 = DmaMuxGenerator<0>;
 
 // ---------------------------------------------------------------------------

@@ -159,6 +159,9 @@ struct Lpuart {
     Lpuart() = delete;
 
     static constexpr uint8_t index = n;
+    /// The kind a DMA claim names this instance's requests by
+    /// (util/dma_owner.hpp): LPUARTn's transmit is DmaOwner<lpuart, n, tx>.
+    static constexpr DmaPeriph dma_periph = DmaPeriph::lpuart;
     /// Every LPUART has one (5.4.21), unlike the USARTs.
     static constexpr bool has_clock_select = lpuart_clock_select_pos(n) != 0xFF;
 

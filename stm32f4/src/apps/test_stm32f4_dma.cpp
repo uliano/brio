@@ -161,6 +161,22 @@ using Block = Dma<2>;
 using Work = DmaStream<2, 0>;    ///< the worker of most letters
 using Rival = DmaStream<2, 3>;   ///< the second stream of the arbitration letter
 
+// ONE OWNER A STREAM (docs/design/dma.md, "The ownership rule"). This suite
+// programs DMA2's streams 0, 3, 5 and 6 by hand - Work and Rival, and the
+// cells letter r stages its requesters on (ADC1's on stream 0, SPI1's on 3,
+// TIM1's update on 5, USART6's transmit on 6) - and runs copy engines on 1
+// (letter s) and 3 to 6 (letter p's load). Each stream has one owner for the
+// whole image: stream 0 the suite's tag, every stream a copy engine runs on
+// that engine's own tag (DmaCopyOwner, which the engine claims itself), the
+// suite's hand programming of the same stream being the same owner's. The
+// console's two streams are its Uart's.
+template <uint8_t n, uint8_t s>
+struct Hand {};
+static_assert(dma_claim<DmaSlotId<2, 0>, Hand<2, 0>>);
+static_assert(dma_claim<DmaSlotId<2, 3>, DmaCopyOwner<2, 3>>);
+static_assert(dma_claim<DmaSlotId<2, 5>, DmaCopyOwner<2, 5>>);
+static_assert(dma_claim<DmaSlotId<2, 6>, DmaCopyOwner<2, 6>>);
+
 constexpr uint16_t buffer_bytes = 2048;
 alignas(4) volatile uint8_t src[buffer_bytes];
 alignas(4) volatile uint8_t dst[buffer_bytes];
@@ -1815,6 +1831,9 @@ static_assert(u6_cell.stream != spi1_cell.stream && u6_cell.stream != adc1_cell.
                   spi1_cell.stream != tim1_up_cell.stream &&
                   adc1_cell.stream != tim1_up_cell.stream,
               "four requesters, four streams");
+static_assert(adc1_cell.stream == 0u && spi1_cell.stream == 3u && tim1_up_cell.stream == 5u &&
+                  u6_cell.stream == 6u,
+              "the four cells are on the streams this suite claims by hand (Hand, above)");
 
 alignas(4) volatile uint16_t handover_items[4];
 

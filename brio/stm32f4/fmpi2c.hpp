@@ -1921,6 +1921,11 @@ class FmpI2cHost {
                   "brio FmpI2cHost: the receive engine's (controller, stream, channel) is not "
                   "the cell this block's receive request is wired to - RM0390 table 28 gives "
                   "FMPI2C1_RX DMA1 stream 2, channel 2; see the transmit engine's message");
+    // Each engine's stream is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either stream, or this request on another stream, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::fmpi2c, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::fmpi2c, n, DmaSignal::rx>>());
     static_assert(fmpi2c_pins_valid(pins),
                   "brio FmpI2cHost: these FMPI2C pads are not a bus - SCL and SDA must both be "
                   "named, must be real pins of ports this part bonds, and no two signals may "

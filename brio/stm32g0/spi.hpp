@@ -1864,6 +1864,11 @@ class SpiHost {
                   "full-duplex and its completion is the RECEIVE block's");
     static_assert(spi_engines_distinct<TxEngine, RxEngine>(),
                   "brio SpiHost: the two engines must ride two different DMA channels");
+    // Each engine's channel is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either channel, or this request on another channel, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::rx>>());
 
     static_assert(spi_pins_valid(pins),
                   "brio SpiHost: these SPI pads are not a link - SCK must be a real pad "

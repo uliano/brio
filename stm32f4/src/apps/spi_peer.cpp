@@ -282,6 +282,11 @@ constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (SysClock::hz / 36'00
 /// of uint16_t a half-word, the span's element choosing.
 using PeerTx = DmaTxEngine<1, 4, 0, uint16_t>;
 using PeerRx = DmaRxEngine<1, 3, 0, uint16_t>;
+// Armed by hand on SPI2's two requests: the peer claims both streams for
+// them (util/dma_owner.hpp) - by their numbers, so that the claims
+// instantiate nothing ahead of the engines' own first use.
+static_assert(dma_claim<DmaSlotId<1, 4>, DmaOwner<DmaPeriph::spi, 2, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<1, 3>, DmaOwner<DmaPeriph::spi, 2, DmaSignal::rx>>);
 
 void wait_nss_high(uint16_t ms);
 

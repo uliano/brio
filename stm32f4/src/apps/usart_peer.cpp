@@ -148,6 +148,10 @@ constexpr uint8_t rx_channel = 2;   // TIM1_CH3
 
 using Engine = Tim<1>;
 using EdgeDma = DmaStream<2, 6>;
+/// The stream this peer programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct EdgeHand {};
+static_assert(dma_claim<DmaSlotId<2, 6>, EdgeHand>);
 
 /// The USART's kernel and the core, both from the crystal.
 constexpr uint32_t usart_hz = SysClock::pclk2_hz;   // 90 MHz

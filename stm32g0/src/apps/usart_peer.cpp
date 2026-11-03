@@ -177,6 +177,10 @@ constexpr uint8_t rx_channel = 2;   // TIM1_CH3
 
 using Engine = Tim<1>;
 using EdgeDma = DmaChannel<1, 1>;
+/// The channel this peer programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct EdgeHand {};
+static_assert(dma_claim<DmaSlotId<1, 1>, EdgeHand>);
 using Span = Tim<2>;
 
 // ---------------------------------------------------------------------------

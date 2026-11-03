@@ -1313,6 +1313,11 @@ class SpiHost {
                   "brio SpiHost: the receive engine's (controller, stream, channel) is not a "
                   "cell this instance's receive request is wired to - see the transmit "
                   "engine's message");
+    // Each engine's stream is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either stream, or this request on another stream, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::spi, n, DmaSignal::rx>>());
     static_assert(spi_pins_valid(pins),
                   "brio SpiHost: these SPI pads are not a link - SCK is required, every pad "
                   "named must be a real pin of a present port, and no two signals may name "

@@ -129,6 +129,10 @@ using Stamper = Tim<3>;               // the FDCAN's one external timestamp sour
 // The no-CPU edge counter: a DMAMUX request generator on the TX pad's
 // EXTI line, feeding one memory-to-memory-ish channel.
 using EdgeCh = DmaChannel<1, 1>;
+/// The channel this suite programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct EdgeHand {};
+static_assert(dma_claim<DmaSlotId<1, 1>, EdgeHand>);
 using EdgeGen = DmaMuxGenerator<0>;
 constexpr uint16_t edge_capacity = 60000;
 volatile uint32_t edge_src = 0xA5A5A5A5u;

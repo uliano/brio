@@ -13,8 +13,11 @@
 // NOT ON THE G031K8: the vectors bind every driver whatever group an
 // image carries, so every instance is in every image - some 8 KB of SRAM,
 // the part's whole RAM before a ring or a buffer. What each instance
-// costs is docs/stm32g0/platform.md's census.
+// costs is docs/stm32g0/platform.md's census. Its images are
+// bench_stm32's three, split as bench_stm32's groups say why.
 // build: boards = g0b1re,g071rb
+// build: groups.g071rb = rmptfed,u,i
+// build: groups.g0b1re = rmptfed,u,i
 // build: monitor_speed = 115200
 
 #define BENCH_IMAGE "bench_stm32_ram"

@@ -318,12 +318,22 @@
 //
 // THE G031K8 does not hold the bench whole: its 8 KB of RAM, not its
 // flash, is the limit (letter d's buffers alone take most of it), so it
-// builds three images there - the skeleton and the SPI host, the DMA,
-// the serial and I2C transports (the groups line below; design/
+// builds four images there - the skeleton and the SPI host, the DMA, the
+// serial transport, the I2C transport (the groups line below; design/
 // overview.md, "A suite's image fits the family's smallest chip").
-// The G071RB and the G0B1RE build one.
+//
+// ONE OWNER A CHANNEL (docs/design/dma.md, "The ownership rule"): the
+// engined SPI host, letter u's USART1 and letter i's I2C1 each take DMA1's
+// channels 2 and 3, so no image carries two of them, on any part - the
+// G071RB and the G0B1RE build three images (the skeleton with the DMA and
+// the SPI host, the serial transport, the I2C transport), and a slot whose
+// letter an image does not carry is the empty NoDmaEngine there
+// (EngineIf, below). The copy engine owns channel 1 and the paced
+// transfer, TIM3's update, channel 4, in every image.
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups.g031k8 = rmptfe,d,ui
+// build: groups.g031k8 = rmptfe,d,u,i
+// build: groups.g071rb = rmptfed,u,i
+// build: groups.g0b1re = rmptfed,u,i
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -840,6 +850,9 @@ void copy_vector() {
 // -- paced: 256 words from a table into one cell on TIM3's update
 using T3 = Tim<3>;
 using Paced = DmaTxEngine<1, 4, uint32_t>;
+// The engine is the suite's, armed by hand on TIM3's update: the suite
+// claims its channel for that request (util/dma_owner.hpp).
+static_assert(dma_claim<DmaSlotId<1, 4>, DmaOwner<DmaPeriph::tim, 3, DmaSignal::update>>);
 constexpr uint32_t paced_hz = 100'000u;
 constexpr uint32_t paced_period = SysClock::hz / paced_hz;   // 640 cycles
 constexpr uint16_t paced_items = 256u;
@@ -862,8 +875,13 @@ void paced_vector() {
 
 // -- the engined SPI host: test_stm32_spi's SPI1 pads, NOTHING WIRED to
 // them - MISO floats, and the time is the wire's whatever comes back.
-using SpiTx = DmaTxEngine<1, 2, uint16_t>;
-using SpiRx = DmaRxEngine<1, 3, uint16_t>;
+/// An engine slot an image whose letters do not use it leaves empty: the
+/// three transports below share channels 2 and 3 by number, one per image.
+template <bool on, typename Engine>
+using EngineIf = std::conditional_t<on, Engine, NoDmaEngine>;
+constexpr bool image_spi_engines = test_letter_carried('d') || test_letter_carried('e');
+using SpiTx = EngineIf<image_spi_engines, DmaTxEngine<1, 2, uint16_t>>;
+using SpiRx = EngineIf<image_spi_engines, DmaRxEngine<1, 3, uint16_t>>;
 constexpr SpiPins spi_pins{
     .sck = {'B', 3, PinFunction::af0},
     .miso = {'B', 4, PinFunction::af0},
@@ -1398,8 +1416,8 @@ constexpr uint32_t loop_rx_ring = loop_big ? 512u : 128u;
 constexpr uint32_t loop_tx_ring = loop_big ? 256u : 64u;
 constexpr uint32_t loop_long = loop_big ? 256u : 64u;
 
-using LoopTx = DmaTxEngine<1, 2>;
-using LoopRx = DmaRxEngine<1, 3>;
+using LoopTx = EngineIf<test_letter_carried('u'), DmaTxEngine<1, 2>>;
+using LoopRx = EngineIf<test_letter_carried('u'), DmaRxEngine<1, 3>>;
 using TxPlain = Uart<1, loop_pins, 16, loop_tx_ring, NoDmaEngine, NoDmaEngine, UartOptions{}, HotPlace>;
 using TxEngined = Uart<1, loop_pins, 16, loop_tx_ring, LoopTx, NoDmaEngine, UartOptions{}, HotPlace>;
 using RxPlain =
@@ -1706,8 +1724,8 @@ constexpr I2cPins i2c_target_pins{
     .sda = {'A', 12, PinFunction::af6},
 };
 using I2cPump = I2cHost<1, i2c_host_pins>;
-using I2cTx = DmaTxEngine<1, 2>;
-using I2cRx = DmaRxEngine<1, 3>;
+using I2cTx = EngineIf<test_letter_carried('i'), DmaTxEngine<1, 2>>;
+using I2cRx = EngineIf<test_letter_carried('i'), DmaRxEngine<1, 3>>;
 using I2cDma = I2cHost<1, i2c_host_pins, I2cTx, I2cRx>;
 using I2cTarget = I2cClient<2, i2c_target_pins>;
 constexpr uint8_t i2c_target_addr = 0x42;

@@ -360,6 +360,10 @@ Meter i2c_peer_meter;   ///< letter i's target on the Nucleo's self-link: the in
 /// letter d's engines.
 using Copier = DmaCopyEngine<2, 4>;
 using PacedRx = DmaRxEngine<2, 5, 6, uint32_t>;
+// Armed by hand on TIM1's update: the bench claims the stream for it
+// (util/dma_owner.hpp) - by its number, so that the claim instantiates
+// nothing ahead of the engine's own first use.
+static_assert(dma_claim<DmaSlotId<2, 5>, DmaOwner<DmaPeriph::tim, 1, DmaSignal::update>>);
 #if defined(STM32F446xx)
 constexpr SpiPins spi1_pins{.sck = {'A', 5, PinFunction::af5},
                             .miso = {'A', 6, PinFunction::af5},

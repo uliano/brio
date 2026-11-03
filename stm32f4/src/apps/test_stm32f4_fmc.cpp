@@ -1010,6 +1010,10 @@ void tj_throughput() {
 
 using DmaBlock = Dma<2>;
 using DmaWork = DmaStream<2, 0>;
+/// The stream this suite programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct WorkHand {};
+static_assert(dma_claim<DmaSlotId<2, 0>, WorkHand>);
 
 bool wait_complete(uint32_t spins = 4'000'000u) {
     while (!DmaWork::flag(DmaFlag::complete)) {

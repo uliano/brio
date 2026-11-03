@@ -337,6 +337,10 @@ using T2 = Tim<2>;   // 32 bits at 64 MHz: the stopwatch letter m times with
 // which a part with no DAC cannot run at all.
 using DacLoop = DmaLoopEngine<1, 1, uint16_t>;
 using AdcPong = DmaPingPongEngine<1, 2, uint16_t>;
+// Armed by hand on the DAC's first channel and the converter: the suite
+// claims both channels for those requests (util/dma_owner.hpp).
+static_assert(dma_claim<DmaSlotId<1, 1>, DmaOwner<DmaPeriph::dac, 1, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<1, 2>, DmaOwner<DmaPeriph::adc, 1, DmaSignal::rx>>);
 #endif
 
 // ---- what this boot found ---------------------------------------------------

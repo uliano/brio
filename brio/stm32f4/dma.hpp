@@ -1689,11 +1689,19 @@ private:
  * which clears EN (10.3.13, 10.5.5) - before it lets another start.
  */
 template <uint8_t n, uint8_t s>
+struct DmaCopyOwner {};
+
+template <uint8_t n, uint8_t s>
 class DmaCopyEngine {
     static_assert(dma_memory_to_memory_capable(n),
                   "brio DmaCopyEngine: memory to memory is DMA2's alone - DMA1's peripheral "
                   "port, the source of such a block, is not connected to the bus matrix "
                   "(RM0090 10.3.6, figures 33 and 34 note 1)");
+    // No request paces a copy, so the engine is its stream's owner: the
+    // tag DmaCopyOwner<n, s> claims it for the whole image
+    // (util/dma_owner.hpp), and a transport or a second engine naming the
+    // same stream does not compile.
+    static_assert(dma_claim<DmaSlotId<n, s>, DmaCopyOwner<n, s>>);
     using Stream = DmaStream<n, s>;
 
     template <typename T>

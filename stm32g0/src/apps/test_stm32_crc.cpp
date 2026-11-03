@@ -193,6 +193,10 @@ constexpr uint32_t code_bytes = 16u * 1024u;
 
 using Dma1 = Dma<1>;
 using ChA = DmaChannel<1, 1>;
+/// The channel this suite programs by hand: its tag owns it
+/// (util/dma_owner.hpp, one tag a slot).
+struct HandA {};
+static_assert(dma_claim<DmaSlotId<1, 1>, HandA>);
 
 // ---------------------------------------------------------------------------
 // Shared helpers

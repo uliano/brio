@@ -27,6 +27,7 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 | STM32F405/415, F407/417, F427/437, F429/439 reference manual | **RM0090 Rev 22** | symlink to `~/Documenti/Elettronica/STM32/STM32F4/STM32F407_429_Reference_Manual.pdf` | the F429's manual and the F405 class's in one document, with separate RCC and PWR chapters for the two classes (ch. 6 and 7, 5.4 and 5.5): a citation names the class's chapter |
 | STM32F446xx reference manual | **RM0390 Rev 6** | symlink to `.../STM32F446_Reference_Manual.pdf` | the F446's; the same peripherals under the same names, the F446's own additions (QUADSPI, SAI2, SPDIFRX, FMPI2C, CEC) |
 | STM32F411xC/xE reference manual | **RM0383 Rev 4** | symlink to `.../STM32F411_Reference_Manual.pdf` | the F411's: the 100 MHz ladder, no over-drive, one ADC, no DAC/CAN |
+| STM32F401xB/C and STM32F401xD/E reference manual | **RM0368 Rev 5** | symlink to `.../STM32F401_Reference_Manual.pdf` | the F401's: read for its DMA request map (9.3.3, tables 28 and 29; [../dma.md](../dma.md), "One owner a stream") and nothing else yet - no part on the bench |
 | STM32F469xx/F479xx reference manual | **RM0386 Rev 6** | symlink to `.../rm0386-*.pdf` | the F469/F479's: the F42x/F43x's frequency ladder row for row (3.3.2 table 9, 6.3.3), the same DMA request mapping with QUADSPI added (tables 29 and 30), ch. 13 (QUADSPI), ch. 18 (the DSI host, its wrapper and D-PHY) with the RCC's figure 17 for its clock tree, the 48 MHz domain switchable to PLLSAI's P output (DCKCFGR.CK48MSEL); its chapters are numbered differently from RM0090's (FLASH 3, PWR 5, RCC 6, DMA 9, FMC 12, ADC 14, DAC 15, LTDC 17, DSI 18, RTC 28, SPI/I2S 31, bxCAN 34, USB OTG 35) |
 | STM32F427xx/F437xx, F429xx/F439xx datasheet | **DocID024030 Rev 10** | symlink to `.../STM32F429_Data_Sheet.pdf` | pinout and the alternate-function table 12 (the AF numbers no header carries), electrical characteristics |
 | STM32F446xC/xE datasheet | **DS10693 Rev 11** | symlink to `.../STM32F446_Datasheet.pdf` | alternate-function table 11 |
@@ -58,13 +59,14 @@ The pack carries twenty-three device headers and the stratum compiles
 on all of them (`brio check stm32f4`), but the frequency ladders - how
 fast a part may run at each regulator scale, how many flash wait
 states a rate needs, how fast each APB may go - are facts of a
-REFERENCE MANUAL that the header does not carry, and only five part
-classes' manuals are on the desk (RM0090 for the F405 and F42x/F43x
-classes, RM0390, RM0383, RM0386). On the F401, F410, F412 and
-F413/F423 headers the reserve says so (`sysclk_ladder().known ==
-false`) and a `Clock` above the 16 MHz reset rate is refused at compile
-time; RM0368, RM0401, RM0402 and RM0430 would each add one row to
-`stm32f4/device_tables.hpp`'s ladder when read.
+REFERENCE MANUAL that the header does not carry, and five part classes'
+manuals are read for them (RM0090 for the F405 and F42x/F43x classes,
+RM0390, RM0383, RM0386). On the F401, F410, F412 and F413/F423 headers
+the reserve says so (`sysclk_ladder().known == false`) and a `Clock`
+above the 16 MHz reset rate is refused at compile time. RM0368, the
+F401's, is on the desk and read for its DMA request map alone; it,
+RM0401, RM0402 and RM0430 would each add one row to
+`stm32f4/device_tables.hpp`'s ladder when read for it.
 
 ## Device headers + SVD: vendored in the repo
 

@@ -1045,7 +1045,7 @@ RTC's wake-up timer as the backstop:
 
 **A RECEIVE FIFO BEHIND A STARVED CHANNEL CAN WEDGE, AND IT IS THE
 SILICON.** Measured on the STM32G0B1RE (revision Z) with USART2's ring on
-DMA1's channel 7 and two memory-to-memory copies on channels 1 and 2 -
+DMA1's channel 7 and two memory-to-memory copies on channels 4 and 5 -
 the pair alternating with each other (RM0444 10.4.4) and the ring ranked
 below them: after a starvation of a little over one character time - two
 entries queued - the receiver can stop for good. RXFNE stands with one to

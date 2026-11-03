@@ -814,6 +814,11 @@ class I2cHost {
                   "brio I2cHost: the receive engine's (controller, stream, channel) is not a "
                   "cell this instance's receive request is wired to - see the transmit "
                   "engine's message");
+    // Each engine's stream is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either stream, or this request on another stream, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::i2c, n, DmaSignal::rx>>());
     static_assert(i2c_pins_valid(pins),
                   "brio I2cHost: these I2C pads are not a bus - SCL and SDA must both be "
                   "named, must be real pins of ports this part bonds, and no two signals may "

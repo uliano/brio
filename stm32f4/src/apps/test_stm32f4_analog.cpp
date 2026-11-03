@@ -1895,6 +1895,9 @@ void tp_sampler() {
 using AdcStream = DmaRxEngine<2, 0, 0, uint16_t>;
 static_assert(Adc1::engine_placed<AdcStream>(),
               "the stream this suite uses must be one of ADC1's own cells");
+// Armed by hand on ADC1's request: the suite claims the stream for it
+// (util/dma_owner.hpp).
+static_assert(dma_engine_claim<AdcStream, DmaOwner<DmaPeriph::adc, 1, DmaSignal::rx>>());
 
 volatile bool adc_dma_complete = false;
 volatile uint8_t adc_dma_errors = 0;
@@ -2017,6 +2020,9 @@ void tq_adc_dma() {
 using DacStream = DmaTxEngine<1, 5, 7, uint32_t>;
 static_assert(Dac::engine_placed<DacStream>(dac_ch_pa4),
               "the stream this suite uses must be DAC channel 1's own cell");
+// Armed by hand on DAC channel 1's request: the suite claims the stream for
+// it (util/dma_owner.hpp).
+static_assert(dma_engine_claim<DacStream, DmaOwner<DmaPeriph::dac, 1, DmaSignal::tx>>());
 
 volatile bool dac_dma_complete = false;
 volatile uint8_t dac_dma_errors = 0;

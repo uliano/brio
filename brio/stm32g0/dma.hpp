@@ -1559,8 +1559,17 @@ private:
  * with DmaIrq::error_only, poll().
  */
 template <uint8_t n, uint8_t ch>
+struct DmaCopyOwner {};
+
+template <uint8_t n, uint8_t ch>
 class DmaCopyEngine {
     using Channel = DmaChannel<n, ch>;
+
+    // No request paces a copy, so the engine is its channel's owner: the
+    // tag DmaCopyOwner<n, ch> claims it for the whole image
+    // (util/dma_owner.hpp), and a transport or a second engine naming the
+    // same channel does not compile.
+    static_assert(dma_claim<DmaSlotId<n, ch>, DmaCopyOwner<n, ch>>);
 
 public:
     DmaCopyEngine() = delete;

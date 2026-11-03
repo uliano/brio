@@ -199,6 +199,15 @@
 // groups lines below; design/overview.md, "A suite's image fits the
 // family's smallest chip"); the G0B1RE builds one.
 //
+// ONE OWNER A CHANNEL (docs/design/dma.md, "The ownership rule"): letter
+// 6's copy pair owns DMA1's channels 1 and 2 (below the ring on 3, which
+// ranks them first on a tie), USART1's transmit engine channel 4 and its
+// receive engine channel 3, the boot probe's request generator channel 5
+// (by hand, Hand<1, 5>), and letter x's USART2 receive engine channel 6 -
+// on the G031K8, which has five, channel 2 of the image that carries x and
+// not letter 6's pair. A slot whose letter an image does not carry is the
+// empty NoDmaEngine there.
+//
 // build: boards = g0b1re,g071rb,g031k8
 // build: groups = abcdefghij,klmnopq,vwxy,12345678,90rsu
 // build: groups.g071rb = abcdefghijklmnopqvwxy,1234567890rsu
@@ -427,8 +436,12 @@ using LoopFifoUart =
 using HsiUart = Uart<1, u1_pins, 64, 64, NoDmaEngine, NoDmaEngine, hsi16_opts>;
 
 using Dma1 = Dma<1>;
-using EdgeCh = DmaChannel<1, 1>;
+using EdgeCh = DmaChannel<1, 5>;
 using Gen0 = DmaMuxGenerator<0>;
+/// The boot probe and the letters that count edges program this channel
+/// by hand: the suite's tag owns it (util/dma_owner.hpp, one tag a slot).
+struct EdgeHand {};
+static_assert(dma_claim<DmaSlotId<1, 5>, EdgeHand>);
 
 // ---------------------------------------------------------------------------
 // Instruments
@@ -5033,7 +5046,7 @@ void tv_lpuart_console() {
 /// receive ones run the single wire with the transmitter on its engine,
 /// so USART1's vector serves the receiver alone; the transmit ones run
 /// full duplex, the receiver on PA10's pull-up.
-using LoopTxCh = DmaTxEngine<1, 2>;
+using LoopTxCh = DmaTxEngine<1, 4>;
 using LoopRxCh = DmaRxEngine<1, 3>;
 /// The receive transports' single wire is DRIVEN (push-pull while a frame
 /// goes out): PA9 also carries the link wire to the far board's receive
@@ -5398,7 +5411,7 @@ void tq_tx_idle() {
 // The menu
 // ---------------------------------------------------------------------------
 
-/// The two-board set's owners of USART1's vector and of DMA1 channels 2/3
+/// The two-board set's owners of USART1's vector and of DMA1 channels 3/4
 /// (loop_mode, beside the single-board letters' own).
 constexpr uint8_t mode_link_irq = 7;
 constexpr uint8_t mode_link_dma = 8;
@@ -7148,8 +7161,15 @@ using LinkLow8 = Uart<1, u1_pins, link_ring, 16, NoDmaEngine, LinkRxEngine, link
 constexpr uint8_t mode_link_low = 11;
 constexpr uint8_t mode_link_low8 = 12;
 
-using CopyA = DmaCopyEngine<1, 1>;
-using CopyB = DmaCopyEngine<1, 2>;
+/// The pair, named through a template so that a template body naming it
+/// depends on its own parameter: the engines (and their claims on channels
+/// 1 and 2) are instantiated only where letter 6's code is, never where a
+/// template that names them is merely defined.
+template <typename>
+struct Pair {
+    using A = DmaCopyEngine<1, 1>;
+    using B = DmaCopyEngine<1, 2>;
+};
 /// The pair's blocks: 2 KB each where the part has the RAM, an eighth of
 /// that on the 8 KB one.
 constexpr uint32_t pair_most = SRAM_SIZE_MAX >= 0x4000UL ? 2048u : 256u;
@@ -7180,6 +7200,8 @@ void ring_drain(CountCheck& c, uint32_t& budget) {
 
 template <typename Port>
 RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
+    using CopyA = typename Pair<Port>::A;
+    using CopyB = typename Pair<Port>::B;
     RingLeg l{};
     l.rate = rate;
     l.pair = pair;
@@ -7249,6 +7271,7 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
     return l;
 }
 
+template <typename = void>   // instantiated by letter 6 alone, the pair with it
 RingLeg ring_leg(uint32_t rate, uint16_t pair, bool low) {
     const bool fast = !LinkIrq::can_baud(u1_hz, rate);
     if (low) {
@@ -7259,47 +7282,52 @@ RingLeg ring_leg(uint32_t rate, uint16_t pair, bool low) {
                 : ring_leg_on<LinkDma>(rate, pair, false, mode_link_dma);
 }
 
+/// A template whose default asks whether this image carries the letter:
+/// the copy pair is instantiated, and its two channels claimed, only there.
+template <bool on = test_letter_carried('6')>
 void t6_ring() {
-    if (!ensure_link()) {
-        bench.verdict("the peer is reachable", false);
-        link_release();
-        return;
-    }
-    for (uint32_t i = 0; i < pair_most; ++i) {
-        pair_src[i] = static_cast<uint8_t>(i * 7u + 1u);
-    }
-    static constexpr uint32_t rates[] = {1'000'000, 2'000'000, 3'200'000, 6'400'000};
-    const uint16_t pairs[] = {0, static_cast<uint16_t>(pair_most / 4u), static_cast<uint16_t>(pair_most)};
-    bool counted = true, alive = true, control = true, within = true;
-    uint32_t kicks = 0, lost_total = 0;
-    for (const uint32_t rate : rates) {
-        for (const uint16_t pair : pairs) {
-            const RingLeg l = ring_leg(rate, pair, true);
-            print(serial, "  ", rate, " baud, ring LOW, pair of ", pair, " B (", l.pairs, " pairs): ", l.c.got,
-                  " in, ", l.c.gaps, " gaps (", l.c.lost, " frames), ", l.c.bad, " bad; skips ", l.skips, ", ORE ",
-                  l.ore, ", kicks ", l.kicks, ", faults ", l.faults, "; the peer sent ", l.peer_count,
-                  " (mod 2^16)", crlf);
-            // Every gap a skip the transport counted, no corrupt byte, and
-            // the stream delivered to its end (a second's worth at least).
-            counted = counted && l.up && l.c.bad == 0u && l.c.gaps <= l.skips;
-            alive = alive && l.up && l.c.got >= rate / 10u;
-            if (pair == 0u) within = within && l.c.gaps == 0u;
-            kicks += l.kicks;
-            lost_total += l.c.lost;
+    if constexpr (on) {
+        if (!ensure_link()) {
+            bench.verdict("the peer is reachable", false);
+            link_release();
+            return;
         }
-        const RingLeg h = ring_leg(rate, static_cast<uint16_t>(pair_most), false);
-        print(serial, "  ", rate, " baud, ring at its DEFAULT level, pair of ", pair_most, " B: ", h.c.got, " in, ",
-              h.c.gaps, " gaps, ", h.c.bad, " bad, kicks ", h.kicks, crlf);
-        control = control && h.up && h.c.gaps == 0u && h.c.bad == 0u && h.c.got >= rate / 10u;
+        for (uint32_t i = 0; i < pair_most; ++i) {
+            pair_src[i] = static_cast<uint8_t>(i * 7u + 1u);
+        }
+        static constexpr uint32_t rates[] = {1'000'000, 2'000'000, 3'200'000, 6'400'000};
+        const uint16_t pairs[] = {0, static_cast<uint16_t>(pair_most / 4u), static_cast<uint16_t>(pair_most)};
+        bool counted = true, alive = true, control = true, within = true;
+        uint32_t kicks = 0, lost_total = 0;
+        for (const uint32_t rate : rates) {
+            for (const uint16_t pair : pairs) {
+                const RingLeg l = ring_leg(rate, pair, true);
+                print(serial, "  ", rate, " baud, ring LOW, pair of ", pair, " B (", l.pairs, " pairs): ", l.c.got,
+                      " in, ", l.c.gaps, " gaps (", l.c.lost, " frames), ", l.c.bad, " bad; skips ", l.skips, ", ORE ",
+                      l.ore, ", kicks ", l.kicks, ", faults ", l.faults, "; the peer sent ", l.peer_count,
+                      " (mod 2^16)", crlf);
+                // Every gap a skip the transport counted, no corrupt byte, and
+                // the stream delivered to its end (a second's worth at least).
+                counted = counted && l.up && l.c.bad == 0u && l.c.gaps <= l.skips;
+                alive = alive && l.up && l.c.got >= rate / 10u;
+                if (pair == 0u) within = within && l.c.gaps == 0u;
+                kicks += l.kicks;
+                lost_total += l.c.lost;
+            }
+            const RingLeg h = ring_leg(rate, static_cast<uint16_t>(pair_most), false);
+            print(serial, "  ", rate, " baud, ring at its DEFAULT level, pair of ", pair_most, " B: ", h.c.got, " in, ",
+                  h.c.gaps, " gaps, ", h.c.bad, " bad, kicks ", h.kicks, crlf);
+            control = control && h.up && h.c.gaps == 0u && h.c.bad == 0u && h.c.got >= rate / 10u;
+        }
+        print(serial, "  the kick fired ", kicks, " times over the low legs (255 a leg at most), ", lost_total,
+              " frames lost to the pair, every one in a counted gap", crlf);
+        judge("a foreign stream with no pair loses nothing, ring ranked low, at every rung to 6.4 Mbaud", within);
+        judge("UNDER THE PAIR EVERY GAP IS COUNTED AND NO BYTE IS CORRUPT OR TAKEN TWICE: the kick racing a "
+              "character loses nothing it does not report, to 6.4 Mbaud", counted);
+        judge("and the receiver keeps going: every leg delivered to its end", alive);
+        judge("the ring at its default level outranks the pair: every byte, every rung", control);
+        link_release();
     }
-    print(serial, "  the kick fired ", kicks, " times over the low legs (255 a leg at most), ", lost_total,
-          " frames lost to the pair, every one in a counted gap", crlf);
-    judge("a foreign stream with no pair loses nothing, ring ranked low, at every rung to 6.4 Mbaud", within);
-    judge("UNDER THE PAIR EVERY GAP IS COUNTED AND NO BYTE IS CORRUPT OR TAKEN TWICE: the kick racing a "
-          "character loses nothing it does not report, to 6.4 Mbaud", counted);
-    judge("and the receiver keeps going: every leg delivered to its end", alive);
-    judge("the ring at its default level outranks the pair: every byte, every rung", control);
-    link_release();
 }
 
 // ---------------------------------------------------------------------------
@@ -9069,7 +9097,10 @@ void tu_stop_wake() {
 // shape on the bridge.
 
 constexpr uint32_t bridge_ring = SRAM_SIZE_MAX >= 0x4000UL ? 512u : 128u;
-using BridgeRx = DmaRxEngine<1, 3>;
+/// Channel 6, or on a part with five the channel letter 6's pair leaves
+/// free in the image that carries x and not 6.
+constexpr uint8_t bridge_channel = dma_channel_present(1, 6) ? 6u : 2u;
+using BridgeRx = std::conditional_t<test_letter_carried('x'), DmaRxEngine<1, bridge_channel>, NoDmaEngine>;
 using BridgeSerial = Uart<2, console_pins, bridge_ring, 16, NoDmaEngine, BridgeRx>;
 volatile bool bridge_live = false;
 
@@ -9383,7 +9414,7 @@ bool dma23_bridge() {
 template <bool on = image_has_link>
 void dma1_ch1_copy() {
     if constexpr (on) {
-        (void)CopyA::service();
+        (void)Pair<std::bool_constant<on>>::A::service();
     } else {
         Nvic::disable(DMA1_Channel1_IRQn);
     }
@@ -9469,9 +9500,26 @@ extern "C" void USART1_IRQHandler() {
     brio::Nvic::disable(brio::Usart<1>::irq());
 }
 
-/// Channels 2 and 3 share this line (table 61): letters p and q's
-/// transmit engine and receive engine, the only channels of this suite
-/// that interrupt.
+/// Channels 4 and up share this line (table 61): letters p and q's transmit
+/// engine on channel 4 and letter x's receive engine where it sits on 6.
+extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
+    if (dma23_bridge()) {
+        return;
+    }
+    const uint8_t m = loop_mode;
+    bool edge = false;
+    if (!dma23_transport(m, edge)) {
+        brio::Nvic::disable(brio::dma_channel_irq(1, 4));
+    }
+    if (edge) {
+        rx_edge_at = now();
+        rx_edges = rx_edges + 1u;
+    }
+}
+
+/// Channels 2 and 3 share this line (table 61): letters p and q's receive
+/// engine, the two-board set's on channel 3, and letter x's on channel 2
+/// on the five-channel part; letter 6's second copy reports here too.
 extern "C" void DMA1_Channel2_3_IRQHandler() {
     if (dma23_bridge()) {
         return;
@@ -9646,7 +9694,7 @@ int main() {
     bench.second_letter('3', "the frame matrix across the wire", t3_frames);
     bench.second_letter('4', "the receiver's errors from a foreign sender", t4_errors);
     bench.second_letter('5', "the engine's shapes: the start's width, the range, one stretched cell", t5_shapes);
-    bench.second_letter('6', "the receive ring beyond the bridge: the kick under a foreign sender", t6_ring);
+    bench.second_letter('6', "the receive ring beyond the bridge: the kick under a foreign sender", t6_ring<>);
     bench.second_letter('7', "finding 4 over the wire: five minutes of 200-frame bursts", t7_finding4);
     bench.second_letter('8', "the pad and the shared wire: drive_rxd, one wire, a collision", t8_wire);
     bench.second_letter('9', "IDLE and the time-out from a faster sender", t9_idle);

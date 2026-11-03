@@ -108,7 +108,7 @@
 //      request line moves - the release contract measured with no wire
 //   p  (outside z) brio stress: THE RING OUTRANKS TWO COPIES - the
 //      console's ring at its default level beside a pair of copies on
-//      channels 1 and 2, every byte judged
+//      channels 4 and 5, every byte judged
 //   q  (outside z) brio stress: THE RING RANKED LOW - the same pair
 //      starving it, the receive FIFO's kick absorbing what fits in nine
 //      characters, and every gap past that counted
@@ -117,7 +117,22 @@
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
 //      alone - no verdict rests on a rate the bridge is proven to corrupt
 //
+// ONE OWNER A CHANNEL (docs/design/dma.md, "The ownership rule"), so three
+// images on every part. The instrument letters (a to n, and r) program
+// DMA1's channels 1 to 5 by hand - through their registers and through the
+// engines the letters arm themselves, on whatever request each studies -
+// and letter m DMA2's five: each such channel is one tag's of this suite
+// for the whole image (Hand<n, ch>, below). Letters o, p, q, u and w take
+// USART1's engines on channels 2 and 3 and the copy pair on 4 and 5; letter
+// x LPUART1's engines on channels 2 and 3. The console keeps 6 and 7 in
+// every image. A slot whose letter an image does not carry is the empty
+// NoDmaEngine there (EngineIf), and a claim of this suite's is made only in
+// the image whose letters program the channel (claim_if).
+//
 // build: boards = g0b1re,g071rb,g031k8
+// build: groups = abcdefghijklmnr,opquw,x
+// build: groups.g071rb = abcdefghijklmnr,opquw,x
+// build: groups.g0b1re = abcdefghijklmnr,opquw,x
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -215,6 +230,36 @@ using ChC = DmaChannel<1, 3>;   // the vector pair's other half
 using ChD = DmaChannel<1, 4>;   // the ping-pong engine
 using ChE = DmaChannel<1, 5>;   // the request generator, and the CIRC race
 
+/// The tag that owns a channel this suite programs by hand
+/// (util/dma_owner.hpp: any empty class is an owner, one tag a slot).
+template <uint8_t n, uint8_t ch>
+struct Hand {};
+
+/// A claim made only where `on`: a function template's discarded branch
+/// is never instantiated, so an image that does not carry the letters
+/// programming a channel makes no claim on it.
+template <bool on, typename Slot, typename Owner>
+consteval bool claim_if() {
+    if constexpr (on) {
+        return dma_claim<Slot, Owner>;
+    } else {
+        return true;
+    }
+}
+
+/// An engine slot an image whose letters do not use it leaves empty.
+template <bool on, typename Engine>
+using EngineIf = std::conditional_t<on, Engine, NoDmaEngine>;
+
+/// The image carrying the instrument letters owns DMA1's channels 1 to 5
+/// by hand (and letter m DMA2's, below).
+constexpr bool image_has_instrument = test_letter_carried('a');
+static_assert(claim_if<image_has_instrument, DmaSlotId<1, 1>, Hand<1, 1>>());
+static_assert(claim_if<image_has_instrument, DmaSlotId<1, 2>, Hand<1, 2>>());
+static_assert(claim_if<image_has_instrument, DmaSlotId<1, 3>, Hand<1, 3>>());
+static_assert(claim_if<image_has_instrument, DmaSlotId<1, 4>, Hand<1, 4>>());
+static_assert(claim_if<image_has_instrument, DmaSlotId<1, 5>, Hand<1, 5>>());
+
 // ---- naming a SECOND controller only where the part has one ----------------
 // `if constexpr` inside a plain function still instantiates the branch it
 // discards, so every leg that spells `Dma<2>` lives in a function TEMPLATE
@@ -228,6 +273,12 @@ template <bool present>
 using Dma2 = Dma<present ? uint8_t{2} : uint8_t{1}>;
 template <bool present, uint8_t ch>
 using Dma2Channel = DmaChannel<present ? uint8_t{2} : uint8_t{1}, ch>;
+// Letter m programs DMA2's five channels by hand, where the part has them.
+static_assert(claim_if<dma_present(2) && test_letter_carried('m'), DmaSlotId<2, 1>, Hand<2, 1>>());
+static_assert(claim_if<dma_present(2) && test_letter_carried('m'), DmaSlotId<2, 2>, Hand<2, 2>>());
+static_assert(claim_if<dma_present(2) && test_letter_carried('m'), DmaSlotId<2, 3>, Hand<2, 3>>());
+static_assert(claim_if<dma_present(2) && test_letter_carried('m'), DmaSlotId<2, 4>, Hand<2, 4>>());
+static_assert(claim_if<dma_present(2) && test_letter_carried('m'), DmaSlotId<2, 5>, Hand<2, 5>>());
 
 using Loop = DmaLoopEngine<1, 1, uint32_t>;
 using Pong = DmaPingPongEngine<1, 4, uint32_t>;
@@ -3035,7 +3086,10 @@ using U1Rx = DmaRxEngine<1, 3>;
 // far board's receive pad (held hi-Z by its dark console), and the open
 // drain's rise on the pad's 40 k pull-up into that load gives out below
 // 1 Mbaud (docs/stm32g0/usart.md, "The baud generator").
-using U1 = Uart<1, u1_pins, 64, 16, U1Tx, U1Rx,
+// The transport claims its two channels (an engine type alone claims
+// nothing), so it takes them only in the image that carries letter o.
+using U1 = Uart<1, u1_pins, 64, 16, EngineIf<test_letter_carried('o'), U1Tx>,
+                EngineIf<test_letter_carried('o'), U1Rx>,
                 uart_half_duplex({.tx_speed = PinSpeed::very_high,
                                   .single_wire_push_pull = true})>;
 constexpr uint32_t u1_baud = 1'000'000;
@@ -3255,104 +3309,113 @@ void ring_legs(Stream& tx, Stream& rx) {
 
 }
 
+/// A template whose default asks whether this image carries the letter:
+/// USART1's engines, and their claims on channels 2 and 3, exist only in the
+/// image that does, and the names below depend on `on` so that nothing of
+/// the letter is checked where it is not.
+template <bool on = test_letter_carried('o')>
 void to_circular_receive() {
-    u1_live = true;
-    const bool up = U1::init(clock, u1_baud);
-    U1::clear_errors();
+    if constexpr (on) {
+        using P = std::conditional_t<on, U1, U1>;
+        using PRx = std::conditional_t<on, U1Rx, U1Rx>;
+        u1_live = true;
+        const bool up = P::init(clock, u1_baud);
+        P::clear_errors();
 
-    // --- what the channel holds, before a byte has moved.
-    const bool circular = ChC::circular();
-    const uint32_t armed = ChC::armed();
-    const uint16_t at_rest = ChC::count();
-    print(serial, "  USART1 single wire at ", u1_baud, " baud, ring 64 bytes: the "
-          "receive channel ", circular ? "CIRCULAR" : "not circular",
-          ", armed ", hex(armed), ", CNDTR at rest ", at_rest, ", laps ",
-          U1Rx::laps(), crlf);
-    bench.verdict("THE RECEIVE ENGINE IS A RING: the channel is circular over "
-                  "the transport's whole 64-byte ring, its count at rest the "
-                  "ring's length, the lap's completion, the half lap and the "
-                  "error armed - the two marks that tell a consumer of a stream "
-                  "with no silence in it",
-                  up && circular &&
-                      armed == static_cast<uint32_t>(DmaFlag::complete | DmaFlag::half |
-                                                     DmaFlag::error) &&
-                      at_rest == 64u && U1Rx::laps() == 0u);
+        // --- what the channel holds, before a byte has moved.
+        const bool circular = ChC::circular();
+        const uint32_t armed = ChC::armed();
+        const uint16_t at_rest = ChC::count();
+        print(serial, "  USART1 single wire at ", u1_baud, " baud, ring 64 bytes: the "
+              "receive channel ", circular ? "CIRCULAR" : "not circular",
+              ", armed ", hex(armed), ", CNDTR at rest ", at_rest, ", laps ",
+              PRx::laps(), crlf);
+        bench.verdict("THE RECEIVE ENGINE IS A RING: the channel is circular over "
+                      "the transport's whole 64-byte ring, its count at rest the "
+                      "ring's length, the lap's completion, the half lap and the "
+                      "error armed - the two marks that tell a consumer of a stream "
+                      "with no silence in it",
+                      up && circular &&
+                          armed == static_cast<uint32_t>(DmaFlag::complete | DmaFlag::half |
+                                                         DmaFlag::error) &&
+                          at_rest == 64u && PRx::laps() == 0u);
 
-    Stream tx{0x2545F491u};
-    Stream rx{0x2545F491u};
-    ring_legs<U1, Usart<1>, U1Rx, u1_byte_cycles>(tx, rx);
+        Stream tx{0x2545F491u};
+        Stream rx{0x2545F491u};
+        ring_legs<P, Usart<1>, U1Rx, u1_byte_cycles>(tx, rx);
 
-    // --- the edge THE VECTORS report: the line's IDLE through isr(), the
-    // ring's half and full marks through dma_isr(), both answering
-    // harvest()'s edge - counted where they are bound.
-    uint32_t bad4 = 0;
-    (void)u1_take(rx, 64, bad4);   // drained: the consumer found it empty
-    const uint32_t e0 = u1_edges;
-    u1_send(tx, 5);
-    u1_settle(2);
-    const uint32_t e1 = u1_edges;
-    const bool asked = U1::harvest();   // an owner asking too is told nothing twice
-    const uint32_t part = u1_take(rx, 2, bad4);
-    u1_send(tx, 3);
-    u1_settle(2);
-    const uint32_t e3 = u1_edges;
-    const uint32_t rest = u1_take(rx, 64, bad4);
-    u1_send(tx, 1);
-    u1_settle(2);
-    const uint32_t e5 = u1_edges;
-    const uint32_t last = u1_take(rx, 64, bad4);
-    print(serial, "  the edge: 5 in +", e1 - e0, ", harvest() asked as well ", asked,
-          ", 2 read and 3 more in +", e3 - e1, ", drained and 1 in +", e5 - e3, " (", part,
-          "+", rest, "+", last, " bytes, ", bad4, " wrong)", crlf);
-    bench.verdict("THE EDGE COMES FROM A VECTOR: the line's IDLE tells a burst on "
-                  "a ring the consumer had drained once, an owner's harvest() then "
-                  "hears nothing new, a consumer that has not drained is not told "
-                  "again, and the next byte after a drain is an edge again",
-                  e1 - e0 == 1u && !asked && e3 == e1 && e5 - e3 == 1u && part == 2u &&
-                      rest == 6u && last == 1u && bad4 == 0u);
+        // --- the edge THE VECTORS report: the line's IDLE through isr(), the
+        // ring's half and full marks through dma_isr(), both answering
+        // harvest()'s edge - counted where they are bound.
+        uint32_t bad4 = 0;
+        (void)u1_take<P>(rx, 64, bad4);   // drained: the consumer found it empty
+        const uint32_t e0 = u1_edges;
+        u1_send<P>(tx, 5);
+        u1_settle<P>(2);
+        const uint32_t e1 = u1_edges;
+        const bool asked = P::harvest();   // an owner asking too is told nothing twice
+        const uint32_t part = u1_take<P>(rx, 2, bad4);
+        u1_send<P>(tx, 3);
+        u1_settle<P>(2);
+        const uint32_t e3 = u1_edges;
+        const uint32_t rest = u1_take<P>(rx, 64, bad4);
+        u1_send<P>(tx, 1);
+        u1_settle<P>(2);
+        const uint32_t e5 = u1_edges;
+        const uint32_t last = u1_take<P>(rx, 64, bad4);
+        print(serial, "  the edge: 5 in +", e1 - e0, ", harvest() asked as well ", asked,
+              ", 2 read and 3 more in +", e3 - e1, ", drained and 1 in +", e5 - e3, " (", part,
+              "+", rest, "+", last, " bytes, ", bad4, " wrong)", crlf);
+        bench.verdict("THE EDGE COMES FROM A VECTOR: the line's IDLE tells a burst on "
+                      "a ring the consumer had drained once, an owner's harvest() then "
+                      "hears nothing new, a consumer that has not drained is not told "
+                      "again, and the next byte after a drain is an edge again",
+                      e1 - e0 == 1u && !asked && e3 == e1 && e5 - e3 == 1u && part == 2u &&
+                          rest == 6u && last == 1u && bad4 == 0u);
 
-    // --- what harvest() costs, the ruler's own read taken out: on a ring
-    // the consumer has drained (the edge's look at the producer included),
-    // and on one whose consumer was told and has not drained yet.
-    auto best_of_8 = [] {
-        uint32_t best = 0xFFFFFFFFu;
+        // --- what harvest() costs, the ruler's own read taken out: on a ring
+        // the consumer has drained (the edge's look at the producer included),
+        // and on one whose consumer was told and has not drained yet.
+        auto best_of_8 = [] {
+            uint32_t best = 0xFFFFFFFFu;
+            for (uint8_t i = 0; i < 8; ++i) {
+                const uint32_t a = cycles_now();
+                (void)P::harvest();
+                const uint32_t b = cycles_now();
+                best = b - a < best ? b - a : best;
+            }
+            return best;
+        };
+        uint32_t ruler = 0xFFFFFFFFu;
         for (uint8_t i = 0; i < 8; ++i) {
             const uint32_t a = cycles_now();
-            (void)U1::harvest();
             const uint32_t b = cycles_now();
-            best = b - a < best ? b - a : best;
+            ruler = b - a < ruler ? b - a : ruler;
         }
-        return best;
-    };
-    uint32_t ruler = 0xFFFFFFFFu;
-    for (uint8_t i = 0; i < 8; ++i) {
-        const uint32_t a = cycles_now();
-        const uint32_t b = cycles_now();
-        ruler = b - a < ruler ? b - a : ruler;
+        const uint32_t drained = best_of_8();
+        u1_send<P>(tx, 1);
+        u1_settle<P>(2);
+        (void)P::harvest();   // told
+        const uint32_t told = best_of_8();
+        const uint32_t one = u1_take<P>(rx, 64, bad4);
+        print(serial, "  harvest(), best of 8 with the ruler's ", ruler, " taken out: ",
+              drained - ruler, " cycles on a drained, empty ring, ", told - ruler,
+              " with a byte the consumer was told of and has not read (", one,
+              " read after)", crlf);
+
+        // --- and the line itself at the rate asked.
+        const uint32_t pm = u1_wire_permille<P>();
+        print(serial, "  1024 frames through the transmit engine in ", pm,
+              " thousandths of their wire time at ", u1_baud, " baud", crlf);
+        bench.verdict("THE LOOP RUNS AT THE RATE ASKED: 1024 frames through the transmit "
+                      "engine in their wire time at 1 Mbaud, -1 % to +3 % - what the "
+                      "stream above, sharing one divisor at both ends, could not tell",
+                      pm >= 990u && pm <= 1030u);
+
+        P::release();
+        u1_live = false;
+        quiet_everything();
     }
-    const uint32_t drained = best_of_8();
-    u1_send(tx, 1);
-    u1_settle(2);
-    (void)U1::harvest();   // told
-    const uint32_t told = best_of_8();
-    const uint32_t one = u1_take(rx, 64, bad4);
-    print(serial, "  harvest(), best of 8 with the ruler's ", ruler, " taken out: ",
-          drained - ruler, " cycles on a drained, empty ring, ", told - ruler,
-          " with a byte the consumer was told of and has not read (", one,
-          " read after)", crlf);
-
-    // --- and the line itself at the rate asked.
-    const uint32_t pm = u1_wire_permille();
-    print(serial, "  1024 frames through the transmit engine in ", pm,
-          " thousandths of their wire time at ", u1_baud, " baud", crlf);
-    bench.verdict("THE LOOP RUNS AT THE RATE ASKED: 1024 frames through the transmit "
-                  "engine in their wire time at 1 Mbaud, -1 % to +3 % - what the "
-                  "stream above, sharing one divisor at both ends, could not tell",
-                  pm >= 990u && pm <= 1030u);
-
-    U1::release();
-    u1_live = false;
-    quiet_everything();
 }
 
 // ---- x: the circular receive on an LPUART ------------------------------------------
@@ -3371,7 +3434,8 @@ constexpr UartPins lp_pins{
 };
 using LpTx = DmaTxEngine<1, 2>;
 using LpRx = DmaRxEngine<1, 3>;
-using Lp = LpUart<1, lp_pins, 64, 16, LpTx, LpRx,
+using Lp = LpUart<1, lp_pins, 64, 16, EngineIf<test_letter_carried('x'), LpTx>,
+                  EngineIf<test_letter_carried('x'), LpRx>,
                   uart_half_duplex({.tx_speed = PinSpeed::very_high,
                                     .single_wire_push_pull = true})>;
 constexpr uint32_t lp_baud = 1'000'000;
@@ -3387,39 +3451,42 @@ constexpr bool lp_bonded = false;
 constexpr bool lp_bonded = true;
 #endif
 
+template <bool on = test_letter_carried('x')>
 void tx_lpuart_ring() {
     if constexpr (!lp_bonded) {
         print(serial, "  SKIP: the LQFP32 bonds no LPUART1 single-wire pad "
               "letter x can use (DS12992 table 12)", crlf);
         return;
-    } else {
+    } else if constexpr (on) {
+        using P = std::conditional_t<on, Lp, Lp>;
+        using PRx = std::conditional_t<on, LpRx, LpRx>;
         lp_live = true;
-        const bool up = Lp::init(clock, lp_baud);
-        Lp::clear_errors();
+        const bool up = P::init(clock, lp_baud);
+        P::clear_errors();
         const bool circular = ChC::circular();
         const uint32_t armed = ChC::armed();
         const uint16_t at_rest = ChC::count();
         print(serial, "  LPUART1 single wire on PB11 at ", lp_baud, " baud, ring "
               "64 bytes: the receive channel ", circular ? "CIRCULAR" : "not circular",
               ", armed ", hex(armed), ", CNDTR at rest ", at_rest, ", laps ",
-              LpRx::laps(), crlf);
+              PRx::laps(), crlf);
         bench.verdict("AN LPUART'S RECEIVE ENGINE IS THE SAME RING: the channel "
                       "circular over the 64-byte ring, the three marks armed",
                       up && circular &&
                           armed == static_cast<uint32_t>(DmaFlag::complete |
                                                          DmaFlag::half | DmaFlag::error) &&
-                          at_rest == 64u && LpRx::laps() == 0u);
+                          at_rest == 64u && PRx::laps() == 0u);
         Stream tx{0x9E3779B9u};
         Stream rx{0x9E3779B9u};
-        ring_legs<Lp, Lpuart<1>, LpRx, lp_byte_cycles>(tx, rx);
-        const uint32_t pm = u1_wire_permille<Lp, Lpuart<1>, lp_byte_cycles>();
+        ring_legs<P, Lpuart<1>, LpRx, lp_byte_cycles>(tx, rx);
+        const uint32_t pm = u1_wire_permille<P, Lpuart<1>, lp_byte_cycles>();
         print(serial, "  1024 frames through the LPUART's transmit engine in ", pm,
               " thousandths of their wire time at ", lp_baud, " baud", crlf);
         bench.verdict("and the LPUART's loop runs at the rate asked: 1024 frames "
                       "through its transmit engine in their wire time, -1 % to "
                       "+3 % (letter o's bound)",
                       pm >= 990u && pm <= 1030u);
-        Lp::release();
+        P::release();
         lp_live = false;
         quiet_everything();
     }
@@ -3432,7 +3499,7 @@ void tx_lpuart_ring() {
 // with any other requester, so ONE copy never starves the ring; TWO copies
 // alternate with EACH OTHER, and a ring ranked below them waits for the
 // pair. Letter p runs the console's own ring at its default level beside
-// such a pair - DMA1's channels 1 and 2, the same block each, launched
+// such a pair - DMA1's channels 4 and 5, the same block each, launched
 // together - and judges every byte the host sends; letter q opens the same
 // USART2 with UartOptions::rx_priority = low, so the pair does starve the
 // ring, and judges the receive FIFO's cure (docs/stm32g0/usart.md, "The
@@ -3442,8 +3509,16 @@ void tx_lpuart_ring() {
 // xorshift both ends know, which is what lets the board find a gap, how
 // long it was, and pick the stream up again behind it.
 
-using CopyA = DmaCopyEngine<1, 1>;
-using CopyB = DmaCopyEngine<1, 2>;
+/// The pair, named through a template so that a template body naming it
+/// depends on its own parameter: the engines - and their claims on channels
+/// 4 and 5 - are instantiated only where letters p and q are, which only the
+/// image carrying them instantiates.
+template <typename>
+struct Pair {
+    using A = DmaCopyEngine<1, 4>;
+    using B = DmaCopyEngine<1, 5>;
+};
+constexpr bool image_has_pair = test_letter_carried('p') || test_letter_carried('q');
 
 /// The same transport as the console, the ring ranked LOW (the knob under
 /// test). On a part without the console's engines it is the console's own
@@ -3580,6 +3655,8 @@ uint8_t* copy_bytes_at(volatile uint32_t* words) {
 /// armed for their errors alone - so no copy vector runs in the window.
 template <class Port>
 LoadedLeg loaded_leg(uint32_t baud, uint16_t pair) {
+    using CopyA = typename Pair<Port>::A;
+    using CopyB = typename Pair<Port>::B;
     constexpr Port port{};
     LoadedLeg leg{};
     leg.baud = baud;
@@ -3692,15 +3769,17 @@ struct PairCell {
     uint16_t pair;
 };
 
-template <bool engines = console_engines>
+template <bool engines = console_engines, bool carried = image_has_pair>
 void tp_ring_outranks_the_pair() {
-    if constexpr (!engines) {
+    if constexpr (!carried) {
+        // not this image's letter: nothing instantiated, no channel claimed
+    } else if constexpr (!engines) {
         print(serial, "  this part's DMA1 has ", Dma<1>::channels,
               " channels: the console has no receive engine to rank - skipped", crlf);
     } else {
         print(serial, "  run it as: brio stress --port <the console> --letters p", crlf,
               "  the console's ring at its default level beside two copies on DMA1's "
-              "channels 1 and 2", crlf);
+              "channels 4 and 5", crlf);
         constexpr PairCell cells[] = {{115200, 2048}, {921600, 512}, {921600, 2048}};
         LoadedLeg legs[3];
         for (uint8_t i = 0; i < 3u; ++i) {
@@ -3726,9 +3805,11 @@ void tp_ring_outranks_the_pair() {
     }
 }
 
-template <bool engines = console_engines>
+template <bool engines = console_engines, bool carried = image_has_pair>
 void tq_ring_ranked_low() {
-    if constexpr (!engines) {
+    if constexpr (!carried) {
+        // not this image's letter: nothing instantiated, no channel claimed
+    } else if constexpr (!engines) {
         print(serial, "  this part's DMA1 has ", Dma<1>::channels,
               " channels: the console has no receive engine to rank - skipped", crlf);
     } else {
@@ -4208,9 +4289,9 @@ int main() {
     bench.letter('n', "the sleep story: a channel through Sleep, and a "
                  "channel frozen by a Stop", tn_sleep_story);
     bench.letter('o', "the circular receive: a ring the channel writes lap "
-                 "after lap", to_circular_receive);
+                 "after lap", to_circular_receive<>);
     bench.letter('x', "the circular receive on an LPUART: letter o's legs, "
-                 "LPUART1's single wire", tx_lpuart_ring);
+                 "LPUART1's single wire", tx_lpuart_ring<>);
     bench.letter('r', "a released requester: what the next owner of its request "
                  "line finds", tr_released_requester);
     bench.letter('p', "the receive ring at its level beside two copies (brio stress)",

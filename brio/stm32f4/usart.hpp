@@ -907,6 +907,11 @@ class Uart {
                   "brio Uart: the receive engine's (controller, stream, channel) is not a "
                   "cell this instance's receive request is wired to - see the transmit "
                   "engine's message");
+    // Each engine's stream is this instance's request's, for the whole
+    // image (docs/design/dma.md, "The ownership rule"): another owner on
+    // either stream, or this request on another stream, does not compile.
+    static_assert(dma_engine_claim<TxEngine, DmaOwner<DmaPeriph::usart, instance, DmaSignal::tx>>());
+    static_assert(dma_engine_claim<RxEngine, DmaOwner<DmaPeriph::usart, instance, DmaSignal::rx>>());
     static_assert(!opts.rts || opts.rts_pin.valid(), "brio Uart: RTS flow control needs the RTS pad");
     static_assert(!opts.cts || opts.cts_pin.valid(), "brio Uart: CTS flow control needs the CTS pad");
     static_assert(!(opts.rts || opts.cts) || S::is_full,
