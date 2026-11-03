@@ -100,7 +100,10 @@ number of bytes the ring took, so a caller that writes directly
 handles the rest itself, where `print` waits for it; and on the
 transport without an engine nothing masks interrupts (the transmit
 interrupt is armed by a plain INTENSET store), where an engined one
-masks an engine's claim alone ("The optional engines" below).
+masks a few short decisions - an engine's claim, a channel register's
+select and use, who retires a finished receive block, the dead-block
+test's three readings - and never a copy or a wait ("The optional
+engines" below).
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does, ending with the transmit and the receive
@@ -292,8 +295,9 @@ on a run's cost:
 - The transmit buffer, DATA ahead of the shift register (31.6.2.5): used -
   one frame queued behind the one on the wire, so a writer that keeps
   DRE served puts frames back to back.
-- DRE as a DMA request (31.6.4.1): used by the optional transmit engine,
-  the stratum's one DMA user (below).
+- DRE as a DMA request (31.6.4.1): used by the optional transmit engine
+  (below); the stratum's other users of the DMA controller are the SPI
+  host's engines and the I2C host's transmit engine ([dmac.md](dmac.md)).
 - TXC (31.8.8): used, `tx_idle()`'s last clause.
 - The baud generators: every regime offered at the resource
   (`UartSampling`, `sercom_closest_baud()` asking both at one S); the
@@ -512,9 +516,10 @@ The engines are a policy, not a feature of the task:
   byte twice.
 - **The budget's two channels, and the receive engine never alone.** The
   engines name channel 0 or 1, each a channel the transport claims at
-  `init()` with its SERCOM's number and holds to `release()`; a claim
-  that finds its channel held by another transport panics (the
-  breadcrumb's context names the refused SERCOM, dmac.md). A receive
+  `init()` as the owner n + 1 for SERCOM n (0 meaning nobody) and holds
+  to `release()`; a claim that finds its channel held by another
+  transport panics, the breadcrumb's context 0xD0 with the refused owner
+  (0xD6 for SERCOM5, dmac.md). A receive
   engine comes with the transmit engine
   (`neg/uart_receive_engine_alone.cpp`), on the other channel
   (`neg/uart_engines_one_channel.cpp`): a receive block on an idle line
@@ -1163,8 +1168,9 @@ BREAK-TO-SYNC DELAY AT EVERY HDRDLY, where 31.8.3's table gives the
   restart it, nor clearing COLL and ERROR and cycling TXEN; disabling the
   instance and enabling it again (configure(), enable()) does.
 
-- **The engine's level, read back** (letter d): CHCTRLB.LVL 2 with
-  CTRL.LVLEN2 alone set ([dmac.md](dmac.md)).
+- **The engine's level, read back** (letter d): CHCTRLB.LVL 2, with
+  CTRL.LVLEN2 set - the block enables levels 2 and 3 together
+  ([dmac.md](dmac.md)).
 - **The kick, measured and retired.** A scratch probe started 400
   messages a run through the transmit engine in four shapes - after a
   full drain at once, after 30 us, after 1.8 ms of standing DRE, and

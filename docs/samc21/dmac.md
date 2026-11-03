@@ -58,8 +58,10 @@ and a `DMAC_Handler` left undefined is a weak alias of the crt's silent
 spin, where the program stops at the end of its first block. Every
 transport holding a channel is called from that one vector, because the
 line stays up while any armed flag stands and each transport takes its
-own channels' flags and nobody else's. `init()` answers false when the
-DMAC or a channel would not reset within its bounded wait. The run a
+own channels' flags and nobody else's. The transport's `init()` answers
+false when the DMAC or a channel would not reset within its bounded
+wait - one false among the transport's own reasons, the answer not
+saying which. The run a
 block carries is the transport's own storage (its ring, or the request's
 buffer), lent to the channel until the block's end. And a standby
 entered with a block in flight is outside what this stratum has run
@@ -71,17 +73,21 @@ SAM C20/C21 data sheet DS60001479M ch. 25, and errata DS80000740S items
 1.10.1..1.10.4, whose matrix is read below for this chip (E/G/J family,
 silicon rev F). Driver: `samc21/dmac.hpp` - `Dmac`, `DmaChannel<ch>`,
 `DmaTxEngine<ch>`, `DmaRxEngine<ch>`; their users `samc21/sercom.hpp`'s
-`Uart` and `samc21/spi.hpp`'s `SpiHost`. Family fixtures
-`test/family_samc21/sercom.cpp` and `spi.cpp` with the negatives
-`dmac_channel_past_budget.cpp`, `uart_receive_engine_alone.cpp`,
-`uart_engines_one_channel.cpp`, `spi_receive_engine_alone.cpp` and
-`spi_engines_one_channel.cpp` under `brio check samc21`. The bench
+`Uart`, `samc21/spi.hpp`'s `SpiHost` and `samc21/i2c.hpp`'s `I2cHost`.
+Family fixtures
+`test/family_samc21/sercom.cpp`, `spi.cpp` and `i2c.cpp` with the
+negatives `dmac_channel_past_budget.cpp`, `uart_receive_engine_alone.cpp`,
+`uart_engines_one_channel.cpp`, `spi_receive_engine_alone.cpp`,
+`spi_engines_one_channel.cpp` and `i2c_engine_slot_receive_engine.cpp`
+under `brio check samc21`. The bench
 letters (a letter is one command key of a suite's console and the group
 of verdicts that key runs): `test_samc_uart` letters d (the claims as
 values), u (the Uart's pair at three rates), w (what a release leaves
 the next owner), x and 1 (a refused claim as a panic) and 2 (two shapes
 for minutes); `test_samc_spi` letters l to r (the SPI host's engines,
-the shapes, a channel disabled mid-block, the write's rate).
+the shapes, a channel disabled mid-block, the write's rate);
+`test_samc_i2c` letter s (the I2C host's writes beside the console's
+engine for ten minutes).
 
 ## What the silicon does
 
@@ -183,9 +189,9 @@ the rule is written for them.
    holds it until `release()`. An engine names channel 0 or 1 and nothing
    else, so no image can make a third channel run; and a claim that finds
    its channel held by another transport PANICS at the first boot that
-   tries it - the third claim of an image, or a second transport on one
-   number. A channel does not change hands at run time beside a live
-   owner.
+   tries it - with two numbers, a third claim of an image is always a
+   second transport on a held one. A channel does not change hands at
+   run time beside a live owner.
 4. **Nothing else of the controller is offered:** no linked descriptors,
    no event-triggered channel, no memory-to-memory copy, no converter or
    timer stream, no CRC through the data port. Each is declined in "Not
@@ -213,15 +219,17 @@ each a recovery or an early end, stated in "The rule's exceptions" below.
 |---|---|---:|---:|---|
 | Uart TX + SPI TX | a logging console beside a display's pixels | 10,911,165 SPI requests beside 2.4 M console and dense blocks, every arrangement of channel numbers, levels and round robin, display refresh at 12 and 24 MHz | 0 | < 2.8e-7 per request |
 | Uart TX + Uart RX (one SERCOM, both engines) | a duplex data link, bulk both ways | 5,414 windows / 64 MB at 115200 and 1 Mbaud; 3,032,700 raw block pairs at 3 Mbaud, 1 Mbaud and 115200; 10 host-echo runs with drifting phase | 0 | < 1.0e-6 per block pair |
-| SPI TX + SPI RX (one SERCOM, both engines) | full-duplex SPI, reads included | 24,817,271 requests, 5..256 frames at 1.5..12 MHz, both channel orders | 0 | < 1.2e-7 per request |
-| Uart TX + SPI RX-only | a logging console beside an SPI read whose transmit side the CPU writes | 12,294,674 requests beside 250,875 console blocks | 0 | < 2.4e-7 per request |
+| SPI TX + SPI RX (one SERCOM, both engines) | full-duplex SPI, reads included | 24,817,271 requests, 5..256 frames at 1.5..12 MHz, both channel orders | 0 | < 1.3e-7 per request |
+| Uart TX + SPI RX-only | a logging console beside an SPI read whose transmit side the CPU writes | 12,294,674 requests beside 250,875 console blocks | 0 | < 2.5e-7 per request |
 | Uart TX + I2C TX | a logging console beside a display over I2C, write-only | 1,461,242 I2C writes (188.7 MB, 1..255 bytes) at 400 kHz and 1 MHz beside 355,316 console blocks at ~90 % of the line | 0 | < 2.1e-6 per write |
-| one TX channel + a memory copy or a timer-paced loop | the control shapes | 13.6 M requests | 0 | < 2.2e-7 per request |
+| one TX channel + a memory copy or a timer-paced loop | the control shapes | 13.6 M requests | 0 | < 2.3e-7 per request |
 
-The measurements of shapes this driver does not build - Uart TX + SPI
-RX-only, a copy or a loop beside a channel - stand as the evidence for
-sentence 1; the driver offers the first three rows' shapes, Uart TX + I2C
-TX and the console alone (sercom.md, spi.md, i2c.md).
+A bound is the one-sided 95 % bound on a rate with no event seen, 3
+over the count. The measurements of shapes this driver does not build -
+Uart TX + SPI RX-only, a copy or a loop beside a channel - stand as the
+evidence for sentence 1; the driver offers Uart TX + SPI TX, the Uart
+pair, the SPI pair, Uart TX + I2C TX and the console alone (sercom.md,
+spi.md, i2c.md).
 
 The shapes the rule refuses:
 
@@ -254,7 +262,7 @@ either end, blocks abandoned, console lines lost or broken):
 
 ## The rule's exceptions
 
-Four paths of the driver can still disable a channel mid-block beside a
+Five paths of the driver can still disable a channel mid-block beside a
 running one, each a recovery from something that already went wrong or a
 block the wire ended early:
 
@@ -268,7 +276,7 @@ block the wire ended early:
   its receiver judging every byte (`test_samc_spi` letter q): no lost
   trigger, no byte lost or repeated, no block abandoned, in 25,000
   disables as written and 25,000 with the SPI's request withdrawn first
-  (below 1.2e-4 a disable at 95 %, against the 0.7 % a receive channel
+  (below 1.2e-4 a disable at 95 % in each of the two, against the 0.7 % a receive channel
   disabled under a running transmit channel lost). What can happen beyond
   that bound is the measured kind: the running channel's pending trigger
   lost, its block stalled until the Uart's dead-block repair abandons it
@@ -280,6 +288,13 @@ block the wire ended early:
   a channel that lost its trigger, with no beat in flight. It disables
   that channel beside another transport's running one; it runs only after
   such a loss, the loss above being its one known cause.
+- **The SPI host's lost trigger, on the transmit engine alone**: TXC and
+  DRE up in the SERCOM's vector with the host's transmit channel enabled
+  and nothing pending end the request `spi_dma_fault`, and the host puts
+  that channel away while the other channel - a console's transmit
+  engine, in the display's shape - may be running. No beat is in flight,
+  so it is the dead-block repair's act, and like it the path runs only
+  after a lost trigger.
 - **An I2C write the wire ended before its block did**: a data NACK, a
   lost arbitration or a bus error while the I2C host's transmit block
   still has beats (and its timed arbiter's `recover()` on a write that
@@ -292,9 +307,13 @@ block the wire ended early:
   whole by the host (below 2.6e-3 a disable at 95 %).
 - **A `release()` whose transmit block outlives its bound** (the block's
   wire time): the channel disabled anyway, the transmitter having
-  stopped. A transfer error ends a block on the silicon's own disable,
-  and the SPI host's fault path disables only its own pair's other
-  channel, with no third running.
+  stopped.
+
+A transfer error is not among them: it ends its block on the silicon's
+own disable. The SPI host's fault path then puts its own channels away -
+on the pair the other channel of the pair, the two holding the whole
+budget so that no third runs; on the transmit engine alone the channel
+the silicon has already disabled.
 
 ## Types and verbs
 
@@ -307,8 +326,9 @@ block the wire ended early:
   `claim(owner)`, `owner()`, `arm(owner, trigger, level, completion)` (a
   panic on a claim held by another), `release(owner)`, `take()` (the
   channel reset and configured whatever its state), `enabled()`,
-  `waiting()` (enabled, nothing pending, no beat moving - with the
-  owner's proof that its trigger stands, a dead block), `priority()`
+  `waiting()` (enabled, nothing pending, no beat moving; when its owner
+  has also read the channel's trigger standing, that is a dead block),
+  `priority()`
   (the level read back, nothing when CTRL leaves it disabled),
   `take_interrupt()` (the channel's flags taken and cleared, one load of
   INTSTATUS when none stands), `observe()` (the beats still to move, read
@@ -442,9 +462,10 @@ Port::release();                 // the claim on channel 0 given back
 - **The write on one channel against the wire** (`test_samc_spi` letter
   r): one beat a frame keeps the wire's pace while a frame lasts 32 core
   cycles or more (BAUD 1 and slower on the SPI); at 16 (BAUD 0, 24 MHz)
-  a frame takes 19.1 cycles, the same with the source in the SRAM or the
-  flash and the core spinning or asleep: the beat's own latency after
-  its trigger, about sixteen cycles ([spi.md](spi.md), Bench findings).
+  a frame takes 19.1 cycles with the source in the SRAM, the core
+  spinning or asleep, and up to 19.7 with the source in the flash: the
+  beat's own latency after its trigger, about sixteen cycles
+  ([spi.md](spi.md), Bench findings).
 
 ## Not covered yet
 
@@ -465,9 +486,12 @@ Driver gaps:
   for its block to drain (10 ms for 1 KB at 1 Mbaud, 88 ms at 115200);
   the masked windows were 213..219 cycles (receive), 311..313 (transmit
   release) and 7 (transmit return). While lent, the Uart receives on its
-  interrupt: clean at 1 Mbaud when no other handler plus mask exceeds two
-  frames, not sustainable at 3 Mbaud, where the receive handler takes
-  110..116 of every 160 cycles.
+  interrupt beside its own transmit engine's stream and the borrower's
+  requests and handlers: clean at 1 Mbaud when no other handler plus mask
+  exceeds two frames, not sustainable at 3 Mbaud, where the receive
+  handler takes 110..116 of every 160 cycles and leaves the rest of the
+  program too little (the interrupt receiver alone keeps 3 Mbaud,
+  sercom.md).
 - **Every use outside the two engines' shapes** - declined: a Uart
   receive engine without its transmit engine, an SPI receive engine
   without its transmit engine (the refusals above; a Uart receive channel

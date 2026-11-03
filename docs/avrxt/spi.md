@@ -649,8 +649,8 @@ at CLK_PER/16 (x 1.21): what buffer mode buys.
 
 **A polled request's fixed cost** - the price of a DCS command, one
 command byte and two of data at CLK_PER/16, the select and the D/C on
-real pads (`spi.req`, n = 3): about 219 cycles above the wire's 384,
-counted along the executed path: 114 before the first byte (the call,
+real pads (`spi.req`, n = 3): about 215 cycles above the wire's 384,
+counted along the executed path: 110 before the first byte (the call,
 the entry, the refusal's test and the status store, the length test,
 `apply()`'s fold and compare at 35 with no register access, the two
 edges at 10 and 14, the setup test, the command burst's prologue with
@@ -659,14 +659,16 @@ its last byte taken first and its masked write), 59 between the phases
 the data burst's prologue), 40 after the last byte (the TXCIF wait's
 last turn, the two reads, the select's edge, the return) and the
 block's two cycles a byte. Measured on the AVR64EA48, the same core
-running the same instructions (below): 217, 166 for the command byte
-alone (n = 1) and 250 with fifteen bytes of data (n = 16).
+running the same instructions (below): 212, 161 for the command byte
+alone (n = 1) and 245 with fifteen bytes of data (n = 16).
 
 **The refusal** (`SpiEngine::dma`) is the first thing `start()` does: the
-field's LDD and a CPSE, then on the refused path the `spi_rejected`
-store and the return. On a polled request the test is six cycles - the
-LDD, the CPSE, its taken RJMP and the `spi_ok` store (counted; inside
-the fixed cost below). Nothing else of the host outlives a request: its
+field's LDD and a CPSE against zero, `SpiEngine::dma`'s value, then on
+the refused path - the CPSE skipping the jump - the `spi_rejected`
+store and the return. On a polled request the test is seven cycles on
+the AVRxt core - the LDD 2, the CPSE 1 (no skip), the RJMP 2 and the
+`spi_ok` STS 2 (counted in the AVR64EA48's release listing; inside the
+fixed cost above). Nothing else of the host outlives a request: its
 state is the register pair `apply()` compares, the clock's figures and
 the status byte.
 
@@ -679,14 +681,15 @@ CLK_PER cycles beside the wire's:
 | `spi.poll`, 256 bytes at CLK_PER/4 (5 MHz) | 8959 | 8192 | 1.09 |
 | `spi.poll`, 256 bytes at CLK_PER/16 (1.25 MHz) | 33640 (a tick inside) | 32768 | 1.03 |
 | `spi.poll.tx`, 256 bytes at CLK_PER/4 | 8939 | 8192 | 1.09 |
-| `spi.poll.tx`, 256 bytes at CLK_PER/16 | 33608 (a tick inside) | 32768 | 1.03 |
-| `spi.req`, one command byte and two of data at CLK_PER/16 | 661 | 384 | 1.72 |
+| `spi.poll.tx`, 256 bytes at CLK_PER/16 | 33614 (a tick inside) | 32768 | 1.03 |
+| `spi.req`, one command byte and two of data at CLK_PER/16 | 656 | 384 | 1.71 |
 
-The best of ten runs. Every count is the DB's: a byte beyond the
+The best of four runs, each the best of 8 (every line but the two
+with a tick inside the same in all four). Every count is the DB's: a byte beyond the
 sixteenth 34.0 cycles at CLK_PER/4 and 130.4 at CLK_PER/16 ((8959 -
-799) / 240 and (33640 - 2335) / 240), the request's fixed cost 217
-cycles (661 less the wire's 384 and this ruler's stopwatch floor of
-60), 166 for the command byte alone and 250 with fifteen bytes of data.
+799) / 240 and (33640 - 2335) / 240), the request's fixed cost 212
+cycles (656 less the wire's 384 and this ruler's stopwatch floor of
+60), 161 for the command byte alone and 245 with fifteen bytes of data.
 The same core runs the same instructions, so the engine's cost in
 cycles does not move with the part, and its cost in time scales with
 CLK_PER. The letter's verdict is the refusal: a request naming `SpiEngine::dma` answers `spi_rejected` with no SCK edge counted, and the same

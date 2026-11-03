@@ -828,6 +828,12 @@ public:
 
     /// Hand the instance back: interrupts off, disabled, core clock
     /// released, bus clock off. The pads' PINS are the task's to release.
+    /// Disabled and not reset: a disabled SERCOM withdraws a raised DMA
+    /// request, so no channel later bound to its trigger moves (measured
+    /// on the same SERCOM as a Uart, docs/samc21/dmac.md, "A released
+    /// requester"). The disable's synchronization answer is not checked:
+    /// one that never completed would gate the instance with ENABLE set,
+    /// the state that page measures holding a request.
     static void release(uint32_t spins = 0xFFFFu) {
         regs().SERCOM_INTENCLR = SpiFlag::all;
         (void)enable(false, spins);
@@ -999,8 +1005,9 @@ public:
  * the program's own select stands through it: the host cannot release what it does not hold. A
  * transfer error is met in the vector, which decides and does not work: the channels put away,
  * the select released, a reset owed. The debt is a value of the half-word apply() compares
- * (reset_owed_key), so the next start() or prime() pays it on the path that already asks, out of
- * line, and neither a polled request nor a refusal carries a test for it; written in the vector
+ * (reset_owed_key), so the next start() that moves data, or prime(), pays it on the path that
+ * already asks, out of line (an empty or refused request leaves it owed), and neither a polled
+ * request nor a refusal carries a test for it; written in the vector
  * only while a request is in flight and read in main context only when none is, it needs no
  * critical section. reset_block() is the one sequence, called by the stall, by the owed reset and
  * by recover(). What it cannot do: on a SERCOM whose core clock is stopped SWRST never completes,
@@ -1477,8 +1484,10 @@ public:
     /// (util/bus_master.hpp); a program may call it with the bus idle, and owes it after
     /// nothing: a stall and a transfer error need no call (the class comment). Main
     /// context. A channel running here is disabled mid-block, and beside another owner's
-    /// running channel that is what docs/samc21/dmac.md's rule speaks of: this is the
-    /// one path of the host that can do it.
+    /// running channel that is what docs/samc21/dmac.md's rule speaks of. The host's one
+    /// other path that disables an enabled channel beside another owner's is the lost
+    /// trigger on the transmit engine alone, met in the vector (end_on_fault()): no beat
+    /// is in flight there, the dead-block case of that page's exceptions.
     ///
     /// Returns false when a synchronization never settled (the bounded
     /// waits' honesty: a false engine is refusing, not hanging).

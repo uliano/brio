@@ -15,7 +15,9 @@ any of them. Each request names how it runs
 request"): `SpiEngine::polled`, the loop, inside the call that starts it;
 or `SpiEngine::dma`, the DMA engines the board file names in the host's
 template arguments ([dmac.md](dmac.md), its budget of two channels),
-the call returning with the wire running and an interrupt ending it.
+the call returning with the wire running and an interrupt ending it -
+but for a refusal and a command loop that stalls, which end inside the
+call ("Types and verbs").
 `SpiClient<n, pads>` is the client role. The
 arbiter, `SpiBus` ([design/spi-bus.md](../design/spi-bus.md) is the
 model), is an active object (a component of a brio program with its own
@@ -32,10 +34,12 @@ block of "How to use" below:
 ```cpp
 using SpiHw = brio::SpiHost<1, my_pads>;
 using SpiBus = brio::SpiBus<SpiHw, P>;
-// in main: SpiHw::init(clock); kernel.init_all(); ...
-// from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
-// baud = *SpiHw::baud_for(6'000'000), mode, engine = SpiEngine::polled), post it to
-// SpiBus, and consume the SpiDone reply.
+// in main, after the clock task's init(): if SpiHw::init(clock) answers
+// false there is no bus; then run the kernel with SpiBus in its list.
+// From an AO: take the rate from SpiHw::baud_for(6'000'000), an optional
+// checked before use, fill a Request (cs, buffers as lend<Lease::reply>(...),
+// baud, mode, engine = SpiEngine::polled), post it to SpiBus, and consume
+// the SpiDone reply.
 ```
 
 Line by line: `SpiHw` names the engine over SERCOM1 with the pads
@@ -46,12 +50,16 @@ CPU rate, and `InFlash`, no path placed in SRAM; `SpiBus` is the arbiter
 over that engine on the platform `P` ([platform.md](platform.md)), with
 `util/spi_bus.hpp`'s defaults of four pending requests and no timeout;
 `SpiHw::init(clock)` takes the clock task's tag ([clock.md](clock.md))
-and brings the instance up as a host, and the rest of `main()` starts
-the kernel with `SpiBus` in its list of active objects (`run()` calls
-every active object's `init()`, which is what `init_all()` names); and
-an active object (AO) fills a `Request` - the chip select as a
-`PinRef`, the buffers lent with `lend<Lease::reply>(...)`, the BAUD
-register value `baud_for()` computes for the device's 6 MHz, the mode,
+and brings the instance up as a host (with no ceiling stated, a false
+answer means a synchronization of the SERCOM never completed), and the
+rest of `main()` starts the kernel - `brio::Tenuto<P, ...>::run()` with
+`SpiBus` in its list of active objects, which calls every active
+object's `init()` and never returns; and an active object (AO) fills a
+`Request` - the chip select as a `PinRef`, the buffers lent with
+`lend<Lease::reply>(...)`, the BAUD register value `baud_for()` computes
+for the device's 6 MHz (an optional: empty when the rate is above half
+the core clock or below what the eight-bit BAUD can divide down to,
+93.75 kHz at 48 MHz), the mode,
 `SpiEngine::polled` - posts it to `SpiBus` and receives `SpiDone` with the
 status (`spi_ok`, `spi_stalled` when the request's spin budget ran
 out, or `spi_rejected` for a request naming `SpiEngine::dma`, which this
@@ -87,9 +95,10 @@ record; what the silicon does (the one register set, the DOPO triple,
 enable protection, two characters in flight, a client's three-SCK-cycle
 rule, a mode change as a CPOL flip, RXC before the wire's end, TXC,
 hardware SS, the timing table against the bench, the absent event
-surface, the errata); the types and verbs, the engines and their costs;
-how to use, one example per use; the bench findings, most of the page;
-and what is not covered.
+surface, the errata); the types and verbs, the engines among them;
+how to use, one example per use; the bench findings, most of the page,
+where "THE TWO WAYS' COSTS" gives the length from which a request costs
+the core less on the engines; and what is not covered.
 
 ## Documents of record
 
@@ -99,8 +108,11 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + eleven negatives; bench suite `test_samc_spi`
-(18 letters - a letter is one command key of the suite's console and the
-group of verdicts it runs - two-board: the peer board runs `spi_peer` on an AVR64EA48,
+(18 letters, a to r - a letter is one command key of the suite's console and the
+group of verdicts it runs; a to e are the registers with no wire, the
+command channel to the peer, the matrix of modes and bit orders, the
+rate ladder and this board as the client, and the bench findings below
+name the rest - two-board: the peer board runs `spi_peer` on an AVR64EA48,
 an AVR DA/DB or a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
 format, one source file serving both architectures - except letters h
@@ -162,10 +174,11 @@ longer than a character (the polled loop, by any handler of the image)
 lets k complete into the buffer and then k + 1, and then the bus stops
 for want of a k + 2 nobody wrote. Nothing can overflow the receiver that
 way, at any rate - measured: STATUS.BUFOVF read after every receive run
-of the bench's letter e, at 12 and 3 MHz, under the console's and the
+of `bench_samc`'s letter e, at 12 and 3 MHz, under the console's and the
 tick's interrupts, never set. The textbook loop that writes k + 1 only after
-reading k leaves the bus idle for the whole turnaround: a fifth slower
-at 3 MHz and twice as slow at 12 (the bare loops, below).
+reading k leaves the bus idle for the whole turnaround: 1.26 times the
+wire at 3 MHz and 2.04 at 12, where the loop a character ahead reads
+1.00 and 1.14 (the bare loops, below).
 
 **A client's DATA write needs three SCK cycles to reach the shifter**
 (32.6.2.6.2), and those cycles elapse only while SCK runs. So an answer
@@ -200,7 +213,8 @@ rises "in the same clock cycle as the last data bit is shifted in"
 (32.6.2.6.1): in modes 0 and 2, whose last edge follows the sampling one
 by half a bit, that is half a bit before the frame is over on the wire -
 measured: a polled read that ended on RXC left SCK at its active level
-at BAUD 255 (letter l, on the code that did). "In Host mode, [TXC] is
+at BAUD 255 (letter l's control, a loop built to end a read on its last
+RXC). "In Host mode, [TXC] is
 set when the data have been shifted out and there are no new data in
 DATA" (32.8.6) - measured to mean the end of the last frame and not its
 start: a write-only block of n frames on the transmit engine, timed from
@@ -325,45 +339,61 @@ item a reader would apply without checking the row.
     sequence a character ahead: the command phase and any data phase
     with an rx write k + 1 on DRE and read k on RXC (two in flight, the
     receive buffer's depth - so no rate threshold and no hazard under
-    the image's interrupts); a transmit-only data phase (a null rx: a
-    display's pixels) paces on DRE alone, never reads the answers and
-    drains the receive side at its tail. Every shape ends on TXC, the
-    receive shapes' one wait for it after their last RXC. One budget
-    bounds the whole transaction's spins, counted down in a register.
-    Nothing is flushed at start(): every character a receive shape
-    writes is read back by it, and the one shape that overflows the
-    receiver drains it at its own tail.
-  - **`SpiEngine::dma`** - the engines, at any length, in this order:
-    with no engines, `spi_rejected`; nothing to move, `spi_ok`; on the
-    transmit engine alone, a request that reads, `spi_rejected` - each
-    before the registers, the select or the D/C are touched, `start()`
-    answering true; a command followed by data, the command in the loop
-    and the data on the engines; a command alone, on the engines; and
-    otherwise the engines. A write rides the transmit channel alone, the
-    receiver's overflow drained at the end; a read starts its receive
-    channel first. Both channels are silent - armed for their transfer
-    errors alone - and the one interrupt of a request is the SERCOM's
-    TXC: `dma_isr()`, bound in the SERCOM's vector and in the DMAC's,
-    ends it there, the select released after the last edge. TXC raised
-    between two beats - a buffer run dry - is cleared by the next beat;
+    the image's interrupts). A transmit-only data phase (a null rx: a
+    display's pixels) longer than the receive buffer's two characters
+    paces on DRE alone, never reads the answers and drains the receive
+    side at its tail; one of one or two characters takes the receive
+    shape and reads its answers back, which costs less than the drain.
+    Every shape ends on TXC, the receive shapes' one wait for it after
+    their last RXC. One budget bounds the whole transaction's spins,
+    counted down in a register: 200000 turns of a flag wait and 6000
+    more a frame, a turn some 16 core cycles, so a stall holds the
+    dispatch for at most that many turns (eight frames: 248000 turns,
+    83 ms at 48 MHz, letter k below). Nothing is flushed at start():
+    every character a receive shape writes is read back by it, and the
+    one shape that overflows the receiver drains it at its own tail.
+  - **`SpiEngine::dma`** - the engines, at any length. `start()` takes
+    these steps in order. With no engines it answers `spi_rejected`;
+    with nothing to move, `spi_ok`; on the transmit engine alone, a
+    request that reads is `spi_rejected` - each before the registers,
+    the select or the D/C are touched, `start()` answering true. A
+    command followed by data runs the command in the loop and the data
+    on the engines; a command alone and a data phase alone run on the
+    engines. A write rides the transmit channel alone, the receiver's
+    overflow drained at the end; a read starts its receive channel
+    first. Both channels are silent - armed for their transfer errors
+    alone - and the request's end is the SERCOM's TXC: `dma_isr()`,
+    bound in the SERCOM's vector and in the DMAC's, ends it there, the
+    select released after the last edge. TXC raised between two beats -
+    a buffer run dry - enters the vector early, where `dma_isr()`
+    answers false, and the next beat clears it. In that vector,
     TXC and DRE up with the transmit channel enabled and nothing pending
     is a channel that lost its trigger, ended `spi_dma_fault`; a bus
-    error on either channel the same. `start()` returns false and the
-    SpiDone follows from the glue in the vector; the request's two pins
-    are kept for the end, nothing else of it.
+    error on either channel (the DMAC's vector) and a receive channel
+    whose last beat does not land within 64 turns end the same way.
+    Once the engines have the request `start()` returns false and the
+    SpiDone follows from the glue in the vector; the first vector to end
+    a request clears the host's in-flight mark, so the other answers
+    false and one request posts one `TransferDone`. A command loop that
+    stalls ends the request inside `start()` instead: true,
+    `spi_stalled`, no channel armed, the select released and the SERCOM
+    reset, the D/C left low. The request's two pins are kept for the
+    end, and whether it reads; nothing else of it.
   - `status()` is the last request's word - `spi_ok`, `spi_stalled`
     (`util/spi_bus.hpp`'s code, one value on every family) when its one
     spin budget ran out with a flag never raised, `spi_dma_fault` (this
-    family's first engine-defined code) or `spi_rejected` after a
-    refusal.
+    stratum's name for `util/bus_master.hpp`'s first engine-defined
+    code, `bus_engine_status`, the same value on every family with
+    engines) or `spi_rejected` after a refusal.
   - **After a stall or a fault the next request starts on a clean
     block**, and the program calls nothing. A stall releases the select
     first and resets the SERCOM (CTRLA.SWRST, 32.6.2.2) inside `start()`;
     a fault, met in the vector, puts the channels away, releases the
     select and leaves a reset owed - a value of the half-word `apply()`
-    compares, so the next `start()` or `prime()` pays it on the path that
-    already asks and neither a polled request nor a refusal carries a
-    test for it. A SERCOM whose core clock stopped cannot complete
+    compares, so the next `start()` that moves data, or `prime()`, pays
+    it on the path that already asks (an empty or refused request leaves
+    it owed), and neither a polled request nor a refusal carries a test
+    for it. A SERCOM whose core clock stopped cannot complete
     SWRST: the debt stands, and the first request after the clock
     returns pays it. `recover()` resets the SERCOM and reconfigures it to
     the applied state, putting the channels away first: the verb a timed
@@ -406,10 +436,12 @@ target:
 
     using SpiHw = brio::SpiHost<1, my_pads>;
     using SpiBus = brio::SpiBus<SpiHw, P>;
-    // in main: SpiHw::init(clock); kernel.init_all(); ...
-    // from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
-    // baud = *SpiHw::baud_for(6'000'000), mode, engine = SpiEngine::polled), post it to
-    // SpiBus, and consume the SpiDone reply.
+    // in main, after the clock task's init(): if SpiHw::init(clock) answers
+    // false there is no bus; then run the kernel with SpiBus in its list.
+    // From an AO: take the rate from SpiHw::baud_for(6'000'000), an optional
+    // checked before use, fill a Request (cs, buffers as lend<Lease::reply>(...),
+    // baud, mode, engine = SpiEngine::polled), post it to SpiBus, and consume
+    // the SpiDone reply.
 
 A display's pixel stream with its loops in SRAM:
 
@@ -447,8 +479,9 @@ high:
 
     Peer::init(clock, {.preload = true});
     const auto r = Peer::answer(std::span<const uint8_t>(frame), spins);
-    // r.end == Peer::RunEnd::closed: the host raised the select after
-    // clocking r.count answers or more; what it sent is not kept.
+    // r.end == Peer::RunEnd::closed: the host raised the select; r.count
+    // answers were loaded, and the run keeps DATA one ahead of the host,
+    // so a host that closed early clocked fewer. What it sent is not kept.
 
 The same with what the host sends kept, the run's length the shorter of
 the two spans:
@@ -458,11 +491,12 @@ the two spans:
 
 ## Bench findings
 
-- Two benches carry this driver. The cross-architecture bench: SAM
-  SERCOM1 function C (PA16 MOSI, PA17 SS, PA18 MISO, PA19 SCK) against
-  an AVR64EA48 peer's SPI0 ALT1 (PE0 MOSI, PE3 SS, PE1 MISO, PE2 SCK)
-  plus GND, both boards at 5 V. And the SAM-SAM bench (both boards'
-  PA16..PA19 straight through plus GND). On either desk the same wires
+- The bench every finding below was measured on is the
+  cross-architecture one: SAM SERCOM1 function C (PA16 MOSI, PA17 SS,
+  PA18 MISO, PA19 SCK) against an AVR64EA48 peer's SPI0 ALT1 (PE0 MOSI,
+  PE3 SS, PE1 MISO, PE2 SCK) plus GND, both boards at 5 V. The suite
+  also serves a SAM-SAM bench (both boards' PA16..PA19 straight through
+  plus GND), not yet run ("Not covered yet"). On either the same wires
   carry a board as host (DOPO row 0x3) and as client (row 0x1).
 - All four transfer modes x both bit orders byte-exact in both
   directions; a deliberate DORD mismatch is an EXACT two-way bit
@@ -480,9 +514,12 @@ the two spans:
   six thousandths are OSC48M against the crystal - the oscillator the
   SERCOM runs on, half a per cent off on this board
   ([../boards/samc21j.md](../boards/samc21j.md)); the divisor is exact.
-  12 MHz reads 1036 and 24 MHz 1680: there the frame (32 and 16 core
-  cycles) is shorter than the polled loop's turn, so the instrument
-  does not time them (below).
+  12 MHz reads 1038 to 1041 and 24 MHz 1695 in three runs: there the
+  frame (32 and 16 core cycles) is no longer than the polled loop's
+  turn in this image - 33 and 27 core cycles - so the reading is the
+  loop's and not the wire's (`bench_samc`'s image turns the same loop
+  in 32.0 at 12 MHz, below; a cycle a frame between two images, not
+  attributed).
 - Back-to-back characters (no inter-byte gap - one engine request)
   bind at the PEER: its answer reload, or its silicon under it. The AVR
   peer serves each window with one call of its driver's runs
@@ -640,14 +677,15 @@ the two spans:
   the last half bit, and the pad is read within a few tens of cycles of
   the end, so at BAUD 255 it cannot be missed; at BAUD 23 the half bit is
   24 cycles and the instrument no longer sees it. The control, the same
-  letter on the loop that ended a read on its last RXC: four requests of
+  letter built with a loop that ends a read on its last RXC: four requests of
   thirty-two ended before the last edge at BAUD 255 - the mode 0 and mode
   2 reads - in each of four runs. The cost of the rule: one TXC wait a
   polled request, a flag already up on the shapes that stopped on it, and
   at most half a bit on a read; on the engines nothing, TXC being the one
   interrupt anyway.
 - THE ENGINES (letter m, against the AVR64EA48's `spi_peer` at 1 MHz -
-  a frame 384 core cycles, the loop far cheaper there): one frame written
+  a frame 384 core cycles, the loop far cheaper there - but for its
+  last two cases, on the loop-back at 6 MHz): one frame written
   on the transmit engine alone and one frame read on the pair, each
   `start()` false and `dma_isr()` the end, `spi_ok`, exact at both ends;
   sixteen read in mode 3; a read naming `dma` on the transmit engine
@@ -659,12 +697,13 @@ the two spans:
   the loop and the data on the engines, the peer receiving all seventeen
   in order, the D/C cleared and then set; a command of four alone on the
   engines, received whole, the D/C high at its end as a polled one leaves
-  it; 1024 polled frames on an engined host never writing a channel's
-  slot; and a command of one with 65535 data frames - 65536, which a sum
-  taken in sixteen bits read as an empty request - taking the wire's
-  2,097,152 ruler ticks and more, polled (2,119,964) and on the engines
-  (2,111,231). Ten runs of m, every one so; on the code before, `dma`
-  was refused whatever its length.
+  it; then on the loop-back at 6 MHz (BAUD 3, a frame 64 core cycles,
+  32 ticks of the crystal ruler), 1024 polled frames on an engined host
+  never writing a channel's slot, and a command of one with 65535 data
+  frames - 65536, which a sum taken in sixteen bits would read as an
+  empty request - taking the wire's 2,097,152 ruler ticks (65536 frames
+  of 32) and more, polled (2,119,964) and on the engines (2,111,231).
+  Ten runs of m, every one so.
 - THE BLOCK'S RESET (letter n, the loop-back): a polled request on a
   clockless SERCOM ends `spi_stalled` and the next read of sixteen, the
   clock back and nothing called, is exact; a read on the pair whose
@@ -688,20 +727,23 @@ the two spans:
   600 console lines whole. The console beside a pair costs its interrupt
   transmitter, some 190 cycles an entry a character (sercom.md).
 - THE TWO WAYS' COSTS (`bench_samc` letter e, the pair at 3 MHz, 64
-  frames, best of 8): E, the engines' least busy cycles of the core -
-  `start()`, the one TXC vector, the masked idle wait's own turns - 987
-  written and 960 read from the flash (877 and 842 with the vectors and
-  the loops in SRAM); F, the polled request's rest above the wire, 458
-  and 374 (429 and 357); E - F, 529 written and 586 read (448 and 485).
+  frames, best of 8, three runs): E, the engines' least busy cycles of
+  the core - `start()`, the one TXC vector, and the turns of the loop
+  the bench waits in (interrupts masked while it tests the end, the
+  core asleep between two tests) - 999 written and 979 read from the
+  flash (897 and 865 with the vectors and the loops in SRAM); F, the
+  polled request's rest above the wire, 457 to 458 and 374 (423 and 346
+  to 351); E - F, 541 to 542 written and 605 read (474 and 514 to 519).
   The engines' wall carries the vector's latency, x 1.13 of the wire at
   64 frames and x 1.03 at 1024 frames at 12 MHz. A polled request holds
   the core for its frames' wire time - or the loop's turn where that is
-  longer: 34 cycles a frame written at 24 MHz, 41 read at 12 MHz - so the
-  engines cost the core fewer cycles from the length (E - F) / frame:
+  longer: about 27 cycles a frame written at 24 MHz (letter f), 41 read
+  at 12 MHz - so the engines cost the core fewer cycles from the length
+  (E - F) / frame:
 
   | SCK (BAUD) | frame, core cycles | engines cheaper, written | read |
   |---|---:|---:|---:|
-  | 24 MHz (0) | 16 (the loop's 34) | 16 frames | - (beyond the receiver) |
+  | 24 MHz (0) | 16 (the loop's 27) | 21 frames | - (beyond the receiver) |
   | 12 MHz (1) | 32 (read: the loop's 41) | 17 | 15 |
   | 6 MHz (3) | 64 | 9 | 10 |
   | 3 MHz (7) | 128 | 5 | 5 |
@@ -711,17 +753,21 @@ the two spans:
 
   Guidance, which nothing in the code reads: at 3 MHz and slower a
   request of five frames or more costs the core less on the engines, at
-  12 MHz from about sixteen; below that the loop is cheaper, and a wrong
-  choice costs time, never correctness.
+  12 MHz from about sixteen and at 24 MHz from about twenty written;
+  below that the loop is cheaper, and a wrong choice costs time, never
+  correctness.
 - THE WRITE AT 24 MHz (letter r, the transmit engine alone on the
   loop-back, blocks of 64 and 1024 frames, the frame from their
   difference so the request's fixed cost cancels, on the crystal ruler -
   OSC48M, which the SERCOM runs on, reads six thousandths fast against
   it): a frame takes 32.20, 64.40 and 128.8 core cycles at BAUD 1, 3 and
-  7 - the wire's 32, 64 and 128 - and 19.12 at BAUD 0 against the wire's
-  16, the same from the SRAM and from the flash, the core spinning on a
-  flag or asleep: 20 Mbit/s on a 24 MHz SCK. So the gap is neither the
-  source's memory nor the core's use of the bus but the channel's own
+  7 - the wire's 32, 64 and 128 - and at BAUD 0, against the wire's 16,
+  19.11 to 19.12 with the source in the SRAM, the core spinning on a
+  flag or asleep, and with the source in the flash 19.29 to 19.31
+  asleep and 19.59 to 19.72 spinning (two runs): 20 Mbit/s on a 24 MHz
+  SCK. So the gap is mostly neither the source's memory nor the core's
+  use of the bus (the two together at most a fifth of it, and only with
+  the source in the flash) but the channel's own
   turn: DRE rises three CLK_SERCOM_APB cycles after DATA empties
   (32.6.2.6.2) and the next beat lands about sixteen cycles after it -
   the trigger's way into the controller, the arbitration, a read and a
@@ -731,25 +777,27 @@ the two spans:
   inferred, not measured: a scope on SCK would show the idle cycles
   between two frames.)
 - `bench_samc` letter e, THE HOST ABOVE THE WIRE: the host on SERCOM1
-  with MISO floating (the time is the wire's), the best of 8, the instrument's figures of the same run
-  being ruler 65, stamp 151 (56 of it charged to a handler), interval
+  with MISO floating (the time is the wire's), the best of 8 in each of
+  three runs, the instrument's figures in the same image (its letter r)
+  being ruler 65, stamp 148 (56 of it charged to a handler), interval
   82. The polled loop (`spi.poll` the write shape, `spi.poll.rx` the
-  receive one, 256 frames): at 3 MHz the wire's, x = 1.01 both shapes
-  (it was 1.45 and 1.54 with one character in flight); at 12 MHz the
-  write shape 34 cycles a character against the wire's 32, x = 1.06
-  (was 3.06), the receive shape 43, x = 1.33 (was 3.43). The data
-  sheet's own sequence written bare over the registers in a scratch
-  program on the same board - no library exists for this family - is the
-  oracle: a character ahead, reading every answer back, it reads x =
-  1.14 at 12 MHz (36.6 cycles a character, 14 instructions a turn) and
-  1.00 at 3; the textbook loop with one in flight 2.04 and 1.26. THE
-  CORTEX-M0+ AT 48 MHz BEHIND TWO WAIT STATES OF FLASH CANNOT TURN A
-  TWO-FLAG POLL AROUND INSIDE A 32-CYCLE CHARACTER, whatever the driver:
-  the write shape beats the bare loop because it polls ONE flag; what
+  receive one; a character's cost is the difference of the 256- and the
+  16-frame lines over 240, so the request's fixed cost cancels): at
+  3 MHz the wire's, x = 1.01 for 256 frames in both shapes; at 12 MHz
+  the write shape 32.0 cycles a character, the wire's 32 (x = 1.05 for
+  256 frames, the fixed cost inside), the receive shape 41.0 (x = 1.32).
+  The data sheet's own sequence written bare over the registers in a
+  scratch program on the same board - no library exists for this
+  family - is the oracle: a character ahead, reading every answer back,
+  it reads x = 1.14 at 12 MHz (36.6 cycles a character, 14 instructions
+  a turn) and 1.00 at 3; the textbook loop with one in flight 2.04 and
+  1.26. THE CORTEX-M0+ AT 48 MHz BEHIND TWO WAIT STATES OF FLASH CANNOT
+  TURN A TWO-FLAG POLL AROUND INSIDE A 32-CYCLE CHARACTER, whatever the
+  driver: the write shape keeps the wire because it polls ONE flag; what
   separates brio's receive loop from the bare one is the flash (the
-  same loops under `InRam` read 1.05 and 1.21: 33.6 and 38.9 cycles a
-  character against 33.7 and 42.4), not the budget - a register
-  count-down against a stack slot moved nothing.
+  same loops under `InRam`: 32.0 and 37.0 cycles a character, x = 1.05
+  and 1.20 for 256 frames), not the budget - a register count-down
+  against a stack slot moved nothing.
   STATUS.BUFOVF after every run: never. There is no interrupt engine:
   the other way is DMA ([design/spi-bus.md](../design/spi-bus.md), "Two
   ways to run a request", weighs a per-character interrupt against the
@@ -758,26 +806,29 @@ the two spans:
   kernel"). THE FIXED COST OF A
   REQUEST (`spi.req`: a polled request of 1, 3 and 16 bytes with a
   command byte, the D/C scripted on PB23 and the select on PA17 - two
-  real pads, four real edges - at 3 MHz): 504, 539 and 628 cycles above
-  the wire, the instrument's 82 inside - the phase boundary is the 35
-  between one byte and three (the last command character read back, the
-  D/C, the first data character's own start), and the 89 from three to
-  sixteen is the transmit-only phase's tail (TXC awaited, the receiver
-  drained: a phase longer than the receive buffer pays it, one of two
-  characters is read back instead and does not). What it is made of,
-  counted in the listing and measured with the polled transaction
-  `InRam` (5, 8 and 24 cycles less, the call through the veneer
-  included, so the flash is not the bulk of it): the bench's own request
-  built on the stack and the interval; start() along that path, some 58
-  instructions counted - the refusal's test (the field's load, a compare
-  and a branch, then the `spi_ok` store), the length test, the one-word
-  compare, the four pin edges inline through `PinRef::set/clear`
-  (pin.hpp forces the two verbs inline: each edge is the group pointer's
-  load, the null test, the mask's load and one OUTSET or OUTCLR store -
-  as calls they cost 49 cycles more on the 3-byte request, measured),
-  the call to the transaction and the return -; the loop's prologue, and
-  the SERCOM's own start and finish latencies at the boundaries. Three
-  runs of each image, the best of 8 in each.
+  real pads, four real edges - at 3 MHz): 537, 577 and 666 cycles above
+  the wire, the instrument's 82 inside, the same in each of three runs.
+  The phase boundary is the 40 between one byte and three (the last
+  command character read back, the D/C, the first data character's own
+  start). The 89 from three to sixteen is the transmit-only phase's
+  tail - TXC awaited and the receiver drained - which a data phase
+  longer than the receive buffer pays; a data phase of two characters
+  reads its answers back instead and pays no drain. What it is made of,
+  read in the listing and measured with the polled transaction `InRam`
+  (17, 27 and 43 cycles less, the call through the veneer included, so
+  the flash is not the bulk of it): the bench's own request built on the
+  stack and the interval; start() along that path - the refusal's test
+  (the field's load, a compare and a branch, then the `spi_ok` store),
+  the length test, the one-word compare, the four pin edges inline
+  through `PinRef::set/clear` (pin.hpp forces the two verbs inline: each
+  edge is the group pointer's load, the null test, the mask's load and
+  one OUTSET or OUTCLR store - as calls they cost 49 cycles more on the
+  3-byte request, measured), the call to the transaction and the
+  return; the loop's prologue; the wait for TXC at the request's end
+  that the select's rule asks (`test_samc_spi` letter l, above) and its
+  test; and the
+  SERCOM's own start and finish latencies at the boundaries. Three runs
+  of each image, the best of 8 in each.
 
 ## Not covered yet
 
