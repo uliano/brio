@@ -23,9 +23,9 @@
  *    the column, the clock arithmetic, the flags and the sequences that
  *    clear them, the control bits as verbs. It decides nothing.
  *  - `I2cHost<n, pins, TxEngine, RxEngine, Placement>` is the engine util/
-  *    i2c_bus.hpp's I2cBus drives: the Request is the same struct on every
- *    stratum, verbatim - {addr, tx span, rx span, reply, speed}, one bus tenure
- *    that is a write, a read, a write-then-read with a repeated START, or
+ *    i2c_bus.hpp's I2cBus drives: the Request has the same fields on every
+ *    stratum - addr, tx and tx_len, rx and rx_len, reply, speed, engine - one
+ *    bus tenure that is a write, a read, a write-then-read with a repeated START, or
  *    the empty probe - and the outcome vocabulary is i2c_bus.hpp's.
  *  - `I2cClient<n, pins>` is the target side: a polled surface and two
  *    interrupt bodies, deliberately thin, because a client is a protocol
@@ -103,14 +103,12 @@
  * shifter: 15.9.1's START bit, in master mode, is "repeated start
  * generation", and set while a byte shifts it goes out as that byte ends.
  * It is not the chapter's own end of a write - figure 15-3 ends one at
- * EVT8_2, with SCL held low past the last acknowledge - and it is the
- * order the far end needs when it is a POLLED target of this block's
- * lineage: such a target loses the last written byte when the START comes
- * after BTF (measured on the CH32V203C8T6 and the CH32V303VCT6,
- * docs/ch32vx03/i2c.md), and a register index followed by a read is that
- * shape. The desk's partner is one (the CH32V006's twi_peer), and in this
- * order it took every written byte, one to four before a read, at both
- * speeds, pump and engines (measured, docs/ch32x035/i2c.md). The price is in the
+ * EVT8_2, with SCL held low past the last acknowledge. No delivery on this
+ * part depends on the order: the one loss measured under the BTF order
+ * needs one core serving both ends (docs/ch32vx03/i2c.md), and the
+ * CH32V006's polled twi_peer took every written byte in this order, one to
+ * four before a read, at both speeds, pump and engines (measured,
+ * docs/ch32x035/i2c.md). It saves the BTF entry. The price is in the
  * error path: the START is requested before the last byte's acknowledge
  * is known, so the phase between the request and SB is its own
  * (`restart`) and a NACK in it is the byte's - i2c_nack_data. The
@@ -202,7 +200,10 @@
  * and the F7 and the two 28-pin parts none - their default column is the
  * debug port's (`i2c1_default_pins`). AFIO_CTLR's pull-up modes for PC16
  * and PC17 (8.3.2.4) do not act under the alternate function (measured):
- * the wire's resistors are the only pull-ups an I2C on those pads has.
+ * the wire's resistors are the only pull-ups an I2C on those pads has. And
+ * they cannot go to the supply: PC17 high at power-up selects WCH's boot
+ * loader (the evaluation board's reference V1.3, section 5), so they hang
+ * from a pad the program drives high once it runs (docs/ch32x035/i2c.md).
  *
  * What the register description names and the bits do not have. CTLR1
  * carries ENARP (bit 4) and its STOP bit is "set by hardware when a
@@ -731,12 +732,16 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *
  *   using Bus = brio::I2cHost<1>;   // the part's first column
  *   using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
- *   Bus::init(clock);               // after the clock task; false: no block, no column
+ *   if (!Bus::init(clock)) {        // after the clock task
+ *       // an HCLK under 4 MHz, a column the probe or USB owns, no block: no bus
+ *   }
  *
  * I2cBus's arguments: the engine, the platform, how many requests may
  * wait their turn (the next is answered i2c_rejected), the completion
  * policy, and the per-bus timeout in kernel ticks - the one that answers
- * a parked tenure with i2c_timeout (util/bus_master.hpp). `clock` is the
+ * a parked tenure with i2c_timeout (util/bus_master.hpp), which must sit
+ * above the longest tenure the program asks for (20 ms fits some 200 bytes
+ * at 100 kHz, and 255 bytes there is 23 ms of wire). `clock` is the
  * clock task's tag object (ch32x035/clock.hpp). With the engines named,
  * dma1_channel6_handler and dma1_channel7_handler call dma_isr() too.
  *

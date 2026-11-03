@@ -583,7 +583,7 @@ prologue's entry and exit outside:
 | the SPI receive loop, an 8-bit frame at HCLK/2, /4, /16 (the wire 16, 32, 128) | the driver | 28.8, 59.8, 154.4 | 29.8, 50.7, 144.4 (the dead bus moving with the instance's address, spi.md) | (above) |
 | the USART DMA vector's body, the transmit engine's block restart | the driver | 238 to 248 | 196 to 197 (207 to 210 with the restart alone placed); 141 with the vector placed instead | 268 (212) |
 | the USART interrupt transmitter's `isr()` | the program's vector | 135 to 136 | 76 with the vector placed (145 as an instance behind the flash's vector) | the vector |
-| the I2C event pump, an entry of a 255-byte write and read | the program's vector | 154, 182 | 92, 106 with the vector placed (161, 177 as an instance behind the flash's vector) | 1818, the benchmark's vector with three hosts inline |
+| the I2C event pump, an entry a byte written and read at 400 kHz | the program's vector | 148, 181 | no suite places it | - |
 
 At the wire's level: the transmit-only loop holds HCLK/2 from SRAM, the
 receive loop's dead bus a frame falls from 28 cycles to 19 at HCLK/4 in

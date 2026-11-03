@@ -1310,29 +1310,28 @@ in the control, and a preemption inside the host's `start()` is a later
 START, never a stretch (the findings are [i2c.md](i2c.md)'s, "The stack
 under the preemptive kernel"). Two of them are this kernel's:
 
-- **The tenure cycle locks to the pressure's period.** Under 97 us x
-  3000, 400 writes landed TIM2's interrupt inside `start()` 352 to 363
-  times with the scheduler path in SRAM and 308 to 316 with it in the
-  flash - six to seven times the 50 or 51 independent ticks would give -
+- **More preemptions land inside `start()` than chance gives.** Under
+  97 us x 3000, 400 writes landed TIM2's interrupt inside `start()` 150 to
+  152 times with the scheduler path in SRAM and 227 to 232 with it in the
+  flash, against the 34 independent ticks would give, not explained -
   `start()` itself in the flash in both images and its figure holding the
   suite's own copy of the Request ([i2c.md](i2c.md)).
 - **Past this core's capacity the stack stays within the pack's count of
   runs.** A held-wire flood with a probe at every tick of 97 us x 3000
-  asks more than the 4656 cycles of a period hold (a rejected probe's
-  chain costs some 1600 cycles over Pressure's 3000): the arbiter's queue
+  asks more than the 4656 cycles of a period hold: the arbiter's queue
   overflows, the time events - walked at the base of the pack - are
   starved, and the Console, the one object that ends the flood, does not
   run. The suite's letter `u` runs that flood by name for 2000 ticks, the
   pressure's vector stopping the timer itself, with the free stack
   painted again before it: the stack's high-water during the letter read
-  1336 to 1400 bytes in ten runs with the scheduler path in SRAM and 1320
-  to 1432 in ten with it in the flash, against the 2144 bytes
+  1304 to 1336 bytes in ten runs with the scheduler path in SRAM and 1288
+  to 1348 in ten with it in the flash, against the 2144 bytes
   the kernel's bound derives - at most five runs for the pack's five
   objects, each object's deepest dispatch at most once, one empty run at
   an entry, by the release listing's frames (the letter's arithmetic).
-  Of the 2000 probes 1353 to 1359 were answered, the arbiter's full queue
-  dropping 642 to 648 requests, with the scheduler path in SRAM, 455 to
-  470 and 1531 to 1546 with it in the flash; after the flood the next tenure
+  Of the 2000 probes 1321 to 1323 were answered, the arbiter's full queue
+  dropping 678 to 680 requests, with the scheduler path in SRAM, 384 to
+  390 and 1611 to 1617 with it in the flash; after the flood the next tenure
   was `i2c_ok` and the arbiter idle in every run. Under the cooperative
   kernel no dispatch nests over another, so the same load would starve
   the lower objects at the stack's one level (not run: the suite is the
@@ -1341,8 +1340,8 @@ under the preemptive kernel"). Two of them are this kernel's:
   turned since the last), which keeps it under what the core serves and
   its held tenure answered in its place ([i2c.md](i2c.md)).
 
-The images: with the path in SRAM 37740 bytes of the 62 KB (59 %) and
-4608 of RAM (22 %); with the path in the flash 37496 and 2092.
+The images: with the path in SRAM 37892 bytes of the 62 KB (60 %) and
+4608 of RAM (22 %); with the path in the flash 37652 and 2092.
 
 ## A handler in SRAM
 
@@ -1454,11 +1453,10 @@ driver can: its private paths (the SPI host's polled loops) and the
 bodies it calls out of the vector, with the vector left in the flash. A
 program that places the vector moves everything inline in it - every
 `InFlash` body it binds - with no call at all. On a path whose body is
-inline in the vector whole (the I2C event pump, a USART's per-byte
-transport), placing the vector is the faster of the two, and placing
-both buys nothing more: an `InRam` body called from a vector in SRAM
-measured the same as the vector alone (79 and 95 cycles against 79 and
-94, the table's I2C row), its bytes spent twice. On a path the driver
+inline in the vector whole (a USART's per-byte transport, the table's row;
+the I2C event pump has the same shape, no suite placing its vector), placing
+the vector is the faster of the two, and placing both spends the bytes
+twice. On a path the driver
 calls out of line or keeps private, `InRam` is the only way.
 
 **What it buys, measured** at 48 MHz on the CH32X035F8U6, each pair one
@@ -1470,7 +1468,7 @@ suite with the path in the flash and in SRAM, nothing else moved:
 | the SPI receive loop's turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 or 26.0, 40.0 or 42.0 (two values, by the address modulo four) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
-| the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (207 at most); 79, 94 with the vector placed | 968 for one plain host |
+| the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver | 213, 257 (341 at most) | 145, 160 to 163 behind a vector in the flash (207 at most) | 968 for one plain host |
 | the console's handler body (115200, `test_x035_spi`) | the program | 148 | 66 | 404 |
 | the tick's handler body | the program | 65 | 29 | 100 |
 

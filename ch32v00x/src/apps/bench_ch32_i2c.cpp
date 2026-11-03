@@ -3,11 +3,11 @@
 // (ch32v00x/i2c.hpp) against a PEER BOARD, one bench line per tenure
 // shape, size, speed and engine, in the grammar every family prints.
 //
-// WHY AN IMAGE OF ITS OWN: bench_ch32 fills nearly all of the CH32V006's
-// 40 KB of program flash (ch32v00x/ld/ch32v006k8.ld stops the image short of
-// the NV partition), and this letter - two instantiations of the host,
-// the pump's and the engines', and the peer's command channel - is about
-// ten more. The ruler, the idle adapter, the meters and the console are
+// WHY AN IMAGE OF ITS OWN: bench_ch32 already builds as two group images
+// under the CH32V006's 40 KB of program flash (ch32v00x/ld/ch32v006k8.ld
+// stops the image short of the NV partition), and this letter carries two
+// instantiations of the host, the pump's and the engines', and the peer's
+// command channel. The ruler, the idle adapter, the meters and the console are
 // bench_ch32's, spelled the same way, so a line here reads as a line
 // there; letter r prints the instrument's cost for this image.
 //

@@ -3437,8 +3437,8 @@ int main() {
     bench.letter('e', "the vocabulary on the wire, and commanded stretching priced", te_vocabulary);
     bench.letter('f', "the two speeds against a second chip, timed; a rung past the chapter", tf_speeds);
     bench.letter('g', "THE DMA ENGINES on channels 6 and 7 against the peer", tg_dma);
-    bench.letter('n', "THE ENGINE A REQUEST NAMES: dma at one byte, interrupt touching no channel, a "
-                      "refused launch on the pump, dma refused without engines, the edges under dma",
+    bench.letter('n', "THE ENGINE A REQUEST NAMES: dma at one byte, interrupt touching no channel, dma "
+                      "refused without engines, the edges under dma",
                  tn_engine);
     bench.letter('h', "THE KERNEL: I2cBus over I2cHost, the rejection, the votes, a held SDA and a held "
                       "clock answered in their place", th_kernel);

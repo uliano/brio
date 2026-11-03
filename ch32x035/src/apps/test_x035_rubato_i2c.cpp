@@ -138,7 +138,7 @@
 //      request once, the next tenure i2c_ok and the arbiter idle; then the
 //      hold met at another speed (above). A flood at every tick regardless
 //      asks more of this core at 97 us x 3000 than it serves - a rejected
-//      probe costs some 1600 cycles beside Pressure's 3000 a period - and
+//      probe and its reply's dispatch beside Pressure's 3000 a period - and
 //      starves the Console, which ends the flood and walks the time events:
 //      letter u runs it so, by name.
 //   i  dark: every object idle, the arbiter's vote, no time event armed,

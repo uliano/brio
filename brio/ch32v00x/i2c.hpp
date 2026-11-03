@@ -15,8 +15,9 @@
  *    the clock arithmetic, the flags and the sequences that clear them,
  *    the control bits as verbs. It decides nothing.
  *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the engine util/
- *    i2c_bus.hpp's I2cBus drives. Its Request is the same struct on every
- *    stratum - {addr, tx span, rx span, reply, speed}, one bus tenure (one
+ *    i2c_bus.hpp's I2cBus drives. Its Request has the same fields on every
+ *    stratum - addr, tx and tx_len, rx and rx_len, reply, speed, engine -
+ *    one bus tenure (one
  *    transaction from its START to its STOP) that is a write, a read, a
  *    write-then-read with a repeated START, or the empty probe - and the
  *    outcome vocabulary is i2c_bus.hpp's (a NACK, the receiver's refusal
@@ -28,21 +29,11 @@
  *    (`I2cClientOptions`), with `flush()` for the byte a target
  *    transmitter is asked beyond the host's closing NACK.
  *
- * The smallest use, a register read through the arbiter
- * (docs/ch32v00x/i2c.md, "How to use it"):
+ * The smallest use, a register read through the arbiter, an excerpt whose
+ * setup docs/ch32v00x/i2c.md states at its opening:
  *
  *     using Bus = brio::I2cHost<1>;                          // PC2 SCL, PC1 SDA
  *     using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
- *
- *     Bus::init(clock);                                      // both speeds solved at 48 MHz
- *
- *     Bus::Request r{};
- *     r.addr = 0x48;
- *     r.tx = brio::lend<brio::Lease::reply>(reg); r.tx_len = 1;
- *     r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
- *     r.speed = brio::I2cSpeed::fast_400k;
- *     r.reply = brio::reply_to<Sensor, brio::I2cDone>();
- *     brio::post<I2c>(r);
  *
  *     BRIO_CH32_VECTOR(i2c1_ev_handler) {
  *         if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
@@ -51,14 +42,32 @@
  *         if (Bus::error_isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
  *     }
  *
+ *     // In main(), after the clock task's init() and before the kernel runs:
+ *     if (!Bus::init(clock)) {                               // both speeds solved at 48 MHz
+ *         // a clock under 8 MHz: no speed is legal, no bus
+ *     }
+ *
+ *     // In a handler of Sensor. The two buffers are static: they are lent until I2cDone.
+ *     static uint8_t reg = 0x00;
+ *     static uint8_t value[2];
+ *     Bus::Request r{};
+ *     r.addr = 0x48;
+ *     r.tx = brio::lend<brio::Lease::reply>(&reg); r.tx_len = 1;
+ *     r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
+ *     r.speed = brio::I2cSpeed::fast_400k;
+ *     r.reply = brio::reply_to<Sensor, brio::I2cDone>();
+ *     brio::post<I2c>(r);
+ *
  * `I2c` is the arbiter (util/bus_master.hpp's BusMaster): an active
  * object of the program - a component with its own event queue, served
  * one event at a time by the kernel - that takes the clients' requests
  * one at a time in arrival order, calls the host's start() for each and
  * replies to the sender with the outcome; `BusPassThrough` is its failure
  * policy (no retry) and the last argument its per-bus timeout, the one
- * answer to a client that holds the clock. `Sensor` is the program's
- * active object that sent this request.
+ * answer to a client that holds the clock, which must sit above the longest
+ * tenure the program asks for: 20 ms fits some 200 bytes at 100 kHz, and 255
+ * bytes there is 23 ms of wire. `Sensor` is the program's active object that
+ * sent this request.
  *
  * Who calls what. init() runs in main, after the clock task (the timing
  * is computed from the rate the clock type claims) and before the
@@ -107,11 +116,9 @@
  * out as that byte ends (measured: every written byte taken, and no BTF
  * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
  * EV8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
- * acknowledge - and it is the order WCH's interrupt example uses: a
- * polled target of this block's lineage loses the last written byte when
- * the START comes after BTF (measured on the CH32V203C8T6 and the
- * CH32V303VCT6, docs/ch32vx03/i2c.md), and a register index followed by
- * a read is exactly that shape. The price is in the error path: the START
+ * acknowledge - and it is the order WCH's interrupt example uses, with no
+ * stretch and no BTF entry of its own. No delivery on this part depends on
+ * it (docs/ch32v00x/i2c.md). The price is in the error path: the START
  * is requested before the last byte's acknowledge is known, so the phase
  * between the request and SB is its own (`restart`), and a NACK in it is
  * the byte's - i2c_nack_data. The repeated START is not withdrawn: the
@@ -164,13 +171,10 @@
  *
  * The event pump takes no placement (util/placement.hpp), unlike this
  * family's SPI host and USART: it is inline in the vector that binds it,
- * and a program that wants it in SRAM places that vector (`.fast_text`) -
- * measured on the CH32V006K8U6 at 48 MHz, an entry of a 255-byte write
- * about 154 cycles between the stamps from the flash and 92 from SRAM with
- * the vector, while the same body as an out-of-line instance in SRAM
- * behind a vector in the flash took 161: the call and the return into the
- * flash's two wait states (RM 18.3.1) cost the entry more than SRAM saves
- * it (docs/ch32v00x/i2c.md).
+ * and a program that wants it in SRAM places that vector (`.fast_text`),
+ * which carries the whole body; a body in SRAM behind a vector in the flash
+ * would still pay the trip through the flash's two wait states (RM 18.3.1,
+ * docs/ch32v00x/i2c.md).
  *
  * Not covered yet: 10-bit addressing on the host side (the resource
  * has the mode and the client matches such an address; the host's
