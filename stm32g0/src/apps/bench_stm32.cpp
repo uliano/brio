@@ -231,7 +231,8 @@
 //      slope of two engined writes of 16 and 255 bytes, and every op
 //      through the engineless host (`i2c.*`) and through the engined host
 //      with every Request naming `dma` (`i2c.*.dma`, DmaTxEngine<1, 2> +
-//      DmaRxEngine<1, 3>, every half on the engines, one byte included):
+//      DmaRxEngine<1, 3>, every half with a buffer on the engines, a read
+//      of one included, a write's first byte the preload's):
 //      i2c.write and i2c.read of
 //      1, 2, 16 and 255 bytes, i2c.wr (one written, a repeated START, 1,
 //      2 and 16 read; n counts both), i2c.probe (the client's address)

@@ -46,7 +46,7 @@
 // same two nodes, so a desk carries the self-link, the peer, or both.
 // main() PROBES the self-link before any letter runs - PB8 and PB9
 // driven both ways against the far pad's own internal pull - and
-// letters b..l, u, x and y skip themselves, printing the reason and
+// letters b..l, u, v, B, x and y skip themselves, printing the reason and
 // claiming no verdict, when the probe says no. THE PEER LETTERS ARE A
 // SECOND SET under their own all-key, `w`: `z` stays the single-board
 // set, runnable with the far board on its dark console, and `w` needs
@@ -104,8 +104,8 @@
 //      depths, measured as the timing shift they really are
 //   h  RELOAD PAST 255 BYTES through TCR, AUTOEND against a software
 //      STOP, and the host's DMA engines - a write, a read, a register
-//      read, a write and a read of one byte - and the half with no buffer
-//      they leave to the pump right after them;
+//      read, a write of one (its preload alone) and a read of one - and the
+//      half with no buffer they leave to the pump right after them;
 //      the 300-byte write's and the engined write's SCL against 400 kHz
 //   i  SMBus: the PEC end to end, PECERR staged, and THE TIME-OUTS -
 //      whose hold does each of the three really police
@@ -122,6 +122,16 @@
 //      channel, `dma` on halves of one byte and on a register read, a half
 //      with no buffer left to the pump under `dma`, and `dma` on the
 //      engineless host refused with nothing on the wire
+//   v  A REFUSED WRITE, position by position, on either engine: the address,
+//      a write of one, the first byte, the second, a later one, a write of
+//      two; the client's count and bytes judged, and the next request whole
+//      byte for byte with no init() and no PE cycle between them; a channel
+//      starved under a refused byte; and a write that does not flush, the
+//      control that shows the byte a refusal leaves in TXDR
+//   B  ES0418 2.11.6's band by name: HSI16 the kernel, PCLK at 44 MHz, a
+//      ratio of 2.75. The host's writes judged byte for byte, and a row with
+//      TXDR left empty by the resource's verbs, its rate printed: what says
+//      whether this silicon has the erratum
 //   n  THE PEER: the twi_link command channel to the peer board, its
 //      ident and ten command round trips
 //   o  the tenure shapes against the peer - write, read, write-then-read
@@ -147,7 +157,7 @@
 // of the I2C self-link plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghijklmuxy,nopqrst
+// build: groups = abcdefghijklmuxy,nopqrst,vB
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -195,6 +205,8 @@ using P = Stm32g0Platform<>;
 using Fast = Clock<ClockSource::pll, 64'000'000>;
 using Mid = Clock<ClockSource::internal, 16'000'000, PowerRegime::range2>;
 using Slow = Clock<ClockSource::internal, 2'000'000, PowerRegime::low_power_run>;
+/// Letter B's rate alone: PCLK against HSI16 is 2.75, inside ES0418 2.11.6's band.
+using Band = Clock<ClockSource::pll, 44'000'000>;
 
 constexpr UartOptions console_opts{.kernel_clock = UsartClock::hsi16};
 
@@ -263,19 +275,20 @@ using DmaHost = I2cHost<1, host_pins, HostTx, HostRx>;
 // tenure at 3216 thousandths of the rate (measured, whenever h had run
 // earlier in the same boot). Host is the engine every letter but h drives,
 // and h switches no rate.
-using SysClock = DynamicClock<Rates<Fast, Mid, Slow>, Ticker, Serial, DmaHost, Host>;
+using SysClock = DynamicClock<Rates<Fast, Mid, Slow, Band>, Ticker, Serial, DmaHost, Host>;
 constexpr SysClock clock;
-static_assert(SysClock::rate_count == 3);
+static_assert(SysClock::rate_count == 4);
 
 constexpr uint8_t r_fast = 0;
 constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
+constexpr uint8_t r_band = 3;
 
 Serial serial;
 // TWO SETS: `z` the single-board letters, runnable with the far board on
 // its dark console; `w` the peer letters n..t, which need `twi_peer` on
 // the far board and FAIL without it.
-TwoKeyTestBench<Serial, 'w', 24> bench;
+TwoKeyTestBench<Serial, 'w', 26> bench;
 
 /// The client's own address, and one it must be deaf to.
 constexpr uint8_t peer_addr = 0x42;
@@ -385,6 +398,9 @@ volatile uint16_t peer_stretch_us = 0;
 /// Commanded refusal: NACK the k-th received byte (1-based; 0 = never).
 /// Needs byte control, which letter c arms.
 volatile uint16_t peer_nack_at = 0;
+/// The bytes byte control has decided this tenure. TCR comes once a byte and
+/// RXNE, the other count, may be served on either side of it.
+volatile uint16_t peer_decided = 0;
 
 uint8_t peer_next_answer() {
     const uint16_t i = peer_tx_n;
@@ -441,6 +457,7 @@ void peer_service() {
         peer_addr_hits = static_cast<uint16_t>(peer_addr_hits + 1u);
         peer_rx_n = 0;
         peer_tx_n = 0;
+        peer_decided = 0;
         if (peer_last_dir_read) {
             // A stale byte in TXDR would be this tenure's first: 32.4.8's
             // own flush, so TXIS asks and the answer is the current
@@ -459,9 +476,8 @@ void peer_service() {
     if ((f & I2cFlag::transfer_reload) != 0u) {
         // Byte control's own event: the byte is in, SCL is held between
         // the eighth and the ninth pulse, and CR2.NACK decides.
-        const bool refuse = (peer_nack_at != 0u) &&
-                            (peer_rx_n == static_cast<uint16_t>(peer_nack_at - 1u));
-        (void)Peer::answer_byte(!refuse);
+        peer_decided = static_cast<uint16_t>(peer_decided + 1u);
+        (void)Peer::answer_byte(peer_decided != peer_nack_at);
         return;
     }
     if ((f & I2cFlag::rxne) != 0u) {
@@ -1417,6 +1433,55 @@ void tc_vocabulary() {
     bench.verdict("... and BUSY is what stands in its place", (held_isr & I2cFlag::busy) != 0u);
     (void)Host::recover();
 
+    // ---- a START still standing ----
+    // Parked behind a held SDA by the resource's own verb, it stands for as long
+    // as the line is held: 32.9.2 sends it "once the bus is free". 32.9.8 says
+    // writing ADDRCF "also clears the START bit", and start() opens with that
+    // write - yet on the STM32G0B1RE it leaves a START parked this way standing,
+    // ADDR being clear, where the same sequence on the STM32F446RE's FMPI2C takes
+    // it. So the CR2 store at start()'s end can refuse, and the host answers
+    // i2c_bus_error with nothing moved. The verdict follows whichever this die
+    // does. The PE cycle takes it either way (32.4.6).
+    peer_live = false;
+    PeerSdaPin::clear();
+    PeerSdaPin::output(false, {.open_drain = true});
+    spin_us(50);
+    (void)H::transfer_now(peer_addr, false, 1, true);
+    spin_us(200);
+    const bool start_stood = H::starting() && H::busy();
+    H::clear(I2cClear::all);
+    const bool start_left = H::starting();
+    if (!start_left) {
+        (void)H::transfer_now(peer_addr, false, 1, true);
+        spin_us(200);
+    }
+    Host::Request sr{};
+    sr.addr = peer_addr;
+    sr.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    sr.tx_len = 4;
+    sr.speed = I2cSpeed::fast_400k;
+    const bool sr_sync = Host::start(sr);
+    const uint8_t sr_status = Host::status();
+    const uint32_t sr_cr2 = H::regs().CR2;
+    const bool sr_nbytes = ((sr_cr2 & I2C_CR2_NBYTES_Msk) >> I2C_CR2_NBYTES_Pos) ==
+                           (start_left ? 1u : 4u);
+    (void)Host::recover();
+    const bool start_gone = !H::starting();
+    PeerSdaPin::function(client_pins.sda.function,
+                         {.open_drain = true, .speed = PinSpeed::very_high});
+    peer_live = true;
+    spin_us(200);
+    print(serial, "  a START parked behind a held SDA: stood ", start_stood, ", left standing by the "
+          "ICR write ", start_left, "; start() over one answered ", sr_sync, ", status ", sr_status,
+          ", CR2 ", hex(sr_cr2), "; the PE cycle took it ", start_gone, crlf);
+    bench.verdict("A START STILL STANDING: parked behind a held SDA it stood, and start() over one "
+                  "answers i2c_bus_error with CR2 unmoved where the ICR write leaves it (this die), "
+                  "false with its own request where the write takes it",
+                  start_stood && sr_nbytes &&
+                      (start_left ? sr_sync && sr_status == i2c_bus_error : !sr_sync));
+    bench.verdict("... and the PE cycle takes it", start_gone);
+    (void)Host::recover();
+
     // ---- ES0548 2.10.2 ----
     print(serial, "  the bus monitor was found BUSY at a letter's start ",
           bus_found_busy, " times so far this run", crlf);
@@ -1644,7 +1709,7 @@ void td_speeds() {
     (void)st_off;
     print(serial, "  Fm+ at 1 MHz: drive on ", ns_on, " ns/clock (status ", st_on,
           "), drive off ", ns_off, " ns/clock (status ", st_off, ")", crlf);
-    // 6.1.3 makes the drive a PAD property and the SCL period is the
+    // 8.1.1 makes the drive a PAD property and the SCL period is the
     // TIMING register's: a rise time that is a fraction of the period on
     // a 2.2k bus does not move the average by a measurable amount. Said,
     // not faked.
@@ -2256,8 +2321,8 @@ void th_long() {
     const bool wr_ok = DmaHost::status() == i2c_ok && same(peer_rx, tx_buf, 2) &&
                        same(rx_buf, serve, 8);
     // AND THE SHORTEST HALVES, right after them on the same host and the
-    // same `dma`: a one-byte write and a one-byte read on the engines, and
-    // a write of three with NO BUFFER, which the engines do not carry and
+    // same `dma`: a one-byte write, its preload alone, a one-byte read on its
+    // channel, and a write of three with NO BUFFER, which the engines do not carry and
     // the pump fills with 0xFF - the tenure an engined host once left with
     // its transmit interrupt disarmed by the engine before it, its clock
     // stretched to the arbiter's timeout.
@@ -2298,7 +2363,8 @@ void th_long() {
     bench.verdict("the write-then-read on both engines: two written, the repeated START, "
                   "eight read",
                   wr_ok);
-    bench.verdict("a one-byte write and a one-byte read through the engines",
+    bench.verdict("under dma a one-byte write, its preload alone, and a one-byte read on its "
+                  "channel",
                   one_w && one_r);
     bench.verdict("and a write with no buffer after them completes, the pump's filler on the "
                   "wire",
@@ -2322,9 +2388,10 @@ void th_long() {
 // CHANNEL'S MEMORY ADDRESS, because one byte costs the pump one entry too:
 // CMAR is zeroed with the channel stopped before every tenure, and
 // DmaChannel::restart() is the only thing that writes it (dma.hpp), so CMAR
-// naming this tenure's buffer afterwards means the engine was started for it,
-// and zero means it was not. Both bounds are identities, no tolerance: an
-// entry more or a channel started is the engine named not followed.
+// naming this tenure's run afterwards means the engine was started for it - a
+// read's buffer, a write's second byte, the first being the preload's - and
+// zero means it was not. Both bounds are identities, no tolerance: an entry
+// more or a channel started is the engine named not followed.
 
 /// What one engined tenure left behind.
 struct EnginePath {
@@ -2369,7 +2436,7 @@ EnginePath engined_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8
         }
     }
     return {status, host_isr_entries, dma_isr_entries,
-            tx != nullptr && TxChannel::regs().CMAR == reinterpret_cast<uint32_t>(tx),
+            tx != nullptr && TxChannel::regs().CMAR == reinterpret_cast<uint32_t>(tx + 1),
             rx != nullptr && RxChannel::regs().CMAR == reinterpret_cast<uint32_t>(rx)};
 }
 
@@ -2417,27 +2484,34 @@ void engine_rule(I2cSpeed speed, const char* rate, const uint8_t* serve) {
                       !p.rx_carried && same(rx_buf, serve, 64));
 
     // ---- dma: the engines at any length, one byte included ----
+    p = engined_tenure(peer_addr, tx_buf, 2, nullptr, 0, I2cEngine::dma, speed);
+    print(serial, "    dma write 2: status ", p.status, ", host entries ", p.host_entries,
+          ", tx channel ", p.tx_carried, crlf);
+    bench.verdict("dma: a write of TWO, its first byte preloaded, the channel started on the "
+                  "second, the STOPF the one entry",
+                  p.status == i2c_ok && p.host_entries == 1u && p.dma_entries == 0u &&
+                      p.tx_carried && client_got(tx_buf, 2));
     p = engined_tenure(peer_addr, tx_buf, 1, nullptr, 0, I2cEngine::dma, speed);
     print(serial, "    dma write 1: status ", p.status, ", host entries ", p.host_entries,
           ", tx channel ", p.tx_carried, crlf);
-    bench.verdict("dma: a write of ONE on the engines, the channel started for it",
+    bench.verdict("... a write of ONE is its preload alone: no channel, the STOPF the one entry",
                   p.status == i2c_ok && p.host_entries == 1u && p.dma_entries == 0u &&
-                      p.tx_carried && client_got(tx_buf, 1));
+                      !p.tx_carried && client_got(tx_buf, 1));
     p = engined_tenure(peer_addr, nullptr, 0, rx_buf, 1, I2cEngine::dma, speed);
     print(serial, "    dma read 1: status ", p.status, ", host entries ", p.host_entries,
           ", rx channel ", p.rx_carried, crlf);
     bench.verdict("... a read of ONE on the engines, the channel started for it",
                   p.status == i2c_ok && p.host_entries == 1u && p.dma_entries == 0u &&
                       p.rx_carried && same(rx_buf, serve, 1));
-    // The register read, one written and one read: both halves on the
-    // engines, TC's repeated START and the STOPF the two entries.
+    // The register read, one written and one read: the preload and the
+    // receive channel, TC's repeated START and the STOPF the two entries.
     p = engined_tenure(peer_addr, tx_buf, 1, rx_buf, 1, I2cEngine::dma, speed);
     print(serial, "    dma 1 + 1: status ", p.status, ", host entries ", p.host_entries,
           ", tx channel ", p.tx_carried, ", rx channel ", p.rx_carried, crlf);
-    bench.verdict("... a register read of one and one: both halves on the engines, TC and the "
-                  "STOPF its two entries",
+    bench.verdict("... a register read of one and one: the preload and the receive channel, TC "
+                  "and the STOPF its two entries",
                   p.status == i2c_ok && p.host_entries == 2u && p.dma_entries == 0u &&
-                      p.tx_carried && p.rx_carried && same(rx_buf, serve, 1));
+                      !p.tx_carried && p.rx_carried && same(rx_buf, serve, 1));
 
     // ---- what the engines cannot carry stays on the pump, under dma too ----
     p = engined_tenure(peer_addr, nullptr, 3, nullptr, 0, I2cEngine::dma, speed);
@@ -2457,8 +2531,8 @@ void engine_rule(I2cSpeed speed, const char* rate, const uint8_t* serve) {
 
     // ---- a byte an unanswered address left in TXDR, then the engines ----
     // A pumped write to nobody leaves its preloaded byte in TXDR (32.9.11);
-    // the engines' first request would wait behind it and it would go out
-    // first, the block's last byte never (the NBYTES count).
+    // TXDR takes no write over it, so it would go out first, the run's last
+    // byte never (the NBYTES count), but for the flush ahead of the preload.
     p = engined_tenure(nobody_addr, tx_buf, 1, nullptr, 0, I2cEngine::interrupt, speed);
     const uint8_t nacked = p.status;
     fill_pattern(tx_buf, 8, 0x5C);
@@ -2568,6 +2642,585 @@ void tu_engine_choice() {
     DmaHost::release();
     (void)Host::init(clock, I2cClock::pclk);
     peer_stop();
+}
+
+// ===========================================================================
+// v - A REFUSED WRITE, position by position, on either engine
+// ===========================================================================
+//
+// The client refuses by its own byte control: peer_nack_at names the received
+// byte, counted from one, and it is in the client's count and buffer, its
+// ninth pulse being what is refused. An address nobody answers refuses the
+// address. THE PASS HAS NO init() AND NO PE CYCLE BETWEEN A FAILED TENURE AND
+// THE NEXT REQUEST, at one speed: either would flush TXDR (32.9.7, TXE set when
+// PE = 0) and hide a byte the failed tenure left there, and the flush start()
+// opens a write with is what is being judged.
+
+/// A write of `tx` then a read of `rx`, refused at byte `at` of the write, or on
+/// the address at zero.
+struct RefusedRow {
+    uint8_t tx;
+    uint8_t rx;
+    uint8_t at;
+};
+
+constexpr RefusedRow refused_rows[] = {
+    {1, 0, 0},     {2, 0, 0},  {16, 0, 0}, {1, 4, 0},  {2, 4, 0},   // the address
+    {1, 0, 1},     {1, 4, 1},                                       // a write of one
+    {2, 0, 1},     {2, 4, 1},  {16, 0, 1},                          // the first byte
+    {2, 0, 2},     {2, 4, 2},  {16, 0, 2},                          // the second
+    {3, 0, 3},     {16, 0, 3}, {16, 0, 7}, {16, 0, 16},             // a later byte
+    {255, 0, 200}, {255, 0, 255},
+};
+
+/// One position's rows: how many there are and how many were right.
+struct RefusedTally {
+    uint16_t seen = 0;
+    uint16_t right = 0;
+    void add(bool ok) {
+        seen = static_cast<uint16_t>(seen + 1u);
+        right = static_cast<uint16_t>(right + (ok ? 1u : 0u));
+    }
+    bool whole() const { return seen != 0u && right == seen; }
+};
+
+/// What the rows came to, by position, for the engine of the refused write.
+struct RefusedPositions {
+    RefusedTally address;
+    RefusedTally one;      ///< a write of one
+    RefusedTally first;    ///< the first byte, of two or more
+    RefusedTally second;
+    RefusedTally later;
+    RefusedTally two;      ///< a write of two, either byte (also counted above)
+    RefusedTally next;     ///< the request after each, byte for byte
+    bool whole() const {
+        return address.whole() && one.whole() && first.whole() && second.whole() &&
+               later.whole() && two.whole() && next.whole();
+    }
+};
+
+/// THE BOUND ON ONE TENURE, in ticks of 1 ms: nine clocks for each address and
+/// each byte plus the START and the STOP at the speed's period, which letter d
+/// reads within a quarter of the rate asked on these kernels; under byte control
+/// the client adds at most its two entries a byte, which at 64 MHz and the
+/// flash's two wait states are under 10 us against a byte of 22.5 us at 400 kHz.
+/// Twice the wire holds all that, doubled again as this bound only tells a
+/// completion from a wedge, and 3 ticks cover the tick's own reading on either
+/// side of a tenure far shorter than a tick.
+uint32_t refused_limit_ms(uint16_t bytes, I2cSpeed s) {
+    const uint32_t clocks = 9u * (static_cast<uint32_t>(bytes) + 2u) + 2u;
+    return 4u * clocks * 1000u / i2c_speed_hz(s) + 3u;
+}
+
+/// A byte of the refused write and of the one after it, each position different.
+constexpr uint8_t refused_value(uint16_t k, uint16_t i) {
+    return static_cast<uint8_t>(0x35u + 0x4Bu * k + 0x1Du * i + ((i * i) >> 3));
+}
+constexpr uint8_t refused_after(uint16_t i) { return static_cast<uint8_t>(0xC7u + 0x35u * i); }
+
+/// One request, waited for: its status, or no_answer after recover().
+template <typename Bus>
+uint8_t refused_request(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                        uint8_t rx_len, I2cEngine e, I2cSpeed s, bool starve) {
+    typename Bus::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(tx);
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rx_len;
+    r.speed = s;
+    r.engine = e;
+    host_done = false;
+    host_isr_entries = 0;
+    peer_isr_entries = 0;   // the client's storm budget is a tenure's here, not a letter's
+    if (Bus::start(r)) {
+        return no_answer;
+    }
+    if (starve) {
+        // Taken away ahead of the address's nine clocks, so no beat is served
+        // and the channel's count stands under a first byte already gone.
+        H::dma_transmit(false);
+    }
+    const uint32_t limit = refused_limit_ms(static_cast<uint16_t>(tx_len + rx_len), s);
+    const uint32_t t0 = Ticker::millis();
+    while (!host_done && Ticker::millis() - t0 < limit) {
+    }
+    if (!host_done) {
+        (void)Bus::recover();
+        return no_answer;
+    }
+    return Bus::status();
+}
+
+/// One row and the request after it.
+template <typename Bus>
+void refused_row(const RefusedRow& row, I2cEngine e, I2cEngine next, I2cSpeed s, bool print_row,
+                 RefusedPositions& pos) {
+    for (uint16_t i = 0; i < row.tx; ++i) {
+        tx_buf[i] = refused_value(static_cast<uint16_t>(row.tx + row.at), i);
+    }
+    uint8_t in[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    peer_nack_at = row.at;
+    peer_addr_hits = 0;
+    peer_rx_n = 0;
+    const uint8_t st = refused_request<Bus>(row.at == 0u ? nobody_addr : peer_addr, tx_buf, row.tx,
+                                            row.rx != 0u ? in : nullptr, row.rx, e, s, false);
+    const uint16_t took = peer_rx_n;
+    const uint16_t hits = peer_addr_hits;
+    bool untouched = true;
+    for (const uint8_t v : in) {
+        untouched = untouched && v == 0xEEu;
+    }
+    const uint8_t want = row.at == 0u ? i2c_nack_addr : i2c_nack_data;
+    const bool right = st == want && untouched && took == row.at &&
+                       hits == (row.at == 0u ? 0u : 1u) && same(peer_rx, tx_buf, took);
+
+    // The next request, with the refusal out of the way and nothing else done:
+    // the client stays in byte control, past any byte this write can reach.
+    uint8_t after[16];
+    for (uint8_t i = 0; i < 16u; ++i) {
+        after[i] = refused_after(i);
+    }
+    peer_nack_at = 0xFFFFu;
+    peer_addr_hits = 0;
+    peer_rx_n = 0;
+    const uint8_t st2 = refused_request<Bus>(peer_addr, after, 16, nullptr, 0, next, s, false);
+    const uint32_t entries = next == I2cEngine::dma ? 1u : 16u;
+    const bool whole = st2 == i2c_ok && peer_rx_n == 16u && peer_addr_hits == 1u &&
+                       same(peer_rx, after, 16) && host_isr_entries == entries;
+    if (print_row || !right || !whole) {
+        print(serial, "    ", row.tx, "+", row.rx, " refused at ", row.at, ": status ", st, " of ",
+              want, ", the client took ", took, ", the next request status ", st2, ", took ",
+              peer_rx_n, ", entries ", host_isr_entries, right && whole ? "" : " <- WRONG", crlf);
+    }
+    if (row.at == 0u) {
+        pos.address.add(right);
+    } else if (row.tx == 1u) {
+        pos.one.add(right);
+    } else if (row.at == 1u) {
+        pos.first.add(right);
+    } else if (row.at == 2u) {
+        pos.second.add(right);
+    } else {
+        pos.later.add(right);
+    }
+    if (row.tx == 2u) {
+        pos.two.add(right);
+    }
+    pos.next.add(whole);
+}
+
+/// A pass of every row on one host at one speed, nothing but the requests
+/// between the rows.
+template <typename Bus>
+void refused_pass(I2cClock kernel, I2cSpeed s, I2cEngine e, I2cEngine next,
+                  RefusedPositions& pos) {
+    if constexpr (Bus::has_dma) {
+        dma_host_live = true;
+    } else {
+        dma_host_live = false;
+    }
+    if (!Bus::init(clock, kernel)) {
+        pos.address.add(false);
+        return;
+    }
+    for (const RefusedRow& row : refused_rows) {
+        refused_row<Bus>(row, e, next, s, false, pos);
+    }
+}
+
+void refused_print(const char* name, const RefusedPositions& p) {
+    print(serial, "  ", name, ": right of rows - the address ", p.address.right, "/", p.address.seen,
+          ", a write of one ", p.one.right, "/", p.one.seen, ", the first byte ", p.first.right, "/",
+          p.first.seen, ", the second ", p.second.right, "/", p.second.seen, ", a later one ",
+          p.later.right, "/", p.later.seen, ", a write of two ", p.two.right, "/", p.two.seen,
+          "; the next request whole ", p.next.right, "/", p.next.seen, crlf);
+}
+
+void tv_refusals() {
+    if constexpr (!self_link_possible) {
+        (void)need_self_link();
+        return;
+    }
+    if (!need_self_link()) {
+        return;
+    }
+    uint8_t serve[8];
+    fill_pattern(serve, 8, 0x60);
+    (void)peer_arm(serve, 8);
+    host_ready();
+    if (!link_alive()) {
+        bench.verdict("the link is alive (declined: no answer from the client)", false);
+        peer_stop();
+        return;
+    }
+    (void)Peer::byte_control(true);
+    Peer::interrupt(I2cInterrupt::transfer_complete, true);
+
+    const I2cSpeed speeds[2] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k};
+    const I2cClock kernels[2] = {I2cClock::pclk, I2cClock::hsi16};
+    RefusedPositions on_dma{};
+    RefusedPositions on_pump{};
+    for (const I2cClock k : kernels) {
+        for (const I2cSpeed s : speeds) {
+            refused_pass<DmaHost>(k, s, I2cEngine::dma, I2cEngine::dma, on_dma);
+            refused_pass<DmaHost>(k, s, I2cEngine::dma, I2cEngine::interrupt, on_dma);
+            refused_pass<DmaHost>(k, s, I2cEngine::interrupt, I2cEngine::dma, on_pump);
+            refused_pass<DmaHost>(k, s, I2cEngine::interrupt, I2cEngine::interrupt, on_pump);
+        }
+    }
+    refused_print("under dma", on_dma);
+    refused_print("under interrupt", on_pump);
+    bench.verdict("under dma THE ADDRESS REFUSED, writes of one, two and sixteen with and without "
+                  "a read half: i2c_nack_addr, nothing at the client",
+                  on_dma.address.whole());
+    bench.verdict("... a write of one refused: i2c_nack_data, its byte counted", on_dma.one.whole());
+    bench.verdict("... the first byte of two or more: i2c_nack_data, though the channel has filled "
+                  "TXDR behind it and TXE reads clear",
+                  on_dma.first.whole());
+    bench.verdict("... the second byte, and a later one up to the last of 255: i2c_nack_data, the "
+                  "client's count exactly the byte refused",
+                  on_dma.second.whole() && on_dma.later.whole());
+    bench.verdict("... a write of two, either byte", on_dma.two.whole());
+    bench.verdict("... and the next request on either engine, no init() and no PE cycle between: "
+                  "whole byte for byte, one entry on the engines and one a byte on the pump",
+                  on_dma.next.whole());
+    bench.verdict("the same rows on the interrupt, and the same next request on either engine",
+                  on_pump.whole());
+
+    // ---- the engineless host, its one engine ----
+    RefusedPositions pump_only{};
+    for (const I2cSpeed s : speeds) {
+        refused_pass<Host>(I2cClock::pclk, s, I2cEngine::interrupt, I2cEngine::interrupt, pump_only);
+    }
+    refused_print("the engineless host", pump_only);
+    bench.verdict("... and on the engineless host", pump_only.whole());
+
+    // ---- A CHANNEL STARVED under a refused first byte ----
+    // TXDMAEN goes away just after start(), so the first byte goes to the wire
+    // with its TXIS unserved and the channel's count standing: only TXE says
+    // the byte left, and the row reads i2c_nack_addr if that test goes. TXIS
+    // stays up through the NACK and the STOP: 32.9.7 clears it on a store into
+    // TXDR and offers no other way while NOSTRETCH is clear, and the next write
+    // would storm its vector or pour its channel ahead of its START if start()
+    // armed either before its preload.
+    dma_host_live = true;
+    (void)DmaHost::init(clock, I2cClock::pclk);
+    uint8_t starved = 0;
+    uint8_t txis_left = 0;
+    uint8_t starved_next = 0;
+    uint8_t after[16];
+    for (uint8_t i = 0; i < 16u; ++i) {
+        after[i] = refused_after(i);
+    }
+    for (uint8_t k = 0; k < 8u; ++k) {
+        for (uint8_t i = 0; i < 16u; ++i) {
+            tx_buf[i] = refused_value(k, i);
+        }
+        const uint8_t len = (k & 1u) != 0u ? 2u : 16u;
+        const I2cEngine next = (k & 2u) != 0u ? I2cEngine::dma : I2cEngine::interrupt;
+        peer_nack_at = 1;
+        peer_rx_n = 0;
+        const uint8_t st = refused_request<DmaHost>(peer_addr, tx_buf, len, nullptr, 0,
+                                                    I2cEngine::dma, I2cSpeed::fast_400k, true);
+        const uint16_t took = peer_rx_n;
+        starved = static_cast<uint8_t>(
+            starved + (st == i2c_nack_data && took == 1u && peer_rx[0] == tx_buf[0] ? 1u : 0u));
+        txis_left = static_cast<uint8_t>(txis_left + ((H::flags() & I2C_ISR_TXIS) != 0u ? 1u : 0u));
+        peer_nack_at = 0xFFFFu;
+        peer_rx_n = 0;
+        const uint8_t st2 = refused_request<DmaHost>(peer_addr, after, 16, nullptr, 0, next,
+                                                     I2cSpeed::fast_400k, false);
+        const uint32_t entries = next == I2cEngine::dma ? 1u : 16u;
+        starved_next = static_cast<uint8_t>(
+            starved_next + (st2 == i2c_ok && peer_rx_n == 16u && same(peer_rx, after, 16) &&
+                                    host_isr_entries == entries
+                                ? 1u
+                                : 0u));
+    }
+    print(serial, "  a channel starved under a refused first byte, 8 rows: i2c_nack_data ", starved,
+          ", TXIS left standing ", txis_left, ", the next request whole ", starved_next,
+          "; the client's vector silenced by its storm budget ", peer_stormed, crlf);
+    bench.verdict("A STARVED CHANNEL: its count stands under a byte already gone, and TXE says "
+                  "i2c_nack_data",
+                  starved == 8u);
+    bench.verdict("... TXIS is left standing, the condition staged, and the next request's preload "
+                  "takes it down: whole, its entries exact on either engine",
+                  txis_left == 8u && starved_next == 8u);
+
+    // ---- THE CONTROL: a write that does not flush ----
+    // A refused first byte under dma leaves the channel's next byte in TXDR,
+    // TXE clear. A write by the resource's verbs with no flush sends that byte
+    // first and the NBYTES count leaves its own last byte behind: what start()'s
+    // flush is there for, and what the judgement above would see without it.
+    for (uint8_t i = 0; i < 16u; ++i) {
+        tx_buf[i] = refused_value(0x55u, i);
+    }
+    peer_nack_at = 1;
+    const uint8_t ctl = refused_request<DmaHost>(peer_addr, tx_buf, 16, nullptr, 0, I2cEngine::dma,
+                                                 I2cSpeed::fast_400k, false);
+    const bool stale = (H::flags() & I2C_ISR_TXE) == 0u;
+    peer_nack_at = 0xFFFFu;
+    peer_rx_n = 0;
+    raw_host_live = true;
+    H::clear(I2cClear::all);
+    (void)H::transfer_now(peer_addr, false, 2, true);
+    const uint32_t t0 = Ticker::millis();
+    while ((H::flags() & I2C_ISR_STOPF) == 0u && Ticker::millis() - t0 < 5u) {
+        if ((H::flags() & I2C_ISR_TXIS) != 0u) {
+            H::data(after[0]);
+        }
+    }
+    H::clear(I2cClear::all);
+    raw_host_live = false;
+    print(serial, "  the control: after a refused first byte status ", ctl, ", TXDR holding ", stale,
+          "; a write of two with no flush, the client got ", peer_rx_n, ": ", hex(peer_rx[0]), " ",
+          hex(peer_rx[1]), " against the channel's ", hex(tx_buf[1]), " and the write's ",
+          hex(after[0]), crlf);
+    bench.verdict("THE LETTER CAN FAIL: with no flush a refused write's byte goes out ahead of the "
+                  "next write, which loses its last",
+                  ctl == i2c_nack_data && stale && peer_rx_n == 2u && peer_rx[0] == tx_buf[1] &&
+                      peer_rx[1] == after[0]);
+
+    peer_nack_at = 0;
+    dma_host_live = false;
+    DmaHost::release();
+    Peer::interrupt(I2cInterrupt::transfer_complete, false);
+    (void)Peer::byte_control(false);
+    (void)Host::init(clock, I2cClock::pclk);
+    peer_stop();
+}
+
+// ===========================================================================
+// B - ES0418 2.11.6's band by name
+// ===========================================================================
+//
+// The erratum, on the STM32G071's sheet and not on this family's other two:
+// with the first byte not in TXDR, two bytes are requested in a row, and if the
+// first is written "in less than two I2C kernel clock cycles after the TXIS/DMA
+// request" while the APB-to-kernel ratio is between 1.5 and 3, the second "is
+// not internally detected" and the block stalls until a PE cycle. HSI16 against
+// PCLK at 44 MHz is 2.75, and two kernel cycles are 125 ns, 5.5 cycles of the
+// clock the channel runs on (this family's HPRE and PPRE are pinned at 1,
+// stm32g0/clock.hpp). The host's writes judge its own path, whose first byte is
+// in TXDR before the START on either engine. THE EMPTY ROW is the sequence the
+// erratum describes, staged through the resource's verbs: its rate is printed and
+// judged only for its accounting, since a sheet that does not list the item says
+// nothing either way. That rate says whether this die stalls on that sequence.
+
+/// A write of `len`, `tenures` times, at one speed.
+struct BandShape {
+    uint8_t len;
+    uint16_t tenures;
+};
+constexpr BandShape band_shapes[3] = {{2, 200}, {16, 100}, {255, 10}};
+
+struct BandRow {
+    uint32_t tenures = 0;
+    uint32_t whole = 0;      ///< answered i2c_ok, the client's count and bytes right
+    uint32_t stalled = 0;    ///< no completion inside the bound, recovered by a PE cycle
+    uint32_t accounted = 0;  ///< stalled, with the first byte at the client and nothing after it
+    uint32_t wrong = 0;      ///< anything else
+    uint32_t stall_isr = 0;  ///< at the first stall: ISR
+    uint32_t stall_cndtr = 0;
+    bool stall_scl = true;
+    bool stall_sda = true;
+    void add(const BandRow& o) {
+        tenures += o.tenures;
+        whole += o.whole;
+        stalled += o.stalled;
+        accounted += o.accounted;
+        wrong += o.wrong;
+        if (stalled == o.stalled && o.stalled != 0u) {
+            stall_isr = o.stall_isr;
+            stall_cndtr = o.stall_cndtr;
+            stall_scl = o.stall_scl;
+            stall_sda = o.stall_sda;
+        }
+    }
+};
+
+void band_fill(uint16_t k, uint8_t len) {
+    for (uint16_t i = 0; i < len; ++i) {
+        tx_buf[i] = refused_value(k, i);
+    }
+}
+
+/// THE EMPTY ROW'S TENURE: TXDR flushed, the transmit channel started on the
+/// WHOLE run and its request enabled before the START, the host's vector
+/// silenced and STOPF polled. Returns true when the STOP came inside the bound.
+bool band_empty_tenure(uint8_t len, uint32_t limit_ms) {
+    raw_host_live = true;
+    H::enables(0u);
+    H::clear(I2cClear::all);
+    H::flush_tx();
+    (void)HostTx::start(std::span<const uint8_t>(tx_buf, len));
+    H::dma_transmit(true);
+    (void)H::transfer_now(peer_addr, false, len, true);
+    bool stopped = false;
+    const uint32_t t0 = Ticker::millis();
+    while (!stopped && Ticker::millis() - t0 < limit_ms) {
+        stopped = (H::flags() & I2C_ISR_STOPF) != 0u;
+    }
+    return stopped;
+}
+
+/// What the empty tenure leaves is taken away, stalled or not: a stall by the
+/// PE cycle the erratum names.
+void band_empty_end(bool stopped) {
+    H::dma_transmit(false);
+    HostTx::stop();
+    if (!stopped) {
+        (void)DmaHost::recover();
+    }
+    H::clear(I2cClear::all);
+    raw_host_live = false;
+}
+
+/// A batch at one speed and length on the path asked for: the first tenure of
+/// every batch preceded by a probe that makes the host apply the speed.
+BandRow band_batch(I2cSpeed s, const BandShape& sh, I2cEngine e, bool empty) {
+    BandRow row{};
+    const uint32_t limit = refused_limit_ms(sh.len, s);
+    (void)refused_request<DmaHost>(peer_addr, nullptr, 0, nullptr, 0, I2cEngine::interrupt, s, false);
+    for (uint16_t k = 0; k < sh.tenures; ++k) {
+        band_fill(k, sh.len);
+        row.tenures += 1u;
+        peer_isr_entries = 0;   // the client's storm budget is a tenure's here
+        peer_rx_n = 0;
+        peer_addr_hits = 0;
+        bool stopped = false;
+        uint8_t st = no_answer;
+        if (empty) {
+            stopped = band_empty_tenure(sh.len, limit);
+            st = stopped ? i2c_ok : no_answer;
+        } else {
+            typename DmaHost::Request r{};
+            r.addr = peer_addr;
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+            r.tx_len = sh.len;
+            r.speed = s;
+            r.engine = e;
+            host_done = false;
+            if (!DmaHost::start(r)) {
+                const uint32_t t0 = Ticker::millis();
+                while (!host_done && Ticker::millis() - t0 < limit) {
+                }
+                st = host_done ? DmaHost::status() : no_answer;
+            }
+        }
+        if (st == no_answer && row.stalled == 0u) {
+            row.stall_isr = H::flags();
+            row.stall_cndtr = DmaChannel<1, 1>::regs().CNDTR;
+            row.stall_scl = SclPin::read();
+            row.stall_sda = SdaPin::read();
+        }
+        if (empty) {
+            band_empty_end(stopped);
+        } else if (st == no_answer) {
+            (void)DmaHost::recover();
+        }
+        if (st == i2c_ok && peer_rx_n == sh.len && peer_addr_hits == 1u &&
+            same(peer_rx, tx_buf, sh.len)) {
+            row.whole += 1u;
+        } else if (st == no_answer) {
+            row.stalled += 1u;
+            row.accounted += peer_rx_n <= 1u && (peer_rx_n == 0u || peer_rx[0] == tx_buf[0]) ? 1u : 0u;
+        } else {
+            row.wrong += 1u;
+        }
+    }
+    return row;
+}
+
+/// A row, its rate in parts per ten thousand.
+void band_print(const char* name, const BandRow& r) {
+    print(serial, "  ", name, ": ", r.tenures, " tenures, ", r.whole, " whole, ", r.stalled,
+          " STALLED (", r.tenures != 0u ? r.stalled * 10000u / r.tenures : 0u,
+          " per ten thousand), ", r.accounted, " of those with the first byte alone at the client, ",
+          r.wrong, " wrong", crlf);
+    if (r.stalled != 0u) {
+        print(serial, "    the first stall: ISR ", hex(r.stall_isr), ", the channel's count ",
+              r.stall_cndtr, ", SCL ", r.stall_scl ? "high" : "LOW", ", SDA ",
+              r.stall_sda ? "high" : "LOW", crlf);
+    }
+}
+
+void tB_band() {
+    if constexpr (!self_link_possible) {
+        (void)need_self_link();
+        return;
+    }
+    if (!need_self_link()) {
+        return;
+    }
+    uint8_t serve[8];
+    fill_pattern(serve, 8, 0x60);
+    (void)peer_arm(serve, 8);
+    SysClock::set_index(r_band);
+    console_drain();
+    dma_host_live = true;
+    const bool up = DmaHost::init(clock, I2cClock::hsi16);
+    const uint32_t pclk = SysClock::hz();
+    const uint32_t ker = DmaHost::kernel_hz();
+    print(serial, "  PCLK / kernel: ", pclk, " / ", ker, " Hz", crlf);
+    bench.verdict("HSI16 against PCLK at 44 MHz, a ratio of 2.75: inside the band of 1.5 to 3",
+                  up && ker == 16'000'000UL && 2u * pclk >= 3u * ker && pclk <= 3u * ker);
+
+    // ---- what a stall looks like to this letter ----
+    // TXDMAEN taken away after start(): the first byte goes, the channel never
+    // answers its TXIS, and SCL stays low with the tenure parked, inside the
+    // bound. The next write after the PE cycle is whole.
+    band_fill(1u, 16);
+    peer_rx_n = 0;
+    const uint8_t staged = refused_request<DmaHost>(peer_addr, tx_buf, 16, nullptr, 0,
+                                                    I2cEngine::dma, I2cSpeed::fast_400k, true);
+    const uint16_t staged_took = peer_rx_n;
+    peer_rx_n = 0;
+    const uint8_t after_staged = refused_request<DmaHost>(peer_addr, tx_buf, 16, nullptr, 0,
+                                                          I2cEngine::dma, I2cSpeed::fast_400k, false);
+    print(serial, "  a stall by hand: status ", staged, ", the client took ", staged_took,
+          "; after the PE cycle status ", after_staged, ", took ", peer_rx_n, crlf);
+    bench.verdict("A STALL IS SEEN: a channel taken away parks a tenure inside the bound, the "
+                  "first byte alone at the client, and the PE cycle recovers it",
+                  staged == no_answer && staged_took == 1u && after_staged == i2c_ok &&
+                      peer_rx_n == 16u && same(peer_rx, tx_buf, 16));
+
+    const I2cSpeed speeds[2] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k};
+    BandRow host_dma{};
+    BandRow host_pump{};
+    BandRow host_one{};
+    BandRow empty{};
+    for (const I2cSpeed s : speeds) {
+        for (const BandShape& sh : band_shapes) {
+            host_dma.add(band_batch(s, sh, I2cEngine::dma, false));
+            empty.add(band_batch(s, sh, I2cEngine::dma, true));
+        }
+        host_one.add(band_batch(s, BandShape{1, 200}, I2cEngine::dma, false));
+        host_pump.add(band_batch(s, BandShape{16, 100}, I2cEngine::interrupt, false));
+    }
+    band_print("the host under dma, 2, 16 and 255 bytes", host_dma);
+    band_print("the host under dma, a write of one", host_one);
+    band_print("the host on the interrupt, 16 bytes", host_pump);
+    band_print("TXDR LEFT EMPTY, the channel on the whole run, 2, 16 and 255 bytes", empty);
+    bench.verdict("inside the band the host's own path under dma: no stall and every byte of every "
+                  "write, a write of one included",
+                  host_dma.tenures != 0u && host_dma.whole == host_dma.tenures &&
+                      host_one.tenures != 0u && host_one.whole == host_one.tenures);
+    bench.verdict("... and on the interrupt", host_pump.tenures != 0u &&
+                                                  host_pump.whole == host_pump.tenures);
+    bench.verdict("the empty row accounted, tenure by tenure: whole, or stalled with the first byte "
+                  "alone at the client and recovered by the PE cycle. Its rate is printed, not "
+                  "judged: it says whether this die stalls on that sequence",
+                  empty.tenures != 0u && empty.wrong == 0u && empty.accounted == empty.stalled);
+
+    dma_host_live = false;
+    DmaHost::release();
+    SysClock::set_index(r_fast);
+    console_drain();
+    (void)Host::init(clock, I2cClock::pclk);
+    peer_stop();
+    calibrate_spin();
 }
 
 // ===========================================================================
@@ -4237,11 +4890,11 @@ void banner() {
     print(serial, crlf, "test_stm32_i2c - STM32G0 I2C (RM0444 ch. 32)", crlf);
     if (self_link) {
         print(serial, "  the SELF-LINK is on the desk: I2C1 host PB8/PB9 AF6  <->  "
-                      "I2C2 client PA11/PA12 AF6; letters b..m and u are live, client "
+                      "I2C2 client PA11/PA12 AF6; letters b..m, u, v and B are live, client "
                       "address ",
               hex(peer_addr), ", client kernel HSI16", crlf);
     } else {
-        print(serial, "  NO SELF-LINK on the desk (probed): letters b..l, u, x and y "
+        print(serial, "  NO SELF-LINK on the desk (probed): letters b..l, u, v, B, x and y "
                       "skip themselves and claim nothing", crlf);
     }
     print(serial, "  PB8/PB9 AF6 with their 2.2k pull-ups reach a PEER BOARD "
@@ -4359,6 +5012,10 @@ int main() {
     bench.letter('m', "the errata: 2.10.1 as refusals, 2.10.2 as a count", tm_errata);
     bench.letter('u', "THE ENGINE NAMED: the default, interrupt, dma at one byte, the refusal",
                  tu_engine_choice);
+    bench.letter('v', "A REFUSED WRITE at every position on either engine, and the next request "
+                      "byte for byte", tv_refusals);
+    bench.letter('B', "ES0418 2.11.6's band by name: the host's writes, and TXDR left empty, its "
+                      "rate printed", tB_band);
     bench.second_letter('n', "THE PEER: the twi_link command channel to the peer board",
                  tn_peer_link);
     bench.second_letter('o', "the tenure shapes against the peer, the repeated START "

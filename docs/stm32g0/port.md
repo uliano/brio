@@ -226,7 +226,7 @@ worth knowing before reading `OSPEEDR` as the whole story:
 `SYSCFG_CFGR1` carries fast-mode-plus bits that raise an I2C pad's sink
 to 20 mA, in two flavours - per pad (PB6, PB7, PB8, PB9, PA9, PA10 and
 nothing else on this family) and per instance (`I2C1_FMP`, `I2C2_FMP`,
-`I2C3_FMP`, which reach every pad configured for that instance). 6.1.3
+`I2C3_FMP`, which reach every pad configured for that instance). 8.1.1
 adds that **with Fm+ enabled the pad's own speed control is ignored**.
 The reserve publishes both (`i2c_pad_fmp_bit()`,
 `i2c_instance_fmp_bit()`) and `I2cHost::fast_plus_drive()` spends them;

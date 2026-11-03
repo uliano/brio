@@ -23,8 +23,8 @@
 //   DynamicClock would move TIMINGR, which no tenure may see). Its engine,
 //   from the chapter (stm32g0/i2c.hpp's class comment, docs/stm32g0/i2c.md):
 //   the byte counter NBYTES with AUTOEND carries the tenure (32.4.9),
-//   RELOAD never used (a Request's lengths are bytes); the first byte of a
-//   pumped write PRELOADED into TXDR before the START; a read's last byte
+//   RELOAD never used (a Request's lengths are bytes); a write half's first
+//   byte PRELOADED into TXDR before the START; a read's last byte
 //   taken at STOPF; a NACK read at STOPF with no NACKIE; one interrupt a
 //   data byte on the pump (no FIFO: TXDR, RXDR and the shifter); the
 //   engines carry every half of a Request that names `dma`, at any length
@@ -99,7 +99,7 @@
 //      byte of a 2+4 refused (i2c_nack_data, the read half never begun),
 //      the next tenure i2c_ok after each.
 //   w  three requesters of three priorities at 400 kHz: the Client's
-//      write-then-reads of 1+6 (both halves on the engines), Minor's
+//      write-then-reads of 1+6 (the preload and the receive channel), Minor's
 //      writes of one (the pump's preload), Pressure's probes: in order,
 //      i2c_ok, nothing rejected, no timeout, the peer's tallies exact.
 //   h  the held wire (the peer holds SDA 60 ms) with Pressure's flood of
@@ -225,10 +225,10 @@ struct Shape {
 struct I2cTraits {
     /// Letter o's table, each shape with the path this host takes under
     /// EngineByLength: a Request with a half of two bytes or more names
-    /// `dma` and rides the engines whole, its half of one too; one with no
-    /// longer half names `interrupt` and rides the pump (the preload, the
-    /// read at the STOPF). Ends on a plain write (the shared body's
-    /// counted serve).
+    /// `dma`, a write half's first byte the preload and the rest on the
+    /// channel; one with no longer half names `interrupt` and rides the pump
+    /// (the preload, the read at the STOPF). Ends on a plain write (the shared
+    /// body's counted serve).
     static constexpr Shape shapes[] = {
         {0, 0, "the probe: the address alone, STOPF its one interrupt"},
         {0, 1, "pump: the one byte read at STOPF"},
@@ -237,10 +237,10 @@ struct I2cTraits {
         {0, 8, "engines"},
         {0, 32, "engines"},
         {1, 1, "pump both halves: the preload, TC's repeated START, the read at STOPF"},
-        {1, 2, "engines both halves, the one written byte on the transmit channel"},
-        {2, 8, "engines both halves"},
+        {1, 2, "the one written byte the preload, the read on the receive channel"},
+        {2, 8, "the preload, the transmit and the receive channel"},
         {1, 0, "pump: the preload alone, STOPF the one interrupt"},
-        {2, 0, "engines: the transmit channel, STOPF the edge"},
+        {2, 0, "the preload, the second byte on the transmit channel, STOPF the edge"},
         {3, 0, "engines"},
         {8, 0, "engines"},
         {32, 0, "engines"},

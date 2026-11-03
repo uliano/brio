@@ -307,10 +307,11 @@ void prepare(const twilink::Frame& f) {
 ///
 /// THE REFUSAL RIDES TARGET BYTE CONTROL and its ordering is the one
 /// test_stm32_i2c's own pump proved: NBYTES armed to ONE at the address
-/// match, the decision taken at TCR with the received count as it stands
-/// BEFORE this byte's RXNE increments it, and TCIE never armed - the
-/// flag is polled, because an armed transfer-complete interrupt with no
-/// owner is a level the ICR cannot clear.
+/// match, the decision taken at TCR on TCR's own count, and TCIE never armed
+/// - the flag is polled, because an armed transfer-complete interrupt with no
+/// owner is a level the ICR cannot clear. TCR comes once a byte; RXNE rises
+/// for the same byte a moment ahead of it, so a pass may serve either first
+/// and the received count cannot say which byte TCR is deciding.
 twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     twilink::Report r{};
     if (!apply_client(a)) return r;
@@ -319,6 +320,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         (void)Client::byte_control(true);
     }
     uint16_t rx = 0, tx = 0;
+    uint16_t decided = 0;
     bool first_taken = false;
     const uint32_t t0 = Ticker::millis();
     for (;;) {
@@ -351,8 +353,9 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         if ((Raw::flags() & I2cFlag::transfer_reload) != 0u) {
             // Byte control's own event: the byte is in, SCL is held
             // between the eighth and the ninth pulse, and CR2.NACK
-            // decides. The count is the one BEFORE this byte's RXNE.
-            const bool refuse = static_cast<uint16_t>(rx + 1u) >= a.nack_at;
+            // decides.
+            ++decided;
+            const bool refuse = decided >= a.nack_at;
             if (refuse) r.flags |= twilink::report_nacked;
             (void)Client::answer_byte(!refuse);
             continue;

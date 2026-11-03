@@ -97,7 +97,7 @@ where the reflex is wrong.
 **The prescaler and the auto-reload are shadowed.** PSC is copied into
 the working register at the next UPDATE event and never before (21.4.13);
 ARR is too when `CR1.ARPE` is set and is taken at once when it is clear
-(21.4.14). A configuration is therefore only in force after an update,
+(21.3.1). A configuration is therefore only in force after an update,
 which is why `configure()` ends with `EGR.UG` - a software update that
 loads both shadows - and then clears the UIF that update raised.
 
@@ -148,7 +148,8 @@ TIM1_BKIN AF2, PA7/PA8 = TIM1_CH1N/CH1 AF2).
 
 **Errata.** All three TIM items of ES0548 Rev 3 apply to revision Z.
 2.7.1 (a one-pulse trigger lost in master-slave reset + trigger with MSM
-set) has "keep MSM reset" as its own workaround, which is this driver's
+set) has no workaround, and the sheet advises keeping MSM reset unless
+cycle-level synchronization is mandatory, which is this driver's
 default - `TimSlaveConfig::master_slave` is false, and a caller that
 sets it is told what it costs. 2.7.2 (a consecutive compare event
 missed) has no workaround and is STAGED at the bench, see below. 2.7.3
@@ -387,7 +388,8 @@ rising edges gave 12800 periods in 12800151 cycles edge-aligned
 (**1000.0 ticks where ARR + 1 = 1000**) and 6406 periods in 12800139
 cycles centre-aligned (**1998.1 ticks where 2 x ARR = 1998 and
 2 x (ARR + 1) = 2000**), so the measurement tells the two candidate
-formulas apart and 21.3.2's "0 to ARR-1 up, ARR to 1 down" is right. The
+formulas apart and 21.3.2's sequence, from 0 up to ARR - 1 and from ARR down
+to 1, is right. The
 three CMS codes differ only in WHEN the compare flag rises: 100 flags in
 100 ms counting up, 200 counting both.
 

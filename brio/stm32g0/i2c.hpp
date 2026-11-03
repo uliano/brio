@@ -134,10 +134,9 @@
  *    normally", and the workaround is to clear the flag and go on. So the
  *    host engine clears BERR and counts it (spurious_bus_errors()) and
  *    never reports i2c_bus_error from it: on this silicon a master's BERR
- *    is not evidence. What the engine does report as i2c_bus_error is its
- *    own bounded wait running out - a tenure the peripheral never
- *    started. A client's BERR is untouched by the erratum and is
- *    reported.
+ *    is not evidence. The one i2c_bus_error the host answers is start()'s,
+ *    for a START still standing. A client's BERR is untouched by the erratum
+ *    and is reported.
  *
  *  - The one verb that disables is 32.4.6's procedure. Clearing PE
  *    releases both lines, resets the state machines, CR2's START, STOP,
@@ -1712,7 +1711,7 @@ struct I2c {
      * offers: `instance_fast_plus()` raises every pad configured for
      * this instance, `pad_fast_plus()` raises one named pad that has a
      * bit of its own (PB6, PB7, PB8, PB9, PA9, PA10 - and nothing
-     * else). 6.1.3 adds that with Fm+ on, the pad's OSPEEDR speed
+     * else). 8.1.1 adds that with Fm+ on, the pad's OSPEEDR speed
      * control is IGNORED.
      *
      * The SYSCFG clock gate is opened here for the same reason
@@ -1847,14 +1846,20 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * TXDR and one RXDR (32.9.10, 32.9.11) - AND THE TENURE'S FRAME COSTS
  * NONE BEYOND THE STOP. What the chapter offers around the byte, and
  * this engine takes:
- *   - THE FIRST BYTE PRELOADED. TXE stands at rest (32.9.7), so start()
- *     writes the first data byte into TXDR before the START: the byte
- *     moves to the shifter at the address's acknowledge and the TXIS
- *     that would have asked for it never rises (the TXIS events count
- *     NBYTES, 32.4.9, and one of them is spent). TXDR takes a write only
- *     with TXE set (32.9.11), so a byte left there by a tenure that never
- *     sent it - an address nobody answered - is FLUSHED first (TXE is
- *     writable to one for exactly that, 32.9.7).
+ *   - THE FIRST BYTE PRELOADED, ON EITHER ENGINE. TXE stands at rest
+ *     (32.9.7), so start() writes a write half's first byte into TXDR before
+ *     the START: the byte moves to the shifter at the address's acknowledge
+ *     and the TXIS that would have asked for it never rises (the TXIS events
+ *     count NBYTES, 32.4.9, and one of them is spent). TXDR takes a write
+ *     only with TXE set (32.9.11), so a byte a failed tenure left there - the
+ *     preload an address nobody answered never sent, or the next one a
+ *     channel poured ahead of a refusal - is FLUSHED first (TXE is writable
+ *     to one for exactly that, 32.9.7). That store also takes down a TXIS a
+ *     failed tenure left standing (32.9.7), before start() arms TXIE or
+ *     TXDMAEN, so no such level can reach the vector or a channel. On a part
+ *     whose errata list "Transmission stalled after first byte transfer"
+ *     (ES0418 2.11.6, the STM32G071) the preload is the sheet's first
+ *     workaround, and the host's one path whatever its clocks' ratio.
  *   - THE LAST BYTE READ AT THE STOP. RXIE goes down once the
  *     second-to-last byte is taken, and the last one - which nothing
  *     follows, the controller NACKing it and sending the STOP by itself
@@ -1871,15 +1876,14 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *   i2c_nack_addr   NACKF with nothing of this half's data gone out: in
  *                   a read half always (a controller receiver is never
  *                   NACKed on data), in a write half when the preloaded
- *                   byte never left TXDR (TXE still clear) and no TXIS
- *                   was served - or, under an engine, when the transmit
- *                   channel's count never moved
+ *                   byte never left TXDR (TXE still clear) and nothing
+ *                   followed it: no TXIS served, or under an engine the
+ *                   transmit channel's count where launch_dma() left it
  *   i2c_nack_data   NACKF after a data byte went to the shifter
  *   i2c_arb_lost    ARLO - another controller won; the silicon has
  *                   already released the bus and switched to target
  *                   mode, so no STOP is ours to send
- *   i2c_bus_error   the engine's own bounded wait ran out: a tenure the
- *                   peripheral never started
+ *   i2c_bus_error   start()'s synchronous answer for a START still standing
  *   i2c_dma_fault   a DMA channel reported an error mid-tenure
  *
  * THE ENABLES ARE THE TENURE'S, IN ONE STORE EACH WAY. start() writes the
@@ -1911,17 +1915,19 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * every half the engines can carry on them at any length - one byte
  * included: 32.7.1 loads TXDR "whenever the TXIS bit is set" and 32.7.2
  * empties RXDR "whenever the RXNE bit is set", the NBYTES counter ending
- * the transfer, and neither names a length below which it does not hold. WHAT THE ENGINES CANNOT CARRY IS A HALF
- * WITH NO BUFFER: under either value it stays on the pump, writing its
- * filler or draining what it reads, and the request completes. A channel is
- * this host's alone (the ownership rule, docs/design/dma.md), so its start
- * is not asked whether it took. `dma` on a host with no engines bound is refused, i2c_rejected with
- * nothing on the wire (start()).
+ * the transfer, and neither names a length below which it does not hold. A
+ * write half's first byte is the preload's on either value, so its channel
+ * carries the rest and a write of one starts none. WHAT THE ENGINES CANNOT
+ * CARRY IS A HALF WITH NO BUFFER: under either value it stays on the pump,
+ * writing its filler or draining what it reads, and the request completes.
+ * A channel is this host's alone (the ownership rule, docs/design/dma.md), so
+ * its start is not asked whether it took. `dma` on a host with no engines
+ * bound is refused, i2c_rejected with nothing on the wire (start()).
  *
  * Which to name is the program's judgement, and docs/stm32g0/i2c.md gives
  * the arithmetic: the engines' fixed cost to the core over the pump's,
- * 79 cycles for a write half and 65 for a read half, against the pump's
- * about 171 a byte past the first, the core's own entry and return
+ * 103 cycles for a write half and 64 for a read half, against the pump's
+ * about 170 a byte past the first, the core's own entry and return
  * included (the pump's first byte of a half takes no interrupt: the
  * write's is preloaded, the read's taken at the STOPF), so a half of two
  * bytes or more costs the core fewer cycles on the engines, at every
@@ -1929,7 +1935,7 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * the top rung: SCL stretches only when TXDR is still empty or RXDR still
  * full a whole byte after TXIS or RXNE rose (32.4.7), and at 64 MHz that
  * byte is nine periods, at least 576 cycles, against the pump's byte
- * entry of about 171. And the core sleeps while a
+ * entry of about 170. And the core sleeps while a
  * channel works: the platform's idle() is a plain WFI that asks no
  * channel anything, and Sleep keeps the DMA clocked (RM0444 table 27,
  * 5.4.18: DMA1SMEN and DMA2SMEN set at reset, written by no verb here).
@@ -2030,8 +2036,9 @@ public:
         I2cSpeed speed = I2cSpeed::standard_100k;
         /// Which mechanism moves the data halves (util/i2c_bus.hpp): the
         /// interrupt by default, the engines at any length when the
-        /// program names `dma` (a half with no buffer stays on the
-        /// interrupt); `dma` on a host with no engines bound is answered
+        /// program names `dma` (a write half's first byte stored in TXDR by
+        /// start(), a half with no buffer left on the interrupt); `dma` on a
+        /// host with no engines bound is answered
         /// i2c_rejected with nothing on the wire. The byte sits in the
         /// padding after `speed`: the Request is 28 bytes with it and
         /// without it.
@@ -2213,10 +2220,10 @@ public:
     /// failures that move nothing, answered through status(): a speed
     /// this kernel clock cannot produce, an address outside 0x08..0x77
     /// (i2c_address_in_range) or `engine = I2cEngine::dma` on a host with
-    /// no engines bound, all i2c_rejected, and a START still
-    /// standing from a tenure the peripheral never closed
-    /// (i2c_bus_error). That is the I2cHost contract
-    /// (docs/design/i2c-bus.md). The Request's buffers stay the client's
+    /// no engines bound, all i2c_rejected, and a START still standing
+    /// (i2c_bus_error), which only a program's own use of the resource can
+    /// leave: the arbiter's recover() takes a parked one. That is the I2cHost
+    /// contract (docs/design/i2c-bus.md). The Request's buffers stay the client's
     /// loans until the reply; the engine keeps its own copy of the other
     /// fields, so the Request itself may go once this returns.
     static bool start(const Request& r) {
@@ -2258,18 +2265,16 @@ public:
         }
         pos_ = 0;
         if (r.tx_len != 0u) {
-            // TXDR flushed whoever fills it: a byte an unanswered address
-            // left there would refuse a preload (32.9.11) and go out in its
-            // place, or hold back an engine's first request and go out
-            // ahead of its block, the block's last byte never (NBYTES).
+            // TXDR flushed: a byte a failed tenure left there would refuse
+            // the preload (32.9.11) and go out in its place, the last byte
+            // of this half never (NBYTES).
             S::flush_tx();
-            if (!(has_dma && tx_dma_)) {
-                // The first byte PRELOADED (the class comment).
-                S::data(r.tx.get() != nullptr ? r.tx.get()[0] : uint8_t{0xFF});
-                pos_ = 1;
-                if (r.tx_len > 1u) {
-                    en |= I2cInterrupt::tx;
-                }
+            // The first byte PRELOADED, on either engine (the class comment),
+            // ahead of TXDMAEN and TXIE, both in the store below.
+            S::data(r.tx.get() != nullptr ? r.tx.get()[0] : uint8_t{0xFF});
+            pos_ = 1;
+            if (r.tx_len > 1u && !(has_dma && tx_dma_)) {
+                en |= I2cInterrupt::tx;
             }
         }
         // The last byte of a pumped read is the STOPF entry's, so a read
@@ -2278,6 +2283,9 @@ public:
             en |= I2cInterrupt::rx;
         }
         S::enables(en);
+        // The clear above wrote ADDRCF, which 32.9.8 says "also clears the START
+        // bit", and it does not take one parked behind a busy bus on the
+        // STM32G0B1RE (test_stm32_i2c's letter c stages it): the store refuses.
         if (!S::transfer_now(r.addr, opens_read, nbytes, !two_phase)) {
             status_ = i2c_bus_error;   // START stood: the peripheral is not ours
             phase_ = Phase::idle;
@@ -2534,10 +2542,10 @@ public:
     /// without a TransferDone (the arbiter's time-out is its reply), and
     /// a DMA engine carrying a half is abandoned or stopped.
     ///
-    /// It is 32.4.6's PE cycle and nothing more, because 32.4.6 is
-    /// exactly what the chapter offers for this: "restores the normal
-    /// operation of the I2C peripheral in case of a deadlock, by toggling
-    /// the PE bit". The cycle releases both lines, resets the state
+    /// It is 32.4.6's PE cycle and nothing more, which is what the chapter
+    /// offers for this (32.4.9): "restores the normal operation of the I2C
+    /// peripheral in case of a deadlock, by toggling the PE bit". The cycle
+    /// releases both lines, resets the state
     /// machines and clears every flag - and KEEPS every configuration
     /// register, so the timings, the filters and the pads survive it and
     /// nothing is reconfigured.
@@ -2609,18 +2617,26 @@ private:
     /// Was the NACK the address's? A read half's always: a controller
     /// receiver is never refused a data byte, it refuses the last one
     /// itself. A probe's always. A write half's when none of its data
-    /// went to the shifter: under an engine the transmit channel's count
-    /// never moved (it pours on TXIS, which the address's NACK never
-    /// raises); on the pump the preloaded byte is still in TXDR (TXE
-    /// clear, 32.9.7) and no TXIS was served - a byte that left for the
-    /// shifter set TXE, and a served TXIS moved pos_ past one.
+    /// went to the shifter, which takes two facts, because the preload that
+    /// waits in TXDR through a refused address looks like the next byte
+    /// waiting there through a refused first one. TXE set says the preload
+    /// left (32.9.7, read by the caller before this looks at anything else);
+    /// that alone answers a write of one. TXE clear says a byte is there and
+    /// not which: its leaving raised TXIS (32.4.9), and a served TXIS refills
+    /// the register. So nothing served is the rest of the proof: pos_ still
+    /// at one on the pump, on an engine the transmit channel's count still
+    /// where launch_dma() set it, the first byte being outside that run. The
+    /// address's NACK raises no TXIS (32.4.9). Neither fact does alone: a
+    /// channel not yet served leaves its count standing under a byte already
+    /// gone, and TXE tells that one.
     static bool nacked_address(uint32_t f) {
         if (phase_ == Phase::reading || t_.tx_len == 0u) {
             return true;
         }
         if constexpr (has_dma) {
             if (tx_dma_) {
-                return TxEngine::progress().remaining == t_.tx_len;
+                return (f & I2C_ISR_TXE) == 0u &&
+                       TxEngine::progress().remaining == t_.tx_len - 1u;
             }
         }
         return pos_ <= 1u && (f & I2C_ISR_TXE) == 0u;
@@ -2679,14 +2695,15 @@ private:
 
     /// The halves the engines carry this tenure, started, and the DMA
     /// request enables they need (start() writes them with the rest).
-    /// Under `interrupt` none; under `dma` every half with a length and a
-    /// buffer - the flags below say which, read by start() and the vector.
+    /// Under `interrupt` none; under `dma` a read half with a buffer, and a
+    /// write half with a buffer past its first byte, which start() preloads:
+    /// the TXIS events count NBYTES and the preload spends one (32.4.9), so
+    /// the channel takes the rest and a write of one starts none. The flags
+    /// below say which, read by start() and the vector.
     /// The start's answer is not read: the channel is this host's alone,
     /// its last block ended with its last tenure (finish(), recover()), and
     /// a length of one to 255 on a byte buffer is a run every block start
-    /// takes. A program that starts this host's engine by hand has broken
-    /// the ownership rule; its tenure stretches SCL until the arbiter's
-    /// timeout answers.
+    /// takes.
     [[gnu::always_inline]] static uint32_t launch_dma(I2cEngine e) {
         uint32_t en = 0;
         if constexpr (has_dma) {
@@ -2700,9 +2717,10 @@ private:
                 rx_dma_ = true;
                 en |= I2cDmaEnable::rx;
             }
-            if (t_.tx_len != 0u && t_.tx.get() != nullptr) {
+            if (t_.tx_len > 1u && t_.tx.get() != nullptr) {
                 TxEngine::mark_busy();
-                (void)TxEngine::launch(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
+                (void)TxEngine::launch(
+                    std::span<const uint8_t>(t_.tx.get() + 1, t_.tx_len - 1u));
                 tx_dma_ = true;
                 en |= I2cDmaEnable::tx;
             }

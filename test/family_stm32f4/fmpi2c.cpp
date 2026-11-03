@@ -308,7 +308,6 @@ void host_smoke() {
     (void)Bus::scl_hz(FmpI2cSpeed::standard_100k);
     (void)Bus::kernel_hz();
     (void)Bus::reference_hz();
-    (void)Bus::transmit_stall_risk();
     (void)Bus::spurious_bus_errors();
     (void)Bus::idle();
     Bus::fast_plus_drive(true);

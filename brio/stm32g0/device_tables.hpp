@@ -428,7 +428,7 @@ constexpr uint8_t lpuart_exti_line(uint8_t n) {
 /// Which USART instance SYSCFG_CFGR1.IR_MOD code 10 selects as the
 /// infrared modulation envelope: USART4 where the part has one (the
 /// G07x/G08x/G0Bx/G0C1), USART2 otherwise (ch. 27's own note, repeated
-/// in 6.1.3's IR_MOD description) - so the rule is the instance's own
+/// in 8.1.1's IR_MOD description) - so the rule is the instance's own
 /// presence, and every G0 has at least USART2. Code 01 is USART1
 /// everywhere and needs no table.
 constexpr uint8_t irtim_second_usart() {
@@ -776,7 +776,7 @@ constexpr uint8_t i2c_dma_tx_request(uint8_t n) {
 /// PB9, PA9, PA10 - and nothing else on this family) and a PER-INSTANCE
 /// one (I2C1_FMP, I2C2_FMP, I2C3_FMP) that raises every pad configured
 /// for that instance. The 20 mA drive is what makes 1 Mbit/s legal on an
-/// FT_f pad at all (DS13560 table 11's `_f` option), and 6.1.3 adds that
+/// FT_f pad at all (DS13560 table 11's `_f` option), and 8.1.1 adds that
 /// with Fm+ enabled the pad's OSPEEDR speed control is IGNORED.
 ///
 /// i2c_pad_fmp_bit() is 0 for a pad with no bit of its own - which

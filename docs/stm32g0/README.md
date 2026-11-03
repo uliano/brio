@@ -347,7 +347,7 @@ and a peer is a second board on the other end of a link.
 | `test_stm32_analog` | 139 | **136** | COMP3's register block and its whole signal path |
 | `test_stm32_serial` | 120 (+ y/w/v/x; + `t` 174, the STM32F446RE as peer) | **112** (+ y/w/v) | LPUART2 (two verdicts), and four to ES0418 2.2.4 ([usart.md](usart.md)) |
 | `test_stm32_spi` | 102 (the STM32F446RE as peer) | - | the same self-link letters that skip on the G0B1RE; SPI3 and SPI2's I2S are absent; the peer letters want a board paired with this one, and none is ([spi.md](spi.md)) |
-| `test_stm32_i2c` | 182 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
+| `test_stm32_i2c` | 200 (+ `w` 35, the STM32F446RE as peer) | **54** (peer) | the same self-link letters, and the peer set's `s` and `t`, whose third node is the self-link's I2C2; I2C3 is absent and I2C2 has no independent clock |
 | `test_stm32_nvm` | 85 | - | one flash bank: no storage attic ([nvm.md](nvm.md)) |
 | `test_stm32_journal` | 52 | - | the same |
 | `test_stm32_fdcan` | 96 | - | no FDCAN on this part ([fdcan.md](fdcan.md)) |
@@ -414,7 +414,7 @@ the G071RB:
 | `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
 | `test_stm32_serial` | 118 (+ y/w/v) | 112 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part and before its letters timed the wire | USART2 is a basic instance here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
 | `test_stm32_spi` | 102 (the STM32F446RE as peer) | - | - | the eleven self-link letters, compiled out: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring; the peer letters want a paired board, and none is |
-| `test_stm32_i2c` | 182 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its two images | the twelve self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
+| `test_stm32_i2c` | 200 (+ `w` 35) | 54 (peer) | **54** (peer), not re-counted on its group images | the self-link letters, skipped on the probe's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
 | `test_stm32_rubato` | 39 | - | - | built for the G0B1RE alone (its boards line); TIM2 and TIM14 exist on this part too |

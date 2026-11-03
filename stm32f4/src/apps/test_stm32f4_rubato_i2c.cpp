@@ -67,8 +67,8 @@
 //   EVERY REQUEST (EngineNamed below), so every data byte rides the
 //   engines, whatever the length (23.4.16: the engines started
 //   before the START; only the address phase and the end stay on the
-//   vectors); ES0298 2.12.3's spurious BERR counted; transmit_stall_risk()
-//   printed (ES0298 2.12.8's band on the APB-to-kernel ratio). start()
+//   vectors); ES0298 2.12.3's spurious BERR counted; the APB-to-kernel
+//   ratio's place in ES0298 2.12.8's band printed. start()
 //   waits for nothing and its LAST act is the CR2 store that carries START
 //   (transfer_now), after the engines are armed. THE PREDICTION: the
 //   STM32G0's - strict, a preemption in start() a later START; three speeds,
@@ -486,7 +486,7 @@ struct OnFmpi2c1 {
     static void print_counters() {
         print(serial, "; spurious BERR ", Host::spurious_bus_errors(), ", transmit tails abandoned ", TxEngine::faults(),
               ", receive faults ", RxEngine::faults(), " (since boot); ES0298 2.12.8's stall band ",
-              Host::transmit_stall_risk() ? "IN FORCE" : "clear");
+              fmpi2c_transmit_stall_risk(Host::reference_hz(), Host::kernel_hz()) ? "IN FORCE" : "clear");
     }
 };
 

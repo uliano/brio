@@ -152,8 +152,8 @@
  *    rest. The event vector's first store comes later than the window, so
  *    `interrupt` does not take it (docs/stm32f4/fmpi2c.md has both
  *    measurements). The ratio stays published - fmpi2c_transmit_stall_risk()
- *    and the host's transmit_stall_risk() - for what is not this host: a
- *    target's first byte and a program's own stream on the resource's verbs.
+ *    - for what is not this host: a target's first byte and a program's own
+ *    stream on the resource's verbs.
  *  - 2.12.4, last-received byte loss in reload mode: with RELOAD set and
  *    NBYTES > 1 a receiver can lose the last byte. The host engine never
  *    sets RELOAD - a Request's spans are eight-bit lengths, so one tenure
@@ -1847,17 +1847,13 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  *                    address outside 0x08..0x77, or `dma` on a host with
  *                    no engines bound - a synchronous answer, no byte
  *                    moved
- *   i2c_bus_error    a START still standing at start(), the other
- *                    synchronous answer (below)
  *   fmpi2c_dma_fault a DMA stream reported an error mid-tenure
  *
- * And no BERR ends a tenure in i2c_bus_error here, which is the
- * erratum's doing. ES0298 2.12.3: in controller mode a BERR can be raised
- * spuriously and "any such transfer continues normally"; the workaround is
- * to clear it and go on. So this engine clears BERR, counts it
- * (spurious_bus_errors()) and does not let it decide anything; the one
- * i2c_bus_error this engine reports is start()'s synchronous answer for a
- * START still standing from a tenure the peripheral never closed. A tenure that never answers is the ARBITER's to
+ * And this host never answers i2c_bus_error, which is the erratum's doing.
+ * ES0298 2.12.3: in controller mode a BERR can be raised spuriously and "any
+ * such transfer continues normally"; the workaround is to clear it and go on.
+ * So this engine clears BERR, counts it (spurious_bus_errors()) and does not
+ * let it decide anything. A tenure that never answers is the ARBITER's to
  * time out (i2c_timeout), and recover() is what it calls.
  *
  * THE TWO OPTIONAL DMA ENGINE SLOTS (the Uart's and the SpiHost's shape,
@@ -1996,9 +1992,9 @@ public:
      *
      * `cfg.bus` is the BUS'S own edges and the SCL detection budget: a rise
      * time the bus does not have lands tSCLL below the specification floor
-     * by the difference. Nullopt (the default) means "the standard's own
-     * numbers and the manual's own tSYNC budget for each mode", which
-     * reproduces tables 134 and 135.
+     * by the difference. Nullopt (the default) means the standard's own
+     * numbers and the floor alone for the SCL detection (the file's opening
+     * says what that charges and what tables 134 and 135 charge instead).
      *
      * The three speeds' TIMINGR values are resolved here (and at rebase());
      * one this kernel clock cannot produce is marked unreachable -
@@ -2111,14 +2107,8 @@ public:
     /// The rate the arithmetic divides: this instance's KERNEL clock.
     static uint32_t kernel_hz() { return ker_hz_; }
     /// The rate its registers are on, which is the other half of ES0298
-    /// 2.12.8's ratio.
+    /// 2.12.8's ratio (fmpi2c_transmit_stall_risk()).
     static uint32_t reference_hz() { return pclk_hz_; }
-    /// ES0298 2.12.8: whether the two rates in force sit in the erratum's
-    /// band. A fact about the clocks, not about this host, whose writes do not
-    /// stall there on either engine.
-    static bool transmit_stall_risk() {
-        return fmpi2c_transmit_stall_risk(pclk_hz_, ker_hz_);
-    }
 
     /// The Fm+ pad drive, which a fast_plus_1m bus needs. Both signals at
     /// once: SYSCFG's two bits are per SIGNAL and not per pad.
@@ -2155,10 +2145,8 @@ public:
     /// move nothing, answered through status(): a speed this kernel clock
     /// cannot produce, an address outside 0x08..0x77
     /// (i2c_address_in_range) or `engine = I2cEngine::dma` on a host with
-    /// no engines bound, all i2c_rejected, and a START still
-    /// standing from a tenure the peripheral never closed
-    /// (i2c_bus_error). That is the
-    /// I2cHost contract (docs/design/i2c-bus.md).
+    /// no engines bound, all i2c_rejected. That is the I2cHost contract
+    /// (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
         req_ = r;
         pos_ = 0;
@@ -2189,11 +2177,10 @@ public:
         if constexpr (has_engines) {
             launch_dma();
         }
-        if (!S::transfer_now(r.addr, opens_read, nbytes, !two_phase)) {
-            status_ = i2c_bus_error;   // START stood: the peripheral is not ours
-            phase_ = Phase::idle;
-            return true;
-        }
+        // It cannot refuse: the address was checked above, and the clear
+        // above wrote ADDRCF, which also clears START (23.7.8, ES0298 2.12.6),
+        // so no START stands here whatever came before.
+        (void)S::transfer_now(r.addr, opens_read, nbytes, !two_phase);
         return false;
     }
 
@@ -2606,9 +2593,6 @@ private:
     /// The start's answer is not read: the stream is this host's alone, its
     /// last block ended with its last tenure (finish(), recover()), and a
     /// length of one to 255 on a byte buffer is a run every block start takes.
-    /// A program that starts this host's engine by hand has broken the
-    /// ownership rule; its tenure stretches SCL until the arbiter's timeout
-    /// answers.
     static void launch_dma() {
         if constexpr (has_engines) {
             tx_dma_ = false;

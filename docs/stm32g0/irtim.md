@@ -41,7 +41,7 @@ yet" below).
 
 RM0444 Rev 6 - IRTIM ch. 27 (figure 278, the
 envelope multiplexer's per-part note, the high-sink paragraph) and
-SYSCFG 6.1.3 (IR_MOD, IR_POL, I2C_PB9_FMP); DS13560 Rev 5 tables 13 and
+SYSCFG 8.1.1 (IR_MOD, IR_POL, I2C_PB9_FMP); DS13560 Rev 5 tables 13 and
 15 for the IR_OUT pads. Errata ES0548 Rev 3: no item touches IRTIM - a
 statement about the document, not a claim about the silicon. Driver:
 `stm32g0/irtim.hpp` (`Irtim`, a monostate - a class with static state
@@ -74,7 +74,7 @@ block) and the voltage reference sit behind. `Irtim::init()` opens it
 and `release()` leaves it open: it is shared.
 
 **Which USART code 10 means is a PER-PART fact** and the manual states it
-twice (ch. 27's own footnote and 6.1.3's IR_MOD description): USART4 on
+twice (ch. 27's own footnote and 8.1.1's IR_MOD description): USART4 on
 the STM32G071/G081/G0B1/G0C1, USART2 on the STM32G031/G041/G051/G061 -
 which is to say USART4 wherever the part HAS a USART4 and USART2
 otherwise, so the reserve derives it from `USART4_BASE` with the

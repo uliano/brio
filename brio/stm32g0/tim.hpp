@@ -123,7 +123,8 @@
  * Errata, ES0548 Rev 3 read on the bench chip's revision Z column - all
  * three TIM items apply:
  *  - 2.7.1 one-pulse mode trigger not detected in master-slave reset +
- *    trigger with MSM set. Its own workaround is "keep MSM reset", so
+ *    trigger with MSM set. No workaround, and the sheet advises keeping MSM
+ *    reset unless cycle-level synchronization is mandatory, so
  *    TimSlaveConfig::master_slave defaults to false and the caller that
  *    sets it is told what it costs; the driver cannot refuse it, since
  *    cycle-accurate cascading is a legitimate thing to want.
