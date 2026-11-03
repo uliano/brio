@@ -1421,8 +1421,8 @@ struct Uart {
     /// What the rings still hold is not sent; the next init() clears them.
     ///
     /// Why the reset is init()'s and not this verb's (docs/design/dma.md,
-    /// the release contract). On this die a DMA request once raised is
-    /// HELD until the channel takes it or the block is reset: USART2's
+    /// the release contract). On this die USART2's DMA requests, once raised,
+    /// are held until the channel takes them or the block is reset: its
     /// transmit request on channel 6 and its receive request on channel 7,
     /// each raised with no channel enabled, outlive the request bit, UE,
     /// TE and RE cleared and the gate closed (docs/ch32v00x/usart.md).

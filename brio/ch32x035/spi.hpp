@@ -993,6 +993,7 @@ public:
         status_ = spi_ok;
         if constexpr (has_engines) {
             reset_owed_ = false;   // the reset above has paid it
+            dma_active_ = false;   // the channels are stopped below: nothing is in flight
             // The receive side at very_high, the transmit at high
             // (docs/design/dma.md): the receive half of DATAR holds one
             // frame, and a starved receive channel loses the next under OVR

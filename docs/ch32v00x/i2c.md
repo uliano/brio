@@ -80,8 +80,9 @@ back `i2c_arb_lost` at once, while a live tenure another controller is
 clocking is waited out (the findings). And `start()`, which the arbiter
 calls in its own dispatch, waits: up to 5 ms for the last tenure's
 STOP to leave the control register, then up to 100 us for the bus to
-free; and the event vector waits once, in a pumped read of three bytes
-or more, for the last byte (up to 100 000 polls, then `i2c_ok` whatever
+free; and the event vector, the byte pump that moves a request's data one
+entry a byte when the request names no DMA, waits once, in a pumped read of
+three bytes or more, for the last byte (up to 100 000 polls, then `i2c_ok` whatever
 DATAR holds - a gap listed below).
 
 The page is long because the chapter's event machine is. In order: the
@@ -248,7 +249,7 @@ takes** - the inventory the costs below are read against:
   rewritten); `release()` stops the engines, clears PE and closes the gate
   with no reset, and `init()` starts from the block's reset line - the
   vendor's DeInit, the one act that withdraws a request DMAEN raised on the
-  CH32V203 ([dma.md](dma.md), the release contract). The engine slots are
+  CH32V203 ([dma.md](dma.md), the release contract). The engine parameters are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, with both
   channels' vectors bound to `dma_isr()`. Which mechanism moves a
   request's data is the request's `engine` field (util/i2c_bus.hpp's
@@ -265,11 +266,12 @@ takes** - the inventory the costs below are read against:
   stopped serving, which ends the tenure `i2c_dma_fault` - this host's
   own status, declared in its header beyond the four wire codes of
   util/i2c_bus.hpp - with its STOP; a read ends on the receive block's
-  completion. A launch the transmit engine refuses - its claim held by
-  another owner of `DmaTxEngine<6>` - is found in the ADDR entry with
-  SCL held, and that half runs on the pump, the request completing; an
-  error puts away only the block the tenure has in flight, so that
-  claim stays its owner's. `dma_isr()` reads the controller's one flag
+  completion. A launch the transmit engine refuses is found in the ADDR entry with
+  SCL held, and that half runs on the pump, the request completing: it
+  takes the engine's run-time `claim()` already taken, which with one owner
+  a channel only code calling `claim()` on this host's own engine does, and
+  no correct program reaches it. An error puts away only the block the
+  tenure has in flight. `dma_isr()` reads the controller's one flag
   register once for both channels. Both engines arm at high, the
   transmit level of [../design/dma.md](../design/dma.md)'s rule: the host
   does not overrun - a byte a starved channel has not moved leaves BTF
@@ -444,8 +446,8 @@ over two runs.
 - **THE DEAD CHANNEL** (letter p): a timer's compare request raised by a
   match with no channel enabled, the timer's gate then closed with no
   reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
-  7 (table 8-2) - is HELD on this die: the next owner of the channel takes
-  one stray item and serves nothing after it ([dma.md](dma.md)). A write
+  7 (table 8-2) - is HELD on this die: the channel takes one stray item at
+  its next enable and serves nothing after it ([dma.md](dma.md)). A write
   of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
   with the transmit count standing, the far end holding one byte - where
   an engine trusting BTF alone would report `i2c_ok`; a read of 16 over
@@ -455,7 +457,7 @@ over two runs.
   timer is reset.
 - **The block's own request does not outlive its gate** (letter p): a
   read stalled over that dead channel, RxNE and BTF standing under DMAEN,
-  left the next owner of channel 7 four items while the block stayed
+  gave channel 7's next enable four items while the block stayed
   live, and none once its gate was closed - with PE up or cleared - or
   after `release()`, which closes the gate. The reset line `init()` starts
   from finds nothing of this block's to clear in these lets-go; a timer's
@@ -531,11 +533,11 @@ verdict green:
   vector entered, both channels' configuration word and count as
   `init()` left them, 19 event entries for the write and 17 for the
   read.
-- **A launch the transmit engine refuses**: with `DmaTxEngine<6>`'s claim
-  held, a write of 4 under `dma` completed `i2c_ok` on the pump with no
-  channel 6 entry, a 2 + 2 completed with its read half on the receive
-  block, the claim still its holder's after both; given back, the next
-  write rode the engine.
+- **A launch the transmit engine refuses**, which only the suite's own
+  `claim()` on the host's engine stages: with it taken, a write of 4 under
+  `dma` completed `i2c_ok` on the pump with no channel 6 entry, a 2 + 2
+  completed with its read half on the receive block, the engine still taken
+  after both; given back, the next write rode the engine.
 - **`dma` on the host with no engines**: `i2c_rejected` inside `start()`,
   the vector never entered, MSL clear, the peer seeing only the request
   that followed.

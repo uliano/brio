@@ -6,10 +6,11 @@ instead of an interrupt a byte, a block of memory copied while the
 program does something else. It covers the DMA controller of RM ch. 9,
 eight channels, each the OR of a fixed handful of peripheral requests,
 an arbiter over four software priorities, three flags a channel; the
-engines a transport names in its template slots (the USART's and the
-I2C host's); and the copy engine. A program rarely drives a channel
-itself: it names an engine in a driver's slot, binds the channel's
-vector to that driver's `dma_isr()`, and the driver does the rest.
+engines a transport names as template arguments, its engine parameters (the
+USART's, the SPI host's and the I2C host's); and the copy engine. A program
+rarely drives a channel itself: it names an engine as a driver's engine
+parameter, binds the channel's vector to that driver's `dma_isr()`, and the
+driver does the rest.
 
 The smallest use, the console on both engines - USART2 transmits on
 channel 7 and receives on 6, the channels this part wires to it:
@@ -26,24 +27,26 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
 ```
 
-Three things decide correctness even there. The channel is the request
+What decides correctness even there. The channel is the request
 on this controller: an engine on any channel but the one figure 9-1
 wires to the peripheral waits for a request that never comes, so the
 transport refuses the wrong channel at compile time (`DmaRequestOf`,
 below, names the request instead of the number). Both channels'
 vectors must be bound by the program, as above, each to the driver's
 `dma_isr()`; a vector left unbound lands in the crt's default handler,
-a spin loop. And a program with a channel at work never sleeps: in the
+a spin loop. A program with a channel at work never sleeps: in the
 Sleep the controller moves nothing, so the platform's `idle()` returns
 at once while any channel is enabled with items left, and a receive
 ring, a channel that runs for ever, holds the program awake
-([platform.md](platform.md)). One more fact a driver author needs: a
-request a peripheral raised and no channel took is held until the
-peripheral's reset line is pulsed, so a driver's `init()` pulses it, the
-gate just opened, before it writes a register or arms a channel, and its
-`release()` closes the gate with no reset ("A released requester", below).
-And a channel has one owner for the whole image, which the compiler checks
-("One owner a channel", below).
+([platform.md](platform.md)). A channel has one owner for the whole image,
+the peripheral request it serves or a tag; the compiler checks that for every
+channel programmed in a request's name, and a bare engine under its default
+tag is the program's duty ("One owner a channel", below). One more fact a
+driver author needs: a request a USART or a timer raised and no channel took
+is held until the peripheral's reset line is pulsed, so a driver's `init()`
+pulses it, the gate just opened, before it writes a register or arms a channel,
+and its `release()` closes the gate with no reset ("A released requester",
+below, with the SPI's and the I2C's, which fall sooner).
 
 The rest of this page, in order: the documents of record; what the
 silicon does, with the chapter's offer item by item; the types and
@@ -121,8 +124,9 @@ key that runs them all), the transport's engines across a wire in
   peripherals run in the Sleep, and they do - USART3's transmitter kept
   raising its request - but no item moves until the core wakes. The
   CH32V203's and the CH32V303's answer ([../ch32vx03/dma.md](../ch32vx03/dma.md)).
-- **A raised request is held** (measured, "A released requester" below):
-  the release contract's case.
+- **A request a USART or a timer raised is held** (measured, "A released
+  requester" below, with the SPI's and the I2C's, which fall sooner): the
+  release contract's case.
 - **The block's gate, DMA1EN in RCC_AHBPCENR, is closed at reset**
   (measured; the register's reset value opens the USB blocks and SRAMEN),
   and the block has no reset line (3.4.9): a channel is put back by
@@ -138,14 +142,14 @@ engines do with each:
 | the register file (CFGR, CNTR, PADDR, MADDR) | yes | PADDR and the configuration word at `arm()`, once; a block is five stores - CFGR with EN clear, CNTR, MADDR, INTFCR, CFGR with EN - and no load; the copy engine's six, PADDR the second. The word is kept in the engine, because the enable store needs it and a read-modify-write would read it back from the bus |
 | the write protection of 9.2.1, and EN standing after a block | yes | the block's first store is the word with EN clear: the disable the note asks for, which EN standing from the last block makes necessary, and the store that changes the beat or the increment in the same access - and every address store comes after it (PADDR stored first was dropped, measured) |
 | the two width fields | yes | the beat (the width of one item moved): PSIZE and MSIZE both follow the element of the run a block is handed (8, 16 or 32 bits); unequal widths (table 9-1's packing and truncation, measured as the table spells it) declined - no transport's register and buffer differ in width; the one-shot channel takes them |
-| the address alignment of 9.3.5/9.3.6 | yes | a run off its beat's boundary is refused, its caller falling back to whatever moves it otherwise |
+| the address alignment of 9.3.5/9.3.6 | yes | a run off its beat's boundary is refused: the engine answers false, and the SPI host answers such a request `spi_rejected` before it touches anything |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
 | circular mode | the receive engine's circular shape (`arm_ring()`) | a byte transport's receive ring: the channel writes the whole storage lap after lap, its count the producer index of util/ring.hpp's `HardwareRing`, the completion a lap counted by `lap()`; a transmit ring declined - a circular channel cannot be stopped at the producer's head; a circular player waits for its first block-stream user |
 | the half-transfer flag | the receive ring's | the ring's half mark: the edge twice a lap of a stream with no silence; no other engine acts on a midpoint |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants |
 | one flag register for eight channels | yes | a transport serving two channels in one handler body reads INTFR once |
-| the priorities | yes | an argument of `arm()`, and the level is the peripheral's ([design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; the I2C host's two at high (it stretches SCL behind a starved channel and loses nothing, [i2c.md](i2c.md)); strict - the level, then the lower number (9.2.1, measured) |
+| the priorities | yes | an argument of `arm()`, and the level is the peripheral's ([design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; the SPI host's receive at very_high and transmit at high ([spi.md](spi.md)); the I2C host's two at high (it stretches SCL behind a starved channel and loses nothing, [i2c.md](i2c.md)); strict - the level, then the lower number (9.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one: there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (9.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -209,7 +213,8 @@ defaults - with eight channels:
 
 A channel has one owner for the whole image
 ([design/dma.md](../design/dma.md), "The ownership rule"), and the
-compiler checks it ([brio/util/dma_owner.hpp](../../brio/util/dma_owner.hpp)).
+compiler checks it within one source file, which a brio application is
+([brio/util/dma_owner.hpp](../../brio/util/dma_owner.hpp)).
 On this series a slot is a channel of the one controller, the manual's
 DMA1: its key is `DmaSlotId<1, ch>`, ch from 1 to 8. The claim is made by
 whatever programs the channel, when it does:
@@ -225,23 +230,26 @@ whatever programs the channel, when it does:
   USART3's transmitter is armed as
   `Paced::arm<brio::DmaOwner<brio::DmaPeriph::usart, 3, brio::DmaSignal::tx>>(&reg)`;
   the copy engine claims `DmaCopyOwner<ch>`. The check reaches named requests:
-  a default tag does not say which request a bare engine serves, so two
-  requests served by bare engines on one channel in one image compile, the
-  program's own duty; a program that wants the check names them;
+  a default tag does not say which request a bare engine serves, so one
+  engine type armed for two requests of its channel compiles, the program's
+  own duty; a program that wants the check names them. Engines of two kinds
+  on one channel are two tags, and do not compile;
 - the `DmaChannel<ch, Owner>` verbs that program a channel - `enable()`,
   `configure()`, the count, the two addresses, `prepare()`, `load()`,
   `arm()`, `stop()` - claim it for `Owner`, by default the hand tag
   `DmaHandOwner<ch>`. The verbs that read a channel, clear its flags or
-  serve its vector claim nothing. A program that programs by hand a
-  channel another use of the same image owns names that owner.
+  serve its vector claim nothing. To program by hand a channel a transport
+  or an engine of the same image binds, a program passes that owner as
+  `Owner`; any other does not compile.
 
 Two owners on one channel do not compile, the error naming
 `DmaSlotId<1, ch>` and both owners: USART2's receive engine and the I2C
 host's transmit engine on channel 6, a copy engine on the console's
 channel 7, a channel the SPI host's receive engine binds programmed by
-hand. The claim's other half, one channel a request, cannot fire here:
-figure 9-1 wires each request to one channel, and every transport refuses
-an engine on any other. A claim emits nothing and costs no cycle.
+hand. The claim's other half, one channel a request, refuses only a program
+that names one request on two channels by hand: figure 9-1 wires each request
+to one channel, and every transport refuses an engine on any other. A claim
+emits nothing and costs no cycle.
 
 What the request map forces (RM 9.2.3, figure 9-1 and the table under
 it). Giving one request its channel takes it from every other request of
@@ -257,22 +265,22 @@ that row:
 | USART1's transmit (4), receive (5) | TIM1's channel 4, trigger and commutation; TIM1's update, TIM2's channel 1 |
 | USART4's receive (8) | TIM2's trigger and commutation |
 
-So the SPI host on DMA forbids USART3 on DMA, the I2C host on DMA forbids
-USART2 the engine on the channel it shares, and a converter stream forbids
-USART4's transmit engine. On the 20-pin parts, which offer no USART1, the
+A host takes both its engines or neither. So the SPI host on DMA (channels 2
+and 3) leaves USART3 no engine, the I2C host on DMA (channels 6 and 7) leaves
+USART2 none, and a converter stream forbids USART4's transmit engine. On the 20-pin parts, which offer no USART1, the
 console's instance decides: a console on USART2 with both engines leaves
 the I2C host without DMA, one on USART3 leaves the SPI host without it, one
 on USART4 (the CH32X035F8U6 alone) takes the converter's channel.
 
 What no choice of instance separates, by part (a console and a second
-serial port each with both engines, an SPI host's transmit, an I2C host's
-transmit, a converter stream):
+serial port each with both engines, an SPI host on DMA, an I2C host on DMA, a
+converter stream):
 
 | part | groups no placement serves at once |
 |---|---|
-| CH32X035F7P6 (USART2 and USART3) | console, SPI transmit, I2C transmit; console, SPI transmit, second port; console, second port, I2C transmit; SPI transmit, second port, I2C transmit |
-| CH32X035F8U6 (and USART4) | console, SPI transmit, converter, I2C transmit; console, SPI transmit, converter, second port; console, SPI transmit, second port, I2C transmit; console, converter, second port, I2C transmit |
-| CH32X035C8, CH32X035G8R, CH32X035G8U, CH32X035R8, CH32X033F8 (all four USARTs) | console, SPI transmit, converter, second port, I2C transmit |
+| CH32X035F7P6 (USART2 and USART3) | console, SPI host, I2C host; console, SPI host, second port; console, second port, I2C host; SPI host, second port, I2C host |
+| CH32X035F8U6 (and USART4) | console, SPI host, converter, I2C host; console, SPI host, converter, second port; console, SPI host, second port, I2C host; console, converter, second port, I2C host |
+| CH32X035C8, CH32X035G8R, CH32X035G8U, CH32X035R8, CH32X033F8 (all four USARTs) | console, SPI host, converter, second port, I2C host |
 
 (Brio has no converter driver on this series yet; the rows are the
 silicon's.)
@@ -287,7 +295,7 @@ each half into a ring of their own:
 | path | instructions | accesses to the controller | interrupts |
 |---|---|---|---|
 | the USART's block start (`pump_tx`, a run in the ring) | 58 over three bodies (`pump_tx`, the ring's `read_span`, the engine's `launch`) | 5 stores, no load (and one USART store: TC written 0) | - |
-| the USART's mask around it | 6 between the `csrrci` and the `csrsi`: the claim, a byte in RAM | none | - |
+| the USART's mask around it | 6 between the `csrrci` and the `csrsi`: `claim()`, a byte in RAM | none | - |
 | the USART's completion vector (a block done, the next started) | the vector's whole body - the flags' read, both channels' service, the ring's `consume` and the block start - flattened into one, no call (`dma_isr()`): inline in the vector by default, 285 to 289 cycles from the flash in the suite's image, measured between the body's first and last statement at 48 MHz, a transfer error's path a call out of it; under the port's `InRam`, one instance of 356 bytes in SRAM, 129 to 132 cycles ([usart.md](usart.md), letter `s`) | one INTFR load, the INTFCR store | one a block |
 | the USART's receive ring | none a byte: the vector's two states and the ring's two marks | none a byte | two a burst, two a lap |
 | a memory-to-memory block (`DmaCopyEngine::copy()`) | the six stores and the busy flag | 6 stores | one a block, or none polled |
@@ -341,7 +349,7 @@ USART3's data register, its transmitter asking for a byte a frame:
 
 ```cpp
 using Paced = brio::DmaTxEngine<2>;                   // USART3's transmit request
-Paced::arm(&brio::Usart<3>::regs().DATAR);
+Paced::arm<brio::DmaOwner<brio::DmaPeriph::usart, 3, brio::DmaSignal::tx>>(&brio::Usart<3>::regs().DATAR);
 (void)Paced::start(std::span<const uint8_t>(table, 256));
 brio::Usart<3>::dma_transmit(true);
 ```
@@ -437,8 +445,8 @@ clears the block's enable, closes the gate and gives the pads back with no
 reset; a timer's `init()` and `release()` do the same
 ([design/dma.md](../design/dma.md), the release contract). The case that reset
 answers, measured on the transport (`test_x035_usart` letter `i`, on USART4's
-receive request, the worst case, seven runs of the letter and three of `z`, three
-stagings a run): a frame driven into PB1 with DMAR set and channel 8 stopped,
+receive request, seven runs of the letter and three of `z`, three stagings a
+run): a frame driven into PB1 with DMAR set and channel 8 stopped,
 so RXNE stands under DMAR with no channel to take it, then `release()`, which
 leaves DMAR set and closes the gate over the raised request. The same port
 initialized again holds no byte before a frame comes, and the next burst of
@@ -463,19 +471,21 @@ later:
 | the gate closed with DMAT set | 1 |
 | the reset line, then the gate | 0 |
 
-A raised request outlives every release short of the reset line, and the
+USART3's raised request outlives every release short of the reset line, and the
 channel takes one stray item at its first enable. Which is why the reset is
 `init()`'s: with one owner a channel, only that owner can meet the request
 again, and it starts from the line that withdraws it.
 
-The other requesters, measured by the same block in the I2C and SPI suites (the
-letters there), each channel programmed in the name of the block's own request:
+The other requesters, measured by the same block (`test_x035_i2c` letter `p`,
+`test_x035_spi` letter `f`), each channel programmed in the name of the request
+the suite's image gives it, SPI1's or I2C1's on the timers' rows as well, the
+timer raising the request:
 
-| requester (the channel) | left live | the gate closed | the enable cleared, then the gate | the reset line, then the gate |
+| requester (the channel) | left live | the gate closed | the enable cleared, then the gate | the clean way out |
 |---|---|---|---|---|
-| TIM1's channels 1 and 3, TIM2's channel 2 compare, raised by a match (2, 6, 7) | - | 1 | - | none: the next block whole |
-| SPI1's TXE under TXDMAEN, SPE up as a host (3) | 4 | 1 | 0 (SPE, which `release()` clears) | 0 |
-| I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE, which `release()` clears) | 0 |
+| TIM1's channels 1 and 3, TIM2's channel 2 compare, raised by a match (2, 6, 7) | - | 1 | - | the reset line, then the gate: none, the next block whole |
+| SPI1's TXE under TXDMAEN, SPE up as a host (3) | 4 | 1 | 0 (SPE) | `release()`, which clears SPE and closes the gate with no reset: 0 |
+| I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE) | `release()`, which clears PE and closes the gate with no reset: 0 |
 
 A timer's request is held like USART3's - the block takes one stray item and
 then serves nothing, a dead channel ([i2c.md](i2c.md), letter p); the software

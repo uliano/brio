@@ -55,8 +55,9 @@
  * channel two of them would program - USART2's receive engine and the I2C
  * host's transmit engine on channel 6, a copy on a transport's channel -
  * is a compile error naming the channel and both owners. Each request is
- * wired to one channel here (the table below), so the claim's other half,
- * one channel a request, never fires.
+ * wired to one channel here (the table below) and every transport refuses an
+ * engine on any other, so the claim's other half, one channel a request,
+ * fires only on a program that names one request on two channels by hand.
  */
 
 #pragma once

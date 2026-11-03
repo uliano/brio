@@ -19,7 +19,7 @@ active object or `print` calls; an active object is a component of a
 brio program with its own event queue, served one event at a time by
 the kernel, [docs/learn/introduction.md](../learn/introduction.md)):
 the interrupt-driven byte transport every brio console is, with a
-transmit ring and a receive ring, a DMA engine in either slot, and the
+transmit ring and a receive ring, a DMA engine in either engine parameter, and the
 same public surface as the other targets' tasks, which is what lets
 `util/line_reader.hpp` and `print()` run here unchanged. Its options
 cost nothing when left at their defaults: an image with them is
@@ -86,7 +86,7 @@ one producer, so `write_byte` and `write_bulk` are called from active
 objects and from `main`, never from an interrupt handler, and both
 copy, the caller's buffer being free when the call returns; and the
 transmit arming masks interrupts around its read-modify-write of CTLR1
-only when a receive engine is in its slot, whose vector rewrites that
+only when a receive engine is named, whose vector rewrites that
 register's receive enables; the plain console's arming masks nothing.
 
 The page is long because the chapter is. In order: the documents of
@@ -557,7 +557,7 @@ out there.
 - **USART2 HOLDS ITS RELEASED REQUESTS** (letter m, ten runs): the
   transmit request (TXE under DMAT) on channel 6 and the receive request
   (a banged frame's RXNE under DMAR) on channel 7, each raised with no
-  channel enabled, then let go one way and the channel's next owner - a
+  channel enabled, then let go one way and the channel's next block - a
   request-paced block of four - counted: the request bit cleared 1 stray
   item, UE, TE and RE cleared 1, the gate closed 1, the reset line and
   then the gate 0, and the control with no request ever raised 0. Only the
@@ -604,7 +604,7 @@ out there.
   receive fed by `brio stress`): the interrupt receiver is one entry a
   byte, 247 cycles each between the stamps; the receive engine takes one
   interrupt a burst of 16 (the idle line, 295 cycles) where the BEFORE
-  took none and the owner's poll a tick, and its edge comes 4630 cycles
+  took none and the line reader's poll a tick, and its edge comes 4630 cycles
   after the last byte landed at 115200 and 1315 at 460800 (1.1 and 1.2
   frames, the byte landing about half a stop bit before the line's end)
   where the poll's came anywhere in its millisecond. Transmit through

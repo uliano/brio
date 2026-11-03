@@ -170,7 +170,7 @@ What the chapter gives a controller's transfer, and what the engine takes:
 
 | offer (section) | taken? | why |
 |---|---|---|
-| the event machine on two vectors (15.3, 15.7) | yes | the silicon's: no byte counter, no FIFO, so the pump is one entry a data byte past the first two and the frame a few entries more (SB, ADDR, the end) |
+| the event machine on two vectors (15.3, 15.7) | yes | the silicon's: no byte counter, no FIFO, so the pump (the event vector moving a request's data) is one entry a data byte past the first two and the frame a few entries more (SB, ADDR, the end) |
 | ITBUFEN as a switch inside a tenure (15.9.2) | yes | TxE and RxNE reach the vector only while the pump needs them, BTF carries the ends |
 | ITEVTEN as a switch between tenures (15.9.2) | yes | raised by `start()`, dropped at the completion with the buffer line and the DMA requests in one CTLR2 store: the BTF a STOP leaves standing and the client half's STOPF enter no vector between tenures (measured: no entry after a completion edge) |
 | EVT8_1 and EVT8 in one entry (figure 15-3) | yes | the entry that clears ADDR loads the data register and the shifter - a one- or two-byte write takes three entries (SB, ADDR, BTF), a register index before a read none of its own (measured) |
@@ -230,7 +230,7 @@ default, or `InRam`);
   `release()` stops the engines, clears PE and closes the gate with no
   reset, and `init()` starts from the block's reset line
   ([../design/dma.md](../design/dma.md)'s release contract). `busy()` is
-  the engine's phase, for a sleep site. The engine slots are
+  the engine's phase, for a sleep site. The engine parameters are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the
   host stretches SCL behind a starved channel and loses nothing, 15.6).
   Which mechanism moves a request's data is the request's `engine` field
@@ -238,10 +238,11 @@ default, or `InRam`);
   that names nothing gets it -, moves every byte from the event vector,
   the first two of a write in the ADDR entry, and touches no channel;
   `dma` puts every data half on the engines at any length. A launch the
-  transmit engine refuses - its claim held by another owner of
-  `DmaTxEngine<6>` - is found in the ADDR entry with SCL held, and that
-  half runs on the pump, the request completing; an error puts away only
-  the block the tenure has in flight, so that claim stays its owner's.
+  transmit engine refuses is found in the ADDR entry with SCL held, and that
+  half runs on the pump, the request completing: it takes the engine's
+  run-time `claim()` already taken, which with one owner a channel only code
+  calling `claim()` on this host's own engine does, and no correct program
+  reaches it. An error puts away only the block the tenure has in flight.
 - `I2cClient<1, pins>`: `init(clock, addresses, I2cClientOptions)` - a
   polled client with `.interrupts = false` -, the polled surface
   (`addressed()`, `answer_address()` returning the direction,
@@ -363,10 +364,10 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
   the ADDR entry, LAST clear. `interrupt` at sixteen bytes on the host
   with engines bound: no DMA entry, both channels' configuration word and
   count as `init()` left them, 17 event entries each way. With
-  `DmaTxEngine<6>`'s claim held, a write of 4 under `dma` completed on the
-  pump with no channel 6 entry and a 2 + 2 with its read half on the
-  receive block, the claim still its holder's; given back, the next write
-  rode the engine. `dma` on the host with no engines: `i2c_rejected`
+  `DmaTxEngine<6>` taken by the suite's own `claim()`, a write of 4 under
+  `dma` completed on the pump with no channel 6 entry and a 2 + 2 with its
+  read half on the receive block, the engine still taken; given back, the
+  next write rode the engine. `dma` on the host with no engines: `i2c_rejected`
   inside `start()`, the vector never entered, nothing on the wire. Under
   `dma` an address nobody answers is `i2c_nack_addr` writing and reading,
   a NACK on the third of six bytes written `i2c_nack_data` with channel 6
@@ -458,9 +459,9 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
 - **The dead channel** (letter p): a timer's compare request raised by a
   match with no channel enabled, the timer's gate then closed with no
   reset - TIM1's channel 3 on DMA channel 6, TIM2's channel 2 on channel
-  7 (figure 9-1) - is held: the next owner of the channel takes one stray
-  item and serves nothing after it. (The software compare event, SWEVGR's
-  CCxG, left the next owner nothing: the match is the request.) A write
+  7 (figure 9-1) - is held: the channel takes one stray item at its next
+  enable and serves nothing after it. (The software compare event, SWEVGR's
+  CCxG, left it nothing: the match is the request.) A write
   of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
   with the transmit count standing, the far end holding one byte - where
   an engine trusting BTF alone would report `i2c_ok`; a read of 16 over
@@ -469,8 +470,8 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
   caller's bound and `recover()` answer it; each lands whole once the
   timer is reset.
 - **The block's own request does not outlive its gate** (letter p): a
-  read stalled under DMAEN, RxNE and BTF standing, left the next owner of
-  channel 7 four items while the block stayed live, and none once its
+  read stalled under DMAEN, RxNE and BTF standing, gave channel 7's next
+  enable four items while the block stayed live, and none once its
   gate was closed - with PE up or cleared - or after `release()`, which
   closes the gate. The reset line `init()` starts from finds nothing of
   this block's to clear in these lets-go; USART3's request on this die
@@ -574,7 +575,7 @@ the same vector:
   behind two wait states at 48 MHz, this core's fetch (the DMA
   controller's own 6 cycles an item from SRAM against 11.5 from the
   flash, [dma.md](dma.md)). The longest entry over every shape is 337
-  cycles, the suite's stamps and owner switch included - the family's
+  cycles, the suite's stamps and its switch among the hosts included - the family's
   longest handler with every driver in the flash ([platform.md](platform.md)
   places it among the handlers), a hold of main context beside any polled
   loop.

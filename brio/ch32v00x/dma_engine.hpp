@@ -38,8 +38,9 @@
  * channel two of them would program - the console's transmit engine and a
  * copy on channel 4, USART2's and the I2C host's engines on channel 6 - is
  * a compile error naming the channel and both owners. On this family each
- * request is wired to one channel (table 8-2), so the claim's other half,
- * one channel a request, never fires.
+ * request is wired to one channel (table 8-2) and every transport refuses an
+ * engine on any other, so the claim's other half, one channel a request,
+ * fires only on a program that names one request on two channels by hand.
  *
  * Why a header of its own: a driver with an engine slot must not include
  * dma.hpp, or every program with a console would carry the controller;

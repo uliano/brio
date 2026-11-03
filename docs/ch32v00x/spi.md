@@ -113,8 +113,8 @@ the whole request - start at an odd address (a command in front of data runs in
 the loop and may sit anywhere), or 16-bit frames over engines of `uint8_t`. A
 request over a transfer of the host's own still on the engines is refused the
 same way, whichever engine it names - the one busy check, made before
-anything moves. Every request ends with the select and the D/C high, ok or
-failed. The client
+anything moves. A request the host runs ends with the D/C high and its select,
+if it names one, high, ok or failed. The client
 is narrower than the host: a client that answers needs CPOL = 1, modes 2
 and 3 (16.2.3), and `SpiClient` refuses an answering client in modes 0
 and 1 - there its window slips one bit at both ends whenever its first
@@ -276,11 +276,11 @@ own key).
   when the engines have it. The order of the fields is this host's: forty
   bytes with no padding, the pads, the buffers and the lengths first, then
   one word holding `clock`, `mode` and `bits` behind `cs_setup_us`, then the
-  reply (the next section). `status()` answers `spi_ok`, `spi_rejected` (a
-  request naming the engines on a host with none, or one they cannot
-  carry), `spi_dma_fault` (a block the engines could not finish) or
-  `spi_stalled` (a polled flag never came within the transaction's bound in
-  time);
+  reply (the next section). `status()` answers `spi_ok`, `spi_rejected` (a request
+  over a transfer still on the engines, one naming the engines on a host with
+  none, or one they cannot carry), `spi_dma_fault` (a block the engines could
+  not finish) or `spi_stalled` (a polled flag never came within the
+  transaction's count of polls);
   after the last two the host has put the block back or will at the next
   request that moves something, and the program calls nothing.
   `init(clock, max_sck_hz)`, `rebase()`, `clock_for(hz)`,
@@ -292,7 +292,7 @@ own key).
   where the two polled loops run from, util/placement.hpp's `InFlash` (the
   default) or `InRam` - each width of each loop then one instance in SRAM,
   a call a phase ([platform.md](platform.md), "A handler in SRAM"); any
-  other tag is refused at compile time. The engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2,
+  other tag is refused at compile time. The engine parameters are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2,
   Elem>`, both or neither, on those two channels and no others (refused
   at compile time otherwise). Their `Elem` is the widest beat: `uint8_t`
   engines serve the 8-bit requests; `uint16_t` engines - DATAR's width,
@@ -371,10 +371,10 @@ r).
   clears RXNE and OVR with a DATAR read and a STATR read (letter v). Nine
   instructions a frame at 8 bits (twelve at 16), and MEASURED AT THE
   WIRE at HCLK/4 and slower in both widths: 31.9 cycles an 8-bit frame against
-  the wire's 32 at HCLK/4, 127.9 to 128.0 and 255.9 at HCLK/16 against 128 and
+  the wire's 32 at HCLK/4, 128.0 and 255.9 to 256.0 at HCLK/16 against 128 and
   256. An interrupt that lands in the loop only pauses the stream, and
   costs what it outlasts the frame's slack: the console's interrupts
-  inside a 16-bit run at HCLK/4 cost 3 cycles a frame (67.3 against
+  inside a 16-bit run at HCLK/4 cost 3 cycles a frame (67.1 against
   64). A phase with an in buffer runs the RECEIVE loop, ONE FRAME IN
   FLIGHT at every rate: write k, poll RXNE, read k and write k + 1 in the
   next instruction, the next frame's load and the store of the one read
@@ -390,7 +390,7 @@ r).
   that at 16; the count is twice the request's frames in cycles, in polls of at
   least four cycles each, plus 256 polls for the block's latency. A poll is five
   instructions in the listing (a load, a test, a count, two branches), measured
-  at 14.7 to 25 cycles from the flash below. So the count never runs out before
+  at 14.7 to 25.0 cycles from the flash below. So the count never runs out before
   the wire has had twice its own time, and a handler or a preemption landing in
   a wait costs time and no polls, so it cannot end a healthy transaction. The
   spin is a count and a branch, and no clock is read.
@@ -421,9 +421,9 @@ r).
   The 8 and 16 cycles between the columns of one row are not that turn and have
   not been bisected. A long read that wants the wire's rate names the engines.
   Under the benchmark's console
-  and tick the same loop reads 56.7 to 56.8 cycles a byte at HCLK/4, 154.6 to
-  155.0 at HCLK/16 and 31.8 to 31.9 at HCLK/2, and 94.2 to 94.9, 282.8 to 284.3
-  and 69.4 to 69.6 a 16-bit frame (letter e, three runs).
+  and tick the same loop reads 56.7 cycles a byte at HCLK/4, 154.9 to 155.6 at
+  HCLK/16 and 31.9 at HCLK/2, and 94.2 to 94.9, 283.2 to 283.5 and 69.4 to 69.5 a
+  16-bit frame (letter e, three runs).
 - **The loops are aligned to the fetch's word.** From the flash the
   receive loop's frame is a function of where the loop starts modulo
   four: half a word moved it by 6 cycles at HCLK/4 and 3 at HCLK/2, the same
@@ -436,15 +436,16 @@ r).
   letters through a twin host): the transmit-only loop at the wire at
   HCLK/2 and slower, 16.0 cycles an 8-bit frame against the flash's 24.9 (the
   wire's 16) and 33.7 a 16-bit one against 37.9 (32); the
-  receive loop 29.8 cycles an 8-bit frame at HCLK/2 against 31.8 to 31.9, 50.7
-  to 50.8 at HCLK/4 against 56.7 to 56.8, 144.0 to 144.3 at HCLK/16 against
-  154.6 to 155.0 (letter e, three runs). The SRAM loop's instance
+  receive loop 29.8 cycles an 8-bit frame at HCLK/2 against 31.9, 50.7 to 50.8
+  at HCLK/4 against 56.7, 144.5 to 144.9 at HCLK/16 against 154.9 to 155.6
+  (letter e, three runs). The SRAM loop's instance
   sits where the image puts it, util/placement.hpp's trampoline not
   aligning it, and its dead bus moves with that: 8 to 16 cycles at
   HCLK/4 across images. Each width of each loop is one instance in SRAM,
-  called once a phase: 528 bytes a host type on the CH32V006 (116 and 126 the
-  transmit-only loop's, 126 and 160 the receive loop's) and 576 on the
-  CH32V003, against 2 KB there.
+  called once a phase: 460 bytes a host type on the CH32V006 (98 and 108 the
+  transmit-only loop's, 106 and 148 the receive loop's, the map's
+  `.fast_text.brio`). No image of the CH32V003 carries the placement ("Not
+  covered yet").
 - **The select and D/C edges** are one store each into BSHR and BCR
   (RM 7.3.1.4, 7.3.1.5), inline, the null D/C a branch; `cs_setup_us`
   is tested before anything is called; no flush of the receive buffer
@@ -491,22 +492,22 @@ r).
   request a disabled channel has not taken is latched).
 - **`spi_stalled`, provoked** (letter h): a polled duplex request of 16
   at /16 with SPI1 HELD in reset - its registers ignoring every write,
-  RXNE never rising - ends `spi_stalled` after 32 490 to 32 610 cycles (21 680
+  RXNE never rising - ends `spi_stalled` after 32 490 to 32 630 cycles (21 680
   to 21 890 on the CH32V003F4P6): the count of 1 280 polls (16 x 64 + 256) at
-  25.0 cycles a poll here and 16.6 there, some 550 cycles the reset (400 there);
-  the same with SPE taken down under the host, a write of sixteen (24 670 to
-  24 760, 19 200 to 19 260 there; 18.8 and 14.7 a poll) and a command phase in the
-  loop in front of a block on the engines (320 polls: 5 950 to 6 030, 5 560 to
-  5 610; 16.9 and 16.1 a poll). Never under the polls' lowest time (5 120 cycles
-  for sixteen frames, 1 280 for the command phase, each poll at four cycles), in
-  thirteen runs, and the D/C and the select high after each.
+  25.0 cycles a poll here and 16.6 to 16.8 there, some 580 cycles the reset (430
+  there); the same with SPE taken down under the host, a write of sixteen (24 680
+  to 24 750, 19 200 to 19 250 there; 18.8 to 18.9 and 14.7 a poll) and a command
+  phase in the loop in front of a block on the engines (320 polls: 5 960 to 6 020,
+  5 560 to 5 600; 17 and 16 a poll). Never under the polls' lowest time (5 120
+  cycles for sixteen frames, 1 280 for the command phase, each poll at four
+  cycles), in ten runs on each part, and the D/C and the select high after each.
   The host's own pulse lets the reset line go:
   CTLR1 reads 0x35C, SPE and MSTR up, RXNE and OVR down, and with no `recover()`
   the next polled request and the next on the engines are `spi_ok`, the latter
   with its one interrupt. Exact against the peer in letter t,
   below.
-- **The drain the reset goes without**: `Spi::disable()` costs 99 cycles (270 on
-  the CH32V003F4P6) on a block held in reset or behind a closed gate, where
+- **The drain the reset goes without**: `Spi::disable()` costs 99 cycles in seven
+  runs of ten and 194 to 200 in the others (270 on the CH32V003F4P6) on a block held in reset or behind a closed gate, where
   SPE reads down and neither of its waits starts. Its two waits spend
   something only on a block with SPE up whose TXE or BSY never comes, each
   bounded by a count of polls: two of the longest frame (16 bits at /256, 4096
@@ -534,9 +535,9 @@ r).
   /256; on the transmit channel a buffer whose last eight bytes are the SRAM's stops
   the channel eight frames in. Either way `dma_isr()` answers true once,
   `spi_dma_fault`, the select released, no core fault, no wedge.
-- **The reset the interrupt leaves to the next request**: 537 cycles on the
-  CH32V006K8U6, 415 on the CH32V003F4P6, read as a `prime()` with the reset owed
-  (786, 799) against one with nothing owed (249, 384). The interrupt writes a byte
+- **The reset the interrupt leaves to the next request**: 579 cycles on the
+  CH32V006K8U6, 434 on the CH32V003F4P6, read as a `prime()` with the reset owed
+  (825, 820) against one with nothing owed (246, 386). The interrupt writes a byte
   and waits for nothing. The request that pays it is the next one that moves
   something: a refused or an empty one touches nothing and leaves the reset owed
   (letter h: CTLR2's ERRIE, set by hand after the fault, stands through a refused
@@ -551,14 +552,14 @@ r).
   its own select behind `prime()`; a stall and a transfer error with the loops
   in SRAM; and through `SpiBus`, two requests posted from one dispatch, the first
   failing: replies in order, the failure's code then `spi_ok`. Every next request
-  exact both ways, 0 mismatches, in all 13 runs of 22 cases. With the reset taken
+  exact both ways, 0 mismatches, in all ten runs of 22 cases. With the reset taken
   out of a scratch build every case fails: over a block in reset the next request
   stalls again (polled) or never answers (on the engines), with SPE down the frame
   left standing goes out under the next select and shifts the peer's stream, and
   after a transfer error the frames still on the wire come back in front, all
   sixteen frames read wrong.
 
-- **When a request ends, the wire has ended** (letter w, wireless, fifteen runs
+- **When a request ends, the wire has ended** (letter w, wireless, thirteen runs
   on each part): the select rises after the last SCK edge, and `start()`'s true
   or `dma_isr()`'s true comes after it too. The letter reads the SCK pad against
   the mode's idle level at the flag the end is read from - the first STATR load
@@ -572,13 +573,13 @@ r).
   letter: half a bit is 128 cycles at /256 and 32 at /64; a poll turn is the
   frame's cycles over the polls a frame the letter prints, some 29 cycles on the
   CH32V003F4P6 (71 polls over a 2048-cycle frame at /256, 17 over 512 at /64)
-  and 37 to 47 on the CH32V006K8U6 (55 and 11 at RXNE, 51 and 13 at the
-  channel's flag). So an early flag would leave the pad off idle for some four
+  and 37 on the CH32V006K8U6 (55 and 14, at RXNE and at the channel's flag).
+  So an early flag would leave the pad off idle for some four
   polls at /256 and one at /64 on the CH32V003F4P6, and some three at /256 on
   the CH32V006K8U6, where at /64 a half bit is under a turn and would be seen on
   some passes and not on every one; from /32 up the half bit is under a turn on
   both parts and the instrument cannot see it. The vector reads the pad at
-  most 387 to 419 cycles after the flag on the CH32V003F4P6 and 282 to 333 on
+  most 385 to 417 cycles after the flag on the CH32V003F4P6 and 285 to 336 on
   the CH32V006K8U6 (each run's worst), so after the request the letter sees an
   early end only past that. The letter
   has teeth: a scratch host whose transmit-only tail skips the wait on BSY fails
@@ -627,9 +628,9 @@ it within a frame of the arithmetic on the same figures (equal in every run).
 
 | measured (letter g, ten runs) | E | F read /4, read /2, write /2 | E - F read, written | from which length, read /4, read /2, write /2 |
 |---|---|---|---|---|
-| CH32V006K8U6, flash | 784 to 787 | 411, 435, 423 | 373 to 376, 361 to 364 | 7, 12, 16 |
-| CH32V006K8U6, SRAM | 719 to 722 | 383, 387, 390 | 336 to 339, 329 to 332 | 7 to 8, 12, 21 |
-| CH32V003F4P6, flash | 718 | 484, 480, 494 | 234, 224 | 5, 7, 12 |
+| CH32V006K8U6, flash | 787 to 790 | 411, 435, 423 | 376 to 379, 364 to 367 | 7 to 8, 12, 16 |
+| CH32V006K8U6, SRAM | 725 | 383, 387, 390 | 342, 335 | 8, 13, 21 |
+| CH32V003F4P6, flash | 718 | 482, 478, 492 | 236, 226 | 5, 7, 12 |
 
 The guidance at every code, in byte frames, from those figures (a read's frame
 the wire plus the table's dead bus, 22 from the flash and 10 to 16 from SRAM,
@@ -638,16 +639,16 @@ engines cost the core fewer cycles than the loop from
 
 | frames | /2 | /4 | /8 | /16 | /32 | /64 and slower |
 |---|---|---|---|---|---|---|
-| CH32V006, flash, read | 12 | 7 | 5 | 3 | 2 | 1 |
+| CH32V006, flash, read | 12 | 7 to 8 | 5 | 3 | 2 | 1 |
 | CH32V006, flash, write | 16 | 12 | 6 | 3 | 2 | 1 |
-| CH32V006, SRAM, read | 12 | 7 to 8 | 5 | 3 | 2 | 1 |
+| CH32V006, SRAM, read | 13 | 8 | 5 | 3 | 2 | 1 |
 | CH32V006, SRAM, write | 21 | 11 | 6 | 3 | 2 | 1 |
 | CH32V003, flash, read | 7 | 5 | 3 | 2 | 1 | 1 |
-| CH32V003, flash, write | 12 | 7 | 4 | 2 | 1 | 1 |
+| CH32V003, flash, write | 12 | 8 | 4 | 2 | 1 | 1 |
 
 In words: one frame already costs the core less on the engines at HCLK/64 and
 slower on the CH32V006 and at HCLK/32 and slower on the CH32V003; at HCLK/2 the
-loop is the cheaper below 7 to 12 frames read and 12 to 21 written. A 16-bit
+loop is the cheaper below 7 to 13 frames read and 12 to 21 written. A 16-bit
 frame is twice the wire, so from /4 on the same arithmetic gives about half the
 byte count. The figures count core cycles alone: a request on the engines
 also leaves the core free through the wire time, which a program that must keep
@@ -855,8 +856,8 @@ busy check answers the next request `spi_rejected` rather than a hang, until
 `recover()`. The timed arbiter calls it on `spi_timeout` and on no other
 answer; it releases the D/C and the select, puts the engines away (the
 channels are this host's alone, one owner a channel), drains (its answer is
-false when a bounded wait ran out, some 2.4 ms at worst on a block with SPE up,
-two waits of 2 304 polls at 25 cycles each) and resets. A program may call it. No verb says the engines are idle, and
+false when a bounded wait ran out, which only a dead block with SPE up
+reaches) and resets. A program may call it. No verb says the engines are idle, and
 `recover()` under a request on them takes it away, its completion never coming, so
 a program calls it when it knows: every request it has posted answered, on a bus
 with one client.
@@ -894,14 +895,14 @@ k, n, o, p, q, r, m), `-4` (the next request after a failure, the end of the
 wire and the same host released with a request standing, then initialized: t,
 w, l) and `-5` (the engines of bytes, in an image where theirs is the only
 binding armed: j): `z` is 47, 22, 28, 13 and 1 verdicts, green in three runs of
-each, letters g, h, i, j, l and t in ten runs or more: a, c, f, g, h, i, j, l,
+each, letters g, h, i, j, k, l, t and w in ten runs or more: a, c, f, g, h, i, j, l,
 v and w with the peer deselected (their select is PC3, a pad with no wire, PC1
 held high), the other letters against it; s (the pair's ceiling) and x (the
 slips) run by name. On the CH32V003F4P6 the suite is twenty-three group images,
 one letter each - the part's 15 KB with no multiplier decide the cut
 (design/overview.md) - and with no peer wired to that board the letters that
-need none ran: a, c and v green three times each, f once, g, h, i, j and l in
-ten runs each.
+need none ran: a, c, f and v green in three runs each, g, h, i, j, l and w in
+ten runs or more.
 
 - **The reset values are table 16-2's** (STATR 0x0002 with TXE up,
   CRCR 0x0007), and a control word lands as spelled.
@@ -922,8 +923,9 @@ ten runs each.
   its vector never entered.
 - **The engine a request names** (letter i, wireless): ONE FRAME at HCLK/2,
   read and written, rides the engines - `start()` false, one DMA interrupt the
-  end, `spi_ok` - where the loop costs the core some 520 cycles against the
-  engines' 800 (letter g). The letter has teeth: on the CH32V003F4P6 a scratch
+  end, `spi_ok` - where a read of one frame in the loop costs the core some 465
+  cycles against the engines' 790 on the CH32V006K8U6 and 516 against 718 on the
+  CH32V003F4P6 (letter g). The letter has teeth: on the CH32V003F4P6 a scratch
   host that ran a request this short polled whatever it named failed it. THE
   COMMAND RULE, D/C sampled by the tick on PC4, a pad with no wire: a command of
   64 frames at HCLK/256 then 64 data frames, D/C low on the two or three ticks
@@ -948,12 +950,12 @@ ten runs each.
   table's worst row, 38, rounded up) and the ticks' 3 and 5.
 - **A HANDLER LONGER THAN A FRAME IS A GAP ON THE BUS** (letter k, against
   the peer): the tick's handler dragged by an empty loop to hold main
-  context off 2409 to 2440 cycles, past four frames of 512, beside ten
+  context off 2406 to 2440 cycles, past four frames of 512, beside ten
   windows of 128 frames at HCLK/64: ten of ten exact both ways, `spi_ok`, the
-  peer's count right, OVR never standing, in eighteen runs of the letter. A
-  window lengthens by 2266 to 2284 cycles (68 823 to 68 826 undragged, 71 092
-  to 71 110 dragged, one tick landing), where the arithmetic above the letter
-  allows some 1420 to 4960, computed from each run's figures.
+  peer's count right, OVR never standing, in ten runs of the letter. A
+  window lengthens by 1803 cycles (68 709 undragged, 70 512 dragged, one tick
+  landing), where the arithmetic above the letter allows some 1420 to 4960,
+  computed from each run's figures.
 - **RXNE does not say TXE in modes 1 and 3**: a frame written behind the one
   shifting is still in the buffer when the frame before it raises RXNE, and a
   write made on that RXNE alone replaces it: over the matrix at HCLK/256 against
@@ -978,10 +980,10 @@ ten runs each.
   an engined block, the difference of two block lengths, best of three,
   against its SCK periods at HCLK over the divisor the BR code names,
   16.3.1, with no gap added - a frame written while another shifts
-  follows it with none, 16.2.2): from SRAM buffers 999, 998, 999 to 1000
-  and 999 to 1000 thousandths at HCLK/2, /4, /16 and /64 in mode 0,
-  1000 at /16 in mode 3, 998 at /4 and 999 at /16 in 16-bit frames (thirteen runs);
-  and with no buffer named, on the host's own cells, 999 to 1000 at /2,
+  follows it with none, 16.2.2): from SRAM buffers 1000 to 1002, 999 to 1001,
+  1000 and 999 to 1000 thousandths at HCLK/2, /4, /16 and /64 in mode 0,
+  1000 at /16 in mode 3, 998 at /4 and 999 to 1000 at /16 in 16-bit frames (ten
+  runs); and with no buffer named, on the host's own cells, 999 to 1000 at /2,
   /4 and 16-bit /4. THE CELLS ARE IN SRAM: with the 0xFF cell a constant in
   flash the same block took 1031 thousandths at HCLK/2 - 16.5 cycles
   where 16 are the wire's, the transmit channel reading its source
@@ -1044,14 +1046,14 @@ ten runs each.
 - **The host above the wire on the CH32V003F4P6** (`bench_ch32` letters
   s and e, MISO floating, the loop idling through the platform's
   `idle()`, which does not sleep over a working channel, [dma.md](dma.md)):
-  the engines at the wire by letter g's measure, 1000 thousandths of the SCK
-  periods at /2, /4, /16 and /64. Letter s's line reads the rate as a
+  the engines at the wire by letter g's measure, 998 to 1000 thousandths of the
+  SCK periods at /2, /4, /16 and /64. Letter s's line reads the rate as a
   difference of two walls (five runs): at HCLK/16 128.0 cycles a byte in 8-bit
-  frames against 128, the fixed part 1198 cycles at both lengths, and 127.2 to
-  128.3 in 16-bit ones; at HCLK/4 30.9 in 8-bit frames and 30.7 to 31.0 in
+  frames against 128, the fixed part 1183 cycles at both lengths, and 127.3 to
+  127.9 in 16-bit ones; at HCLK/4 30.9 in 8-bit frames and 30.8 to 31.0 in
   16-bit ones against 32. A block cannot beat the clock its BR code makes: the
-  walls' fixed parts differ at HCLK/4, 1507 cycles at 32 frames against 1267 at
-  256 in 8-bit frames and 1750 to 1752 against 1191 to 1340 in 16-bit ones, and
+  walls' fixed parts differ at HCLK/4, 1491 cycles at 32 frames against 1249 at
+  256 in 8-bit frames and 1729 against 1219 to 1309 in 16-bit ones, and
   that difference is not explained ("Not covered yet"). The
   polled write 1.05 times the wire at 256 frames of
   HCLK/4; the receive loop's frame over the wire, `spi.frame` from the
@@ -1158,7 +1160,7 @@ Implemented but not bench-verified, each with what would measure it:
   the slip itself was measured on the CH32V006 alone. A CH32V003 wired to
   the CH32X035 as the CH32V006 is, answering a mode-0 window whose first
   bit is 1 after a window of zeros, would measure it.
-- The suite's letters against a peer on the CH32V003F4P6: its twenty-one group
+- The suite's letters against a peer on the CH32V003F4P6: its twenty-three group
   images link (`brio fit`), the letters that need no peer ran; a CH32V003
   wired to the CH32X035 as the CH32V006 is would run the others. Letter t among
   them, so on that part the next request after a failure is judged by its status
@@ -1179,8 +1181,8 @@ Implemented but not bench-verified, each with what would measure it:
   host's receive loop at HCLK/4 and HCLK/16, frames counted, would measure what
   its write-ahead buys and what it loses against the bus's one-frame buffer.
 - The CH32V003F4P6's engined lines in letter s: why a 32-frame line's fixed part
-  runs 240 cycles over the 256-frame line's at HCLK/4 in 8-bit frames, and 410
-  to 560 in 16-bit ones. A stamp around
+  runs 242 cycles over the 256-frame line's at HCLK/4 in 8-bit frames, and 420
+  to 510 in 16-bit ones. A stamp around
   `start()` and one at the completion on each line would split it.
 - HSCR's high-speed read mode: its rate formula against a scope on
   SCK.

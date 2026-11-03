@@ -14,7 +14,7 @@ active object or `print` calls; an active object is a component of a
 brio program with its own event queue, served one event at a time by
 the kernel, [docs/learn/introduction.md](../learn/introduction.md)): the
 interrupt-driven byte transport every console runs on, with a transmit
-ring and a receive ring, a DMA engine in either slot, and the same
+ring and a receive ring, a DMA engine in either engine parameter, and the same
 public surface and template parameters as the sibling strata's tasks,
 which is what lets `util/line_reader.hpp` and `print()` run here
 unchanged.
@@ -281,7 +281,7 @@ restart), `harvest()` (the same edge asked from the consumer's side),
 `dma_faults()`, `write_byte` and `write_bulk` (a run: as many as fit -
 without a transmit engine its first byte pushed and TXEIE armed before
 the rest is copied, armed again behind it; with one the run copied whole
-and the engine nudged, the block claimed under the mask and launched
+and the engine nudged, its `claim()` under the mask and the block launched
 outside it), `read_byte` and `read_span`/`consume` (the receive run in
 place - under a receive engine the channel's own ring, `consume()`
 answering whether the run was intact), `tx_idle()` (no block in flight,
@@ -548,9 +548,9 @@ reports. What it measured:
   last one's completion - against the polled blast taken back to back,
   in both placements of the port. The DMA vector's body - the flags'
   read, the channels' service and the restart (the ring's consume, the
-  claim, the next run, TC cleared and the five stores) - is flattened, no
+  engine's `claim()`, the next run, TC cleared and the five stores) - is flattened, no
   call left on it, and placed whole with the port: under `InRam` the
-  suite's vector in the flash keeps its entry, the owner test, the stamps
+  suite's vector in the flash keeps its entry, its test of which port runs, the stamps
   and one call. Under `InRam` gapless at every rate to 3 Mbaud, twelve
   runs: the span within 500 ppm of the polled blast's at 1, 1.5, 2, 2.4
   and 3 Mbaud - the instrument's own spread, two blasts back to back on a

@@ -899,6 +899,7 @@ public:
         status_ = spi_ok;
         if constexpr (has_engines) {
             reset_owed_ = false;   // the reset above has paid it
+            dma_active_ = false;   // the channels are stopped below: nothing is in flight
             // The transmit block ends before the receive block does, which
             // is the one interrupt a block takes: its errors alone. The
             // receive side at VERY_HIGH, the transmit at HIGH (DmaPriority's
@@ -1092,11 +1093,11 @@ public:
     }
 
     /// The engine's completion status, for the TransferDone payload:
-    /// spi_ok, spi_rejected (a request naming the engines on a host with
-    /// none, or one they cannot carry), spi_stalled (a polled flag never came) or spi_dma_fault
-    /// (a block the engines could not finish). Read it in the vector right
-    /// after dma_isr() answered true, or after a start() that answered
-    /// true; start() sets it to spi_ok on entry.
+    /// spi_ok, spi_rejected (a request over a transfer still on the engines,
+    /// one naming the engines on a host with none, or one they cannot carry),
+    /// spi_stalled (a polled flag never came) or spi_dma_fault (a block the
+    /// engines could not finish). Read it in the vector right after dma_isr()
+    /// answered true, or after a start() that answered true.
     static uint8_t status() { return status_; }
 
     /// Put the ENGINE back where start() is legal, whatever it was doing
@@ -1127,8 +1128,8 @@ public:
     /// SCK, MOSI and MISO floating. No reset: the next init() starts from
     /// the block's reset line, before it configures and before it arms a
     /// channel (docs/design/dma.md, the release contract), so a request this
-    /// block left standing reaches no block of the next owner's. Main
-    /// context, with no request in flight.
+    /// block left standing reaches no block of this host's. Main context,
+    /// with no request in flight.
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();
