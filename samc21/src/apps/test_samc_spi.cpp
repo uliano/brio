@@ -1,5 +1,5 @@
 // build: boards = c21j
-// build: groups = abcdefghijklmnpr,ao,aq
+// build: groups = abcdefghijklmnprs,ao,aq
 // build: monitor_speed = 115200
 //
 // test_samc_spi - the SERCOM in SPI mode (DS60001479M ch. 32) and, over
@@ -103,6 +103,11 @@
 //      from STANDBY (RUNSTDBY; the RTC on OSCULP32K the backstop)
 //   k  the host's rare paths: the spin budget on a clockless SERCOM, and
 //      an early TXC under a handler (into the peer's receive-only run)
+//   s  A REQUEST'S END, no wire and no peer: D/C and the select high after a
+//      stalled command (polled and on the engines), a stalled data phase, a
+//      transfer error and recover() over a request in flight; the one busy
+//      check, before anything moves; D/C rising after the command's last
+//      edge, sampled against the SCK pad in the four modes
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -2667,12 +2672,22 @@ void tk_host_paths() {
     const bool cs_up = Cs::read();
     const bool rx_empty = !Raw::rxc_flag();
     (void)Raw::core_clock(0);
+    // The budget's time (samc21/spi.hpp, the class comment): twice the frames'
+    // wire time and 4096 core cycles, a floor because a turn takes more than
+    // the four cycles the count is made at. The wall is the 24 MHz crystal's
+    // and OSC48M is half a per cent off it (docs/boards/samc21j.md), which the
+    // real turn's margin over four cycles covers many times.
+    const uint32_t bound_cycles = 4096u + 2u * 8u * 16u * (static_cast<uint32_t>(command_baud) + 1u);
+    const uint32_t took_cycles = took * 2u;
     print(serial, "  a polled request of 8 with the core clock channel down: status ", status,
-          " after ", took / 24u, " us (the budget 200000 + 6000 a character = 248000 turns), select ",
-          cs_up ? "high" : "LOW", crlf);
+          " after ", took / 24u, " us, ", took_cycles, " core cycles against the budget's floor of ",
+          bound_cycles, ", select ", cs_up ? "high" : "LOW", crlf);
     bench.verdict("a polled request on a clockless SERCOM spends its spin budget and comes "
                   "back spi_stalled, the select raised, the receiver empty",
                   clockless && status == spi_stalled && cs_up && rx_empty);
+    bench.verdict("the stall lasted at least the budget's time, derived from the rate: twice the "
+                  "wire time of the request and 4096 core cycles",
+                  took_cycles >= bound_cycles);
     bench.verdict("and with the channel back the engine runs a request spi_ok",
                   link_command_mode() && command(Op::ping) && Bus::status() == spi_ok);
 
@@ -3287,6 +3302,289 @@ void tn_reset() {
     bench.verdict("and a polled one after a fault is exact too", bad_next[1] == 0u && next_st[1] == spi_ok);
 }
 
+// ---- s - a request's end, and the one busy check -------------------------------
+
+namespace re {
+
+/// TC4's sampler for D/C against the SCK pad (the vector at the end of the
+/// file, in SRAM so that the loop keeps its share), a sample every
+/// `sample_cycles`. WHY THE PERIOD: at BAUD 255 half a bit is 256 core cycles,
+/// and a D/C raised on RXC stands that long before the last edge, less the
+/// loop's reaction under this vector. D/C is read first and SCK after it, so a
+/// D/C raised after the last edge can never read beside an active SCK, and no
+/// run of this letter can fail for the sampler's sake. With the wait on TXC
+/// taken out of the host the polled rows fail 15 or 16 requests of 16 in modes
+/// 0 and 2 (measured). The loop ahead of the engines reacts later, its way back
+/// to the D/C's store outlasting half a bit under this vector: the same control
+/// is not seen there, so that row is printed and not judged, and what says that
+/// path waits is that it runs the one command_phase() of the polled rows.
+constexpr uint16_t sample_cycles = 160u;
+volatile bool on = false;
+volatile bool idle_high = false;
+volatile bool dc_seen_low = false;
+volatile uint16_t samples = 0;
+volatile uint16_t high_and_active = 0;
+volatile uint8_t first_high = 0;   // 0 none yet, 1 SCK idle at it, 2 SCK active at it
+
+[[gnu::always_inline]] inline void sample() {
+    const bool dc = dm::Fake::read();
+    const bool sck = SckPin::read();
+    samples = static_cast<uint16_t>(samples + 1u);
+    if (!dc) {
+        dc_seen_low = true;
+    } else if (dc_seen_low) {
+        const bool active = sck != idle_high;
+        if (first_high == 0u) {
+            first_high = active ? 2u : 1u;
+        }
+        if (active) {
+            high_and_active = static_cast<uint16_t>(high_and_active + 1u);
+        }
+    }
+}
+
+bool sampler_up() {
+    if (!Shot::init(0)) return false;
+    if (!Shot::configure(TcConfig{.mode = TcMode::count16, .prescaler = TcPrescaler::div1,
+                                  .waveform = TcWaveform::match_frequency})) {
+        return false;
+    }
+    if (!Shot::set_cc16(0, sample_cycles)) return false;
+    Shot::clear_flags(Shot::overflow_flag);
+    Shot::arm(Shot::overflow_flag);
+    Nvic::enable(Shot::irq());
+    return true;
+}
+
+/// What a request left on the two lines: the D/C's pad, and the select's two
+/// stores in the spy (fallen, then risen: a request's path stores each once).
+struct End {
+    uint8_t status;
+    bool ended_in_start;
+    bool dc_high;
+    bool cs_fell;
+    bool cs_rose;
+};
+
+template <typename H>
+End stalled_on_a_clockless_sercom(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint16_t len,
+                                  SpiEngine engine, uint8_t baud) {
+    (void)H::init(clock);
+    H::prime(SpiMode::mode0, baud);
+    dm::engage<H>();
+    GclkChannel::disconnect(Raw::gclk_core_id());
+    for (uint32_t k = 0; k < 100000u && GclkChannel::connected(Raw::gclk_core_id()); ++k) {
+    }
+    auto r = dm::request<H>(tx, nullptr, len, baud, SpiMode::mode0, engine);
+    r.cmd = lend<Lease::reply>(cmd);
+    r.cmd_len = cmd_len;
+    r.cs = dm::spy(dm::spy_cs);
+    r.dc = dm::Fake::ref();
+    dm::spy_reset();
+    End e{};
+    e.ended_in_start = H::start(r);
+    e.status = H::status();
+    e.dc_high = dm::Fake::read();
+    e.cs_fell = (dm::spy_group.PORT_OUTCLR & dm::spy_cs) != 0u;
+    e.cs_rose = (dm::spy_group.PORT_OUTSET & dm::spy_cs) != 0u;
+    (void)Raw::core_clock(0);
+    dm::disengage();
+    H::release();
+    return e;
+}
+
+bool end_clean(const End& e, uint8_t status) {
+    return e.ended_in_start && e.status == status && e.dc_high && e.cs_fell && e.cs_rose;
+}
+
+void print_end(const char* what, const End& e) {
+    print(serial, "  ", what, ": status ", e.status, ", D/C ", e.dc_high ? "high" : "LOW", ", the select ",
+          e.cs_fell ? "fell" : "NEVER FELL", " and ", e.cs_rose ? "rose" : "DID NOT RISE", crlf);
+}
+
+/// One row of the flip's sampling: `rows` requests on host H, the sampler on.
+template <typename H>
+void sampled_rows(SpiMode mode, const uint8_t* cmd, const uint8_t* tx, uint16_t len, SpiEngine engine,
+                  uint16_t& active, uint8_t& active_first, uint16_t& samples_least) {
+    (void)H::init(clock);
+    SckPin::function(PinFunction::c, {.input_enable = true});
+    dm::engage<H>();
+    H::prime(mode, 255);
+    idle_high = spi_cpol(mode);
+    bool bus_on = false;
+    for (uint8_t k = 0; k < 16u; ++k) {
+        auto r = dm::request<H>(tx, nullptr, len, 255, mode, engine);
+        r.cmd = lend<Lease::reply>(cmd);
+        r.cmd_len = 2;
+        r.dc = dm::Fake::ref();
+        dc_seen_low = false;
+        first_high = 0;
+        high_and_active = 0;
+        samples = 0;
+        on = true;
+        (void)Shot::enable(true);
+        (void)dm::run<H>(r, bus_on);
+        (void)Shot::enable(false);
+        on = false;
+        active = static_cast<uint16_t>(active + high_and_active);
+        active_first = static_cast<uint8_t>(active_first + (first_high == 2u ? 1u : 0u));
+        if (samples < samples_least) samples_least = samples;
+    }
+    dm::disengage();
+    H::release();
+}
+
+} // namespace re
+
+void ts_request_end() {
+    const uint8_t baud = *Bus::baud_for(1'000'000UL);
+    static const uint8_t two[2] = {0x2C, 0x3C};
+    uint8_t four[4] = {1, 2, 3, 4};
+    dm::Fake::set();
+    dm::Fake::output();
+
+    // ---- a stall: D/C and the select high, in the phase and on the engine it hit ----
+    const re::End polled_cmd = re::stalled_on_a_clockless_sercom<Loop>(two, 2, four, 4, SpiEngine::polled, baud);
+    const re::End polled_only = re::stalled_on_a_clockless_sercom<Loop>(two, 2, nullptr, 0, SpiEngine::polled, baud);
+    const re::End polled_data = re::stalled_on_a_clockless_sercom<Loop>(nullptr, 0, four, 4, SpiEngine::polled, baud);
+    const re::End engines_cmd = re::stalled_on_a_clockless_sercom<dm::DLoop>(two, 2, four, 4, SpiEngine::dma, baud);
+    re::print_end("a polled command stalled, data behind it", polled_cmd);
+    re::print_end("a polled command alone stalled", polled_only);
+    re::print_end("a polled data phase stalled", polled_data);
+    re::print_end("the command of a request on the engines stalled", engines_cmd);
+    bench.verdict("A STALLED COMMAND ENDS WITH D/C HIGH AND THE SELECT HIGH, polled with data behind it, "
+                  "polled alone, and in the loop ahead of the engines",
+                  re::end_clean(polled_cmd, spi_stalled) && re::end_clean(polled_only, spi_stalled) &&
+                      re::end_clean(engines_cmd, spi_stalled));
+    bench.verdict("a stalled data phase ends the same way", re::end_clean(polled_data, spi_stalled));
+
+    // ---- a transfer error, and recover() over a request in flight ------------------
+    bool on = false;
+    const uint8_t* past = reinterpret_cast<const uint8_t*>(HSRAM_ADDR + HSRAM_SIZE - 8u);
+    (void)dm::DLoop::init(clock);
+    dm::engage<dm::DLoop>();
+    {
+        auto r = dm::request<dm::DLoop>(nullptr, nullptr, 0, baud, SpiMode::mode0, SpiEngine::dma);
+        r.cmd = lend<Lease::reply>(past);
+        r.cmd_len = 16;
+        r.cs = dm::spy(dm::spy_cs);
+        r.dc = dm::Fake::ref();
+        dm::spy_reset();
+        const uint8_t st = dm::run<dm::DLoop>(r, on);
+        const bool dc = dm::Fake::read();
+        const bool rose = (dm::spy_group.PORT_OUTSET & dm::spy_cs) != 0u;
+        print(serial, "  a command alone on the engines, its source past the SRAM's end: status ", st,
+              ", D/C ", dc ? "high" : "LOW", ", the select ", rose ? "rose" : "DID NOT RISE", crlf);
+        bench.verdict("A TRANSFER ERROR IN A COMMAND ENDS WITH D/C HIGH AND THE SELECT HIGH, spi_dma_fault",
+                      on && st == spi_dma_fault && dc && rose);
+    }
+    {
+        // 16 frames at BAUD 255 are 1.4 ms: recover() lands inside the command.
+        auto r = dm::request<dm::DLoop>(nullptr, nullptr, 0, 255, SpiMode::mode0, SpiEngine::dma);
+        static const uint8_t sixteen[16] = {};
+        r.cmd = lend<Lease::reply>(sixteen);
+        r.cmd_len = 16;
+        r.cs = dm::spy(dm::spy_cs);
+        r.dc = dm::Fake::ref();
+        dm::spy_reset();
+        const bool engaged = !dm::DLoop::start(r);
+        const bool dc_low = !dm::Fake::read();
+        (void)dm::DLoop::recover();
+        const bool dc = dm::Fake::read();
+        const bool rose = (dm::spy_group.PORT_OUTSET & dm::spy_cs) != 0u;
+        print(serial, "  recover() over a command on the engines: on the engines ", engaged, ", D/C low in it ",
+              dc_low, ", then D/C ", dc ? "high" : "LOW", ", the select ", rose ? "rose" : "DID NOT RISE", crlf);
+        bench.verdict("recover() over a request in flight leaves D/C high and the select high",
+                      engaged && dc_low && dc && rose);
+    }
+
+    // ---- the one busy check --------------------------------------------------------
+    dm::fill_stream(dm::big_tx, 64, 0x47);
+    {
+        auto first = dm::request<dm::DLoop>(dm::big_tx, dm::big_rx, 64, 255, SpiMode::mode0, SpiEngine::dma);
+        // A polled request and one on the engines, each over the transfer in flight,
+        // on the spy's pins: neither may store to them.
+        uint8_t small[2] = {0x11, 0x22};
+        auto second = dm::request<dm::DLoop>(small, nullptr, 2, 7, SpiMode::mode3, SpiEngine::polled);
+        second.cs = dm::spy(dm::spy_cs);
+        second.dc = dm::spy(dm::spy_dc);
+        auto third = second;
+        third.engine = SpiEngine::dma;
+        dm::dma_done = false;
+        const bool engaged = !dm::DLoop::start(first);
+        dm::spy_reset();
+        const uint32_t ctrla = Raw::ctrla();
+        const bool polled_refused = dm::DLoop::start(second) && dm::DLoop::status() == spi_rejected;
+        const bool dma_refused = dm::DLoop::start(third) && dm::DLoop::status() == spi_rejected;
+        const bool nothing_moved = dm::spy_group.PORT_OUTSET == 0u && dm::spy_group.PORT_OUTCLR == 0u &&
+                                   Raw::ctrla() == ctrla;
+        const uint32_t t0 = Ticker::millis();
+        while (!dm::dma_done && Ticker::millis() - t0 < 100u) {
+        }
+        const bool ended = dm::dma_done;
+        const uint8_t st = dm::dma_status;
+        uint16_t wrong = 0;
+        for (uint16_t i = 0; i < 64u; ++i) {
+            if (dm::big_rx[i] != dm::big_tx[i]) ++wrong;
+        }
+        print(serial, "  over a transfer in flight: a polled request refused ", polled_refused, ", one on the "
+              "engines refused ", dma_refused, ", nothing moved ", nothing_moved, "; the transfer ended ", ended,
+              " status ", st, ", ", wrong, " of 64 wrong", crlf);
+        bench.verdict("THE ONE BUSY CHECK: over this host's own transfer in flight, a request of either "
+                      "engine is refused spi_rejected before the select, the D/C or the block moves",
+                      engaged && polled_refused && dma_refused && nothing_moved);
+        bench.verdict("and the transfer in flight ends spi_ok, every byte exact, its answer not the refusal's",
+                      ended && st == spi_ok && wrong == 0u);
+    }
+    dm::disengage();
+    dm::DLoop::release();
+
+    // ---- D/C rises after the command's last edge -----------------------------------
+    const bool sampler = re::sampler_up();
+    uint16_t alone_active[4] = {};
+    uint8_t alone_first[4] = {};
+    uint16_t data_active_unused = 0;
+    uint8_t polled_first[2] = {};
+    uint8_t engines_first[2] = {};
+    uint16_t samples_least = 0xFFFFu;
+    for (uint8_t m = 0; m < 4u; ++m) {
+        re::sampled_rows<Loop>(static_cast<SpiMode>(m), two, nullptr, 0, SpiEngine::polled, alone_active[m],
+                               alone_first[m], samples_least);
+    }
+    // With data behind it the data's own edges follow D/C, so the sample judged is the
+    // first with D/C high, in the two modes whose first data edge is half a bit late.
+    for (uint8_t k = 0; k < 2u; ++k) {
+        const SpiMode mode = k == 0u ? SpiMode::mode0 : SpiMode::mode2;
+        re::sampled_rows<Loop>(mode, two, four, 4, SpiEngine::polled, data_active_unused, polled_first[k],
+                               samples_least);
+        re::sampled_rows<dm::DLoop>(mode, two, four, 4, SpiEngine::dma, data_active_unused, engines_first[k],
+                                    samples_least);
+    }
+    Nvic::disable(Shot::irq());
+    print(serial, "  D/C against SCK, BAUD 255, a command of two, 16 requests a row, a sample every ",
+          re::sample_cycles, " cycles, the fewest samples in a request ", samples_least, ":", crlf);
+    for (uint8_t m = 0; m < 4u; ++m) {
+        print(serial, "    mode ", m, ", the command alone, polled: ", alone_active[m],
+              " samples with D/C high and SCK active", crlf);
+    }
+    print(serial, "    command then data: the first high sample with SCK active - polled mode 0 ", polled_first[0],
+          ", mode 2 ", polled_first[1], "; the loop ahead of the engines mode 0 ", engines_first[0], ", mode 2 ",
+          engines_first[1], " of 16", crlf);
+    // The sampler ran: two frames at BAUD 255 are 8192 cycles, 51 periods; half of them
+    // is far under any cost of its body and the tick.
+    bench.verdict("the sampler ran through every request", sampler && samples_least >= 25u);
+    bench.verdict("THE D/C RISES AFTER THE COMMAND'S LAST EDGE, modes 0 and 2, where RXC comes half a bit "
+                  "early: no sample with D/C high and SCK active, the command alone, polled",
+                  alone_active[0] == 0u && alone_active[2] == 0u);
+    bench.verdict("and in modes 1 and 3", alone_active[1] == 0u && alone_active[3] == 0u);
+    bench.verdict("and with data behind it, polled: SCK idle at D/C's rise",
+                  polled_first[0] == 0u && polled_first[1] == 0u);
+
+    dm::Fake::set();
+    dm::Fake::release();
+    (void)link_command_mode();
+}
+
 // ---- o, p - the two SPI shapes, held for minutes ------------------------------
 
 /// The marked line a shape letter prints each second of its run, read by
@@ -3701,8 +3999,14 @@ extern "C" void SERCOM2_Handler() {
 
 /// Letter k's one-shot: the core held inside a host request, the SERCOM's
 /// flags sampled at the hold's end.
-extern "C" void TC4_Handler() {
+extern "C" [[gnu::section(".fast_text")]] void TC4_Handler() {
     Shot::clear_flags(Shot::overflow_flag);
+#ifndef SPI_SELECT_CONTROL
+    if (re::on) {   // letter s's sampler, a sample a period, the vector in SRAM to leave the loop its share
+        re::sample();
+        return;
+    }
+#endif
     shot_fired = static_cast<uint8_t>(shot_fired + 1u);
     (void)delay_us(clock, shot_hold_us);
     shot_flags_end = Raw::flags();
@@ -3755,6 +4059,9 @@ int main() {
                       "the sum (needs the peer)",
                  tm_engines);
     bench.letter('n', "the block's reset after a stall and after a fault, no recover()", tn_reset);
+    bench.letter('s', "a request's end: D/C and the select after a stall, a fault and recover(); the one "
+                      "busy check; D/C after the command's last edge",
+                 ts_request_end);
     bench.letter('o', "the display's shape for minutes: SPI transmit engine beside the console's "
                       "(needs the peer)",
                  to_display, false);

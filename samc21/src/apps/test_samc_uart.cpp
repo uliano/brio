@@ -2052,7 +2052,8 @@ void tt_levels() {
 // its end (25.6.2.6), DRE up behind it - and run three ways: the SERCOM
 // disabled and gated (staged here by hand, the resource's verbs in their
 // order); gated with ENABLE left set, a release that skips the disable too,
-// the worst case; and Uart::release(). Then what the gated instance holds is
+// the worst case; and Uart::release(), which disables and gates and resets
+// nothing. Then what the gated instance holds is
 // read, and the same Uart's init() and first block run: its 256 bytes on the
 // loop, every byte, in order, nothing more.
 //
@@ -2237,9 +2238,9 @@ void tw_released_requester() {
     bench.verdict("A GATED CLOCK HOLDS A REQUEST LEFT STANDING: gated with ENABLE set, the "
                   "instance reads DRE up behind the gate",
                   (held[1].flags & SercomFlag::dre) != 0u);
-    bench.verdict("Uart::release() leaves the instance reset behind the gate - INTFLAG and CTRLA "
-                  "zero",
-                  held[2].flags == 0u && held[2].ctrla == 0u);
+    bench.verdict("Uart::release() disables and gates and resets nothing: the instance reads DRE "
+                  "clear behind the gate, its configuration standing",
+                  (held[2].flags & SercomFlag::dre) == 0u && held[2].ctrla != 0u);
     bench.verdict("the same Uart's next init() after any of the three releases, the worst case "
                   "among them: its first block 256 of 256 in order, no stray beat, no stall, no "
                   "fault",

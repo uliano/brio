@@ -478,7 +478,9 @@ const bool up = Bus::init(clock);   // armed again for the same owner; false: th
   transport each fail to compile on the three packages, the error the
   claim's (the three `neg/dma_*.cpp` above); the same transports with the
   channels given one owner each compile, and every image of the stratum
-  links with its channels claimed.
+  links with its channels claimed. The claims cost nothing: the stratum's
+  50 images built with the claim taken out of `sercom_dma_claimed()` are
+  byte-identical to the images built with it.
 - **The level read back** from an armed channel, with that level enabled
   in CTRL: 2 for a transmit engine (`test_samc_uart` letter d, the
   console's engine); a channel at a level not enabled is invisible to the
@@ -496,27 +498,40 @@ const bool up = Bus::init(clock);   // armed again for the same owner; false: th
     read 0xC1, 0xC2, then the block's 0xB1, in order.
   - **A disable withdraws the request.** Disabled and gated, the instance
     read through its bus clock alone shows INTFLAG 0x00 with CTRLA's
-    configuration standing (0x40000004).
+    configuration standing (0x40210004).
   - **A gated clock holds a request left standing.** Gated with ENABLE
-    set: INTFLAG reads 0x03 (DRE and TXC) behind the gate. A channel
+    set: INTFLAG reads 0x03 (DRE and TXC) behind the gate, CTRLA
+    0x40210006. A channel
     bound by hand to that trigger took ONE stray beat - the first byte of
     its block - and waited, enabled, for a rise that cannot come; and the
     same channel bound to no trigger (TRIGSRC 0) moved nothing, the
     engine's `arm()` resetting the channel (25.6.2.2).
-  - **The reset leaves nothing.** `release()` resets the SERCOM before
-    the gate (CTRLA.SWRST, 31.6.2.2, 31.8.1): INTFLAG and CTRLA read zero
-    behind it.
+  - **`release()` disables and gates and resets nothing**: the instance
+    reads DRE clear behind the gate, its configuration standing, as the
+    disable above.
   - After each of the three, the same Uart's next `init()` sent its first
-    256 bytes whole and in order, no stray beat and no fault: a
-    transport's own `init()` resets its SERCOM before it arms its
-    engines.
+    256 bytes whole and in order, no stray beat, no stall and no fault, in
+    every one of ten runs.
+  - **The control: the reset taken out of the Uart's `init()`.**
+    The letter reads the same in three runs: INTFLAG 0x03 behind the gate
+    and the next block 256 of 256 in order. `configure()` writes
+    enable-protected registers, so it disables the instance before the
+    channel is armed, and that disable withdraws the request. So on this
+    family the reset at `init()` answers nothing that disable does not; it
+    stays for the contract every family keeps, and for a block a debugger
+    or a program left in any other state.
 
   So the SAM C21 gives the STM32F4's answer of
   [../design/dma.md](../design/dma.md) at the peripheral - a disable
   withdraws a raised request, a gated clock does not - and keeps nothing
   in the channel. The stray reaches only a binding of the SAME trigger,
-  which under the ownership rule is the same transport's next `init()`,
-  and that `init()` starts from a reset SERCOM.
+  which under the ownership rule is the same transport's next `init()`.
+  Every `init()` on this family starts from a reset SERCOM, the Uart's,
+  the SPI host's and the I2C host's alike: its clock just opened, before
+  a register of its own and before it arms a channel
+  ([../design/dma.md](../design/dma.md), "The release contract"); every
+  `release()` disables and gates, gives its pads back, closes its line
+  and pulses no reset.
 - **A bus error** disables its channel and sets TERR (25.6.2.8): a read
   on the SPI pair whose transmit run crosses the SRAM's end (0x20008000
   on the J18A) ended `spi_dma_fault` in every run of `test_samc_spi`
@@ -580,6 +595,11 @@ Driver gaps:
   transport ([platform.md](platform.md)).
 
 Implemented but not bench-verified:
+- The contract's worst case on the SPI host and the I2C host: a SERCOM gated
+  with ENABLE set, then the same transport's `init()` and first block, is
+  measured on the Uart (letter w above) and read in the two hosts' `init()`,
+  which run the same reset in the same place; letter w's staging in
+  `test_samc_spi` and `test_samc_i2c` would measure them.
 - The rule on the other affected revisions (E and H) and on any die but
   one ATSAMC21J18A at revision F: every bound above is that die's;
   another die of the part, and a part at revision E or H, would measure

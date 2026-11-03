@@ -444,11 +444,12 @@ taking a burst, and what this driver does with each:
   character's),
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
-  `release()` - the engine first, then the SERCOM RESET before its
-  clocks are gated (CTRLA.SWRST, 31.6.2.2: a gated instance left enabled
-  holds its transmit request and hands the next channel bound to its
-  trigger a stray beat, [dmac.md](dmac.md)). Init
-  order is deliberate: clocks, reset, configure,
+  `release()` - the engine first, then the SERCOM disabled and its
+  clocks gated, with no reset: a gated instance left enabled holds its
+  transmit request, and `init()` withdraws it, whatever left the block so
+  ([dmac.md](dmac.md), "A released requester"). Init
+  order is deliberate: clocks, reset (CTRLA.SWRST, 31.6.2.2, before a
+  register of its own and before an engine is armed), configure,
   enable, and only then the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
   reaches the wire. `ByteTransport`, `EdgeSink` and `ClockUser` are

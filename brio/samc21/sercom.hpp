@@ -1452,28 +1452,26 @@ public:
     static void baud_reg(uint16_t v) { regs().SERCOM_BAUD = v; }
 
     /**
-     * Hand the instance back: interrupts off, the instance RESET, core
-     * clock released, bus clock off. The pads' PINS are the task's to
-     * release.
+     * Hand the instance back: interrupts off, the instance disabled, core
+     * clock released, bus clock off - and no reset. The pads' PINS are
+     * the task's to release.
      *
-     * THE RESET COMES BEFORE THE GATE (docs/design/dma.md, the release
-     * contract). The transmitter's DMA request is a level - "set when the
+     * THE RESET IS THE NEXT init()'S (docs/design/dma.md, "The release
+     * contract"). The transmitter's DMA request is a level - "set when the
      * transmit buffer (TX DATA) is empty, cleared when DATA is written"
      * (31.6.4.1) - and a GATED CLOCK HOLDS IT: an instance gated with
-     * ENABLE set reads DRE up behind the gate and hands the next channel
-     * bound to its trigger one stray beat. A disable before the gate
-     * withdraws it but leaves CTRLA and the rest standing; CTRLA.SWRST
-     * takes "all registers ... to their initial state, and the SERCOM will
-     * be disabled" (31.6.2.2, 31.8.1), so the gated instance holds nothing
-     * whatever state the transport was in (each of the three measured,
-     * docs/samc21/dmac.md, "A released requester"). reset() is the
-     * erratum-aware verb (1.17.16: an instance found disabled is enabled
-     * first), and it waits SYNCBUSY.SWRST out before the clocks go - a
-     * register access during the reset is an APB error (31.8.1).
+     * ENABLE set reads DRE up behind the gate, and a channel bound to its
+     * trigger takes one stray beat. The disable here withdraws it, CTRLA
+     * and the rest left standing (measured, docs/samc21/dmac.md, "A
+     * released requester"); its synchronization's answer is not needed,
+     * because whatever state the instance is left in, the one transport
+     * that binds its trigger again - the same one, under the ownership
+     * rule - resets it (reset(), CTRLA.SWRST, 31.6.2.2) before it writes a
+     * register of its own and before it arms a channel.
      */
     static void release(uint32_t spins = 0xFFFFu) {
         regs().SERCOM_INTENCLR = SercomFlag::all;
-        (void)reset(spins);
+        (void)enable(false, spins);
         GclkChannel::disconnect(gclk_core_id());
         bus_clock(false);
     }
@@ -1913,6 +1911,11 @@ public:
         if (!S::core_clock(generator)) {
             return false;
         }
+        // THE BLOCK FROM RESET, first (docs/design/dma.md, "The release
+        // contract"): the clock just opened, no register of this transport's
+        // written and no channel armed, SWRST withdraws whatever a previous
+        // life left standing - a transmit request held behind the gate
+        // included - so the engines meet none.
         if (!S::reset()) {
             return false;
         }
@@ -2470,9 +2473,10 @@ public:
 
     /// Stop the transport and hand everything back: the engines first (a
     /// channel still writing DATA of a SERCOM being torn down is the one
-    /// teardown order that matters), then the NVIC line, the peripheral - reset before its clocks are gated, so no
-    /// transmit request stands behind it (Sercom::release()) - both
-    /// clocks and the two pins.
+    /// teardown order that matters), then the NVIC line, the peripheral -
+    /// disabled before its clocks are gated, and not reset: init() resets it
+    /// (Sercom::release(), the release contract) - both clocks and the two
+    /// pins.
     ///
     /// THE TRANSMIT BLOCK IN FLIGHT ENDS FIRST. A channel is disabled only at
     /// its block's end or when no other channel runs (docs/samc21/dmac.md, "The

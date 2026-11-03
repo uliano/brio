@@ -1729,8 +1729,9 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
     (void)Serial::isr();
     sercom_meter.leave();
 }
-// Letter u's transmit engine, letter e's engined SPI host and letter i's
-// engined I2C host take the DMAC's vector in turn, each live alone.
+// Letter u's transmit engine and letter e's engined SPI host take the DMAC's
+// vector in turn in the first image, letter i's engined I2C host in the second,
+// each live alone.
 extern "C" BENCH_PLACEMENT void DMAC_Handler() {
     dmac_meter.enter();
     if (di::dma_live) {

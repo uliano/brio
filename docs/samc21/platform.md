@@ -1099,9 +1099,9 @@ SRAM (letter r), at 48 MHz:
 | the USART's per-byte transmit (letter u, 4096 bytes) | 189; x 2.03 at 3 Mbaud | not offered (181 against 185 in the variant's build) | 124; x 1.32 | - |
 | the USART's per-byte receive (letter u, 256 bytes at 115200) | 203 | not offered (207 against 202) | 135 | - |
 | the transmit engine's completion (letter u, a block) | 220 | 197 | 145 | the instance 228 B, the vector 400 B |
-| the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 42.3 | 38.8 | the driver's alone | the transaction 696 B |
-| the SPI polled write loop at 12 MHz, a frame | 33.6 | 33.5 | the driver's alone | (above) |
-| a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 632, 923, 2676 | 627, 915, 2652 | the driver's alone | (above) |
+| the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 43.0 | 37.0 | the driver's alone | the transaction 696 B |
+| the SPI polled write loop at 12 MHz, a frame | 32.0 | 32.0 | the driver's alone | (above) |
+| a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 673, 960, 2712 | 653, 939, 2675 | the driver's alone | (above) |
 | the I2C event entry: a written byte, a read one (letter i, the same at the three speeds) | 205, 176 | not offered (183 against 195, 167 against 161) | 127, 112 | - |
 
 What the rows say:

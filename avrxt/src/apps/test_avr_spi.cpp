@@ -1316,6 +1316,21 @@ void tj_engine() {
     verdict("the command phase reaches the wire", ok && cmd_edges == 7);
     verdict("DC ends in the data phase (high)", Ss::read());
 
+    // A REQUEST'S END (docs/design/spi-bus.md, "When a request ends"): the D/C
+    // high whatever the phases, and a refusal moves it not at all. This host has
+    // no failure once the select has fallen - no bound and no stall, every burst
+    // ending inside start() -, so these are its every end.
+    ok = run_engine({{}, Ss::ref(), lend<Lease::reply>(eng_cmd), 3, {}, lend<Lease::reply>(eng_rx), 8, {},
+                     SpiClock::div16, SpiMode::mode0, SpiEngine::polled, 0});
+    verdict("a command with data behind it ends with DC high", ok && Ss::read());
+    Ss::clear();
+    const bool refused_sync = Host::start({{}, Ss::ref(), lend<Lease::reply>(eng_cmd), 3, {},
+                                           lend<Lease::reply>(eng_rx), 8, {}, SpiClock::div16,
+                                           SpiMode::mode0, SpiEngine::dma, 0});
+    verdict("a refusal moves no DC: left low by the program, it stays low",
+            refused_sync && Host::status() == spi_rejected && !Ss::read());
+    Ss::set();
+
     // cs_setup_us and the degenerate request.
     ok = run_engine({Ss::ref(), {}, {}, 0, {}, lend<Lease::reply>(eng_rx), 1, {},
                      SpiClock::div16, SpiMode::mode3, SpiEngine::polled, 10});

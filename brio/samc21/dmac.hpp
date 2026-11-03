@@ -137,12 +137,14 @@
  * the channel was disabled fires nothing at the next enable (measured,
  * docs/samc21/dmac.md, "A released requester").
  *
- * A release leaves the next owner nothing. The channel keeps no request (above),
- * and arm() resets the channel before it selects the next owner's trigger. The
- * requester's own line is its owner's to withdraw: a SERCOM gated with ENABLE set
- * holds DRE up and hands whoever selects its trigger next one stray beat, so a
- * transport resets its SERCOM in release() before the gate (measured, the same
- * section).
+ * A request held across a release reaches nothing (docs/design/dma.md, "The
+ * release contract"). The channel keeps no request (above), and arm() resets the
+ * channel before it selects its trigger. The requester's own line is the
+ * transport's: a SERCOM gated with ENABLE set holds DRE up and hands a channel
+ * that selects its trigger one stray beat (measured, the same section), and under
+ * the ownership rule the one transport that selects it again is the same one, at
+ * its next init() - which resets its SERCOM before it configures it and before it
+ * arms an engine. A release disables and gates and resets nothing.
  *
  * Errata 1.10.1 (CRCDATAIN, rev B), 1.10.2 and 1.10.3 (linked descriptors, E/G/J
  * revisions B..D - the N family's row carries the marks under E and F: read the

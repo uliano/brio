@@ -748,6 +748,12 @@ public:
         return true;
     }
 
+    /// Hand the instance back: interrupts off, disabled, core clock
+    /// released, bus clock off - and no reset; the pads' PINS are the
+    /// task's. The next host init() resets the instance before anything
+    /// else (docs/design/dma.md, "The release contract"), so whatever a
+    /// disable whose synchronization did not complete leaves standing
+    /// reaches nothing.
     static void release(uint32_t spins = 0xFFFFu) {
         regs().SERCOM_INTENCLR = I2cmFlag::all;
         (void)enable(false, spins);
@@ -1194,6 +1200,11 @@ public:
         if (!S::core_clock(generator)) {
             return false;
         }
+        // THE BLOCK FROM RESET, first (docs/design/dma.md, "The release
+        // contract"): the clock just opened, no register of this transport's
+        // written and no channel armed, SWRST withdraws whatever a previous
+        // life left standing - a transmit request held behind the gate
+        // included - so the engines meet none.
         if (!S::reset()) {
             return false;
         }

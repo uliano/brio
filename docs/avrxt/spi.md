@@ -76,7 +76,10 @@ What decides correctness even there:
 - **The select and the D/C pin are the program's to configure**: driven
   high and made outputs before the first request. `init()` does not
   touch them; the engine only clears and sets them around each
-  transaction.
+  transaction, and at its end a request leaves both high. Nothing fails
+  here once the select has fallen - no bound and no stall, every burst
+  ending inside `start()` - and a refusal moves neither (`test_avr_spi`
+  letter j).
 - **The buffers are lent**: the requester does not read or write `cmd`,
   `data` or a receive buffer from the post until its `SpiDone` arrives.
   Nothing checks it ([util/bus_master.hpp](../../brio/util/bus_master.hpp)).
@@ -813,7 +816,7 @@ around it.
 Rev B1 at 5 V, CLK_PER 20 MHz from the board's quartz, SPI0 on ALT1
 (PE0..PE3, the wires to the partner SAM C21; the board's PC4..PC7 are
 jumpered onto them and stay inputs). `test_avr_spi` builds three images
-there (the group axis): `test_avr_spi-1` (`z`, a..j) 180 of 180,
+there (the group axis): `test_avr_spi-1` (`z`, a..j) 182 of 182,
 `test_avr_spi-2` (t in `z`, 16 of 16; k..p in `y`, 51 of 51) and
 `test_avr_spi-3` (`y`, q..w, 54 of 54), green in every run - letters `j`
 and `t` ten times, every key at least three -, the two-board keys
@@ -989,7 +992,7 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Implemented but not bench-verified:**
 
-- `test_avr_spi` letters `j` (the refusal) and `t` (the held-core sweep
+- `test_avr_spi` letters `j` (the refusal, the request's end) and `t` (the held-core sweep
   on the polled loop alone), and `bench_avr` letter `e`'s verdict (the
   refusal), on the AVR128DB48 and the AVR128DA48: measured on the
   AVR64EA48 alone - the same core, chapter and instructions -, and a run

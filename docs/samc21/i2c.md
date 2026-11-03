@@ -420,7 +420,9 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   write-then-read on a repeated START; the empty request is the address
   probe; `engine` sits in the padding after `speed`, so the Request is no
   larger for it, a static_assert in the header holding it there),
-  asynchronous whenever the wire moves, smart mode always on, the i2c_*
+  asynchronous whenever the wire moves, smart mode always on, `init()`
+  starting from a reset SERCOM and `release()` disabling and gating it with
+  no reset ([dmac.md](dmac.md), "A released requester"), the i2c_*
   status vocabulary on the wire (nack_addr for any address nobody
   acknowledged, nack_data for a refused written byte, arb_lost,
   bus_error), per-speed register pairs cached with `speed_ok()` and the

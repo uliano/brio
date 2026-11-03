@@ -827,13 +827,14 @@ public:
     }
 
     /// Hand the instance back: interrupts off, disabled, core clock
-    /// released, bus clock off. The pads' PINS are the task's to release.
-    /// Disabled and not reset: a disabled SERCOM withdraws a raised DMA
-    /// request, so no channel later bound to its trigger moves (measured
-    /// on the same SERCOM as a Uart, docs/samc21/dmac.md, "A released
-    /// requester"). The disable's synchronization answer is not checked:
-    /// one that never completed would gate the instance with ENABLE set,
-    /// the state that page measures holding a request.
+    /// released, bus clock off - and no reset. The pads' PINS are the
+    /// task's to release. A disabled SERCOM withdraws a raised DMA request
+    /// (measured on the same SERCOM as a Uart, docs/samc21/dmac.md, "A
+    /// released requester"), and the disable's synchronization answer is
+    /// not needed: one that never completed gates the instance with ENABLE
+    /// set, the state that page measures holding a request, and the next
+    /// host init() resets the instance before anything else
+    /// (docs/design/dma.md, "The release contract").
     static void release(uint32_t spins = 0xFFFFu) {
         regs().SERCOM_INTENCLR = SpiFlag::all;
         (void)enable(false, spins);
@@ -944,7 +945,8 @@ public:
  *    no vector, and start() returns true.
  *  - SpiEngine::dma: the engines, at any length. start() returns false and
  *    dma_isr() ends it, a command followed by data excepted (below). In order:
- *    on a host with no engines, spi_rejected; nothing to move, spi_ok; what the
+ *    on a host with no engines, spi_rejected (a host with engines refuses every
+ *    request, of either engine, while its own transfer is in flight, below); nothing to move, spi_ok; what the
  *    engines cannot carry - on a host with the transmit engine alone, a request
  *    that reads (rx not null) - spi_rejected, before the registers, the select or
  *    the D/C are touched, so the program names polled for its reads; a command
@@ -953,6 +955,14 @@ public:
  *    data on the engines; a command alone rides the engines; and otherwise the
  *    engines. start() returns true for a polled request, an empty one and a refused
  *    one, and false only when the engines have it.
+ *
+ * THE ONE BUSY CHECK IS THE HOST'S OWN TRANSFER IN FLIGHT, made first: a request on the
+ * engines between its launch and its end, whichever engine the new request names.
+ * start() answers true with spi_rejected before the select, the D/C or the block moves,
+ * and the transfer in flight goes on untouched. The arbiter never starts a request over
+ * one in flight, so only a program that drives the host directly can meet it, and it
+ * reads status() at once: the transfer's own end writes its answer there (spi_ok or
+ * spi_dma_fault), so a vector landing between the two reads hands it that answer instead.
  *
  * THE ENGINE SLOTS: both, the transmit one alone, or neither (the defaults). The
  * engines are samc21/dmac.hpp's, each a channel of the two an image may hold, claimed
@@ -1076,10 +1086,28 @@ public:
  *
  * THE PHASE BOUNDARY IS WHERE THE WRITE-AHEAD STOPS. The D/C line must
  * change between the last command character and the first data one ON
- * THE WIRE, so the first data character is written only once the last
- * command character has been read back (and D/C raised) - one character
- * in flight across that one boundary, two everywhere else; a request
- * with no command phase, or none but the command, never meets it.
+ * THE WIRE, and after the command's last edge: RXC rises half a bit before
+ * that edge in modes 0 and 2 (measured, docs/samc21/spi.md), so a command phase
+ * ends on TXC (32.8.6), D/C rises then, and the first data character is written after it -
+ * one character in flight across that one boundary, two everywhere else. A
+ * request with no command phase never meets it; one that is all command
+ * raises D/C on the same TXC, the wire's end.
+ *
+ * AT ITS END, OK OR FAILED, A REQUEST LEAVES D/C AND THE SELECT HIGH: a
+ * clean end, a stall in either phase on either engine, a transfer error, and
+ * recover() over a request in flight. A refused or empty request moves neither.
+ *
+ * EVERY BOUND IS A TIME, derived from the clocks when the rate is applied
+ * (docs/design/spi-bus.md, "Every bound is a time"). A frame is 16 x (BAUD + 1)
+ * core cycles on the wire (SCK = f_ref / 2 (BAUD + 1), table 30-2, on generator 0
+ * f_ref the core's own rate, which is what lets the count ignore the rate). A polled transaction's budget is at least
+ * twice its frames' wire time and 4096 core cycles more, held as a count of poll
+ * turns at four core cycles a turn, under what a turn costs in the release listing
+ * (a load, a test, a branch not taken, a decrement, a compare and a branch taken:
+ * eight cycles at the least, some sixteen measured from the flash): a turn only runs while the wire is moving, a handler over the loop
+ * spends none of it, and a stalled SERCOM holds the loop for the budget's time
+ * or longer. release()'s wait on a block in flight is that block's wire time and
+ * two frames, by the same count.
  *
  * THE RECEIVE BUFFER IS NOT FLUSHED AT EVERY START. Every character a
  * receive shape of the loop writes is read back by it, so nothing stands
@@ -1282,12 +1310,18 @@ public:
         if (!S::core_clock(generator)) {
             return false;
         }
+        // THE BLOCK FROM RESET, first (docs/design/dma.md, "The release
+        // contract"): the clock just opened, no register of this transport's
+        // written and no channel armed, SWRST withdraws whatever a previous
+        // life left standing - a transmit request held behind the gate
+        // included - so the engines meet none.
         if (!S::reset()) {
             return false;
         }
 
         applied_ = boot_config();
         applied_key_ = key_of(applied_.mode, applied_.baud);
+        turns_a_frame_ = turns_a_frame(applied_.baud);
         if (!S::configure(applied_)) {
             return false;
         }
@@ -1381,8 +1415,9 @@ public:
 
     /// Run a transaction, or begin it (called by SpiBus from main context). True
     /// when it ended inside the call - a polled request, the empty one, a refused
-    /// one (spi_rejected in status(), the wire untouched), a command loop that
-    /// stalled - and false when the engines have it and dma_isr() will end it:
+    /// one (spi_rejected in status(), the wire untouched, a transfer of this host's
+    /// in flight among the reasons), a command loop that stalled - and false when
+    /// the engines have it and dma_isr() will end it:
     /// util/bus_master.hpp's engine contract. True is "ended", not "succeeded": a
     /// request whose budget ran out returns true with the select released, the
     /// SERCOM reset and status() = spi_stalled, so a caller driving the engine
@@ -1393,7 +1428,14 @@ public:
     /// pins are kept.
     static bool start(const Request& r) {
         const bool on_engines = r.engine == SpiEngine::dma;
-        if constexpr (!has_engines) {
+        if constexpr (has_engines) {
+            if (dma_active_) [[unlikely]] {
+                // The one busy check, first: this host's own transfer is in
+                // flight, and nothing here moves (the class comment).
+                status_ = spi_rejected;
+                return true;
+            }
+        } else {
             if (on_engines) {
                 // This host has no engines: refused before the registers, the
                 // select or the D/C are touched.
@@ -1521,9 +1563,9 @@ public:
     /// the wire; a block that outlives the bound is disabled anyway.
     static void release() {
         if constexpr (has_engines) {
-            // A frame is 16 x (BAUD + 1) core cycles and a poll turn several.
-            uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * 16u *
-                             (static_cast<uint32_t>(applied_.baud) + 1u);
+            // The block's wire time and two frames (the class comment: every bound
+            // is a time), a turn here a masked select and load, far over four cycles.
+            uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * turns_a_frame_ / 2u;
             while (TxEngine::running() && spins-- != 0u) {
             }
             TxEngine::release();
@@ -1587,6 +1629,7 @@ private:
         applied_key_ = key_of(mode, baud);
         applied_.mode = mode;
         applied_.baud = baud;
+        turns_a_frame_ = turns_a_frame(baud);
         if (owed) {
             (void)reset_block();
             return;
@@ -1597,12 +1640,23 @@ private:
         (void)S::enable(true);
     }
 
-    /// The bounded spin of a polled transaction: ONE budget for the whole
-    /// of it, generous - the slowest character this generator can
-    /// produce is 512 x 9 core-clock cycles, and a wait is a few
-    /// instructions a turn.
+    /// A poll turn's floor in core cycles, and the slack a transaction's
+    /// budget starts from (the class comment).
+    static constexpr uint32_t turn_cycles = 4u;
+    static constexpr uint32_t budget_slack_cycles = 4096u;
+
+    /// The budget per frame at a BAUD value: twice the frame's 16 x (BAUD + 1)
+    /// core cycles, in turns. Worked out where a rate is applied, so a request
+    /// pays one multiply for it.
+    static constexpr uint32_t turns_a_frame(uint8_t baud) {
+        return 2u * 16u * (static_cast<uint32_t>(baud) + 1u) / turn_cycles;
+    }
+
+    /// The bounded spin of a polled transaction, ONE budget for the whole of
+    /// it: a time, at least twice its wire time and 4096 core cycles more,
+    /// counted in turns of at least turn_cycles (the class comment).
     static uint32_t spin_budget(uint32_t frames) {
-        return 200000u + 6000u * frames;
+        return budget_slack_cycles / turn_cycles + turns_a_frame_ * frames;
     }
 
     /// Spin until an INTFLAG bit stands, charging the transaction's
@@ -1715,8 +1769,8 @@ private:
     static constexpr uint8_t rx_depth = 2;
 
     /// The whole of a polled transaction: the command phase
-    /// read back character by character (exact: its last answer is what
-    /// says the D/C may flip), the D/C flip, then the data phase in the
+    /// read back character by character and closed on TXC (the wire's end of
+    /// it: the D/C flips after its last edge), the D/C flip, then the data phase in the
     /// shape the two spans give it - transmit-only on DRE where it is
     /// longer than the receive buffer (a display's row) and read back
     /// where it is not (a command's parameters: measured, the tail's
@@ -1732,11 +1786,23 @@ private:
         Hot<Placement>::run([&r, total] { polled_body(r, total); });
     }
 
+    /// The command phase, polled on either engine: its characters read back, then
+    /// TXC, which the last character's write cleared and which closes it on the wire
+    /// where RXC comes half a bit early in modes 0 and 2 (the class comment). True,
+    /// for one test, when there is no command.
+    [[gnu::always_inline]] static bool command_phase(const Request& r, uint32_t& budget) {
+        if (r.cmd_len == 0u) {
+            return true;
+        }
+        return run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget) &&
+               wait_flag(SpiFlag::txc, budget);
+    }
+
     /// The polled transaction's path, written once.
     [[gnu::always_inline]] static void polled_body(const Request& r, uint32_t total) {
         uint32_t budget = spin_budget(total);
-        bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
-        r.dc.set();   // data phase (a no-op when len == 0)
+        bool whole = command_phase(r, budget);
+        r.dc.set();   // data phase, and the request's end: raised on a stall too
         if (whole) {
             const uint8_t* tx = r.tx.get();
             uint8_t* rx = r.rx.get();
@@ -1773,12 +1839,12 @@ private:
     // ---- the engines ---------------------------------------------------------
 
     /// The command phase of a request on the engines, in the loop (the class comment):
-    /// one more instance of the host's placement. True when its last character came back.
+    /// one more instance of the host's placement. True when its last edge passed.
     static bool command_loop(const Request& r) {
         bool whole = false;
         Hot<Placement>::run([&r, &whole] {
             uint32_t budget = spin_budget(r.cmd_len);
-            whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
+            whole = command_phase(r, budget);
         });
         return whole;
     }
@@ -1798,6 +1864,7 @@ private:
             if (!command_loop(r)) {
                 status_ = spi_stalled;
                 S::flush_rx();
+                r.dc.set();   // the rule of a request's end, on a stall too
                 r.cs.set();
                 (void)reset_block();
                 return true;
@@ -1863,6 +1930,7 @@ private:
         S::enable_txc_interrupt(false);
         tenure_dc_.set();   // a command alone leaves D/C where a polled one does
         tenure_cs_.set();
+        status_ = spi_ok;   // over a refusal that wrote status() while this one flew
         dma_active_ = false;
         return true;
     }
@@ -1921,6 +1989,8 @@ private:
     /// the one thing apply() compares.
     static inline SpiConfig applied_{};
     static inline volatile uint16_t applied_key_ = 0;
+    /// The polled budget per frame at the rate applied (the class comment).
+    static inline uint32_t turns_a_frame_ = 0;
     static inline uint32_t ref_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<uint8_t> ceiling_{};
