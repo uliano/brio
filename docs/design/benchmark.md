@@ -460,7 +460,7 @@ a receive, at the rate named.
 | CH32V303VCT6 (144 MHz PLL, zero-wait window, the V4F; 4.5 Mbaud) | 1.00 (the engine 1.00), 1.00 (1.00) | the interrupt receiver 1.00, 1.00 and 1.01 at 115200, 1 and 4.5 Mbaud, the engine 1.00, 1.00 and 1.01; 256 entries for 256 | the engine 1.0, 1.1 and 1.5 frames | not measured on this board | the transmit engine 0.1 %, the interrupt transmitter 5.1 %; the interrupt receiver 8.6 %, the engine 0.1 % | not run on this board |
 | CH32V006K8U6 (48 MHz; 3 Mbaud transmit, 460800 receive from the host) | the engine 1.03, 1.00; the interrupt transmitter 1.46, 1.46 (one entry a byte outlasts a 160-cycle frame) | the interrupt receiver 0.99 at 115200 and 460800 (the host the sender, n - 1 frames timed), the engine one entry for 256 bytes | the engine 1.1 and 1.2 frames after the last byte landed, at 115200 and 460800 | within a bit at 250000 (the poll's turn longer than a bit at 1 Mbaud) | the transmit engine 2.3 %, the interrupt transmitter 73 % (x 1.09 at 4096 bytes) | not run: the V00x EVT's Idle_Recv handler is the V20x one, byte for byte |
 | STM32G0B1RE (64 MHz PLL, 2 WS; 2 Mbaud) | 1.05 (the engine 1.04: the first block's start), 1.00 (1.01) | the paced receiver 1.00, 1.02 and 1.05 at 115200, 1 and 2 Mbaud, the engine 1.00, 1.00 and 1.02; 64 entries for 256, the engine two marks | the paced receiver 1.05 frames at 115200, at 1 Mbaud the tail taken by the level's own entry; the engine's IDLE 1.06 frames and 1.46 at 1 Mbaud | +8 cycles (the interrupt transmitter) and -29 (the engine, inside the poll's resolution) at 9600 baud, a bit 6666 | transmit 20 % (the engine 3.5 %), receive 15 % (17 %: the HAL's FIFO receive) | HAL v1.4.7: its FIFO receive 107 cycles a byte against 96, and the length wanted up front; ReceiveToIdle_DMA's edge 1.04 and 1.34 to 1.49 frames, within 5 per cent |
-| RP2040 (125 MHz; 7.8125 Mbaud) | 1.06 (the engine 1.25: the first block's start in a cold image), 1.00 (1.02) | the interrupt receiver 1.00, 1.01 and 1.12 at 115200, 1 and 7.8125 Mbaud, the engine 1.00, 1.01 and 1.09; 21 entries for 256 at 1 Mbaud, the engine two completions | the interrupt receiver 3.18 frames at 115200 (RT), at 1 Mbaud the 17 bytes taken by the level's own entry; the engine's tail at the owner's ask | 0 to 1 us after it at 9600 baud, a bit 104 us | transmit 2.0 % (25 cycles a byte), receive 3.7 % (46 a byte); the SDK's polled loop the whole wire time | pico-sdk 2.3.1, polled loops only: 58 cycles a byte read from the FIFO against 46 |
+| RP2040 (125 MHz; 7.8125 Mbaud) | 1.06 (the engine 1.25: the first block's start in a cold image), 1.00 (1.02) | the interrupt receiver 1.00, 1.01 and 1.12 at 115200, 1 and 7.8125 Mbaud, the engine 1.00, 1.01 and 1.09; 21 entries for 256 at 1 Mbaud, the engine two completions | the interrupt receiver 3.18 frames at 115200 (RT), 3.31 to 3.37 at 1 Mbaud; the engine's tail at the owner's ask | 0 to 1 us after it at 9600 baud, a bit 104 us | transmit 2.0 % (25 cycles a byte), receive 3.7 % (46 a byte); the SDK's polled loop the whole wire time | pico-sdk 2.3.1, polled loops only: 58 cycles a byte read from the FIFO against 46 |
 | RP2350, Cortex-M33 (150 MHz; 9.375 Mbaud) | 1.01 (1.06), 1.00 (1.00) | 1.00, 1.00 and 1.05, the engine 1.00, 1.00 and 1.05; 21 entries for 256 at 1 Mbaud | 3.20 frames at 115200, 3.37 at 1 Mbaud; the engine's tail at the owner's ask | 0 to 1 us, a bit 104 us | 1.1 % (17 a byte), 2.1 % (27 a byte) | pico-sdk: 34 cycles a byte against 27 |
 | RP2350, Hazard3 (150 MHz; 9.375 Mbaud) | 1.00 (1.03), 1.00 (1.00) | 1.00, 1.00 and 1.05, the engine 1.00, 1.00 and 1.04; 21 entries for 256 at 1 Mbaud | 3.19 and 3.03 frames; the engine's tail at the owner's ask | 0 to 1 us, a bit 104 us | 1.2 % (17 a byte), 1.9 % (27 a byte) | pico-sdk: 29 cycles a byte against 27 |
 | AVR128DB48 (24 MHz; 3 Mbaud) | 1.03, 1.00 | 1.00 at 115200 and 1 Mbaud, 1.04 at 2, 3.9 at 3 (the consumer starved, below); 256 and 254 to 1 Mbaud | -2 to 0 cycles at 115200; +69 to +78 at 1 to 3 Mbaud, under a frame | +35 to +37 cycles at 115200 (a bit is 208), +47 at 460800 (52), +26 at 1 Mbaud (24) | 25 %, 31 to 35 % (27 %) | the data sheet's sequence: 1.00 at 115200 and 1 Mbaud, 1.01 at 2, 2.9 at 3 |
@@ -717,18 +717,6 @@ Gaps, each with what would explain or measure it:
   caches reset before it in both images, the ring's head read before
   each line, and the code placed at one address in both.
 
-- `bench_vx03`'s letter i run after its letter u in one session stalls
-  at its first tenure, on the CH32V203C8 (whose two images keep the
-  letters apart) and on the CH32V303VC, whose whole image passes
-  letter i first in a fresh session and stalls on it after u. The
-  stall is the SCL measurement's engined 255-byte read: I2C1 holds
-  RxNE and BTF with DMAEN set, DMA1 channel 7 (I2C1's receive request,
-  which USART2's transmit request shares) is enabled with 254 of its
-  255 items left and its flags clear, and the event vector re-enters
-  on BTF for ever. Clearing USART2's DMA request enables before its
-  release does not cure it. Not explained; what would: the channel's
-  and the USART's registers read at letter i's start in both orders,
-  and letter u run with its transmit engine off channel 7.
 - The cost of one code moves with its placement on the cores that
   fetch through a cache in front of slow flash: the STM32F446RE's idle
   turn (133 or 81 cycles) and its polled receive loop at 22.5 MHz

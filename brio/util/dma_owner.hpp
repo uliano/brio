@@ -91,6 +91,15 @@
  * front end, before any optimization: the same in a release and a debug
  * build, with inlining or without.
  *
+ * TWO THINGS A CLAIM DOES NOT DO BY ITSELF. It adds no byte, but a claim at
+ * file scope written through a class's member (`Engine::dma_slot`) instantiates
+ * that class ahead of its first use, which can reorder what the object emits
+ * and move the image with no instruction changed: outside a class body, spell
+ * the slot by number, `DmaSlotId<1, 7>`. And a split into several images does
+ * not separate two owners when each image still compiles every owner's code,
+ * the linker dropping what is not called: the claim fires in the compiler, so
+ * an image whose letters do not use a slot must not instantiate its owner.
+ *
  * THE LIMIT: ONE TRANSLATION UNIT. The compiler sees one source file and the
  * headers it includes at a time, and so does the check. Every brio image's
  * application is one source file (its other units, the startup code and the
