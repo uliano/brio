@@ -320,16 +320,19 @@ with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
 costs core cycles, never correctness. The core cycles each costs,
 `bench_rp2350` letter i's `i2c.cost` lines (start() and the vectors, the
 least of five, the host and its vector in the flash, the same at the
-three speeds), at 150 MHz, Cortex-M33 / Hazard3:
+three speeds and in five runs but where a range is given), at 150 MHz,
+Cortex-M33 / Hazard3:
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
 | `interrupt` | 375 / 346 | 385 / 360 | 403 / 379 | 493 / 474 | 622 / 578 | 748 / 711 | 2600 / 2359 | 9950 / 8916 |
-| `dma` | 390 / 349 | 390 / 353 | 604 / 578 | 540 / 474 | 543 / 478 | 543 / 478 | 629 / 549 | 629 / 549 |
+| `dma` | 390 / 349 | 390 / 353 | 604 / 578 to 687 | 540 / 475 | 543 / 478 | 543 / 478 | 629 / 549 | 629 / 549 |
 
 The pump costs F + b x n, F 132 / 162 cycles and b 38.5 / 34.3 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
-543 / 478, at any length. So `dma` costs the core fewer cycles from
+543 / 478 for a read of nine to sixteen bytes, 604 / 578 to 687 at three and
+629 / 549 from sixty-four (a third entry, the transmit block's end
+finding no room for the STOP entry). So `dma` costs the core fewer cycles from
 **nine bytes** on both halves (the pump's second entry); a read of one
 or two costs the same within fifteen cycles either way, and one of three
 to eight costs the engines a second entry (the transmit block's end). A
@@ -367,7 +370,7 @@ extern "C" void isr_i2c1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_i2c`
-reports **70 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+reports **78 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
 pair, from one source, against the WeAct RP2040's peer over the pair's
 I2C wires. Nothing in this chapter reads differently between the halves,
 which is what a block outside the processor should look like. The same
@@ -391,7 +394,7 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   depths are the chapter's word and not the register's. The transmit FIFO
   is **sixteen** entries deep, measured under TX_CMD_BLOCK - full at
   sixteen, TX_OVER on the seventeenth, flushed by the disable - and the
-  disable of an idle block is reported by IC_ENABLE_STATUS in **1 us**.
+  disable of an idle block is reported by IC_ENABLE_STATUS within **3 us**.
   The interrupt lines are **36 and 37**, not the RP2040's 23 and 24.
 - **THE PULL-UPS READ THE WAY E9 FORCES.** A pad of this stepping whose
   input buffer is on holds history against its own pull-down, so an idle
@@ -417,16 +420,16 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   `start()` with the peer answering the general call and matching only
   the write to its own address, a data NACK at the first and at the
   third byte), the three speeds byte-exact both ways -
-  99, 393 to 394 and 965 to 968 kHz measured on the timer for 100, 400
+  99, 393 to 394 and 965 to 970 kHz measured on the timer for 100, 400
   and 1000 asked -, the engines with eight 255-byte reads at 1 MHz and
   TX_OVER never raised, I2cBus with its timed bus (`i2c_timeout` at the
   arbiter's 20 ms, the peer holding SCL), the stuck bus (four pulses for
-  a client releasing at its fourth fall; 0xFF in 122 to 124 us for a
+  a client releasing at its fourth fall; 0xFF in 125 to 132 us for a
   line nine pulses cannot free), arbitration both ways, and this board
   as the peer host's client, written to, read from and general-called -
   all of it through GP36/GP37 and the unstick's verbs on the HIGH half
-  of SIO. The client's stretch prices at 754 to 763 us for eight holds of
-  100 us, a write under it within 4 us of the plain one.
+  of SIO. The client's stretch prices at 747 to 760 us for eight holds of
+  100 us, a write under it within 3 us of the plain one.
 - **THE CLIENT'S EDGES** (letter m, the peer's host at 100 kHz, both
   halves): without the hold, 24 bytes written into a receive FIFO nobody
   drains are all acknowledged, the first 16 kept exact and EIGHT
@@ -438,46 +441,52 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   through 2 ms and 50 ms more, a byte written after it untaken, neither
   bit set; `release()` lets SCL go and the far host's read finishes on the
   pull-up - the RP2040's figures exactly
-  ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Ten runs of z on
+  ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Thirteen runs of z on
   each half.
 - **THE HOST'S COST**, `bench_rp2350` letter i against the peer's
   client, the same image built for both halves, the host's vector placed
   in SRAM (the V image of [platform.md](platform.md), "A handler in SRAM",
   `BENCH_VECTORS_IN_SRAM` in bench_rp2350.cpp), nothing of the far end on
   this core; the wire's time at the SCL
-  period measured (379.0 cycles at 400 kHz against the counts' 375: the
-  pull-ups' rise, 26 ns a period at every speed). The best of five each,
+  period measured (378.7 cycles at 400 kHz against the counts' 375: the
+  pull-ups' rise, 24 to 26 ns a period at every speed). Each line of the
+  letter is the best of five; each figure below the least of three runs,
   clk_sys cycles at 150 MHz, Cortex-M33 / Hazard3:
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 7744 / 7755 (x 1.05) | 1 | 89 / 72 | 767 / 385 | 392 / 403 |
-  | write of 255 | 874 138 / 874 149 (x 1.00) | 31 | 5444 / 4774 | 15 938 / 6756 | 392 / 403 |
-  | read of 16 | 59 012 / 59 017 (x 1.00) | 2 | 362 / 317 | 1461 / 817 | 495 / 500 |
-  | read of 255 | 874 231 / 874 236 (x 1.00) | 32 | 9008 / 8417 | 23 141 / 10 434 | 485 / 490 |
-  | register read, 1 + 1 | 15 146 / 15 152 (x 1.02) | 1 | 124 / 102 | 625 / 405 | 441 / 447 |
-  | read of 255 on the engines | 874 122 / 874 130 (x 1.00) | 3 | 345 / 697 | 2348 / 1812 | 376 / 384 |
+  | write of 1 | 7752 / 7761 (x 1.05) | 1 | 96 / 71 | 532 / 327 | 404 / 413 |
+  | write of 255 | 873 647 / 873 527 (x 1.00) | 31 | 6055 / 5404 | 17 142 / 7312 | 406 / 415 |
+  | read of 16 | 58 975 / 58 981 (x 1.00) | 2 | 358 / 326 | 1325 / 772 | 491 / 503 |
+  | read of 255 | 873 588 / 873 480 (x 1.00) | 32 | 8556 / 8541 | 22 395 / 10 467 | 346 / 357 |
+  | register read, 1 + 1 | 15 149 / 15 151 (x 1.03) | 1 | 132 / 103 | 648 / 396 | 453 / 456 |
+  | read of 255 on the engines | 873 478 / 873 438 (x 1.00) | 3 | 343 / 265 | 2264 / 922 | 237 / 245 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
   read is one every eight bytes. The address and the speed stay in the
   block between tenures, so a one-byte write's fixed cost is the same at
-  the three speeds (390, 392, 392 on the M33); the disable, IC_TAR and
-  enable that a new address still pays costs 1839 cycles more at
-  100 kHz, 240 at 400 kHz and 105 at 1 MHz on the M33 (1861, 251, 116 on
-  the Hazard3) - the disable waits on the block's own shutdown, which
-  follows the bus timing. The longest host entry is 298 / 279 cycles, a
-  255-byte read's. With the vector in the flash too (`bench_rp2350`, the
-  default image) the one-byte write's fixed cost reads 491 / 671 and its
-  handler 87 / 236, a 255-byte write 31 / 35 interrupts. **A HANDLER IN FLASH IS A LOTTERY ON THE
-  CORTEX-M33**: the one-STOP handler measured 188 to 365 cycles across
-  three flash builds of the bench, with up to six XIP cache misses of
-  about seventy cycles each in a tenure, against 84 from SRAM; the
-  Hazard3 builds of the same source ranged 57 to 287. Where it runs is the
-  program's: the vector it binds, and `I2cHost`'s placement tag for
+  400 kHz and 1 MHz (404 to 406 on the M33, 413 to 415 on Hazard3); at
+  100 kHz it reads higher, 572 or 573 / 469 to 575, and what the excess is
+  is not split. The disable, IC_TAR and enable that a new address still
+  pays costs about 1650 / 1680 to 1780 cycles more at 100 kHz, 210 to
+  230 / 240 at 400 kHz and 92 to 94 / 104 to 107 at 1 MHz - the disable
+  waits on the block's own shutdown, which follows the bus timing. The
+  longest host entry is 282 / 285 cycles, a 255-byte read's. With the
+  vector in the flash too (`bench_rp2350`, the default image) the
+  one-byte write's fixed cost reads 400 to 404 / 522 to 524 and its
+  handler 96 / 180, a 255-byte write 31 interrupts on both halves at
+  400 kHz. **WARM, THE PLACEMENT MATTERS ON HAZARD3 ALONE**: the one-STOP
+  handler reads the same 96 cycles on the Cortex-M33 from the flash and
+  from SRAM, and 180 against 71 on Hazard3, whose tenure misses the XIP
+  cache twice even warm from the flash image (the letter's count over the
+  tenure; which lines, not counted). COLD, it matters on both:
+  the same handler after every line of the XIP cache is invalidated reads
+  2848 / 1649 cycles from the flash and 96 / 71 placed. Where it runs is
+  the program's: the vector it binds, and `I2cHost`'s placement tag for
   `start()` and the bodies ([platform.md](platform.md), "A handler in
-  SRAM", has the one-byte write's longest entry WARM / COLD: 88 / 2960 on
-  the M33 and 226 / 1669 on Hazard3 with both in the flash, 110 / 110
-  and 71 / 71 with both placed). `bench_rp2350` runs the handler from
+  SRAM", has the one-byte write's longest entry WARM / COLD: 96 / 2848 on
+  the M33 and 180 / 1649 on Hazard3 with both in the flash, 119 / 119
+  and 80 / 80 with both placed). `bench_rp2350` runs the handler from
   the flash, `bench_rp2350_ram` from SRAM.
 - THE VENDOR'S TENURE ON THE SAME WIRE: the pico-sdk 2.3.1's polled
   `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
@@ -488,23 +497,24 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   SCL period measures the same (378.9 cycles at 400 kHz on both). At
   400 kHz, fixed cost, the SDK against the default image (the table's
   V image in brackets), Cortex-M33 / Hazard3: a one-byte write 362 / 354
-  against 491 / 549 (392 / 403), a 255-byte write 366 / 357 against
-  498 / 678, a 16-byte read 767 / 853 against 492 / 621, a 255-byte
-  read 13 675 / 15 203 (x 1.02) against 587 / 882 (x 1.00), a register
-  read of 1 + 1 -16 / -45 against 539 / 830; a refused address 348 / 317
-  against 560 / 583. Against the V image the write's gap is within a
-  fifth (8 and 12 %): what the SDK does not do - no interrupt, no wake
-  from the idle loop; the default image adds 100 to 150 cycles more, the
-  difference the bullet above states between its two conditions (the
-  vector in the flash or in SRAM). For it
-  the SDK holds the core the whole wire, busy 7714 / 7706 cycles
-  against 599 / 302. Its short reads' fixed cost is
+  against 400 / 522 (404 / 413), a 255-byte write 366 / 357 against
+  400 / 525, a 16-byte read 767 / 853 against 485 / 509, a 255-byte
+  read 13 675 / 15 203 (x 1.02) against 301 / 385 (x 1.00), a register
+  read of 1 + 1 -16 / -45 against 449 / 566; a refused address 348 / 317
+  against 559 / 591. The one-byte write's gap is within a fifth on the
+  M33 from either image (11 and 12 %) and on Hazard3 against the V image
+  (17 %): what the SDK does not do - no interrupt, no wake from the idle
+  loop; Hazard3's default image adds some 110 cycles more, its handler's
+  difference between the flash and SRAM (the bullet above). For it the
+  SDK holds the core the whole wire, busy 7714 / 7706 cycles against
+  527 / 436 from the default image. Its short reads' fixed cost is
   below zero because `i2c_read_blocking` returns at the last byte,
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,
   where the pump pours them by the FIFO.
-- THE ENGINES (letter g, every request naming its engine, fifteen runs
-  on each half - twelve alone, three in z - the same figures in each):
+- THE ENGINES (letter g, every request naming its engine, twenty-five
+  runs on each half - twelve alone, thirteen in z - the same figures in
+  each):
   the shortest reads under `dma`, one byte and two, on the receive
   engine, its run the length and every byte of it moved, the transmit
   engine never claimed, one host entry and no DMA line entry; writes of
@@ -525,15 +535,18 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
   `i2c_dma_fault` with no host interrupt, the peer having served 3 or 4
-  bytes by the abort on the Cortex-M33 and 3 on the Hazard3, in fifteen
-  runs each, and the next engined read is clean.
+  bytes by the abort on the Cortex-M33 and 3 on the Hazard3, in
+  twenty-five runs each, and the next engined read is clean.
 - **THE ENGINES' FIRST READ IS THE XIP CACHE'S FILL.** A 64-byte engined
-  read at 400 kHz takes 1483 to 1488 us (393 to 394 kHz) with two host
-  interrupts; letter g's first after a flash takes 1544 / 1529 us
-  (Cortex-M33 / Hazard3), and the same read with every line of the cache
-  invalidated first, printed third, 1532 to 1539 / 1521 to 1522 over
-  fifteen runs on each half; the RP2040's reading in a smaller size
-  ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter judges the second.
+  read at 400 kHz takes 1483 to 1489 us (392 to 394 kHz) with two host
+  interrupts; letter g's first takes 1540 to 1544 / 1527 to 1532 us
+  (Cortex-M33 / Hazard3) inside the key `z`, whose other letters run
+  before it, and 1513 to 1535 / 1505 to 1520 with the letter run alone,
+  and the same read with every line of the cache invalidated first,
+  printed third, 1531 to 1539 / 1520 to 1530 - two host interrupts in
+  every case, over twenty-five runs on each half; the RP2040's reading
+  in a smaller size ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter
+  judges the second.
 
 ### The stack under the preemptive kernel (`test_rp2350_rubato_i2c`)
 
@@ -548,9 +561,9 @@ at every pass's opening, once the RP2040's rail reads up on the two
 pads, and given back at every letter's end. Every letter runs once with
 the alarm silent and six times under it. **209 verdicts in the key `z`,
 green in every run on Hazard3 and in every run but the first after a
-flash on the Cortex-M33** - the key three times on each half, its
-vocabulary letter `q` ten more on Hazard3 and forty-three more on the
-Cortex-M33; the letters `x` and `s`, outside it, green in three runs
+flash on the Cortex-M33** - the key thirteen times on each half, its
+vocabulary letter `q` ten more on Hazard3 and eighteen more on the
+Cortex-M33; the letters `x` and `s`, outside it, green in thirteen runs
 each on each half. The one verdict the Cortex-M33 fails there is the
 peer's and not the host's (below, "The probe after a refusal"). The pack,
 the command channel through the arbiter and the letters are the I2C
@@ -563,52 +576,60 @@ and the RP2040's run of it is [../rp2040/i2c.md](../rp2040/i2c.md)'s.
 `start()`'s first entry starts the tenure, so a preemption after its
 k-th entry leaves the block (1 + k) byte times before it needs the next,
 and only a longer one holds SCL ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
-the host's engine). Letter `s`, Cortex-M33 / Hazard3: `start()` takes
-391 to 446 / 211 to 240 cycles for a one-byte write and 531 to 562 /
-336 to 339 for a write of sixteen, the fifteen entries after the first
-88 to 150 / 96 to 125 cycles, where 400 writes under independent ticks
-would land 2 to 4 times. Under 97 us x 3000, the longest preemption of
-`start()` 3245 / 3289 cycles against two byte times' 6750 at 400 kHz:
-5 to 14 / 3 to 9 landings in `start()` in 400 writes, 3 to 12 / 2 to 7
-with the host active on the wire, and **no stretch in ten runs on either
-half**. At 1 MHz (two byte times 2700 cycles) the Cortex-M33 landed 24
-to 37 times, 4 to 12 with the host active, and stretched 13 tenures in
-4000 writes, every write `i2c_ok` and the peer's tallies exact; Hazard3
-never landed in `start()` at 1 MHz, in ten runs, and neither half did
-under the 160 us spin at 389 us - the tenure cycle settled at a phase of
-the alarm's period clear of `start()`, so the letter's long-spin case is
-judged here only by its exactness and its stretches stay the RP2040's
-measurement. Letter `x`, 400 writes of sixteen at 400 kHz (`start()`
-347 to 349 / 338 to 340 cycles silent): 9 to 19 / 3 to 11 landings
-against the 9 independent ticks would give, 6 to 12 / 1 to 5 with the
-host active, no stretch. The key `z` stretched no tenure in ten runs on
-either half.
+the host's engine). Letter `s`, Cortex-M33 / Hazard3, on `start()` as
+the suite wraps it (one copy of the Request and a compare to name its
+engine, `rp2040/src/apps/rp_rubato_i2c.hpp`'s `EngineByLength`) with the
+host in the flash: `start()` takes 280 to 316 / 357 to 371 cycles for a
+one-byte write and 452 to 478 / 433 to 438 for a write of sixteen, the
+fifteen entries after the first 137 to 196 / 65 to 79 cycles, where 400
+writes under independent ticks would land 3 to 5 / 1 or 2 times. Under
+97 us x 3000, the longest preemption of `start()` 3243 to 3471 / 3392
+to 3510 cycles against two byte times' 6750 at 400 kHz: 3 to 13 / 15 to
+25 landings in `start()` - its whole span counted - in 400 writes, 1 to
+6 / 3 to 12 with the host active on the wire, and **no stretch in
+thirteen runs on either half**. At 1 MHz (two byte times 2700 cycles)
+the Cortex-M33 never landed in `start()` in thirteen runs, nor under
+the 160 us spin at 389 us, and Hazard3 landed twice in thirteen runs at
+97 us x 3000 (once with the host active, no stretch) and never under the
+long spin - where independent ticks would land some twelve times in a
+run of 400 writes. The tenure cycle there is not independent of the
+alarm's period, and which part of it sets the phase is not established;
+the letter's long-spin case is judged here only by its exactness, and
+its stretches are the RP2040's measurement. Letter `x`, 400 writes of
+sixteen at 400 kHz (`start()` 392 to 394 / 434 to 438 cycles silent): 8
+to 23 / 13 to 24 landings against the 10 / 11 or 12 independent ticks
+would give, 3 to 14 / 5 to 11 with the host active, no stretch. The
+key `z` stretched no tenure in thirteen runs on either half.
 
 **THE HELD WIRE PARKS THE START.** Letter `h`, both halves: the Client's
 write into the peer's 60 ms hold, after the disable, IC_TAR and enable
-cycle its address takes, answered `i2c_timeout` 19.9 to 20.1 ms after
-its `start()` in every pass of ten runs, and the same met at 400 kHz
-after commands at 100 kHz, ten of ten; the flood of probes answered
+cycle its address takes, answered `i2c_timeout` 19.97 to 20.07 ms
+after its `start()` in every pass of thirteen runs, and the same met at
+400 kHz after commands at 100 kHz, thirteen of thirteen; the flood of
+probes answered
 `i2c_rejected` while the queue is full, one `i2c_timeout` a pass, and
 after the release `i2c_ok` or, once a pass, `i2c_nack_addr` from a peer
 not yet back. The parked one-entry tenure's false end on another node's
 STOP that the RP2040 measured ([../rp2040/i2c.md](../rp2040/i2c.md)) was
 not seen on this chip: none in twelve pressed passes on the Cortex-M33
-before the host required its state machine idle at a STOP, none in 120
-on the two halves after.
+of a build whose STOP test lacked the state machine's idle, and none in
+156 on the two halves with it (thirteen runs of `z` each).
 
 **The probe after a refusal races the peer.** Letter `q`'s control pass
 writes six bytes to a peer refusing the third, then probes it at once:
 the peer refuses by disabling its client once the second byte is taken,
 and enables it again once the block reports the disable done, after the
 host's STOP. On the Cortex-M33, in the first run after both boards are
-flashed - the peer's `twi_peer` cold in its XIP cache - that probe meets
-the client still disabled and is answered `i2c_nack_addr`: six runs of
-six, every later run clean (forty). The host's side of the race is
-its abort: a tenure on the interrupt touches no channel at its abort, so
-the probe follows sooner; the same image with the abort putting the
-engines away regardless passed the first run three times of three. The
-verdict judges the peer's recovery, and is not loosened here.
+flashed, that probe meets the client still disabled and is answered
+`i2c_nack_addr`: in every such run measured (six of letter `q` alone and
+one of `z`), and in none of the later ones (twelve of `q`, nine of `z`).
+The host's side of the race is its abort: a tenure on the interrupt
+touches no channel at its abort, so the probe follows sooner; a control
+build whose abort puts the engines away regardless passed the first run
+three times of three, and its six later runs. Why the peer re-enables
+later in the first run after its own flash is not measured - its code
+cold in the XIP cache is the reading. The verdict judges the peer's
+recovery, and is not loosened here.
 
 **Every shape, and three requesters, under every pressure as in the
 control.** Letter `o` at 400 kHz, one serve counted to its end - the
@@ -616,14 +637,15 @@ suite naming `dma` for a request with a half of two bytes or more and
 `interrupt` otherwise, so the shapes take every path the host has
 (`rp2040/src/apps/rp_rubato_i2c.hpp`'s table names each) - every
 shape `i2c_ok` and byte-exact, the peer's count, sum and seventeen
-address matches exact; post to reply over ten runs, the control's and
-the worst under pressure, Cortex-M33 / Hazard3: the probe 71 to 78 and
-73 to 94 / 70 to 80 and 94 to 101 us, the 32-byte write 760 to 762 and
-761 to 797 / 761 to 763 and 762 to 763, the 32-byte read 760 to 761 and
-761 to 803 / 760 and 761 to 766. Letter `w`: every reply `i2c_ok`, to
-its requester, in its order, the peer's tallies exact, 5.4 to 6.2 / 5.3
-to 5.9 ms a pass. Letter `p`: the peer's commanded stretch of 1000 us a
-byte on a read of 8 in 8788 to 8809 / 8789 to 8804 us against the 8762
+address matches exact; post to reply over thirteen runs, the control's
+and the worst under pressure, Cortex-M33 / Hazard3: the probe 67 to 82
+and 74 to 94 / 70 to 83 and 70 to 97 us, the 32-byte write 761 to 763
+and 762 or 763 / 763 or 764 and 764 to 807, the 32-byte read 760 and
+760 or 761 / 762 to 764 and 763 to 806. Letter `w`: every reply
+`i2c_ok`, to its requester, in its order, the peer's tallies exact, 5.4
+to 5.9 / 5.3 to 5.9 ms a pass. Letter `p`: the peer's commanded stretch
+of 1000 us a byte on a read of 8 in 8788 to 8810 / 8789 to 8813 us
+against the 8762
 its eight holds take at least.
 
 ## Not covered yet
