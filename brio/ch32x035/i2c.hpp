@@ -140,9 +140,8 @@
  * engine slot on any other channel is refused at compile time. Channel 6
  * is also USART2's receive request and channel 7 its transmit - an OR of
  * the two peripherals' requests on each, so an image gives those two
- * channels to one block or the other and the compiler checks nothing
- * between them - which is why release() pulses
- * the block's reset line (docs/design/dma.md's release contract).
+ * channels to one block or the other, the compiler refusing both
+ * (ch32x035/dma_engine.hpp, one owner a channel).
  *
  * Which mechanism moves a request's data is the program's to name, per
  * request (Request::engine, util/i2c_bus.hpp's I2cEngine): `interrupt`,
@@ -1330,16 +1329,17 @@ public:
     }
 
     /**
-     * The block given back. The reset line before the gate
-     * (docs/design/dma.md, the release contract): on this die a raised DMA
-     * request can outlive its peripheral's DMA enable, its enable and a
-     * closed gate unless the block is reset (measured on USART3 and on the
-     * timers, docs/ch32x035/dma.md, "A released requester"), and channels 6
-     * and 7 are ORs this block shares with USART2 and the timers. This
-     * block's own request, raised under DMAEN by a read stalled over a dead
-     * channel, measured not to outlive its gate (docs/ch32x035/i2c.md): the
-     * pulse is the contract's - the vendor's own DeInit - two stores that
-     * leave nothing whatever the block holds.
+     * The block given back: the engines' channels stopped, both vectors
+     * off, PE cleared, the gate closed, the pads floating. No reset: the
+     * next init() starts from the block's reset line, before it configures
+     * and before it arms a channel (docs/design/dma.md, the release
+     * contract). On this die a raised DMA request can outlive its
+     * peripheral's DMA enable, its enable and a closed gate unless the
+     * block is reset (measured on USART3 and on the timers,
+     * docs/ch32x035/dma.md, "A released requester"); this block's own
+     * request, raised under DMAEN by a read stalled over a dead channel,
+     * measured not to outlive its gate (docs/ch32x035/i2c.md). Either way
+     * the pulse at init() withdraws it.
      */
     static void release() {
         if constexpr (has_dma) {
@@ -1349,7 +1349,6 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
-        S::reset();
         S::bus_clock(false);
         t_.phase = Phase::idle;
         SclPin::release();
@@ -1990,7 +1989,10 @@ public:
     /// host reads, this side transmits.
     static bool host_reads() { return host_reads_; }
 
-    /// The block given back, the reset line before the gate as the host's.
+    /// The block given back, the reset line before the gate. The client
+    /// takes no DMA engine, so docs/design/dma.md's release contract does
+    /// not reach it: the pulse leaves the block at its reset values for the
+    /// instance's next user.
     static void release() {
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());

@@ -227,7 +227,8 @@ default, or `InRam`);
   stuck client free by hand - a line pulled low as a push-pull output over
   a clear bit and released as a floating input, never driven high - and
   `recover()` puts the block back (SWRST, the timing rewritten).
-  `release()` pulses the block's reset line before its gate
+  `release()` stops the engines, clears PE and closes the gate with no
+  reset, and `init()` starts from the block's reset line
   ([../design/dma.md](../design/dma.md)'s release contract). `busy()` is
   the engine's phase, for a sleep site. The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the
@@ -470,11 +471,11 @@ channel, the stuck BUSY, the vectors' client, the cost): `z` is 60 and
 - **The block's own request does not outlive its gate** (letter p): a
   read stalled under DMAEN, RxNE and BTF standing, left the next owner of
   channel 7 four items while the block stayed live, and none once its
-  gate was closed - with PE up or cleared - or after `release()`. The
-  release contract's reset pulse finds nothing of this block's to clear
-  in these lets-go; USART3's request on this die does outlive its gate
-  ([dma.md](dma.md), "A released requester"), and the pulse is the
-  contract for both.
+  gate was closed - with PE up or cleared - or after `release()`, which
+  closes the gate. The reset line `init()` starts from finds nothing of
+  this block's to clear in these lets-go; USART3's request on this die
+  does outlive its gate ([dma.md](dma.md), "A released requester"), and the
+  pulse is the contract for both.
 - **The client from its vectors** (letter v): letter j's two cases with
   the interrupt enables up, `service()` and `error_service()` the bodies
   of i2c1_ev and i2c1_er - six bytes written to it byte-exact (eight

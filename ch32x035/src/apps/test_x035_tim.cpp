@@ -107,11 +107,21 @@ constexpr uint32_t pb1 = 1UL << 1;
 
 bool pad(uint32_t mask) { return (Port<'B'>::in() & mask) != 0u; }
 
+/// A timer given back with its reset line pulsed by the suite: release() does
+/// not pulse it, and this suite walks figure 9-1's rows, so the next timer's
+/// letter on a channel must not meet a request the last one left held there
+/// (docs/ch32x035/dma.md, "A released requester").
+template <typename T>
+void down() {
+    T::reset();
+    T::release();
+}
+
 /// Everything back: both timers reset and gated off, both remap fields at
 /// their default, the four pads floating inputs.
 void all_off() {
-    T1::release();
-    T2::release();
+    down<T1>();
+    down<T2>();
     (void)T1::remap(0);
     (void)T2::remap(0);
     Ch3Pad::release();
@@ -650,7 +660,7 @@ bool dma_row() {
     T::interrupts(ch < 4u ? T::compare_dma(ch) : T::update_dma, false);
     T::enable(false);
     (void)E::abandon();
-    T::release();
+    down<T>();
     const bool ok = started && idle_left == 3u && left == 0u;
     print(serial, "    TIM", n);
     if (ch < 4u) {
@@ -682,7 +692,7 @@ uint16_t ug_moves() {
     const uint16_t left = DmaChannel<dch>::count();
     T::interrupts(T::update_dma, false);
     (void)E::abandon();
-    T::release();
+    down<T>();
     return static_cast<uint16_t>(3u - left);
 }
 
@@ -801,7 +811,7 @@ void measure_slack() {
             break;
         }
     }
-    T1::release();
+    down<T1>();
     stamp_slack_cycles = most + least;
     print(serial, "  the poll's turn: ", least, " cycles, ", most, " with the tick's vector in it - every interval "
           "below good to ", stamp_slack_cycles, crlf);
@@ -865,7 +875,7 @@ uint8_t repetition_round(uint8_t& cases) {
                                                      : ", every one counting up (an underflow's)")
                      : ", DIRECTIONS MIXED",
               got ? "" : " (A FLAG DID NOT COME)", crlf);
-        T::release();
+        down<T>();
     }
     return exact;
 }
@@ -913,7 +923,7 @@ bool centre_flags(TimAlignment mode, const char* name) {
     print(serial, "  ", name, ": CC1IF ", gaps[0] / us_cycles, " ", gaps[1] / us_cycles, " ", gaps[2] / us_cycles,
           " ", gaps[3] / us_cycles, " ", gaps[4] / us_cycles, " ", gaps[5] / us_cycles, " us apart, ", ups,
           " of 7 rises counting up", got ? "" : " (A FLAG DID NOT COME)", crlf);
-    T1::release();
+    down<T1>();
     return ok;
 }
 
@@ -1025,7 +1035,7 @@ void tf_time_base() {
                       near(static_cast<int32_t>(down_rate), 4800, 48));
     bench.verdict("an underflow every ATRLR + 1 counts, a compare's flag once a period, the direction reading "
                   "down - within the slack", down_ok);
-    T1::release();
+    down<T1>();
 
     // UDIS (12.4.1): the update event disabled - no UIF at an overflow and
     // the shadows not loaded, until it is cleared. First what configure()
@@ -1059,7 +1069,7 @@ void tf_time_base() {
                   udis_quiet && near(static_cast<int32_t>(udis_kept), 4800, 48));
     bench.verdict("UDIS cleared: the next overflow raises UIF and takes the PSC written",
                   udis_cleared_flag && near(static_cast<int32_t>(after_udis), 2400, 24));
-    T1::release();
+    down<T1>();
 
     // URS (12.4.1): with it set, UG updates - the shadows loaded - without
     // raising UIF; an overflow still raises it.
@@ -1136,7 +1146,7 @@ bool tim2_c2n(uint8_t code) {
           low ? "low" : "HIGH", ", CC2NP ", inverted ? "low" : "HIGH", "; the toggle ", k, " edges ", per,
           " cycles apart (1000 asked)", crlf);
     Pad2::release();
-    T2::release();
+    down<T2>();
     (void)T2::remap(0);
     return remapped && claimed && high && low && inverted && ch1_off && k >= 5u &&
            near(static_cast<int32_t>(per), 1000, 5);

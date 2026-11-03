@@ -554,10 +554,12 @@ struct Adc {
         return true;
     }
 
+    /// The line off, the converter powered down, the gate closed, no reset:
+    /// init() starts from the block's reset line, before a register is
+    /// written (docs/design/dma.md, the release contract). Main context.
     static void release() {
         Pfic::disable(irq());
         regs().CTLR2 &= ~adc_adon;
-        reset();
         bus_clock(false);
     }
 

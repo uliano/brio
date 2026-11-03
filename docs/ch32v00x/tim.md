@@ -144,7 +144,10 @@ key).
 
 [brio/ch32v00x/tim.hpp](../../brio/ch32v00x/tim.hpp):
 
-- `Tim<n>`, n = 1 or 2: `init()`/`release()`, `configure(TimConfig)`
+- `Tim<n>`, n = 1 or 2: `init()` (the gate, the reset line),
+  `release()` (the counter stopped, the gate closed, no reset:
+  [../design/dma.md](../design/dma.md), the release contract),
+  `configure(TimConfig)`
   (the time base, the counting mode, the three WCH bits, RPTCR on
   TIM1; SMCFGR back at zero, the counter left stopped, UG run, UIF
   cleared), `enable()`,
@@ -211,8 +214,8 @@ The vectors: `tim1_up_handler`, `tim1_cc_handler`, `tim1_trg_com_handler`,
 
 The reference suite is `test_ch32_tim` (28 verdicts in `z`, two of
 its letters on the jumper PD2 to PD4, one probe letter outside `z`)
-on the CH32V006K8U6 at 48 MHz, and 19 on the CH32V003F4P6, whose
-image has no TIM3 letter and whose jumper letters decline without the
+on the CH32V006K8U6 at 48 MHz, and 19 on the CH32V003F4P6, two group
+images there, which have no TIM3 letter and whose jumper letters decline without the
 wire - the two parts' images are one source, the facts letter
 refusing a pair dead time on TIM2 where the part has none.
 

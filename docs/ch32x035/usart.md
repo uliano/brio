@@ -296,9 +296,11 @@ the channel's ring written over unread bytes), `hw_overruns`,
 `min_hz_for`, `can_baud`; `rebase(hz)` - the port as a `ClockUser`,
 draining what it holds at the old rate before writing the new divisor -
 `set_baud(hz, baud)` for the link's own rate, and `release()`, which
-stops the engines, clears UE and pulses the block's reset line before it
-closes the gate: a raised request outlives every other release on this
-die ([dma.md](dma.md), "A released requester").
+stops the engines, clears UE and closes the gate with no reset: `init()`
+starts from the block's reset line, before it writes a register or arms a
+channel, because a raised request outlives every other release on this
+die ([dma.md](dma.md), "A released requester"; letter i measures it on the
+port itself).
 
 `tx_room()` is the bytes `write_bulk()` would take now, the transmit
 ring's free count (util/stream.hpp's `RoomSink`,
@@ -391,7 +393,7 @@ evaluation board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the
 console on USART2 and the instance under test USART4 on its default
 column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
-doubled. `z` (23 verdicts) is the single-board set, run with the far
+doubled. `z` (26 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
 leaving their link pads floating inputs; `y` (98 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
@@ -444,6 +446,13 @@ reports. What it measured:
 - **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
   `init()` of USART3 on its code 1 - PC18 and PC19 - answers false,
   USART3's gate is as it was and its remap field at the reset code.
+- **A receive request left standing across `release()`** (letter `i`, ten
+  runs, three stagings each): the block's reset line at `init()` withdraws it
+  (the ring empty before any frame, the next burst of eight whole), and with
+  the reset left out the channel moves one item with nothing driven
+  ([dma.md](dma.md), "A released requester"). The frames are driven onto PB1
+  as a GPIO output: the USART's receiver reads the pad whichever way it is
+  configured.
 - **Half duplex does not hear its own frames** (letter `h`): HDSEL on
   PB0, the pad on the function, four bytes sent and TC reached for each,
   none raising RXNE.

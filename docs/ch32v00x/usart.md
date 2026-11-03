@@ -322,9 +322,10 @@ the key that runs the single-board set, `w` the two-board key, below).
   with the clock standing still, the ring drained first, false and
   nothing written when unreachable), `can_baud(pclk, baud)`,
   `min_hz_for(baud)`, `release()` (the vector off, the channels stopped,
-  CTLR1 cleared, the block's reset pulsed - the vendor's DeInit, the one
-  act that withdraws a DMA request the block holds (measured, below;
-  [dma.md](dma.md)) - the gate closed, the pads released), the engine
+  CTLR1 cleared, the gate closed, the pads released, no reset: `init()`
+  starts from the block's reset line, the one act that withdraws a DMA
+  request the block holds (measured, below; [dma.md](dma.md), "A released
+  requester"), before it writes a register or arms a channel), the engine
   verbs `dma_isr()` (the ISR body of both channels, the controller's one
   flag register read once; its true is the receive edge, as `isr()`'s),
   `harvest()` (the same edge asked from the consumer's side, and a
@@ -474,9 +475,9 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (70 verdicts in `z` with the
+The reference suite is `test_ch32_serial` (73 verdicts in `z` with the
 jumper PD2 to PD4 fitted, which lends TIM2's channel 1 as the ruler to
-five of its letters - 56 without it, those letters then skipping and
+five of its letters - 59 without it, those letters then skipping and
 claiming nothing -, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
@@ -558,9 +559,15 @@ out there.
   (a banged frame's RXNE under DMAR) on channel 7, each raised with no
   channel enabled, then let go one way and the channel's next owner - a
   request-paced block of four - counted: the request bit cleared 1 stray
-  item, UE, TE and RE cleared 1, the gate closed 1, `release()` - the
-  reset line, then the gate - 0, and the control with no request ever
-  raised 0. The pulse in `release()` is what keeps the next owner whole.
+  item, UE, TE and RE cleared 1, the gate closed 1, the reset line and
+  then the gate 0, and the control with no request ever raised 0. Only the
+  reset line withdraws the request, which is why `init()` starts from it,
+  and letter l measures that on the port itself ([dma.md](dma.md), "A
+  released requester").
+- **The same port released with a request standing, then initialized**
+  (letter l, ten runs, three stagings each): the ring empty before any frame,
+  the next burst of eight whole; with the reset left out the channel moves one
+  item with nothing banged ([dma.md](dma.md), "A released requester").
 - **The receive ring over a DEAD channel** (letter m): TIM2's channel 2
   compare request held on channel 7 before the ring is armed there - the
   arming takes its one stray item, and the channel then moves nothing. A

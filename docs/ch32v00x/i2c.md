@@ -245,9 +245,10 @@ takes** - the inventory the costs below are read against:
   raises inside a tenure, once no START or STOP stands. `unstick()`
   clocks a stuck client free by hand and clears the STOPF its own STOP
   leaves, and `recover()` puts the peripheral back (SWRST, the timing
-  rewritten); `release()` pulses the block's reset before the gate - the
-  vendor's DeInit, the one act that withdraws a request DMAEN raised on
-  the CH32V203 ([dma.md](dma.md)). The engine slots are
+  rewritten); `release()` stops the engines, clears PE and closes the gate
+  with no reset, and `init()` starts from the block's reset line - the
+  vendor's DeInit, the one act that withdraws a request DMAEN raised on the
+  CH32V203 ([dma.md](dma.md), the release contract). The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, with both
   channels' vectors bound to `dma_isr()`. Which mechanism moves a
   request's data is the request's `engine` field (util/i2c_bus.hpp's
@@ -456,9 +457,10 @@ over two runs.
   read stalled over that dead channel, RxNE and BTF standing under DMAEN,
   left the next owner of channel 7 four items while the block stayed
   live, and none once its gate was closed - with PE up or cleared - or
-  after `release()`. The release contract's reset pulse finds nothing of
-  this block's to clear in these lets-go; a timer's request does outlive
-  its gate, and the pulse is the contract for every requester.
+  after `release()`, which closes the gate. The reset line `init()` starts
+  from finds nothing of this block's to clear in these lets-go; a timer's
+  request does outlive its gate, and the pulse is the contract for every
+  requester.
 
 ### The repeated START: on the last byte's TxE, and the refusal
 

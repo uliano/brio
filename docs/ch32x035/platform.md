@@ -1254,10 +1254,11 @@ preemptive kernel"). What it established:
   A lead under 38 ppm is what the letters accept (two characters over a
   leg's 14400, less the HSI's 100 ppm of wander between runs a second
   apart).
-- **The DMA release contract holds at every hand-over.** Each leg moves
+- **The DMA release contract holds at every leg.** Each leg moves
   USART4 from the polled command channel to the Uart task and back
-  through the block's reset line ([dma.md](dma.md), "A released
-  requester"), every leg byte-exact from its first block; letter `i`
+  through the block's reset line, the channels staying USART4's for the
+  whole image ([dma.md](dma.md), "A released requester"), every leg
+  byte-exact from its first block; letter `i`
   read both link channels and both SPI channels disabled, the SPI's
   request enables and every DMA enable of TIM2 clear (TIM2's update
   request is a row of channel 2, the SPI's receive channel, and its

@@ -207,7 +207,7 @@
  * edge gated once per idle-to-busy transition of the consumer, re-opened
  * when its look finds the ring empty. A channel that never takes the frame
  * - stopped by a transfer error, or frozen by a request another peripheral
- * left on its OR (docs/design/dma.md's release contract) - leaves RXNE
+ * raised on its OR (a timer's compare request, docs/ch32x035/dma.md) - leaves RXNE
  * standing under RXNEIE, and the wait would re-enter for ever: its entries
  * that find the count unmoved are counted, and the 255th gives the channel
  * up - a DMA fault counted, RXNEIE down, the edge reported - and the
@@ -934,6 +934,13 @@ struct Uart {
         }
 
         Resource::bus_clock(true);
+        // The block through its reset line first, before a register is
+        // written and before an engine is armed: whatever an earlier
+        // transport on this instance or this port's own release() left - a
+        // request bit, a frame standing under DMAR, a DMA request the
+        // channel never took - is gone (docs/ch32x035/dma.md, "A released
+        // requester"), and the words below are the whole configuration.
+        Resource::reset();
 
         // The column, only where it is not the reset one: AFIO's reset
         // value already selects code 0.
@@ -1492,19 +1499,16 @@ public:
     }
 
     /// Stop the port and park its pads: the vector off, the engines'
-    /// channels stopped, UE clear, the block's reset pulsed, the bus clock
-    /// closed, the pins released. A setup verb, main context; what the
-    /// rings held no longer goes out, and is cleared by the next init().
-    ///
-    /// The reset line before the gate (docs/design/dma.md, the release
-    /// contract). A channel of this controller is an OR of the requests
-    /// wired to it (dma_engine.hpp's table: USART2's two share 6 and 7 with
-    /// the I2C, USART4's transmit shares 1 with the ADC), and on this die a
-    /// raised request outlives its peripheral's release unless the block
-    /// is reset (measured on the CH32X035F8U6, docs/ch32x035/dma.md, "A
-    /// released requester"): the next owner's first enable would move one
-    /// stray item. The pulse - two read-modify-writes of the bus's reset
-    /// register - leaves none, and takes CTLR3 with it.
+    /// channels stopped, UE clear, the bus clock closed, the pins released.
+    /// A setup verb, main context; what the rings held no longer goes out,
+    /// and is cleared by the next init(). No reset: the registers keep what
+    /// they held, CTLR3's DMA requests included, and the next init() starts
+    /// from the block's reset line (docs/design/dma.md, the release
+    /// contract). On this die a raised request outlives its peripheral's
+    /// release unless the block is reset (measured on the CH32X035F8U6,
+    /// docs/ch32x035/dma.md, "A released requester"); with one owner a
+    /// channel only this port meets it again, and its init() withdraws it
+    /// before a channel is armed.
     static void release() {
         Pfic::disable(usart_irq_for(instance));
         if constexpr (has_tx_engine) {
@@ -1514,7 +1518,6 @@ public:
             RxEngine::stop();
         }
         regs().CTLR1 = 0;
-        Resource::reset();
         Resource::bus_clock(false);
         Tx::release();
         if constexpr (!opts.half_duplex) {

@@ -45,7 +45,8 @@
 //      and written; THE COMMAND RULE, D/C sampled by the tick: a command in the
 //      loop then the data on the engines, and a command alone on them; THE
 //      REFUSALS, each one the engines cannot carry answered spi_rejected before
-//      anything moves, and the next requests
+//      anything moves, and the next requests; THE ONE BUSY CHECK, a polled
+//      request and one naming the engines refused over a transfer in flight
 //   j  THE ENGINES OF BYTES, wireless, in an image of its own: 16-bit frames
 //      on a host whose engines are of uint8_t refused before anything moves
 //   g  WHEN A REQUEST ENDS, THE WIRE HAS ENDED, wireless: the SCK pad against
@@ -78,7 +79,8 @@
 //      request leaves dead (its loop, spi_ok, no channel touched), the
 //      engines over it answered by the caller's bound and
 //      recover(); and the block's own transmit request let go four ways -
-//      release()'s reset pulse leaving the next owner of channel 3 nothing
+//      release(), SPE cleared and the gate closed with no reset, leaving the
+//      next owner of channel 3 nothing
 //   e  OVR AND ITS CLEAR, wireless, measured against 16.2.7 on the resource:
 //      what raises the flag, which reads clear it, flush_rx()
 //   n  (y) THE PEER: the command channel, ident (the CH32V006, kind 0x06),
@@ -229,6 +231,8 @@ volatile uint32_t tick_body_max = 0;
 volatile uint32_t tick_drag = 0;
 /// Letter i's witness of D/C: while `dc_watch` stands the tick's handler counts
 /// the level it finds on the pad.
+/// The completion's vector takes the watch down with the D/C's rise: no tick
+/// pending behind that handler reads it.
 volatile bool dc_watch = false;
 volatile uint32_t dc_low_ticks = 0;
 volatile uint32_t dc_high_ticks = 0;
@@ -310,11 +314,16 @@ void dma_ready(bool high_speed = false) {
     CsPin::output(true);
 }
 
+/// The D/C the two helpers' requests carry: none unless a letter names one
+/// (letter f, which reads it after every failure).
+PinRef xfer_dc{};
+
 template <typename H = Host>
 uint8_t host_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
                   SpiMode mode, SpiClock rate, SpiDataSize bits, bool polled) {
     typename H::Request r{};
     r.cs = cs;
+    r.dc = xfer_dc;
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
     r.tx = lend<Lease::reply>(tx);
@@ -345,6 +354,7 @@ uint8_t dma_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* 
                  SpiClock rate, SpiDataSize bits, bool polled, SpiMode mode = SpiMode::mode0) {
     typename H::Request r{};
     r.cs = cs;
+    r.dc = xfer_dc;
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
     r.tx = lend<Lease::reply>(tx);
@@ -396,6 +406,29 @@ bool went_to_engines(uint16_t n, SpiClock rate, bool read, uint8_t& status) {
         (void)D::recover();
     }
     return true;
+}
+
+/// THE ONE BUSY CHECK, asked while a transfer of the host's own is on its
+/// engines: a request naming `polled` or the engines, its select and D/C on a
+/// port of RAM, mode 3 at /2. True when start() answered at once with
+/// spi_rejected, neither pad was touched and the control word stands (the
+/// transfer in flight keeps its mode and rate). Touches neither host_done nor
+/// the interrupt count, which belong to the transfer in flight.
+template <typename D>
+bool busy_refused(bool polled) {
+    const uint16_t word = S::regs().CTLR1;
+    GpioRegs port{};
+    typename D::Request r{};
+    r.cs = PinRef{&port, 1u};
+    r.dc = PinRef{&port, 2u};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.len = 4;
+    r.mode = SpiMode::mode3;
+    r.clock = SpiClock::div2;
+    r.engine = polled ? SpiEngine::polled : SpiEngine::dma;
+    const bool done = D::start(r);
+    const bool untouched = port.BSHR == 0u && port.BCR == 0u;
+    return done && D::status() == spi_rejected && untouched && S::regs().CTLR1 == word;
 }
 
 /// A request that must be refused, on a port of RAM: a select and a D/C that
@@ -1123,15 +1156,19 @@ void ti_engine_rules() {
           ", in the loop D/C low on ", low_in_loop, " ticks and high on ", high_in_loop, ", ", entries_in_loop,
           " interrupts; on the engines low on ", low_on_engines, " and high on ", high_on_engines, ", ", both_entries,
           " interrupts, status ", both_status, crlf);
+    // D/C rises at the command's end and start() returns after the launch, some
+    // hundreds of cycles against the tick's 48 000: at most one tick in that
+    // span reads it high "in the loop", in about one run in fifty.
     bench.verdict("A COMMAND THEN DATA: the command in the loop inside start(), D/C low there; the data on the engines, "
                   "D/C high there; one interrupt, spi_ok, D/C and the select high at the end",
-                  !both_inside && both_done && low_in_loop >= 2u && high_in_loop == 0u && entries_in_loop == 0u &&
+                  !both_inside && both_done && low_in_loop >= 2u && high_in_loop <= 1u && entries_in_loop == 0u &&
                       low_on_engines == 0u && high_on_engines >= 2u && both_entries == 1u && both_status == spi_ok &&
                       both_up);
     dc_low_ticks = 0;
     dc_high_ticks = 0;
     host_done = false;
     dma_isr_entries = 0;
+    dc_watch = true;
     const bool alone_inside = DmaHost::start(command_request(0));
     const uint32_t alone_entries_at_return = dma_isr_entries;
     const bool alone_low_at_return = !DcPin::read_out();
@@ -1154,17 +1191,36 @@ void ti_engine_rules() {
 
     // WHAT THE ENGINES CANNOT CARRY IS REFUSED, before the block, the select or the
     // D/C is touched (refused()): 16-bit frames with the out buffer, the in buffer
-    // or a command alone off the half-word boundary (9.3.6), and a transmit engine
-    // another owner holds, whose claim would refuse
-    // the launch and leave the receive block waiting for ever. A command in front
+    // or a command alone off the half-word boundary (9.3.6). A command in front
     // of a data phase runs in the loop, from any address: that one is not refused.
     constexpr SpiDataSize wide = SpiDataSize::bits16;
     const bool odd_out = refused<DmaHost>(nullptr, 0, tx_buf + 1, rx_buf, 8, wide);
     const bool odd_in = refused<DmaHost>(nullptr, 0, tx_buf, rx_buf + 1, 8, wide);
     const bool odd_command = refused<DmaHost>(tx_buf + 1, 4, nullptr, nullptr, 0, wide);
-    const bool claimed = DmaTx::claim();
-    const bool held = refused<DmaHost>(nullptr, 0, tx_buf, rx_buf, 8, SpiDataSize::bits8);
-    DmaTx::unclaim();
+
+    // THE ONE BUSY CHECK: a write of 64 frames at /256 on the engines (some
+    // 131 000 cycles), and while it runs a polled request and one naming the
+    // engines, each refused before anything moves; the transfer in flight then
+    // ends spi_ok with its one interrupt - the refusals' status did not leak
+    // into its own.
+    DmaHost::prime(SpiMode::mode0, SpiClock::div256);
+    typename DmaHost::Request flight{};
+    flight.cs = LoneCs::ref();
+    flight.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    flight.len = 64;
+    flight.clock = SpiClock::div256;
+    flight.engine = SpiEngine::dma;
+    host_done = false;
+    dma_isr_entries = 0;
+    const bool flight_inside = DmaHost::start(flight);
+    const bool busy_polled = busy_refused<DmaHost>(true);
+    const bool busy_dma = busy_refused<DmaHost>(false);
+    for (uint32_t i = 0; i < 2'000'000UL && !host_done; ++i) {
+    }
+    const bool flight_done = host_done;
+    const uint8_t flight_status = DmaHost::status();
+    const uint32_t flight_entries = dma_isr_entries;
+    dma_isr_entries = 0;
     const uint8_t odd_command_with_data = dma_xfer(LoneCs::ref(), tx_buf + 1, 2, tx_buf, rx_buf, 8, SpiClock::div16, wide,
                                                    false);
     const uint32_t odd_command_entries = dma_isr_entries;
@@ -1173,13 +1229,19 @@ void ti_engine_rules() {
     DmaHost::release();
     host_ready();
     print(serial, "  refused: odd out ", odd_out ? "yes" : "NO", ", odd in ", odd_in ? "yes" : "NO", ", odd command alone ",
-          odd_command ? "yes" : "NO", ", a held transmit engine ",
-          held ? "yes" : "NO", "; an odd command before aligned data ", odd_command_with_data, " (", odd_command_entries,
-          " interrupt); then polled ", next_polled, ", on the engines ", next_engines, crlf);
+          odd_command ? "yes" : "NO", "; over a transfer in flight: polled ", busy_polled ? "refused" : "NOT REFUSED",
+          ", on the engines ", busy_dma ? "refused" : "NOT REFUSED", ", the transfer then ", flight_status, " with ",
+          flight_entries, " interrupt(s); an odd command before aligned data ", odd_command_with_data, " (",
+          odd_command_entries, " interrupt); then polled ", next_polled, ", on the engines ", next_engines, crlf);
     bench.verdict("WHAT THE ENGINES CANNOT CARRY IS REFUSED: 16-bit frames off the half-word boundary, out, in or a "
-                  "command alone, and over a held transmit engine: spi_rejected at once, select "
-                  "and D/C never touched, the control word, SCK and the block as they were",
-                  odd_out && odd_in && odd_command && claimed && held);
+                  "command alone: spi_rejected at once, select and D/C never touched, the control word, SCK and the "
+                  "block as they were",
+                  odd_out && odd_in && odd_command);
+    bench.verdict("THE ONE BUSY CHECK: over a transfer of the host's own in flight a polled request and one naming "
+                  "the engines are refused, spi_rejected, select, D/C and the control word untouched; the transfer "
+                  "ends spi_ok with its one interrupt",
+                  !flight_inside && busy_polled && busy_dma && flight_done && flight_status == spi_ok &&
+                      flight_entries == 1u);
     bench.verdict("AND THE NEXT REQUESTS RUN: an odd command before aligned data in the loop (one interrupt), then "
                   "polled and on the engines, each spi_ok",
                   odd_command_with_data == spi_ok && odd_command_entries == 1u && next_polled == spi_ok &&
@@ -2023,7 +2085,7 @@ void tc_refusals() {
 }
 
 // ===========================================================================
-// f - the fault exits, recover() and release()'s reset pulse (wireless)
+// f - the fault exits, recover() and release() (wireless)
 // ===========================================================================
 //
 // Every exit of the host that no healthy wire takes, provoked on purpose
@@ -2092,9 +2154,11 @@ uint16_t next_owner_moves() {
 }
 
 // THE STALLS. spi_stalled is the polled path's answer to a flag that never comes -
-// a clock that stopped, a block that is dead - spent from ONE budget for the
-// whole transaction. The host releases the select and puts the block back itself,
-// so the next request needs no recover(). Staged two ways a reset cures: SPI1 HELD
+// a clock that stopped, a block that is dead - spent from ONE count of polls for
+// the whole transaction (take_budget(): twice the wire's time for the frames, in
+// polls of at least four cycles, and 256 polls). The host releases the D/C and the
+// select and puts the block back itself, so the next request needs no recover();
+// every request here carries the D/C (PA0), read after each failure. Staged two ways a reset cures: SPI1 HELD
 // IN RESET, its registers ignoring every write and RXNE never rising, the host's
 // own pulse being what lets the line go; and SPE TAKEN DOWN under the host, a frame
 // left standing in the transmit buffer and TXE never rising again, the host's
@@ -2103,15 +2167,21 @@ uint16_t next_owner_moves() {
 // error, and a block pointed at each hole in the map. What came back is letter t's
 // to judge, against the peer.
 //
-// THE WALL'S BOUND. At /16 and 8 bits a frame's budget is 2^7 turns, so sixteen
-// frames spend (16 + 2) x 128 = 2304 turns, and a command phase of one frame
-// (1 + 2) x 128 = 384. The dearest turn measured is 25.4 cycles (from the flash; a
-// load, a test, a count and two branches), and moving a loop half a fetch word
-// moves it by up to 6 (docs/ch32x035/spi.md, "The fetch"): 32 cycles a turn. On
-// top, 3 000 cycles: two ticks' handlers in the span, the host's way in, and the
-// reset. So 2304 x 32 + 3000 = 76 728 and 384 x 32 + 3000 = 15 288.
-constexpr uint32_t wall_of_sixteen = 2304UL * 32UL + 3000UL;
-constexpr uint32_t wall_of_command = 384UL * 32UL + 3000UL;
+// THE WALL'S BOUNDS, the host's budget (take_budget()): at /16 and 8 bits a frame
+// is 128 cycles on the wire and the shift 6, so sixteen frames are 16 x 64 + 256 =
+// 1 280 polls, and a command phase of one frame 64 + 256 = 320. A poll is at least
+// four cycles, so the wall from the call to its return is at least 5 120 and 1 280
+// cycles (twice the wire's 2 048 and 128, and the 256 polls), a handler only
+// lengthening it. It is at most those polls at the dearest turn measured on the
+// loops, 32 cycles (docs/ch32x035/spi.md, "The fetch"),
+// 40960 and 10240, and 3 000 cycles more for two ticks' handlers in the
+// span, the host's way in and the reset. So 5 120 to 43960, and 1 280 to 13240.
+constexpr uint32_t polls_of_sixteen = 16UL * 64UL + 256UL;
+constexpr uint32_t polls_of_command = 64UL + 256UL;
+constexpr uint32_t bound_of_sixteen = polls_of_sixteen * 4UL;
+constexpr uint32_t bound_of_command = polls_of_command * 4UL;
+constexpr uint32_t wall_of_sixteen = polls_of_sixteen * 32UL + 3000UL;
+constexpr uint32_t wall_of_command = polls_of_command * 32UL + 3000UL;
 
 /// The ways a request is made to stall, and the two a transfer error takes.
 enum class Stage : uint8_t { held_in_reset, spe_down_write, spe_down_command, fault_rx, fault_tx };
@@ -2169,7 +2239,8 @@ void stall_paths(uint8_t& good_stalls, uint8_t& good_next) {
         uint32_t wall = 0;
         const uint8_t stalled = stall_stage<H>(s, mode, wall);
         const uint32_t stall_entries = dma_isr_entries;
-        const bool lone_high = LoneCs::read_out();
+        const bool lone_high = LoneCs::read_out() && DcPin::read_out();
+        const uint32_t floor = s == Stage::spe_down_command ? bound_of_command : bound_of_sixteen;
         const uint32_t bound = s == Stage::spe_down_command ? wall_of_command : wall_of_sixteen;
         const uint8_t next_polled = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div16,
                                                 SpiDataSize::bits8, true, mode);
@@ -2180,10 +2251,11 @@ void stall_paths(uint8_t& good_stalls, uint8_t& good_next) {
         const uint32_t async_entries = dma_isr_entries;
         H::release();
         print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", stage_name(s), ": status ", stalled, " after ",
-              wall, " cycles (the bound ", bound, "), select ", lone_high ? "high" : "LOW", ", channel interrupts ",
+              wall, " cycles (", floor, " to ", bound, "), D/C and select ", lone_high ? "high" : "LOW",
+              ", channel interrupts ",
               stall_entries, "; then polled ", next_polled, " (", polled_entries, " interrupts), asynchronous ",
               next_async, " (", async_entries, ")", crlf);
-        if (stalled == spi_stalled && wall < bound && lone_high && stall_entries == 0u) {
+        if (stalled == spi_stalled && wall >= floor && wall < bound && lone_high && stall_entries == 0u) {
             ++good_stalls;
         }
         if (next_polled == spi_ok && polled_entries == 0u && next_async == spi_ok && async_entries == 1u) {
@@ -2211,6 +2283,7 @@ template <typename H>
 typename H::Request fault_request(Stage s, SpiMode mode) {
     typename H::Request r{};
     r.cs = LoneCs::ref();
+    r.dc = xfer_dc;
     if (s == Stage::fault_rx) {
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
         r.rx = lend<Lease::reply>(reinterpret_cast<uint8_t*>(past_flash));
@@ -2259,7 +2332,7 @@ void real_faults(uint8_t& good_faults, uint8_t& good_next) {
         const bool answered = await_done();
         const uint8_t st = H::status();
         const uint32_t entries = dma_isr_entries;
-        const bool lone_high = LoneCs::read_out();
+        const bool lone_high = LoneCs::read_out() && DcPin::read_out();
         const uint8_t next_polled = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, link_clock,
                                                 SpiDataSize::bits8, true, mode);
         const uint8_t next_async = dma_xfer<H>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, link_clock,
@@ -2267,8 +2340,8 @@ void real_faults(uint8_t& good_faults, uint8_t& good_next) {
         H::release();
         print(serial, "  ", H::placed_in_ram ? "SRAM: " : "flash: ", stage_name(s), ": dma_isr() ",
               answered ? "true" : "never", ", status ", st, " (spi_dma_fault ", spi_dma_fault, "), ", entries,
-              " interrupts, select ", lone_high ? "high" : "LOW", "; then polled ", next_polled, ", asynchronous ",
-              next_async, crlf);
+              " interrupts, D/C and select ", lone_high ? "high" : "LOW", "; then polled ", next_polled,
+              ", asynchronous ", next_async, crlf);
         if (!inside && answered && st == spi_dma_fault && entries == 1u && lone_high) {
             ++good_faults;
         }
@@ -2326,6 +2399,8 @@ void hole_line(HoleSurvey& h, const char* way, uint32_t address, uint8_t st) {
 
 void stalls_and_holes() {
     LoneCs::output(true);
+    DcPin::output(true);
+    xfer_dc = DcPin::ref();
 
     // 1. The host with no engines, a polled read of sixteen at /16.
     host_ready<FlashHost>();
@@ -2334,17 +2409,17 @@ void stalls_and_holes() {
     const uint8_t st = host_xfer<FlashHost>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                             SpiClock::div16, SpiDataSize::bits8, true);
     const uint32_t took = cycles_now() - t0;
-    const bool released = LoneCs::read_out();
+    const bool released = LoneCs::read_out() && DcPin::read_out();
     const uint16_t ctlr1 = S::regs().CTLR1;
     const uint16_t statr = S::status();
     const uint8_t after = host_xfer<FlashHost>(LoneCs::ref(), nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                                SpiClock::div16, SpiDataSize::bits8, true);
     print(serial, "  a polled read of 16 at /16 with the block held in reset: status ", st, " (spi_stalled ",
-          spi_stalled, ") after ", took, " cycles (the bound ", wall_of_sixteen, ", the wire's 2048), select ",
-          released ? "high" : "LOW", ", CTLR1 ", hex(ctlr1), " STATR ", hex(statr), ", the next request ", after, crlf);
-    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled within its derived bound, the select "
-                  "released",
-                  st == spi_stalled && took < wall_of_sixteen && released);
+          spi_stalled, ") after ", took, " cycles (", bound_of_sixteen, " to ", wall_of_sixteen,
+          ", the wire's 2048), D/C and select ", released ? "high" : "LOW", ", CTLR1 ", hex(ctlr1), " STATR ", hex(statr), ", the next request ", after, crlf);
+    bench.verdict("A POLLED REQUEST OVER A BLOCK HELD IN RESET ends spi_stalled within its derived bound, never "
+                  "before it, the D/C and the select released",
+                  st == spi_stalled && took >= bound_of_sixteen && took < wall_of_sixteen && released);
     bench.verdict("the host has put the block back: the reset line let go, SPE and MSTR up, nothing in the receive "
                   "buffer, and with no recover() the next request is spi_ok",
                   (ctlr1 & (spi_spe | spi_mstr)) == (spi_spe | spi_mstr) && (statr & (spi_rxne | spi_ovr)) == 0u &&
@@ -2356,8 +2431,8 @@ void stalls_and_holes() {
     stall_paths<FlashDmaHost>(good_stalls, good_next);
     stall_paths<DmaHost>(good_stalls, good_next);
     bench.verdict("EVERY STALL PATH ON THE ENGINED HOST, IN BOTH PLACEMENTS, the polled command phase in front of an "
-                  "asynchronous block among them, ends spi_stalled inside start() within its bound, the select "
-                  "released, no channel interrupt",
+                  "asynchronous block among them, ends spi_stalled inside start() within its bound and never "
+                  "before it, the D/C and the select released, no channel interrupt",
                   good_stalls == 6u);
     bench.verdict("and each time, with no recover(), the next polled request and the next asynchronous one, on the "
                   "engines with their one interrupt, are spi_ok",
@@ -2389,7 +2464,7 @@ void stalls_and_holes() {
           "; two requests ", gate_1, " after ", gate_1_took, " and ", gate_2, " after ", gate_2_took,
           " cycles; Spi::disable() ", drained ? "true" : "false", " after ", drain_took,
           " cycles; the gate opened, requests ", open_1, " and ", open_2, crlf);
-    bench.verdict("A CLOSED GATE IS NOT CURED: every request behind it stalls, each on its own budget within the bound",
+    bench.verdict("A CLOSED GATE IS NOT CURED: every request behind it stalls, each on its own bound",
                   gate_1 == spi_stalled && gate_2 == spi_stalled && gate_1_took < wall_of_sixteen &&
                       gate_2_took < wall_of_sixteen);
     bench.verdict("the gate opened, the host needs no recover(): at most one more stall, and the next request is spi_ok",
@@ -2404,7 +2479,7 @@ void stalls_and_holes() {
     real_faults<FlashDmaHost>(good_faults, good_after_fault);
     real_faults<DmaHost>(good_faults, good_after_fault);
     bench.verdict("A BLOCK RUNNING PAST THE END OF A MEMORY, read or written, is a transfer error: dma_isr() true once, "
-                  "spi_dma_fault, the select released",
+                  "spi_dma_fault, the D/C and the select released",
                   good_faults == 4u);
     bench.verdict("and with no recover() the next polled request and the next on the engines are spi_ok; a refused "
                   "request behind a fault leaves the block alone and the reset owed, the next prime() pays it",
@@ -2439,6 +2514,8 @@ void stalls_and_holes() {
           holes.hung, " with no answer", crlf);
     bench.verdict("every one of those blocks ended, and the next asynchronous request is spi_ok",
                   holes.hung == 0u && after_holes == spi_ok);
+    xfer_dc = PinRef{};
+    DcPin::release();
     LoneCs::release();
 }
 
@@ -2487,13 +2564,13 @@ void tf_faults() {
                   "and once TIM1 is reset and recover() has run both paths complete spi_ok",
                   st_async == no_answer && rec2 && st_live_polled == spi_ok && st_live_async == spi_ok);
 
-    // 4. THE RELEASE PULSE: the block's own transmit request. SPE up as a
+    // 4. THE BLOCK'S OWN TRANSMIT REQUEST, let go. SPE up as a
     // host with nothing written - TXE stands - and TXDMAEN set with no
     // channel enabled: the request rises on channel 3. Let go four ways,
     // each on a fresh raise: none (the request still asserted: the staging
     // proved), the gate closed alone, SPE cleared and the gate closed, and
-    // release() - the reset line before the gate - which must leave the
-    // next owner nothing.
+    // release() - SPE cleared and the gate closed, no reset - which must
+    // leave the next owner nothing.
     uint16_t moved[4] = {};
     for (uint8_t way = 0; way < 4u; ++way) {
         dma_ready<FlashDmaHost>();
@@ -2520,7 +2597,8 @@ void tf_faults() {
     bench.verdict("TXE under TXDMAEN raised the block's own request on channel 3: left live, the next owner "
                   "takes an item",
                   moved[0] >= 1u);
-    bench.verdict("release() - the reset line before the gate - leaves the next owner nothing", moved[3] == 0u);
+    bench.verdict("release() - SPE cleared and the gate closed, no reset - leaves the next owner nothing",
+                  moved[3] == 0u);
     bench.verdict("and no way of letting go hands the next owner more than the one item a held request is",
                   moved[1] <= 1u && moved[2] <= 1u);
     host_ready<Host>();
@@ -4411,6 +4489,13 @@ void tw_waveforms() {
         host_ready();
         Host::prime(static_cast<SpiMode>(m), SpiClock::div256);
         (void)delay_us(clock, 50);
+        // The frame is 2 048 cycles at /256 and two of its edges are 128 cycles
+        // apart, so an interrupt inside it can hide them from the sampler. The
+        // last line's bytes go out first, then the frame starts just after a
+        // tick: the next one is 48 000 cycles away, past the frame's end (the
+        // kick at sample 8, 288 cycles, plus the 2 048).
+        console_drain();
+        settle_ms(1u);
         const uint32_t took = sample_wave_frame(wave_samples, 8, 0x5A);
         console_drain();
         S::flush_rx();
@@ -4762,12 +4847,14 @@ BRIO_CH32_VECTOR(spi1_handler) {
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
         read_the_end();
         host_done = true;
+        dc_watch = false;
     } else if (owner == Owner::bus_ao && DmaHost::dma_isr()) {
         brio::post<kl::SpiArb>(brio::TransferDone{DmaHost::status()});
     } else if (owner == Owner::flash_dma_host && FlashDmaHost::dma_isr()) {
         read_the_end();
         dma_done_at = brio::Ticker::cycles();
         host_done = true;
+        dc_watch = false;
     }
 }
 BRIO_CH32_VECTOR(dma1_channel2_handler) { spi_dma(); }
@@ -4803,7 +4890,7 @@ int main() {
                  td_witness, false);
     bench.letter('e', "OVR AND ITS CLEAR on the resource: what raises it, which reads clear it, flush_rx()", te_overrun);
     bench.letter('f', "THE FAULT EXITS: every stall path and a real transfer error with no recover() after them, a "
-                      "closed gate, the rest of the map, a polled request over a dead channel, release()'s pulse",
+                      "closed gate, the rest of the map, a polled request over a dead channel, release()",
                  tf_faults);
     bench.second_letter('n', "THE PEER: the command channel, ident, ten pings", tn_peer_link);
     bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC, the frame kept",

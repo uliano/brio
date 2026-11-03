@@ -97,8 +97,8 @@
 //      channel 6 or 7 with no wire: a write over it ending i2c_dma_fault, a
 //      read over it never completing with its event vector unstormed, each
 //      landing whole once the timer is reset; and the block's own request
-//      left by a stalled read, let go four ways - release()'s reset pulse
-//      leaving the next owner of channel 7 nothing
+//      left by a stalled read, let go four ways - release(), its gate
+//      closed with no reset, leaving the next owner of channel 7 nothing
 //   q  THE CONTROLLER'S OWN HABITS, raw, the vectors dark: how long BTF
 //      stands under a STOP or a repeated START requested at EVT8_2; a
 //      repeated START requested while a byte shifts, that byte refused -
@@ -2896,15 +2896,15 @@ void tp_dead_channel() {
     bench.verdict("after recover(), release() and TIM2's reset the same read is byte-exact", lrs == i2c_ok &&
                                                                                              mism == 0u);
 
-    // 3. THE RELEASE PULSE: the block's OWN request. A read over the dead
+    // 3. THE BLOCK'S OWN REQUEST, let go. A read over the dead
     // channel 7 stalls with RxNE and BTF standing under DMAEN - the I2C's
     // own request raised on a channel that never answered it - and TIM2 is
     // then reset, so whatever the next owner of channel 7 takes is the
     // I2C's. Four ways of letting go, each on a fresh stall: none (the
     // vectors off, the block live: the request still asserted, which proves
     // the staging raised one), the gate closed alone, PE cleared and the
-    // gate closed (no reset), and release() - the reset line before the
-    // gate - which must leave the next owner nothing.
+    // gate closed (no reset), and release() - PE cleared and the gate
+    // closed, no reset - which must leave the next owner nothing.
     uint16_t moved[4] = {};
     for (uint8_t way = 0; way < 4u; ++way) {
         stall_dead_read();
@@ -2933,7 +2933,8 @@ void tp_dead_channel() {
     bench.verdict("the stalled read raised the block's own request on channel 7: left live, the next owner "
                   "takes an item",
                   moved[0] >= 1u);
-    bench.verdict("release() - the reset line before the gate - leaves the next owner nothing", moved[3] == 0u);
+    bench.verdict("release() - PE cleared and the gate closed, no reset - leaves the next owner nothing",
+                  moved[3] == 0u);
     bench.verdict("and no way of letting go hands the next owner more than the one item a held request is",
                   moved[1] <= 1u && moved[2] <= 1u);
     bench.verdict("and the command channel is back", command(Op::ping));
@@ -3116,7 +3117,7 @@ int main() {
     bench.letter('j', "TWO HOSTS ON ONE WIRE: arbitration both ways, a START into a live tenure, this "
                       "board as the peer's client - written to and read from", tj_two_hosts);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);
-    bench.letter('p', "THE DEAD CHANNEL: a held request under the engines' write and read, and release()'s "
+    bench.letter('p', "THE DEAD CHANNEL: a held request under the engines' write and read, and release() over "
                       "pulse", tp_dead_channel);
     bench.letter('v', "THIS BOARD AS THE CLIENT FROM ITS VECTORS: written to and read from by the peer's "
                       "controller", tv_client_vectors);

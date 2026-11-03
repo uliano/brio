@@ -100,6 +100,11 @@
 //      interrupt transmitter timed against the wire at each rate) and
 //      refusing an unreachable rate, release() giving the instance and
 //      its pads back
+//   l  THE RELEASE CONTRACT ON THE SAME OWNER: USART2's receive request left
+//      standing across release() (DMAR set, a frame in DATAR, the gate
+//      closed), then init() again - the ring empty before any frame, the
+//      next burst whole; the control, the reset left out, showing the held
+//      request as one item
 //   u  AN OVERRUN AT A BURST'S TAIL under the receive engine: a fill on
 //      channel 1 at the ring's own level starving the ring under a banged
 //      burst's last three frames, the vector held off until the channel
@@ -158,7 +163,7 @@
 //
 // build: boards = v006k8,v003f4
 // build: groups = k
-// build: groups.v006k8 = abcdefgh,ijkqrstuymno,12345678
+// build: groups.v006k8 = abcdefgh,ijklqrstuymno,12345678
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -2003,9 +2008,10 @@ void release_ways(bool transmit, uint16_t (&moved)[5]) {
     U2::bus_clock(false);
     moved[3] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
-    // 4. The transport's release(): the reset line, then the gate.
+    // 4. The reset line, then the gate (what init() starts from).
     raise_u2_request(transmit);
-    PlainUart::release();
+    U2::reset();
+    U2::bus_clock(false);
     moved[4] = held::next_owner_moves<ch, Owner>(clock);
     all_off();
 }
@@ -2016,11 +2022,11 @@ void tm_released_request() {
     release_ways<6, U2Tx>(true, tx);
     release_ways<7, U2Rx>(false, rx);
     print(serial, "  the next owner moved (of 4) - control, request bit cleared, UE/TE/RE cleared, the gate closed, "
-                  "release():", crlf, "    channel 6 after USART2's transmit request: ", tx[0], " ", tx[1], " ", tx[2],
+                  "the reset line then the gate:", crlf, "    channel 6 after USART2's transmit request: ", tx[0], " ", tx[1], " ", tx[2],
           " ", tx[3], " ", tx[4], crlf, "    channel 7 after its receive request: ", rx[0], " ", rx[1], " ", rx[2], " ",
           rx[3], " ", rx[4], crlf);
     bench.verdict("with no request ever raised the next owner of channel 6 or 7 moves nothing", tx[0] == 0u && rx[0] == 0u);
-    bench.verdict("after the transport's release() - the reset line, then the gate - it moves nothing",
+    bench.verdict("after the reset line, then the gate, it moves nothing",
                   tx[4] == 0u && rx[4] == 0u);
     bench.verdict("every other way of letting go left the channel at most one stray item down",
                   tx[1] <= 1u && tx[2] <= 1u && tx[3] <= 1u && rx[1] <= 1u && rx[2] <= 1u && rx[3] <= 1u);
@@ -2119,6 +2125,120 @@ void tm_released_request() {
     Pfic::disable(dma_channel_irq(6));
     Pfic::disable(dma_channel_irq(7));
     all_off();
+}
+
+// ===========================================================================
+// l - the release contract on the same owner: released, then initialized
+// ===========================================================================
+//
+// docs/design/dma.md's release contract: release() gates the clock and pulses
+// no reset; init() starts from the block's reset line, the gate just opened
+// and no channel armed. The case that reset answers, staged on USART2's
+// receive request - the worst one: DmaUart up, its receive channel stopped,
+// one frame banged in, so RXNE stands under DMAR with no channel to take it;
+// then DmaUart::release(), which leaves DMAR set and closes the gate over the
+// raised request. Then the SAME owner:
+//
+//   init() again: its ring armed, nothing banged - the ring must hold no
+//   byte (a stray would be the held frame, the ring's first item bogus) -
+//   then a burst of eight frames, which must arrive whole and in order;
+//   THE CONTROL: the gate opened with no reset and the same channel armed
+//   circular by hand for USART2's receive (the steps of init() that come
+//   before and after its reset line, the reset left out) - its count must
+//   show the held request, one item moved with nothing banged.
+//
+// Every count is exact: the banger is the only source on the RX pad, and a
+// held request is taken within a few bus cycles of the channel's enable, so
+// 3 ms of settling (some 144 000 cycles at 48 MHz) leave nothing in flight.
+
+using U2Rx7 = DmaRxEngine<7>;   ///< DmaUart's receive engine, by its type
+
+/// The staging: DmaUart up, its receive channel stopped, a frame banged in
+/// with DMAR set, then release() - DMAR and RXNE left standing under a gate
+/// closed with no reset.
+void raise_and_release() {
+    (void)transport_on<DmaUart>(&dma_edge_isr, 9600);
+    U2Rx7::stop();
+    Pfic::disable(Irq::usart2);   // the idle line's clear would read DATAR, and take the frame
+    bang_idle(9600, 2);
+    bang_frame({.data = 0xA5, .baud = 9600});
+    bang_idle(9600, 1);
+    DmaUart::release();
+    u2_isr = nullptr;
+}
+
+void tl_release_reinit() {
+    constexpr uint8_t runs = 3;
+    uint8_t clean = 0;
+    uint8_t whole = 0;
+    uint32_t strays = 0;
+    for (uint8_t run = 0; run < runs; ++run) {
+        raise_and_release();
+        // THE SAME OWNER INITIALIZED AGAIN, as transport_on() does it but for
+        // its all_off(), which would reset the block by hand.
+        Dma::open();
+        u2_isr = &dma_edge_isr;
+        const bool up = DmaUart::init(clock, 9600);
+        RxPad::input(PinPull::up);
+        Pfic::enable(dma_channel_irq(6));
+        Pfic::enable(dma_channel_irq(7));
+        settle_ms(3);
+        uint8_t b = 0;
+        uint32_t stray = 0;
+        while (DmaUart::read_byte(b)) {
+            ++stray;
+        }
+        bang_idle(9600, 2);
+        for (uint32_t i = 0; i < 8u; ++i) {
+            bang_frame({.data = stream_byte(80u + i), .baud = 9600});
+        }
+        bang_idle(9600, 2);
+        settle_ms(3);
+        uint32_t got = 0;
+        bool in_order = true;
+        while (DmaUart::read_byte(b)) {
+            if (got < 8u && b != stream_byte(80u + got)) {
+                in_order = false;
+            }
+            ++got;
+        }
+        print(serial, "  run ", run, ": init() again ", up ? "up" : "DOWN", ", ", stray,
+              " byte(s) before any frame; a burst of 8: ", got, in_order ? " in order" : " NOT in order", crlf);
+        strays += stray;
+        if (up && stray == 0u) {
+            ++clean;
+        }
+        if (got == 8u && in_order) {
+            ++whole;
+        }
+        all_off();
+    }
+
+    // THE CONTROL: the same staging, then the gate opened with no reset and
+    // the receive channel armed circular for USART2's request by hand.
+    static uint8_t ctl_ring[16];
+    uint16_t held = 0;
+    for (uint8_t run = 0; run < runs; ++run) {
+        raise_and_release();
+        Dma::open();
+        U2::bus_clock(true);
+        (void)U2Rx7::arm_ring<U2Rx>(&U2::regs().DATAR, ctl_ring);
+        settle_ms(3);
+        const uint16_t moved = static_cast<uint16_t>(sizeof ctl_ring - U2Rx7::remaining());
+        U2Rx7::stop();
+        print(serial, "  control run ", run, ": the gate opened with no reset, the channel armed: ", moved,
+              " item(s) moved with nothing banged", crlf);
+        if (moved == 1u) {
+            ++held;
+        }
+        all_off();
+    }
+    bench.verdict("RELEASED WITH DMAR SET AND A FRAME STANDING, THEN INITIALIZED AGAIN: the ring holds no byte "
+                  "before a frame comes - init()'s reset line withdrew the held request",
+                  clean == runs && strays == 0u);
+    bench.verdict("and the next burst of eight arrives whole and in order", whole == runs);
+    bench.verdict("THE CONTROL: the same staging with the reset left out moves one item, the held request",
+                  held == runs);
 }
 
 // ===========================================================================
@@ -3803,6 +3923,8 @@ int main() {
     bench.letter('u', "an overrun at a burst's tail under the receive engine: no storm", tu_overrun_tail);
     bench.letter('m', "the released request: USART2's own on channels 6 and 7; the ring over a dead channel",
                  tm_released_request);
+    bench.letter('l', "the release contract on the same owner: released with a request standing, then "
+                      "initialized again", tl_release_reinit);
     bench.letter('n', "the overrun clear's window: a frame's request against the CPU's read", tn_clear_window);
     bench.letter('o', "the flow-control options as a port: rts and cts", to_flow_port);
     bench.letter('y', "host-assisted (brio stress): the console's own error counters", ty_host, false);

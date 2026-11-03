@@ -910,10 +910,12 @@ struct Uart {
         }
 
         Resource::bus_clock(true);
-        // The block through its reset line first: whatever the program or
-        // an earlier transport on this instance left - a status read that
-        // armed a clear, a request bit, an enable - is gone, and the words
-        // below are the whole configuration.
+        // The block through its reset line first, before a register is
+        // written and before an engine is armed: whatever the program, an
+        // earlier transport on this instance or this port's own release()
+        // left - a status read that armed a clear, a request bit, a frame
+        // standing under DMAR, a DMA request the channel never took - is
+        // gone, and the words below are the whole configuration.
         Resource::reset();
         Resource::remap(remap);
 
@@ -1413,26 +1415,22 @@ struct Uart {
     static constexpr uint32_t min_hz_for(uint32_t baud) { return baud * 16u; }
 
     /// Stop the port and park its pads: the vector off, the engines'
-    /// channels stopped, UE clear, the block's reset pulsed, the gate
-    /// closed, the pads released. What the rings still hold is not sent;
-    /// the next init() clears them.
+    /// channels stopped, UE clear, the gate closed, the pads released. No
+    /// reset: the registers keep what they held, CTLR3's DMA requests
+    /// included, and the next init() starts from the block's reset line.
+    /// What the rings still hold is not sent; the next init() clears them.
     ///
-    /// The reset line before the gate. A channel of this controller is an
-    /// OR of the requests wired to it (RM table 8-2: USART2 shares 6 and 7
-    /// with I2C1, USART1's receive shares 5 with TIM1's update), and on the
-    /// CH32V203 and the CH32V303 - the same controller's lineage - a
-    /// request once raised is HELD until the channel acknowledges it or the
-    /// block is reset: clearing DMAT, DMAR and UE does not withdraw it, and
-    /// a gated clock freezes it on the OR, where the next owner's first
-    /// enable moves one item and the channel stalls
-    /// (docs/ch32vx03/dma.md). This die holds USART2's too, measured both
-    /// ways: its transmit request on channel 6 and its receive request on
-    /// channel 7, each raised with no channel enabled, outlive the request
-    /// bit cleared, UE, TE and RE cleared and the gate closed - the next
-    /// owner takes one stray item - and after this verb's reset line none
-    /// (docs/ch32v00x/usart.md). The pulse is the vendor's own
-    /// USART_DeInit, two read-modify-writes of the bus's reset register,
-    /// and takes CTLR3 with it.
+    /// Why the reset is init()'s and not this verb's (docs/design/dma.md,
+    /// the release contract). On this die a DMA request once raised is
+    /// HELD until the channel takes it or the block is reset: USART2's
+    /// transmit request on channel 6 and its receive request on channel 7,
+    /// each raised with no channel enabled, outlive the request bit, UE,
+    /// TE and RE cleared and the gate closed (docs/ch32v00x/usart.md).
+    /// With one owner a channel the only user that can meet such a request
+    /// is this port, initialized again - and its init() pulses the reset
+    /// line, the gate just opened and no channel armed, before anything
+    /// else: a receive request left standing here gives the next ring no
+    /// stray byte (docs/ch32v00x/dma.md, "A released requester").
     static void release() {
         Pfic::disable(usart_irq_for(instance));
         if constexpr (has_tx_engine) {
@@ -1442,7 +1440,6 @@ struct Uart {
             RxEngine::stop();
         }
         regs().CTLR1 = 0;
-        Resource::reset();
         Resource::bus_clock(false);
         Tx::release();
         if constexpr (!opts.half_duplex) {

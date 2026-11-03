@@ -608,9 +608,12 @@ public:
         bus_clock(true);
         reset();
     }
+    /// The counter stopped, the gate closed, no reset: init() starts from
+    /// the block's reset line (docs/design/dma.md, the release contract),
+    /// and a compare or update request this timer raised stands until then
+    /// on its channel's OR (docs/ch32v00x/dma.md, "What the silicon does").
     static void release() {
         enable(false);
-        reset();
         bus_clock(false);
     }
 

@@ -50,7 +50,8 @@ What decides correctness even there. The channel is the request: there
 is no multiplexer, each peripheral's request reaches one fixed channel
 (table 8-2), and each transport (the USART's, the SPI host's, the I2C
 host's) refuses at compile time an engine on any other channel, or two
-engines on one. Every channel a program engines
+engines on one; and a channel has one owner for the whole image, also
+checked when the program is compiled ("One owner a channel", below). Every channel a program engines
 has its vector bound, as above; an unbound one lands in the startup
 code's spin at its channel's first interrupt. A run handed to an engine stays
 the caller's until its end is reported, and a run off its beat's
@@ -109,10 +110,12 @@ the key that runs the image's set of letters.
   channel 6 and its receive request on channel 7, each raised with no
   channel enabled, leave the next owner one stray item after the request
   bit, UE, TE and RE or the gate alone is let go, and none after the
-  reset line ([usart.md](usart.md), letter m). The USART's and the I2C
-  host's `release()` pulse the block's reset before the gate - the
-  vendor's own DeInit, which the USART's case needs - and the timers' and
-  the ADC's reset their blocks there already.
+  reset line ([usart.md](usart.md), letter m). So every transport with an
+  engine starts its `init()` from the block's reset line - the gate just
+  opened, no register written, no channel armed - and its `release()`
+  stops the engines, closes the gate and gives the pads back with no
+  reset ([../design/dma.md](../design/dma.md), the release contract;
+  "A released requester" below measures it).
 - **A channel is the STM32F1's**: CFGR (direction, circular,
   memory-to-memory, the two increments, the two widths, the priority,
   three interrupt enables, EN), CNTR counting down as items move,
@@ -277,7 +280,10 @@ whatever programs the channel, when it does:
   `DmaTxOwner<ch>` or `DmaRxOwner<ch>` by default, so a block paced by
   TIM2's channel 2 compare is armed as
   `Paced::arm<brio::DmaOwner<brio::DmaPeriph::tim, 2, brio::DmaSignal::compare2>>(&cell)`;
-  the copy engine claims `DmaCopyOwner<ch>`;
+  the copy engine claims `DmaCopyOwner<ch>`. The check reaches named requests:
+  a default tag does not say which request a bare engine serves, so two
+  requests served by bare engines on one channel in one image compile, the
+  program's own duty; a program that wants the check names them;
 - the `DmaChannel<ch, Owner>` verbs that program a channel - `enable()`,
   `configure()`, the count, the two addresses, `prepare()`, `load()`,
   `arm()`, `stop()` - claim it for `Owner`, by default the hand tag
@@ -469,14 +475,14 @@ and i and letter d's writes measured on the CH32V006K8U6:
 - **The costs in time** (`bench_ch32` letters d and s on the
   CH32V006K8U6, each line from the launch to the completion interrupt):
   a copy 6.0 cycles an item of four bytes, a copy from the flash and a
-  fill 8.0, the controller's own rate; a block's fixed cost 503 to 512
+  fill 8.0, the controller's own rate; a block's fixed cost 498 to 509
   cycles in the image of seven letters and 381 to 393 in a scratch one
   of three - the same code, so the figure is its image's layout as much
-  as its own; a block of 256 words paced by TIM1's update at 10 kHz
-  1.00 of its pace, the intervals 4794 to 4812 cycles against 4800 as a
+  as its own; a block of 256 words paced by TIM2's channel 2 compare at 10 kHz
+  1.00 of its pace, the intervals 4794 to 4815 cycles against 4800 as a
   polling core sees them. The SPI host's engined write at the wire,
-  32.0 to 32.1 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both
-  widths, 913 cycles a transaction above it in 8-bit frames and 928 in
+  32.0 to 32.2 and 128.0 cycles a byte at HCLK/4 and HCLK/16 in both
+  widths, 913 cycles a transaction above it in 8-bit frames and 931 in
   16-bit ones, the bench's own instrument inside ([spi.md](spi.md), "The
   host above the wire" and "Which engine to name").
 - **`DmaCopyEngine`** (letter g, both parts): copy and fill at the
@@ -539,6 +545,39 @@ and i and letter d's writes measured on the CH32V006K8U6:
   runs the paced block at its pace, so that part's `idle()` sleeps over
   a working channel.
 
+### A released requester
+
+Every transport with an engine - the `Uart`, the SPI host, the I2C host -
+starts its `init()` from the block's reset line, the gate just opened, before
+it writes a register or arms a channel, and its `release()` stops the engines,
+clears the block's enable, closes the gate and gives the pads back with no
+reset; the timers' and the ADC's `init()` and `release()` do the same
+([../design/dma.md](../design/dma.md), the release contract). The case that
+reset answers, measured on the transports themselves, seven runs of each letter
+and three of `z`, three stagings a run:
+
+- **USART2's receive request** (`test_ch32_serial` letter l, the CH32V006K8U6):
+  a frame banged in with DMAR set and channel 7 stopped, so RXNE stands under
+  DMAR with no channel to take it, then `release()`, which leaves DMAR set and
+  closes the gate over the raised request. The same port initialized again
+  holds no byte before a frame comes, and the next burst of eight arrives whole
+  and in order. THE CONTROL: the same staging, the gate opened with no reset and
+  channel 7 armed circular by hand for USART2's receive, moves one item with
+  nothing banged, every time: the held request, a bogus first byte in the ring.
+- **SPI1's receive request** (`test_ch32_spi` letter l, both parts, wireless):
+  a frame written by hand with RXDMAEN set and channel 2 not enabled, then
+  `release()`, which drains, clears SPE and closes the gate with RXDMAEN and RXNE
+  left as they were. The same host initialized again runs a read of eight on the
+  engines to `spi_ok`, one interrupt, nothing left in the receive buffer (a stray
+  first item would complete the receive block a frame early and leave the last
+  frame in DATAR, whatever MISO carries). THE CONTROL: the same staging, the gate
+  opened with no reset and channel 2 armed by hand for SPI1's receive, moves one
+  item with nothing clocked, every time, on both parts.
+
+Each count is exact, so no tolerance: the banged line or the host's own clock is
+the only source, and 3 ms of settling (144 000 cycles at 48 MHz) leave no item in
+flight.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -558,9 +597,3 @@ Implemented but not bench-verified, each with what would measure it:
 - **The I2C host's engines on the CH32V003F4P6**: `test_ch32_i2c`
   letter g in its group image against a peer, which that board's desk
   has not got (on the CH32V006K8U6 the letter is green, above).
-- **The transfer-error path** (TEIE, the engines' `abandon()` and the
-  fault counters): written from 8.2.1 and provoked by nothing the bench
-  found - reads and writes of five holes in the map and writes into the
-  flash, locked and open, all complete as normal blocks (above); a
-  peripheral whose bus answers an access with an error, if this die has
-  one, would measure it.

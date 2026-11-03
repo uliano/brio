@@ -18,7 +18,9 @@
 //  - `z`, THE SINGLE-BOARD LETTERS, runnable with the far board dark (its
 //    console, or its usart_peer searching: either leaves both link pads
 //    floating inputs, usart_link.hpp's dark discipline): letters d, e and
-//    h transmit on PB0 into that input and judge nothing the far end does.
+//    h transmit on PB0 into that input and judge nothing the far end does,
+//    and letter i drives PB1 itself, as a GPIO output, into the far end's
+//    floating TX pad.
 //  - `y`, THE TWO-BOARD LETTERS, against the CH32V006 running usart_peer
 //    on its 24 MHz crystal: driven in band over the link itself
 //    (usart_link.hpp), its rendezvous a letter, and every leg judged from
@@ -43,6 +45,11 @@
 //      hardware clears it on the break frame's stop bit
 //   f  USART3's code 1 puts TX and RX on PC18/PC19, the debug port's pads:
 //      init() answers false while the probe owns them, and touches nothing
+//   i  THE RELEASE CONTRACT ON THE SAME OWNER: USART4's receive request left
+//      standing across release() (DMAR set, a frame in DATAR - driven onto
+//      PB1 as a GPIO output, the far board dark - the gate closed), then
+//      init() again: the ring empty before any frame, the next burst whole;
+//      the control, the reset left out, showing the held request as one item
 //   h  half duplex on PB0 alone: the receiver does NOT hear the instance's
 //      own frames (14.5's "the TX and RX pins connected internally" is the
 //      receive path letter p proves with a second chip), measured
@@ -440,6 +447,135 @@ void tf_debug_column() {
 // what each does).
 #include "x035_link_dut.hpp"
 using namespace x035link;
+
+// ---------------------------------------------------------------------------
+// i - the release contract on the same owner: released, then initialized
+// ---------------------------------------------------------------------------
+//
+// docs/design/dma.md's release contract: release() gates the clock and pulses
+// no reset; init() starts from the block's reset line, the gate just opened
+// and no channel armed. The case that reset answers, staged on USART4's
+// receive request with the far board dark - its PB0 a floating input, so this
+// end's PB1, RX, is driven here as a GPIO output and the USART's receiver
+// reads the pad (8.2.4: an output's input stage stays on): RingOnly up, its
+// receive channel 8 stopped, one frame driven in at 9600, so RXNE stands
+// under DMAR with no channel to take it; then RingOnly::release(), which
+// leaves DMAR set and closes the gate over the raised request. Then the SAME
+// owner: init() again - the ring must hold no byte before a frame (a stray
+// would be the held frame, the ring's first item bogus) - and a burst of
+// eight, which must arrive whole and in order; and THE CONTROL, the gate
+// opened with no reset and channel 8 armed circular by hand for USART4's
+// receive (the steps of init() around its reset line, the reset left out),
+// whose count must show the held request: one item moved, nothing driven.
+// Every count is exact: the driven pad is the only source, and a held request
+// is taken within a few bus cycles of the enable, so 3 ms of settling (some
+// 144 000 cycles at 48 MHz) leave nothing in flight.
+
+/// One 8N1 frame at 9600 driven onto PB1 as a GPIO output, each edge on the
+/// STK's cycle count: a bit of 5000 cycles at 48 MHz, the edge a store some
+/// tens of cycles after its instant - well inside the receiver's sampling.
+void drive4_frame(uint8_t v) {
+    constexpr uint32_t bit = SysClock::hz / 9600u;
+    const uint32_t t0 = Ticker::cycles();
+    Rx4::clear();   // the start bit
+    for (uint32_t i = 0; i < 9u; ++i) {
+        while (Ticker::cycles() - t0 < (i + 1u) * bit) {
+        }
+        if (i == 8u || ((v >> i) & 1u) != 0u) {
+            Rx4::set();   // a one, or the stop bit
+        } else {
+            Rx4::clear();
+        }
+    }
+    while (Ticker::cycles() - t0 < 11u * bit) {   // the stop bit, and one idle bit
+    }
+}
+
+using U4Rx8 = DmaRxEngine<8>;   ///< RingOnly's receive engine, by its type
+
+/// The staging: RingOnly up with PB1 driven idle-high, its receive channel
+/// stopped, a frame driven in with DMAR set, then release() - DMAR and RXNE
+/// left standing under a gate closed with no reset.
+void raise_and_release4() {
+    u4_owner = U4Owner::ring_only;
+    (void)RingOnly::init(clock, 9600);
+    Rx4::output(true);
+    wait_ms(2);
+    U4Rx8::stop();
+    Pfic::disable(usart_irq_for(4));   // the idle line's clear would read DATAR, and take the frame
+    drive4_frame(0xA5);
+    RingOnly::release();
+    u4_owner = U4Owner::irq;
+}
+
+void ti_release_reinit() {
+    constexpr uint8_t runs = 3;
+    uint8_t clean = 0;
+    uint8_t whole = 0;
+    for (uint8_t run = 0; run < runs; ++run) {
+        raise_and_release4();
+        // THE SAME OWNER INITIALIZED AGAIN.
+        u4_owner = U4Owner::ring_only;
+        const bool up = RingOnly::init(clock, 9600);
+        Rx4::output(true);
+        wait_ms(3);
+        uint8_t b = 0;
+        uint32_t stray = 0;
+        while (RingOnly::read_byte(b)) {
+            ++stray;
+        }
+        for (uint32_t i = 0; i < 8u; ++i) {
+            drive4_frame(static_cast<uint8_t>(0x31u + 7u * i));
+        }
+        wait_ms(3);
+        uint32_t got = 0;
+        bool in_order = true;
+        while (RingOnly::read_byte(b)) {
+            if (got < 8u && b != static_cast<uint8_t>(0x31u + 7u * got)) {
+                in_order = false;
+            }
+            ++got;
+        }
+        RingOnly::release();
+        u4_owner = U4Owner::irq;
+        (void)Rx4::input();
+        print(serial, "  run ", run, ": init() again ", up ? "up" : "DOWN", ", ", stray,
+              " byte(s) before any frame; a burst of 8: ", got, in_order ? " in order" : " NOT in order", crlf);
+        if (up && stray == 0u) {
+            ++clean;
+        }
+        if (got == 8u && in_order) {
+            ++whole;
+        }
+    }
+
+    // THE CONTROL: the same staging, then the gate opened with no reset and
+    // channel 8 armed circular for USART4's receive by hand.
+    static uint8_t ctl_ring[16];
+    uint8_t held = 0;
+    for (uint8_t run = 0; run < runs; ++run) {
+        raise_and_release4();
+        U4::bus_clock(true);
+        (void)U4Rx8::arm_ring<U4Rx>(&U4::regs().DATAR, ctl_ring);
+        wait_ms(3);
+        const uint16_t moved = static_cast<uint16_t>(sizeof ctl_ring - U4Rx8::remaining());
+        U4Rx8::stop();
+        U4::reset();
+        U4::bus_clock(false);
+        (void)Rx4::input();
+        print(serial, "  control run ", run, ": the gate opened with no reset, channel 8 armed: ", moved,
+              " item(s) moved with nothing driven", crlf);
+        if (moved == 1u) {
+            ++held;
+        }
+    }
+    bench.verdict("RELEASED WITH DMAR SET AND A FRAME STANDING, THEN INITIALIZED AGAIN: the ring holds no byte "
+                  "before a frame comes - init()'s reset line withdrew the held request",
+                  clean == runs);
+    bench.verdict("and the next burst of eight arrives whole and in order", whole == runs);
+    bench.verdict("THE CONTROL: the same staging with the reset left out moves one item, the held request",
+                  held == runs);
+}
 
 // ---------------------------------------------------------------------------
 // h - half duplex on PB0 alone: its own frames
@@ -2255,6 +2391,8 @@ int main() {
     bench.letter('e', "the break, on USART4", te_break);
     bench.letter('f', "the column on the probe's pads", tf_debug_column);
     bench.letter('h', "half duplex on PB0: its own frames", th_half_duplex_self);
+    bench.letter('i', "the release contract on the same owner: released with a request standing, then "
+                      "initialized again", ti_release_reinit);
     bench.second_letter('j', "the rendezvous, and the HSI against the crystal", tj_link);
     bench.second_letter('k', "the rates across the wire, timed by the far chip", tk_rates);
     bench.second_letter('l', "the frame matrix across the wire", tl_frames);

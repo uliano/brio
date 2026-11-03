@@ -39,13 +39,16 @@ at once while any channel is enabled with items left, and a receive
 ring, a channel that runs for ever, holds the program awake
 ([platform.md](platform.md)). One more fact a driver author needs: a
 request a peripheral raised and no channel took is held until the
-peripheral's reset line is pulsed, so a driver's `release()` pulses it
-before closing the gate ("A released requester", below).
+peripheral's reset line is pulsed, so a driver's `init()` pulses it, the
+gate just opened, before it writes a register or arms a channel, and its
+`release()` closes the gate with no reset ("A released requester", below).
+And a channel has one owner for the whole image, which the compiler checks
+("One owner a channel", below).
 
 The rest of this page, in order: the documents of record; what the
 silicon does, with the chapter's offer item by item; the types and
-verbs, with what a block costs; how to use it; the bench findings; the
-release contract measured; what is not covered.
+verbs, with what a block costs and the owner of a channel; how to use it;
+the bench findings; the release contract measured; what is not covered.
 
 ## Documents of record
 
@@ -119,7 +122,7 @@ key that runs them all), the transport's engines across a wire in
   raising its request - but no item moves until the core wakes. The
   CH32V203's and the CH32V303's answer ([../ch32vx03/dma.md](../ch32vx03/dma.md)).
 - **A raised request is held** (measured, "A released requester" below):
-  the CH32V203's answer again, and the release contract's case.
+  the release contract's case.
 - **The block's gate, DMA1EN in RCC_AHBPCENR, is closed at reset**
   (measured; the register's reset value opens the USB blocks and SRAMEN),
   and the block has no reset line (3.4.9): a channel is put back by
@@ -221,7 +224,10 @@ whatever programs the channel, when it does:
   `DmaTxOwner<ch>` or `DmaRxOwner<ch>` by default, so a block paced by
   USART3's transmitter is armed as
   `Paced::arm<brio::DmaOwner<brio::DmaPeriph::usart, 3, brio::DmaSignal::tx>>(&reg)`;
-  the copy engine claims `DmaCopyOwner<ch>`;
+  the copy engine claims `DmaCopyOwner<ch>`. The check reaches named requests:
+  a default tag does not say which request a bare engine serves, so two
+  requests served by bare engines on one channel in one image compile, the
+  program's own duty; a program that wants the check names them;
 - the `DmaChannel<ch, Owner>` verbs that program a channel - `enable()`,
   `configure()`, the count, the two addresses, `prepare()`, `load()`,
   `arm()`, `stop()` - claim it for `Owner`, by default the hand tag
@@ -424,13 +430,32 @@ no pad. The transport's engines across a wire are `test_x035_usart`'s
 
 ### A released requester
 
-The release contract ([design/dma.md](../design/dma.md)), measured on
-this die (letter `i`): USART3 opened with DMAT and its transmitter on, its
-TXE request standing on channel 2 with no channel enabled to take it, then
-let go one way, then channel 2 bound by its next owner - a four-byte block
-into a RAM cell, request-paced - and its count read 300 us later:
+Every transport with an engine - the `Uart`, the SPI host, the I2C host -
+starts its `init()` from the block's reset line, the gate just opened, before
+it writes a register or arms a channel, and its `release()` stops the engines,
+clears the block's enable, closes the gate and gives the pads back with no
+reset; a timer's `init()` and `release()` do the same
+([design/dma.md](../design/dma.md), the release contract). The case that reset
+answers, measured on the transport (`test_x035_usart` letter `i`, on USART4's
+receive request, the worst case, seven runs of the letter and three of `z`, three
+stagings a run): a frame driven into PB1 with DMAR set and channel 8 stopped,
+so RXNE stands under DMAR with no channel to take it, then `release()`, which
+leaves DMAR set and closes the gate over the raised request. The same port
+initialized again holds no byte before a frame comes, and the next burst of
+eight arrives whole and in order. THE CONTROL: the same staging, the gate opened
+with no reset and channel 8 armed circular by hand for USART4's receive, moves
+one item with nothing driven, every time: the held request, a bogus first byte
+in the ring. A count, so no tolerance: the driven pad is the only source, and
+3 ms of settling (144 000 cycles) leave no item in flight.
 
-| let go by | the next owner moved |
+What withdraws a raised request, measured on this die with a request-paced
+block in a RAM cell on the same channel (`test_x035_dma` letter `i`): USART3
+opened with DMAT and its transmitter on, its TXE request standing on channel 2
+with no channel enabled to take it, then let go one way, then channel 2 bound
+in USART3's name - a four-byte block, request-paced - and its count read 300 us
+later:
+
+| let go by | the block moved |
 |---|---|
 | nothing ever raised (the control) | 0 |
 | DMAT cleared, the block clocked and enabled | 1 |
@@ -439,27 +464,25 @@ into a RAM cell, request-paced - and its count read 300 us later:
 | the reset line, then the gate | 0 |
 
 A raised request outlives every release short of the reset line, and the
-next owner of the channel takes one stray item at its first enable - the
-CH32V203's answer. So the `Uart`'s `release()` pulses the block's reset
-before it closes the gate ([usart.md](usart.md)), the I2C host's and
-client's do the same ([i2c.md](i2c.md)), and the suite's own pacer too.
+channel takes one stray item at its first enable. Which is why the reset is
+`init()`'s: with one owner a channel, only that owner can meet the request
+again, and it starts from the line that withdraws it.
 
-The other requesters, measured by the same next owner in the I2C and SPI
-suites (the letters there):
+The other requesters, measured by the same block in the I2C and SPI suites (the
+letters there), each channel programmed in the name of the block's own request:
 
 | requester (the channel) | left live | the gate closed | the enable cleared, then the gate | the reset line, then the gate |
 |---|---|---|---|---|
 | TIM1's channels 1 and 3, TIM2's channel 2 compare, raised by a match (2, 6, 7) | - | 1 | - | none: the next block whole |
-| SPI1's TXE under TXDMAEN, SPE up as a host (3) | 4 | 1 | 0 (SPE) | 0 |
-| I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE) | 0 |
+| SPI1's TXE under TXDMAEN, SPE up as a host (3) | 4 | 1 | 0 (SPE, which `release()` clears) | 0 |
+| I2C1's RxNE under DMAEN, a read stalled (7) | 4 | 0 | 0 (PE, which `release()` clears) | 0 |
 
-A timer's request is held like USART3's - the next owner takes one stray
-item and then serves nothing, a dead channel ([i2c.md](i2c.md), letter
-p); the software compare event (SWEVGR's CCxG) raised none. SPI1's
-outlives a closed gate while SPE stands and falls with SPE; I2C1's falls
-with its gate. Each block's `release()` pulses its reset line before the
-gate all the same: the contract's two stores leave nothing whatever the
-block holds.
+A timer's request is held like USART3's - the block takes one stray item and
+then serves nothing, a dead channel ([i2c.md](i2c.md), letter p); the software
+compare event (SWEVGR's CCxG) raised none. SPI1's outlives a closed gate while
+SPE stands and falls with SPE; I2C1's falls with its gate. Their `init()` pulses
+their reset lines all the same: the contract is uniform, two stores that leave
+nothing whatever the block holds.
 
 ## Not covered yet
 
@@ -476,12 +499,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The transfer-error path** (TEIE, the engines' `abandon()` and the
-  fault counters): written from 9.2.1 and provoked by nothing the bench
-  found - reads and writes of five holes in the map and writes into the
-  flash, locked and open, all complete as normal blocks (above); a
-  peripheral whose bus answers an access with an error, if this die has
-  one, would measure it.
 - The six parts other than the CH32X035F8U6: the request table's rows by
   part are compiled for all seven (`brio check ch32x035`); a board of each
   package would measure the USART1 rows the QFN20 does not offer.

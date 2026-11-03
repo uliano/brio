@@ -48,6 +48,11 @@
 //      MOE and raises BIF; pulled down, the outputs come back under AOE
 //
 // build: boards = v006k8,v003f4
+// build: groups.v003f4 = abcd,efgix
+// (on the CH32V003 the suite whole comes within the 5 % of the 15 KB the
+// part leaves an image, so it builds as two images there: the blocks, the
+// time base, the periods and the cross-timer letter; the captures, the one
+// pulse, the break and the probe - letter e, TIM3's, is the CH32V006's)
 // build: monitor_speed = 115200
 
 #include <stdint.h>

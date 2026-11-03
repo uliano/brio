@@ -69,10 +69,10 @@
 //   THE DMA RELEASE CONTRACT (docs/ch32x035/dma.md, "A released
 //   requester"): a raised request outlives its peripheral's release unless
 //   the block is reset - so every hand of USART4 between the polled
-//   command channel and the Uart task goes through a reset: Uart::release()
-//   pulses it before the gate, the command path's u4_open() pulses it
-//   before it programs the port, and task_up() pulses it before the Uart
-//   task's init(), the TX pad parked high across it. The SPI host raises
+//   command channel and the Uart task goes through a reset: the command
+//   path's u4_open() pulses it before it programs the port, task_up() pulses
+//   it with the TX pad parked high across it, and the Uart's init() starts
+//   from it; Uart::release() gates the block with no reset. The SPI host raises
 //   its requests around the engines and nowhere else (spi.hpp), and letter
 //   i reads every channel the image uses disabled and every request enable
 //   clear.
@@ -509,8 +509,8 @@ bool task_up(uint32_t rate) {
 }
 
 /// The transport's release(): the vector off, both engines stopped, the
-/// block's reset pulsed BEFORE its gate closes (usart.hpp, the release
-/// contract), the pads released.
+/// gate closed with no reset (usart.hpp, the release contract), the pads
+/// released.
 void task_down() {
     LinkPort::release();
     link_live = false;

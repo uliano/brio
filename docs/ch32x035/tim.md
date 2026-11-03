@@ -154,8 +154,9 @@ driver does with each:
 CH32V00x's TIM surface for the subset above:
 
 - `Tim<n>`, n = 1 or 2 (`Tim<3>` does not compile: chapter 13's block).
-  `init()` opens the gate and pulses the reset line, `release()` the
-  reverse; `remap(code)`, `remap()`, `column(code)`; `configure(TimConfig)`
+  `init()` opens the gate and pulses the reset line, `release()` stops the
+  counter and closes the gate with no reset
+  ([../design/dma.md](../design/dma.md), the release contract); `remap(code)`, `remap()`, `column(code)`; `configure(TimConfig)`
   and the time base's single verbs (`enable`, `count`, `set_count`,
   `prescaler`, `set_prescaler`, `period`, `set_period`, `repetition`,
   `set_repetition`, `one_pulse`, `direction`); `update()`; `flags()`, `flag()`,

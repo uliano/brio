@@ -1118,6 +1118,9 @@ public:
         return true;
     }
 
+    /// Hand the instance back: the engines' channels stopped, both vectors
+    /// off, PE cleared, the gate closed, the pads floating. Main context;
+    /// waits for nothing.
     static void release() {
         if constexpr (has_dma) {
             TxEngine::stop();
@@ -1126,15 +1129,12 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
-        // The reset line before the gate: on the CH32V203 and the CH32V303
-        // a request DMAEN raised is held through DMAEN and PE cleared and
-        // frozen on the channel's OR by the gate, stalling the next owner
-        // of channel 6 or 7 - USART2's here (docs/ch32vx03/dma.md). On this
-        // die this block's own request, raised by a read stalled over a
-        // dead channel, measured not to outlive its gate, where a timer's
-        // compare request does (docs/ch32v00x/i2c.md); the pulse, the
-        // vendor's own I2C_DeInit, leaves none either way.
-        S::reset();
+        // No reset here: the next init() starts from the reset line, before
+        // it configures and before it arms a channel (docs/design/dma.md,
+        // the release contract). This block's own request, raised by a read
+        // stalled over a dead channel, measured not to outlive its gate,
+        // where a timer's compare request does (docs/ch32v00x/i2c.md); the
+        // pulse at init() withdraws one either way.
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();
