@@ -972,8 +972,9 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  * read of three bytes or more, the transmit block's end and the STOP; one
  * or two host entries (the STOP, and TX_EMPTY when the commands did not
  * fit) for a shorter one. The transmit engine is claimed when the read
- * half starts; a channel another owner holds is not taken, and the pump
- * writes the commands instead (launch_dma()).
+ * half starts; a claim already standing on it - a program's own, the channel
+ * having no other owner (docs/design/dma.md, "The ownership rule") - is not
+ * overridden, and the pump writes the commands instead (launch_dma()).
  */
 template <DwApbI2cChip Chip, uint8_t n, typename Chip::Pins pins,
           typename TxEngine = DwApbI2cAbsentEngine, typename RxEngine = DwApbI2cAbsentEngine,
@@ -1268,7 +1269,7 @@ private:
                 // reach here: the last command's when the transmit engine
                 // poured the middle block, every command's after the
                 // first when it did not (a read of one or two bytes, or a
-                // transmit channel another owner held). The receive
+                // claim already standing on the transmit engine). The receive
                 // engine reports errors alone (armed quiet): its run ends
                 // with the last byte, a bit and a STOP before STOP_DET, so
                 // the STOP is the tenure's end here too.
@@ -1669,7 +1670,7 @@ private:
     /// True when the transmit engine took the middle block (dma_isr()
     /// writes the last entry), false when the pump writes the commands
     /// after the first: a read of one or two bytes has no middle block,
-    /// and a transmit channel claimed by another owner is not taken.
+    /// and a claim already standing on the transmit engine is not overridden.
     ///
     /// Neither launch can refuse what it is handed here, so neither
     /// result is read. The receive start refuses a null run, an empty
@@ -1729,7 +1730,7 @@ private:
 
     /// The tenure's channels stopped and bound again: the transmit
     /// engine's block abandoned only when this tenure poured one (a
-    /// channel another owner claimed is left to it).
+    /// claim that stood before it is left standing).
     static void put_engines_away() {
         if constexpr (has_engines) {
             S::dma_requests(false, false);

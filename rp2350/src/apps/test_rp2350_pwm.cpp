@@ -1286,6 +1286,78 @@ void ty_probe() {
 
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
+// r - A RELEASED REQUESTER, THE SAME OWNER AGAIN (the release contract,
+// docs/design/dma.md; no wire). Slice 3's wrap owns channel 6 for the whole image. A
+// slice's release is a stop, the block's reset being every slice's, so nothing is
+// pulsed at an init() and what is asked is what a stopped slice and a stopped
+// channel leave the same owner. The staging: the slice running at 100 kHz with the
+// channel bound on its wrap, untriggered, so that the wrap's pulses bank credits on
+// the channel; then the channel stopped and the slice stopped.
+//
+//   contract  the channel bound again and a run of eight started with the slice still
+//             stopped: nothing moves, whatever stood banked (printed), the trigger
+//             dropping it; the slice started, exactly eight at one a period;
+//   control   the slice left running: the same run moves at once, the detector seeing
+//             a live request.
+//
+// Bounds: a period is 10 us, so the 100 us of banking are ten pulses, and 20 us is two
+// wraps where a stale credit would move in under a microsecond; the run takes 80 us on
+// a wall of 70 to 100 (one period's phase either way, and the ruler's microsecond).
+void tr_released_requester() {
+    using S = PwmSlice<3>;
+    static uint32_t run[8];
+    uint8_t contract = 0;
+    uint8_t live = 0;
+    uint32_t banked_seen = 0;
+    const PwmSliceConfig ten_us{.divider = {1, 0}, .top = 1499};
+    for (uint8_t i = 0; i < 4u; ++i) {
+        for (uint8_t k = 0; k < 8u; ++k) {
+            run[k] = static_cast<uint32_t>(k) * 100u;
+        }
+        (void)S::configure(ten_us);
+        S::levels(0, 0);
+        S::counter(0);
+        S::enable(true);
+        Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
+        spin_us(100);
+        const uint32_t banked = DmaChannel<Stream::channel>::debug_credits();
+        Stream::stop();
+        S::enable(false);
+        Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
+        (void)Stream::start(run, 8u);
+        spin_us(20);
+        const uint32_t moved_stopped = 8u - DmaChannel<Stream::channel>::count();
+        const uint32_t t0 = us_now();
+        S::enable(true);
+        while (DmaChannel<Stream::channel>::busy() && us_now() - t0 < 2000u) {
+        }
+        const uint32_t took = us_now() - t0;
+        const uint32_t moved_running = 8u - DmaChannel<Stream::channel>::count();
+        (void)Stream::complete();
+        Stream::stop();
+        // The control: the slice still running under a fresh bind.
+        Stream::arm(S::cc_address(), S::dreq, false, DmaReport::errors);
+        (void)Stream::start(run, 8u);
+        spin_us(20);
+        const uint32_t moved_live = 8u - DmaChannel<Stream::channel>::count();
+        (void)Stream::complete();
+        Stream::stop();
+        S::enable(false);
+        S::levels(0, 0);
+        print(serial, "  banked ", banked, " credits on the bound channel; stopped, then bound again: ", moved_stopped,
+              " of 8 moved; the slice started: ", moved_running, " of 8 in ", took, " us; the control, running: ", moved_live,
+              " moved", crlf);
+        banked_seen = banked_seen > banked ? banked_seen : banked;
+        contract = static_cast<uint8_t>(contract + (moved_stopped == 0u && moved_running == 8u && took >= 70u && took <= 100u ? 1u : 0u));
+        live = static_cast<uint8_t>(live + (moved_live >= 1u ? 1u : 0u));
+    }
+    bench.verdict("A S1499PED SLICE AND A S1499PED CHANNEL LEAVE THE SAME OWNER NOTHING: credits banked and left, the trigger "
+                  "drops them - no item moves until the slice runs, then exactly its run at one a period, four of four",
+                  banked_seen >= 1u && contract == 4u);
+    bench.verdict("THE CONTROL: with the slice running the same run moves at once, four of four - the detector sees a request",
+                  live == 4u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_pwm - the PWM block (datasheet 12.5) on ", arch_name(),
           ": twelve slices, two interrupt lines; slice 6 B on GP13 -> GP15 (slice 7 B), slice 0 B "
@@ -1353,6 +1425,7 @@ int main() {
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless", ta_block);
+    bench.letter('r', "a released requester: the same owner initialized again", tr_released_requester);
     bench.letter('b', "the two interrupt lines", tb_lines);
     bench.letter('c', "the wire: frequency and duty", tc_wire, false);
     bench.letter('d', "phase-correct, inversion, the buffered level", td_modes, false);

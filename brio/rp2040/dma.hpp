@@ -37,7 +37,9 @@
  * the UART's and the SPI host's DMA bodies call it on a fault, so that
  * handler may spin for up to 100 000 polls. The channel verbs have no
  * guard of their own and refuse a BUSY channel; one channel has one
- * owner. service() is the DMA line's interrupt body, called from the
+ * owner for the whole image, one request one channel, checked when the
+ * program is compiled (docs/rp2040/dma.md, "One owner a channel").
+ * service() is the DMA line's interrupt body, called from the
  * program's handler. A transmit engine's claim() is a test-and-set that
  * masks nothing itself: the UART, the one transport that splits it from
  * the launch, takes it under its own guard (interrupts masked for those

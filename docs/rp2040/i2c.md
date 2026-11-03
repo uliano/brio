@@ -425,8 +425,8 @@ client finding below is measured from both sides. The cost figures are
   count and sum exact. `interrupt` at 64 bytes on the engined host
   touches no channel - no DMA line entry, the receive run and its
   channel's write address unchanged - in eight host entries. A 40-byte
-  read under `dma` with the transmit channel claimed by another owner
-  (the letter itself) completes exact, its commands the pump's in four
+  read under `dma` with the transmit engine already claimed
+  (by the letter itself) completes exact, its commands the pump's in four
   host entries, every byte the receive engine's. A write-then-read of
   6 + 16 under `dma` whose third written byte the client refuses - the
   read half already on the engines - is `i2c_nack_data`, two bytes
@@ -673,6 +673,16 @@ the general call, matching only the probe that follows, the third
 byte of six refused `i2c_nack_data`, the last written byte of a 2+4
 refused `i2c_nack_data` with no read half after it, the next tenure
 `i2c_ok` after each.
+- A RELEASED REQUESTER, THE SAME OWNER AGAIN (letter r, ten runs of four rounds,
+  the second chip serving): the host released the worst way, both DMA enables of IC_DMA_CR
+  set, its channels stopped, the transmit FIFO empty and so its request standing, the block
+  held in reset. Then `init()`: a channel bound on the transmit request, pouring into a cell
+  of RAM and not into the block, moves none of four in 20 us, and after `init()` again an
+  engined read of 16 bytes at 400 kHz is exact. THE CONTROL, the reset removed: the block
+  disabled and enabled with the enables left set, the same channel moves one item at once,
+  the request standing, and no more, a cell of RAM giving the block nothing to clear it with;
+  nothing of the control reaches the wire. That is the request a reset at `init()` withdraws
+  ([dma.md](dma.md)).
 
 ## Not covered yet
 

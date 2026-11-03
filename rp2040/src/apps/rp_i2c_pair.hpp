@@ -784,6 +784,107 @@ void tf_speeds() {
 }
 
 // =============================================================================
+// r - a released requester, the same owner again
+// =============================================================================
+//
+// The release contract (docs/design/dma.md): this instance owns its two channels
+// for the whole image, so what its block holds across a release can reach only this
+// instance, initialized again. The staging is the worst release: IC_DMA_CR's two
+// enables set, both channels stopped, the transmit FIFO empty and so its request
+// standing, and the block taken down with the enables left set.
+//
+//   contract  the block held in reset, this chip's gate, then the host's own
+//             init(): a channel bound on the transmit request, pouring into a cell
+//             of RAM and not into the block, moves nothing in 20 us, and after
+//             init() again one read of 16 bytes on the engines is exact;
+//   control   no reset: the block disabled and enabled again, the enables left
+//             set, the same channel on the same cell moves an item, the request
+//             standing and asking once (the block raises the next when the FIFO has
+//             taken this one, and a cell of RAM gives it nothing). That is the request
+//             a reset at init() withdraws. The cell keeps it off the bus: nothing of
+//             the control's reaches the wire.
+//
+// Bounds: the 20 us are 2500 cycles of the channel's turn at the slowest core, which
+// a standing request needs a dozen of; a read of 16 at 400 kHz takes about 400 us on a
+// 20 000 us limit. Four rounds.
+alignas(4) uint16_t released_cells[4] = {0x1111u, 0x2222u, 0x3333u, 0x4444u};
+volatile uint16_t released_sink = 0;
+
+/// What a channel on the transmit request moves, into a cell of RAM, in 20 us.
+uint8_t released_request_moves() {
+    DmaTx::arm(&released_sink, Raw::dreq_tx, false, DmaReport::errors);
+    (void)DmaTx::start(released_cells, 4u);
+    spin_us(20);
+    const uint8_t moved = static_cast<uint8_t>(4u - DmaChannel<DmaTx::channel>::count());
+    DmaTx::stop();
+    return moved;
+}
+
+void released_stage() {
+    (void)DmaHost::init(clock);
+    owner = Owner::none;
+    DmaTx::stop();
+    DmaRx::stop();
+    Raw::dma_requests(true, true);
+    spin_us(5);
+}
+
+void tr_released_requester() {
+    if (!need_peer()) {
+        return;
+    }
+    const twilink::Params a = serve_params(400, 0x2D);
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    const uint32_t s0 = us_now();
+    owner = Owner::none;
+    Host::release();
+    uint8_t after_reset = 0;
+    uint8_t exact = 0;
+    uint8_t held = 0;
+    uint16_t served = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        released_stage();
+        Raw::hold();
+        (void)DmaHost::init(clock);
+        const uint8_t moved_reset = released_request_moves();
+        (void)DmaHost::init(clock);
+        owner = Owner::dma_host;
+        for (uint8_t k = 0; k < 16u; ++k) {
+            rx_buf[k] = 0xEE;
+        }
+        const uint8_t st = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k, 20'000u,
+                                           I2cEngine::dma);
+        const uint8_t wrong = pattern_mismatches(rx_buf, 16, a.seed, served);
+        served = static_cast<uint16_t>(served + 16u);
+        owner = Owner::none;
+        released_stage();
+        (void)Raw::disable();
+        Raw::enable();
+        const uint8_t moved_held = released_request_moves();
+        Raw::dma_requests(false, false);
+        print(serial, "  the contract: the request's channel moved ", moved_reset, " of 4, then 16 bytes on the engines "
+              "status ", st, ", ", wrong, " wrong; the control, no reset: it moved ", moved_held, " of 4", crlf);
+        after_reset = static_cast<uint8_t>(after_reset + (moved_reset == 0u ? 1u : 0u));
+        exact = static_cast<uint8_t>(exact + (st == i2c_ok && wrong == 0u ? 1u : 0u));
+        held = static_cast<uint8_t>(held + (moved_held >= 1u ? 1u : 0u));
+    }
+    DmaHost::release();
+    host_ready();
+    outlast(a, s0);
+    twilink::Report r{};
+    const bool rep = peer_report(r);
+    bench.verdict("THE RESET AT init(): the host released with both DMA enables set, the gate closed, initialized again - "
+                  "no request stands on its channel, four of four, and its engined read is exact, four of four",
+                  after_reset == 4u && exact == 4u && rep);
+    bench.verdict("THE CONTROL, no reset: the block disabled and enabled with the enables left set, the request stands and "
+                  "the channel moves an item at once, four of four - the held request the reset withdraws",
+                  held == 4u);
+}
+
+// =============================================================================
 // g - the DMA engines
 // =============================================================================
 //
@@ -1012,8 +1113,8 @@ void tg_dma() {
     bench.verdict("interrupt, the default, at 64 bytes touches no channel: no DMA line entry, the receive run and "
                   "its channel's write address unchanged, four to ten host entries, byte-exact",
                   sti == i2c_ok && mi == 0u && lines_i == 0u && untouched && isr_i >= 4u && isr_i <= 10u);
-    // THE TRANSMIT CHANNEL HELD BY ANOTHER OWNER (this letter takes its
-    // claim): the read's commands are the pump's - sixteen at start(), then
+    // A CLAIM ALREADY STANDING ON THE TRANSMIT ENGINE (this letter takes it):
+    // the read's commands are the pump's - sixteen at start(), then
     // refills of eight or more on TX_EMPTY, two or three, the last carrying
     // STOP, then the STOP's own entry: three to four host entries, one spare
     // - and every byte the receive engine's.
@@ -1033,7 +1134,7 @@ void tg_dma() {
     print(serial, "  a 40-byte read under dma with the transmit channel held: status ", sc, ", the receive run ",
           cap_c, " (", moved_c, " moved), ", isr_c, " host entries, ", lines_c, " DMA line entries, ", mc40,
           " wrong", crlf);
-    bench.verdict("a transmit channel another owner holds is not taken: a 40-byte read under dma completes "
+    bench.verdict("a claim standing on the transmit engine is not overridden: a 40-byte read under dma completes "
                   "byte-exact, its commands the pump's (three to five host entries), every byte on the receive "
                   "engine, no DMA line entry, the holder's claim intact",
                   held && sc == i2c_ok && mc40 == 0u && cap_c == 40u && moved_c == 40u && lines_c == 0u &&

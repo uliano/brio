@@ -62,6 +62,7 @@ constexpr I2cPins bus_pins{.scl = 37, .sda = 36};
 using Client = I2cClient<0, bus_pins>;
 using Host = I2cHost<0, bus_pins>;
 using Raw = DwApbI2c<0>;
+using RefusalPlacement = InFlash;   // rp_twi_peer.hpp, refusal_end()
 using SdaPin = Pin<36>;
 using SclPin = Pin<37>;
 

@@ -123,6 +123,11 @@ from git runs it with `-c "set RESCUE 1"` before `target/rp2040.cfg`
 (the 0.12.0 release's script has no rescue branch), after which an
 ordinary `brio flash` programs the board again. Measured on a Pico.
 
+On the RP2350 the same symptom comes from reading a DMA register while that block
+is held in reset, and `brio flash`'s rescue recovers it. That trap and Hazard3's
+`riscv set_mem_access sysbus` are on the [RP2350 page](../rp2350/README.md),
+"Debugging".
+
 ## The UART bridge
 
 It carries 3 Mbaud byte-exact, host to board (measured with

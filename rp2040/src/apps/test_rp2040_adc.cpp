@@ -628,6 +628,78 @@ void th_under_force() {
     Adc::release();
 }
 
+// r - A RELEASED REQUESTER, THE SAME OWNER AGAIN (the release contract,
+// docs/design/dma.md; no wire). The converter owns channel 7 for the whole image, so
+// what its block holds across a release can reach only the converter, initialized
+// again. The staging is the worst release: the FIFO enabled with DREQ_EN set, the
+// channel stopped, one conversion of the temperature sensor standing in the FIFO, and
+// the converter disabled with DREQ_EN left set.
+//
+//   contract  the block held in reset, this chip's gate, then init() and the FIFO and
+//             DREQ_EN as before: the channel bound on the request and a run of eight
+//             started moves nothing while nothing converts, and then eight
+//             conversions give it its eight entries;
+//   control   no reset anywhere: the channel bound the same way, the converter still
+//             disabled with DREQ_EN set, moves the entry that stood, one of the eight.
+//
+// Bounds: the 20 us given a stale entry are 2500 cycles of the channel's turn; one
+// conversion is 2 us at 48 MHz (96 cycles), so eight are 16 us at the fastest and
+// 2000 us is a stall's budget. Four rounds.
+void adc_hold_a_request() {
+    (void)Adc::init(clock);
+    Adc::select(AdcInput::temperature);
+    Block::stop();
+    Adc::fifo({.enable = true, .dreq = true, .threshold = 1});
+    Adc::drain();
+    (void)Adc::read();
+    spin_us(5);
+    Adc::enable(false);
+}
+
+/// What the channel moves of a run of eight with nothing converting.
+uint32_t adc_moved_idle(uint16_t* run) {
+    Block::arm(Adc::fifo_address(), Adc::dreq, true, DmaReport::errors);
+    (void)Block::start(run, 8u);
+    spin_us(20);
+    return 8u - DmaChannel<Block::channel>::count();
+}
+
+void tr_released_requester() {
+    static uint16_t run[8];
+    uint8_t contract = 0;
+    uint8_t held = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        adc_hold_a_request();
+        Resets::hold(ResetBlock::adc);
+        (void)Adc::init(clock);
+        Adc::select(AdcInput::temperature);
+        Adc::fifo({.enable = true, .dreq = true, .threshold = 1});
+        const uint32_t moved_after_reset = adc_moved_idle(run);
+        Adc::start_many(true);
+        const uint32_t t0 = us_now();
+        while (!Block::idle() && us_now() - t0 < 2000u) {
+        }
+        (void)Adc::stop_many();
+        const uint32_t moved_after_block = 8u - DmaChannel<Block::channel>::count();
+        Block::stop();
+        Adc::release();
+        adc_hold_a_request();
+        const uint32_t moved_held = adc_moved_idle(run);
+        Block::stop();
+        Adc::release();
+        print(serial, "  the contract: idle ", moved_after_reset, " of 8 moved, then ", moved_after_block,
+              " of 8 under conversions; the control, no reset: ", moved_held, " moved with nothing converting", crlf);
+        contract = static_cast<uint8_t>(contract + (moved_after_reset == 0u && moved_after_block == 8u ? 1u : 0u));
+        held = static_cast<uint8_t>(held + (moved_held == 1u ? 1u : 0u));
+    }
+    bench.verdict("THE RESET AT init(): the converter released with DREQ_EN set and a sample standing, the gate closed, "
+                  "initialized again - its channel moves nothing until it converts, then exactly its run, four of four",
+                  contract == 4u);
+    bench.verdict("THE CONTROL, no reset anywhere: the channel moves the one sample that stood, the converter disabled with "
+                  "DREQ_EN set, four of four - the held request the reset withdraws",
+                  held == 4u);
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_adc - the RP2040 ADC (datasheet 4.9): the sensor, GP26..GP28 through their pulls, GP29 for "
           "the record; clk_sys=", SysClock::hz, " Hz", crlf);
@@ -697,6 +769,7 @@ int main() {
     bench.letter('f', "the FIFO: threshold, overflow, shift, the error flag", tf_fifo);
     bench.letter('g', "the sampler", tg_sampler);
     bench.letter('h', "the FIFO's underflow, the forced interrupt", th_under_force);
+    bench.letter('r', "a released requester: the same owner initialized again", tr_released_requester);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

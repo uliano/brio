@@ -10,6 +10,8 @@
 // g, A POLLED WAIT THAT RUNS OUT, and LETTER h, A DMA BLOCK THE BUS REFUSES: what
 // the host leaves after each and the next request with no recover() from the
 // program, on the same host, on the loop-back (below, above tg_stall and th_fault).
+// AND LETTER j, A REQUEST'S END AND THE ONE BUSY CHECK, and LETTER u, A RELEASED
+// REQUESTER, THE SAME OWNER AGAIN (at the end of this file).
 //
 // What the including suite states before it includes this file, inside its
 // own anonymous namespace with `using namespace brio` in force:
@@ -17,6 +19,7 @@
 //   SysClock, clock, serial, bench
 //   Host, DmaHost        SpiHost<0, {18, 19, 16}> without engines, and the
 //                        same with half-word engines reporting on DMA_IRQ_0
+//   HostTxEngine, HostRxEngine   those two engines
 //   CsPin                the loop-back's select, GP17
 //   DcPin                a D/C line, GP22
 //   SckPad               the host's clock pad, GP18, read as an input
@@ -803,7 +806,7 @@ bool stage_stall(bool stand) {
 /// A polled write of nine frames at /2 on 8-bit frames, stalled: the one shape
 /// that reads nothing as it goes, so what stands in the receive FIFO still
 /// stands when its budget runs out and the transmit FIFO fills. The budget is
-/// 200 000 turns a frame and one more, 2 000 000 turns.
+/// (9 + 2) frames at a 64-read share at /2, 704 reads of the status register.
 template <typename H>
 uint8_t stalled_write() {
     return xfer<H>(nullptr, 0, tx_buf, nullptr, 9, SpiMode::mode0, SpiClocks::div2, SpiDataSize::bits8, true);
@@ -905,7 +908,8 @@ bool run(const DmaHost::Request& one, const DmaHost::Request& two) {
 // taken down under the host (stage_stall()), so frames written to the transmit
 // FIFO stay there and the loop's flag never rises, which is a stall on silicon
 // with no clock tree touched, and one the block's reset cures. The budget is
-// 2 000 000 turns at some ten cycles a turn: under 200 ms by a margin, printed.
+// the request's frames and two more at their share, derived from the clocks
+// (brio/pl022/spi.hpp, budget_for()): under 200 ms by a wide margin, printed.
 // Judged, with no recover() anywhere in the letter: spi_stalled and never the
 // engines' code, the select released (the request drove it low and it reads
 // high), the block clean and enabled at the word applied - the frames that stood
@@ -962,8 +966,7 @@ void tg_stall() {
                   both_ways);
 
     // A command phase polled ahead of an engined data block: this request runs its
-    // command through the receive shape, whose budget is the command's one frame
-    // and one more, 400 000 turns.
+    // command through the receive shape, whose budget is the command's one frame.
     const bool stood_c = stage_stall<DmaHost>(false);
     cmd_buf[0] = 0x5A;
     const AsyncRun cmd = async_once<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode0, SpiClocks::div2);
@@ -1215,4 +1218,243 @@ void th_fault() {
                   queued_ok == 2u);
     spi0_owner = Spi0Owner::none;
     DmaHost::release();
+}
+
+// j - A REQUEST'S END, AND THE ONE BUSY CHECK (docs/design/spi-bus.md, "One busy
+// check, before anything moves" and "When a request ends, the wire has ended"). No
+// wire but the loop-back.
+//
+// THE BUSY CHECK: 64 frames at /128 on the engines, some 65 500 cycles, and over
+// them, each engine in turn, a request that would move everything if it were
+// let: another mode and rate, a command phase with its own D/C. Judged: start()
+// answers true with spi_rejected, the select still low and the D/C still high;
+// then the first request ends with spi_ok in status() (the refusal's code does not
+// survive it), exact, one DMA interrupt, and the mode and rate were never touched,
+// which the data's being exact says.
+//
+// THE END: a command phase that stalls - the block's enable taken down under the
+// host (stage_stall()) - polled with a data phase behind it, polled alone, and named
+// dma with a data phase behind it, which runs that command in the loop; on the host
+// with engines, and polled on the host with none. A command alone on the engines
+// whose buffer the bus refuses: a read of the hole, the D/C low when the fault comes,
+// spi_dma_fault in the DMA interrupt. Judged in each: the code, and the select high
+// and the D/C high when the request has answered, read at the pads' output
+// registers, and the next request exact. A stall of the vector's wait for BSY has no
+// staging (nothing stops the block's BSY with its receive channel finishing); it
+// ends through the same exit as the fault, finish_dma().
+template <typename H>
+typename H::Request plain_request(SpiEngine engine, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx,
+                                  uint16_t len, SpiMode mode, SpiClock rate) {
+    typename H::Request r{};
+    r.cs = CsPin::ref();
+    r.dc = DcPin::ref();
+    r.cmd = lend<Lease::reply>(cmd);
+    r.cmd_len = cmd_len;
+    r.tx = lend<Lease::reply>(tx);
+    r.rx = lend<Lease::reply>(rx);
+    r.len = len;
+    r.mode = mode;
+    r.clock = rate;
+    r.engine = engine;
+    return r;
+}
+
+/// One stalled command phase on a host brought up: true when it answered inside
+/// start() with spi_stalled and left both lines high.
+template <typename H>
+bool command_stall_ends_high(const char* name, SpiEngine engine, uint16_t data_frames) {
+    const bool down = stage_stall<H>(false);
+    cmd_buf[0] = 0x5A;
+    DcPin::set();
+    const typename H::Request r =
+        plain_request<H>(engine, cmd_buf, 1, tx_buf, data_frames != 0u ? rx_buf : nullptr, data_frames, SpiMode::mode0,
+                         SpiClocks::div2);
+    const bool inside = H::start(r);
+    const uint8_t st = H::status();
+    const bool dc_high = DcPin::read_out();
+    const bool cs_high = CsPin::read_out();
+    print(serial, "  ", name, ": inside start() ", inside ? "yes" : "NO", ", status ", st, ", D/C ",
+          dc_high ? "high" : "LOW", ", select ", cs_high ? "high" : "LOW", crlf);
+    return down && inside && st == spi_stalled && dc_high && cs_high;
+}
+
+void tj_request_end() {
+    (void)DcPin::output(true);
+    dma_host_ready();
+    DmaHost::loopback(true);
+    next_pattern(64, 0x2B);
+    cmd_buf[0] = 0xC5;
+    const DmaHost::Request first =
+        plain_request<DmaHost>(SpiEngine::dma, nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode3, SpiClocks::div128);
+    transfer_done = false;
+    dma_isr_entries = 0;
+    const bool on_engines = !DmaHost::start(first);
+    const bool cs_held = !CsPin::read_out();
+    uint8_t refused = 0;
+    for (const SpiEngine engine : {SpiEngine::polled, SpiEngine::dma}) {
+        const DmaHost::Request over =
+            plain_request<DmaHost>(engine, cmd_buf, 1, tx_buf + 128, nullptr, 8, SpiMode::mode0, SpiClocks::div2);
+        const bool inside = DmaHost::start(over);
+        if (inside && DmaHost::status() == spi_rejected && !CsPin::read_out() && DcPin::read_out()) {
+            ++refused;
+        }
+    }
+    const bool still_running = !transfer_done;
+    const uint32_t t0 = us_now();
+    while (!transfer_done && us_now() - t0 < 10'000u) {
+    }
+    const bool exact = same(tx_buf, rx_buf, 64);
+    print(serial, "  over 64 frames on the engines (still running ", still_running ? "yes" : "NO", "): ", refused,
+          " of 2 requests refused with the select and the D/C unmoved; the first ends status ", transfer_status, ", ",
+          dma_isr_entries, " DMA interrupts", exact ? ", exact" : ", NOT EXACT", crlf);
+    bench.verdict("THE ONE BUSY CHECK: a request over one on the engines, either engine, answers spi_rejected inside "
+                  "start() with the select and the D/C unmoved, and the one in flight ends spi_ok, exact, one interrupt",
+                  on_engines && cs_held && still_running && refused == 2u && transfer_done &&
+                      transfer_status == spi_ok && dma_isr_entries == 1u && exact);
+
+    uint8_t ended = 0;
+    ended = static_cast<uint8_t>(ended + (command_stall_ends_high<DmaHost>("a command polled ahead of 16 frames, stalled",
+                                                                           SpiEngine::polled, 16) ? 1u : 0u));
+    bool next = next_exact(false, 0x37);
+    ended = static_cast<uint8_t>(ended + (command_stall_ends_high<DmaHost>("a command polled alone, stalled",
+                                                                           SpiEngine::polled, 0) ? 1u : 0u));
+    next = next_exact(true, 0x3B) && next;
+    ended = static_cast<uint8_t>(ended + (command_stall_ends_high<DmaHost>("a command ahead of a block on the engines, stalled",
+                                                                           SpiEngine::dma, 16) ? 1u : 0u));
+    next = next_exact(true, 0x41) && next;
+    spi0_owner = Spi0Owner::none;
+    DmaHost::release();
+    host_ready();
+    Host::loopback(true);
+    ended = static_cast<uint8_t>(ended + (command_stall_ends_high<Host>("a command on the host with no engines, stalled",
+                                                                        SpiEngine::polled, 16) ? 1u : 0u));
+    Host::release();
+    bench.verdict("A COMMAND PHASE THAT STALLS LEAVES THE SELECT AND THE D/C HIGH: polled with data behind it, polled "
+                  "alone, ahead of a block on the engines, on a host with no engines; spi_stalled inside start(), the "
+                  "next request exact",
+                  ended == 4u && next);
+
+    dma_host_ready();
+    DmaHost::loopback(true);
+    DcPin::set();
+    const AsyncRun fault = async_once<DmaHost>(reinterpret_cast<const uint8_t*>(bus_hole), 4, nullptr, nullptr, 0,
+                                               SpiMode::mode3, SpiClocks::div128, SpiDataSize::bits8, DcPin::ref());
+    const bool dc_high = DcPin::read_out();
+    const bool cs_high = CsPin::read_out();
+    const bool fault_next = next_exact(true, 0x4F);
+    print(serial, "  a command alone on the engines, its buffer in the hole: status ", fault.status, ", D/C ",
+          dc_high ? "high" : "LOW", ", select ", cs_high ? "high" : "LOW", ", the next request ",
+          fault_next ? "exact" : "NOT EXACT", crlf);
+    bench.verdict("A COMMAND THE BUS REFUSES ON THE ENGINES LEAVES THE SELECT AND THE D/C HIGH: spi_dma_fault from the DMA "
+                  "interrupt, the next request exact",
+                  !fault.inside && fault.status == spi_dma_fault && dc_high && cs_high && fault_next);
+    spi0_owner = Spi0Owner::none;
+    DmaHost::release();
+    (void)DcPin::release();
+}
+
+// u - A RELEASED REQUESTER, THE SAME OWNER AGAIN (the release contract,
+// docs/design/dma.md; the loop-back, no wire). SPI0 owns channels 4 and 5 for the
+// whole image, so what its block holds across a release can reach only SPI0,
+// initialized again. The staging is the worst release: both DMA enables set, both
+// channels stopped, three frames written so that they stand in the receive FIFO
+// with its request raised, the transmit FIFO's room raising the other - and the block
+// taken down with the enables left set.
+//
+//   contract  the block held in reset, this chip's gate, then the host's own init()
+//             and one request of 32 frames on the engines: spi_ok, one interrupt,
+//             exact, both FIFOs clean after it;
+//   control   no reset anywhere: the block disabled, the enables left set, then the
+//             bring-up by hand, the two channels bound as init() binds them, and the
+//             same block. With the block disabled the bound channel moves nothing; with
+//             it enabled again the receive channel's first three items are the
+//             frames that stood: the request a reset at init() withdraws, the PL022
+//             keeping its FIFOs across a disable.
+//
+// Bounds: three frames at /16 are 384 cycles, under 4 us on either chip, and
+// wait_frames_landed() is given 1000 us; the block is 32 frames, 4096 cycles, and
+// 1000 us is its budget, a stalled channel the only thing that spends it. Four rounds.
+constexpr uint8_t stale_spi_frames = 3;
+
+void spi_hold_a_request() {
+    dma_host_ready();
+    spi0_owner = Spi0Owner::none;
+    DmaHost::prime(SpiMode::mode3, SpiClocks::div16);
+    DmaHost::loopback(true);
+    HostTxEngine::stop();
+    HostRxEngine::stop();
+    Pl022<0>::dma_requests(true, true);   // no channel bound: both requests stand
+    Pl022<0>::write_data(0xE1u);
+    Pl022<0>::write_data(0xE2u);
+    Pl022<0>::write_data(0xE3u);
+    (void)wait_frames_landed(1000u);
+}
+
+bool spi_reinit_exact() {
+    spi_hold_a_request();
+    Pl022<0>::hold();
+    dma_host_ready();
+    DmaHost::loopback(true);
+    next_pattern(32, 0x55);
+    const AsyncRun run = async_once<DmaHost>(nullptr, 0, tx_buf, rx_buf, 32, SpiMode::mode3, SpiClocks::div16);
+    const bool exact = same(tx_buf, rx_buf, 32);
+    const bool clean = fifos_clean();
+    print(serial, "  the contract: status ", run.status, ", ", run.dma_entries, " DMA interrupts, first ", hex(rx_buf[0]),
+          " (sent ", hex(tx_buf[0]), ")", exact ? ", exact" : ", NOT EXACT", ", both FIFOs clean ", clean ? "yes" : "NO", crlf);
+    spi0_owner = Spi0Owner::none;
+    DmaHost::release();
+    return !run.inside && run.status == spi_ok && run.dma_entries == 1u && exact && clean;
+}
+
+uint32_t spi_disabled_moved = 0;   ///< what the control's channel moved with the block disabled
+
+uint8_t spi_reinit_without_reset() {
+    spi_hold_a_request();
+    Pl022<0>::enable(false);   // the enables left set, the FIFOs kept, nothing held
+    next_pattern(32, 0x55);
+    HostRxEngine::arm(Pl022<0>::data_address(), Pl022<0>::dreq_rx, true, DmaReport::errors);
+    (void)HostRxEngine::start(rx_buf, 32);
+    HostTxEngine::arm(Pl022<0>::data_address(), Pl022<0>::dreq_tx, false, DmaReport::errors);
+    const uint32_t t_disabled = us_now();
+    while (us_now() - t_disabled < 20u) {
+    }
+    spi_disabled_moved = 32u - DmaChannel<HostRxEngine::channel>::count();
+    Pl022<0>::enable(true);
+    (void)HostTxEngine::start(tx_buf, 32);
+    const uint32_t t0 = us_now();
+    while (!HostRxEngine::idle() && us_now() - t0 < 1000u) {
+    }
+    uint8_t stale = 0;
+    while (stale < stale_spi_frames && rx_buf[stale] == static_cast<uint8_t>(0xE1u + stale)) {
+        ++stale;
+    }
+    print(serial, "  the control: disabled, the receive channel moved ", spi_disabled_moved, "; enabled, first ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]),
+          " (the stale frames are E1 E2 E3, the block starts ", hex(tx_buf[0]), "): ", stale, " stale", crlf);
+    (void)HostTxEngine::complete();
+    HostTxEngine::stop();
+    HostRxEngine::stop();
+    Pl022<0>::dma_requests(false, false);
+    Pl022<0>::enable(false);
+    Pl022<0>::hold();
+    return stale;
+}
+
+void tu_released_requester() {
+    uint8_t contract = 0;
+    uint8_t held = 0;
+    uint8_t withdrawn = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        contract = static_cast<uint8_t>(contract + (spi_reinit_exact() ? 1u : 0u));
+        held = static_cast<uint8_t>(held + (spi_reinit_without_reset() == stale_spi_frames ? 1u : 0u));
+        withdrawn = static_cast<uint8_t>(withdrawn + (spi_disabled_moved == 0u ? 1u : 0u));
+    }
+    bench.verdict("THE RESET AT init(): SPI0 released with both DMA enables set and frames standing, the gate closed, "
+                  "initialized again - its request is exact, one interrupt, no stale frame, four of four",
+                  contract == 4u);
+    bench.verdict("THE CONTROL, no reset anywhere: the frames that stood are the receive channel's first three items, "
+                  "four of four - the held request the reset withdraws",
+                  held == 4u);
+    bench.verdict("a disabled PL022 raises nothing: with the enables left set the bound channel moves nothing until the "
+                  "block is enabled, four of four",
+                  withdrawn == 4u);
 }

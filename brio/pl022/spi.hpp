@@ -99,14 +99,17 @@
  *    SpiEngine::polled start() runs the whole transaction in an explicit
  *    loop before it returns, at any length and on a host with engines
  *    too, so it needs no interrupt vector: it waits for every frame,
- *    bounded by one budget for the whole transaction, with interrupts left
- *    on (no handler that holds the loop off can overrun it, below), and
- *    spends the request's cs_setup_us in the family's busy-wait. Under
+ *    bounded by one budget for the whole transaction (budget_for(), a time
+ *    derived from the clocks), with interrupts left on (no handler that holds
+ *    the loop off can overrun it, below), and spends the request's
+ *    cs_setup_us in the family's busy-wait. Under
  *    SpiEngine::dma the DMA engines run it, at any length: start() arms them
  *    and returns false, and dma_isr() ends it. A dma request is refused at
  *    once (spi_rejected, nothing on the wire) on a host with no engines
  *    bound and when the engines cannot carry it, and a command phase ahead
  *    of its data phase runs in the loop first. Pl022Host below has the rules.
+ *    Either engine is refused the same way while a request of this host is
+ *    still on the engines: the one busy check, before anything moves.
  *  - dma_isr() is the body of the DMA line the engines report on, the
  *    host's one interrupt body: the program's handler for that line calls
  *    it and nothing else does. It returns true when the transaction has
@@ -236,16 +239,22 @@
  * every mode. Both measured on both RP chips, the SCK pad read right after
  * each end (the suites' letter t). So with SPH = 0 the end waits for BSY, once
  * a phase and never a frame: in the polled loop's tail, on the request's
- * budget, and in the DMA line's body, on a bound counted in turns of the wait,
- * as many as one SCK period has core cycles at the rate in force and a margin
- * (wire_end_for()), whose running out ends the request spi_stalled, the select
- * released and the block's reset owed. A turn takes several core cycles, so
- * the bound outlasts the period it covers. With SPH = 1
+ * budget, and in the DMA line's body, on a bound derived from the clocks
+ * whenever a rate is applied (wire_end_for()): at least one SCK period and the
+ * synchronizers' few SSPCLK cycles, in reads of SSPSR of at least a core cycle
+ * each. Its running out ends the request spi_stalled, the select and the D/C
+ * released and the block's reset owed. With SPH = 1
  * nothing waits. The vector's wait holds every other interrupt off: up to one
  * SCK period less the vector's own entry, and a single read of SSPSR from the
  * rate at which that entry outlasts it (each family's document has the
  * figures). A command phase ends the same way, so D/C flips after the
  * command's last edge.
+ *
+ * AT ITS END, OK OR FAILED, A REQUEST LEAVES THE SELECT HIGH AND THE D/C HIGH
+ * (docs/design/spi-bus.md), a null one of either being nobody's to raise: a
+ * stall in a command phase, polled or ahead of a block on the engines, and a bus
+ * error or a stall on the engines raise the D/C as a clean end does. Only the
+ * failed paths pay the store; a clean request has raised it already.
  *
  * After a stall or a bus error the next request starts on a clean block,
  * whoever called it, and the program calls nothing: this type does it
@@ -255,8 +264,8 @@
  * released first and then the block reset and reconfigured to the state
  * applied. A bus error on a channel answers spi_dma_fault from the DMA line:
  * the interrupt decides and does not work, so it drops the requests, puts
- * the channels away, releases the select and leaves the reset owed, and the
- * next start() pays it before anything else. prime() pays it too: a caller
+ * the channels away, releases the select and the D/C and leaves the reset owed,
+ * and the next start() pays it before anything else. prime() pays it too: a caller
  * that frames the select by hand primes, lowers the select and only then
  * calls start(), and a reset under a low select would clock what stood in the
  * FIFOs, and in modes 2 and 3 move SCK, in front of a device listening. Until
@@ -854,9 +863,14 @@ constexpr bool pl022_engine_claimed() {
  *    request as a polled one ends (true, spi_stalled); a command with no data
  *    phase rides the engines as the whole request.
  *
- * A refusal answers true at once with spi_rejected in status(), before the
- * block, the select or the D/C is touched, so nothing reaches the wire. Which
- * engine costs the core less at which length is measured and stated in each
+ * THE ONE BUSY CHECK, first in start(), whichever engine a request names: a
+ * request of this host still on the engines refuses the new one, spi_rejected,
+ * and the request in flight goes on untouched. The arbiter never starts a request
+ * over one in flight, so only a program that drives the host directly meets it.
+ * The channels are this host's alone (docs/design/dma.md, "The ownership rule"),
+ * so no other owner is a case. A refusal answers true at once with spi_rejected in
+ * status(), before the block, the select or the D/C is touched, so nothing reaches
+ * the wire. Which engine costs the core less at which length is measured and stated in each
  * family's document; nothing here reads it.
  */
 template <Pl022Chip Chip, uint8_t n, typename Chip::Pins pins, typename TxEngine, typename RxEngine,
@@ -1047,8 +1061,8 @@ public:
 
     /// The reference rate and the core rate changed. A Request's `clock`
     /// is a DIVISION of SSPCLK and scales by itself; what is recomputed
-    /// is the ceiling, the cs_setup timing and the vector's bound on the
-    /// shifter's end. The bus must be idle.
+    /// is the ceiling, the cs_setup timing and the two bounds on a wait
+    /// (wire_end_for()). The bus must be idle.
     static void rebase(uint32_t pclk_hz, uint32_t sys_hz) {
         pclk_hz_ = pclk_hz;
         ceiling_ = ceiling_hz_ != 0u ? spi_clock_for(pclk_hz, ceiling_hz_) : std::optional<SpiClock>{};
@@ -1086,12 +1100,12 @@ public:
     /// The request is LENT for the call: nothing of it is kept but, on the
     /// engines, its two pins (the file header). A polled request, and a
     /// command phase ahead of a data phase on the engines, waits here in the
-    /// explicit loop, bounded by one budget and needing no vector; when
-    /// start() answers true the wire has ended (the file header). A budget
-    /// that runs out ends the transaction with spi_stalled in status(), the select
-    /// released and then the block reset and reconfigured (the file header's
-    /// paragraph on a stall and a bus error), so nothing is owed by the
-    /// program. A reset a bus error left owed is paid here first, whichever
+    /// explicit loop, bounded by one budget (budget_for()) and needing no
+    /// vector; when start() answers true the wire has ended (the file header). A
+    /// budget that runs out ends the transaction with spi_stalled in status(), the
+    /// select and the D/C released and then the block reset and reconfigured (the
+    /// file header's paragraph on a stall and a bus error), so nothing is owed by
+    /// the program. A reset a bus error left owed is paid here first, whichever
     /// way the request runs. The reset's one wait is the family's for the
     /// block to come out of it, and it lies in the flash under either
     /// placement.
@@ -1103,12 +1117,12 @@ public:
     /// report on, and from nowhere else. The receive channel's completion
     /// ends the transaction: in modes 0 and 2 it waits for BSY's fall (the file
     /// header: up to one SCK period less the vector's own entry, with every
-    /// other interrupt held off meanwhile, on a bound counted in turns
+    /// other interrupt held off meanwhile, on a bound derived from the clocks
     /// (wire_end_for()), and spi_stalled with the reset owed if the bound runs
-    /// out), then the requests go down and the select is
+    /// out), then the requests go down and the select and the D/C are
     /// released. A bus error on either channel ends it with spi_dma_fault at
     /// once, with no wait: the requests down, the channels put away and the
-    /// select released; the block's reset is left to the next start(), and
+    /// select and the D/C released; the block's reset is left to the next start(), and
     /// nothing here disables or configures the block (putting a channel away
     /// is the family DMA's abort, its own bounded spin, which the channel's bus
     /// error makes the short case). The transmit channel reports a bus error
@@ -1129,8 +1143,8 @@ public:
     /// start() that answered true.
     static uint8_t status() { return status_; }
 
-    /// Put the engine back where start() is legal: the select released
-    /// first, the engines put away and re-claimed, the block reset and
+    /// Put the engine back where start() is legal: the select and the D/C
+    /// released first, the engines put away and re-claimed, the block reset and
     /// reconfigured to the applied state, false when it did not come back.
     /// The timed arbiter calls it on a transaction that never answered, on
     /// nothing else, and a program may with the bus idle; neither a stall
@@ -1138,6 +1152,7 @@ public:
     /// after both.
     static bool recover() {
         tenure_cs_.set();
+        tenure_dc_.set();
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
@@ -1177,6 +1192,15 @@ private:
     /// phase's, and ONE launch of the engines, so the flattened body carries one
     /// copy of each.
     [[gnu::always_inline]] static bool start_body(const Request& r) {
+        // THE ONE BUSY CHECK (the class comment), before anything moves. It is
+        // this host's own flag and the interrupt that clears it is the only
+        // other party: one load and a branch a request, on a host with engines.
+        if constexpr (has_dma) {
+            if (dma_active_) [[unlikely]] {
+                status_ = spi_rejected;
+                return true;
+            }
+        }
         // 32 bits: cmd_len + len reaches 65790, and a 16-bit sum of 65536 would
         // read as an empty request and answer spi_ok with nothing on the wire.
         const uint32_t total = static_cast<uint32_t>(r.cmd_len) + r.len;
@@ -1216,7 +1240,7 @@ private:
         // data phase on the engines. No flush of the receive FIFO here: a
         // transaction takes back every frame it wrote, and a stall or a bus
         // error ends in the block's reset.
-        uint32_t budget = spin_budget(engines ? static_cast<uint32_t>(r.cmd_len) : total);
+        uint32_t budget = budget_for(engines ? static_cast<uint32_t>(r.cmd_len) : total);
         bool data = !has_cmd;
         const uint8_t* out = data ? r.tx.get() : r.cmd.get();
         uint8_t* in = data ? r.rx.get() : nullptr;
@@ -1250,7 +1274,7 @@ private:
         // modes 2 and 3, and the device has seen the transaction end by then.
         r.cs.set();
         if (!ok) {
-            stalled();
+            stalled(r.dc);
         }
         return true;
     }
@@ -1284,8 +1308,8 @@ private:
     /// of the frame. False when the bound ran out: a block that stopped clocking
     /// with BSY up.
     [[gnu::always_inline]] static bool shifter_stopped() {
-        uint32_t turns = wire_end_turns_;
-        if (turns == 0u) {
+        uint32_t reads = wire_end_reads_;
+        if (reads == 0u) {
             return true;
         }
         Regs& regs = S::regs();
@@ -1293,7 +1317,7 @@ private:
             if ((regs.SSPSR & SpiFlag::busy) == 0u) {
                 return true;
             }
-        } while (--turns != 0u);
+        } while (--reads != 0u);
         return false;
     }
 
@@ -1372,16 +1396,16 @@ private:
         }
     }
 
-    /// One exit for a tenure on the engines: the requests down, a failed
-    /// block put away, D/C where a polled request leaves it, the select
-    /// released. A failed one leaves the block's reset owed to the next start():
+    /// One exit for a tenure on the engines, the one store of the status the
+    /// request's reply reads: the requests down, a failed block put away, the D/C
+    /// high and the select released, ok or failed. A failed one leaves the block's reset owed to the next start():
     /// this is the interrupt, which decides and does not work, and the frames
     /// still in the FIFOs go with that reset whenever it comes - one landing
     /// here behind a drain would not.
     static void finish_dma(uint8_t st) {
         S::dma_requests(false, false);
+        status_ = st;   // a refusal over this request wrote status_ in the meantime
         if (st != spi_ok) {
-            status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
             arm_rx_engine();
@@ -1389,8 +1413,8 @@ private:
         } else {
             // The receive block completing is proof the transmit one did.
             (void)TxEngine::complete();
-            tenure_dc_.set();
         }
+        tenure_dc_.set();
         dma_active_ = false;
         tenure_cs_.set();
     }
@@ -1454,27 +1478,44 @@ private:
         return q > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : static_cast<uint32_t>(q);
     }
 
-    /// The bound of the vector's wait at the configuration in force, in turns of
-    /// the wait, kept beside the control word and never computed in the interrupt:
-    /// zero with SPH = 1, where nothing is waited for, and otherwise one turn for
-    /// each core cycle of one SCK period, and a margin. BSY falls one SCK period
-    /// after the last frame reached the receive FIFO (the file header). A turn is
-    /// a load of SSPSR, its test, the count and the branch back, more than one core
-    /// cycle on every core, so the bound outlasts the period at any rate - by as
-    /// many times as a turn has cycles - and a block still clocking is never cut
-    /// short; the margin, 64 turns, covers the block's synchronization of BSY to
-    /// the core's clock, a few SSPCLK cycles.
+    /// THE BOUNDS, derived from the two clocks whenever a rate is applied (init(),
+    /// rebase(), a change of mode, rate or width) and read and never computed where
+    /// they are spent; a count of reads of SSPSR, which take at least a core cycle
+    /// each, so a bound is a time no shorter than the one it covers on any core and
+    /// whatever the compiler emitted, and never a number of a loop's turns chosen by
+    /// hand. A read of the block's status takes some ten core cycles in the loops as
+    /// compiled on both RP chips (letter g of their suites times one), so a bound
+    /// that runs out spends up to about ten times its figure below.
+    ///
+    /// The vector's wait, zero with SPH = 1 where nothing is waited for: one SCK
+    /// period, by which BSY falls after the last frame reached the receive FIFO
+    /// (the file header), and the eight SSPCLK cycles allowed for the block's
+    /// synchronization of BSY to the core's clock, in core cycles: at clk_peri = clk_sys
+    /// a time of (divisor + 8) core cycles at the least. A block still clocking is
+    /// never cut short.
+    ///
+    /// The polled loop's budget, as a shift (budget_for()): a frame's share is the
+    /// power of two at or above twice the frame's own time on the wire, its bits
+    /// and the two SCK periods the block may idle between frames with SPH = 0, in
+    /// core cycles: at clk_peri = clk_sys between two and four times (bits + 2) x
+    /// divisor core cycles, read at the least.
     static void wire_end_for() {
+        const uint64_t q8 = core_per_sspclk_q8_;
+        const uint64_t divisor = applied_.clock.divisor();
         if constexpr (has_engines) {
             if ((applied_word_ & SpiControl0::cpha) != 0u) {
-                wire_end_turns_ = 0;
-                return;
+                wire_end_reads_ = 0;
+            } else {
+                const uint64_t cycles = ((divisor + bsy_sync_sspclk) * q8) >> 8;
+                wire_end_reads_ = cycles > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : static_cast<uint32_t>(cycles);
             }
-            const uint64_t cycles = (static_cast<uint64_t>(applied_.clock.divisor()) * core_per_sspclk_q8_) >> 8;
-            wire_end_turns_ = cycles + wire_end_margin > 0xFFFF'FFFFull
-                                  ? 0xFFFF'FFFFu
-                                  : static_cast<uint32_t>(cycles + wire_end_margin);
         }
+        const uint64_t share = (2u * (static_cast<uint64_t>(applied_.bits) + 2u) * divisor * q8) >> 8;
+        uint8_t shift = 0;
+        while (shift < 31u && (uint64_t{1} << shift) < share) {
+            ++shift;
+        }
+        budget_shift_ = shift;
     }
 
     // ---- the frames ---------------------------------------------------------
@@ -1507,15 +1548,19 @@ private:
         }
     }
 
-    /// The spin budget of a polled transaction, in turns of whichever wait
-    /// the loop is in: 200 000 per frame and 200 000 more, saturated. A turn
-    /// is a status read across the peripheral bus, its test, the count and
-    /// the branch back, ten to twelve core cycles on the RP cores (each
-    /// family's document times a stall), so a frame's share is some two
-    /// million core cycles: about twice the slowest frame, 65024 x 16 SSPCLK
-    /// cycles, where SSPCLK runs at the core's rate, as on both RP chips.
-    static uint32_t spin_budget(uint32_t frames) {
-        return frames < 21'000u ? 200'000u * (frames + 1u) : 0xFFFF'FFFFu;
+    /// THE BOUND OF A POLLED TRANSACTION, one budget of reads of SSPSR whichever
+    /// wait the loop is in, shared by all its frames: each frame's share and two more
+    /// (the share is wire_end_for()'s, derived from the clocks at the rate applied),
+    /// so a budget that runs out has read for at least twice the request's whole time
+    /// on the wire, as core cycles, and by the read's ten or so core cycles some
+    /// twenty-five to sixty times it, the most on a request of a few frames. A handler that holds the loop off spends none of it.
+    /// One load, a shift and a compare a request, nothing a frame. It saturates at
+    /// 2^32 - 1 reads, where a request's wire time reaches a quarter of that in core
+    /// cycles and more: at the reads' own ten cycles a request longer than about
+    /// 4.5 minutes on the wire at 125 MHz could stall with its block still clocking.
+    [[gnu::always_inline]] static uint32_t budget_for(uint32_t frames) {
+        const uint8_t shift = budget_shift_;
+        return frames < (0xFFFF'FFFFu >> shift) - 2u ? (frames + 2u) << shift : 0xFFFF'FFFFu;
     }
 
     /// THE POLLED LOOP, THE RECEIVE SHAPE (the file header): `count`
@@ -1660,9 +1705,10 @@ private:
         return cfg;
     }
 
-    /// After a polled wait ran out, the select released: spi_stalled, and
-    /// the next request starts on a clean block.
-    [[gnu::noinline, gnu::cold]] static void stalled() {
+    /// After a polled wait ran out, the select released: the D/C up as at every
+    /// end, spi_stalled, and the next request starts on a clean block.
+    [[gnu::noinline, gnu::cold]] static void stalled(typename Chip::PinRef dc) {
+        dc.set();
         status_ = spi_stalled;
         (void)reset_block();
     }
@@ -1686,10 +1732,9 @@ private:
 
     // ---- the state ----------------------------------------------------------
 
-    /// The margin of the vector's bound over one SCK period, in turns
-    /// (wire_end_for()).
-    static constexpr uint32_t wire_end_margin = 64u;
-
+    /// What the vector's bound allows over one SCK period for the block's
+    /// synchronization of BSY to the core's clock, in SSPCLK cycles (wire_end_for()).
+    static constexpr uint32_t bsy_sync_sspclk = 8u;
 
     /// The two pins of the request on the engines, for its end (finish_dma()).
     static inline typename Chip::PinRef tenure_cs_{};
@@ -1702,9 +1747,10 @@ private:
     static inline volatile bool reset_owed_ = false;
     /// SSPCLK's cycle in the core's, in 256ths (rebase()).
     static inline uint32_t core_per_sspclk_q8_ = 256u;
-    /// The vector's bound on the shifter's end at the rate in force
-    /// (wire_end_for()).
-    static inline uint32_t wire_end_turns_ = 0;
+    /// The vector's bound on the shifter's end at the rate in force, in reads
+    /// of SSPSR, and a frame's share of a polled budget as a shift (wire_end_for()).
+    static inline uint32_t wire_end_reads_ = 0;
+    static inline uint8_t budget_shift_ = 0;
     // One cell each serves both beats: a byte access at a half-word's
     // address is its low byte on these little-endian cores. THE DUMMY
     // LIVES IN RAM, never as a constant: the transmit engine reads it once

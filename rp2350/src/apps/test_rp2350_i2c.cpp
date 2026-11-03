@@ -56,6 +56,9 @@
 //      `interrupt` at 64 bytes touching no channel, the transmit channel
 //      held by another owner, the fault path, the bursts, and a data
 //      NACK with the read half's engines launched
+//   r  A RELEASED REQUESTER, THE SAME OWNER AGAIN: the host released with its DMA
+//      enables set, initialized again, no request standing and one engined read
+//      exact - and the control with no reset, the channel moving at once
 //   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
 //      rejection, both votes, and THE TIMED BUS - the peer holding SCL -
 //      answered by the arbiter's per-bus timeout
@@ -351,6 +354,7 @@ int main() {
     bench.letter('e', "the vocabulary on the wire, the stretch priced", guarded<bench, clock, te_vocabulary>);
     bench.letter('f', "the three speeds, measured", guarded<bench, clock, tf_speeds>);
     bench.letter('g', "the DMA engines", guarded<bench, clock, tg_dma>);
+    bench.letter('r', "a released requester: the same owner initialized again", guarded<bench, clock, tr_released_requester>);
     bench.letter('h', "the kernel: I2cBus over I2cHost, the timed bus", guarded<bench, clock, th_kernel>);
     bench.letter('i', "the stuck bus", guarded<bench, clock, ti_unstick>);
     bench.letter('j', "the pads and the isolation latch, above GP31", tj_pads);

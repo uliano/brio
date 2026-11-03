@@ -405,23 +405,29 @@ struct Xip {
     /// Why it is built this way, three statements kept apart:
     ///
     ///  - Measured on the RP2040 B2: with this routine in the flash, a
-    ///    flush left one word of the cache's data memory that the next fill
-    ///    of the same set did not overwrite - the line filled after it held
-    ///    the routine's own `bx lr; nop` word in place of its own, at the
-    ///    same word position - and a core executing that line returned
-    ///    through a stale link register (a HardFault, or the bootrom's
-    ///    fault loop). The same program with the routine as it is here ran
-    ///    ten runs of ten to its end on two images, no stale line left.
-    ///  - Inferred, not established: a line fill started by the routine's
-    ///    own fetch, still in flight when FLUSH is written, keeps that word
-    ///    in its slot. From this inference come the SRAM placement, the
-    ///    read through the bypass alias - taken to complete only after any
-    ///    fill under way has - and the mask over the read and the write,
-    ///    so that no handler fetched from the flash starts a fill between
-    ///    them. From it too comes the duty above: a fill another master
-    ///    starts is the same hazard, and it is not measured. Synthetic
+    ///    flush left one line of the flash whose word 0 read wrong through
+    ///    the cached alias, right through the bypass one: the routine's own
+    ///    `bx lr; nop` word, in that line's set, and a core executing it
+    ///    returned through a stale link register (a HardFault, or the
+    ///    bootrom's fault loop). In that state the debugger read the slot: its
+    ///    data was the routine's whole line, consistent, the faulting line's
+    ///    word 0 hit and its word 1 missed, and the routine's own line missed
+    ///    on both words. This cache fills one word per miss, so a slot holding
+    ///    two addresses' words is its normal state and proves nothing. The same
+    ///    program with the routine as it is here ran ten runs of ten to its
+    ///    end on two images, no such line left.
+    ///  - Inferred, not established, since no tag memory can be read: the
+    ///    defect is in the cache's bookkeeping and not in its data, the tag
+    ///    side serving that word 0 for the wrong address, and a line fill
+    ///    started by the routine's own fetch, still in flight when FLUSH is
+    ///    written, is what leaves it so. From this inference come the SRAM
+    ///    placement, the read through the bypass alias - taken to complete
+    ///    only after any fill under way has - and the mask over the read and
+    ///    the write, so that no handler fetched from the flash starts a fill
+    ///    between them. From it too comes the duty above: a fill another
+    ///    master starts is the same hazard, and it is not measured. Synthetic
     ///    probes that flush from the flash and refill the set did not
-    ///    reproduce the stale word outside the bench's own sequence.
+    ///    reproduce it outside the bench's own sequence.
     ///  - The datasheet: 2.6.3.2 calls a flush while another master reads
     ///    the flash (the other core executing from it) a safe operation,
     ///    that master stalled until the flush ends, and its errata

@@ -366,15 +366,16 @@ extern "C" void isr_uart0() {
   10016 to 10663 cycles at 115200 and 10000 to 10183 at 1 Mbaud - 39 to
   42 a byte, moving between runs of one image with the XIP cache; the
   receive engine 1179 to 1742 cycles for the same 256, two completions.
-  The edge from the burst's last stop bit (BUSY falling): the time-out's
-  3.2 frames at 115200 (3.15 to 3.18); at 1 Mbaud the burst arrives on
-  ONE edge, which the letter reads between 1.16 and 0.07 frames before
-  BUSY falls - the stamp of that fall is taken by the loop that drains
-  the ring, so it can come late (not dissected). Under the engine
+  The last edge of a burst of 17, from its last stop bit (BUSY falling,
+  stamped by a loop that does nothing else and read within 119 cycles,
+  the consumer draining only after it): the time-out's 3.18 to 3.19 frames
+  at 115200 and 3.31 to 3.37 at 1 Mbaud, two edges in each of ten runs, the
+  first at the receive level and the last the seventeenth byte's time-out,
+  32 bit periods and the vector's way. Under the engine
   `UARTRIS.RTRIS` never rose (17 bytes and ten frames of silence: the
   FIFO empty, every byte moved), so the engine's burst edge is its
-  owner's poll - 0.2 to 10.2 frames at 115200 and 6.6 to 55 at 1 Mbaud
-  on a 1 ms tick.
+  owner's poll - 0.62 to 10.5 frames at 115200 and 41.7 to 98.3 at 1 Mbaud
+  on a 1 ms tick, a poll that fits the tick's period at each rate.
 - THE MASKED WINDOW OF `harvest()` (the same letter, the ruler read
   around the one call, best of 8; the ruler's own `stopwatch` floor, 41
   cycles, is inside each figure): 151 cycles with nothing landed - the
@@ -434,13 +435,6 @@ Implemented but not bench-verified, each with what would measure it:
   STM32F4 USART page](../stm32f4/usart.md), letter h); a letter that
   writes a run with interrupts masked, reads the room under the mask and
   the edge after the wire time would measure them here.
-- Where a burst of 17 at 1 Mbaud is told: letter u reads its one edge
-  between 1.16 and 0.07 frames before BUSY falls, where the M33 and
-  Hazard3 read 3.26 frames after on the same source and a lone byte's
-  time-out is 32 bit periods from its stop bit at every rung (letter c);
-  the stamp of BUSY's fall shares its loop with the drain, so the reading
-  may be the instrument's. The edge and the last stop bit timed against
-  the RX pad would place each one.
 - The 7 to 19 us from a masked time-out's line unmasked to the byte in
   the program's hands (letter c), some 900 to 2400 cycles where the
   receive path costs 39 to 42 a byte in a burst: the vector's entry and the

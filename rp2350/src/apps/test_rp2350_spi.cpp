@@ -90,6 +90,12 @@
 //      spi_dma_fault, the select released, the reset paid by the next
 //      start(), that request exact with no recover(), directly and queued
 //      in SpiBus
+//   j  A REQUEST'S END AND THE ONE BUSY CHECK (rp2040/src/apps/rp_spi_async.hpp): a request
+//      over one on the engines refused with nothing moved; a command phase that
+//      stalls or faults leaves the select and the D/C high
+//   u  A RELEASED REQUESTER, THE SAME OWNER AGAIN (rp2040/src/apps/rp_spi_async.hpp): SPI0 released with
+//      its DMA enables set and frames standing, initialized again, one request
+//      exact - and the control with no reset anywhere
 //   n  THE PEER: ident (kind 0x08, on its crystal), ten pings, and the
 //      dark listener woken by nothing
 //   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
@@ -164,7 +170,9 @@ TestBench<Serial, 19> bench;
 // no wire is on those pads.
 constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
 using Host = SpiHost<0, host_pins>;
-using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
+using HostTxEngine = DmaTxEngine<4, uint16_t>;
+using HostRxEngine = DmaRxEngine<5, uint16_t>;
+using DmaHost = SpiHost<0, host_pins, HostTxEngine, HostRxEngine>;
 using CsPin = Pin<17>;
 using DcPin = Pin<22>;
 using SckPad = Pin<host_pins.sck>;
@@ -922,6 +930,8 @@ int main() {
     bench.letter('t', "when a request ends, the wire has ended: the SCK pad read", tt_wire_end);
     bench.letter('g', "a polled wait that runs out: spi_stalled, the next request clean", tg_stall);
     bench.letter('h', "a DMA block the bus refuses: spi_dma_fault, the next request clean", th_fault);
+    bench.letter('j', "a request's end and the one busy check: the D/C and the select after a stall and a fault", tj_request_end);
+    bench.letter('u', "a released requester: the same owner initialized again", tu_released_requester);
     // The two-board letters drive link pads: each behind the partner-rail
     // guard (pair_power.hpp).
     bench.letter('n', "the peer: ident, the command channel, the dark listener",

@@ -118,8 +118,16 @@ has the two). `SpiEngine::polled` is an explicit loop inside `start()`, at any
 length and whether engines are bound or not, so it needs no DMA and no
 interrupt vector; the arbiter sends its reply in the same dispatch.
 `SpiEngine::dma` is the DMA engines, at any length: `start()` launches them and
-returns false, and the engines' one interrupt ends the request. For a request
-naming dma, in this order:
+returns false, and the engines' one interrupt ends the request.
+
+The one busy check comes first, whichever engine a request names: while a request
+of this host is on the engines, `start()` answers true with `spi_rejected` before
+the block, the select or the D/C is touched, and the request in flight goes on.
+It is the host's own flag, one load and a branch a request on a host with engines;
+the arbiter never starts a request over one in flight, so only a program driving the
+host directly meets it, and under the ownership rule ([design/dma.md](../design/dma.md))
+the channels have no other owner to test for. For a request naming dma, then, in this
+order:
 
 1. on a host with no engines bound, `spi_rejected`, nothing on the wire;
 2. a request with nothing to move completes on the spot, `spi_ok`;
@@ -282,7 +290,8 @@ either:
 ## The include contract
 
 `pl022/spi.hpp` includes `kernel/borrowed.hpp`, `kernel/post.hpp`,
-`util/clock.hpp` and `util/spi_bus.hpp`, and nothing else: no vendor
+`util/clock.hpp`, `util/dma_owner.hpp`, `util/placement.hpp` and `util/spi_bus.hpp`,
+and nothing else: no vendor
 header, no family header, no device include, and in particular no core
 stratum - a PL022 may sit on a core `brio/cortexm/` knows nothing about,
 which is why the microsecond busy-wait arrives as a type of the family's
@@ -299,7 +308,12 @@ which is also what makes the host suite below possible.
 ## The engine slots
 
 A transmit and a receive engine, both or neither, and with them what
-`SpiEngine::dma` runs on (`has_dma`). A request on them moves as one block each
+`SpiEngine::dma` runs on (`has_dma`). The host claims each engine's channel for this
+instance's request when its type is instantiated (`util/dma_owner.hpp`, through the
+slot the family's engine publishes as `dma_slot`), so a second owner on either channel,
+or this request on a second one, does not compile; an engine of a chip with no DMA
+controller behind it, the simulated PL022's, publishes no slot and claims nothing. A
+request on them moves as one block each
 way - its data phase, or a command with no data phase after it - and a command
 ahead of a data phase runs in the loop inside `start()` first, D/C rising
 between the two on the wire. ONE INTERRUPT A REQUEST - every frame that came
@@ -400,17 +414,18 @@ So with SPH = 0 the host waits for BSY, once a phase and never a frame:
 
 - on the polled loop's tail, on the request's own budget - a budget that runs
   out there is the stall a polled wait always was: `spi_stalled`, the select
-  released, the block reset;
+  and the D/C released, the block reset;
 - in the DMA line's body, after the receive channel's completion, on a bound
-  counted in turns of the wait: as many turns as one SCK period has core
-  cycles at the rate in force, and 64 more for the block's synchronization of
-  BSY to the core's clock. A turn is a read of SSPSR, its test and the count,
-  several core cycles, so the bound lasts several periods where the wait it
-  bounds lasts one; it is kept beside the control word (`wire_end_for()`) and
-  never computed in the interrupt. Its running out - a block that stopped
-  clocking with BSY up - ends the request `spi_stalled` with the select
-  released and the block's reset owed to the next `start()`, as a bus error
-  leaves it.
+  derived from the clocks whenever a rate is applied and never computed in the
+  interrupt (`wire_end_for()`): one SCK period and eight SSPCLK cycles for the
+  block's synchronization of BSY to the core's clock, in core cycles, counted in
+  reads of SSPSR of at least a core cycle each. So the bound is a time no shorter
+  than what it covers, on any core and whatever the compiler emitted, and a block
+  still clocking is never cut short; a read costs some ten core cycles as compiled,
+  so a bound that runs out holds the interrupt up to about ten times that time. Its
+  running out - a block that stopped clocking with BSY up - ends the request
+  `spi_stalled` with the select and the D/C released and the block's reset owed to the
+  next `start()`, as a bus error leaves it.
 
 With SPH = 1 nothing waits: the end is the last edge already. A bus error
 waits for nothing either. A command phase ends the same way, so D/C flips
@@ -483,13 +498,19 @@ polled loop on the same board is the figure beside them).
   BSY to clear, drains the receive FIFO and clears the overrun. Both: the
   width a template parameter, the buffers advancing pointers, no accessor
   call, no interrupt asked of anything, the waits bounded by ONE budget for
-  the whole transaction, counted in turns of whichever wait the loop is in:
-  200 000 turns for each frame of the transaction and 200 000 more, so (frames
-  + 1) x 200 000 (saturating at 2^32 - 1 from 21 000 frames). A turn is ten to
-  twelve core cycles on the RP cores (each family's letter g times a stall of
-  2 000 000 turns), so a frame's share is some two million core cycles, about twice the
-  slowest frame (65024 x 16 SSPCLK cycles) where SSPCLK runs at the core's
-  rate, as it does on both RP chips. Measured on both of the RP2350's cores: the
+  the whole transaction, a time derived from the two clocks whenever a rate is applied
+  (`wire_end_for()`, `budget_for()`). A frame's share is the power of two at or above
+  twice the frame's time on the wire, its bits and two more for the block's gap with
+  SPH = 0, in core cycles, and the budget is (frames + 2) shares, counted in reads of
+  SSPSR of at least a core cycle each, so it runs out no sooner than twice the
+  request's wire time, on any core and whatever the compiler emitted, and a handler
+  that holds the loop off spends none of it. A read costs ten or so core cycles as
+  compiled (each family's letter g times a stall), so a stall holds the core some
+  twenty-five to sixty times the request's wire time, the most on a request of a few
+  frames: the bound scales
+  with the request instead of with the slowest frame the block can make. It saturates
+  at 2^32 - 1 reads, past which a request longer than about 4.5 minutes on the wire at
+  125 MHz could stall with its block still clocking. Measured on both of the RP2350's cores: the
   write shape at the nominal wire (plus the block's gap in modes 0 and 2) at
   clk_peri / 2, where it is taken; the receive shape at the wire at clk_peri
   / 4 and slower and bound by its three accesses a frame at / 2, where it
@@ -500,20 +521,21 @@ polled loop on the same board is the figure beside them).
   with or without engines, and the next request starts on a clean block with
   nothing asked of the program. Inside `start()`, in main context, the select
   is released first, because the reset can move the SCK pad in modes 2 and 3
-  and the device must have seen the transaction end; then the block is reset
-  and reconfigured to the state applied. The reset throws away what stands in
+  and the device must have seen the transaction end; then the D/C goes high, a
+  store on this path alone since a clean request has raised it already, and the
+  block is reset and reconfigured to the state applied. The reset throws away what stands in
   both FIFOs, frames a block that does not clock still holds in its transmit
   FIFO among them, so no wait for BSY and no drain go with it. A command phase
   polled ahead of an engined data block takes the same path, with no block
   launched. With a null select in the Request the program's own select stands
   through the reset, since the host cannot release what it does not hold, and that
-  caller raises it when `start()` answers. The budget itself is the hold-up, about two slowest frames a frame, and
+  caller raises it when `start()` answers. The budget itself is the hold-up, and
   each family's document measures it.
 - A BUS ERROR ON A CHANNEL ANSWERS `spi_dma_fault`, what the engines answer, and
   the next request starts on a clean block the same way. `dma_isr()` runs in the
   interrupt, which decides and does not work: it drops the requests, puts both
-  channels away and binds them again, releases the select and leaves the reset
-  owed, a flag. It disables, resets and configures nothing. The next `start()`
+  channels away and binds them again, releases the select and the D/C and leaves the
+  reset owed, a flag. It disables, resets and configures nothing. The next `start()`
   tests that flag before anything else, one load and one branch a request on a
   host with engines and nothing on a host with none, and pays the reset first,
   whichever way the request runs. `prime()` tests and pays it the same way, because

@@ -312,6 +312,15 @@ the same on both.
   OUTOVER low and high, two microseconds a level): from low, 100 pulses
   and a last rise count **101 in rising mode and 100 in FALLING mode**,
   exact - a B input reads the pad, so an override is a wire.
+- **A RELEASED REQUESTER, THE SAME OWNER AGAIN** (letter r, no wire, ten runs of four
+  rounds on each half): a slice's release is a stop, the block's reset being every slice's, so no
+  `init()` pulses anything here and what is asked is what a stopped slice and a stopped
+  channel leave the channel's owner. The slice running at 100 kHz with the channel bound
+  on its wrap, untriggered, banks 10 or 11 credits in 100 us; the channel stopped and the
+  slice stopped, then the channel bound again and a run of eight started: none moves with
+  the slice stopped, the trigger dropping what stood banked, and all eight with it running,
+  in 73 to 77 us at one a period. THE CONTROL: the slice left running, the same run moves
+  at once.
 
 ## Not covered yet
 

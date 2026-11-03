@@ -141,7 +141,7 @@ block (FCS.OVER stays), where a plain write does.
   `clock_hz`, `enable`, `ready` / `wait_ready`, `temperature_sensor`,
   `release` (the block HELD in reset: a converter merely disabled with
   DREQ_EN set keeps its sample in the FIFO and requests it - the next
-  owner's channel reads it, measured); the sampler's
+  owner's channel reads it, letter r); the sampler's
   surface `select(input)` / `select_input`,
   `selected()` (AINSEL as it stands, moved by the round-robin),
   `selected_input()` (the last select), `input_code`, `start()`
@@ -258,6 +258,14 @@ as the known voltages, the DMA as the reader.
 - THE SAMPLER walks the sensor and input 0 on a 5 ms software pace,
   twenty samples each in 200 ms, the sensor's near its count and the
   pulled-up pad's near full scale.
+- A RELEASED REQUESTER, THE SAME OWNER AGAIN (letter r, no wire, ten runs of four
+  rounds): the converter released the worst way, the FIFO enabled with DREQ_EN set,
+  the channel stopped, one conversion standing in the FIFO, the block held in reset. Then
+  `init()`, the FIFO and DREQ_EN as before: the channel bound on the request moves none of
+  a run of eight while nothing converts, and all eight under conversions. THE CONTROL,
+  the reset removed: the same channel, the converter still disabled with DREQ_EN set,
+  moves the one sample that stood. That is why `release()` holds the block in reset and
+  `init()` starts from one ([dma.md](dma.md)).
 
 ## Not covered yet
 

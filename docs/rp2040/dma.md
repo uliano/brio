@@ -460,7 +460,9 @@ travelled by DMA):
   disabled the bound channel moves nothing (4.2.5: "all request signals are deasserted"), and with
   it enabled the receive channel's first four items are the four stale frames, four
   rounds of four. The PL011 keeps its FIFOs across a disable, so that is the request
-  a reset at `init()` withdraws.
+  a reset at `init()` withdraws. Every transport's letter says the same of its own
+  block: [spi.md](spi.md), [i2c.md](i2c.md), [adc.md](adc.md), [pwm.md](pwm.md) (a
+  slice stopped and not reset, its credits dropped by the next trigger).
 
 ## Not covered yet
 

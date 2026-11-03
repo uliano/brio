@@ -18,6 +18,8 @@
 //                            DwApbI2c<n> on the link's pads
 //   SdaPin, SclPin           the two link pads as Pin types
 //   us_now()                 the microsecond ruler (the system timer)
+//   RefusalPlacement         util/placement.hpp's tag for the end of a refusal
+//                            (refusal_end(), below)
 //   peer_kind, peer_label    twi_link's kind byte and the eight-character
 //                            Ident label
 //   bus_text                 the pads, for the banner
@@ -311,6 +313,28 @@ void service_command() {
 
 // ---- the actions ----------------------------------------------------------------
 
+/// THE END OF A REFUSAL: the block, disabled to refuse a byte, goes idle with the
+/// host's STOP, and this client is back on its address before the host's next
+/// START. A host that probes right after the refused tenure comes within tens of
+/// microseconds, so a binding whose flash stands behind a cold cache after its
+/// flashing places this path in SRAM, the wait and the re-enable with it. 1 when the
+/// block lost the refused byte, 0 when it did not, -1 when the serve's time ran out
+/// first.
+int8_t refusal_end(uint32_t t0, uint32_t ms) {
+    return Hot<RefusalPlacement>::run([t0, ms]() -> int8_t {
+        while (Raw::running()) {
+            if (expired(t0, ms)) {
+                return -1;
+            }
+        }
+        const bool lost = Raw::client_rx_data_lost();
+        (void)Raw::nack_data(true);
+        Raw::clear_all();
+        Raw::enable();
+        return lost ? 1 : 0;
+    });
+}
+
 /// Be a client: stretch, NACK, general call, deafness - and, through
 /// `coll`, the shared-address fixed-byte flavour (S4, whose third party no
 /// desk of this pair carries).
@@ -349,14 +373,12 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
         if (cut) {
             // The refusal under way: the block finishes the byte in flight,
             // does not acknowledge it, and goes idle with the host's STOP.
-            if (!Raw::running()) {
-                if (Raw::client_rx_data_lost()) {
+            const int8_t ended = refusal_end(t0, a.ms);
+            if (ended >= 0) {
+                if (ended == 1) {
                     r.flags |= twilink::report_nacked;
                 }
-                (void)Raw::nack_data(true);
                 refusing = true;
-                Raw::clear_all();
-                Raw::enable();
                 cut = false;
                 ++r.addr_hits;
                 if (r.stops < 255u) {

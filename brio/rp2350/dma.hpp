@@ -28,7 +28,9 @@
  * channel at work. The channel verbs and the engines' arm() belong to
  * main() or to an active object's handler (an active object is a
  * component of a brio program with its own event queue, served one event
- * at a time by the kernel); a programming verb refuses a BUSY channel
+ * at a time by the kernel); one channel has one owner for the whole image,
+ * one request one channel, checked when the program is compiled
+ * (docs/rp2350/dma.md, "One owner a channel"); a programming verb refuses a BUSY channel
  * rather than waiting for it, bar DmaRxEngine's start() and
  * start_discard(), which abort a running receive and bind the channel
  * again. The waits are bounded spins: Dma::abort() polls CHAN_ABORT for

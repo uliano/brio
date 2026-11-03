@@ -147,7 +147,11 @@ the concept below.
   `DwApbI2cBlock<Chip, n>`, the engine `DwApbI2cHost<Chip, n, pins,
   ...>` with its two optional DMA slots, its two ISR bodies and its
   hand-driven unstick, and `DwApbI2cClient<Chip, n, pins>` with
-  `I2cClientEvent`.
+  `I2cClientEvent`. The host claims each engine's channel for this instance's
+  request when its type is instantiated (`util/dma_owner.hpp`, through the slot the
+  family's engine publishes as `dma_slot`): a second owner on either channel, or this
+  request on a second one, does not compile. An engine of a chip with no DMA
+  controller behind it, the simulated block's, publishes no slot and claims nothing.
 - Not here, by design: which pads carry the two lines and under which
   function, how the block is taken out of reset, which interrupt
   controller owns the line and what it calls it, which rate of the
@@ -223,7 +227,8 @@ none:
 ## The include contract
 
 `dw_apb_i2c/i2c.hpp` includes `kernel/borrowed.hpp`, `kernel/post.hpp`,
-`util/clock.hpp`, `util/i2c_bus.hpp` and `util/placement.hpp`, and
+`util/clock.hpp`, `util/dma_owner.hpp`, `util/i2c_bus.hpp` and
+`util/placement.hpp`, and
 nothing else: no vendor
 header, no family header, no device include. It may therefore be included
 anywhere, in any order, and a family's `i2c.hpp` includes it beside its
@@ -292,7 +297,7 @@ disable (answered `i2c_bus_error` instead of waited on), an abort of
 every reason, the engines' hand-over in the middle of a read phase, the
 path each value of a request's `engine` takes (a short read on the
 receive engine alone, a write that stays on the pump, `dma` refused on a
-host without engines, a transmit channel another owner holds), and a
+host without engines, a claim already standing on the transmit engine), and a
 client that releases SDA on the n-th pulse of the unstick.
 
 What the fake does NOT model is the FIFOs: nothing moves an entry out of
@@ -460,8 +465,9 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   `dma_isr()`, the block's abort asked and the channels stopped: the
   stratum's own status, beyond the four wire codes util/i2c_bus.hpp
   defines. The transmit engine is CLAIMED when the read half
-  starts, its one launch step that can fail: a channel another owner
-  holds is not taken, the pump writes the commands on TX_EMPTY (about
+  starts, its one launch step that can fail: a claim already standing on it,
+  a program's own since the channel has no other owner, is not overridden, and
+  the pump writes the commands on TX_EMPTY (about
   one entry for each eight), the receive engine still collects, and the
   request completes exact. The receive start and the transmit launch
   cannot refuse what the host hands them (a buffer or the sink, one

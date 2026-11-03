@@ -59,6 +59,9 @@ constexpr I2cPins bus_pins{.scl = 3, .sda = 2};
 using Client = I2cClient<1, bus_pins>;
 using Host = I2cHost<1, bus_pins>;
 using Raw = DwApbI2c<1>;
+// The refusal's end in SRAM: this image's flash is cold after its flashing, and a
+// host's probe follows the refused tenure at once (rp_twi_peer.hpp, refusal_end()).
+using RefusalPlacement = InRam;
 using SdaPin = Pin<2>;
 using SclPin = Pin<3>;
 

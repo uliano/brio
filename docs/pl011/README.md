@@ -124,7 +124,13 @@ manual either, which is exactly why they are the concept below.
   `Pl011Transport<Chip, n, pins, ...>` with its two ring buffers, its
   error counters (each saturating at its top: a count that wrapped would
   read as a few errors after a storm of them), its two optional DMA engine
-  slots and its two ISR bodies.
+  slots and its two ISR bodies. The transport claims each engine's channel for
+  this instance's request when its type is instantiated (`util/dma_owner.hpp`,
+  through the slot the family's engine publishes as `dma_slot`): a second owner on
+  either channel, or this request on a second one, does not compile, and two
+  transport types over one request on one channel are one owner. An engine of a chip
+  with no DMA controller behind it, the simulated PL011's, publishes no slot and
+  claims nothing.
 - Not here, by design: which pads carry the signals and under which
   function, how the block is taken out of reset, which interrupt
   controller owns the line and what it calls it, which rate of the
@@ -195,7 +201,7 @@ none:
 ## The include contract
 
 `pl011/uart.hpp` includes `kernel/platform.hpp`, `util/clock.hpp`,
-`util/placement.hpp` and `util/ring.hpp`, and nothing else: no vendor header, no family header,
+`util/dma_owner.hpp`, `util/placement.hpp` and `util/ring.hpp`, and nothing else: no vendor header, no family header,
 no device include. It may therefore be included anywhere, in any order,
 and a family's `uart.hpp` includes it beside its own headers. Apps and
 family drivers keep including the family's header, never this one - the

@@ -554,6 +554,32 @@ flash endurance: `h`, `i` and `w`.
   register resets with its DMA bit clear (10.6), and no driver here
   writes it - which is why `fast_stream_fifo()` is the engine's address
   and `stream_fifo()` the processor's.
+- **NO STALE WORD AFTER `invalidate_all()`, AS FAR AS TWO INSTRUMENTS CAN SEE.** The
+  RP2040's flush left a line whose first word read wrong through the cache
+  ([../rp2040/flash.md](../rp2040/flash.md), "Bench findings"), so the same was
+  looked for here, on both architectures, around the benchmark's letters d, e, u
+  and i with every line invalidated before each timed operation. A TORN LINE, half
+  a line from another line: the data memory read by pinning every line, on the
+  default image, the image with the hot paths in SRAM and two more placements -
+  none in 848 snapshots, 1 736 704 lines judged. This chip fills a whole line (the
+  debugger's single reads: word 0 misses and word 1 of that line then hits; 4.4.2,
+  "64-bit accesses for cache line fills"), so a torn line would be abnormal here,
+  where on the RP2040 it is normal. That count has no calibration on real hardware. A
+  MIS-TAGGED LINE, the RP2040's class: the image read through the cached alias and
+  the uncached one at the halt - none in 588 snapshots (254 cold at a random
+  moment, 254 cold after the letter, 80 warm), the default image and the SRAM one on
+  each architecture. How strong that is: on the RP2040 the same comparison catches
+  the defect in 2.9 % of random-moment snapshots, 3 in 103 (a one-sided 95 % lower
+  bound of 0.8 %), so a defect exactly as visible here would have gone unseen with a
+  chance of 11 % (55 % at the lower bound) over one image's 75 snapshots on the
+  Cortex-M33, 21 % (66 %) over 52 on Hazard3, and 0.05 % (13 %) over the chip's 254.
+  STRONG PER CHIP AND WEAK PER IMAGE, and calibrated on eight events on another chip:
+  a defect of another visibility is not bounded by it. The comparison reads as it
+  goes, so a read that misses allocates and may evict a stale line not read yet
+  (no non-allocating alias exists here), and it covers the image and its tail and
+  not the rest of the flash. Whether a line fill racing a maintenance write can
+  mis-tag a whole line, the datasheet does not say; these counts are the only
+  evidence.
 
 ## Not covered yet
 
@@ -603,6 +629,13 @@ Implemented but not bench-verified, each with what would measure it:
   is issued nowhere: the cache-as-SRAM gap above is what would exercise
   it, and a letter that pins a line, fills it through the uncached alias
   and proves it survives an eviction sweep would measure it.
+- **`invalidate_all()` while another master reads the flash.** In every image of
+  the finding above ("No stale word") core 1 idled in the bootrom and the DMA ran
+  only as the letters run it. The RP2040 asks its flush's caller to keep other
+  masters off the flash and this page asks nothing of `invalidate_all()`; a letter
+  that invalidates while core 1 runs a loop out of the flash, or while a channel
+  reads the window, and then compares the cached alias with the uncached one over
+  the image, would measure it.
 - **The two alias refusals and the split ways.** `refuse_uncached`,
   `refuse_untranslated` and `set_split_ways` are compiled and never set:
   each turns an access this suite depends on into a bus error or halves

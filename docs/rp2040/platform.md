@@ -780,8 +780,10 @@ What the rows say:
   switch empties the cache through `Xip::flush()`, which runs from SRAM
   and reads the flash past the cache before it writes FLUSH
   ([flash.md](flash.md), "Bench findings"). Executed from the flash, the
-  flush left one stale word in the cache - the flush routine's own
-  `bx lr` in the first line filled after it in that word's set - and
+  flush left one line whose first word read wrong through the cache - the
+  flush routine's own `bx lr`, served for another address in that word's
+  set, the slot's data the routine's whole line and the wrong read inferred
+  to be the cache's bookkeeping, since no tag memory can be read - and
   letter i faulted in its engined reads on F and B, where that line fell
   in the engined host's `start()` or in the letter's own code. With the
   flush in SRAM, letter i under the switch runs to its end in ten runs of
@@ -820,7 +822,7 @@ Implemented but not bench-verified, each with what would measure it:
 - Another master reading the flash while `Xip::flush()` runs - core 1
   executing out of the flash, a DMA channel reading the window: the
   flush's caller owes the flash to no other master ([flash.md](flash.md),
-  "How to use it"), a duty drawn from the stale word's inferred cause
+  "How to use it"), a duty drawn from the wrong read's inferred cause
   where the datasheet calls such a flush safe (2.6.3.2). A letter that
   flushes from core 0 while core 1 runs a loop out of the flash, or while
   a transmit engine pours a constant from the window, and then compares

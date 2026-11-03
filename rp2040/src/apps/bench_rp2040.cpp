@@ -180,8 +180,8 @@
 //      uart.rx: bursts of 16 and 256, the transmitter on its engine so
 //      UART1's vector is the receiver's, through the interrupt receiver
 //      and the receive engine (harvest() publishing the engine's run as
-//      the ring is read). uart.edge: a burst of 17 with the consumer
-//      draining on every edge, the last edge against BUSY falling,
+//      the ring is read). uart.edge: a burst of 17, BUSY falling stamped alone and the consumer
+//      draining after it, the last edge against BUSY falling,
 //      signed; the engine's edge is harvest() asked from the tick, its
 //      owner's poll. Then the receive time-out probed under the engine
 //      (UARTRIS read raw after ten frames of silence), the copy into
@@ -1360,10 +1360,15 @@ void run_uart_rx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
 }
 
 /// uart.edge: a burst of 17 bytes - one past a receive level of sixteen,
-/// so the tail is the edge's to deliver - with the consumer draining on
-/// every edge a vector reports; wall = the ruler at the LAST edge minus
-/// the ruler at the burst's last stop bit (tx_idle() turning true: BUSY
-/// falling), signed.
+/// so the tail is the edge's to deliver - and wall = the ruler at the LAST
+/// edge minus the ruler at the burst's last stop bit (tx_idle() turning
+/// true: BUSY falling), signed. BUSY'S FALL IS STAMPED BY A LOOP THAT DOES
+/// NOTHING ELSE, and the consumer drains only after it: a stamp taken in a
+/// loop that also drains the ring comes late by the drain, up to some 700
+/// cycles for 16 bytes. The fall lies between the last poll that read
+/// BUSY up and the first that read it down, and that window is printed
+/// beside the reading: a turn when nothing lands inside it, more when the
+/// vector does, and the reading is good to that much.
 template <typename T>
 void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
     constexpr uint32_t n = 17u;
@@ -1382,11 +1387,19 @@ void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
     (void)T::write_bulk(payload_bytes(0, n));
     const uint32_t t0 = Ruler::now();
     const uint32_t settle = 8u * frame + SysClock::hz / 250u;   // 4 ms past the tail
-    for (;;) {
-        if (!idle_seen && T::tx_idle()) {
-            idle_at = Ruler::now();
+    uint32_t last_up = t0;
+    while (Ruler::now() - t0 < SysClock::hz / 10u) {
+        const bool idle = T::tx_idle();
+        const uint32_t now = Ruler::now();
+        if (idle) {
+            idle_at = now;
             idle_seen = true;
+            break;
         }
+        last_up = now;
+    }
+    const uint32_t fall_window = idle_at - last_up;
+    for (;;) {
         if (edge_count != seen) {
             seen = edge_count;
             for (;;) {
@@ -1412,7 +1425,8 @@ void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
     const int32_t latency = static_cast<int32_t>(edge_at - idle_at);
     print(serial, "  ", op, " at ", baud, " baud: ", got, " of ", n, " bytes (", wrong,
           " wrong) on ", edge_count, " edges; the last edge ", latency, " cycles after the "
-          "last stop bit = ", latency * 100 / static_cast<int32_t>(frame), "/100 of a frame",
+          "last stop bit = ", latency * 100 / static_cast<int32_t>(frame), "/100 of a frame, BUSY's fall "
+          "within ", fall_window, " cycles before that stamp",
           idle_seen ? "" : " (BUSY NEVER FELL)", crlf);
     print(serial, "bench ", op, " n=", n, " wall=", latency, " busy=- irq=", edge_count,
           " isr=- rate=- wire=- x=-", crlf);

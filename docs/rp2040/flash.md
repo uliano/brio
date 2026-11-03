@@ -169,7 +169,7 @@ master reads the flash while it runs - the other core not executing
 from it, no DMA channel reading the window, a transmit engine pouring a
 constant that lives in the flash included.** Nothing checks it, and
 nothing can. The datasheet calls such a flush safe (2.6.3.2); the duty
-rests on the stale word the bench findings describe and on its inferred
+rests on the stale read the bench findings describe and on its inferred
 cause, not on a measurement of the other master. The flush may be called
 from any context; a handler that becomes pending during it starts when
 it ends, since the core waits on one stalled load.
@@ -210,25 +210,40 @@ but their timings, which is the point of the bootrom's engine.
   (the write of FLUSH, its read and the return among the cached lines),
   an engined I2C transaction measured cold after every flush faulted -
   ten cold runs of ten on one image, five of six on another, never warm.
-  The cache kept ONE stale word, the same in each of eleven dumps of one
-  layout - the line filled first after the flush in the set of the flush
-  routine's own `bx lr; nop` word held that word in place of its own, at
-  the same word position, while the alias that bypasses the cache read
-  the flash right - and a core executing it returned through a stale
-  link register (an INVSTATE HardFault, or the bootrom's fault loop);
-  the other image's stale line was another, in the set of its own flush
-  routine's word. With the routine in SRAM and the bypass read under the
-  mask before the write, the same transaction runs to its end in ten
-  runs of ten on one image and twenty of twenty on the other, no stale
-  line found after; the routine in SRAM with no bypass read, masked or
-  not, ran eight of eight clean, the mask alone in the flash faulted one
-  run of four, and the flash routine with its own lines fetched first
-  and a bypass read before the write six of six clean. That a line fill
-  started by the routine's own fetch and still in flight when FLUSH is
-  written keeps that word is an inference, not established: probes that
-  flush from the flash and refill the set did not reproduce the stale
-  word outside that sequence. The datasheet calls a flush while
-  executing from the flash safe and lists no erratum for it. THE COST,
+  MEASURED, in the fault: one line of the flash, the same in each of eleven
+  dumps of one layout, read wrong through the cached alias and right through
+  the alias that bypasses the cache. That line lies in the set of the flush
+  routine's own `bx lr; nop` word, and a core executing it returned through
+  a stale link register (an INVSTATE HardFault, or the bootrom's fault loop);
+  the other image's line was another, in the set of its own flush routine's
+  word. The debugger then read the slot and the two lines word by word, the hit
+  counter beside each read. This cache fills ONE WORD PER MISS (word 0 of a line
+  misses, then word 1 of that line misses too), so a line holding the words of
+  two addresses is its normal state (53 to 213 such lines in a snapshot, with
+  this flush or the other). The slot's data was the routine's WHOLE line,
+  consistent, and the wrong word of the faulting line stood nowhere else in the
+  16 KB of data. The faulting line's word 0 HIT and returned the routine's word
+  0; its word 1 MISSED and the flash answered; the routine's own line missed on
+  both words, its data sitting in the slot. So the wrong read is one word,
+  and word 1 of that line was never wrong. INFERRED, since no tag memory can
+  be read: the defect is in the cache's bookkeeping and not in its data - the
+  tag side serves that word 0 for the wrong address, and no fill need have
+  happened on it. That a line fill started by the routine's own fetch and still
+  in flight when FLUSH is written leaves the bookkeeping so is a further
+  inference, not established: probes that flush from the flash and refill the
+  set did not reproduce it outside that sequence. THE FIX, MEASURED: with the
+  routine in SRAM and the bypass read under the mask before the write, the same
+  transaction runs to its end in ten runs of ten on one image and twenty of
+  twenty on the other. Reading the slot at a random moment of the benchmark's
+  cold letters d, e and u, by the reads that do not allocate, finds the wrong
+  line in 8 of 103 snapshots with the flush in the flash and in none of 114 with
+  this one (the chance of none in 114 at the old rate is about 0.01 %); a
+  snapshot taken after a letter's end finds it with neither. The routine in SRAM with no
+  bypass read, masked or not, ran eight of eight clean, the mask alone in the
+  flash faulted one run of four, and the flash routine with its own lines
+  fetched first and a bypass read before the write six of six clean. THE
+  DATASHEET calls a flush while executing from the flash safe and lists no
+  erratum for it. THE COST,
   at 125 MHz on the WeAct board (the second stage's SSI clock at clk_sys
   / 4): in SRAM eleven instructions and a literal, 32 bytes, and in the
   flash the five-instruction veneer, 16 bytes; the masked part (seven
