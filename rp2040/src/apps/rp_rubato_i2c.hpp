@@ -123,9 +123,9 @@
 /// its Request names (Request::engine, util/i2c_bus.hpp) and the shared
 /// body builds every Request naming none, so this wrapper names it in
 /// start(): `dma` when either half carries two bytes or more, `interrupt`
-/// otherwise - the suite's own `if`, one copy of the Request and a compare
-/// (two on the RP2350) added to start()'s cycles, which put letter o's shapes
-/// on every path the host has. Every other verb is the host's own.
+/// otherwise - the suite's own `if`, one copy of the Request and one or two
+/// compares (up to four on the RP2350) added to start()'s cycles, which put
+/// letter o's shapes on every path the host has. Every other verb is the host's own.
 template <typename Base>
 struct EngineByLength : Base {
     static bool start(const typename Base::Request& r) {

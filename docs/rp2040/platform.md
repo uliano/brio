@@ -737,8 +737,8 @@ every timed run). F: every driver InFlash and every vector in the flash
 (the default); R: the drivers InRam; V: the vectors placed; B: both.
 Each cell is the range over three runs or more where the runs spread
 (ten warm on F, thirteen on B, six on R; letter i ten times cold on F
-and twenty on B); the I2C rows are letter i's, each the least of its
-runs.
+and twenty on B); the I2C rows are letter i's over five warm and five cold
+runs on each image.
 
 | path | F | R | V | B |
 |---|---|---|---|---|
@@ -747,14 +747,14 @@ runs.
 | ... the DMA line's handler | 191 to 374 / 8264 | 207 to 577 / 4578 | 191 / 191 | 198 / 198 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1575 to 1913 / 14076 | 886 to 1533 / 8151 to 9759 | 805 to 840 / 1271 | 877 to 912 / 1342 to 2950 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 4513 to 6091 / 8682 to 9798 | 1778 to 3173 / 6239 to 7077 | 390 to 425 / 2090 to 2930 | 645 to 1446 / 2218 to 2774 |
-| I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5504 | 362 / 12640 | 379 / 5504 |
+| I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5129 to 5504 | 362 / 12640 to 16076 | 379 / 5504 |
 | ... its longest handler entry | 169 / 6382 | 201 / 3174 | 169 / 169 | 192 / 192 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 49547 / 72966 | 49603 / 61326 | 49547 / 61850 | 49594 / 54810 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 49553 to 49644 / 71946 to 73838 | 49602 / 61326 to 61422 | 49553 to 49738 / 61750 to 64166 | 49593 / 54810 |
 
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
-  a polled request 18 cycles dearer under InRam, an I2C entry 28 to 37 - the cache serves a warm path at the SRAM's pace,
+  a polled request 18 cycles dearer under InRam, an I2C entry 23 to 32 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
   (`spi.poll` of 256 frames 5739 against 5757). A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
@@ -786,17 +786,17 @@ What the rows say:
   to be the cache's bookkeeping, since no tag memory can be read - and
   letter i faulted in its engined reads on F and B, where that line fell
   in the engined host's `start()` or in the letter's own code. With the
-  flush in SRAM, letter i under the switch runs to its end in ten runs of
-  ten on F and twenty of twenty on B, every line printed and every byte
-  read the peer's: the engined 16-byte read at 400 kHz cold 72966 to
-  74366 cycles on F and 54810 in every run on B.
+  flush in SRAM, letter i under the switch runs to its end in five runs of
+  five on each of the four images, every line printed and every byte
+  read the peer's: the engined 16-byte read at 400 kHz cold 71946 to
+  73838 cycles on F and 54810 in every run on B.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
-  `start()` 824 bytes without engines and 1572 with them (the engines'
-  launch folded in), the DMA line's body 684 (the wait for the end of the
+  `start()` 816 bytes without engines and 1548 with them (the engines'
+  launch folded in), the DMA line's body 712 (the wait for the end of the
   last frame there); the
-  I2C host's 624 to 1908; the UART's 156 to 740 - the bench's four
-  drivers, in all their types, 11416 bytes (11.1 KB: 3080 the SPI host's,
-  5628 the I2C host's, 2708 the UART's).
+  I2C host's 624 to 1872; the UART's 156 to 740 - the bench's three
+  drivers, in all their types, 11320 bytes (11.1 KB: 3076 the SPI host's,
+  5536 the I2C host's, 2708 the UART's).
 
 So: a program that cannot afford the cold path - a first transaction
 after `init()` on a deadline, a handler that must answer within a frame

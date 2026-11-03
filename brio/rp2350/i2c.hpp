@@ -331,7 +331,9 @@ using DwApbI2c = DwApbI2cBlock<Rp2350DwApbI2c, n>;
  * `I2cEngine::dma`, at any length, and a pure write of three bytes or
  * more, the transmit engine bound at IC_DATA_CMD's zero-filling alias
  * (datasheet 2.1.5); a write before a read and a shorter write stay on the
- * interrupt under either value (docs/rp2350/i2c.md).
+ * interrupt under either value (docs/rp2350/i2c.md). With engines the
+ * program binds the DMA line's vector to `Bus::dma_isr()` the same way, and
+ * `Dma::init()` runs before `Bus::init()`.
  */
 template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

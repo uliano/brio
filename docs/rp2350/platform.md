@@ -106,7 +106,7 @@ path, with its measured cost; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 3.1 (the processor subsystem and
+The RP2350 datasheet (build 80d627281ed5), 3.1 (the processor subsystem and
 SIO, with 3.1.2's CPUID and 3.1.8's platform timer), 3.2 (the interrupt
 lines, the six spare ones among them), 3.8 (Hazard3: the CSRs, the
 interrupt controller, and 3.8.1.23 on `wfi`), 3.8.4.2 (the interrupt
@@ -1091,7 +1091,7 @@ established, on both halves:
   GP25 not an output, the ceiling the Console's.
 
 The I2C stack runs the same way in `test_rp2350_rubato_i2c` (209
-verdicts on each half, a pack of five objects, TIMER1's alarm 0 the
+verdicts on each architecture, a pack of five objects, TIMER1's alarm 0 the
 pressure), against the RP2040's `twi_peer`: every shape byte-exact under
 every pressure, no stretch of a tenure at 400 kHz -
 [i2c.md](i2c.md), "The stack under the preemptive kernel".
@@ -1126,10 +1126,10 @@ program either places the vector it binds or gives `SpiHost`, `Uart` or
 each architecture; cycles at 150 MHz, each cell WARM / COLD, cold read by
 letter c, every line of the XIP cache invalidated before every timed
 run; F the default, R the drivers InRam, V the vectors placed, B both;
-the I2C rows are letter i's, each the least of five runs on F, V and B
-and of three on R, a range where the runs spread; the R column's come
-from another session, and a wall moves between sessions, so its walls
-are not to be read against the others to the cycle):
+the I2C rows are letter i's, each the least of five runs, a range where the
+runs spread by more than ten cycles; the R column's come from another session,
+and a wall moves between sessions, so its walls are not to be read against the
+others to the cycle):
 
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
@@ -1140,7 +1140,7 @@ are not to be read against the others to the cycle):
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
 | I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 189 / 537 | 185 / 4291 | 188 / 536 |
 | ... its longest handler entry | 96 / 2880 | 123 / 1094 | 96 / 96 | 119 / 119 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58938 / 67742 | 58911 / 61416 | 58941 / 63544 | 58966 / 59580 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58938 / 67742 | 58963 / 61466 | 58941 / 63544 | 58966 / 59580 |
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
@@ -1149,9 +1149,9 @@ are not to be read against the others to the cycle):
 | ... the DMA line's handler | 103 to 263 / 2857 | 125 / 1180 | 105 / 105 | 125 / 125 |
 | UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
-| I2C one-byte write at 400 kHz, `start()` | 188 / 4138 | 191 / 1782 to 3989 | 188 / 4153 | 192 / 1782 |
-| ... its longest handler entry | 70 / 1649 | 80 / 545 | 70 / 70 | 80 / 80 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58951 / 64980 | 58916 / 61853 | 58955 / 62552 | 58971 / 60723 |
+| I2C one-byte write at 400 kHz, `start()` | 188 / 4138 | 188 / 1845 | 188 / 4153 | 192 / 1782 |
+| ... its longest handler entry | 70 / 1649 | 79 / 545 | 70 / 70 | 80 / 80 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58951 / 64980 | 58972 / 61940 to 62222 | 58955 / 62552 | 58971 / 60723 to 60989 |
 
 What the rows say - the RP2040's reading on both halves:
 

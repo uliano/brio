@@ -421,13 +421,14 @@ void tb_scan() {
     // A refused address ends at its NACK: 9.4 SCL periods at 100 kHz (the
     // address byte, its acknowledge, the START's 0.4) = 94 us on the wire,
     // and the wire is never faster than the counts. Above it: the disable,
-    // IC_TAR and enable a new address costs (6 us at 100 kHz,
-    // docs/design/benchmark.md's letter i), start(), the one handler and the
-    // wait's own loop (under 2000 cycles, 16 us at 125 MHz), the rise at
-    // 100 kHz (under 1 us over 9.4 periods) and the ruler's microsecond -
-    // 94 to 118 us.
-    bench.verdict("nobody home is i2c_nack_addr, answered at the address's NACK: 94 to 118 us at 100 kHz",
-                  nacks == 111u && nobody_us >= 94u && nobody_us <= 118u);
+    // IC_TAR and enable a new address costs (at most 957 cycles at 100 kHz on
+    // the RP2040, 1836 on the RP2350, docs/rp2040/i2c.md and docs/rp2350/i2c.md),
+    // start(), the one handler and the wait's own loop (under 2000 cycles),
+    // the rise at 100 kHz (under 1 us over 9.4 periods) and the ruler's
+    // microsecond. At 125 MHz 94 + 7.7 + 16 + 1 + 1 = 119.7; at 150 MHz
+    // 94 + 12.3 + 13.4 + 1 + 1 = 121.7 - 94 to 122 us on either chip.
+    bench.verdict("nobody home is i2c_nack_addr, answered at the address's NACK: 94 to 122 us at 100 kHz",
+                  nacks == 111u && nobody_us >= 94u && nobody_us <= 122u);
 }
 
 // =============================================================================
@@ -1490,8 +1491,8 @@ void tk_arbitration() {
         host_ready();
         fill_pattern(tx_buf, 5, 0xD0);
         // The window: 350 us, past the peer's 40 us of quiet and its 120 us
-        // lead, with its start() - a disable, IC_TAR and an enable, 6 us at
-        // 100 kHz - well inside.
+        // lead, with its start() - a disable, IC_TAR and an enable, 8 to 12 us
+        // at 100 kHz - well inside.
         const uint8_t st = arb_tenure(rd.dut_target, tx_buf, 5, nullptr, 0, 350);
         outlast(a, s0);
         twilink::Report r{};

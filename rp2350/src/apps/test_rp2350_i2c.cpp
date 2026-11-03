@@ -35,7 +35,7 @@
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: 9.4 as the driver states it over the whole
-//      bank, the timing arithmetic at this clk_sys (table 1053's floors
+//      bank, the timing arithmetic at this clk_sys (table 1106's floors
 //      reproduced), the reset state, the FIFO depths the block reports,
 //      the refusals, the enable and the disable through IC_ENABLE_STATUS
 //   b  THE SCAN: every address 0x08..0x77 probed, the peer's 0x6B alone
@@ -192,7 +192,7 @@ void ta_block() {
                   i2c_scl_hz(SysClock::hz, *i2c_timing_for(SysClock::hz, I2cSpeed::standard_100k)) == 100'000u &&
                       i2c_scl_hz(SysClock::hz, *i2c_timing_for(SysClock::hz, I2cSpeed::fast_400k)) >= 399'000u &&
                       i2c_scl_hz(SysClock::hz, *i2c_timing_for(SysClock::hz, I2cSpeed::fast_plus_1m)) == 1'000'000u);
-    bench.verdict("table 1053's floors reproduced: fast mode at 12 MHz is (LCNT 15, HCNT 6), standard at "
+    bench.verdict("table 1106's floors reproduced: fast mode at 12 MHz is (LCNT 15, HCNT 6), standard at "
                   "2.7 MHz is (12, 6), fast-mode-plus needs 32 MHz, a hertz below each is refused",
                   i2c_timing_for(12'000'000u, I2cSpeed::fast_400k)->lcnt == 15u &&
                       i2c_timing_for(12'000'000u, I2cSpeed::fast_400k)->hcnt == 6u &&

@@ -34,7 +34,9 @@ constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
 using Bus = brio::I2cHost<0, pins>;
 using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
 
-Bus::init(clock);
+if (!Bus::init(clock)) {
+    // no bus: a clock under 2.7 MHz, or the block did not come up
+}
 
 Bus::Request r{};
 r.addr = 0x48;
@@ -49,25 +51,30 @@ extern "C" void isr_i2c0() {
 }
 ```
 
+It assumes the program's platform `P`, its clock task's tag `clock`,
+`static uint8_t reg[1]` and `static uint8_t value[2]`, and an active
+object `Sensor` that handles `I2cDone`; `init()` runs in `main()` and the
+post in one of `Sensor`'s handlers.
+
 Line by line: `pins` names the clock and data pads; `Bus` is the
-family's `I2cHost` on instance 0, the engine; `I2c` is the arbiter, an
+family's `I2cHost` on instance 0; `I2c` is the arbiter, an
 active object (a component with its own event queue, served one event
 at a time by the kernel, here over the program's platform `P`) that
 takes requests from every active object that uses the bus in arrival order, with room
 for four waiting requests, retries no failure (`BusPassThrough`: every
-outcome goes back to the requester as it is) and recovers the engine
+outcome goes back to the requester as it is) and recovers the host
 when a transaction has not answered within 20 ms (the per-bus timeout,
 in kernel ticks, `i2c_timeout` its answer). A request names the 7-bit
 address, lends one byte to write (the register number) and two bytes to
 read back (a loan under
-`Lease::reply`, kernel/borrowed.hpp: the arbiter and the engine may use
+`Lease::reply`, kernel/borrowed.hpp: the arbiter and the host may use
 them until the reply), the speed, and the active object the `I2cDone`
 reply goes to; it is posted to the arbiter, and `post` copies the
 request into the arbiter's queue, so `r` itself may go out of scope -
 what it lends may not. The handler is the program's, under the name the
 family's startup code gives I2C0's vector (`isr_i2c0` on both RP
-chips): when the engine's interrupt body returns true, the transaction
-has just ended, and the handler posts the engine's status to the
+chips): when the host's interrupt body returns true, the transaction
+has just ended, and the handler posts the host's status to the
 arbiter, which sends the reply.
 
 What decides correctness even there: **the buffers a request lends
@@ -76,7 +83,11 @@ is bound and posts `TransferDone`, or the arbiter never learns that a
 transaction ended (the timeout is what then answers); the arbiter is
 in the program's list of active objects; and `init()` runs after the
 clock's, since the SCL counts are computed from the rate the clock
-type claims for ic_clk. The bus vocabulary itself (the Request, the
+type claims for ic_clk. The pads carry the internal pull-up the chips'
+chapters ask for, and the bus still needs its external resistors. The
+20 ms must exceed the longest request the program makes at its speed: a
+request of 255 bytes is 23 ms of wire at 100 kHz and 5.8 ms at 400 kHz. The
+bus vocabulary itself (the Request, the
 reply, the status codes) is [../design/i2c-bus.md](../design/i2c-bus.md)'s;
 what an active object is and how a program lists them is the learning
 route's ([../learn/introduction.md](../learn/introduction.md)). Every
@@ -87,14 +98,17 @@ polled path. What moves nothing is answered at once, inside `start()`:
 outside 0x08..0x77 that no host may name
 ([../design/i2c-bus.md](../design/i2c-bus.md)) and for a request naming
 the DMA engines on a host that has none bound; `i2c_bus_error` for a
-block that will not disable to take a new address.
+block still not disabled after 100 000 reads of `IC_ENABLE_STATUS` when a
+new address needs the disable, which a correct program does not meet (a
+tenure's end leaves the block able to disable at once).
 
-The page goes on with what the stratum is for, the document of record,
-what lives here, what a family owes (the traits type member by member),
-the include contract, what stays per family, the host suite that proves
-the file knows no chip, what the block offers the host's engine that
-bears on cost (used or declined, with the measured figures' homes), the
-client, and what is not covered.
+Three uses of one word, kept apart below. `I2cHost` is the transfer engine
+`I2cBus` drives. The engines, in the plural, are the two DMA channels a
+host may be given. `Request::engine` names what moves a request's bytes:
+`interrupt`, the pump (the code that moves them from the block's
+interrupt), or `dma`, those channels.
+
+
 
 ## What the stratum is
 
@@ -312,7 +326,7 @@ that many entries - so a test stages half a FIFO of bytes by setting
 tail at the STOP and the masks the handler leaves, while the bytes' values
 and the wire's timing stay the bench's to judge.
 
-## The host's engine: what the block offers that bears on cost
+## The host: what the block offers that bears on cost
 
 Each item of the block's programmer's model that decides what a tenure
 costs, used or declined, with its reason; the measured figures are each
@@ -335,16 +349,17 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   when it returned, and the block entered once more for nothing - on the
   RP2040, a third host entry reading IC_INTR_STAT zero on
   test_rp2040_i2c letter g's second engined read after every boot, which
-  reading the mask back after the store did not cure. The cost: two
-  stores on an entry that keeps TX_EMPTY armed, none on one that does
-  not.
+  reading the mask back after the store did not cure. The cost: one
+  store to mask it on an entry that finds it armed, and one to arm it again
+  when room is still wanted.
 - **The receive threshold (`IC_RX_TL`, RX_FULL) and its level
   (`IC_RXFLR`)** - used at half the FIFO, written once at `init()`: a
   long read takes eight bytes an interrupt (one level read, then loads)
   and pours the commands their room leaves in the same entry, so the
   bytes coming back pace the refill and a 255-byte read is 32
   interrupts, one for each eight bytes received and the STOP's. RX_FULL
-  is masked once half a FIFO or less is owed: the tail is the STOP's. A deeper level (three quarters: TX_TL 4,
+  is masked once half a FIFO of bytes or fewer remains: the STOP's entry
+  reads those last bytes. A deeper level (three quarters: TX_TL 4,
   RX_TL 11) was measured too, on the RP2040 - 21 and 22 interrupts for
   255 bytes, about a sixth fewer handler cycles - and declined: its
   longest entry grows by a fifth (the latency every other vector waits
@@ -371,24 +386,24 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   still to come (measured on the RP2040 under the preemptive kernel: a
   probe parked behind a client holding SDA ended `i2c_bus_error` on the
   hold's release, its entry still in `IC_TXFLR` at the vector's entry;
-  [../rp2040/i2c.md](../rp2040/i2c.md)). And an abort leaves both at
-  rest too, flushing the FIFOs and idling the machine: a tenure whose
-  START waited for another node's STOP and lost the arbitration between
-  the handler's read of `IC_INTR_STAT` and its read of `IC_STATUS`
-  passed for its own STOP - on the RP2040, a control build whose STOP
-  test omits the read below ended an engined read inside a window held
-  by hand `i2c_ok` with the host's code cold in the XIP cache
-  (the letter run first after a boot, four boots of four) and in six runs
-  of `test_rp2040_i2c`'s key `z` out of six, and `i2c_arb_lost` with that
-  code just run (the letter run again, or right after an engined read:
-  twelve of twelve) - so `IC_RAW_INTR_STAT` is read after `IC_STATUS` and
-  a standing
-  TX_ABRT leaves the tenure to the abort's own entry. The test is one
+  [../rp2040/i2c.md](../rp2040/i2c.md)).
+
+  An abort leaves both at rest too, since it flushes the FIFOs and idles
+  the machine. So a tenure whose START waited for another node's STOP, and
+  which loses the arbitration between the handler's read of `IC_INTR_STAT`
+  and its read of `IC_STATUS`, would pass for ended on its own STOP. The
+  handler therefore reads `IC_RAW_INTR_STAT` after `IC_STATUS`, and a
+  standing TX_ABRT leaves the tenure to the abort's own entry. On the
+  RP2040, a control build without that read ended an engined read inside a
+  window held by hand `i2c_ok` with the host's code cold in the XIP cache
+  (the letter run first after a boot, four boots of four, and six runs of
+  `test_rp2040_i2c`'s key `z` out of six), and `i2c_arb_lost` with that code
+  just run (twelve of twelve). The test is one
   mask and one compare in the handler's STOP path, and one register read
   more where it passes (5 to 8 cycles measured on both chips).
 - **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
   instead of overrunning, and an empty command FIFO with no STOP holds it
-  too (the block's own rule), so a handler that comes late stretches the
+  too (RP2040 4.3.7, RP2350 12.2.7), so a handler that comes late stretches the
   bus and loses nothing. So does a thread held off inside `start()`:
   `start()` writes its first entry before the rest, so the tenure is on
   the wire while the fill goes on. Held off after its k-th entry, the
@@ -399,9 +414,9 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   until the fill resumes - a stretch inside the tenure, the bytes
   unchanged. Two byte
   times are 45 us at 400 kHz and 18 us at 1 MHz, so a preempting dispatch
-  of 3000 cycles (some 23 to 28 us with its road on these chips)
-  stretched no tenure at 400 kHz on either chip and, at 1 MHz, 122 in
-  5200 writes on the RP2040, where the RP2350's preemptions all but never
+  of 3000 cycles (22 to 41 us with its road on these chips)
+  stretched no tenure at 400 kHz on either chip and, at 1 MHz, 32 in
+  6000 writes on the RP2040, where the RP2350's preemptions all but never
   landed inside `start()` (measured under the preemptive kernel,
   [../rp2040/i2c.md](../rp2040/i2c.md) and
   [../rp2350/i2c.md](../rp2350/i2c.md)). The client takes it as a field
@@ -416,8 +431,9 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   tenures, so the disable/IC_TAR/enable cycle runs only when the address
   or the speed moves, or when the last tenure did not end on its own STOP
   (an abort, a recover). That cycle's disable waits for the block's own
-  shutdown, which follows the bus timing: about 6 us at 100 kHz and
-  1.5 us at 400 kHz, paid in the dispatch.
+  shutdown, which follows the bus timing, and is paid in the dispatch: the
+  whole cycle costs 7.6 us at 100 kHz and 1.4 us at 400 kHz on the RP2040, 10
+  to 12 us and 1.5 or 1.6 us on the RP2350, measured on an idle bus.
 - **`IC_TAR` written while enabled** - not offered: the register
   description of the chips here takes a write only with `IC_ENABLE[0]`
   clear, so a new address is always the disable/enable cycle above.
@@ -436,12 +452,16 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   outside the range is. The request names it in one field,
   `r.engine = brio::I2cEngine::dma;`, on a host whose two engine parameters
   are filled (each family's "How to use it" has the host type and the
-  vector). A wrong choice costs core cycles, never correctness: each
-  family's document gives the measured cost of both, and the length
-  from which `dma` costs the core less - a read of nine bytes on the
-  RP2040 with the host in SRAM and on the RP2350's Cortex-M33, eight on its
-  Hazard3, the pump's second entry; a write of fourteen and of thirteen on
-  those two.
+  vector). On a host with engines a wrong choice costs core cycles, never
+  correctness. Each family's document gives the measured cost of both,
+  and the length from which `dma` costs the core less:
+
+  - a read on the RP2040: nine bytes with the host in SRAM; from the flash
+    the same at 400 kHz and 1 MHz, later at 100 kHz, where the XIP cache
+    spreads it;
+  - a read on the RP2350: nine bytes on the Cortex-M33, eight on Hazard3;
+  - a write: fourteen bytes on the RP2350's Cortex-M33, thirteen on its
+    Hazard3, and never on the RP2040, whose writes stay on the pump.
 - **A write phase under `dma`, the chip's question** - a write entry is
   the request's byte with the command bits above it clear, and a byte beat
   at the register's own address lands replicated across the word on both
@@ -458,22 +478,26 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   which starts the tenure, the transmit engine pours the bytes between in
   byte beats from the request's own buffer with no copy, and the block's end
   on the DMA line hands the pump the last entry with its STOP. A write
-  before a read stays on the pump whichever the chip: it is the register
-  index of a read, a few bytes `start()` writes with no interrupt of their
-  own, and the channel's block in that tenure is the read's commands. So
-  does a write of one or two bytes, which has none between. ONE ADDRESS SERVES BOTH WIDTHS: the transmit engine is
-  bound at the alias once, at `arm()`, and a read's halfword commands go
-  through it too, landing with the same low sixteen bits, the upper lanes
-  zero instead of a copy the block does not read - so no request writes the
-  address, and a request costs only the store of CTRL the engine already
-  makes when the beat or the step differs from the last block's, one
-  compare against RAM and one store. The figures, and the length from which
+  before a read stays on the pump whichever the chip, because the
+  channel's block in that tenure is the read's commands. It is usually a
+  register index, a few bytes `start()` writes with no interrupt of their
+  own; a longer one takes TX_EMPTY entries like any write on the pump. A
+  write of one or two bytes stays there too, having no byte between its
+  first and its last entry.
+
+  One address serves both widths. The transmit engine is bound at the alias
+  once, when `init()` arms it, and a read's halfword commands go through it
+  too: they land with the same low sixteen bits, and zeros in the upper
+  lanes, which the block does not read. So no request writes the address. A
+  request pays what any engine start pays: one compare against RAM, and one
+  store of CTRL when the beat or the step differs from the last block's. The
+  figures, and the length from which
   the channel costs the core less, are the family's
   ([../rp2350/i2c.md](../rp2350/i2c.md)).
 - **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
   `IC_DMA_RDLR`)** - used for the read phase under `dma`, and for a
   write phase where the chip carries one, watermarks at
-  their reset value (single transfers, the chapter's advice); BOTH
+  their reset value (single transfers, RP2040 4.3.15.3); BOTH
   ENGINES ARM AT THE FAMILY'S NORMAL LEVEL, the rule's for a peripheral
   that waits (docs/design/dma.md): a starved command channel leaves the
   transmit FIFO empty and a starved receive channel leaves the receive
@@ -495,11 +519,12 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   A bus error on either channel ends the tenure `i2c_dma_fault` in
   `dma_isr()`, the block's abort asked and the channels stopped: the
   stratum's own status, beyond the four wire codes util/i2c_bus.hpp
-  defines. The receive start and the transmit start
-  cannot refuse what the host hands them (a buffer or the sink, one
-  byte or more; a halfword cell, one command or more; a channel no other
-  owner can name, `dw_apb_i2c_engine_claimed` the compile-time check, and
-  whose last block has ended), so neither result is read. An abort under the engines stops them BEFORE the abort is
+  defines. Neither engine's start can refuse what the host hands it, so
+  neither result is read. The receive start gets a buffer or the sink, one
+  byte or more. The transmit start gets a halfword cell, one command or
+  more, or on a chip with the alias the request's own bytes, one or more.
+  Each channel has no other owner (`dw_apb_i2c_engine_claimed` is the
+  compile-time check), and its last block has ended. An abort under the engines stops them BEFORE the abort is
   read away: the FIFOs stay flushed until `IC_CLR_TX_ABRT` is read, so a
   command the transmit engine still pours meanwhile is dropped instead
   of starting a tenure of its own.
@@ -514,8 +539,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   together and the wired-AND decides; the loser's abort is ARB_LOST,
   `i2c_arb_lost`. Measured both ways between an RP2040 and an RP2350
   (each chip's document). A new address written while another node holds
-  the bus pays a slower disable: 94 us at 100 kHz on the RP2040 against
-  the 6 us of an idle bus.
+  the bus pays a slower disable: 94 us at 100 kHz on the RP2040, where
+  the whole cycle takes 7.6 us on an idle bus.
 - **The interrupt decode** - one `IC_INTR_STAT` read an entry; the
   sources not armed for the tenure never reach the handler, and a mask
   bit is written only when it changes (a mirror of TX_EMPTY's and
@@ -531,9 +556,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **GEN_CALL stands through the address's acknowledge**: a read of
   `IC_CLR_GEN_CALL` inside that bit does not hold, and the line re-enters
   - two to seventeen times in the 8 us after the address at 100 kHz,
-  measured on the RP2040 against a host's general call - a stimulus no
-  brio host sends now, every host refusing address 0x00
-  ([../design/i2c-bus.md](../design/i2c-bus.md)), so no suite re-runs it.
+  traced on the RP2040. No suite re-runs it, since every brio host refuses
+  address 0x00 ([../design/i2c-bus.md](../design/i2c-bus.md)).
   `service()` masks the source at the first report and gives it back at
   the call's first data byte, which always follows: one `general_call`
   event a call.

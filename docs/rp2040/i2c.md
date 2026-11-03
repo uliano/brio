@@ -11,8 +11,8 @@ instance, `I2cHost<n, pins, ...>` the host engine `util/i2c_bus.hpp`
 drives, `I2cClient<n, pins>` the client role. The arbiter, `I2cBus`,
 is an active object (a component of a brio program with its own event
 queue, served one event at a time by the kernel,
-[docs/learn/introduction.md](../learn/introduction.md)): devices post
-it requests, it runs them one tenure at a time on the host - a tenure
+[docs/learn/introduction.md](../learn/introduction.md)): other active
+objects post it requests, it runs them one tenure at a time on the host - a tenure
 being one START to its STOP - and replies to each.
 
 The smallest use, a register read through the arbiter, from "How to
@@ -23,7 +23,9 @@ constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
 using Bus = brio::I2cHost<0, pins>;
 using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
 
-Bus::init(clock);
+if (!Bus::init(clock)) {
+    // no bus: a clock under 2.7 MHz, or the block did not come up
+}
 
 Bus::Request r{};
 r.addr = 0x48;
@@ -38,6 +40,11 @@ extern "C" void isr_i2c0() {
 }
 ```
 
+An excerpt: it assumes the program's platform `P`, its clock task's tag
+`clock`, `static uint8_t reg[1]` and `static uint8_t value[2]`, and an
+active object `Sensor` that handles `I2cDone`; `init()` runs in `main()`
+and the post in one of `Sensor`'s handlers.
+
 Line by line: `pins` names I2C0's SCL and SDA pads, GP13 and GP12, which
 table 279 gives the instance (a pin it does not give does not
 compile); `Bus` is the host engine over I2C0; `I2c` the arbiter over it
@@ -45,7 +52,9 @@ compile); `Bus` is the host engine over I2C0; `I2c` the arbiter over it
 the failure policy (a failed request is answered to its client as it
 failed, never retried), and a 20 ms timeout after which
 a tenure that never completed is answered `i2c_timeout` and the host
-recovered - listed in the program's `Tenuto` like any active object;
+recovered (a request of 255 bytes is 23 ms of wire at 100 kHz, 5.8 ms at
+400 kHz, so the figure must exceed the program's longest request at its
+speed) - listed in the program's `Tenuto` like any active object;
 `init()` takes the clock task's tag ([clock.md](clock.md)) and solves
 the three speeds' SCL counts from clk_sys; the request writes one byte
 (the register's address) to the device at 0x48 and reads two back in
@@ -54,7 +63,9 @@ that receives the `I2cDone` reply; `isr_i2c0` is I2C0's handler under
 the pico-sdk's name, and it tells the arbiter when the host's tenure
 completes.
 
-What decides correctness even there. The request lends its buffers
+What decides correctness even there. The bus needs external pull-up
+resistors on both wires: the pads take the internal pull-up the chapter
+asks for, and that does not do the pulling. The request lends its buffers
 (`brio::lend<Lease::reply>`): `reg` and `value` belong to the tenure
 from the post until `Sensor` receives its `I2cDone`, and stay
 untouched and in scope until then, which nothing checks. `init()` after
@@ -68,19 +79,12 @@ every host refuses ([../design/i2c-bus.md](../design/i2c-bus.md)) - and
 one that names `I2cEngine::dma` on a host with no DMA engines bound, as
 this `Bus` is. The vector is the program's to bind: the
 crt gives `isr_i2c0` a weak alias to `Default_Handler`'s spin, so an
-unbound vector parks the core there at the host's first interrupt. The
-pull-ups are the board's: the pads take the internal pull-up the
-chapter asks for, but the bus needs its external resistors. And a bus
+unbound vector parks the core there at the host's first interrupt. And a bus
 without a timeout (`I2cBus`'s last argument 0) waits for ever on a
 tenure whose completion never comes, a client holding SCL among the
 causes ("Bench findings", the timed bus).
 
-The page is long because the chapter is. In order: the documents of
-record; what the silicon does - the host as a command FIFO, the SCL
-timing, the client, two hosts, the pins; the types and verbs; how to
-use it, with the engines and a client; the bench findings, against the
-partner's peer on the pair's wires, with the host's cost and the
-vendor's tenure on the same wire; and what is not covered.
+
 
 ## Documents of record
 
@@ -106,11 +110,11 @@ this chip's device description held against the bits the IP file spells
 itself, and the public names `DwApbI2c<n>` (the resource), `I2cHost`
 (the engine `I2cBus` drives) and `I2cClient` (the other end), this
 chip's aliases of the three templates there. The reference suite:
-`test_rp2040_i2c`, the block wireless and then the wire, which is the
-desk partner's: I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this
+`test_rp2040_i2c`, first the block with nothing on the wire and then the
+wire to a second board, the partner: I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this
 board's 3V3 on each, to the WeAct RP2350B
 ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), whose peer of
-the twi_link protocol is commanded over the bus under test; the same
+the twi_link protocol is commanded over the bus under test; that
 board's own suite, `test_rp2350_i2c`, judges this chip's block as that
 peer. A suite's letter is one command key of its console and the group
 of verdicts it runs.
@@ -275,7 +279,9 @@ constexpr brio::I2cPins pins{.scl = 13, .sda = 12};
 using Bus = brio::I2cHost<0, pins>;
 using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
 
-Bus::init(clock);
+if (!Bus::init(clock)) {
+    // no bus: a clock under 2.7 MHz, or the block did not come up
+}
 
 Bus::Request r{};
 r.addr = 0x48;
@@ -291,8 +297,9 @@ extern "C" void isr_i2c0() {
 ```
 
 With the engines: `I2cHost<0, pins, DmaTxEngine<4, uint16_t>,
-DmaRxEngine<5>>`, `isr_dma_0` calling `Bus::dma_isr()` the same way, and
-every request that should ride them naming them (an excerpt: the request
+DmaRxEngine<5>>`, `brio::Dma::init()` before `Bus::init()` ([dma.md](dma.md)),
+`isr_dma_0` calling `Bus::dma_isr()` the same way (line 0 is an engine's
+default interrupt line), and every request that should ride them naming them (an excerpt: the request
 above on that host, reading a block of 64 bytes into a buffer `block` of
 the program's, lent like `value`):
 
@@ -301,24 +308,26 @@ r.rx = brio::lend<brio::Lease::reply>(block); r.rx_len = 64;   // a block worth 
 r.engine = brio::I2cEngine::dma;                               // the read half on the DMA channels
 ```
 
-The host never chooses. A request that names nothing runs on the host's
+The program chooses, request by request. A request that names nothing runs on the host's
 interrupt, at any length, and touches no channel; one that names `dma`
 has its read half on the engines at any length - the receive engine
 collecting every byte, the transmit engine pouring the commands of a
 read of three bytes or more - while its write half, which the engines
 cannot carry, stays on the interrupt and the request completes. On a host
-with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
-costs core cycles, never correctness, so the choice is the program's by
-what it knows: the length, and what else the core must do meanwhile.
-The core cycles each costs, letter i's `i2c.cost` lines (start() and
-the vectors, the least of five) at 400 kHz over five runs of the letter,
-a range where the XIP cache spreads them, at 125 MHz - the same at
-100 kHz and 1 MHz but for the `dma` row from the flash, which the cache
-spreads (below), and one run's 1430 for an `interrupt` read of 16 at
-100 kHz; the rows "the host in SRAM" from
-`bench_rp2040_ram`, whose host is `InRam` and whose vectors are placed
-([platform.md](platform.md), "A handler in SRAM"), the rows "from the
-flash" from `bench_rp2040`, the default image:
+with no engines bound, `dma` is answered `i2c_rejected`. On a host with
+engines a wrong choice costs core cycles, never correctness, so the choice
+is the program's by what it knows: the length, and what else the core must
+do meanwhile.
+
+The table gives the core cycles each costs at 125 MHz: letter i's `i2c.cost`
+lines (`start()` and the vectors, the least of five) at 400 kHz over five
+runs of the letter, a range where the XIP cache, through which the core
+executes the flash, spreads them. The rows "the host in SRAM" are
+`bench_rp2040_ram`'s, whose host is `InRam` and whose vectors are placed
+([platform.md](platform.md), "A handler in SRAM"); the rows "from the flash"
+are `bench_rp2040`'s, the default image. At 100 kHz and 1 MHz the figures are
+the same, but for the `dma` row from the flash (below) and one run's 1430 for
+an `interrupt` read of 16 at 100 kHz.
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
@@ -327,24 +336,31 @@ flash" from `bench_rp2040`, the default image:
 | `interrupt`, from the flash | 663 to 848 | 681 | 707 | 837 | 1062 | 1244 | 4119 | 15 541 |
 | `dma`, from the flash | 699 | 703 | 1042 | 942 | 952 | 952 to 1138 | 1407 to 1500 | 1591 to 1683 |
 
-The pump costs F + b x n with F about 300 cycles and b about 60 a byte,
-in steps of eight (one entry for each half FIFO); the engines cost E,
-about 1000 cycles from SRAM for a read of nine to sixteen bytes, with
-1094 at three and 1198 from sixty-four (a third entry, the transmit
-block's end finding no room for the STOP entry). So `dma` costs the core
-fewer cycles from **nine bytes** with the host placed in SRAM (the
-pump's second entry), and from the flash from nine at 400 kHz and 1 MHz
-in five runs of five, but at 100 kHz from sixteen in three runs and from
-sixty-four in two, where the engined path's lines miss the XIP cache by
-turns (E 1134 to 1414 there); a read of
-one or two costs the same within forty cycles either way (the 848 above is
-one run of five, its other four 663), and one of
-three to eight costs the engines a second entry (the transmit block's
-end). A write costs the same under either value. The energy side: under
-either value the core waits in its sleep instruction between entries,
-and the chip's SLEEP state asks in addition that the DMA have no
-outstanding transfer on any channel (2.11.2), which a `dma` read's
-channels hold for the read - not measured here.
+From sixteen bytes up the pump costs F + b x n, F about 300 cycles and b about
+60 a byte, in steps of eight (one entry for each half FIFO). The engines
+cost E, about 1000 cycles from SRAM for a read of nine to sixteen bytes and
+1198 from sixty-four (a third entry, the transmit block's end finding no room
+for the STOP entry). Warm, the host in SRAM is not cheaper than the host in the
+flash: it pays the call's veneer, and the cache serves a warm path at the SRAM's
+pace; what SRAM buys is the cold path, and no spread warm
+([platform.md](platform.md), "A handler in SRAM").
+
+So `dma` costs the core fewer cycles from **nine bytes** with the host in SRAM
+(the pump's second entry). From the flash the same holds at 400 kHz and 1 MHz in
+five runs of five. At 100 kHz it holds from sixteen bytes in three runs and from
+sixty-four in two, because the engined path's lines miss the XIP cache by turns
+(E 1134 to 1414 there). A read of one or two costs the same within forty cycles
+either way (the 848 above is one run of five, its other four 663). A read of
+three to eight costs the engines a second entry (the transmit block's end), and
+at three and four `start()` itself reads 100 cycles more than at eight: a block
+of one or two beats ends before `start()` returns, so the DMA line's entry falls
+in its span (inferred from those lengths, not counted apart).
+
+A write takes the same path under either value, the pump; no line of the letter
+prices the two apart. Under either value the core waits in its sleep instruction
+between entries, and the chip's SLEEP state asks in addition that the DMA have
+no outstanding transfer on any channel (2.11.2), which a `dma` read's channels
+hold for the read: what that costs is not measured ("Not covered yet").
 
 A client:
 
@@ -366,8 +382,8 @@ extern "C" void isr_i2c1() {
 ## Bench findings
 
 The reference suite is `test_rp2040_i2c`, green on the WeAct board
-against the WeAct RP2350B's peer over the pair's I2C wires, on either
-of that chip's halves: **73 verdicts** in its key `z`. The same block as the PEER, the RP2040 the
+against the WeAct RP2350B's peer over the I2C wires between the two, on either
+of that chip's architectures: **73 verdicts** in its key `z`. The same block as the PEER, the RP2040 the
 far end, is judged by `test_rp2350_i2c` (docs/rp2350/i2c.md), so every
 client finding below is measured from both sides. The cost figures are
 `bench_rp2040` letter i's, against the same peer.
@@ -384,9 +400,9 @@ client finding below is measured from both sides. The cost figures are
   home is `i2c_nack_addr` in 110 to 111 us at 100 kHz - the address's 94
   us of wire and the disable cycle a new address pays. The three speeds
   run byte-exact both ways against the second chip and measure, on the
-  system timer over a 64-byte tenure, 99, 392 or 393 and 962 to 965 kHz
+  system timer over a 64-byte tenure, 99, 392 or 393 and 962 to 966 kHz
   for 100, 400 and 1000 asked (the counts give 100, 399.4 and 1000 on an
-  ideal wire); the bench's SCL period at 400 kHz is 315.9 to 316.0
+  ideal wire); the bench's SCL period at 400 kHz is 315.9
   cycles against the counts' 313, the 1.5 kOhm pull-ups' rise adding 23
   ns a period at every speed.
 - THE TENURE SHAPES against a second chip: a write, a read, a
@@ -409,13 +425,13 @@ client finding below is measured from both sides. The cost figures are
   is taken, which refuses the byte in flight and sets SLV_RX_DATA_LOST)
   is `i2c_nack_data`, with nothing and two bytes stored. THE CLIENT'S
   STRETCH IS A READ'S: 100 us held before each of eight bytes given
-  lengthens this host's read by 745 to 749 us - eight holds less the
+  lengthens this host's read by 744 to 749 us - eight holds less the
   host's own 6 us low phase each overlaps - and leaves a write under the
   same client within 7 us of the plain one (the block holds SCL as a
   receiver only with its receive FIFO full).
 - THE ENGINES against the second chip (letter g, every request naming
-  its engine): a 64-byte read under `dma` at 400 kHz in 1496 to 1508 us
-  (387 to 391 kHz) with two host interrupts - the second engined read
+  its engine): a 64-byte read under `dma` at 400 kHz in 1501 to 1519 us
+  (385 to 389 kHz) with two host interrupts - the second engined read
   in a row; the first is the XIP cache's fill, below -, a
   write-then-read of 2 + 32, a deaf client on an engined read, and eight
   255-byte reads at 1 MHz byte-exact with TX_OVER never raised. THE
@@ -430,50 +446,38 @@ client finding below is measured from both sides. The cost figures are
   6 + 16 under `dma` whose third written byte the client refuses - the
   read half already on the engines - is `i2c_nack_data`, two bytes
   stored, and the next engined read exact. Twenty-five runs of the
-  letter (twelve alone, thirteen in z), the same figures in each.
+  letter (fifteen alone, ten in z), the same counts in each.
 - THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
   `i2c_dma_fault` with no host interrupt, and the next engined read is
-  clean. The peer had served 6 bytes by the abort in twenty-five runs
-  out of twenty-five: the end of the letter's derived bound of one to six (the
-  handler cold, under four byte times, then the byte under way and the
-  next). The RP2350 reads 3 or 4 on the same letter; that the RP2040's
-  handler reaches the bound's end because its path misses the XIP cache
-  is a reading, not measured - no XIP counter was read around it.
+  clean. The peer had served 4 or 6 bytes by the abort, in those twenty-five
+  runs, inside the letter's derived bound of one to six (the handler cold, under
+  four byte times, then the byte under way and the next). The RP2350 reads 3 on
+  the same letter; no XIP counter was read around it, so why this handler comes
+  later is not established.
 - I2cBus OVER I2cHost: four queued tenures, the NACK in its place, the
   rejection of what a four-deep queue cannot hold, both votes, and THE
   TIMED BUS - the peer holding SCL 30 ms before the first byte of a read
   - answered `i2c_timeout` at the arbiter's 20 ms with SCL still held,
   the recover()ed engine carrying the next two tenures.
-- THE STUCK BUS: the peer holding SDA until its fourth SCL fall is freed
-  by unstick() in exactly four pulses; a line nine pulses cannot free is
-  0xFF in 115 to 118 us (twenty waits of 5 us on SysTick's delay, and the pads
+- THE STUCK BUS: the peer holding SDA until its fourth SCL fall is freed by unstick() in exactly four pulses; a line nine pulses cannot free is
+  0xFF in 115 to 117 us (twenty waits of 5 us on SysTick's delay, and the pads
   handed over), the bus working after the far end lets go.
 - TWO HOSTS (4.3.8), measured both ways: both STARTs written while a
   START made by hand holds the bus busy, released by the one STOP that
   closes it - this host aiming at 0x6B loses the wired-AND to the peer's
   0x2C at its first address bit (`i2c_arb_lost`), and aiming at 0x11 it
   keeps the bus and the PEER reports the loss. THE HOST'S STOP_DET IS
-  EVERY STOP ON THE WIRE: a host that took any STOP for its own would
-  end a tenure written inside the window `i2c_ok` on the window's own
-  STOP before it had clocked a bit, so this one requires its transmit
-  FIFO empty and its host state machine idle at the STOP (its own STOP
-  follows its last entry; the IP stratum's page, and below, the held
-  wire under the preemptive kernel) - and no TX_ABRT standing at that
-  read. Without that last test, an engined read of 16 aimed at the
-  higher address inside the window - its read half on the engines from
-  `start()` - can lose the arbitration between the handler's read of the
-  pending sources and its read of `IC_STATUS`, the abort's flush leaving
-  the FIFO empty and the machine idle, and pass for its own STOP: a
-  control build whose STOP test omits the raw TX_ABRT read ended it
-  `i2c_ok` with the host's code cold in the XIP cache - letter `k` run
-  first after a boot, four boots of four - and in six runs of `z` out of
-  six, and `i2c_arb_lost` with that code just run (`k` run again after
-  itself or after `z`, or right after letter `g`'s engined reads: twelve
-  of twelve). With the read, `i2c_arb_lost` in every run: letter `k`
+  EVERY STOP ON THE WIRE, so this host requires its transmit FIFO empty, its host
+  state machine idle and no TX_ABRT standing at the STOP
+  ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), STOP_DET). The last test is
+  letter `k`'s: an engined read of 16 aimed at the higher address inside the
+  window. A control build without it ended that read `i2c_ok` with the host's code
+  cold in the XIP cache (`k` first after a boot, four boots of four, and six runs
+  of `z` of six) and `i2c_arb_lost` with that code just run (twelve of twelve). With the read, `i2c_arb_lost` in every run: letter `k`
   first after a boot three times of three, run again three of three, and
-  in three runs of `z`. A new address written while another node holds
+  in ten runs of `z`. A new address written while another node holds
   the bus costs a disable of 94 us at 100 kHz.
 - THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
   with their STOP; two reads of six served one byte a read request, the
@@ -488,36 +492,34 @@ client finding below is measured from both sides. The cost figures are
   read request the client holds SCL for NEVER COMPLETES: IC_EN stays 1
   through 2 ms and 50 ms more, a byte written after it untaken, neither
   bit set; `release()` lets SCL go and the far host's read finishes on the
-  pull-up ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Thirteen
-  runs of z, the same figures in each.
+  pull-up ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)). Ten
+  runs of z, the same counts in each.
 - THE FIRST ENGINED READ IS THE XIP CACHE'S FILL. Letter g's first
-  64-byte read at 400 kHz takes 1607 to 1654 us with ONE host interrupt
-  inside the key `z`, whose other letters run before it, after a flash
-  or not (thirteen runs), where the read right after it takes 1496 to
-  1508 us with two; the same read with every line of the XIP cache
-  flushed first (the letter's third, printed) takes 1654 to 1664 us with
-  one; and letter g run alone, again in the same boot, reads its first
-  1532 to 1566 us, two interrupts in eleven runs of twelve. The difference
-  is the host's `start()`, its vector's and the DMA line's code fetched
-  out of the flash - the flushed read reproduces it - and the late
-  handler finding room for the STOP entry is why one entry stands for
-  two. The placement takes part of it away: `bench_rp2040` letter i's
+  64-byte read at 400 kHz takes 1559 to 1649 us inside the key `z`, whose other
+  letters run before it (ten runs), with one host interrupt in seven runs and
+  two in three. The read right after it takes 1501 to 1518 us with two. The same
+  read with every line of the XIP cache flushed first (the letter's third,
+  printed) takes 1652 to 1662 us with one. Letter g run alone reads its first in
+  1532 to 1647 us, two interrupts in fourteen runs of fifteen. The difference is
+  the host's `start()`, its vector's and the DMA line's code fetched out of the
+  flash, which the flushed read reproduces, and the late handler finding room for
+  the STOP entry is why one entry can stand for two. The placement takes part of it away: `bench_rp2040` letter i's
   16-byte engined read at 400 kHz reads 49 553 to 49 644 cycles warm from the
   default image, and cold 61 326 to 61 422 with the hosts InRam, 61 750 to
   64 166 with the vectors placed, 54 810 with both and 71 946 to 73 838 from the
   default image ([platform.md](platform.md), "A handler in SRAM"). The
   letter judges the second read.
 - TX_EMPTY IS MASKED BEFORE THE PUSH ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
-  the transmit threshold): masked after it, the engined read's second
-  read took a third host entry reading IC_INTR_STAT zero after every
-  boot - the letter's verdict failed seven passes in seven - and reading
-  the mask back after the store changed nothing; masked first, ten passes
-  in ten read two entries.
+  the transmit threshold): the engined read's second read takes two entries in
+  twenty-five runs of twenty-five, and masked after the push it took a third,
+  reading IC_INTR_STAT zero, in seven passes of seven.
 - THE HOST'S COST, `bench_rp2040` letter i against the peer's client,
   the host's vector in the flash (the default image, warm), nothing of
   the far end on this core. Each line of the letter is the best of
-  five, and each figure here its range over five runs; the fixed cost is
-  wall less the wire's time, in clk_sys cycles at 125 MHz:
+  five, and each figure here its range over five runs, in clk_sys cycles at
+  125 MHz. The fixed cost is wall less the wire's time; busy is every cycle the
+  core was not idle, the handlers' among them
+  ([../design/benchmark.md](../design/benchmark.md)):
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
@@ -530,12 +532,11 @@ client finding below is measured from both sides. The cost figures are
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
   read is one every eight bytes. A spread in the handler's column is the
-  XIP cache's; a step of 146 cycles in the busy column with the handler's
+  XIP cache's. A step of 146 cycles in the busy column with the handler's
   unmoved is a tick's wake landing in the run (inferred from its size and from
   its coming and going at other lengths). The letter's vector holds both of its
-  hosts' bodies in one function, so a handler figure here holds that function's
-  register allocation, which a change in the other host's body can move by a few
-  cycles an entry. The fixed cost is the same at the three
+  hosts' bodies in one function, so a change in the other host's body can move a
+  handler figure here by a few cycles an entry. The fixed cost is the same at the three
   speeds (732 at each for a one-byte write) because the address and
   the speed stay in the block between tenures: the cycle of disable,
   IC_TAR and enable, which a new address still pays (`i2c.write.readdr`),
@@ -550,10 +551,9 @@ client finding below is measured from both sides. The cost figures are
 - THE VENDOR'S TENURE ON THE SAME WIRE: the pico-sdk 2.3.1's polled
   `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
   the pinned archive, `clock_get_hz` answered with clk_sys, brio's crt,
-  clock, console and ruler around it) on I2C1, GP2/GP3, against the same
-  peer between the same serve commands; the SDK's own `i2c_init`, then
+  clock, console and ruler around it) on I2C1, GP2/GP3, against the same peer, each tenure inside one commanded serve of the peer's; the SDK's own `i2c_init`, then
   brio's counts written over its own, so the SCL period measures the
-  same (316.0 cycles at 400 kHz, letter i's too). At 400 kHz,
+  same (316.0 cycles at 400 kHz, letter i's 315.9). At 400 kHz,
   fixed cost, the SDK against brio's default image: a one-byte write 398
   against 732, a 255-byte write 388 against 728, a 16-byte read 1053
   against 878 or 879, a 255-byte read 16 442 (x 1.02) against 866 (x 1.00), a
@@ -573,106 +573,103 @@ Measured by `test_rp2040_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
 (pending depth 4, the per-bus timeout at 20 ms) over the engined
 `I2cHost<1>` on GP2/GP3 (DMA channels 4 and 5 on DMA_IRQ_0, clk_sys at
 125 MHz) inside Rubato on core 0, against the WeAct RP2350B's
-`twi_peer`, while PWM slice 7's wrap posts to the pack's highest object
+`twi_peer`, while PWM slice 7's wrap posts to the highest of the suite's
+active objects (the pack)
 every 97, 193 or 389 us and its dispatch spins 300 or 3000 cycles - at
 97 us x 3000, 25 % of the core. Every letter runs once with the slice
 silent and six times under it, and letter `c` runs letter `o` again with
 every pressure fed by core 1's doorbell ([multicore.md](multicore.md)).
-**237 verdicts in the key `z`, green in every run - the key thirteen
-times, its vocabulary letter `q` ten more; the letters `x`, `e` and `s`,
-outside it, green in thirteen runs each.** The pack, the command
-channel through the arbiter and the letters are the I2C suites' shared
+**237 verdicts in the key `z`, green in ten runs of ten; the letters `x`, `e`
+and `s`, outside it, green in fifteen runs each.** The pack, the command channel
+through the arbiter and the letters are the I2C suites' shared
 body (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them);
 what the two Raspberry Pi chips share over this block - the paths, the
 peer's arithmetic, the stretch instrument, letter `s` - is
 `rp2040/src/apps/rp_rubato_i2c.hpp`, whose header derives every bound.
 
-**Where a preemption reaches this host: inside `start()`'s fill, and a
-stretch only past two byte times.** `start()`'s first entry starts the
+**A preemption can land inside `start()`'s fill, and it stretches the tenure
+only past two byte times.** `start()`'s first entry starts the
 tenure, and the block clocks the address and that byte while the fill
 goes on: a preemption after the k-th entry leaves the block (1 + k) byte
 times before it needs the next, and only a longer one empties the
 command FIFO with no STOP in it - the block then holds SCL until
 `start()` resumes, the bytes unchanged
-([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), the host's engine).
+([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "The host").
 Letter `s` measures the fill, on `start()` as the suite wraps it (one
-copy of the Request and a compare to name its engine,
-`rp_rubato_i2c.hpp`'s `EngineByLength`) with the host in the flash:
-`start()` takes 1174 to 1341 cycles for a one-byte write and 1549 to
-1664 for a write of sixteen, so the fifteen entries after the first are
-246 to 479 cycles (16 to 31 an entry), where 400 writes under ticks
-independent of them would land 8 to 15 times. Under 97 us x 3000, the
-longest preemption of `start()` 4290 to 4933 cycles: at 400 kHz, where
-two byte times are 5625 cycles, the slice landed in `start()` - its
-whole span counted, the part before the first entry included - 90 to
-107 times in 400 writes, 47 to 63 of them with the host active on the
-wire, and **stretched no tenure in thirteen runs**; at 1 MHz (two byte
-times 2250 cycles), 108 to 130 landings, 56 to 76 with the host active,
-5 to 15 stretches in each run of 400 writes (122 in 5200); under a
-160 us spin at 389 us, longer than a whole sixteen-byte write at 1 MHz,
-63 to 80 landings, 36 to 50 with the host active and 20 to 36 of those
-stretched (356 of 558) - a stretch found only where a landing found the
-host active, which the letter judges; where the others landed in the
-fill is not split. Every
+copy of the Request and one or two compares to name its engine,
+`rp_rubato_i2c.hpp`'s `EngineByLength`) with the host in the flash, over
+fifteen runs. `start()` takes 722 to 839 cycles for a one-byte write and 1135
+to 1225 for a write of sixteen, so the fifteen entries after the first are 354
+to 467 cycles (23 to 31 an entry), where 400 writes under ticks independent of
+them would land 11 to 15 times. The slice's landings count `start()`'s whole
+span, the part before the first entry included, in 400 writes a run:
+
+| pressure | bus | landings in `start()` | with the host active | stretched |
+|---|---|---|---|---|
+| 97 us x 3000 | 400 kHz | 91 to 119 | 27 to 41 | none |
+| 97 us x 3000 | 1 MHz | 60 to 82 | 28 to 48 | 0 to 4 a run (32 in 6000 writes) |
+| a 160 us spin at 389 us | 1 MHz | 32 to 54 | 10 to 25 | 4 to 12 a run (122 of 292) |
+
+Under 97 us x 3000 the longest preemption of `start()` is 4570 to 5130 cycles,
+against two byte times of 5625 at 400 kHz and 2250 at 1 MHz. The 160 us spin
+is longer than a whole sixteen-byte write at 1 MHz. A stretch is found only where
+a landing found the host active, which the letter judges; where the others landed
+in the fill is not split. Every
 write `i2c_ok` and the peer's tallies exact, stretched or not. A stretch
 is read on the pad: the host active, its FIFO empty and SCL low for
 10 us, longer than any low half this host clocks (6 us at 100 kHz) - an
 empty FIFO alone is the block still clocking the entry it took. The key
-`z`, whose letter `p` runs 1 MHz, stretched 7 tenures in thirteen runs.
+`z`, whose letter `p` runs 1 MHz, stretched 16 tenures in ten runs.
 
-**THE SLICE AND THE DOORBELL LAND ALIKE.** Letter `x`, 400 writes of
-sixteen at 400 kHz (`start()` 1613 to 1642 cycles on average, silent):
-under the slice at 97 us x 3000 the landings in `start()` are 99 to 119
-against the 53 or 54 independent ticks would give; letter `e`, the same
-with every tick a doorbell from core 1, reads 89 to 122, and `start()`
-averages 3805 to 4206 cycles there against 3470 to 3687 under the
-slice. Both pressures land about twice as often as independent ticks
-would, the same within the runs' spread; which part of the tenure cycle
-makes it is not established. No stretch in either, at 400 kHz.
+**THE SLICE AND THE DOORBELL LAND ABOUT AS OFTEN.** Letter `x`, 400 writes of
+sixteen at 400 kHz (`start()` 1173 to 1199 cycles on average, silent): under the
+slice at 97 us x 3000 the landings in `start()` are 77 to 101, against the 38 or
+39 independent ticks would give, 27 to 43 with the host active. Letter `e`, the
+same with every tick a doorbell from core 1 ([multicore.md](multicore.md)), reads
+91 to 110, 74 to 82 with the host active, and `start()` averages 3694 to 3943
+cycles there against 3006 to 3307 under the slice. Both land two to three times
+as often as independent ticks would; which part of the tenure cycle makes it, and
+why the doorbell finds the host active more often, is not established. No stretch
+in either, at 400 kHz.
 
 **THE HELD WIRE PARKS THE START, ACROSS A NEW ADDRESS AND A NEW SPEED.**
 Letter `h`: the peer holds SDA low 60 ms, and the Client's write into
 it, whose `start()` first takes the disable, IC_TAR and enable cycle for
-its address, is answered `i2c_timeout` 19.9 to 20.2 ms after its
-`start()` in every pass of thirteen runs - its START parked behind the
+its address, is answered `i2c_timeout` 20.1 to 20.2 ms after its
+`start()` in every pass of ten runs - its START parked behind the
 hold, the re-enabled block still knowing the bus busy; met at 400 kHz
-after commands at 100 kHz, the same, thirteen of thirteen. The preempting object's flood
+after commands at 100 kHz, the same, ten of ten. The preempting object's flood
 of probes is answered `i2c_rejected` while the arbiter's queue is full,
 one probe a pass `i2c_timeout` (parked behind the hold in its turn), and
 after the release `i2c_ok`, or `i2c_nack_addr` for the one probe a pass
 that meets the peer before its client is back. THE ONE-ENTRY TENURE AND
-ANOTHER NODE'S STOP: a host that takes a STOP for its own with its
-transmit FIFO empty alone ends the probe parked at the release
-`i2c_bus_error` on the release's STOP - measured on such a build, 15 of
-24 pressed passes: its one entry still in the FIFO at the vector's entry
-(IC_TXFLR 1, MST_ACTIVITY clear) and taken by the block, the bus free,
-by the time the handler read TFE, its START then going out for a tenure
-already answered. This host requires the state machine idle beside the
-FIFO empty, and the probe ends on its own STOP, `i2c_nack_addr`, in 78
-pressed passes of 78. The test is one mask and one compare in the
-handler's STOP path, and the read of a standing abort beside it one
-register read more - the one-STOP handler 169 cycles in the cost table
-above ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), STOP_DET).
+ANOTHER NODE'S STOP: a build whose STOP test asked for the transmit FIFO empty
+alone ended the probe parked at the release `i2c_bus_error` on the release's STOP,
+in 15 of 24 pressed passes: its one entry was still in the FIFO at the vector's
+entry (IC_TXFLR 1, MST_ACTIVITY clear), and the block took it by the time the
+handler read TFE. This host requires the state machine idle too, and the probe ends
+on its own STOP, `i2c_nack_addr`, in 60 pressed passes of 60 (the test's cost:
+[../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), STOP_DET).
 
 **Every shape, and three requesters, under every pressure as in the
-control.** Letter `o` at 400 kHz against one serve counted to its end:
+control.** Letter `o` at 400 kHz against one commanded run of bytes from the peer, counted to its end:
 the probe, reads of 1 (the pump), 2 (the receive engine) and 3, 8 and
 32 (both engines), write-then-reads of 1+1 (the pump), 1+2 and 2+8
 (their read on the engines), writes of 1, 2, 3, 8 and 32 (the pump) -
 the suite naming `dma` for a request with a half of two bytes or more,
 `interrupt` otherwise - every one `i2c_ok`,
 every read byte-exact, the peer's count, sum and seventeen address
-matches exact (a write-then-read is two). Post to reply over thirteen
-runs, the control's and the worst under pressure: the probe 102 to 146
-and 99 to 140 us, the 32-byte write 772 to 780 and 778 to 821, the
-32-byte read 772 to 782 and 777 to 821. Letter `w`: the Client's 20 write-then-reads
+matches exact (a write-then-read is two). Post to reply over ten
+runs, the control's and the worst under pressure: the probe 100 to 136
+and 95 to 167 us, the 32-byte write 769 to 772 and 776 to 818, the
+32-byte read 778 to 783 and 783 to 820. Letter `w`: the Client's 20 write-then-reads
 of 1+6 (two outstanding), a requester below the arbiter with 10 writes
 of 2, and in a pressure pass the preempting object's 8 probes - every
 reply `i2c_ok`, to its requester, in its order, nothing rejected, no
-timeout, the peer's tallies exact, 5.8 to 7.0 ms a pass. Letter `p`: a
+timeout, the peer's tallies exact, 5.8 to 7.1 ms a pass. Letter `p`: a
 read of 16, a 1+4 and a write of 16 byte-exact at 100 kHz, 400 kHz and
 1 MHz, and the peer's commanded stretch of 1000 us a byte on a read of 8
-in 8813 to 8863 us against the 8762 its eight holds take at least.
+in 8818 to 8868 us against the 8762 its eight holds take at least.
 Letter `q`: the deaf client's probe and write `i2c_nack_addr`, a write to
 0x7A and one to the general call `i2c_rejected` with the peer, answering
 the general call, matching only the probe that follows, the third
@@ -736,9 +733,10 @@ Implemented but not bench-verified, each with what would measure it:
   at 100 kHz (traced: six entries 1 us apart, then RX_FULL a byte
   later), and no STOP_DET followed (STOP_DET_IFADDRESSED, the note on
   IC_CON bit 7) - which is why `service()` masks the source until the
-  call's first data byte and reports one event. No brio host sends a
-  general call now, the partner's included, so no suite reaches it; a
+  call's first data byte and reports one event. No brio host sends a general call, the partner's included, so no suite reaches it; a
   controller that sends one would measure it.
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
+- What a `dma` read costs the chip's SLEEP state: a meter on the rail, the same
+  read under either value, would measure it.

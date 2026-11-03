@@ -99,9 +99,9 @@
  *    the interrupt; it answers true at once for the refusals that move
  *    nothing (a speed the clock cannot produce, a block that would not
  *    disable). When the address or the speed moves it disables the block
- *    first and waits, bounded, for the block's own shutdown - about 6 us
- *    at 100 kHz and 1.5 us at 400 kHz on an idle bus, paid in the
- *    dispatch.
+ *    first and waits, bounded, for the block's own shutdown, which follows
+ *    the bus timing and is paid in the dispatch (the family's document has
+ *    the figure at each speed).
  *  - isr() is the instance's interrupt body and dma_isr() the body of
  *    the DMA line the engines report on: the program's handler for each
  *    calls it and nothing else does. Each returns true when the tenure
@@ -985,9 +985,9 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  *              refused.
  *
  * `dma` on a host with no engines bound is answered i2c_rejected inside
- * start(), nothing on the wire. A wrong choice costs core cycles, never
- * correctness; the family's document gives the length from which `dma`
- * costs the core less at each speed. The receive engine is armed to
+ * start(), nothing on the wire. On a host with engines a wrong choice costs
+ * core cycles, never correctness; the family's document gives the length
+ * from which `dma` costs the core less at each speed. The receive engine is armed to
  * report a bus error alone (the family's Report::errors): its block ends
  * with the last byte, before that byte's NACK and the STOP, and the
  * tenure ends on the STOP like every other - two interrupts an engined
