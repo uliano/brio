@@ -250,8 +250,9 @@ next in the shift register with SCL stretched until RXDR is read, and a
 byte the transmit channel has not written stretches SCL after the ninth
 pulse until TXDR is (32.4.7) - a starved channel slows the bus and loses
 nothing. The resource's `release()` - the host's and the client's -
-pulses the block's reset before the gate, so a DMA enable a tenure left
-set cannot raise its request again for the next owner of the line
+disables the block and gates its clock, no reset pulse; the tasks'
+`init()` start from the reset line, so a DMA enable a tenure left set
+cannot raise its request again when the clock returns
 ([dma.md](dma.md), "A released requester holds nothing here").
 
 `I2cClient<n, pins>` is the target: `init(clock, addresses, speed,
@@ -1208,7 +1209,7 @@ Implemented but not bench-verified:
 - **The held request of an I2C.** `test_stm32_dma` letter `r` measures a
   released requester on USART1, SPI1 and TIM3 with no wire; an I2C's
   TXIS or RXNE stands only inside a tenure on a wire, so no letter there
-  can raise one, and the claim that `release()`'s reset pulse withdraws
+  can raise one, and the claim that `init()`'s reset pulse withdraws
   it rests on what that letter measures of the other three requesters
   ([dma.md](dma.md), "A released requester holds nothing here") - the
   self-link's engined letters pass with the pulse in place. A

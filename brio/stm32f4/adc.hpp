@@ -963,10 +963,15 @@ public:
      * keeps fADC under `ceiling` - which at 180 MHz on this family means
      * PCLK2/2 is out and PCLK2/4 is the fastest legal division.
      *
-     * The RESET is deliberately NOT taken here: one line resets every
-     * converter and the common block together, so an `Adc<2>::init()`
-     * would silently stop an `Adc<1>` mid-sequence. `AdcCommon::reset()`
-     * is the verb, and the program says when.
+     * The RESET LINE is deliberately NOT taken here: one line resets
+     * every converter and the common block together, so an
+     * `Adc<2>::init()` would silently stop an `Adc<1>` mid-sequence.
+     * `AdcCommon::reset()` is the verb, and the program says when. What
+     * the release contract asks of an init() (docs/design/dma.md) - a
+     * request left raised withdrawn before anything is configured - this
+     * converter's own registers give instead: CR2 and CR1 cleared with the
+     * clock on, the DMA bit with them, which measured withdraws ADC1's
+     * standing request (docs/stm32f4/dma.md, "A released requester").
      */
     template <typename Clock>
     static bool init(Clock clock, const AdcConfig& c, uint32_t ceiling = adc_max_hz) {
@@ -983,6 +988,9 @@ public:
             return false;
         }
         bus_clock(true);
+        regs().CR2 = 0u;
+        regs().CR1 = 0u;
+        clear_flags(AdcFlag::all);
         AdcCommon::prescaler(p);
         if (!configure(c)) {
             return false;
@@ -993,15 +1001,13 @@ public:
     /// Everything this converter turned on, off again. The common block
     /// is left alone - it is the siblings' too.
     ///
-    /// THE RELEASE CONTRACT WITHOUT THE RESET LINE (docs/design/dma.md).
-    /// The pulse the other transports give their block before the gate is
-    /// one line for every converter and the common block here (RM0090
-    /// 6.3.9, "common to all ADCs") - it would stop a sibling mid-sequence.
-    /// What it would buy is a raised request withdrawn, and CR2 cleared
-    /// with the clock still on buys the same: measured, a cleared DMA bit
-    /// withdraws ADC1's standing request, and this release hands the next
-    /// owner of its stream nothing, before the gate opens again or after
-    /// (test_stm32f4_dma letter r, docs/stm32f4/dma.md).
+    /// CR1 and CR2 cleared with the clock still on - ADON, the DMA bit and
+    /// the interrupts with them - and the clock gated. No reset pulse, as
+    /// the release contract asks (docs/design/dma.md): here there is none
+    /// to give, the line being every converter's and the common block's
+    /// (RM0090 6.3.9, "common to all ADCs"); init() clears the same two
+    /// registers first, the request a cleared DMA bit withdraws
+    /// (docs/stm32f4/dma.md, "A released requester").
     static void release() {
         regs().CR1 = 0;
         regs().CR2 = 0;

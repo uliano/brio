@@ -1759,18 +1759,17 @@ struct I2c {
     /// makes the shared I2C2/I2C3 vector safe.
     [[gnu::always_inline]] static uint32_t isr() { return pending(); }
 
-    /// The interrupt line off, the block disabled and reset, the clock
-    /// gated. The reset line before the gate is the release contract
-    /// (docs/design/dma.md): a DMA request the block raised - TXIS or
-    /// RXNE behind TXDMAEN or RXDMAEN, which an abandoned tenure leaves -
-    /// is not left standing for the next owner of its request line. For
-    /// setup or the owning active object, with no tenure in flight; the
-    /// pads are not touched here (the tasks' release() verbs give them
-    /// back).
+    /// The interrupt line off, the block disabled, the clock gated - no
+    /// reset pulse. The tasks' init() verbs start from the reset line
+    /// (docs/design/dma.md, the release contract): a DMA request the block
+    /// raised and left standing - TXIS or RXNE behind TXDMAEN or RXDMAEN,
+    /// which an abandoned tenure leaves - is withdrawn there, before a
+    /// channel is armed. For setup or the owning active object, with no
+    /// tenure in flight; the pads are not touched here (the tasks'
+    /// release() verbs give them back).
     static void release() {
         Nvic::disable(irq());
         (void)disable();
-        reset();
         bus_clock(false);
     }
 };
@@ -2566,9 +2565,9 @@ public:
     }
 
     /// Everything given back: the interrupt line, the engines, the
-    /// block (reset, its clock gated - I2c<n>::release()) and the two
-    /// pads to their reset state. Main context, with no tenure in
-    /// flight; init() brings it up again.
+    /// block (disabled, its clock gated - I2c<n>::release(), no reset
+    /// pulse) and the two pads to their reset state. Main context, with
+    /// no tenure in flight; init() brings it up again from the reset line.
     static void release() {
         Nvic::disable(S::irq());
         if constexpr (has_dma) {
@@ -2964,9 +2963,10 @@ public:
     /// gate them.
     static void interrupt(uint32_t mask, bool on) { S::interrupt(mask, on); }
 
-    /// Everything given back: the interrupt line, the block (reset, its
-    /// clock gated) and the two pads to their reset state. Main context;
-    /// a controller addressing this target afterwards gets no answer.
+    /// Everything given back: the interrupt line, the block (disabled, its
+    /// clock gated, no reset pulse - init() starts from one) and the two
+    /// pads to their reset state. Main context; a controller addressing
+    /// this target afterwards gets no answer.
     static void release() {
         Nvic::disable(S::irq());
         S::release();

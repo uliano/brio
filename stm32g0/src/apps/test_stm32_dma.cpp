@@ -104,8 +104,9 @@
 //      own loop, both engines on letter o's channels, letter o's legs and
 //      the line's rate (skipped by name on the LQFP32)
 //   r  A RELEASED REQUESTER: USART1, SPI1 and TIM3 each released five
-//      ways with a request standing, and what the next owner of the same
-//      request line moves - the release contract measured with no wire
+//      ways with a request standing, and what a channel on the same
+//      request moves before its owner runs a block - the reset at init()
+//      measured with no wire, and its control
 //   p  (outside z) brio stress: THE RING OUTRANKS TWO COPIES - the
 //      console's ring at its default level beside a pair of copies on
 //      channels 4 and 5, every byte judged
@@ -3869,39 +3870,45 @@ void tq_ring_ranked_low() {
 
 // ---- r: a released requester (the release contract) -----------------------------
 //
-// docs/design/dma.md's release contract asks whether a peripheral's DMA
-// request, once raised, outlives the peripheral's release. On this family
-// the DMAMUX routes ONE request line to each channel (RM0444 11.4.4), so a
-// stray can only reach a channel that selects the SAME request again - the
-// peripheral's next owner, through any channel. The letter measures it with
-// no wire: a requester brought up with its request standing and no channel
-// listening, released one of five ways, and then the INCOMING owner - DMA1's
-// channel 5 routed to the same request, four bytes of memory into the
-// requester's own register - enabled for 2000 cycles. Every item it moves
-// is a request that outlived the release. Where the requester's clock was
-// gated, it is opened again afterwards (no reset) and the count read once
-// more. MEASURED on the STM32G0B1RE: unlike the CH32V203's, a block here
-// holds nothing across its release - but a DMA enable left set raises the
-// request again as soon as anything opens the clock, which is what the
-// reset pulse in every release() takes away.
+// docs/design/dma.md's release contract: a transport's release() gates its
+// clock and pulses no reset, its init() starts from the reset line. The
+// DMAMUX routes ONE request line to each channel (RM0444 11.4.4), and under
+// one owner a channel the only channel a request held across a release can
+// reach is its own owner's, when that owner is initialized again. The
+// letter measures that with no wire: a requester brought up with its
+// request standing and no channel listening, released one of five ways,
+// then DMA1's channel 5 routed to the same request - four bytes of memory
+// into the requester's own register, the shape its owner's channel has -
+// enabled for 2000 cycles. Every item it moves before its owner runs a
+// block is a request that outlived the release. Where the requester's
+// clock was gated, it is opened again afterwards (no reset) and the count
+// read once more. MEASURED on the STM32G0B1RE: unlike the CH32V203's, a
+// gated block here holds nothing - but a DMA enable left set raises the
+// request again as soon as anything opens the clock (C), which the reset at
+// init() takes away (A).
 //
-//   A  the contract: block disabled, RESET pulsed, clock gated
+//   A  THE CONTRACT: released as the transports release - block disabled,
+//      the DMA enable LEFT SET, clock gated, no reset - then init()'s first
+//      step, the clock opened and the reset pulsed, before the channel; then
+//      the owner brought up again runs the channel's block
 //   B  the DMA enable cleared, block disabled, clock gated (no reset)
-//   C  the DMA enable left set, block disabled, clock gated (no reset)
+//   C  THE CONTROL: as A with the reset at init removed - the DMA enable
+//      left set, block disabled, clock gated, then opened (no reset)
 //   D  the DMA enable cleared, block disabled, clock left on (no reset)
-//   E  the control: nothing released - the request is live
+//   E  nothing released - the request is live (the detector's control)
 
 enum class Release : uint8_t { contract, enable_cleared_gated, enable_set_gated,
                                enable_cleared_clocked, live };
 
 struct Handover {
-    uint16_t moved;           // items the incoming owner moved
+    uint16_t moved;           // items the channel moved before its owner ran a block
     uint16_t moved_ungated;   // and after the clock was opened again (B, C)
+    uint16_t block;           // A: items the channel moved once the owner ran its block
 };
 
-/// The incoming owner: DMA1 channel 5 on request `req`, four bytes of
-/// memory into the requester's own register `data` - the shape the next
-/// owner of a transmit or an update line has - given 2000 cycles. THE
+/// The detector: DMA1 channel 5 on request `req`, four bytes of
+/// memory into the requester's own register `data` - the shape its
+/// owner's channel has - given 2000 cycles. THE
 /// DIRECTION IS PART OF THE MEASUREMENT: USART1's transmit request,
 /// standing, moved nothing into a channel that read a RAM cell into RAM,
 /// and two frames' worth into one that wrote TDR, so the detector writes
@@ -3940,9 +3947,10 @@ Handover usart1_handover(Release how) {
     spin_cycles(SysClock::hz / 10000u);
     switch (how) {
         case Release::contract:
-            Usart<1>::enable(false);
-            Usart<1>::reset();
+            Usart<1>::enable(false);   // DMAT left set, as Uart::release() leaves it
             Usart<1>::bus_clock(false);
+            Usart<1>::bus_clock(true);   // init()'s first step: the clock, then the reset
+            Usart<1>::reset();
             break;
         case Release::enable_cleared_gated:
             Usart<1>::enable(false);
@@ -3968,6 +3976,16 @@ Handover usart1_handover(Release how) {
         spin_cycles(2000u);
     }
     h.moved_ungated = incoming_moved();
+    h.block = 0;
+    if (how == Release::contract) {
+        // The owner up again, its block on the channel: four frames at the
+        // divisor's pace (556 at 64 MHz, some 87 us a frame).
+        (void)Usart<1>::configure({}, 556);
+        Usart<1>::dma_transmit(true);
+        Usart<1>::enable(true);
+        spin_cycles(SysClock::hz / 500u);
+        h.block = incoming_moved();
+    }
     incoming_stop();
     Usart<1>::bus_clock(true);
     Usart<1>::enable(false);
@@ -3987,9 +4005,10 @@ Handover spi1_handover(Release how) {
     spin_cycles(SysClock::hz / 10000u);
     switch (how) {
         case Release::contract:
-            (void)S1::disable();
-            S1::reset();
+            (void)S1::disable();   // TXDMAEN left set, as SpiHost::release() leaves it
             S1::bus_clock(false);
+            S1::bus_clock(true);   // init()'s first step: the clock, then the reset
+            S1::reset();
             break;
         case Release::enable_cleared_gated:
             (void)S1::disable();
@@ -4015,6 +4034,15 @@ Handover spi1_handover(Release how) {
         spin_cycles(2000u);
     }
     h.moved_ungated = incoming_moved();
+    h.block = 0;
+    if (how == Release::contract) {
+        // The owner up again, its block on the channel: four frames clocked
+        // into nobody at the reset rate.
+        (void)S1::configure(SpiConfig{.dma_transmit = true});
+        S1::enable();
+        spin_cycles(SysClock::hz / 10000u);
+        h.block = incoming_moved();
+    }
     incoming_stop();
     S1::bus_clock(true);
     (void)S1::disable();
@@ -4033,7 +4061,8 @@ Handover tim3_handover(Release how) {
     spin_cycles(64u);
     switch (how) {
         case Release::contract:
-            T3::release();
+            T3::bus_clock(false);   // UDE left set: the worst case, staged by hand
+            T3::init();             // init(): the clock, then the reset
             break;
         case Release::enable_cleared_gated:
             T3::interrupts(T3::update_dma, false);
@@ -4056,6 +4085,15 @@ Handover tim3_handover(Release how) {
         spin_cycles(2000u);
     }
     h.moved_ungated = incoming_moved();
+    h.block = 0;
+    if (how == Release::contract) {
+        // The owner up again, one update behind UDE: one item.
+        (void)T3::configure({.prescaler = 0, .period = 0xFFFFu});
+        T3::interrupts(T3::update_dma, true);
+        T3::update();
+        spin_cycles(2000u);
+        h.block = incoming_moved();
+    }
     incoming_stop();
     T3::bus_clock(true);
     T3::release();
@@ -4065,9 +4103,9 @@ Handover tim3_handover(Release how) {
 
 void tr_released_requester() {
     quiet_everything();
-    const char* names[5] = {"A contract (reset)  ", "B enable cleared, gated",
-                            "C enable set, gated ", "D enable cleared, clocked",
-                            "E live (control)    "};
+    const char* names[5] = {"A contract (init resets)", "B enable cleared, gated ",
+                            "C enable set, no reset  ", "D enable cleared, clocked",
+                            "E live (control)        "};
     Handover u[5];
     Handover s[5];
     Handover t[5];
@@ -4082,28 +4120,33 @@ void tr_released_requester() {
               "/", t[i].moved_ungated, "  (items moved of 4 / after the clock reopened)",
               crlf);
     }
-    bench.verdict("THE CONTROL: a live request moves the incoming owner's items - two "
+    print(serial, "  A, the owner's block after its init(): USART1_TX ", u[0].block, "  SPI1_TX ", s[0].block,
+          "  TIM3_UP ", t[0].block, "  (of 4, 4, 1)", crlf);
+    bench.verdict("THE DETECTOR'S CONTROL: a live request moves the channel's items - two "
                   "for USART1 (TDR and the shift register, then the wire's pace), the "
                   "block for SPI1, the one update for TIM3: the detector sees a request",
                   u[4].moved >= 1u && s[4].moved >= 1u && t[4].moved >= 1u);
-    bench.verdict("NO REQUEST OUTLIVES ITS RELEASE HERE: a gated clock withdraws a raised "
-                  "request whatever the DMA enable says, and so does the DMA enable cleared "
-                  "with the clock left on - the incoming owner moved nothing (B, C, D)",
+    bench.verdict("NOTHING REACHES A CHANNEL UNDER THE GATE HERE: a gated clock withdraws a "
+                  "raised request whatever the DMA enable says, and so does the DMA enable "
+                  "cleared with the clock left on - the channel moved nothing (B, C, D)",
                   u[1].moved == 0u && s[1].moved == 0u && t[1].moved == 0u &&
                       u[2].moved == 0u && s[2].moved == 0u && t[2].moved == 0u &&
                       u[3].moved == 0u && s[3].moved == 0u && t[3].moved == 0u &&
                       u[1].moved_ungated == 0u && s[1].moved_ungated == 0u &&
                       t[1].moved_ungated == 0u);
-    bench.verdict("BUT A DMA ENABLE LEFT SET RAISES ITS REQUEST AGAIN WHEN THE CLOCK "
-                  "RETURNS, no reset in between: SPI1 (TXE behind TXDMAEN) and TIM3 (the "
-                  "pending update behind UDE) fed the incoming owner (C, reopened) - what "
-                  "the reset in release() takes away",
+    bench.verdict("THE CONTROL OF THE CONTRACT: A DMA ENABLE LEFT SET RAISES ITS REQUEST "
+                  "AGAIN WHEN THE CLOCK RETURNS, no reset in between: SPI1 (TXE behind TXDMAEN) "
+                  "and TIM3 (the pending update behind UDE) fed the channel before their owner "
+                  "ran a block (C, reopened) - what the reset at init() takes away",
                   s[2].moved_ungated >= 1u && t[2].moved_ungated >= 1u);
-    bench.verdict("THE CONTRACT HANDS OVER CLEAN: a requester released with its reset "
-                  "pulsed before the gate leaves the incoming owner of its request line "
-                  "nothing", u[0].moved == 0u && s[0].moved == 0u && t[0].moved == 0u &&
+    bench.verdict("THE CONTRACT: released with the DMA enable left set and the clock gated, "
+                  "then initialized from the reset line, the channel on the owner's request "
+                  "moves nothing before the owner runs its block - and the block moves exactly "
+                  "its items, four frames, one update (A)",
+                  u[0].moved == 0u && s[0].moved == 0u && t[0].moved == 0u &&
                       u[0].moved_ungated == 0u && s[0].moved_ungated == 0u &&
-                      t[0].moved_ungated == 0u);
+                      t[0].moved_ungated == 0u && u[0].block == 4u && s[0].block == 4u &&
+                      t[0].block == 1u);
     quiet_everything();
 }
 
@@ -4292,8 +4335,8 @@ int main() {
                  "after lap", to_circular_receive<>);
     bench.letter('x', "the circular receive on an LPUART: letter o's legs, "
                  "LPUART1's single wire", tx_lpuart_ring<>);
-    bench.letter('r', "a released requester: what the next owner of its request "
-                 "line finds", tr_released_requester);
+    bench.letter('r', "a released requester: what its own channel sees after init(), and the "
+                 "control", tr_released_requester);
     bench.letter('p', "the receive ring at its level beside two copies (brio stress)",
                  tp_ring_outranks_the_pair<>, false);
     bench.letter('q', "the ring ranked LOW beside two copies: the FIFO's kick (brio "

@@ -736,37 +736,45 @@ into the console's ring: every byte in order, no overrun, the two
 controllers meeting only in the bus matrix's round robin.
 
 **A released requester: a gated clock holds a raised request, a cleared
-enable withdraws it.** Letter r, no wire: four requesters brought up
-with their request standing and no stream listening, released five
-ways, then a stream on the requester's own cell enabled for 2000 cycles
-as its next owner, moving four items between memory and the requester's
-register (and once more after the requester's clock reopens, no reset).
-Items moved, of four, before / after the clock reopened:
+enable or the reset at `init()` withdraws it.** Letter r, no wire. The
+release contract (docs/design/dma.md): a transport's `release()` gates
+its block and pulses no reset, its `init()` starts from the reset line;
+under one owner a stream, the only stream a request held across a
+release can reach is the owner's own, on its own cell, when it is
+initialized again. Four requesters are brought up with their request
+standing and no stream listening, released five ways, then a stream on
+the requester's own cell is enabled for 2000 cycles, moving four items
+between memory and the requester's register (and once more after the
+requester's clock reopens, no reset). Items moved, of four, before /
+after the clock reopened, on the STM32F446RE:
 
 | release | USART6_TX | SPI1_TX | TIM1_UP | ADC1 |
 |---|---|---|---|---|
-| A: disabled, RESET pulsed, gated (the contract) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| A: the contract - released as the transports release (the DMA enable LEFT SET, gated, no reset), then `init()`'s first step, the clock opened and the reset pulsed (the ADC: CR2 and CR1 cleared with the clock on), before the stream | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| ... and the owner brought up again, its block on the stream | 4 | 4 | 1 | 1 |
 | B: the DMA enable cleared, gated | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
-| C: the DMA enable left SET, gated | 1 / 2 | 1 / 2 | 1 / 1 | 1 / 2 |
+| C: the control - as A with the reset at init removed: the DMA enable left SET, gated, the stream enabled under the gate, then the clock opened | 1 / 2 | 1 / 2 | 1 / 1 | 1 / 2 |
 | D: the DMA enable cleared, clocked | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
-| E: live (the control) | 2 / 2 | 4 / 4 | 1 / 1 | 1 / 1 |
+| E: live (the detector's control) | 2 / 2 | 4 / 4 | 1 / 1 | 1 / 1 |
 | F: the ADC's own `release()` (CR2 cleared, then gated) | - | - | - | 0 / 0 |
 
 So THIS controller is neither the CH32V203's nor the STM32G0's: a request
-standing when the clock is gated reaches the next owner of the cell while
-the clock is still off - the stream takes the stray item from the frozen
+standing when the clock is gated reaches a stream on its cell while the
+clock is still off - the stream takes the stray item from the frozen
 request line, as the CH32V203's channel does - but clearing the DMA
-enable withdraws it, as on the STM32G0. Every transport's `release()`
-before this was C: UE, SPE or PE cleared, the request bit left set, the
-gate closed. Each now pulses its RCC reset before the gate - the Uart,
-the SPI host and client, the I2C host and client, the FMPI2C block (host
-and client); the timers and the DAC already did, the DAC for its own
-erratum besides ("DMA request not automatically cleared by clearing
-DMAEN", ES0206 2.6.1, ES0298 2.7.1). The ADC is the one transport that
-cannot: its reset line is every converter's and the common block's
-(RM0090 6.3.9), and its `release()` clears CR2 with the clock on - F, the
-B of the table - which hands over clean. QUADSPI has no verb that sets
-its DMAEN.
+enable withdraws it, as on the STM32G0. The transports' `release()` is
+C: UE, SPE or PE cleared, the request bit left set, the gate closed (the
+Uart, the SPI host and client, the I2C host and client, the FMPI2C block
+for host and client; the DAC's clears its channels, which by its own
+erratum does not withdraw a pending request, "DMA request not
+automatically cleared by clearing DMAEN", ES0206 2.6.1, ES0298 2.7.1; the
+timers' clears DIER). Their `init()` opens the clock and pulses the reset
+before it configures the block or arms a stream - A: nothing moved, and
+the owner's block exact. The ADC is the one transport without a reset
+line of its own: it is every converter's and the common block's (RM0090
+6.3.9), so its `init()` clears CR2 and CR1 with the clock on instead, the
+same as B, and its `release()` clears CR2 with the clock on before the
+gate - F. QUADSPI has no verb that sets its DMAEN.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
@@ -933,7 +941,7 @@ Implemented but not bench-verified, each with what would measure it:
   `test_stm32f4_dma` (letters m and n among them, the circular receive on
   DMA2 and on DMA1's other cells) are owed a run with the two-moment
   engines and the circular shape - and letters p and r with the levels and
-  the release resets. On the F429 and the F411 letter p is the stronger
+  the reset at `init()`. On the F429 and the F411 letter p is the stronger
   measurement: their console is USART1, its ring DMA2's stream 2, and the
   four copies share its arbiter.
 - **The arbiter on DMA1.** Every copy runs on DMA2 (DMA1 cannot copy), so
@@ -941,9 +949,14 @@ Implemented but not bench-verified, each with what would measure it:
   timer's update request at a rate the controller cannot keep up with is
   the load that would measure it.
 - **The held request of the I2C and FMPI2C blocks** is not staged: a
-  standing request wants a tenure past its address phase. Both release
-  through the reset, applied by reading from the four requesters letter r
-  measures.
+  standing request wants a tenure past its address phase. Both start their
+  `init()` from the reset, applied by reading from the four requesters
+  letter r measures.
+- **The contract through the transports' own verbs.** Letter r stages each
+  requester's release and `init()` at the register level, in the order the
+  transports' `init()` and `release()` take them (read in their code); a run
+  that releases an engined transport mid-block and initializes it again,
+  its next block judged at both ends, would measure the verbs themselves.
 - **The circular shape's half-word and word rings, and its restart.**
   `arm(data, ring)` over a span of `uint16_t` or `uint32_t` is compiled
   (the family fixture) and run nowhere - a converter's stream would

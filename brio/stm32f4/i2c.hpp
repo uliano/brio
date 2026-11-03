@@ -1367,13 +1367,12 @@ public:
         Nvic::disable(S::event_irq);
         Nvic::disable(S::error_irq);
         S::disable();
-        // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
-        // contract): on this family a raised request is held through a
-        // gated clock while its enable stands - measured on four other
-        // requesters, an abandoned tenure leaves DMAEN so - and the next
-        // owner of the stream's cell takes a stray item; the pulse takes it
-        // away (docs/stm32f4/dma.md, "A released requester").
-        S::reset();
+        // NO RESET PULSE HERE (docs/design/dma.md, the release contract): on
+        // this family a raised request is held through a gated clock while
+        // its enable stands - an abandoned tenure leaves DMAEN so - and a
+        // stream on its cell would take a stray item (docs/stm32f4/dma.md,
+        // "A released requester"); init() starts from the reset line, which
+        // takes it away before the streams are armed again.
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();
@@ -2064,8 +2063,7 @@ public:
         Nvic::disable(S::event_irq);
         Nvic::disable(S::error_irq);
         S::disable();
-        S::reset();   // the release contract, as I2cHost::release()
-        S::bus_clock(false);
+        S::bus_clock(false);   // no reset pulse: init() starts from one, as I2cHost's
         SclPin::release();
         SdaPin::release();
     }

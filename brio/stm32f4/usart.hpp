@@ -1631,15 +1631,16 @@ public:
         }
     }
 
-    /// Stop the port and park its pads: interrupts off, UE clear, the
-    /// block RESET, the bus clock closed, the pins released. The engines'
+    /// Stop the port and park its pads: interrupts off, UE clear, the bus
+    /// clock closed, the pins released - no reset pulse. The engines'
     /// streams are stopped first, because 10.3.17's warning is explicit -
     /// switch the stream off and wait for EN to read 0 BEFORE the
-    /// peripheral it serves. THE RESET LINE BEFORE THE GATE is the release
-    /// contract (docs/design/dma.md): a request DMAT or DMAR raised is
-    /// HELD through a gated clock while the bit stands - the next owner of
-    /// the stream's cell takes a stray item - and the pulse takes it away
-    /// (docs/stm32f4/dma.md, "A released requester").
+    /// peripheral it serves. A request DMAT or DMAR raised is HELD through
+    /// the gated clock while the bit stands, and a stream bound to its cell
+    /// would take a stray item (docs/stm32f4/dma.md, "A released
+    /// requester"): init() starts from the reset line, which takes it away
+    /// before the streams are armed again (docs/design/dma.md, the release
+    /// contract).
     static void release() {
         Nvic::disable(S::irq);
         if constexpr (has_tx_engine) {
@@ -1651,7 +1652,6 @@ public:
         S::regs().CR1 &= ~(USART_CR1_RXNEIE | USART_CR1_TXEIE | USART_CR1_IDLEIE | USART_CR1_PEIE);
         S::error_interrupt(false);
         S::enable(false);
-        S::reset();
         S::bus_clock(false);
         TxPin::release();
         if constexpr (!opts.half_duplex) {

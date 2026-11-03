@@ -688,12 +688,20 @@ public:
         bus_clock(true);
         reset();
     }
-    /// Counter stopped, outputs off, pads NOT touched (a pad is the
-    /// caller's claim - TimPad::release() is its release), block reset
-    /// and its clock closed.
+    /// Counter stopped, its interrupts and DMA requests disarmed, outputs
+    /// off, the clock closed - no reset pulse: init() starts from one
+    /// (docs/design/dma.md, the release contract). Pads NOT touched (a pad
+    /// is the caller's claim - TimPad::release() is its release). The
+    /// outputs go off through CCER and, on a timer with a break unit,
+    /// BDTR.MOE, neither of which a LOCK level protects.
     static void release() {
         enable(false);
-        reset();
+        TIM_TypeDef& t = regs();
+        t.DIER = 0u;
+        t.CCER = 0u;
+        if constexpr (has_break) {
+            t.BDTR = t.BDTR & ~TIM_BDTR_MOE;
+        }
         bus_clock(false);
     }
 

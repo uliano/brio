@@ -54,10 +54,12 @@ from `stm32g0/device_tables.hpp` (the reserve: the table of what each
 part has, read off the device header), and the request ids from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (17 letters in `z`, 85 verdicts, wireless - a letter is
-one command key of the suite's console and the group of verdicts it
-runs, `z` the key that runs them all; letters `p`, `q`, `u` and `w`
-outside `z` need `brio stress`); the engines' cost is
+`test_stm32_dma`, three images on every part because of the ownership
+rule - the instrument letters `a` to `n` and `r`, then `o` with the
+serial streaming, then `x` ("One owner a channel") - 17 letters in their
+`z` and 85 verdicts, wireless (a letter is one command key of the suite's
+console and the group of verdicts it runs, `z` the key that runs them
+all; letters `p`, `q`, `u` and `w` outside `z` need `brio stress`); the engines' cost is
 `bench_stm32`'s letter `d`. Family fixture
 `test/family_stm32g0/dma.cpp` plus its negatives under
 `brio check stm32g0` (`dma*.cpp`), three of them the ownership check's.
@@ -568,40 +570,47 @@ characters with no byte lost, and past that every gap was counted
 the table). The pair ran its blocks at about 3.5 cycles a byte each, the
 two together.
 
-**A RELEASED REQUESTER HOLDS NOTHING HERE** (`test_stm32_dma` letter
-`r`, no wire). docs/design/dma.md's release contract asks whether a
-peripheral's raised request outlives its release. The DMAMUX routes ONE
-request line to each channel (11.4.4), so a stray could only reach a
-channel that selects the SAME request again - the peripheral's next
-owner. Measured with USART1's transmit (TXE behind DMAT), SPI1's transmit
-(TXE behind TXDMAEN) and TIM3's update (one software update behind UDE),
-each brought up with its request standing and no channel listening, then
-released, then DMA1's channel 5 routed to the same request and enabled
-over four bytes into the requester's own register, on the STM32G0B1RE
-and the STM32G071RB alike:
+**A RELEASED REQUESTER HOLDS NOTHING HERE, AND THE RESET AT `init()`
+TAKES THE ONE THING THAT COMES BACK** (`test_stm32_dma` letter `r`, no
+wire). docs/design/dma.md's release contract: a transport's `release()`
+gates its block and pulses no reset, its `init()` starts from the reset
+line. The DMAMUX routes ONE request line to each channel (11.4.4), and
+under one owner a channel the only channel a request held across a
+release can reach is its own owner's, when it is initialized again.
+Measured with USART1's transmit (TXE behind DMAT), SPI1's transmit (TXE
+behind TXDMAEN) and TIM3's update (one software update behind UDE), each
+brought up with its request standing and no channel listening, then
+released, then DMA1's channel 5 routed to the same request - the shape
+of the owner's own channel - and enabled over four bytes into the
+requester's own register; where the clock was gated it is opened again
+afterwards and the count read once more. Items moved, before / after the
+clock reopened, on the STM32G0B1RE:
 
 | the release | USART1_TX | SPI1_TX | TIM3_UP |
 |---|---|---|---|
-| A: block disabled, RESET pulsed, clock gated (the contract) | 0 | 0 | 0 |
-| B: DMA enable cleared, clock gated, no reset | 0 | 0 | 0 |
-| C: DMA enable left SET, clock gated, no reset | 0 | 0 | 0 |
-| ... and C's clock opened again, no reset | 0 | 4 | 1 |
-| D: DMA enable cleared, clock left on, no reset | 0 | 0 | 0 |
-| E: nothing released (the control) | 2 | 4 | 1 |
+| A: the contract - released as the transports release (the DMA enable LEFT SET, clock gated, no reset), then `init()`'s first step, the clock opened and the reset pulsed, before the channel | 0 / 0 | 0 / 0 | 0 / 0 |
+| ... and the owner brought up again, its block on the channel | 4 | 4 | 1 |
+| B: DMA enable cleared, clock gated, no reset | 0 / 0 | 0 / 0 | 0 / 0 |
+| C: the control - as A with the reset at init removed: the DMA enable left SET, clock gated, then opened, no reset | 0 / 0 | 0 / 4 | 0 / 1 |
+| D: DMA enable cleared, clock left on, no reset | 0 / 0 | 0 / 0 | 0 / 0 |
+| E: nothing released (the detector's control) | 2 / 2 | 4 / 4 | 1 / 1 |
 
 Unlike the CH32V203's, a gated block here withdraws its request, and so
-does a DMA enable cleared with the clock on: no item reaches the next
-owner. What does survive is a DMA ENABLE LEFT SET: the moment anything
-opens the block's clock again without a reset, SPI1 asks again for every
-frame and TIM3 serves its pending update (USART1 asked for nothing, its
-UE being clear). Every release() of this stratum's transports therefore
-pulses the block's reset before the gate - the USART and LPUART tasks,
-the SPI host and client, the I2C resource, the ADC, the DAC, the timers
-- which clears every enable. THE DIRECTION MATTERS TO THE DETECTOR:
+does a DMA enable cleared with the clock on: nothing reaches a channel
+while the gate is closed. What does survive is a DMA ENABLE LEFT SET: the
+moment anything opens the block's clock again without a reset, SPI1 asks
+again for every frame and TIM3 serves its pending update (USART1 asked
+for nothing, its UE being clear) - C, the control. The transports'
+`release()` leaves that enable set (the USART and LPUART tasks, the SPI
+host and client, the I2C resource; the ADC's and the DAC's `release()`
+clear theirs, the timers' clears DIER), and their `init()` opens the
+clock and pulses the reset before it configures the block or arms a
+channel, which clears every enable: A, the request gone and the owner's
+block exact. THE DIRECTION MATTERS TO THE DETECTOR:
 USART1's standing transmit request moved nothing into a channel reading a
 RAM cell into RAM and two items into one writing TDR (the second into
-the shift register, then the wire's pace), so the incoming owner writes
-where the line's owner would.
+the shift register, then the wire's pace), so the detector's channel
+writes where the line's owner's would.
 
 **Throughput.** 512 words (2048 bytes) memory to memory in 2638 cycles =
 5.15 cycles a word, about 49.7 MB/s at 64 MHz - the two AHB accesses
@@ -946,8 +955,9 @@ periods, rising moves 10 words, falling 10, both 20.
 0x2000) and scores **76/76** against the G0B1RE's 80, the four missing
 verdicts being the two the part cannot have and the two that skip with
 them; letter `o`'s circular receive, letter `r`'s released requesters
-and, outside `z`, letters `p`, `q` and `u` pass there as on the bigger
-part (the receive FIFO's kick fired on this die too - [usart.md](usart.md)):
+gated, cleared and live (rows B to E; row A, the reset at `init()`, is
+owed a run there) and, outside `z`, letters `p`, `q` and `u` pass there as
+on the bigger part (the receive FIFO's kick fired on this die too - [usart.md](usart.md)):
 
 - **There is ONE controller.** `dma_present(2)` is false, so `Dma<2>` and
   `DmaChannel<2, n>` do not compile there at all and DMA1's seven channels
@@ -1056,12 +1066,18 @@ ring's restart after a transfer error (`harvest()` starting a channel
 transport hands the engine, so nothing stages it), and the held request
 of an I2C, an ADC and a DAC (letter `r` stages USART1, SPI1 and TIM3 -
 an I2C request needs a tenure on a wire, a converter's a conversion; the
-reset in their release() is applied by reading). On the STM32G031K8,
+reset at their init() is applied by reading), and the contract through
+the transports' own verbs (letter `r` stages each requester's release and
+`init()` at the register level, in the order the transports take them -
+read in their code; a run that releases an engined transport mid-block
+and initializes it again, its next block judged at both ends, would
+measure the verbs themselves). On the STM32G031K8,
 letter `o`, letter `h`'s rate verdict on the interrupt console, and
 letters `p` and `q` (built for it, the board not on the desk; one run of
 the suite measures them - the console has no engines
 there, so `p` and `q` skip by name). On the STM32G071RB and the
-STM32G031K8, 10.4.5's peripheral-to-peripheral transfer: the leg is
+STM32G031K8, letter `r` with the reset at `init()` (one run of each
+part's first image measures it), and 10.4.5's peripheral-to-peripheral transfer: the leg is
 arranged over TIM6's update moving TIM3's compare into TIM4's, and those
 parts have no TIM4 (the STM32G031K8 no TIM6 either), so it skips by name
 there; rearranging it over the timers they have would measure it.

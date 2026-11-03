@@ -6261,6 +6261,54 @@ void tK_way_back() {
     bench.verdict("...and the vector itself releases the select the request named",
                   !e_sel.ended && e_sel.completed && e_sel.status == spi_dma_fault && e_sel.released);
 
+    // ---- D/C at a request's end, however it ended ------------------------------
+    // PB6, a pad on no recorded wire, is each request's D/C, parked low before
+    // it; no select is named, so the peer hears nothing. Three requests made to
+    // fail, each with a command phase that holds D/C low: a polled one whose
+    // command stalls (the enable taken down), one naming the engines whose
+    // command stalls in the loop, and a command alone on the engines whose
+    // block reads reserved space. Each must end with D/C high, as a clean end
+    // leaves it.
+    using KDc = Pin<'B', 6>;
+    KDc::output(false);
+    bool dc_up[3] = {false, false, false};
+    uint8_t dc_status[3] = {0xFFu, 0xFFu, 0xFFu};
+    for (uint8_t k = 0; k < 3u; ++k) {
+        way::host_up(SpiMode::mode0);
+        DmaHost::Request q{};
+        q.dc = KDc::ref();
+        q.clock = kl::way_rate;
+        if (k == 2u) {
+            q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(kl::way_bad_address()));
+            q.cmd_len = 8;
+        } else {
+            q.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(kl::way_tx));
+            q.cmd_len = 1;
+            q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(kl::way_tx));
+            q.len = 8;
+            (void)S1::disable();
+        }
+        q.engine = k == 0u ? SpiEngine::polled : SpiEngine::dma;
+        KDc::clear();
+        host_done = false;
+        const bool ended = DmaHost::start(q);
+        (void)way::completed_within(ended, 100u);
+        dc_status[k] = DmaHost::status();
+        dc_up[k] = KDc::read_out();
+        DmaHost::release();
+    }
+    dma_host_live = false;
+    KDc::release();
+    print(serial, "    D/C after a polled command's stall ", dc_up[0] ? "high" : "LOW", " (status ", dc_status[0],
+          "), after an engines' request's command stall ", dc_up[1] ? "high" : "LOW", " (status ", dc_status[1],
+          "), after a command alone whose block faulted ", dc_up[2] ? "high" : "LOW", " (status ", dc_status[2], ")",
+          crlf);
+    bench.verdict("AT ITS END, OK OR FAILED, A REQUEST LEAVES D/C HIGH: a polled command phase that stalls "
+                  "(spi_stalled), a command phase in the loop before the engines' block that stalls (spi_stalled), a "
+                  "command alone on the engines whose block faults (spi_dma_fault) - D/C high after each",
+                  dc_status[0] == spi_stalled && dc_status[1] == spi_stalled && dc_status[2] == spi_dma_fault &&
+                      dc_up[0] && dc_up[1] && dc_up[2]);
+
     // ---- queued behind a transfer error, through the arbiter -------------------
     const way::Queued q_fault_p = way::run_queued(true, true, 0x95);
     way::print_queued("queued behind a transfer error, polled", q_fault_p);
@@ -6642,15 +6690,34 @@ void tS_named() {
                   named::refused(odd_tx) && named::refused(odd_rx) && named::refused(odd_cmd) &&
                       named::refused(bytes));
 
-    // A transmit channel a program holds refuses at the launch: the select has
-    // fallen by then, and comes back; nothing is clocked. The select is PB6
-    // here, so the peer's never moves.
+    // THE ONE BUSY CHECK: a request while this host's own block is on the
+    // engines is refused before anything of it moves, whichever engine either
+    // names. The block in flight frames no select (a null cs) and clocks 64
+    // frames at PCLK/256, some 2 ms, into nobody; the two requests started
+    // under it name the link's select, watched for a fall, D/C on PB6 parked
+    // low (a data phase would raise it), and another mode and rate (a
+    // configuration applied would move CR1). Then the block in flight ends
+    // as it would have: one completion.
     CsPin::output(true);
     named::DcPad::output(false);
     (void)DmaHost::init(clock, named::link_config());
     dma_host_live = true;
-    DmaHost::prime(SpiMode::mode0, SpiClock::div16);
-    const bool held = HostTx::claim();
+    DmaHost::prime(SpiMode::mode0, SpiClock::div256);
+    DmaHost::Request flight{};
+    flight.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    flight.len = 64;
+    flight.clock = SpiClock::div256;
+    flight.engine = SpiEngine::dma;
+    host_done = false;
+    dma_completions = 0;
+    const bool flight_async = !DmaHost::start(flight);
+    const uint32_t busy_cr1 = S1::regs().CR1;
+    cs_falls = 0;
+    (void)CsWatch::select();
+    (void)CsWatch::configure(ExtiSense::falling);
+    (void)CsWatch::clear();
+    (void)CsWatch::arm(true);
+    Nvic::enable(CsWatch::irq());
     DmaHost::Request late{};
     late.cs = CsPin::ref();
     late.dc = named::DcPad::ref();
@@ -6659,20 +6726,31 @@ void tS_named() {
     late.clock = SpiClock::div8;
     late.mode = SpiMode::mode3;
     late.engine = SpiEngine::dma;
-    way::watch_sck(true);
-    const bool late_ended = DmaHost::start(late);
-    const uint8_t late_status = DmaHost::status();
-    settle_ms(1);
-    way::watch_sck(false);
-    const uint16_t late_edges = static_cast<uint16_t>(sck_edges_selected + sck_edges_released);
-    const bool late_up = named::DcPad::read_out();
-    HostTx::unclaim();
-    print(serial, "    a transmit channel a program holds: claimed ", held ? 1u : 0u, ", start() ",
-          late_ended ? 1u : 0u, ", status ", late_status, ", SCK edges ", late_edges, ", the select back up ",
-          late_up ? 1u : 0u, crlf);
-    bench.verdict("A CHANNEL THAT REFUSES THE BLOCK ENDS THE REQUEST: start() true, spi_rejected, no edge on SCK, "
-                  "the select back up - it does not wait for a completion that will never come",
-                  held && late_ended && late_status == spi_rejected && late_edges == 0u && late_up);
+    const bool late_dma = DmaHost::start(late);
+    const uint8_t late_dma_status = DmaHost::status();
+    late.engine = SpiEngine::polled;
+    const bool late_polled = DmaHost::start(late);
+    const uint8_t late_polled_status = DmaHost::status();
+    const bool busy_regs = S1::regs().CR1 == busy_cr1;
+    const bool busy_dc_low = !named::DcPad::read_out();
+    const uint32_t m0 = Ticker::millis();
+    while (!host_done && Ticker::millis() - m0 < 50u) {
+    }
+    (void)CsWatch::arm(false);
+    (void)CsWatch::clear();
+    const uint16_t busy_falls = cs_falls;
+    print(serial, "    two requests under a block in flight: on the engines start() ", late_dma ? 1u : 0u,
+          ", status ", late_dma_status, "; polled start() ", late_polled ? 1u : 0u, ", status ", late_polled_status,
+          " (spi_rejected ", spi_rejected, "); select falls ", busy_falls, ", D/C ",
+          busy_dc_low ? "untouched" : "MOVED", ", CR1 ", busy_regs ? "untouched" : "MOVED",
+          "; the block in flight ended ", host_done ? 1u : 0u, ", status ", DmaHost::status(), ", completions ",
+          dma_completions, crlf);
+    bench.verdict("THE ONE BUSY CHECK: a request while the host's own block is on the engines - naming the engines or "
+                  "the loop - is refused before anything of it moves: start() true, spi_rejected, its select never "
+                  "fell, D/C and CR1 untouched; the block in flight ends as it would have, one completion, spi_ok",
+                  flight_async && late_dma && late_dma_status == spi_rejected && late_polled &&
+                      late_polled_status == spi_rejected && busy_falls == 0u && busy_dc_low && busy_regs &&
+                      host_done && dma_completions == 1u && DmaHost::status() == spi_ok);
     dma_host_live = false;
     DmaHost::release();
     named::DcPad::release();

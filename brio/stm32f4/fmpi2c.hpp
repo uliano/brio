@@ -1729,19 +1729,18 @@ struct FmpI2c {
     [[gnu::always_inline]] static uint32_t isr() { return pending_event(); }
     [[gnu::always_inline]] static uint32_t error_isr() { return pending_error(); }
 
-    /// The interrupt lines off, the block disabled and RESET, the clock
-    /// gated. THE RESET LINE BEFORE THE GATE is the release contract
-    /// (docs/design/dma.md): on this family a raised request is held
-    /// through a gated clock while its enable stands - measured on four
-    /// other requesters, an abandoned tenure leaves TXDMAEN or RXDMAEN so -
-    /// and the next owner of the stream's cell takes a stray item; the
-    /// pulse takes it away (docs/stm32f4/dma.md, "A released requester").
-    /// The host and the client both release through here.
+    /// The interrupt lines off, the block disabled, the clock gated - no
+    /// reset pulse. On this family a raised request is held through a
+    /// gated clock while its enable stands - an abandoned tenure leaves
+    /// TXDMAEN or RXDMAEN so - and a stream on its cell would take a stray
+    /// item (docs/stm32f4/dma.md, "A released requester"): the host's and
+    /// the client's init() start from the reset line, which takes it away
+    /// before a stream is armed again (docs/design/dma.md, the release
+    /// contract). The host and the client both release through here.
     static void release() {
         Nvic::disable(event_irq);
         Nvic::disable(error_irq);
         (void)disable();
-        reset();
         bus_clock(false);
     }
 };

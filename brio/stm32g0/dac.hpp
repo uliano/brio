@@ -298,11 +298,11 @@ public:
         bus_clock(true);
     }
 
-    /// Both channels off, the block reset and its bus clock closed; the
-    /// pads stay as they are (release_pad() is theirs).
+    /// Both channels off and the bus clock closed - no reset pulse: init()
+    /// starts from one (docs/design/dma.md, the release contract); the pads
+    /// stay as they are (release_pad() is theirs).
     static void release() {
         regs().CR = 0;
-        reset();
         bus_clock(false);
     }
 

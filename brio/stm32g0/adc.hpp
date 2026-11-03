@@ -852,15 +852,15 @@ public:
 
     /// Everything this file turned on, off again: conversions stopped,
     /// interrupts disarmed, the converter disabled, the internal sources
-    /// powered down, the regulator dropped, the block reset and its bus
-    /// clock closed.
+    /// powered down, the regulator dropped and the bus clock closed - no
+    /// reset pulse: init() starts from one (docs/design/dma.md, the release
+    /// contract), which withdraws a DMA request left behind CFGR1.DMAEN.
     static void release() {
         (void)stop();
         regs().IER = 0;
         (void)disable();
         common().CCR = common().CCR & ~(internal_enable_mask());
         regulator_off();
-        reset();
         bus_clock(false);
     }
 

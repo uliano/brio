@@ -1565,8 +1565,9 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 
 // A polled wait that ran out ends the transaction with spi_stalled
 // (util/spi_bus.hpp's code): no frame came back within the budget a
-// transaction is given (a thousand polls a frame, at least twice the slowest
-// frame by the listing), the select is raised and the block reset, which is
+// transaction is given (the request's wire time and two frames more at the
+// applied rate, in polls of at least a cycle each, budget_for()), the select
+// and the D/C are raised and the block reset, which is
 // what clears the frames its TXFIFO holds, so the next request starts clean and
 // the program calls nothing. It cannot happen
 // on a host whose clock runs, and a report beats a frame of garbage returned
@@ -1619,11 +1620,14 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *    the engines - one fixed rule: a command is short by nature, and a
  *    block of its own would cost a second launch and a second interrupt;
  *    a stall there ends the request as a polled one's does. A command with
- *    no data phase is the block. A channel that refuses the block at its
- *    launch - the transmit one a program holds - ends the request
- *    spi_rejected, its select back up, nothing of the data phase clocked
- *    (a command phase ahead of it has already run in the loop). The block's own
+ *    no data phase is the block. ONE BUSY CHECK, first of all: a request
+ *    while this host's own block is still on the engines is refused
+ *    spi_rejected before the select, the D/C or the block moves, polled or
+ *    not - the only check there is, no other owner holding the channels
+ *    (docs/design/dma.md, "The ownership rule"). The block's own
  *    interrupts are never armed: the instance's vector is not the host's.
+ *    AT ITS END, OK OR FAILED, A REQUEST LEAVES THE SELECT AND THE D/C
+ *    HIGH - a stall in a command phase and a transfer error included.
  *
  * WHEN A REQUEST ENDS THE WIRE HAS ENDED. The select rises, and start()
  * or dma_isr() answers true, after the last SCK edge, also for a caller
@@ -2017,6 +2021,7 @@ public:
 
         applied_ = boot_config();
         applied_key_ = setting_key(applied_.mode, applied_.clock, applied_.bits);
+        frame_polls_ = frame_cycles(applied_.clock, applied_.bits);
         if (!S::configure(applied_)) {
             return false;
         }
@@ -2147,8 +2152,10 @@ public:
     /// Begin a transaction (called by SpiBus from main context). The request
     /// runs on the engine it names and on no other. True when it ended inside
     /// the call: a polled request, the empty one, a refused one (spi_rejected,
-    /// nothing on the wire: a host with no engines, or what the engines cannot
-    /// carry, the class comment's list) and one whose command loop stalled.
+    /// nothing on the wire and neither the select nor the D/C moved: this
+    /// host's own block still on the engines, a host with no engines, or what
+    /// the engines cannot carry, the class comment's list) and one whose
+    /// command loop stalled.
     /// False when the engines have it and dma_isr() will end it, a TransferDone
     /// following. Exactly util/bus_master.hpp's engine contract. True is
     /// "ended", not "succeeded": status() is the answer, and on spi_stalled the
@@ -2158,6 +2165,16 @@ public:
     /// A request that completes here is READ THROUGH THE REFERENCE; one that
     /// goes to the engines leaves its two pads behind (the class comment).
     static bool start(const Request& r) {
+        if constexpr (has_engines) {
+            // THE ONE BUSY CHECK (docs/design/spi-bus.md): this host's own
+            // block still on the engines. Made first, before the select, the
+            // D/C or the block moves - and before an owed reset, which a
+            // block in flight cannot have left.
+            if (dma_active_) [[unlikely]] {
+                status_ = spi_rejected;
+                return true;
+            }
+        }
         pay_owed_reset();
         if constexpr (!has_dma) {
             if (r.engine == SpiEngine::dma) {
@@ -2256,6 +2273,7 @@ public:
     /// clear after the reset: a closed clock gate, which the pulse cannot open.
     static bool recover() {
         tenure_cs_.set();
+        tenure_dc_.set();   // the end of a request, however it ended: both high
         if constexpr (has_engines) {
             (void)TxEngine::abandon();   // a block in flight is counted
             arm_engines();
@@ -2266,23 +2284,22 @@ public:
     }
 
     /// Give the instance back: the engines stopped, the peripheral
-    /// disabled by its procedure and reset, its bus clock off, SCK, MOSI
-    /// and MISO returned to analog. For an idle bus, from setup or the
-    /// arbiter's dispatch; the next use is a fresh init(). The disable
-    /// procedure's bounded wait is spent and its answer dropped: the reset
-    /// that follows puts the block right either way.
+    /// disabled by its procedure, its bus clock off, SCK, MOSI and MISO
+    /// returned to analog - no reset pulse. For an idle bus, from setup or
+    /// the arbiter's dispatch; the next use is a fresh init(), which starts
+    /// from the reset line (docs/design/dma.md, the release contract): a
+    /// request this block raised and left standing - TXE behind TXDMAEN,
+    /// which a DMA enable still set raises again the moment the clock
+    /// returns - is withdrawn there, before a channel is armed. The disable
+    /// procedure's bounded wait is spent and its answer dropped: that reset
+    /// puts the block right either way.
     static void release() {
         if constexpr (has_engines) {
-            reset_owed_ = false;   // the reset below covers it
+            reset_owed_ = false;   // init()'s reset covers it
             TxEngine::stop();
             RxEngine::stop();
         }
         (void)S::disable();
-        // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
-        // contract): a DMA request this block raised is not left standing
-        // for the next owner of its request line - an abandoned block
-        // leaves TXE up behind TXDMAEN.
-        S::reset();
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();
@@ -2594,13 +2611,13 @@ private:
     /// back, else the receive shape with its answers paced by count.
     template <bool wide>
     [[gnu::always_inline]] static bool run_polled(const Request& r) {
-        // The budget: the slowest frame is 256 x 16 = 4096 PCLK cycles and an
-        // empty poll at least nine by the listing, so a thousand polls a frame
-        // is at least twice the slowest frame, plus a floor for the shortest
-        // request. Here the flattened body keeps the budget on the stack, and an
-        // empty poll measures 23 to 37 cycles by where the image puts it, the
-        // command phase's own function 10 (docs/stm32g0/spi.md, the stall's wall).
-        uint32_t budget = 100'000u + ((static_cast<uint32_t>(r.cmd_len) + r.len) << 10);
+        // The budget: the request's wire time and two frames more, in polls
+        // (budget_for(): derived from the rate and the frame applied, never a
+        // count chosen by hand). A poll takes at least a cycle - an empty one
+        // measures 23 to 37 by where the image puts the flattened body, the
+        // command phase's own function 10 (docs/stm32g0/spi.md, the stall's
+        // wall) - so the wait never gives up before the wire could have ended.
+        uint32_t budget = budget_for(static_cast<uint32_t>(r.cmd_len) + r.len);
         bool ok = true;
         if (r.cmd_len != 0u) {
             ok = loop_tx<wide, true>(r.cmd.get(), r.cmd_len, budget);
@@ -2749,7 +2766,11 @@ private:
     /// window opened; a command alone is the block; a command before data runs
     /// in the transmit-only loop, one fixed rule (the class comment), and the
     /// data phase is the block. False: dma_isr() ends it. True when the command
-    /// loop stalled or a channel refused the block.
+    /// loop stalled, the select and the D/C released and the block reset.
+    /// The channels cannot refuse the block: start()'s busy check leaves none
+    /// of this host's in flight, the refusals above cover the run and its
+    /// alignment, and no other owner holds them (docs/design/dma.md, "The
+    /// ownership rule").
     [[gnu::noinline]] static bool start_engines(const Request& r) {
         const bool alone = r.len == 0u;
         if (!engines_carry(r.bits, alone ? r.cmd.get() : r.tx.get(), alone ? nullptr : r.rx.get())) {
@@ -2762,29 +2783,38 @@ private:
         const bool wide = spi_frame_is_halfword(r.bits);
         if (alone) {
             // The echoes discarded; the completion raises D/C.
-            return launch_dma(r.cmd.get(), nullptr, r.cmd_len, wide) ? false : launch_refused();
+            launch_dma(r.cmd.get(), nullptr, r.cmd_len, wide);
+            return false;
         }
         if (r.cmd_len != 0u) {
             if (!command_polled(r)) {
                 r.cs.set();   // before the reset, which can move SCK (the class comment)
+                r.dc.set();   // the end of a request, however it ended: both high
                 stalled();
                 return true;
             }
             r.dc.set();
         }
-        return launch_dma(r.tx.get(), r.rx.get(), r.len, wide) ? false : launch_refused();
+        launch_dma(r.tx.get(), r.rx.get(), r.len, wide);
+        return false;
     }
 
-    /// A channel refused the block: the transmit one a program holds (claim()).
-    /// Nothing of the block was clocked, since the transmit channel is what
-    /// starts the clock and it went second - a command phase ahead of it already
-    /// went out in the loop, D/C left high; the select comes back up and the
-    /// request ends refused.
-    [[gnu::noinline, gnu::cold]] static bool launch_refused() {
-        dma_active_ = false;
-        tenure_cs_.set();
-        status_ = spi_rejected;
-        return true;
+    /// One frame's wire time in core cycles at a rate and a frame size: the
+    /// division times the frame's bits, PCLK being HCLK under the clock task
+    /// (stm32g0/clock.hpp pins the prescalers).
+    static constexpr uint32_t frame_cycles(SpiClock c, SpiDataSize bits) {
+        return static_cast<uint32_t>(spi_division(c)) * spi_data_bits(bits);
+    }
+
+    /// THE BOUNDED WAIT, a time derived from the clocks and not a count chosen
+    /// by hand (docs/design/spi-bus.md, "Every bound is a time"): `frames` and
+    /// two more at the applied rate, in polls of at least a cycle each, so a
+    /// wait ends no sooner than the wire could have; how much later is the
+    /// poll's own length, 10 to 37 cycles in the release listing. Two loads, a
+    /// multiply and an add once a request; at 65535 frames of 16 bits at
+    /// PCLK/256 the product stays under 2^32.
+    [[gnu::always_inline]] static uint32_t budget_for(uint32_t frames) {
+        return (frames + 2u) * frame_polls_;
     }
 
     /// The command phase of a request naming the engines, in the transmit-only
@@ -2792,7 +2822,7 @@ private:
     /// placement: the path runs once a request, and the placement's SRAM
     /// instance is the polled transaction's alone.
     [[gnu::noinline]] static bool command_polled(const Request& r) {
-        uint32_t budget = 100'000u + (static_cast<uint32_t>(r.cmd_len) << 10);
+        uint32_t budget = budget_for(r.cmd_len);
         return spi_frame_is_halfword(r.bits) ? loop_tx<true, true>(r.cmd.get(), r.cmd_len, budget)
                                              : loop_tx<false, true>(r.cmd.get(), r.cmd_len, budget);
     }
@@ -2801,47 +2831,42 @@ private:
     /// DmaTxEngine::start() with the frame's own beat - five stores each.
     /// The buffers of a wide request hold each frame low byte first, the
     /// CPU's own order, so a half-word beat reads and writes them as the
-    /// loops' load_frame()/store_frame() do. True when both took it; false
-    /// leaves no channel of the host running.
-    static bool launch_dma(const uint8_t* tx, uint8_t* rx, uint16_t count, bool wide) {
+    /// loops' load_frame()/store_frame() do. The starts' answers are not
+    /// read: start_engines() says why neither can refuse.
+    static void launch_dma(const uint8_t* tx, uint8_t* rx, uint16_t count, bool wide) {
         dma_active_ = true;
         // The RECEIVE channel goes first: its request rises only when a
         // frame has come back, and the transmit side is what starts the
         // clock.
-        bool rx_ok = false;
-        bool tx_ok = false;
         if (wide) {
             if constexpr (sizeof(typename TxEngine::element) >= 2u &&
                           sizeof(typename RxEngine::element) >= 2u) {
-                rx_ok = rx != nullptr ? RxEngine::start(std::span<uint16_t>(reinterpret_cast<uint16_t*>(rx), count))
-                                      : RxEngine::start_discard(&rx_sink_, count);
-                tx_ok = rx_ok && (tx != nullptr ? TxEngine::start(std::span<const uint16_t>(
-                                                      reinterpret_cast<const uint16_t*>(tx), count))
-                                                : TxEngine::start_fixed(&tx_dummy_, count));
+                (void)(rx != nullptr ? RxEngine::start(std::span<uint16_t>(reinterpret_cast<uint16_t*>(rx), count))
+                                     : RxEngine::start_discard(&rx_sink_, count));
+                (void)(tx != nullptr ? TxEngine::start(std::span<const uint16_t>(
+                                           reinterpret_cast<const uint16_t*>(tx), count))
+                                     : TxEngine::start_fixed(&tx_dummy_, count));
             }
         } else {
-            rx_ok = rx != nullptr ? RxEngine::start(std::span<uint8_t>(rx, count))
-                                  : RxEngine::start_discard(reinterpret_cast<uint8_t*>(&rx_sink_), count);
-            tx_ok = rx_ok && (tx != nullptr ? TxEngine::start(std::span<const uint8_t>(tx, count))
-                                            : TxEngine::start_fixed(reinterpret_cast<const uint8_t*>(&tx_dummy_), count));
+            (void)(rx != nullptr ? RxEngine::start(std::span<uint8_t>(rx, count))
+                                 : RxEngine::start_discard(reinterpret_cast<uint8_t*>(&rx_sink_), count));
+            (void)(tx != nullptr ? TxEngine::start(std::span<const uint8_t>(tx, count))
+                                 : TxEngine::start_fixed(reinterpret_cast<const uint8_t*>(&tx_dummy_), count));
         }
-        if (!tx_ok) [[unlikely]] {
-            if (rx_ok) {
-                RxEngine::stop();
-            }
-            return false;
-        }
-        return true;
     }
 
     /// One exit for a block that ends a transaction: the channels settled, D/C
-    /// and the select released; the vector's caller posts completion. On a transfer error this decides and does not
-    /// work: no disable, no reset, no configuration - frames may still stand in
-    /// the TXFIFO, be on the wire and stand in the RXFIFO, and the flag makes
-    /// the next start() reset them away.
+    /// and the select released, on a fault as on a completion (the end of a
+    /// request, docs/design/spi-bus.md); the vector's caller posts completion.
+    /// On a transfer error this decides and does not work: no disable, no
+    /// reset, no configuration - frames may still stand in the TXFIFO, be on
+    /// the wire and stand in the RXFIFO, and the flag makes the next start()
+    /// reset them away. The status is written here on every end, spi_ok
+    /// too: a request the busy check refused while this block was in flight
+    /// has left its own answer there since.
     static void finish_dma(uint8_t st) {
+        status_ = st;
         if (st != spi_ok) {
-            status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
             reset_owed_ = true;
@@ -2851,8 +2876,8 @@ private:
             // transmit engine takes no completion interrupt (arm_engines())
             // and is completed here, on that proof.
             (void)TxEngine::complete();
-            tenure_dc_.set();
         }
+        tenure_dc_.set();
         dma_active_ = false;
         tenure_cs_.set();
     }
@@ -2904,6 +2929,7 @@ private:
         }
     }
     [[gnu::noinline]] static void reapply(uint32_t key, SpiMode m, SpiClock c, SpiDataSize bits) {
+        frame_polls_ = frame_cycles(c, bits);
         applied_key_ = key;
         applied_.mode = m;
         applied_.clock = c;
@@ -2955,6 +2981,10 @@ private:
     /// compares.
     static inline SpiConfig applied_{};
     static inline uint32_t applied_key_ = 0;
+    /// One frame's wire time at the rate and the frame size applied, in core
+    /// cycles (frame_cycles()): the polled budget's unit, set wherever the
+    /// applied word changes, read once a request.
+    static inline uint32_t frame_polls_ = 0;
     static inline uint32_t pclk_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<SpiClock> ceiling_{};
@@ -3489,14 +3519,14 @@ public:
     static SpiDataSize bits() { return bits_; }
 
     /// Give the instance back: the vector disabled, the peripheral
-    /// disabled by its procedure and reset, its bus clock off, every pad
-    /// named in `pins` returned to analog. For a client no host is
-    /// clocking, from setup or an active object's handler; the next use
-    /// is a fresh init().
+    /// disabled by its procedure, its bus clock off, every pad named in
+    /// `pins` returned to analog - no reset pulse: the next use is a fresh
+    /// init(), which starts from the reset line (the release contract, as
+    /// SpiHost::release()). For a client no host is clocking, from setup
+    /// or an active object's handler.
     static void release() {
         Nvic::disable(S::irq());
         (void)S::disable();
-        S::reset();   // the release contract, as SpiHost::release()
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();

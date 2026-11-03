@@ -184,9 +184,9 @@ A monostate (a class used through its type alone, all its members
 static, never instantiated) - a part has one DAC block or none.
 
 - **The block**: `bus_clock()`, `reset()`, `init()` (clock, reset, clock),
-  `release()` (the block reset before the gate - the release contract,
-  and this family's erratum besides: a cleared DMAEN does not withdraw a
-  pending request), `claim_pad<Pin>()` / `release_pad<Pin>()` (analog mode,
+  `release()` (both channels off and the clock gated, no reset pulse;
+  `init()`'s reset is what withdraws a pending request - the release
+  contract, and this family's erratum besides: a cleared DMAEN does not), `claim_pad<Pin>()` / `release_pad<Pin>()` (analog mode,
   which is not this family's reset state), `channels` and
   `channels_known`, `steps` (4096 always - the 8-bit format is a
   placement, not a resolution), `irq()`.

@@ -291,8 +291,9 @@ TX and RX inside the chip and leaves the RX pad alone.
   prescalers move), `set_baud(hz, baud)`, `divisor_for`,
   `min_hz_for`, `can_baud`, `actual_baud(fck)`, `kernel_hz<Clock>()`,
   `release()` (the streams stopped, the interrupts off, UE clear, the
-  block's RCC RESET pulsed before its gate closes - the release contract:
-  a raised request is held through a gated clock on this family,
+  clock gated, no reset pulse: a raised request is held through a gated
+  clock on this family, and `init()` starts from the block's RCC reset,
+  which withdraws it before the streams are armed - the release contract,
   [dma.md](dma.md)); with engines, `dma_isr()` (the streams' vectors' body,
   whose true is the receive edge as `isr()`'s), `harvest()` (the same
   edge asked from the consumer's side, below) and `dma_faults()`. Refused at compile time: invalid or coincident pads,

@@ -41,6 +41,13 @@
  *                           memory, or fill one from a cell, in the
  *                           controller's memory-to-memory mode.
  *
+ * A channel has one owner for the whole image, checked when the program
+ * compiles (util/dma_owner.hpp, docs/stm32g0/dma.md "One owner a channel"):
+ * a transport claims the engines in its slots for its request and a copy
+ * engine its channel for its own tag; the other engines learn their request
+ * at arm(), so a program that arms one by hand, or programs a DmaChannel
+ * itself, makes the claim beside it.
+ *
  * The smallest use, a copy with no peripheral and no request
  * (docs/stm32g0/dma.md opens with it and says what decides correctness):
  *
@@ -1193,8 +1200,8 @@ public:
     /// Stop the channel and forget the block, counted as nothing: flags
     /// and enables put back, the binding (request, CPAR, the kept word)
     /// standing for the next start(). The owner's verb when it puts its
-    /// peripheral away (docs/design/dma.md's release contract: the
-    /// peripheral's requests stopped first); called where no completion
+    /// peripheral away (10.4.5: the peripheral's requests stopped
+    /// first); called where no completion
     /// of this engine can run under it.
     static void stop() {
         Channel::stop();
@@ -1559,7 +1566,7 @@ private:
  * with DmaIrq::error_only, poll().
  */
 template <uint8_t n, uint8_t ch>
-struct DmaCopyOwner {};
+struct DmaCopyOwner {};   // the tag a copy owns its channel by (util/dma_owner.hpp)
 
 template <uint8_t n, uint8_t ch>
 class DmaCopyEngine {

@@ -2851,10 +2851,13 @@ public:
         }
     }
 
-    /// Put everything back: interrupts off, instance disabled and reset,
-    /// pads to analog, bus clock off. The rings are dropped, the bytes
-    /// still queued with them: a program that wants them on the wire
-    /// waits for tx_idle() first. Main context; no wait.
+    /// Put everything back: interrupts off, instance disabled, pads to
+    /// analog, bus clock off - no reset pulse: init() starts from one
+    /// (docs/design/dma.md, the release contract), which withdraws a DMA
+    /// request this release left behind, its enable still set, before a
+    /// channel is armed again. The rings are dropped, the bytes still
+    /// queued with them: a program that wants them on the wire waits for
+    /// tx_idle() first. Main context; no wait.
     ///
     /// The instance stops before its channels: a receive ring never ends,
     /// and 10.4.5 stops a circular channel by stopping the peripheral's
@@ -2868,7 +2871,6 @@ public:
         if constexpr (has_rx_engine) {
             RxEngine::stop();
         }
-        S::reset();
         TxPin::release();
         if constexpr (!opts.half_duplex) {
             RxPin::release();

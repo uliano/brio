@@ -299,9 +299,12 @@ public:
         bus_clock(true);
     }
 
+    /// Both channels off and the bus clock closed - no reset pulse:
+    /// init() starts from one (docs/design/dma.md, the release contract),
+    /// which is what withdraws a request DMAENx raised, clearing DMAENx not
+    /// doing so here (stop_dma(), ES0206 2.6.1).
     static void release() {
         regs().CR = 0;
-        reset();
         bus_clock(false);
     }
 

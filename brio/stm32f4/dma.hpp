@@ -14,6 +14,12 @@
  *     (void)Copier::copy(frame_out, frame_in, 1024);   // 1024 uint32_t
  *     while (Copier::busy()) { }
  *
+ * A stream has one owner for the whole image, whatever cell its CHSEL picks,
+ * checked when the program compiles (util/dma_owner.hpp, docs/stm32f4/dma.md
+ * "One owner a stream"): a transport claims the engines in its slots for its
+ * request and a copy engine its stream for its own tag; a program that arms
+ * an engine by hand, or drives a DmaStream itself, makes the claim beside it.
+ *
  * It holds four layers, in the two strata every brio driver has:
  *
  *   Dma<n>                the block: its AHB1 gate, its reset, the two
@@ -1689,7 +1695,7 @@ private:
  * which clears EN (10.3.13, 10.5.5) - before it lets another start.
  */
 template <uint8_t n, uint8_t s>
-struct DmaCopyOwner {};
+struct DmaCopyOwner {};   // the tag a copy owns its stream by (util/dma_owner.hpp)
 
 template <uint8_t n, uint8_t s>
 class DmaCopyEngine {

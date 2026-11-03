@@ -77,7 +77,7 @@ rate; a nonzero `cs_setup_us` also needs SysTick's counter running, since with
 it stopped the delay returns at once and the setup time is skipped in silence
 (`cortexm/delay.hpp`). And "it is done" is not "it succeeded": `start()`
 returns true on a polled request that stalled too (a flag the loop waited for
-never rose within its budget), with the select released, the peripheral reset
+never rose within its budget), with the select and the D/C released, the peripheral reset
 and `status()` answering `spi_stalled` instead of `spi_ok`, so a program that
 must trust `who` reads `status()`, as the block does, and calls nothing else:
 the next request starts on a clean block.
@@ -100,8 +100,9 @@ needs no interrupt vector bound**, and its loop waits with interrupts enabled;
 the buffers are read and written inside `start()` and are the caller's again
 when it returns. **It holds the core for its whole wire time**: under the
 cooperative kernel (`Tenuto`) every other active object waits with it, only
-handlers running, and a stall holds them for the budget (400 000 spins and 4096
-a frame: 781.7 ms on a request of 2048 frames at PCLK1/256). Through the
+handlers running, and a stall holds them for the budget (the request's wire time
+and two frames more at the applied rate, in polls: 1.49 s on a request of 2048
+frames at PCLK1/256, whose wire is 93 ms). Through the
 arbiter a request is posted instead (the block "The same bus shared, through the
 arbiter" below): the post returns at once, the loop runs later in the arbiter's
 dispatch, and the buffers are lent from the post until the `SpiDone` reply
@@ -113,9 +114,8 @@ runs before the host's `init()`. The host's `init()` arms both streams, which op
 their NVIC lines. The program binds the two streams' vectors to `Bus::dma_isr()`,
 whose true answer is the edge the glue posts `TransferDone` on. What the engines
 cannot carry - on a host with none, everything - is refused with `spi_rejected`
-before the select falls; a stream that refuses the block at its launch is the one
-refusal found later, after the select fell (it rises again, and nothing of the data
-phase is clocked: "The engines" below). **The request runs on the engine it names and
+before the select falls, and so is any request while this host's own block is still
+on the streams, the one busy check ("The engines" below). **The request runs on the engine it names and
 on no other**: name the engines when the other objects must run through the transfer
 or a long read wants the wire's rate, and the loop otherwise; "Which engine costs the
 core less" below gives the lengths, as guidance, and nothing in the host reads them.
@@ -364,14 +364,14 @@ bound: a request naming them needs them, `static_assert(Bus::has_dma)`).
 ([design/spi-bus.md, "What follows each code"](../design/spi-bus.md#what-follows-each-code-and-who-acts)):
 `spi_ok`; `spi_rejected`, a request naming the engines on a host with none or one
 they cannot carry (the list under "The engines" below), nothing on the wire and
-nothing to do but change the program - or one a stream refused at its launch, its
-select back up and nothing of the data phase clocked (a command phase ahead of it
-has gone out in the loop); `spi_stalled`, the select released and then the
+nothing to do but change the program - or any request while this host's own block
+is on the streams, the busy check, the block in flight going on untouched;
+`spi_stalled`, the select and the D/C released and then the
 peripheral reset and reconfigured, inside `start()` - or, on the engines, the vector's
-wait for the wire's end run out, the select released and the reset left to the next
-`start()`;
-`spi_dma_fault`, the requests dropped, both streams put away and the select
-released in the streams' vector, which does no more: the peripheral's reset is left
+wait for the wire's end run out, the select and the D/C released and the reset left
+to the next `start()`;
+`spi_dma_fault`, the requests dropped, both streams put away and the select and the
+D/C released in the streams' vector, which does no more: the peripheral's reset is left
 to the next `start()`, which tests a flag first and pays it before anything else, so
 until then a frame can still be on the wire and another stand in the receive buffer.
 
@@ -401,9 +401,9 @@ priorities, not pad slew classes; docs/design/dma.md's rule): the receive
 buffer holds one frame, and a receive stream the transmit one outran finds it full -
 OVR, "all other subsequently transmitted bytes are lost" (RM0090 28.3.10) - where a
 waiting transmit only stops the clock between two frames. `release()` stops both
-streams, disables the peripheral and pulses its RCC reset before the gate, the release
-contract (a raised request is held through a gated clock on this family,
-[dma.md](dma.md)).
+streams, disables the peripheral and gates its clock, no reset pulse; `init()` starts
+from the RCC reset, which withdraws a request held through the gated clock before the
+streams are armed - the release contract ([dma.md](dma.md)).
 
 Three verbs are this stratum's own: `sck_speed` and
 `errata_apb_ceiling_hz`/`within_errata_ceiling`, because on this family the SCK pad's
@@ -422,8 +422,9 @@ spins)`, `receive(in, spins)` - each returning a `Run` (`count`, and a
 `RunEnd`: `complete`, `closed`, `stalled`) over `uint8_t` or `uint16_t`
 frames, a wider element refused at compile time - `disable`, `write`,
 `writable`, `poll`, `selected`, `select`, `drive_output` (the dark
-listener), the error verbs, `isr()`, `release` (the block reset before
-the gate, as the host's), and `frames_ahead` = 1, this silicon's answer
+listener), the error verbs, `isr()`, `release` (the block disabled
+and its clock gated, no reset pulse, `init` starting from the reset, as
+the host's), and `frames_ahead` = 1, this silicon's answer
 to the one number a portable client would need.
 
 `SpiPins` and `I2sPins` name the pads with the alternate function the
@@ -486,9 +487,14 @@ dispatch above the caller. That decides the shapes:
   the DR read and the DR write adjacent; after the last frame, the SCK pad's
   idle level.
 
-One budget, 400 000 spins and 4096 a frame, bounds the whole transaction's
-spins; when it runs out the select is released, the peripheral reset and
-reconfigured and the transaction ends with `spi_stalled`. A request that changes the rate, the mode or
+One budget bounds the whole transaction's spins, a time derived from the clocks
+and not a count chosen by hand: the request's frames and two more at the applied rate,
+a frame being the division times its bits in PCLK cycles and log2(HCLK/PCLK) more in
+core cycles, in polls of at least a cycle each, so a wait ends no sooner than the wire
+could have (the shift is worked out wherever the rate, the width or the clock
+changes, and a request pays one load, an add and a shift). When it runs out the select
+and the D/C are released, the peripheral reset and reconfigured and the transaction
+ends with `spi_stalled`. A request that changes the rate, the mode or
 the width runs the disable of 26.3.10 first, with bounded waits of its own outside
 that budget and an answer the host drops: the budget of the transaction that follows
 shows what it left as a stall of its own.
@@ -527,6 +533,14 @@ false; the receive stream's completion is the one interrupt a request, and
 on. The instance's own interrupt is never armed, and `init()` leaves its NVIC
 line as it finds it. In this order:
 
+- THE ONE BUSY CHECK, first of all and the same for a polled request: while
+  this host's own block is still on the streams, `start()` returns true at once
+  with `spi_rejected`, before the select, the D/C or the block moves - the only
+  busy check there is, no other owner holding the streams (docs/design/dma.md,
+  "The ownership rule"). Letter `s` starts a block of 64 frames at PCLK1/256
+  and, under it, one request naming the streams and one polled: both refused,
+  their select never falling, D/C and CR1 untouched, and the block in flight
+  ending as it would have, one completion, `spi_ok`.
 - A host with no engines REFUSES it: `start()` returns true at once with
   `spi_rejected`, before the block, the select or the D/C is touched
   (measured: the select's pad sees no falling edge, letter `q`), and `has_dma`
@@ -553,15 +567,20 @@ line as it finds it. In this order:
   and a second interrupt. D/C rises after the command's last SCK edge and before
   the data's first (letter `s` counts them: 64 of 64 edges at PCLK1/256 for a
   four-frame command). A stall in that loop ends the request as a polled one's
-  does: `start()` true, `spi_stalled`, the select released, the block reset.
+  does: `start()` true, `spi_stalled`, the select and the D/C released, the block
+  reset.
 - A command with no data phase is the block, the whole request on the streams.
-- A stream that refuses the block at its launch - one a program holds with
-  `claim()`, or one that has not stopped (its enable bit still set) - ends the
-  request `spi_rejected` with `start()` true, its select back up: the requests
-  rise only after both streams run, so nothing of the block is clocked (letter `s`,
-  a held stream). A command phase ahead of the block has already gone out in the
-  loop by then, D/C left high. Nothing in the request's own fields can make a
-  stream refuse.
+- The streams then take the block: neither can refuse it, the busy check having
+  left none of this host's running, the refusals above covering the run, and no
+  other owner holding them.
+
+**At its end, ok or failed, a request leaves the select and the D/C high**
+(docs/design/spi-bus.md, "When a request ends"): a polled stall, a stall in the
+command phase ahead of a streams' block, a transfer error and a wait for the wire's
+end that ran out in the vector all release both, as a clean end does. Letter `k`
+makes three requests fail with a command phase holding D/C low - a polled command
+that stalls, a streams' request whose command stalls in the loop, a command alone
+on the streams whose block reads reserved space - and reads D/C high after each.
 
 **When a request ends, the wire has ended.** The select rises, and `start()` or
 `dma_isr()` answers true, after the last SCK edge - also for a caller that frames
@@ -583,10 +602,10 @@ at least one core cycle the bound is never shorter than the half bit. When the e
 comes the wait ends at it, within the half bit; when it never comes the vector spends
 the whole count, each poll an IDR load, a compare, a count and a branch, so several
 times the half bit. Then the request ends `spi_stalled`, the select released and the
-reset owed to the next `start()` (letter `E` stages it by taking the pad from the
+reset owed to the next `start()`, the D/C high with it (letter `E` stages it by taking the pad from the
 block). A transfer error does not wait: the vector drops the requests, puts the
-streams away, releases the select and marks the reset owed, which the next `start()`
-pays. The cost by rate, in the vector with every other interrupt held off, measured
+streams away, releases the select and the D/C and marks the reset owed, which the
+next `start()` pays. The cost by rate, in the vector with every other interrupt held off, measured
 by letter `E` (the vector's cycles from entry to `dma_isr()`'s answer, mode 0 against
 mode 1, which waits for nothing):
 
@@ -1177,9 +1196,10 @@ ladder, are judged at PCLK1/2 too:
 - **THE ENGINE A REQUEST NAMES** (letter `s`, against the peer, ten runs): one
   frame read and one written on the streams at PCLK1/4 and PCLK1/8, where the loop
   costs the core less - `start()` false, one block, one completion, exact at both
-  ends; the refusals of "The engines" above with every witness; a stream a program
-  holds refusing the block at its launch, the request ended `spi_rejected` and no edge
-  on SCK; the next request exact; a four-frame command before eight data frames at
+  ends; the refusals of "The engines" above with every witness; the one busy check,
+  two requests under a block in flight refused with their select never falling and D/C
+  and CR1 untouched, the block ending `spi_ok` with its one completion; the next
+  request exact; a four-frame command before eight data frames at
   PCLK1/256 and a one-frame command before 32 at PCLK1/128, each one block and one
   completion with D/C rising at exactly the command's last edge (64 and 16 of SCK's
   edges counted); a three-frame command alone on the streams, D/C high at its end.
@@ -1350,9 +1370,9 @@ ladder, are judged at PCLK1/2 too:
   hardware INPUT - SSM and SSI cleared under the host's configuration -
   and the G0 pulling the shared select low some 36 ms in (`ss_pulse`):
   MODF clears SPE and MSTR, the RXNE the loop waits for never comes, and
-  the request ends `spi_stalled` when its one budget (400000 + 4096 spins
-  a frame) runs out, at 781.7 ms, the core and every other active object held
-  that long, with the peripheral reset and reconfigured (SPE, MSTR and SSM back).
+  the request ends `spi_stalled` when its one budget (2050 frames of 8192 core
+  cycles, 16.8 million polls) runs out, at 1.49 s, 16 cycles a poll, the core and
+  every other active object held that long, with the peripheral reset and reconfigured (SPE, MSTR and SSM back).
   ERRIE's vector runs ONCE on that fault, SR 0x22 (MODF, TXE standing beside it). The request is full
   duplex on purpose: on a transmit-only one OVR would come first, since nothing reads
   the receive buffer.
@@ -1365,10 +1385,10 @@ ladder, are judged at PCLK1/2 too:
   frame at PCLK1/8, which runs in the loop. Each ends `spi_stalled` with the select
   reading high, the next window, 32 frames at PCLK1/32 (PCLK1/8 after the command phase),
   polled or on the streams, exact at both ends. The wall in `start()` is the budget at 180
-  MHz: 38.85 ms for the nine-frame write and 38.93 ms for the read, 16 cycles a poll on APB1,
-  and 36.01 ms for the command phase; a poll's turn moves with the image's layout, the read
-  measuring 48.64 ms, 20 cycles a poll, in another. The reset's share is under a thousand
-  cycles, `recover()` over a frame standing with SPE down measuring 850 (4.7 us).
+  MHz: 11264 polls at PCLK1/32 (1024 core cycles a frame), 1.01 ms for the nine-frame write and
+  for the read, 16 cycles a poll on APB1, and 768 polls for the command phase at PCLK1/8, 75
+  us, 18 cycles a poll; a poll's turn moves with the image's layout. The reset's share is under a thousand
+  cycles, `recover()` over a frame standing with SPE down measuring 934 to 1091 (5 to 6 us).
 - **The order is on the pad** (letter `k`). This block drives SCK only while SPE is set: with
   the pad's pull-down on in mode 3 it falls when SPE falls and rises on the enable, and with no
   pull it held its level through the reset and no edge came within 1 ms on these wires. So
@@ -1475,6 +1495,10 @@ PCLK/4, every data frame exact.
 ## Not covered yet
 
 Driver gaps:
+- The resource's own waits stay a count of turns: `Spi<n>`'s `wait_until()`, under
+  `disable()`, bounds at 400 000 polls, a verb below the host, which has no rate of
+  its own to derive from and whose answer the host drops. A rate change behind a
+  stalled block pays it once; deriving it means handing the resource the applied rate.
 - No CRC phase in `SpiHost`'s Request or in `SpiClient`'s runs: the unit
   is the resource's (`crc_polynomial`, `crc_enable`, `crc_next`, the two
   accumulators, CRCERR), measured on the wire by hand from both ends

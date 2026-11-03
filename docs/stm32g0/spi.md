@@ -257,13 +257,13 @@ inside start: a polled request, the empty one, a refused one, one whose
 command loop stalled; false = on the engines, `dma_isr()` posts
 `TransferDone`), `dma_isr()` (the channels'
 interrupt body; the host arms no interrupt of the block and binds no
-vector of its own), `status()` (`spi_ok`; `spi_rejected`, a request naming
-the engines on a host with none or one they cannot carry, or one a channel
-refused at its launch; `spi_dma_fault`, both channels
-put away and the select raised in the vector, which does no more, the peripheral's
-reset left to the next `start()`; or `spi_stalled` when a polled wait ran out of its
-budget, no frame back within it, the select raised and then the peripheral reset and
-reconfigured, inside `start()`; the next paragraph says what follows both), `prime()`,
+vector of its own), `status()` (`spi_ok`; `spi_rejected`, a request while this
+host's own block is on the engines, or one naming the engines on a host with none
+or one they cannot carry; `spi_dma_fault`, both channels
+put away and the select and the D/C raised in the vector, which does no more, the
+peripheral's reset left to the next `start()`; or `spi_stalled` when a polled wait
+ran out of its budget, no frame back within it, the select and the D/C raised and
+then the peripheral reset and reconfigured, inside `start()`; the next paragraph says what follows both), `prime()`,
 `bit_order()`, `recover()`, `rebase(hz)`, `clock_for(hz)`,
 `sck_hz(code)`, `release()`. The constants state the engine's numbers:
 `has_dma` (whether engines are bound: a request naming them needs them,
@@ -510,10 +510,11 @@ host clocks a frame out whenever the transmit channel fills the TXFIFO,
 and a receive channel it outran would find the 32-bit RXFIFO full - OVR,
 the frame discarded and every one after it lost (35.5.11) - where a
 transmit channel that waits only stops the clock between two frames.
-`release()` on the host and on the client pulses the block's reset
-before the gate: a DMA enable left set raises its request again when the
-clock returns ([dma.md](dma.md), "A released requester holds nothing
-here").
+`release()` on the host and on the client disables the block and gates
+its clock, no reset pulse; `init()` starts from the reset line, before it
+configures the block or arms a channel: a DMA enable a release left set
+raises its request again when the clock returns, and the reset takes it
+away ([dma.md](dma.md), "A released requester holds nothing here").
 
 ```cpp
 using Tx = brio::DmaTxEngine<1, 1, uint16_t>;
@@ -798,7 +799,7 @@ NOT pack in its polled path (the packing is its interrupt receiver's). So brio's
 take 4.8 to 5.2 times less of the time at PCLK/4 in bytes and 2.9 in half-words, and at
 PCLK/16, where brio's are the wire's, the vendor's stays 1.84 of it in bytes and 1.57 in
 half-words. Its fixed cost at PCLK/16 is 788 and 1063 cycles above the wire for a request
-of one and three frames, against brio's 299 and 390 (below).
+of one and three frames, against brio's 310 and 394 (below).
 
 **A request's fixed cost** - the price of a DCS command - from the same
 letter: a polled command of one byte and 0, 2 and 15 bytes of data,
@@ -806,12 +807,12 @@ write-only, the select on PA15 and the D/C on PB6, at PCLK/16:
 
 | op | n | `InFlash`: wall, rest | `InRam`: wall, rest |
 |---|---|---|---|
-| spi.req | 1 | 427, 299 | 410, 282 |
-| spi.req | 3 | 774, 390 | 744, 360 |
-| spi.req | 16 | 2461, 413 | 2455, 407 |
+| spi.req | 1 | 438, 310 | 413, 285 |
+| spi.req | 3 | 778, 394 | 745, 361 |
+| spi.req | 16 | 2481, 433 | 2456, 408 |
 
 "Rest" is wall minus the wire's cycles, the Stopwatch's ~62 inside it;
-the 3-byte request's some 328 net cycles (298 under `InRam`) are: the compare of the settings
+the 3-byte request's some 332 net cycles (299 under `InRam`) are: the compare of the settings
 and the clamp (~15 instructions), the select and the D/C edges (one
 store each, inline), the command phase (one frame in, the tail's wait
 on FTLVL and BSY, the overrun's clear and the drain - two reads), the
@@ -832,6 +833,14 @@ The block's own interrupts are never armed, and `init()` leaves the instance's N
 line as it finds it - SPI2 and SPI3 share one line where the part has a SPI3, and
 the other instance may be a client using it. In this order:
 
+- THE ONE BUSY CHECK, first of all and the same for a polled request: while
+  this host's own block is still on the engines, `start()` returns true at once
+  with `spi_rejected`, before the select, the D/C or the block moves - the only
+  busy check there is, no other owner holding the channels (docs/design/dma.md,
+  "The ownership rule"). Letter `S` starts a block of 64 frames at PCLK/256 and,
+  under it, one request naming the engines and one polled: both refused, their
+  select never falling, D/C and CR1 untouched, and the block in flight ending as
+  it would have, one completion, `spi_ok`.
 - A host with no engines REFUSES it: `start()` returns true at once with
   `spi_rejected`, before the block, the select or the D/C is touched (letter `s`:
   the select's own pad sees no falling edge, CR1 keeps its polarity, both FIFOs
@@ -854,15 +863,20 @@ the other instance may be a client using it. In this order:
   a second interrupt. D/C rises on a wire at rest between the two (letter `S`: the
   handler of D/C's own edge, which runs before the data block is launched, finds BSY
   low, the TXFIFO empty and SCK idle). A stall in that loop ends the request as a
-  polled one's does: `start()` true, `spi_stalled`, the select released, the block
-  reset.
+  polled one's does: `start()` true, `spi_stalled`, the select and the D/C released,
+  the block reset.
 - A command with no data phase is the block, the whole request on the engines.
-- A channel that refuses the block at its launch - the transmit one a program holds
-  with `claim()` - ends the request `spi_rejected` with `start()` true and its select
-  back up: the transmit channel, which starts the clock, goes second, so nothing of
-  the block is clocked (letter `S`). A command phase ahead of the block has already
-  gone out in the loop by then, D/C left high. Nothing in the request's own fields
-  can make a channel refuse.
+- The channels then take the block: neither can refuse it, the busy check having
+  left none of this host's in flight, the refusals above covering the run, and no
+  other owner holding them.
+
+**At its end, ok or failed, a request leaves the select and the D/C high**
+(docs/design/spi-bus.md, "When a request ends"): a polled stall, a stall in the
+command phase ahead of an engines' block, and a transfer error met in the vector
+all release both, as a clean end does. Letter `K` makes three requests fail with a
+command phase holding D/C low - a polled command that stalls, an engines'
+request whose command stalls in the loop, a command alone on the engines whose
+block reads reserved space - and reads D/C high after each.
 
 **When a request ends, the wire has ended.** The select rises, and `start()` or
 `dma_isr()` answers true, after the last SCK edge - also for a caller that frames
@@ -1342,12 +1356,17 @@ staged with SPE taken down under the host, which leaves the frames written stand
 TXFIFO, on each path: a polled write and a polled read of nine frames and the command
 phase of a request naming the engines, one frame, which runs in the loop. Each ends `spi_stalled` with the select reading
 high and the next window, 32 frames at PCLK/32, polled or on the engines, exact at both ends;
-with no reset the same windows are wrong in all 32 frames. The wall in `start()` is the budget
-at 64 MHz: 39.3 ms for the nine-frame write and 53.2 ms for the read in this image, 23 and 31
-cycles a poll, and 15.9 ms for the command phase, 10 cycles a poll. The two loops in the polled
-body keep the budget on the stack and a poll's turn there moves with the image's layout, 34 and
-37 cycles a poll measured in another (58.1 and 63.4 ms); the command phase's own function does
-not move. `recover()` over three frames standing in the TXFIFO with SPE down measures 973 cycles
+with no reset the same windows are wrong in all 32 frames. The wall in `start()` is the budget,
+the request's frames and two more at the applied rate, counted in polls: 2816 polls for the
+nine-frame write and read at PCLK/32 (256 cycles a frame), 768 for the one-frame command phase. At
+64 MHz that is 1.07 ms for the write and 1.47 ms for the read in this image, 24 and 34 cycles a
+poll, and 136 us for the command phase, 11 cycles a poll. The two loops in the polled body keep
+the budget on the stack and a poll's turn there moves with the image's layout; the command
+phase's own function does not move. A poll takes at least a cycle, so a wait never gives up before
+the wire could have ended, and a handler landing on the loop costs a poll at most: it is not a
+time the loop can run out of behind a preemption. At the slowest rate the same arithmetic holds a
+dead bus longest: 2048 frames of 16 bits at PCLK/256 are 8.4 million polls, some 3 s at 24 cycles
+a poll, by arithmetic. `recover()` over three frames standing in the TXFIFO with SPE down measures 1010 cycles
 (15 us).
 
 **The order is on the pad** (letter `K`). This block drives SCK only while SPE is set: with the
@@ -1453,6 +1472,11 @@ it.
 **Driver gaps** - implemented nowhere, and a program that wants them
 must reach the registers itself:
 
+- **the disable procedure's own waits stay a count of turns.** `Spi<n>::disable()`
+  bounds its two waits at 200 000 polls, a resource verb below the host, which has
+  no rate of its own to derive from and whose answer the host drops ("the
+  transaction's budget" above). A rate change behind a stalled block pays them once;
+  deriving them means handing the resource the applied rate.
 - **no half-duplex or receive-only TASK.** `SpiDirection` and its verbs
   are on the resource and `spi_config_valid()` knows the rules, but
   `SpiHost`'s Request is full-duplex only: a bidirectional device wants
@@ -1578,7 +1602,7 @@ on every header of the pack, but no silicon has run it:
   PCLK/4, in an image no build reproduces today. The flash's 64-bit lines behind the
   prefetch are the candidate; an alignment attribute on the transaction, measured on both
   placements of every host the stratum's images carry, would say.
-- **a 3-byte polled request costs some 328 cycles above the wire** (298 from
+- **a 3-byte polled request costs some 332 cycles above the wire** (299 from
   SRAM), net of the ruler: the breakdown above names the silicon's own latencies
   at the four phase ends (~50), ~180 instructions from the flash and the call into
   the flattened transaction. A ceiling

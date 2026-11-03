@@ -338,9 +338,9 @@ interrupts and the two vectors' masked views (`interrupt`, `interrupts`,
 enables (`dma_transmit`, `dma_receive`), the SMBus time-outs (`timeouts`,
 `smbus_probe`), the Fast-mode Plus drive (`fast_plus_drive`,
 `fast_plus_scl`, `fast_plus_sda`), the wake that is not there
-(`wake_from_stop`), and `release` (the block disabled and its RCC reset
-pulsed before the gate - the release contract, docs/design/dma.md - for
-the host and the client alike). The constants `number`, `event_irq`,
+(`wake_from_stop`), and `release` (the block disabled and its clock
+gated, no reset pulse, the host's and the client's `init` starting from
+the RCC reset - the release contract, docs/design/dma.md). The constants `number`, `event_irq`,
 `error_irq`, `smbus_claimed`, `wakes_from_stop`, `has_ten_bit`,
 `has_fast_plus`.
 
