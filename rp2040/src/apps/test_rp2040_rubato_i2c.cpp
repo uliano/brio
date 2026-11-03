@@ -141,6 +141,8 @@ constexpr I2cPins link_pins{.scl = 3, .sda = 2};
 using TxEngine = DmaTxEngine<4, uint16_t>;
 using RxEngine = DmaRxEngine<5>;
 using LinkHost = I2cHost<1, link_pins, TxEngine, RxEngine>;
+/// A write phase stays on the pump on this chip (rp_rubato_i2c.hpp).
+constexpr bool pure_write_on_engine = false;
 using SdaPin = Pin<2>;
 using SclPin = Pin<3>;
 

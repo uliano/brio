@@ -208,6 +208,12 @@ struct Rp2350DwApbI2c {
     /// reads zero).
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 16;
+    /// The alias of 2.1.5 with the unused byte lanes driven to zero: a byte
+    /// beat lands in IC_DATA_CMD as a plain write entry, so the transmit
+    /// engine carries a write phase. 2.1.3's interposer names only the atomic
+    /// aliases; that this one reaches the I2C behind it is measured, on both
+    /// architectures, by test_rp2350_i2c.
+    static constexpr uint32_t byte_beat_alias = reg_alias_zero_fill;
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).
@@ -322,11 +328,10 @@ using DwApbI2c = DwApbI2cBlock<Rp2350DwApbI2c, n>;
  * The two engine slots take rp2350/dma.hpp's DmaTxEngine<ch, uint16_t>
  * and DmaRxEngine<ch> on any two of the sixteen channels, both or
  * neither; they serve the read phase of a Request that names
- * `I2cEngine::dma`, at any length, a write phase staying on the
- * interrupt under either value: a byte beat from the request's buffer
- * lands replicated across IC_DATA_CMD at the register's address
- * (datasheet 2.1.5), its copy in bit 8 a read command
- * (docs/rp2350/i2c.md).
+ * `I2cEngine::dma`, at any length, and a pure write of three bytes or
+ * more, the transmit engine bound at IC_DATA_CMD's zero-filling alias
+ * (datasheet 2.1.5); a write before a read and a shorter write stay on the
+ * interrupt under either value (docs/rp2350/i2c.md).
  */
 template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>

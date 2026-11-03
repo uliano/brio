@@ -89,7 +89,8 @@ block below): on the Cortex-M33 half nothing else starts it.
 The rest of this page, in order: the documents of record; what the
 silicon does (the one function column, the isolated pads, the bank in
 two words, the DREQ numbers and the reset bits, the shared interrupt
-numbering, the bus clear by hand and its ruler, erratum RP2350-E9); the
+numbering, the alias a write rides the DMA through, the bus clear by hand
+and its ruler, erratum RP2350-E9); the
 types and verbs this stratum adds; how to use it, the host, its
 engines, the ruler and the client; the bench findings, against the desk
 partner; and what is not covered. What the block itself does is the IP
@@ -107,7 +108,8 @@ floors and the cycles the block adds, 12.2.15 the DMA interface, 12.2.16
 the interrupt registers, 12.2.17 the registers), 9.4 (the GPIO function
 table), 12.6.4.1 (the system DREQ table), 7.5 (the reset controller),
 3.2 (the interrupt lines), 2.1.3 (the atomic register aliases), 2.1.5
-(narrow writes replicated across a register), 3.1.3 and 9.8 (the
+(narrow writes replicated across a register, and the alias that zero-fills
+them), 3.1.3 and 9.8 (the
 single-cycle IO the unstick drives an open-drain line through), 9.7 (the
 pad isolation latches); [../design/i2c-bus.md](../design/i2c-bus.md) for
 the Request and the vocabulary. The driver is Synopsys's and not this
@@ -149,7 +151,7 @@ request per FIFO. 12.2 has no "Changes from RP2040" section, where the
 SPI, the ADC and the DMA chapters all do, and the two chips' register
 descriptions agree define for define - which is why the driver is one
 file in an IP stratum and this one is a page of differences. There are
-five, and none of them is inside the block:
+six, and none of them is inside the block:
 
 **The pins are one column, over a longer bank.** Every fourth pad from
 GP0 carries an I2C signal - SDA on the even pads, SCL on the odd, the
@@ -196,6 +198,23 @@ running - not the RP2040's 23 and 24 - and an app binds `isr_i2c0` /
 same object, an NVIC on the Cortex-M33 half and Hazard3's own on the
 other, which is exactly why the IP stratum's concept takes the controller
 as a type.
+
+**A byte beat can land as a plain write entry.** A write entry is the
+request's byte with the command bits above it clear, and a byte written at
+IC_DATA_CMD's own address reaches it replicated across the word (2.1.5, and
+12.6: the DMA has one transfer size for both sides), its copy in bit 8 a read
+command, in bit 9 a STOP, in bit 10 a RESTART. This chip's fabric offers the
+way out the RP2040's does not: at +0x4000, bit 14 of the address, "invalid byte
+lanes [are] driven to zero" (2.1.5). 2.1.3 says the I2C's atomic aliases are
+served by a bus interposer and does not list this one among them, so what it
+does on this block is a measurement, on both architectures (letter y of
+`test_rp2350_i2c`): byte beats through it moved 3 to 255 bytes at the three
+speeds with every one at its position on the partner, and the same run at the
+register's own address does not move those bytes. So the transmit engine is
+bound there and a pure write can ride it from the request's own buffer, with
+no copy. A read's halfword commands go through the same address: the upper
+lanes are zero instead of a copy, in a part of the word the block does not
+read.
 
 And one thing that is not a difference in the block but changes what a
 program must do: **the unstick is paced by the platform timer.** The bus
@@ -258,11 +277,11 @@ stratum adds:
   "A handler in SRAM"). The host's `Request` carries the engine it runs
   on, `engine`, `I2cEngine::interrupt` by default or `I2cEngine::dma`,
   and `has_dma` says whether engines are bound (the IP stratum's page,
-  "The engine a request names"). A write half stays on the interrupt
-  under `dma`: a byte beat from the request's buffer reaches
-  `IC_DATA_CMD` replicated across the word at the register's address
-  (2.1.5; the DMA's one transfer size for both sides, 12.6), its copy in
-  bit 8 a read command.
+  "The engine a request names"). `dma_carries_writes` is true on an engined
+  host of this chip, and `dma_write_min`, three, is the shortest write it
+  carries: a pure write of that length or more under `dma` rides the
+  transmit engine. A write before a read and a write of one or two bytes
+  stay on the interrupt.
 
 The family header also holds the vocabulary check: every bit the IP file
 spells for itself, held by `static_assert` against the macro this chip's
@@ -305,6 +324,19 @@ r.rx = brio::lend<brio::Lease::reply>(block); r.rx_len = 64;   // a block worth 
 r.engine = brio::I2cEngine::dma;                               // the read half on the DMA channels
 ```
 
+A long write the same way (an excerpt, the same host, `page` a buffer of the
+program's, lent until the `I2cDone`; a request with no read half):
+
+```cpp
+Bus::Request w{};
+w.addr = 0x50;
+w.tx = brio::lend<brio::Lease::reply>(page); w.tx_len = 64;    // from this buffer, no copy
+w.speed = brio::I2cSpeed::fast_400k;
+w.reply = brio::reply_to<Sensor, brio::I2cDone>();
+w.engine = brio::I2cEngine::dma;                               // the bytes between the first and the last on the channel
+brio::post<I2c>(w);
+```
+
 This chip has sixteen channels and four interrupt lines, and the line is
 the engine's third parameter, so a host whose engines ring on line 2 is
 `DmaTxEngine<6, uint16_t, 2>` and `DmaRxEngine<7, uint8_t, 2>` with
@@ -314,33 +346,58 @@ The host never chooses. A request that names nothing runs on the host's
 interrupt, at any length, and touches no channel; one that names `dma`
 has its read half on the engines at any length - the receive engine
 collecting every byte, the transmit engine pouring the commands of a
-read of three bytes or more - while its write half, which the engines
-cannot carry, stays on the interrupt and the request completes. On a host
+read of three bytes or more - and, with no read half, a write of three
+bytes or more on the transmit engine. Every other write half stays on the
+interrupt and the request completes. On a host
 with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
 costs core cycles, never correctness. The core cycles each costs,
 `bench_rp2350` letter i's `i2c.cost` lines (start() and the vectors, the
 least of five, the host and its vector in the flash, the same at the
-three speeds and in five runs but where a range is given), at 150 MHz,
+three speeds and in three runs but where a range is given), at 150 MHz,
 Cortex-M33 / Hazard3:
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
-| `interrupt` | 375 / 346 | 385 / 360 | 403 / 379 | 493 / 474 | 622 / 578 | 748 / 711 | 2600 / 2359 | 9950 / 8916 |
-| `dma` | 390 / 349 | 390 / 353 | 604 / 578 to 687 | 540 / 475 | 543 / 478 | 543 / 478 | 629 / 549 | 629 / 549 |
+| `interrupt` | 365 / 342 | 377 / 356 | 396 / 376 | 491 / 476 | 618 / 581 | 751 / 721 | 2628 / 2418 | 10 073 / 9166 |
+| `dma` | 373 / 349 | 375 / 353 | 576 / 572 | 512 / 473 | 522 / 476 | 522 / 476 | 610 / 547 | 610 / 547 |
 
-The pump, the interrupt-driven engine, costs F + b x n, F 132 / 162 cycles and b 38.5 / 34.3 a byte,
+| write of | 1 | 2 | 3 | 8 | 13 | 14 | 16 | 17 | 32 | 64 | 255 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `interrupt` | 310 / 299 | 320 / 309 | 330 / 319 | 380 / 369 | 430 / 419 | 440 / 429 | 460 / 449 | 593 / 553 | 880 / 796 | 1752 / 1516 | 6974 / 5827 |
+| `dma` | 316 / 304 | 326 / 314 | 497 / 509 | 433 / 409 | 433 / 409 | 433 / 409 | 433 / 409 | 433 or 516 / 409 or 475 | 516 / 475 | 516 / 475 | 516 / 475 |
+
+For a read, the pump, the interrupt-driven engine, costs F + b x n, F 127 / 156 cycles and b 39.0 / 35.3 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
-543 / 478 for a read of nine to sixteen bytes, 604 / 578 to 687 at three and
-629 / 549 from sixty-four (a third entry, the transmit block's end
+522 / 476 for a read of nine to sixteen bytes and
+610 / 547 from sixty-four (a third entry, the transmit block's end
 finding no room for the STOP entry). So `dma` costs the core fewer cycles from
-**nine bytes** on both halves (the pump's second entry); a read of one
-or two costs the same within fifteen cycles either way, and one of three
-to eight costs the engines a second entry (the transmit block's end). A
-write costs the same under either value. The energy side: under either
+**nine bytes** on the Cortex-M33 and from eight on Hazard3, by three cycles
+there (the pump's second entry comes at nine on both); a read of one
+or two costs the same within eight cycles either way, and one of three
+to eight costs the engines a second entry (the transmit block's end).
+
+For a write, `start()` alone writes up to sixteen entries with the block's one
+interrupt at the STOP, so the pump costs 300 / 289 cycles and 10 a byte, and its
+second entry comes at seventeen; the channel costs E, 433 / 409 for a write of
+eight to sixteen bytes and 516 / 475 from thirty-two, whatever the length (the
+third entry is the same TX_EMPTY as a read's; at seventeen it comes or not,
+as the FIFO stands at the block's end). So, by the inequality of the design
+page (E - F <= N x b, here 133 / 120 over 10), `dma` costs the core fewer
+cycles from **fourteen bytes** on the Cortex-M33 and **thirteen** on Hazard3,
+level at twelve there. A write of one or two is the pump's under either value,
+`dma` adding its one compare. A write of three to eight costs the channel a
+second entry; at three and four its figure reads 64 / 100 cycles higher than at
+eight, in `start()`: a block of one or two beats ends before `start()` returns, so
+the DMA line's entry and return fall inside `start()`'s span (inferred from
+those lengths, not counted apart; a read of three and four shows the same 64 /
+100). What the channel buys past the break-even is the core free on a long
+write: a write of 255 at 400 kHz keeps the core busy 17 383 / 7020 cycles on the
+interrupt and 2112 / 882 on the channel, 31 entries against 3, its longest host
+entry 102 / 74 cycles, at the same wall time (x 1.00). The energy side: under either
 value the core waits in its sleep instruction between entries, and the
 chip's SLEEP state asks in addition that the DMA have no outstanding
-transfer on any channel (6.5.2), which a `dma` read's channels hold for
-the read - not measured here.
+transfer on any channel (6.5.2), which a `dma` tenure's channels hold for
+its data - not measured here.
 
 A program that means to call `unstick()` starts the ruler its half-bits
 are paced by, which on the Cortex-M33 half nothing else does:
@@ -370,7 +427,7 @@ extern "C" void isr_i2c1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_i2c`
-reports **78 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+reports **93 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
 pair, from one source, against the WeAct RP2040's peer over the pair's
 I2C wires. Nothing in this chapter reads differently between the halves,
 which is what a block outside the processor should look like. The same
@@ -512,25 +569,53 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,
   where the pump pours them by the FIFO.
-- THE ENGINES (letter g, every request naming its engine, twenty-five
-  runs on each half - twelve alone, thirteen in z - the same figures in
-  each):
+- THE ENGINES (letter g, every request naming its engine, three runs of z
+  on each half, the same figures in each):
   the shortest reads under `dma`, one byte and two, on the receive
   engine, its run the length and every byte of it moved, the transmit
-  engine's `claim()` never taken, one host entry and no DMA line entry; writes of
-  1 and 32 under `dma` (the half the engines cannot carry) complete on
-  the interrupt, no DMA line entry, the 32 in three host entries, the
+  engine never started, one host entry and no DMA line entry; a write of
+  1 under `dma` on the interrupt, no DMA line entry, and one of 32 on the
+  transmit engine, one DMA line entry and two host entries, the
   peer's count and sum exact; `interrupt` at 64 bytes on the engined
   host touches no channel - no DMA line entry, the receive run and its
-  channel's write address unchanged - in eight host entries; a 40-byte
-  read under `dma` with the transmit engine's `claim()` already held
-  (by the letter itself) completes exact, its commands the pump's in four
-  host entries, every byte the receive engine's; a write-then-read of
+  channel's write address unchanged - in eight host entries; a write-then-read of
   6 + 16 under `dma` whose third written byte the client refuses, the
   read half already on the engines, is `i2c_nack_data` with two bytes
   stored and the next engined read exact; and an engined read losing the
   arbitration inside a window held by hand is `i2c_arb_lost` (letter k,
   [../rp2040/i2c.md](../rp2040/i2c.md) for the race it closes).
+- A PURE WRITE ON THE TRANSMIT ENGINE (letters y, n, o and v, each with its
+  control, ten runs of each on each half outside `z`, all green, and in the
+  three runs of `z`). The bytes: 3, 4, 17, 18, 64 and 255 at 400 kHz and 255 at
+  100 kHz and 1 MHz, each read back by the partner against the pattern at its
+  position, none off in 874 bytes, the sum and the count exact; one DMA line
+  entry each, one host entry for a block that left room for the last entry (3,
+  4 and 17) and two where it did not, TX_OVER never raised; a read of 16 between
+  them on the same channel exact, its halfword commands through the same address.
+  A write of 255 takes 5841 to 5854 us at 400 kHz, 23 139 to 23 152 at 100 kHz
+  and 2384 to 2397 at 1 MHz, within 1.4 % of the wire's time. THE CONTROL, the
+  channel bound at the register's own address, 32 bytes of the same pattern:
+  the partner receives 17, 16 of them off the pattern, and serves 15, the read
+  commands the replicated lanes made.
+  A NACK in mid-write: the twentieth of 255 refused at 100 kHz is `i2c_nack_data`,
+  nineteen bytes stored exact, one host entry and no DMA line entry, the channel
+  stopped, and the next engined read exact. The abort flushes the transmit FIFO and
+  holds it flushed until it is read away, which leaves the request standing, so what
+  remains of the block pours into nothing while the host's vector comes: a block with
+  217 entries to go is still running then, and the vector stops it before the abort is
+  read away, which is what keeps the rest from starting a tenure of its own. (One with
+  44 to go, a write of 64, had ended before the vector on the Cortex-M33, its end on the
+  DMA line a harmless entry, and on Hazard3 had not.) The first byte refused is
+  `i2c_nack_data` with nothing stored, a deaf address on a write of 32 `i2c_nack_addr`.
+  THE CONTROL, nothing refused: i2c_ok, the 255 stored exact.
+  A lost arbitration: a write of 255 aimed at the higher address, inside a window held
+  by hand with the first entry and the block already in the FIFO, is `i2c_arb_lost`,
+  the channel stopped, the peer's host keeping the bus. THE CONTROL, aimed at the lower
+  address: this host keeps it, `i2c_nack_addr`, the peer's reporting the loss.
+  A bus error: a write of 16 from the last byte of SRAM (`start()` reads the first
+  entry, the channel's first beat reads past SRAM_END, 2.2.3) is `i2c_dma_fault`, on the
+  DMA line alone with no host entry, the channel stopped, the partner storing the one
+  byte the block ever held. THE CONTROL: the next write from RAM i2c_ok and exact.
 - THE ENGINES' FAULT PATH (letter g): a 64-byte engined read whose
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
@@ -564,7 +649,8 @@ green in every run on Hazard3 and in every run but the first after a
 flash on the Cortex-M33** - the key thirteen times on each half, its
 vocabulary letter `q` ten more on Hazard3 and eighteen more on the
 Cortex-M33; the letters `x` and `s`, outside it, green in thirteen runs
-each on each half. The one verdict the Cortex-M33 fails there is the
+each on each half; three runs of the key on each half with the suite's
+pure writes of three bytes or more on the transmit engine, green. The one verdict the Cortex-M33 fails there is the
 peer's and not the host's (below, "The probe after a refusal"). The pack,
 the command channel through the arbiter and the letters are the I2C
 suites' shared body (`avrxt/src/apps/rubato_i2c.hpp`); what the two
@@ -577,26 +663,28 @@ and the RP2040's run of it is [../rp2040/i2c.md](../rp2040/i2c.md)'s.
 k-th entry leaves the block (1 + k) byte times before it needs the next,
 and only a longer one holds SCL ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
 the host's engine). Letter `s`, Cortex-M33 / Hazard3, on `start()` as
-the suite wraps it (one copy of the Request and a compare to name its
+the suite wraps it (one copy of the Request and two compares to name its
 engine, `rp2040/src/apps/rp_rubato_i2c.hpp`'s `EngineByLength`) with the
-host in the flash: `start()` takes 280 to 316 / 357 to 371 cycles for a
-one-byte write and 452 to 478 / 433 to 438 for a write of sixteen, the
-fifteen entries after the first 137 to 196 / 65 to 79 cycles, where 400
-writes under independent ticks would land 3 to 5 / 1 or 2 times. Under
-97 us x 3000, the longest preemption of `start()` 3243 to 3471 / 3392
+host in the flash: `start()` takes 424 to 460 / 364 to 386 cycles for a
+one-byte write and 504 to 516 / 456 for a write of sixteen, the
+fifteen entries after the first 44 to 92 / 70 to 92 cycles, where 400
+writes under independent ticks would land 1 or 2 times (three runs; `start()`'s
+averages hold the XIP misses of the image's layout, the host's own cost of the
+choice being 5 or 6 cycles in `bench_rp2350` letter i's warm lines). Under
+97 us x 3000, the longest preemption of `start()` 3243 to 3471 / 3289
 to 3510 cycles against two byte times' 6750 at 400 kHz: 3 to 13 / 15 to
 25 landings in `start()` - its whole span counted - in 400 writes, 1 to
-6 / 3 to 12 with the host active on the wire, and **no stretch in
-thirteen runs on either half**. At 1 MHz (two byte times 2700 cycles)
-the Cortex-M33 never landed in `start()` in thirteen runs, nor under
-the 160 us spin at 389 us, and Hazard3 landed twice in thirteen runs at
-97 us x 3000 (once with the host active, no stretch) and never under the
+7 / 3 to 12 with the host active on the wire, and **no stretch in
+sixteen runs on either half**. At 1 MHz (two byte times 2700 cycles)
+the Cortex-M33 never landed in `start()` in sixteen runs, nor under
+the 160 us spin at 389 us, and Hazard3 landed three times in sixteen runs at
+97 us x 3000 (twice with the host active, no stretch) and never under the
 long spin - where independent ticks would land some twelve times in a
 run of 400 writes. The tenure cycle there is not independent of the
 alarm's period, and which part of it sets the phase is not established;
 the letter's long-spin case is judged here only by its exactness, and
 its stretches are the RP2040's measurement. Letter `x`, 400 writes of
-sixteen at 400 kHz (`start()` 392 to 394 / 434 to 438 cycles silent): 8
+sixteen at 400 kHz (`start()` 387 or 388 / 459 or 460 cycles silent): 7
 to 23 / 13 to 24 landings against the 10 / 11 or 12 independent ticks
 would give, 3 to 14 / 5 to 11 with the host active, no stretch. The
 key `z` stretched no tenure in thirteen runs on either half.
@@ -634,13 +722,15 @@ recovery and was not loosened.
 control.** Letter `o` at 400 kHz, one serve counted to its end - the
 suite naming `dma` for a request with a half of two bytes or more and
 `interrupt` otherwise, so the shapes take every path the host has
-(`rp2040/src/apps/rp_rubato_i2c.hpp`'s table names each) - every
+(`rp2040/src/apps/rp_rubato_i2c.hpp`'s table names each; a write of
+exactly sixteen stays on the interrupt, letters `s` and `x` measuring that
+fill) - every
 shape `i2c_ok` and byte-exact, the peer's count, sum and seventeen
-address matches exact; post to reply over thirteen runs, the control's
-and the worst under pressure, Cortex-M33 / Hazard3: the probe 67 to 82
-and 74 to 94 / 70 to 83 and 70 to 97 us, the 32-byte write 761 to 763
-and 762 or 763 / 763 or 764 and 764 to 807, the 32-byte read 760 and
-760 or 761 / 762 to 764 and 763 to 806. Letter `w`: every reply
+address matches exact; post to reply over three runs, the control's
+and the worst under pressure, Cortex-M33 / Hazard3: the probe 73 to 86
+and 65 to 89 / 75 to 80 and 69 to 91 us, the 32-byte write, on the transmit
+engine, 763 to 766 and 764 to 802 / 761 to 763 and 761 to 805, the 32-byte read
+764 or 765 and 763 to 805 / 762 and 761 to 770. Letter `w`: every reply
 `i2c_ok`, to its requester, in its order, the peer's tallies exact, 5.4
 to 5.9 / 5.3 to 5.9 ms a pass. Letter `p`: the peer's commanded stretch
 of 1000 us a byte on a read of 8 in 8788 to 8810 / 8789 to 8813 us
@@ -661,8 +751,8 @@ its eight holds take at least.
 
 Driver gaps, each with its reason. The ones that belong to the block
 rather than to this chip - the high-speed mode, SMBus, the stuck-bus
-timeouts, 10-bit addressing on the host side, a write phase on the DMA
-engines, the client on the engines - are in
+timeouts, 10-bit addressing on the host side, the client on the engines -
+are in
 [../dw_apb_i2c/README.md](../dw_apb_i2c/README.md) and are not repeated
 here.
 

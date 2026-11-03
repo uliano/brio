@@ -75,6 +75,12 @@
 //    IC_ENABLE). The block back idle, NACK_ONLY goes on and the block is
 //    enabled again, so every later byte is refused too, as the protocol's
 //    cumulative count asks.
+//  - THE BYTES RECEIVED ARE JUDGED IN PLACE. A serve compares each byte it
+//    takes with the pattern at its position (a.pattern, a.seed) and reports
+//    how many differed in `sstatus`, saturating at 255: this block has no
+//    SSTATUS, and sum and count alone would pass a run in the wrong order.
+//    A host that writes something else than the pattern reads this count
+//    as noise.
 //  - NO ADDRESS-MATCH EVENT: a tenure is counted at its end, the STOP
 //    (STOP_DET, raised for this client's tenures alone) or the repeated
 //    START (RESTART_DET), and `addr_hits` is their sum. A general call has
@@ -357,6 +363,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     bool cut = false;   // the block disabled mid-tenure, refusing byte nack_at
     bool gc_seen = false;
     uint16_t rx = 0, tx = 0;
+    uint8_t wrong = 0;   // bytes received off the pattern (the header)
     bool first_taken = false;
     // A STOP counted and no byte moved since: the counted serve's one
     // moment to end (the header).
@@ -395,6 +402,9 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 first_taken = true;
             }
             r.sum = static_cast<uint16_t>(r.sum + v);
+            if (v != twilink::pattern_value(a.pattern, a.seed, rx) && wrong != 255u) {
+                ++wrong;
+            }
             ++rx;
             at_stop = false;
             if (a.nack_at > 1u && !refusing && rx + 1u == a.nack_at) {
@@ -479,7 +489,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     r.count = static_cast<uint16_t>(rx + tx);
     r.aux0 = static_cast<uint8_t>(rx);
     r.aux1 = static_cast<uint8_t>(tx);
-    r.sstatus = status_byte();
+    r.sstatus = wrong;
     return r;
 }
 
@@ -706,7 +716,7 @@ void status() {
           last_report.aux0, "/", last_report.aux1, " hits=", last_report.addr_hits, " stops=", last_report.stops,
           " flags=", hex(last_report.flags), crlf);
     print(console, "               sum=", hex(last_report.sum), " first=", hex(last_report.first),
-          " lastaddr=", hex(last_report.last_addr), " status=", hex(last_report.sstatus),
+          " lastaddr=", hex(last_report.last_addr), " off the pattern=", last_report.sstatus,
           " at-NACK=", hex(last_report.mstatus), " ms=", last_report.ms, crlf);
 }
 

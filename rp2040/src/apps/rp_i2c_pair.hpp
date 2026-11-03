@@ -998,7 +998,10 @@ void tg_dma() {
     // the request's bytes, and a byte beat lands replicated across the
     // command register (the chip's document): the write stays on the
     // pump and completes - no DMA line entry, the receive engine's run
-    // untouched, the bytes counted by the peer at the letter's end.
+    // untouched, the bytes counted by the peer at the letter's end. On a
+    // chip whose transmit engine carries a pure write (the RP2350's zero-filling
+    // alias) the one byte is still the pump's and the 32 the channel's: one
+    // DMA line entry, the STOP and at most a TX_EMPTY.
     const uint32_t cap_before = DmaRx::capacity();
     uint8_t w1[1] = {0x5C};
     const uint8_t sw1 = tenure<DmaHost>(twilink::dut_addr, w1, 1, nullptr, 0, I2cSpeed::fast_400k, 200'000u, dma);
@@ -1013,11 +1016,19 @@ void tg_dma() {
     // The 32-byte write on the pump: sixteen entries at start(), refills of
     // at least eight on TX_EMPTY (half the FIFO): two, then the STOP - three
     // host entries, four for a refill that lands a byte late.
-    bench.verdict("a half the engines cannot carry, under dma, completes on the interrupt: writes of 1 and 32 "
-                  "bytes i2c_ok, no DMA line entry, the receive run untouched, the 32 in three or four host entries "
-                  "(the peer's count and sum judged at the end)",
-                  sw1 == i2c_ok && sw32 == i2c_ok && lines_w1 == 0u && lines_w32 == 0u &&
-                      DmaRx::capacity() == cap_before && isr_w32 >= 3u && isr_w32 <= 4u);
+    if constexpr (DmaHost::dma_carries_writes) {
+        bench.verdict("writes under dma: the 1 byte on the interrupt, no DMA line entry, the 32 on the transmit engine, "
+                      "one DMA line entry and one or two host entries, both i2c_ok, the receive run untouched (the "
+                      "peer's count and sum judged at the end)",
+                      sw1 == i2c_ok && sw32 == i2c_ok && lines_w1 == 0u && lines_w32 == 1u &&
+                          DmaRx::capacity() == cap_before && isr_w32 >= 1u && isr_w32 <= 2u);
+    } else {
+        bench.verdict("a half the engines cannot carry, under dma, completes on the interrupt: writes of 1 and 32 "
+                      "bytes i2c_ok, no DMA line entry, the receive run untouched, the 32 in three or four host entries "
+                      "(the peer's count and sum judged at the end)",
+                      sw1 == i2c_ok && sw32 == i2c_ok && lines_w1 == 0u && lines_w32 == 0u &&
+                          DmaRx::capacity() == cap_before && isr_w32 >= 3u && isr_w32 <= 4u);
+    }
     const uint8_t st4 = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k, 200'000u, dma);
     const uint32_t lines_probe = dma_entries;
     served = static_cast<uint16_t>(served + 1u);
@@ -1113,32 +1124,6 @@ void tg_dma() {
     bench.verdict("interrupt, the default, at 64 bytes touches no channel: no DMA line entry, the receive run and "
                   "its channel's write address unchanged, four to ten host entries, byte-exact",
                   sti == i2c_ok && mi == 0u && lines_i == 0u && untouched && isr_i >= 4u && isr_i <= 10u);
-    // A CLAIM ALREADY STANDING ON THE TRANSMIT ENGINE (this letter takes it):
-    // the read's commands are the pump's - sixteen at start(), then
-    // refills of eight or more on TX_EMPTY, two or three, the last carrying
-    // STOP, then the STOP's own entry: three to four host entries, one spare
-    // - and every byte the receive engine's.
-    for (uint8_t i = 0; i < 40u; ++i) {
-        rx_buf[i] = 0xEE;
-    }
-    const bool held = DmaTx::claim();
-    const uint8_t sc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 40, I2cSpeed::fast_400k, 20'000u, dma);
-    const uint32_t cap_c = DmaRx::capacity();
-    const uint32_t moved_c = DmaRx::take();
-    const uint32_t lines_c = dma_entries;
-    const uint32_t isr_c = isr_entries;
-    const bool still_held = DmaTx::busy();
-    DmaTx::unclaim();
-    const uint8_t mc40 = pattern_mismatches(rx_buf, 40, a.seed, served);
-    served = static_cast<uint16_t>(served + 40u);
-    print(serial, "  a 40-byte read under dma with the transmit channel held: status ", sc, ", the receive run ",
-          cap_c, " (", moved_c, " moved), ", isr_c, " host entries, ", lines_c, " DMA line entries, ", mc40,
-          " wrong", crlf);
-    bench.verdict("a claim standing on the transmit engine is not overridden: a 40-byte read under dma completes "
-                  "byte-exact, its commands the pump's (three to five host entries), every byte on the receive "
-                  "engine, no DMA line entry, the holder's claim intact",
-                  held && sc == i2c_ok && mc40 == 0u && cap_c == 40u && moved_c == 40u && lines_c == 0u &&
-                      isr_c >= 3u && isr_c <= 5u && still_held);
     owner = Owner::none;
     DmaHost::release();
     host_ready();

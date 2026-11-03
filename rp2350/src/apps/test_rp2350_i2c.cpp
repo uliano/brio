@@ -53,9 +53,8 @@
 //   g  THE DMA ENGINES (channels 4 and 5), every request naming its
 //      engine: a 64-byte read timed, a write-then-read, reads of one and
 //      two bytes on the receive engine, writes under `dma` on the pump,
-//      `interrupt` at 64 bytes touching no channel, the transmit channel
-//      held by another owner, the fault path, the bursts, and a data
-//      NACK with the read half's engines launched
+//      `interrupt` at 64 bytes touching no channel, the fault path, the
+//      bursts, and a data NACK with the read half's engines launched
 //   r  A RELEASED REQUESTER, THE SAME OWNER AGAIN: the host released with its DMA
 //      enables set, initialized again, no request standing and one engined read
 //      exact - and the control with no reset, the channel moving at once
@@ -76,6 +75,17 @@
 //   l  THE ROLES INVERT: this board's client written to and read from by
 //      the peer's host, and a general call commanded of that host refused
 //      there, nothing reaching this client
+//   y  A PURE WRITE ON THE TRANSMIT ENGINE, its bytes in byte beats through
+//      IC_DATA_CMD's zero-filling alias (2.1.5): 3 to 255 bytes at the three
+//      speeds, a read's halfword commands between them on the same channel,
+//      the partner judging every byte at its position; and the control, the
+//      channel bound at the register's own address
+//   n  a NACK in mid-write, at the first byte and on the address, the channel
+//      running; the control, the same write with nothing refused
+//   o  a lost arbitration with the channel launched; the control, the other
+//      direction
+//   v  a bus error on the channel, a run that leaves the map; the control, the
+//      next write from RAM
 //   x  (outside z) the hand-made window traced: what the block reports of
 //      a START and a STOP it did not make, and a tenure written inside it
 //
@@ -316,6 +326,348 @@ void tj_pads() {
                       SclPin::function() == PinFunction::none);
 }
 
+// =============================================================================
+// y, n, o, v - a pure write on the transmit engine, through the alias
+// =============================================================================
+
+/// The engined host up with no other owner on the vector, a peer's serve
+/// already running.
+void write_host_ready() {
+    owner = Owner::none;
+    Host::release();
+    (void)DmaHost::init(clock);
+    owner = Owner::dma_host;
+}
+
+/// The peer's report over the pump, the engined host given back first.
+bool write_host_done(const twilink::Params& a, uint32_t since_us, twilink::Report& r) {
+    owner = Owner::none;
+    DmaHost::release();
+    host_ready();
+    outlast(a, since_us);
+    return peer_report(r);
+}
+
+/// `n` bytes of the serve's pattern from position `from` into tx_buf, and
+/// their sum.
+uint32_t pattern_run(uint8_t seed, uint16_t from, uint16_t n) {
+    uint32_t sum = 0;
+    for (uint16_t i = 0; i < n; ++i) {
+        tx_buf[i] = twilink::pattern_value(twilink::pattern_counting, seed, static_cast<uint16_t>(from + i));
+        sum += tx_buf[i];
+    }
+    return sum;
+}
+
+/// One write under `dma`, its bytes the serve's pattern from `from`.
+uint8_t pattern_write(uint8_t seed, uint16_t from, uint16_t n, I2cSpeed speed, uint32_t& sum) {
+    sum += pattern_run(seed, from, n);
+    // The wire's time twice over at nine periods a byte, and 5 ms for the
+    // handlers: a 255-byte write at 100 kHz is 46 ms + 5.
+    const uint32_t wait = 18'000'000u / i2c_speed_hz(speed) * (n + 1u) + 5000u;
+    return tenure<DmaHost>(twilink::dut_addr, tx_buf, static_cast<uint8_t>(n), nullptr, 0, speed, wait, I2cEngine::dma);
+}
+
+// y - the bytes, judged by the partner at each position.
+void ty_write_bytes() {
+    if (!need_peer()) {
+        return;
+    }
+    const twilink::Params a = serve_params(800, 0x00);
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    uint32_t s0 = us_now();
+    write_host_ready();
+    struct Run {
+        uint16_t n;
+        I2cSpeed speed;
+    };
+    const Run runs[] = {{3, I2cSpeed::fast_400k},       {4, I2cSpeed::fast_400k},  {17, I2cSpeed::fast_400k},
+                        {18, I2cSpeed::fast_400k},      {64, I2cSpeed::fast_400k}, {255, I2cSpeed::fast_400k},
+                        {255, I2cSpeed::standard_100k}, {255, I2cSpeed::fast_plus_1m}};
+    uint16_t sent = 0;
+    uint16_t served = 0;
+    uint32_t sum = 0;
+    uint8_t clean = 0;
+    bool over = false;
+    uint8_t read_ok = 0;
+    uint8_t reads = 0;
+    for (const Run& run : runs) {
+        const uint32_t t0 = us_now();
+        const uint8_t st = pattern_write(a.seed, sent, run.n, run.speed, sum);
+        const uint32_t took = us_now() - t0;
+        const uint32_t lines = dma_entries;
+        const uint32_t entries = isr_entries;
+        over = over || (Raw::raw_pending() & I2cInterrupt::tx_over) != 0u;
+        sent = static_cast<uint16_t>(sent + run.n);
+        print(serial, "  ", run.n, " bytes under dma at ", i2c_speed_hz(run.speed) / 1000u, " kHz: status ", st, " in ", took,
+              " us, ", lines, " DMA line entry, ", entries, " host entries", crlf);
+        // One block, so one DMA line entry; the STOP, and TX_EMPTY when the
+        // block's end found no room for the last entry.
+        if (st == i2c_ok && lines == 1u && entries >= 1u && entries <= 2u) {
+            ++clean;
+        }
+        // THE SAME CHANNEL NEXT, ITS OTHER WIDTH: a read's halfword commands
+        // through the alias, the beat and the step moved and moved back.
+        if (run.n >= 18u) {
+            for (uint8_t i = 0; i < 16u; ++i) {
+                rx_buf[i] = 0xEE;
+            }
+            const uint8_t sr = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, I2cSpeed::fast_400k, 20'000u,
+                                               I2cEngine::dma);
+            ++reads;
+            if (sr == i2c_ok && pattern_mismatches(rx_buf, 16, a.seed, served) == 0u) {
+                ++read_ok;
+            }
+            served = static_cast<uint16_t>(served + 16u);
+        }
+    }
+    bench.verdict("A PURE WRITE UNDER dma RIDES THE CHANNEL: 3 to 255 bytes at the three speeds i2c_ok, one DMA line "
+                  "entry, the STOP and at most one TX_EMPTY on the host's vector, TX_OVER never raised",
+                  clean == sizeof runs / sizeof runs[0] && !over);
+    bench.verdict("... and the same channel between them carries a read's halfword commands through the same address, "
+                  "each read of 16 exact",
+                  reads != 0u && read_ok == reads);
+    // WHAT STAYS ON THE PUMP UNDER dma: no DMA line entry.
+    const uint8_t s1 = pattern_write(a.seed, sent, 1, I2cSpeed::fast_400k, sum);
+    const uint32_t l1 = dma_entries;
+    sent = static_cast<uint16_t>(sent + 1u);
+    const uint8_t s2 = pattern_write(a.seed, sent, 2, I2cSpeed::fast_400k, sum);
+    const uint32_t l2 = dma_entries;
+    sent = static_cast<uint16_t>(sent + 2u);
+    bench.verdict("writes of one and two bytes under dma stay on the pump: no byte between the first entry and the "
+                  "last, no DMA line entry, i2c_ok",
+                  s1 == i2c_ok && s2 == i2c_ok && l1 == 0u && l2 == 0u);
+    twilink::Report r{};
+    bool rep = write_host_done(a, s0, r);
+    print(serial, "  the peer received ", static_cast<uint16_t>(r.count - served), " of ", sent, ", served ", r.aux1, " (",
+          served, "), sum ", hex(r.sum), " (", hex(static_cast<uint16_t>(sum)), "), first ", hex(r.first), ", ", r.sstatus,
+          " off the pattern at their position", crlf);
+    bench.verdict("THE PARTNER JUDGES THE BYTES: every one received once, the sum exact, none off the counting pattern "
+                  "at its position",
+                  rep && static_cast<uint16_t>(r.count - served) == sent && r.aux1 == static_cast<uint8_t>(served) &&
+                      r.sum == static_cast<uint16_t>(sum) && r.sstatus == 0u);
+    // THE CONTROL: the channel bound at the register's own address. The
+    // pattern's byte 0x01 is a read command there and 0x02 a STOP, so the same
+    // write does not move exact bytes - the partner's count says so.
+    if (!need_peer()) {
+        return;
+    }
+    const twilink::Params c = serve_params(300, 0x00);
+    if (!peer_act(Op::serve, c)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    s0 = us_now();
+    write_host_ready();
+    DmaTx::arm(Raw::data_address(), Raw::dreq_tx, false);
+    uint32_t csum = 0;
+    const uint8_t cst = pattern_write(c.seed, 0, 32, I2cSpeed::fast_400k, csum);
+    (void)DmaHost::recover();
+    twilink::Report cr{};
+    rep = write_host_done(c, s0, cr);
+    print(serial, "  the control, 32 bytes with the channel at the register's own address: status ", cst, ", the peer "
+          "received ", cr.aux0, ", served ", cr.aux1, ", ", cr.sstatus, " off the pattern", crlf);
+    bench.verdict("THE CONTROL: at the register's own address the same write is not those bytes - the replicated lanes "
+                  "make read commands of some, the partner's count short",
+                  rep && cr.aux0 != 32u && cr.aux1 != 0u);
+}
+
+// n - a NACK in mid-write, the channel running.
+void tn_write_nack() {
+    if (!need_peer()) {
+        return;
+    }
+    // The peer stores nack_at - 1 and refuses the next, whatever the FIFO
+    // holds ahead of it. The longest write, so that the channel is still
+    // pouring into the flushed FIFO when the host's vector comes: refused at the
+    // twentieth, some 217 of its 253 entries remain, where a write of 64 leaves
+    // 44, which were gone before the vector on the Cortex-M33 - and the abort's
+    // stop is judged only on a block that outlasts the vector (the rest falls
+    // into the flushed FIFO whether the channel is stopped or not).
+    twilink::Params a = serve_params(300, 0x10);
+    a.nack_at = 20;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the nack-at serve", false);
+        return;
+    }
+    uint32_t s0 = us_now();
+    write_host_ready();
+    uint32_t sum = 0;
+    const uint8_t st = pattern_write(a.seed, 0, 255, link_speed, sum);
+    const uint32_t lines = dma_entries;
+    const uint32_t entries = isr_entries;
+    const bool stopped = !DmaTx::busy();
+    // A read on the engines right after: the abort left them bound and free.
+    for (uint8_t i = 0; i < 16u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t sr = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed, 200'000u, I2cEngine::dma);
+    const uint8_t mr = pattern_mismatches(rx_buf, 16, a.seed, 0);
+    twilink::Report r{};
+    bool rep = write_host_done(a, s0, r);
+    const uint32_t stored_sum = pattern_run(a.seed, 0, 19);
+    print(serial, "  255 under dma, the twentieth refused: status ", st, ", ", lines, " DMA line entries, ", entries,
+          " host entries, the channel ", stopped ? "stopped" : "RUNNING", "; the peer stored ", r.aux0, " (sum ", hex(r.sum),
+          " of ", hex(static_cast<uint16_t>(stored_sum)), "), ", r.sstatus, " off the pattern; the next engined read ", sr,
+          ", ", mr, " wrong", crlf);
+    // The abort flushes the transmit FIFO and holds it so until it is read
+    // away, which leaves the request standing: what remains of the block pours
+    // in microseconds into nothing, so its end may reach the DMA line before
+    // the host's vector stops the channel, one entry or none.
+    bench.verdict("A NACK IN MID-WRITE: i2c_nack_data on the host's one entry, at most one on the DMA line, the channel "
+                  "stopped, nineteen bytes stored and exact",
+                  st == i2c_nack_data && lines <= 1u && entries == 1u && stopped && rep && r.aux0 == 19u &&
+                      r.sum == static_cast<uint16_t>(stored_sum) && r.sstatus == 0u);
+    bench.verdict("... and the next engined read is exact: the abort stopped the channel before the FIFOs came out of "
+                  "their flushed state, no byte of the block starting a tenure of its own",
+                  sr == i2c_ok && mr == 0u && rep && r.aux1 == 16u);
+    // THE FIRST BYTE REFUSED AND THE ADDRESS REFUSED, the block barely started.
+    if (!need_peer()) {
+        return;
+    }
+    twilink::Params f = serve_params(300, 0x10);
+    f.nack_at = 1;
+    if (!peer_act(Op::serve, f)) {
+        bench.verdict("the peer accepted the nack-at serve", false);
+        return;
+    }
+    s0 = us_now();
+    write_host_ready();
+    uint32_t sum1 = 0;
+    const uint8_t s1 = pattern_write(f.seed, 0, 32, link_speed, sum1);
+    const uint8_t s2 = tenure<DmaHost>(nobody, tx_buf, 32, nullptr, 0, link_speed, 200'000u, I2cEngine::dma);
+    const bool free = !DmaTx::busy();
+    twilink::Report fr{};
+    rep = write_host_done(f, s0, fr);
+    print(serial, "  the first byte refused: status ", s1, ", the peer stored ", fr.aux0, "; nobody home on a write of 32 under "
+          "dma: status ", s2, crlf);
+    bench.verdict("the first byte refused is i2c_nack_data with nothing stored, a deaf address on a write under dma "
+                  "i2c_nack_addr, each with the channel stopped",
+                  s1 == i2c_nack_data && s2 == i2c_nack_addr && free && rep && fr.aux0 == 0u);
+    // THE CONTROL: no refusal, the same write after the aborts: all of it.
+    if (!need_peer()) {
+        return;
+    }
+    const twilink::Params c = serve_params(300, 0x10);
+    if (!peer_act(Op::serve, c)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    s0 = us_now();
+    write_host_ready();
+    uint32_t csum = 0;
+    const uint8_t cs = pattern_write(c.seed, 0, 255, link_speed, csum);
+    const uint32_t cl = dma_entries;
+    twilink::Report cr{};
+    rep = write_host_done(c, s0, cr);
+    print(serial, "  the control, no refusal: status ", cs, ", ", cl, " DMA line entry, the peer stored ", cr.aux0, crlf);
+    bench.verdict("THE CONTROL: with nothing refused the same write is i2c_ok, its block ended, all 255 stored exact",
+                  cs == i2c_ok && cl == 1u && rep && cr.aux0 == 255u && cr.sstatus == 0u &&
+                      cr.sum == static_cast<uint16_t>(csum));
+}
+
+// o - arbitration with the channel launched.
+void to_write_arbitration() {
+    if (!need_peer()) {
+        return;
+    }
+    struct Round {
+        uint8_t target;
+        bool lose;
+    };
+    // Letter k's two addresses: 0x6B against the peer's 0x2C loses at the first
+    // bit, 0x11 wins at the second; letter k's window of 350 us.
+    const Round rounds[] = {{twilink::command_addr, true}, {twilink::low_addr, false}};
+    for (const Round& rd : rounds) {
+        twilink::Params a{};
+        a.ms = 600;
+        a.addr = twilink::dut_addr;
+        a.target = twilink::dut_addr;
+        a.count = 4;
+        a.seed = 0x40;
+        a.aux16 = 120;
+        if (!peer_act(Op::arb, a)) {
+            bench.verdict("the peer accepted the arbitration command", false);
+            return;
+        }
+        const uint32_t s0 = us_now();
+        write_host_ready();
+        fill_pattern(tx_buf, 255, 0xD0);
+        const uint8_t st = arb_tenure<DmaHost>(rd.target, tx_buf, 255, nullptr, 0, 350, I2cEngine::dma);
+        const bool stopped = !DmaTx::busy();
+        twilink::Report r{};
+        const bool rep = write_host_done(a, s0, r);
+        const bool peer_lost = rep && (r.flags & twilink::report_arblost) != 0u;
+        const bool peer_ran = rep && (r.flags & twilink::report_host_ran) != 0u;
+        print(serial, "  a write of 255 under dma -> ", hex(rd.target), " against the peer -> 0x2C: this board ", st,
+              ", the channel ", stopped ? "stopped" : "RUNNING", "; the peer: flags ", hex(r.flags), " status ", r.mstatus, crlf);
+        if (rd.lose) {
+            bench.verdict("A LOST ARBITRATION ON THE CHANNEL: aiming at the higher address, i2c_arb_lost, the channel "
+                          "stopped, the peer's host keeping the bus",
+                          st == i2c_arb_lost && stopped && peer_ran && !peer_lost && r.mstatus == i2c_nack_addr);
+        } else {
+            bench.verdict("THE CONTROL, the other direction: aiming at the lower address this host keeps the bus and "
+                          "nobody answers (i2c_nack_addr), the peer's host the one that loses",
+                          st == i2c_nack_addr && stopped && peer_lost);
+        }
+    }
+    bench.verdict("the command channel is back after the races", command(Op::ping));
+}
+
+// v - a bus error on the channel.
+void tv_write_fault() {
+    if (!need_peer()) {
+        return;
+    }
+    // THE LAST BYTE OF SRAM (2.2.3: SRAM_END is 0x20082000): start() reads it
+    // for the first entry, and the channel's first beat reads the address past
+    // it, which nothing answers: a read bus error on the channel's first beat.
+    const auto* const edge = reinterpret_cast<const uint8_t*>(0x20081FFFu);
+    const twilink::Params a = serve_params(300, 0x30);
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    const uint32_t s0 = us_now();
+    write_host_ready();
+    const uint8_t sf = tenure<DmaHost>(twilink::dut_addr, edge, 16, nullptr, 0, I2cSpeed::fast_400k, 20'000u, I2cEngine::dma);
+    const uint32_t lines = dma_entries;
+    const uint32_t entries = isr_entries;
+    const bool stopped = !DmaTx::busy();
+    twilink::Report r{};
+    bool rep = write_host_done(a, s0, r);
+    print(serial, "  a write of 16 from the last byte of SRAM: status ", sf, " (i2c_dma_fault ", i2c_dma_fault, "), ", lines,
+          " DMA line entry, ", entries, " host entries, the channel ", stopped ? "stopped" : "RUNNING", "; the peer stored ",
+          r.aux0, crlf);
+    // The bound: the one entry start() wrote is all the block ever held, and the
+    // abort may cut it: nothing stored, or its one byte.
+    bench.verdict("A BUS ERROR ON THE CHANNEL: a write whose run leaves the map is i2c_dma_fault, on the DMA line alone, "
+                  "the channel stopped, at most its one first byte reaching the partner",
+                  sf == i2c_dma_fault && lines == 1u && entries == 0u && stopped && rep && r.aux0 <= 1u);
+    // THE CONTROL: the same request from a buffer the map holds.
+    if (!need_peer()) {
+        return;
+    }
+    const twilink::Params c = serve_params(300, 0x30);
+    if (!peer_act(Op::serve, c)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return;
+    }
+    const uint32_t c0 = us_now();
+    write_host_ready();
+    uint32_t sum = 0;
+    const uint8_t cs = pattern_write(c.seed, 0, 16, I2cSpeed::fast_400k, sum);
+    twilink::Report cr{};
+    rep = write_host_done(c, c0, cr);
+    print(serial, "  the control, 16 bytes from RAM: status ", cs, ", the peer stored ", cr.aux0, ", ", cr.sstatus,
+          " off the pattern", crlf);
+    bench.verdict("THE CONTROL: the next write from a buffer in the map is i2c_ok and exact, the channel back in service",
+                  cs == i2c_ok && rep && cr.aux0 == 16u && cr.sstatus == 0u && cr.sum == static_cast<uint16_t>(sum));
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_i2c - the RP2350 I2C (datasheet 12.2, DW_apb_i2c v2.03a) on the ",
           arch_name(), " half: the block wireless, then I2C0 on GP37/GP36 against the RP2040's twi_peer; clk_sys=",
@@ -361,6 +713,10 @@ int main() {
     bench.letter('k', "arbitration on the wire", guarded<bench, clock, tk_arbitration>);
     bench.letter('l', "the roles invert: this board as the peer's client", guarded<bench, clock, tl_roles>);
     bench.letter('m', "the client's edges: the overrun, the disable inside a tenure", guarded<bench, clock, tm_client_edges>);
+    bench.letter('y', "a pure write on the channel: the bytes, judged by the partner", guarded<bench, clock, ty_write_bytes>);
+    bench.letter('n', "a pure write on the channel: a NACK in mid-write", guarded<bench, clock, tn_write_nack>);
+    bench.letter('o', "a pure write on the channel: a lost arbitration", guarded<bench, clock, to_write_arbitration>);
+    bench.letter('v', "a pure write on the channel: a bus error", guarded<bench, clock, tv_write_fault>);
     bench.letter('x', "the hand-made window, traced (outside z)", guarded<bench, clock, tx_window>, false);
 
     if (serial_ok) {

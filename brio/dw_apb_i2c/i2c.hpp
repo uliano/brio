@@ -178,12 +178,16 @@
  * banks credits on while the FIFO is empty and spends in a burst that can
  * fill it. A read of one or two bytes has no command between the first
  * and the last, so the pump writes its commands and the receive engine
- * alone runs. A write phase stays on the pump under either engine: its
- * entries are the request's bytes, each of which must reach the register
- * with the command bits above it clear, and a byte beat from the
- * request's buffer arrives replicated across the word on the families
- * here (the family's own document names the section), its copy in bit 8
- * a read command.
+ * alone runs. A write entry is the request's byte with the command bits
+ * above it clear, and a byte beat at the register's own address arrives
+ * replicated across the word, its copy in bit 8 a read command (the
+ * family's document names the section). So the write phase is the chip's
+ * question, `Chip::byte_beat_alias`: on a family with an alias of the
+ * register that drives the unused byte lanes to zero the transmit engine is
+ * bound there, and a pure write of three bytes or more under `dma` rides it
+ * from the request's own buffer, its first entry and its last (STOP) the
+ * pump's as a read's are; on a family without one, and for every other
+ * write, the write phase stays on the pump under either engine.
  *
  * Where the host's hot path runs is the program's choice, by the host's
  * last template parameter, util/placement.hpp's tag: start(), isr() and
@@ -195,8 +199,7 @@
  *
  * Not built, each with its reason in docs/dw_apb_i2c/README.md: the
  * high-speed mode, SMBus, the stuck-bus timeouts, the bus clear of the
- * blocks that have one. The slots for DMA engines are here, empty, so
- * the type's shape does not move when a family fills them.
+ * blocks that have one.
  */
 
 #pragma once
@@ -268,6 +271,11 @@ concept DwApbI2cChip =
         /// FIFOs were synthesized.
         { C::instances } -> std::convertible_to<uint8_t>;
         { C::fifo_depth } -> std::convertible_to<uint8_t>;
+        /// The offset from a register's address at which a byte beat lands
+        /// with the unused byte lanes zero, so as a plain write entry in
+        /// IC_DATA_CMD; 0 when this chip's fabric offers no such alias and a
+        /// write phase cannot ride a transmit engine from its own buffer.
+        { C::byte_beat_alias } -> std::convertible_to<uint32_t>;
     } &&
     requires(volatile uint32_t& reg, uint32_t bits, typename C::Pins pins, uint8_t instance,
              typename C::Irq line, typename C::SpinRate rate, uint32_t hz, uint32_t us) {
@@ -658,6 +666,15 @@ struct DwApbI2cBlock {
     static Regs& regs() { return Chip::template regs<n>(); }
     static constexpr typename Chip::Irq irq() { return Chip::template irq<n>(); }
     static volatile void* data_address() { return &regs().IC_DATA_CMD; }
+    /// Where a transmit engine is bound: IC_DATA_CMD through the family's
+    /// zero-filling alias where it has one. A halfword command lands there
+    /// as at the register's own address, the block reading no bit above the
+    /// low sixteen, and a byte beat lands as a plain write entry, so one
+    /// address serves both widths and no request writes it.
+    static volatile void* command_address() {
+        return reinterpret_cast<volatile void*>(reinterpret_cast<uintptr_t>(&regs().IC_DATA_CMD) +
+                                                static_cast<uint32_t>(Chip::byte_beat_alias));
+    }
 
     /// The block from its reset state: held, released, ready.
     static bool reset() { return Chip::template reset<n>(); }
@@ -957,10 +974,15 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  *              last, and the pump writes the first entry (RESTART) and,
  *              once the block of commands is in, the last (STOP). A read
  *              of one or two bytes has no such entry: the pump writes
- *              both commands and the receive engine collects. The write
- *              half and the probe stay on the pump - a half the engines
- *              cannot carry, the file header says why - and the request
- *              completes; it is not refused.
+ *              both commands and the receive engine collects. On a family
+ *              with a zero-filling alias (`dma_carries_writes`) a PURE WRITE
+ *              of `dma_write_min` bytes or more takes the same shape: the
+ *              pump writes its first entry and, once the block is in, its
+ *              last (STOP), the transmit engine pours the bytes between in
+ *              byte beats from the request's own buffer, with no copy. Every
+ *              other write half and the probe stay on the pump - a half the
+ *              engines cannot carry - and the request completes; it is not
+ *              refused.
  *
  * `dma` on a host with no engines bound is answered i2c_rejected inside
  * start(), nothing on the wire. A wrong choice costs core cycles, never
@@ -971,10 +993,12 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  * tenure ends on the STOP like every other - two interrupts an engined
  * read of three bytes or more, the transmit block's end and the STOP; one
  * or two host entries (the STOP, and TX_EMPTY when the commands did not
- * fit) for a shorter one. The transmit engine is claimed when the read
- * half starts; a claim already standing on it - a program's own, the channel
- * having no other owner (docs/design/dma.md, "The ownership rule") - is not
- * overridden, and the pump writes the commands instead (launch_dma()).
+ * fit) for a shorter one; a write on the transmit engine the same two,
+ * the block's end and the STOP, and a TX_EMPTY when the block's end found
+ * no room for its last entry. Both channels are this host's alone, the compiler
+ * checking that no other owner names them (docs/design/dma.md, "The ownership
+ * rule"), so nothing can stand on the transmit engine when the read half
+ * starts (launch_dma()); a program does not call the engine's verbs itself.
  */
 template <DwApbI2cChip Chip, uint8_t n, typename Chip::Pins pins,
           typename TxEngine = DwApbI2cAbsentEngine, typename RxEngine = DwApbI2cAbsentEngine,
@@ -1022,6 +1046,13 @@ public:
     /// false is answered i2c_rejected by start(); a program that depends
     /// on the engines may `static_assert(Bus::has_dma)` instead.
     static constexpr bool has_dma = has_engines;
+    /// Whether a pure write under `dma` rides the transmit engine: engines
+    /// bound, on a family whose chip traits name a zero-filling alias. False,
+    /// the write half stays on the pump.
+    static constexpr bool dma_carries_writes = has_engines && Chip::byte_beat_alias != 0u;
+    /// The shortest write the engine carries: its first entry and its last
+    /// are the pump's, so three bytes leave it the one between.
+    static constexpr uint8_t dma_write_min = 3;
 
     struct Request {
         /// The 7-bit client address, unshifted: 0x08 to 0x77
@@ -1038,14 +1069,16 @@ public:
         uint8_t rx_len;
         ReplyTo<I2cDone> reply;
         I2cSpeed speed = I2cSpeed::standard_100k;
-        /// Which mechanism moves the read half (util/i2c_bus.hpp): the
-        /// host's interrupt by default; under `dma` the receive engine
-        /// collects every byte read, at any length, and the transmit
-        /// engine pours the read commands between the first and the last
-        /// when there is one. The write half and the probe stay on the
-        /// interrupt under either value (the class comment says why), and
-        /// the request completes. `dma` on a host with no engines bound is
-        /// answered i2c_rejected with nothing on the wire.
+        /// Which mechanism moves the data (util/i2c_bus.hpp): the host's
+        /// interrupt by default; under `dma` the receive engine collects
+        /// every byte read, at any length, and the transmit engine pours the
+        /// read commands between the first and the last when there is one,
+        /// and on a host with `dma_carries_writes` the bytes between the
+        /// first and the last of a pure write of `dma_write_min` or more.
+        /// Every other write half and the probe stay on the interrupt under
+        /// either value (the class comment), and the request completes. `dma`
+        /// on a host with no engines bound is answered i2c_rejected with
+        /// nothing on the wire.
         I2cEngine engine = I2cEngine::interrupt;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
@@ -1218,7 +1251,7 @@ private:
         // the rest.
         tx_armed_ = false;
         rx_armed_ = false;
-        const bool more = fill();
+        const bool more = write_on_engine() ? launch_write() : fill();
         uint32_t mask = I2cInterrupt::tx_abrt | I2cInterrupt::stop_det;
         // RX_FULL only while more than half a FIFO of bytes is owed to the
         // pump: a tail of half a FIFO or less is the STOP's to take, and a
@@ -1266,11 +1299,10 @@ private:
         if constexpr (has_engines) {
             if (dma_active_) {
                 // Under the engines only the commands' room and the STOP
-                // reach here: the last command's when the transmit engine
+                // reach here: the last entry's when the transmit engine
                 // poured the middle block, every command's after the
-                // first when it did not (a read of one or two bytes, or a
-                // claim already standing on the transmit engine). The receive
-                // engine reports errors alone (armed quiet): its run ends
+                // first when it did not (a read of one or two bytes). The
+                // receive engine reports errors alone (armed quiet): its run ends
                 // with the last byte, a bit and a STOP before STOP_DET, so
                 // the STOP is the tenure's end here too.
                 if ((up & I2cInterrupt::tx_empty) != 0u) {
@@ -1356,13 +1388,15 @@ private:
                 (void)TxEngine::complete();
                 poured_ = false;
                 S::dma_requests(false, true);
-                // The block of plain read commands is in the FIFO - up to
-                // its whole depth at once, since the request is a level
-                // the DMA banks credits on while the FIFO is empty and
-                // spends in a burst (measured: a STOP entry pushed here
-                // by hand was dropped with TX_OVER). The last entry goes
-                // through the pump, which writes when there is room and
-                // waits on TX_EMPTY otherwise.
+                // The middle block, of read commands or of a write's bytes,
+                // is in the FIFO - up to its whole depth at once, since the
+                // request is a level the DMA banks credits on while the FIFO
+                // is empty and spends in a burst (measured: a STOP entry
+                // pushed here by hand was dropped with TX_OVER). The last
+                // entry goes through the pump, which writes when there is
+                // room and waits on TX_EMPTY otherwise. The receive request
+                // stays up on a write too: an empty receive FIFO raises none,
+                // and the STOP takes both down.
                 issued_ = static_cast<uint16_t>(total_entries() - 1u);
                 if (fill()) {
                     S::interrupts(I2cInterrupt::tx_empty, true);
@@ -1502,6 +1536,18 @@ private:
     static bool dma_serves() {
         if constexpr (has_engines) {
             return req_.engine == I2cEngine::dma && req_.rx_len != 0u;
+        } else {
+            return false;
+        }
+    }
+
+    /// Whether this tenure is a pure write on the transmit engine: the
+    /// chip's alias, `dma` named, nothing to read and a byte between the
+    /// first entry and the last. A false constant where the family has no
+    /// alias, so the path compiles away.
+    static bool write_on_engine() {
+        if constexpr (dma_carries_writes) {
+            return req_.engine == I2cEngine::dma && req_.rx_len == 0u && req_.tx_len >= dma_write_min;
         } else {
             return false;
         }
@@ -1669,22 +1715,20 @@ private:
     /// The read half onto the engines, with its first entry in the FIFO.
     /// True when the transmit engine took the middle block (dma_isr()
     /// writes the last entry), false when the pump writes the commands
-    /// after the first: a read of one or two bytes has no middle block,
-    /// and a claim already standing on the transmit engine is not overridden.
+    /// after the first: a read of one or two bytes has no middle block.
     ///
-    /// Neither launch can refuse what it is handed here, so neither
-    /// result is read. The receive start refuses a null run, an empty
-    /// one and a misaligned one: its run is the request's buffer or the
-    /// sink, one byte or more, of bytes. The transmit launch refuses the
-    /// same three and an unclaimed channel: its cell is a halfword
-    /// constant, its count want - 2 is one or more, and the claim is
-    /// taken first - the one step that can fail, and its failure costs
-    /// the pump a TX_EMPTY entry a half FIFO of commands, the request
-    /// completing exact.
+    /// Neither start can refuse what it is handed here, so neither result
+    /// is read. The receive start refuses a null run, an empty one and a
+    /// misaligned one: its run is the request's buffer or the sink, one
+    /// byte or more, of bytes. The transmit start refuses the same three
+    /// and a block already running: its cell is a halfword constant, its
+    /// count want - 2 is one or more, and the channel is free, this host
+    /// its one owner (the class comment) and its last block completed or
+    /// abandoned before the tenure ended.
     static bool launch_dma() {
         if constexpr (has_engines) {
             const uint8_t want = read_len();
-            const bool poured = want > 2u && TxEngine::claim();
+            const bool poured = want > 2u;
             dma_active_ = true;
             poured_ = poured;
             // The receive channel first: every byte of the phase,
@@ -1696,13 +1740,34 @@ private:
             }
             S::dma_requests(false, true);
             if (poured) {
-                (void)TxEngine::launch_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
+                (void)TxEngine::start_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
                 S::dma_requests(true, true);
             }
             return poured;
         } else {
             return false;
         }
+    }
+
+    /// A pure write onto the transmit engine: its first entry by hand,
+    /// which starts the tenure, then the bytes between the first and the
+    /// last in byte beats from the request's own buffer, no copy, the
+    /// channel's address the alias arm_engines() bound. dma_isr() writes the
+    /// last entry, with its STOP, as it does a read's. The start cannot
+    /// refuse: its run is not null, one byte or more (write_on_engine()), of
+    /// bytes, and the channel is free (launch_dma()). False: nothing is left
+    /// for start() to wait room for.
+    static bool launch_write() {
+        if constexpr (dma_carries_writes) {
+            const uint8_t* const bytes = req_.tx.get();
+            S::push(*bytes);
+            issued_ = 1u;
+            dma_active_ = true;
+            poured_ = true;
+            (void)TxEngine::start(bytes + 1, static_cast<uint32_t>(req_.tx_len) - 2u);
+            S::dma_requests(true, false);
+        }
+        return false;
     }
 
     /// The transmit engine reports its blocks (the STOP entry waits on
@@ -1715,7 +1780,7 @@ private:
     /// pinned at the end of this file) - the bus slows, nothing is lost.
     static void arm_engines() {
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address(), S::dreq_tx, false);
+            TxEngine::arm(S::command_address(), S::dreq_tx, false);
             arm_rx_engine();
         }
     }
@@ -1729,8 +1794,7 @@ private:
     }
 
     /// The tenure's channels stopped and bound again: the transmit
-    /// engine's block abandoned only when this tenure poured one (a
-    /// claim that stood before it is left standing).
+    /// engine's block abandoned only when this tenure poured one.
     static void put_engines_away() {
         if constexpr (has_engines) {
             S::dma_requests(false, false);

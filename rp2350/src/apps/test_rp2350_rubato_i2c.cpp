@@ -148,6 +148,10 @@ constexpr I2cPins link_pins{.scl = 37, .sda = 36};
 using TxEngine = DmaTxEngine<4, uint16_t>;
 using RxEngine = DmaRxEngine<5>;
 using LinkHost = I2cHost<0, link_pins, TxEngine, RxEngine>;
+/// A pure write of three bytes or more rides the transmit engine on this chip
+/// (rp_rubato_i2c.hpp).
+constexpr bool pure_write_on_engine = true;
+static_assert(pure_write_on_engine == LinkHost::dma_carries_writes);
 using SdaPin = Pin<36>;
 using SclPin = Pin<37>;
 

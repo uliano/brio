@@ -29,6 +29,8 @@ using DmaHost = I2cHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
 using Client = I2cClient<1, client_pins>;
 static_assert(!Host::has_engines && DmaHost::has_engines);
 static_assert(!Host::has_dma && DmaHost::has_dma);
+// No alias on this chip: a write half stays on the pump under `dma` (2.1.4).
+static_assert(Rp2040DwApbI2c::byte_beat_alias == 0u && !DmaHost::dma_carries_writes);
 static_assert(Host::Request{}.engine == I2cEngine::interrupt, "a Request naming nothing runs on the interrupt");
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(sizeof(Host::Request) == sizeof(DmaHost::Request));

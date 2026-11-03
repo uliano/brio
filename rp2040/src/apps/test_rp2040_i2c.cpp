@@ -44,9 +44,8 @@
 //   g  THE DMA ENGINES (channels 4 and 5), every request naming its
 //      engine: a 64-byte read timed, a write-then-read, reads of one and
 //      two bytes on the receive engine, writes under `dma` on the pump,
-//      `interrupt` at 64 bytes touching no channel, the transmit channel
-//      held by another owner, the fault path, the bursts, and a data
-//      NACK with the read half's engines launched
+//      `interrupt` at 64 bytes touching no channel, the fault path, the
+//      bursts, and a data NACK with the read half's engines launched
 //   r  A RELEASED REQUESTER, THE SAME OWNER AGAIN: the host released with its DMA
 //      enables set, initialized again, no request standing and one engined read
 //      exact - and the control with no reset, the channel moving at once

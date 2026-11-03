@@ -146,6 +146,10 @@ struct Rp2040DwApbI2c {
     /// component parameter register is not implemented here).
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 16;
+    /// No alias: this chip's fabric replicates a narrow write across every
+    /// register (2.1.4), so a byte beat cannot land as a plain write entry
+    /// and a write phase stays on the pump.
+    static constexpr uint32_t byte_beat_alias = 0;
     /// Whether a host may be given util/placement.hpp's InRam: the
     /// family's platform answers (its linker script collects
     /// `.fast_text`).

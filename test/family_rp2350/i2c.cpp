@@ -79,6 +79,8 @@ using LineHost = I2cHost<0, host_pins, DmaTxEngine<4, uint16_t, 2>, DmaRxEngine<
 using Client = I2cClient<1, client_pins>;
 static_assert(!Host::has_engines && DmaHost::has_engines && LineHost::has_engines);
 static_assert(!Host::has_dma && DmaHost::has_dma && LineHost::has_dma);
+// 2.1.5's alias: a pure write under `dma` rides the transmit engine here.
+static_assert(Rp2350DwApbI2c::byte_beat_alias == 0x4000u && !Host::dma_carries_writes && DmaHost::dma_carries_writes);
 static_assert(Host::Request{}.engine == I2cEngine::interrupt, "a Request naming nothing runs on the interrupt");
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(sizeof(Host::Request) == sizeof(DmaHost::Request));

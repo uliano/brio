@@ -220,7 +220,10 @@ choice in it answers an item of the controller's own offer:
   access of that width). `Elem` is the widest beat the
   binding allows, and a wider run does not compile; a half-word or word
   run not aligned to its beat is refused at run time (12.6.2.1.1: the DMA
-  does not enforce alignment).
+  does not enforce alignment). A narrow beat lands replicated across a
+  register at its own address and with the unused lanes zero at its +0x4000
+  alias (2.1.5), which is where the I2C host binds its transmit engine
+  ([i2c.md](i2c.md)).
 - **The count's MODE nibble** (12.6.2.2.1): a block's count is checked
   against the 28 bits the nibble leaves - one compare - because a larger
   one written whole would select a mode, TRIGGER_SELF among them.

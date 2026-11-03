@@ -34,6 +34,11 @@ using TxEngine = SimDwApbI2cEngine<0, uint16_t>;
 using RxEngine = SimDwApbI2cEngine<1, uint8_t>;
 using Streamed = DwApbI2cHost<SimDwApbI2c, 1, peer_pins, TxEngine, RxEngine>;
 
+using WriteTxEngine = SimDwApbI2cEngine<2, uint16_t>;
+using WriteRxEngine = SimDwApbI2cEngine<3, uint8_t>;
+using WriteHost = DwApbI2cHost<SimDwApbI2cZeroFill, 1, peer_pins, WriteTxEngine, WriteRxEngine>;
+static_assert(WriteHost::dma_carries_writes && !Streamed::dma_carries_writes && !Host::dma_carries_writes);
+
 SimDwApbI2cRegs& regs() { return SimDwApbI2c::regs<0>(); }
 SimDwApbI2cRegs& peer_regs() { return SimDwApbI2c::regs<1>(); }
 
@@ -685,44 +690,186 @@ TEST_CASE("a long write then a read under dma: the read launched from the vector
     Streamed::release();
 }
 
-TEST_CASE("a transmit channel another owner holds: the pump writes the commands, the receive engine collects") {
+TEST_CASE("a chip with no alias binds the transmit engine at the register itself") {
     fresh();
     TxEngine::reset();
     RxEngine::reset();
     constexpr Clock clock;
     REQUIRE(Streamed::init(clock));
-    TxEngine::held = true;
-    uint8_t in[40]{};
-    Streamed::Request r{};
-    r.addr = 0x48;
-    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
-    r.rx_len = 40;
-    r.engine = I2cEngine::dma;
-    REQUIRE_FALSE(Streamed::start(r));
-    CHECK(TxEngine::blocks == 0u);
-    CHECK(RxEngine::length == 40u);
-    CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::rx);
-    // Sixteen commands in, the room paces the rest (no RX_FULL under the
-    // receive engine).
-    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::tx_empty));
-    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry());
-    peer_regs().IC_TXFLR = 0;
-    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
-    CHECK_FALSE(Streamed::isr());   // sixteen more
-    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) != 0u);
-    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
-    CHECK_FALSE(Streamed::isr());   // the last eight, the STOP among them
-    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    CHECK(TxEngine::bound_at == reinterpret_cast<uintptr_t>(&peer_regs().IC_DATA_CMD));
+    CHECK(RxEngine::bound_at == reinterpret_cast<uintptr_t>(&peer_regs().IC_DATA_CMD));
+    Streamed::release();
+}
+
+namespace {
+
+/// A pure write of `n` bytes under `dma` on the host whose chip has the alias.
+void start_write(const uint8_t* out, uint8_t n) {
+    WriteHost::Request w{};
+    w.addr = 0x48;
+    w.tx = lend<Lease::reply>(out);
+    w.tx_len = n;
+    w.engine = I2cEngine::dma;
+    REQUIRE_FALSE(WriteHost::start(w));
+}
+
+void fresh_write_host() {
+    fresh();
+    WriteTxEngine::reset();
+    WriteRxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(WriteHost::init(clock));
+}
+
+const uint8_t write_bytes[8] = {0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
+
+}   // namespace
+
+TEST_CASE("the alias: the transmit engine is bound there, the receive engine at the register") {
+    fresh_write_host();
+    CHECK(WriteTxEngine::bound_at == reinterpret_cast<uintptr_t>(&peer_regs().IC_DATA_CMD) + 0x4000u);
+    CHECK(WriteRxEngine::bound_at == reinterpret_cast<uintptr_t>(&peer_regs().IC_DATA_CMD));
+    WriteHost::release();
+}
+
+TEST_CASE("the alias: a pure write under dma rides the transmit engine, its two ends the pump's") {
+    fresh_write_host();
+    start_write(write_bytes, 8);
+    // The first entry by hand, the six between from the request's own
+    // buffer in byte beats; only the two sources that end a tenure.
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x31));
+    CHECK(WriteTxEngine::blocks == 1u);
+    CHECK(WriteTxEngine::length == 6u);
+    CHECK(WriteTxEngine::beat == 1u);
+    CHECK_FALSE(WriteTxEngine::fixed);
+    CHECK(WriteTxEngine::run_at == reinterpret_cast<uintptr_t>(write_bytes + 1));
+    CHECK(WriteRxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::tx);
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
+    // A STOP before the last entry is another node's: the tenure goes on.
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK_FALSE(WriteHost::isr());
+    // The block's end: the last entry with its STOP, the room being there.
+    WriteTxEngine::next_flags = WriteTxEngine::flag_complete;
+    peer_regs().IC_TXFLR = 4;
+    CHECK_FALSE(WriteHost::dma_isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x38, {.stop = true}));
+    CHECK((peer_regs().IC_DMA_CR & I2cDmaControl::tx) == 0u);
     CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) == 0u);
-    // An abort now leaves the held channel alone: not abandoned.
+    CHECK_FALSE(WriteTxEngine::busy());
+    // The STOP ends it.
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(WriteHost::isr());
+    CHECK(WriteHost::status() == i2c_ok);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    WriteHost::release();
+}
+
+TEST_CASE("the alias: a full FIFO at the block's end, the last entry waits for TX_EMPTY") {
+    fresh_write_host();
+    start_write(write_bytes, 8);
+    WriteTxEngine::next_flags = WriteTxEngine::flag_complete;
+    peer_regs().IC_TXFLR = SimDwApbI2c::fifo_depth;
+    const uint32_t before = peer_regs().IC_DATA_CMD;
+    CHECK_FALSE(WriteHost::dma_isr());
+    CHECK(peer_regs().IC_DATA_CMD == before);
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) != 0u);
+    peer_regs().IC_TXFLR = 8;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(WriteHost::isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x38, {.stop = true}));
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) == 0u);
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(WriteHost::isr());
+    CHECK(WriteHost::status() == i2c_ok);
+    WriteHost::release();
+}
+
+TEST_CASE("the alias: the three bytes the path starts at, and what stays on the pump") {
+    fresh_write_host();
+    start_write(write_bytes, 3);
+    CHECK(WriteTxEngine::blocks == 1u);
+    CHECK(WriteTxEngine::length == 1u);
+    WriteTxEngine::next_flags = WriteTxEngine::flag_complete;
+    peer_regs().IC_TXFLR = 0;
+    CHECK_FALSE(WriteHost::dma_isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x33, {.stop = true}));
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(WriteHost::isr());
+
+    // Two bytes have none between: both written by start().
+    WriteTxEngine::reset();
+    start_write(write_bytes, 2);
+    CHECK(WriteTxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    CHECK(peer_regs().IC_DATA_CMD == i2c_write_entry(0x32, {.stop = true}));
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(WriteHost::isr());
+
+    // `interrupt` touches no channel.
+    WriteHost::Request p{};
+    p.addr = 0x48;
+    p.tx = lend<Lease::reply>(static_cast<const uint8_t*>(write_bytes));
+    p.tx_len = 8;
+    REQUIRE_FALSE(WriteHost::start(p));
+    CHECK(WriteTxEngine::blocks == 0u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(WriteHost::isr());
+
+    // A write before a read stays on the pump: its entries are written by
+    // start(), and the channel's block is the read's commands.
+    uint8_t in[8]{};
+    WriteHost::Request wr{};
+    wr.addr = 0x48;
+    wr.tx = lend<Lease::reply>(static_cast<const uint8_t*>(write_bytes));
+    wr.tx_len = 4;
+    wr.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    wr.rx_len = 8;
+    wr.engine = I2cEngine::dma;
+    REQUIRE_FALSE(WriteHost::start(wr));
+    CHECK(WriteTxEngine::fixed);
+    CHECK(WriteTxEngine::beat == 2u);
+    CHECK(WriteTxEngine::length == 6u);
+    CHECK(WriteRxEngine::length == 8u);
+    WriteHost::release();
+}
+
+TEST_CASE("the alias: an abort in mid-write stops the channel before the abort is read away") {
+    fresh_write_host();
+    start_write(write_bytes, 8);
+    CHECK(WriteTxEngine::busy());
+    peer_regs().IC_TX_ABRT_SOURCE = I2cAbort::data_noack;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_abrt;
+    CHECK(WriteHost::isr());
+    CHECK(WriteHost::status() == i2c_nack_data);
+    CHECK(WriteTxEngine::faults == 1u);
+    CHECK_FALSE(WriteTxEngine::busy());
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    // The next write starts from the top, under a disable: the abort left
+    // the block not addressed.
+    const uint32_t resets = WriteTxEngine::blocks;
+    start_write(write_bytes, 8);
+    CHECK(WriteTxEngine::blocks == resets + 1u);
     peer_regs().IC_TX_ABRT_SOURCE = I2cAbort::arb_lost;
     peer_regs().IC_INTR_STAT = I2cInterrupt::tx_abrt;
-    CHECK(Streamed::isr());
-    CHECK(Streamed::status() == i2c_arb_lost);
-    CHECK(TxEngine::faults == 0u);
+    CHECK(WriteHost::isr());
+    CHECK(WriteHost::status() == i2c_arb_lost);
+    WriteHost::release();
+}
+
+TEST_CASE("the alias: a bus error on the channel ends the tenure i2c_dma_fault, the block aborted") {
+    fresh_write_host();
+    start_write(write_bytes, 8);
+    WriteTxEngine::next_flags = WriteTxEngine::flag_error;
+    CHECK(WriteHost::dma_isr());
+    CHECK(WriteHost::status() == i2c_dma_fault);
+    CHECK(WriteTxEngine::faults == 1u);
+    CHECK((peer_regs().IC_ENABLE & I2cEnable::abort) != 0u);
     CHECK(peer_regs().IC_DMA_CR == 0u);
-    TxEngine::held = false;
-    Streamed::release();
+    WriteHost::release();
 }
 
 TEST_CASE("dma on a host with no engines is refused at start(), nothing written") {

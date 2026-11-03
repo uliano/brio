@@ -190,6 +190,7 @@ The constants:
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
 | `fifo_depth` | the two FIFOs' depth, which is a synthesis parameter of the block and therefore the family's fact, not this file's; the engine puts both thresholds at its half |
+| `byte_beat_alias` | the offset from a register's address at which a byte beat lands with the unused byte lanes zero, 0 where the chip's bus fabric has none: what decides whether a write phase can ride a transmit engine (below, "A write phase under `dma`") |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -297,8 +298,9 @@ disable (answered `i2c_bus_error` instead of waited on), an abort of
 every reason, the engines' hand-over in the middle of a read phase, the
 path each value of a request's `engine` takes (a short read on the
 receive engine alone, a write that stays on the pump - the interrupt-driven engine,
-which moves the bytes from the block's interrupt -, `dma` refused on a
-host without engines, a run-time `claim()` already held on the transmit engine), and a
+which moves the bytes from the block's interrupt -, a write on the transmit
+engine of a chip with the alias, `dma` refused on a
+host without engines), and a
 client that releases SDA on the n-th pulse of the unstick.
 
 What the fake does NOT model is the FIFOs: nothing moves an entry out of
@@ -427,13 +429,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   transmit engine pours the commands between the first and the last
   when there are any (a read of three bytes or more). A read of one or
   two bytes has none: the pump writes its one or two commands with the
-  rest of the tenure and the receive engine alone runs. The write half
-  and the probe stay on the pump under either value, and the request
-  completes: a write entry is the request's byte with the command bits
-  above it clear, and a byte beat from the request's buffer reaches the
-  register replicated across the word on the chips here, its copy in
-  bit 8 a read command (each family's document names its bus fabric's
-  section, and what the RP2350 offers against it - the gap below). `dma`
+  rest of the tenure and the receive engine alone runs. The probe stays
+  on the pump under either value. `dma`
   on a host with no engines bound (`has_dma` false) is answered
   `i2c_rejected` inside `start()`, nothing on the wire, as an address
   outside the range is. The request names it in one field,
@@ -442,10 +439,40 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   vector). A wrong choice costs core cycles, never correctness: each
   family's document gives the measured cost of both, and the length
   from which `dma` costs the core less - a read of nine bytes on the
-  RP2040 with the host in SRAM and on both halves of the RP2350, the
-  pump's second entry.
+  RP2040 with the host in SRAM and on the RP2350's Cortex-M33, eight on its
+  Hazard3, the pump's second entry; a write of fourteen and of thirteen on
+  those two.
+- **A write phase under `dma`, the chip's question** - a write entry is
+  the request's byte with the command bits above it clear, and a byte beat
+  at the register's own address lands replicated across the word on both
+  chips here, its copy in bit 8 a read command, in bit 9 a STOP and in bit
+  10 a RESTART. So the traits' `byte_beat_alias` decides. Zero, the RP2040's
+  (its fabric has no other behaviour, RP2040 2.1.4): the write half stays on
+  the pump under either value and the request completes; a halfword staging
+  copy the size of the request would carry it, and is declined, the RAM of
+  a doubled buffer being more than the pump's few per cent of the core
+  during a long write ([../rp2040/i2c.md](../rp2040/i2c.md)). Not zero,
+  the RP2350's +0x4000 (RP2350 2.1.5, measured there): the host's
+  `dma_carries_writes` is true, a pure write of three bytes or more under
+  `dma` takes the read half's shape - the pump writes its first entry,
+  which starts the tenure, the transmit engine pours the bytes between in
+  byte beats from the request's own buffer with no copy, and the block's end
+  on the DMA line hands the pump the last entry with its STOP. A write
+  before a read stays on the pump whichever the chip: it is the register
+  index of a read, a few bytes `start()` writes with no interrupt of their
+  own, and the channel's block in that tenure is the read's commands. So
+  does a write of one or two bytes, which has none between. ONE ADDRESS SERVES BOTH WIDTHS: the transmit engine is
+  bound at the alias once, at `arm()`, and a read's halfword commands go
+  through it too, landing with the same low sixteen bits, the upper lanes
+  zero instead of a copy the block does not read - so no request writes the
+  address, and a request costs only the store of CTRL the engine already
+  makes when the beat or the step differs from the last block's, one
+  compare against RAM and one store. The figures, and the length from which
+  the channel costs the core less, are the family's
+  ([../rp2350/i2c.md](../rp2350/i2c.md)).
 - **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
-  `IC_DMA_RDLR`)** - used for the read phase under `dma`, watermarks at
+  `IC_DMA_RDLR`)** - used for the read phase under `dma`, and for a
+  write phase where the chip carries one, watermarks at
   their reset value (single transfers, the chapter's advice); BOTH
   ENGINES ARM AT THE FAMILY'S NORMAL LEVEL, the rule's for a peripheral
   that waits (docs/design/dma.md): a starved command channel leaves the
@@ -462,18 +489,17 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   - the same, when the block's end finds no room in the FIFO for that
     entry: three, TX_EMPTY bringing it.
 
+  A write on the transmit engine costs the same two or three, whatever its
+  length.
+
   A bus error on either channel ends the tenure `i2c_dma_fault` in
   `dma_isr()`, the block's abort asked and the channels stopped: the
   stratum's own status, beyond the four wire codes util/i2c_bus.hpp
-  defines. The host takes the transmit engine's run-time `claim()` when the read half
-  starts, its one launch step that can fail: a `claim()` already held,
-  a program's own since the channel has no other owner, is not overridden, and
-  the pump writes the commands on TX_EMPTY (about
-  one entry for each eight), the receive engine still collects, and the
-  request completes exact. The receive start and the transmit launch
+  defines. The receive start and the transmit start
   cannot refuse what the host hands them (a buffer or the sink, one
-  byte or more; a halfword cell, one command or more), so neither result
-  is read. An abort under the engines stops them BEFORE the abort is
+  byte or more; a halfword cell, one command or more; a channel no other
+  owner can name, `dw_apb_i2c_engine_claimed` the compile-time check, and
+  whose last block has ended), so neither result is read. An abort under the engines stops them BEFORE the abort is
   read away: the FIFOs stay flushed until `IC_CLR_TX_ABRT` is read, so a
   command the transmit engine still pours meanwhile is dropped instead
   of starting a tenure of its own.
@@ -567,17 +593,5 @@ family's own document.
 - 10-bit addressing on the host side: the resource has the mode and
   `IC_TAR` takes ten bits; the Request's `addr` is 7 bits on every
   stratum, and a 10-bit device is the first user.
-- A write phase on the DMA engines: an entry is the request's byte with
-  the command bits above it clear, and a byte beat from the request's
-  buffer lands replicated across the command register on both chips here
-  at the register's own address, a read command in bit 8. That is the
-  silicon on the RP2040; the RP2350 has an alias of every peripheral that
-  drives the unused byte lanes to zero instead (RP2350 2.1.5), through
-  which a byte beat would land as a plain write entry - never tried on
-  the I2C, which sits behind the bus interposer that serves its atomic
-  aliases (2.1.3), and not built: the transmit engine would be bound to
-  the alias, and the write's last byte, with its STOP, stays the pump's.
-  A halfword staging copy the size of the request, the RP2040's way, is
-  declined until a program needs a bulk write on the engines.
 - The client on the DMA engines: the requests exist; a streaming client
   is born with a program that needs one.

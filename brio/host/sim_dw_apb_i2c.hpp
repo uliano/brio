@@ -322,6 +322,9 @@ struct SimDwApbI2c {
 
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 16;
+    /// No zero-filling alias, the chip the write half stays on the pump of;
+    /// SimDwApbI2cZeroFill below is the other.
+    static constexpr uint32_t byte_beat_alias = 0;
 
     /// The two blocks, and the reset values the block comes up with.
     static inline Regs block[instances]{};
@@ -466,6 +469,15 @@ private:
 
 static_assert(DwApbI2cChip<SimDwApbI2c>);
 
+/// The same two blocks on a chip whose fabric has an alias that zero-fills a
+/// narrow write: what a pure write under `dma` does there. The array is the
+/// register block, so nothing is ever written through the alias; the engine
+/// records the address it was bound at.
+struct SimDwApbI2cZeroFill : SimDwApbI2c {
+    static constexpr uint32_t byte_beat_alias = 0x4000;
+};
+static_assert(DwApbI2cChip<SimDwApbI2cZeroFill>);
+
 /// A static clock for the tests over SimDwApbI2c: the rate a family's own
 /// Clock type would carry.
 template <uint32_t rate>
@@ -507,10 +519,12 @@ struct SimDwApbI2cEngine {
     static inline uint32_t blocks = 0;
     static inline uint32_t faults = 0;
     static inline uint32_t length = 0;
+    static inline uintptr_t bound_at = 0;   ///< the address the last arm() bound
+    static inline uintptr_t run_at = 0;     ///< where the last block reads from
+    static inline uint8_t beat = 0;         ///< the last block's beat, in bytes
     static inline bool fixed = false;       ///< the last block poured one cell
     static inline bool discarded = false;   ///< the last block was thrown away
     static inline bool running = false;
-    static inline bool held = false;        ///< another owner holds the channel: claim() refuses
 
     static uint8_t service() {
         const uint8_t f = next_flags;
@@ -519,33 +533,23 @@ struct SimDwApbI2cEngine {
     }
     static void arm(volatile void* data, SimDwApbI2cRequest request, bool high_priority,
                     Report report = Report::blocks) {
-        (void)data;
+        bound_at = reinterpret_cast<uintptr_t>(data);
         (void)request;
         high = high_priority;
         errors_only = report == Report::errors;
         armed = armed + 1u;
     }
-    static bool start(Elem* buffer, uint32_t len) {
-        (void)buffer;
+    template <typename T>
+    static bool start(const T* buffer, uint32_t len) {
+        run_at = reinterpret_cast<uintptr_t>(buffer);
+        beat = sizeof(T);
         fixed = false;
         discarded = false;
         return begin(len);
     }
     static bool start_fixed(const Elem* cell, uint32_t len) {
-        return claim() && launch_fixed(cell, len);
-    }
-    /// The claim a family's transmit engine takes before a launch: false
-    /// while a block runs or another owner holds the channel (`held`).
-    static bool claim() {
-        if (running || held) {
-            return false;
-        }
-        running = true;
-        return true;
-    }
-    static void unclaim() { running = false; }
-    static bool launch_fixed(const Elem* cell, uint32_t len) {
-        (void)cell;
+        run_at = reinterpret_cast<uintptr_t>(cell);
+        beat = sizeof(Elem);
         fixed = true;
         discarded = false;
         return begin(len);
@@ -576,10 +580,12 @@ struct SimDwApbI2cEngine {
         blocks = 0;
         faults = 0;
         length = 0;
+        bound_at = 0;
+        run_at = 0;
+        beat = 0;
         fixed = false;
         discarded = false;
         running = false;
-        held = false;
     }
 
 private:

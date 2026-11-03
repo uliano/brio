@@ -62,8 +62,12 @@
 // `interrupt` otherwise. Under `dma` a read phase rides the engines - every
 // byte collected by the receive engine, and from three bytes the middle
 // block of commands poured by the transmit engine, the first command and
-// the last the pump's - and a write phase stays on the pump (its bytes land
-// replicated across the command register on a byte beat).
+// the last the pump's. A write phase stays on the pump on the RP2040 (its
+// bytes land replicated across the command register on a byte beat); on the
+// RP2350 (pure_write_on_engine, which its suite states and holds against the
+// host's dma_carries_writes) a pure write of three bytes or more rides the
+// transmit engine the same way, but for one of exactly one fill of the
+// FIFO, which stays on the pump: letters s and x measure that fill.
 // The probe is a ONE-BYTE READ: the block has no address-only frame
 // (dw_apb_i2c/i2c.hpp's header), so the peer gives it a byte and counts it.
 // The address and the speed go into the block under a disable/enable cycle,
@@ -120,13 +124,18 @@
 /// body builds every Request naming none, so this wrapper names it in
 /// start(): `dma` when either half carries two bytes or more, `interrupt`
 /// otherwise - the suite's own `if`, one copy of the Request and a compare
-/// added to start()'s cycles, which put letter o's shapes on every path the
-/// host has. Every other verb is the host's own.
+/// (two on the RP2350) added to start()'s cycles, which put letter o's shapes
+/// on every path the host has. Every other verb is the host's own.
 template <typename Base>
 struct EngineByLength : Base {
     static bool start(const typename Base::Request& r) {
         typename Base::Request q = r;
         q.engine = (r.tx_len >= 2u || r.rx_len >= 2u) ? I2cEngine::dma : I2cEngine::interrupt;
+        if constexpr (pure_write_on_engine) {
+            if (r.rx_len == 0u && r.tx_len == Base::Resource::fifo_depth) {
+                q.engine = I2cEngine::interrupt;
+            }
+        }
         return Base::start(q);
     }
 };
@@ -155,13 +164,28 @@ struct Shape {
     uint8_t rx_len;
     const char* path;
 };
+/// What a pure write of three or more bytes takes under `dma`: the two chips'
+/// words, only the chip's own instantiated.
+template <bool on_engine>
+struct WritePaths {
+    static constexpr const char* of_3 = "pump under dma";
+    static constexpr const char* of_8 = "pump under dma: one fill";
+    static constexpr const char* of_32 = "pump under dma: a fill of sixteen, then refills at TX_EMPTY, half the FIFO";
+};
+template <>
+struct WritePaths<true> {
+    static constexpr const char* of_3 = "transmit engine: the pump's first and last entries, one byte poured";
+    static constexpr const char* of_8 = "transmit engine";
+    static constexpr const char* of_32 = "transmit engine: its block through the 16-deep FIFO on its level request";
+};
 struct I2cTraits {
     /// Letter o's table, each shape with the path this host takes under
     /// EngineByLength: a read half of two bytes or more names `dma` and
     /// rides the receive engine, from three with the transmit engine
     /// pouring the middle commands; a write half stays on the pump under
     /// either value (`dma` named from two bytes, the half the engines
-    /// cannot carry); the probe a one-byte read the peer serves
+    /// cannot carry), but on the RP2350 for a pure write of three or more,
+    /// on the transmit engine; the probe a one-byte read the peer serves
     /// (probe_bytes). The plain writes last, as the shared body asks.
     static constexpr Shape shapes[] = {
         {0, 0, "pump: the probe, one read entry carrying STOP, its byte served and dropped"},
@@ -175,9 +199,9 @@ struct I2cTraits {
         {2, 8, "pump write, engine read (its first entry with RESTART)"},
         {1, 0, "pump: one entry carrying STOP"},
         {2, 0, "pump under dma: a half the engines cannot carry"},
-        {3, 0, "pump under dma"},
-        {8, 0, "pump under dma: one fill"},
-        {32, 0, "pump under dma: a fill of sixteen, then refills at TX_EMPTY, half the FIFO"},
+        {3, 0, WritePaths<pure_write_on_engine>::of_3},
+        {8, 0, WritePaths<pure_write_on_engine>::of_8},
+        {32, 0, WritePaths<pure_write_on_engine>::of_32},
     };
     static_assert(Host::has_engines, "the table names engine paths");
     /// The probe is a one-byte read the peer counts (the file header).

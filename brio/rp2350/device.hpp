@@ -131,6 +131,9 @@ namespace brio {
 inline constexpr uint32_t reg_alias_xor = 0x1000u;
 inline constexpr uint32_t reg_alias_set = 0x2000u;
 inline constexpr uint32_t reg_alias_clr = 0x3000u;
+/// And the alias of 2.1.5, bit 14 of the address: a narrow write there drives
+/// the unused byte lanes to zero instead of replicating the value.
+inline constexpr uint32_t reg_alias_zero_fill = 0x4000u;
 
 inline volatile uint32_t& reg_alias(volatile uint32_t& reg, uint32_t alias) {
     return *reinterpret_cast<volatile uint32_t*>(

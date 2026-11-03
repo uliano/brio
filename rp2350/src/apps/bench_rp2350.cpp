@@ -261,9 +261,11 @@
 //      its start() finds another address in the block), then on the
 //      engined host (DmaTxEngine<6, uint16_t>, DmaRxEngine<7>), every
 //      Request naming `dma`, i2c.read.dma of 1, 2, 16 and 255 and
-//      i2c.wr.dma of 1 + 16; then i2c.cost, the same read on the engined
+//      i2c.wr.dma of 1 + 16 and i2c.write.dma of 3, 16 and 255; then
+//      i2c.cost, the same read and write on the engined
 //      host under `interrupt` and under `dma` at 1, 2, 3, 4, 8, 9, 12, 16,
-//      64 and 255 bytes, the core cycles of each (start() and the two vectors),
+//      64 and 255 bytes read, and at 1, 2, 3, 4, 8, 12 to 17, 32, 64 and 255
+//      written, the core cycles of each (start() and the two vectors),
 //      and i2c.engines, the fit: E, F, b and the first length at which
 //      `dma` costs the core less (i2c_cost_of_engines()). Each the best
 //      of five after one thrown away, every run judged: its status, and
@@ -2072,18 +2074,22 @@ void i2c_engined_group(I2cSpeed speed, uint32_t period_x1000) {
     }
     i2c_print("i2c.wr.dma", 16, i2c_best<I2cEngined>(i2c_peer_addr, 1, 16, speed, false, dma),
               i2c_periods_x10(1, 16, false), period_x1000);
+    for (const uint8_t n : {uint8_t{3}, uint8_t{16}, uint8_t{255}}) {
+        i2c_print("i2c.write.dma", n, i2c_best<I2cEngined>(i2c_peer_addr, n, 0, speed, false, dma),
+                  i2c_periods_x10(n, 0, false), period_x1000);
+    }
 }
 
-/// A read of n on host H under `engine`: one warm run thrown away, then
-/// the least core cycles (start() and the two vectors) of five - the
-/// figure the cost lines compare, where i2c_best() keeps the shortest
+/// A tenure of tx_len + rx_len on host H under `engine`: one warm run thrown
+/// away, then the least core cycles (start() and the two vectors) of five -
+/// the figure the cost lines compare, where i2c_best() keeps the shortest
 /// wall; exact only if every run was.
 template <typename H>
-I2cOp i2c_least_core(uint8_t n, I2cSpeed speed, I2cEngine engine) {
-    bool exact = i2c_once<H>(i2c_peer_addr, 0, n, speed, engine).exact;
+I2cOp i2c_least_core(uint8_t tx_len, uint8_t rx_len, I2cSpeed speed, I2cEngine engine) {
+    bool exact = i2c_once<H>(i2c_peer_addr, tx_len, rx_len, speed, engine).exact;
     I2cOp best{};
     for (uint8_t run = 0; run < 5u; ++run) {
-        const I2cOp o = i2c_once<H>(i2c_peer_addr, 0, n, speed, engine);
+        const I2cOp o = i2c_once<H>(i2c_peer_addr, tx_len, rx_len, speed, engine);
         exact = exact && o.exact;
         if (run == 0u || o.start_cycles + o.s.isr < best.start_cycles + best.s.isr) {
             best = o;
@@ -2099,41 +2105,41 @@ I2cOp i2c_least_core(uint8_t n, I2cSpeed speed, I2cEngine engine) {
 /// engines), each side's core cycles start() plus the host's vector plus
 /// the DMA line's (the meters' sum; the core's own exception entry and
 /// return are outside it, and so is the tick, which the busy figure
-/// counts), the least of five (i2c_least_core()). A write moves the same
-/// way under either value (the engines cannot carry it). Then the fit:
-/// the pump's F and b from its reads of 16 and 255 (core = F + b x n),
-/// the engines' E their read of 16, and the shortest length of the list
-/// from which `dma` costs the core fewer cycles at every longer one.
-void i2c_cost_of_engines(I2cSpeed speed) {
-    constexpr uint8_t lens[] = {1, 2, 3, 4, 8, 9, 12, 16, 64, 255};
-    constexpr uint8_t k16 = 7;
-    constexpr uint8_t k255 = 9;
-    static_assert(lens[k16] == 16u && lens[k255] == 255u);
-    uint32_t pump[sizeof lens] = {};
-    uint32_t eng[sizeof lens] = {};
+/// counts), the least of five (i2c_least_core()), for a read and for a pure
+/// write. Then the fit: the pump's F and b from its tenures of 16 and 255
+/// (core = F + b x n), the engines' E their tenure of 16, and the shortest
+/// length of the list from which `dma` costs the core fewer cycles at every
+/// longer one. A write of one or two stays on the pump under `dma`.
+template <size_t count>
+void i2c_cost_of_engines(I2cSpeed speed, bool write, const uint8_t (&lens)[count], uint8_t k16) {
+    const uint8_t k255 = static_cast<uint8_t>(count - 1u);
+    uint32_t pump[count] = {};
+    uint32_t eng[count] = {};
     uint8_t first_cheaper = 0;
     bool exact = true;
-    for (uint8_t k = 0; k < sizeof lens; ++k) {
+    for (uint8_t k = 0; k < count; ++k) {
         const uint8_t n = lens[k];
-        const I2cOp p = i2c_least_core<I2cEngined>(n, speed, I2cEngine::interrupt);
-        const I2cOp e = i2c_least_core<I2cEngined>(n, speed, I2cEngine::dma);
+        const uint8_t tx_len = write ? n : uint8_t{0};
+        const uint8_t rx_len = write ? uint8_t{0} : n;
+        const I2cOp p = i2c_least_core<I2cEngined>(tx_len, rx_len, speed, I2cEngine::interrupt);
+        const I2cOp e = i2c_least_core<I2cEngined>(tx_len, rx_len, speed, I2cEngine::dma);
         exact = exact && p.exact && e.exact;
         pump[k] = p.start_cycles + p.s.isr;
         eng[k] = e.start_cycles + e.s.isr;
-        print(serial, "  i2c.cost read n=", n, " at ", i2c_speed_hz(speed) / 1000u, " kHz: interrupt start ",
+        print(serial, "  i2c.cost ", write ? "write" : "read", " n=", n, " at ", i2c_speed_hz(speed) / 1000u, " kHz: interrupt start ",
               p.start_cycles, " + vectors ", p.s.isr, " (", p.s.irq, " irq) = ", pump[k], "; dma start ",
               e.start_cycles, " + vectors ", e.s.isr, " (", e.s.irq, " irq) = ", eng[k], "; dma - interrupt ",
               static_cast<int32_t>(eng[k] - pump[k]), (p.exact && e.exact) ? "" : "  MISMATCH", crlf);
     }
     // The shortest length of the list from which `dma` is the cheaper at
     // that length and at every longer one.
-    for (uint8_t k = sizeof lens; k != 0u && eng[k - 1u] < pump[k - 1u]; --k) {
+    for (uint8_t k = count; k != 0u && eng[k - 1u] < pump[k - 1u]; --k) {
         first_cheaper = lens[k - 1u];
     }
-    // b in hundredths of a cycle a byte, from the reads of 16 and 255.
+    // b in hundredths of a cycle a byte, from the tenures of 16 and 255.
     const uint32_t b_x100 = (pump[k255] - pump[k16]) * 100u / (255u - 16u);
     const int32_t f = static_cast<int32_t>(pump[k16]) - static_cast<int32_t>(b_x100 * 16u / 100u);
-    print(serial, "  i2c.engines at ", i2c_speed_hz(speed) / 1000u, " kHz: E=", eng[k16], " F=", f, " b=",
+    print(serial, "  i2c.engines ", write ? "write" : "read", " at ", i2c_speed_hz(speed) / 1000u, " kHz: E=", eng[k16], " F=", f, " b=",
           b_x100 / 100u, '.', b_x100 % 100u / 10u, b_x100 % 10u, " a byte; dma costs the core less from n=",
           first_cheaper, first_cheaper == 0u ? " (never in the list)" : "", exact ? "" : "  MISMATCH", crlf);
 }
@@ -2165,7 +2171,13 @@ void ti_i2c() {
         i2c_mode = I2cMode::engined;
         (void)I2cEngined::init(clock);
         i2c_engined_group(speed, period);
-        i2c_cost_of_engines(speed);
+        // The reads' list and the writes', each ending at 255, the fit's two
+        // points named; the writes' closer around the sixteen a FIFO holds.
+        constexpr uint8_t read_lens[] = {1, 2, 3, 4, 8, 9, 12, 16, 64, 255};
+        constexpr uint8_t write_lens[] = {1, 2, 3, 4, 8, 12, 13, 14, 15, 16, 17, 32, 64, 255};
+        static_assert(read_lens[7] == 16u && write_lens[9] == 16u);
+        i2c_cost_of_engines(speed, false, read_lens, 7);
+        i2c_cost_of_engines(speed, true, write_lens, 9);
         i2c_mode = I2cMode::none;
         I2cEngined::release();
         i2c_mode = I2cMode::pump;

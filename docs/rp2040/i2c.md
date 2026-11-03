@@ -311,30 +311,31 @@ with no engines bound, `dma` is answered `i2c_rejected`. A wrong choice
 costs core cycles, never correctness, so the choice is the program's by
 what it knows: the length, and what else the core must do meanwhile.
 The core cycles each costs, letter i's `i2c.cost` lines (start() and
-the vectors, the least of five) at 400 kHz over ten runs of the letter,
+the vectors, the least of five) at 400 kHz over three runs of the letter,
 a range where the XIP cache spreads them, at 125 MHz - the same at
 100 kHz and 1 MHz but for the `dma` row from the flash, which the cache
-spreads at 100 kHz (below); the rows "the host in SRAM" from
+spreads (below); the rows "the host in SRAM" from
 `bench_rp2040_ram`, whose host is `InRam` and whose vectors are placed
 ([platform.md](platform.md), "A handler in SRAM"), the rows "from the
 flash" from `bench_rp2040`, the default image:
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
-| `interrupt`, the host in SRAM | 693 | 711 | 736 | 861 | 1102 | 1277 | 4185 | 15 752 |
-| `dma`, the host in SRAM | 729 | 733 | 1116 | 1015 | 1023 | 1023 | 1218 | 1218 |
-| `interrupt`, from the flash | 657 | 675 | 700 | 825 | 1049 to 1234 | 1224 | 4045 | 15 252 |
-| `dma`, from the flash | 692 | 696 | 1056 | 956 | 966 | 966 | 1147 | 1147 |
+| `interrupt`, the host in SRAM | 694 | 712 | 738 | 868 | 1110 | 1292 | 4256 | 16 062 |
+| `dma`, the host in SRAM | 725 | 729 | 1094 | 993 | 1001 | 1001 | 1198 | 1198 |
+| `interrupt`, from the flash | 663 | 681 | 707 | 837 | 1062 | 1244 | 4119 | 15 541 |
+| `dma`, from the flash | 699 | 703 | 1042 | 942 | 952 | 952 to 1416 | 1130 to 1591 | 1409 to 1499 |
 
 The pump costs F + b x n with F about 300 cycles and b about 60 a byte,
 in steps of eight (one entry for each half FIFO); the engines cost E,
-about 1020 cycles from SRAM for a read of nine to sixteen bytes, with
-1116 at three and 1218 from sixty-four (a third entry, the transmit
+about 1000 cycles from SRAM for a read of nine to sixteen bytes, with
+1094 at three and 1198 from sixty-four (a third entry, the transmit
 block's end finding no room for the STOP entry). So `dma` costs the core
 fewer cycles from **nine bytes** with the host placed in SRAM (the
-pump's second entry), and from the flash from nine at 400 kHz and 1 MHz
-in ten runs of ten, but from sixteen to sixty-four at 100 kHz, where the
-engined path's lines miss the XIP cache by turns (E 1151 to 1335 there);
+pump's second entry), and from the flash from nine at 1 MHz in three runs
+of three and at 400 kHz in two of three, but from sixteen to sixty-four
+at 100 kHz and from sixty-four in the third at 400 kHz, where the
+engined path's lines miss the XIP cache by turns (E 1136 to 1416 there);
 a read of
 one or two costs the same within forty cycles either way, and one of
 three to eight costs the engines a second entry (the transmit block's
@@ -365,7 +366,7 @@ extern "C" void isr_i2c1() {
 
 The reference suite is `test_rp2040_i2c`, green on the WeAct board
 against the WeAct RP2350B's peer over the pair's I2C wires, on either
-of that chip's halves: **72 verdicts** in its key `z`. The same block as the PEER, the RP2040 the
+of that chip's halves: **73 verdicts** in its key `z`. The same block as the PEER, the RP2040 the
 far end, is judged by `test_rp2350_i2c` (docs/rp2350/i2c.md), so every
 client finding below is measured from both sides. The cost figures are
 `bench_rp2040` letter i's, against the same peer.
@@ -418,16 +419,13 @@ client finding below is measured from both sides. The cost figures are
   write-then-read of 2 + 32, a deaf client on an engined read, and eight
   255-byte reads at 1 MHz byte-exact with TX_OVER never raised. THE
   SHORTEST READS under `dma`, one byte and two: on the receive engine,
-  its run the length and every byte of it moved, the transmit engine's
-  `claim()` never taken, one host entry, no DMA line entry. Writes of 1 and 32
+  its run the length and every byte of it moved, the transmit engine
+  never started, one host entry, no DMA line entry. Writes of 1 and 32
   under `dma` (the half the engines cannot carry) complete on the
   interrupt, no DMA line entry, the 32 in three host entries, the peer's
   count and sum exact. `interrupt` at 64 bytes on the engined host
   touches no channel - no DMA line entry, the receive run and its
-  channel's write address unchanged - in eight host entries. A 40-byte
-  read under `dma` with the transmit engine's `claim()` already held
-  (by the letter itself) completes exact, its commands the pump's in four
-  host entries, every byte the receive engine's. A write-then-read of
+  channel's write address unchanged - in eight host entries. A write-then-read of
   6 + 16 under `dma` whose third written byte the client refuses - the
   read half already on the engines - is `i2c_nack_data`, two bytes
   stored, and the next engined read exact. Twenty-five runs of the
@@ -696,13 +694,16 @@ Driver gaps, each with its reason:
   addresses with every reserved one
   ([../design/i2c-bus.md](../design/i2c-bus.md)); a broadcast is a
   feature of its own, born with its first user.
-- A write phase on the DMA engines: an entry is the request's byte with
-  the command bits above it clear, and this chip replicates a narrow
-  write across the word (2.1.4) with the DMA's one transfer size for
-  both sides (2.5), so a byte beat from the request's buffer lands with
-  its copy in bit 8, a read command. A halfword staging copy the size of
-  the request is declined until a program needs a bulk write on the
-  engines; until then `dma` leaves the write half on the interrupt.
+- A write phase on the DMA engines, by silicon: an entry is the request's
+  byte with the command bits above it clear, and this chip replicates a
+  narrow write across the word (2.1.4) with the DMA's one transfer size
+  for both sides (2.5), so a byte beat from the request's buffer lands
+  with its copy in bit 8, a read command. It has no alias against that,
+  where the RP2350 has one and rides it
+  ([../rp2350/i2c.md](../rp2350/i2c.md)), so `dma` leaves the write half on
+  the interrupt. A halfword staging copy the size of the request is
+  declined: its RAM against the pump's busy cycles, 2 % of the core during
+  a write of 255 at 400 kHz (the table under "The host's cost").
 - The client on the DMA engines: the requests exist; a streaming
   client is born with a program that needs one.
 - The receive-side hold (`sda_rx_hold`) and a client's `ten_bit`: a
