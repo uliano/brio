@@ -274,8 +274,9 @@ flag, or in the DMA Transfer Complete interrupt routine". ITBUFEN must
 be off while a DMA request serves the same direction.
 
 **What the engine takes from the chapter, and what it declines.** Every
-item that bears on a tenure's cost, measured on the STM32F429I-DISC1 at
-180 MHz (APB1 45 MHz):
+item that bears on a tenure's cost, at 180 MHz with APB1 at 45 MHz - the
+silicon's own timings below measured on the STM32F429I-DISC1, the STOP's
+drain on the Nucleo-F446RE:
 - *One data register, no FIFO, no byte counter, no automatic STOP.* One
   interrupt a byte is this block's, on the pump; the figure is the
   handler's cycles a byte (bench findings).
@@ -327,12 +328,13 @@ item that bears on a tenure's cost, measured on the STM32F429I-DISC1 at
   CR2 store (`control2()`).
 - *The STOP's drain is the next tenure's.* With no event for the
   controller's own STOP, and CR1 untouchable while STOP stands (27.6.1),
-  start() waits for it, bounded - a bit period after a completion when a
-  tenure is started at once: 1830 cycles at 100 kHz, 270 at 400, spent in
+  start() waits for it, bounded - up to about a bit period after a completion when a
+  tenure is started at once: 1848 to 1879 cycles at 100 kHz and 324 to
+  371 at 400 (`bench_stm32f4` letter `i`), spent in
   the caller (the arbiter's dispatch). The alternatives were weighed and
   declined: a deferred START needs an event the chapter has not got, and
   a timer of the bus's own would cost a timer and an interrupt a tenure
-  to free about ten microseconds at 100 kHz and one and a half at 400.
+  to free about ten microseconds at 100 kHz and two at 400.
 - *The three receive procedures* (one byte, two with POS, N with the BTF
   pair). Used. The faster EV7_1 path - RxNE to the end, the NACK and the
   STOP programmed on the second-to-last RxNE - declined: it must complete
@@ -645,54 +647,6 @@ the Nucleo-F446RE alone ("Not covered yet").
   microsecond-wide window makes the target deaf to a controller that
   opens its next tenure at once.
 
-**The host above the wire: `bench_stm32f4`'s letter `i`** on the same
-board and bus (benchmark.md's grammar; the letter's header says how the
-wire is counted: the SCL period measured on the pad - 1800 core cycles at
-100 kHz, 456 at 400, the stated rows exactly - a START and an Sr a period,
-nine a byte, the STOP left to the next tenure's line). `fixed` is wall
-less that wire; `irq` and `isr` are the I2C vectors' alone; BEFORE is the
-engine this round started from, HAL is ST's v1.8.5 (`HAL_I2C_Master_
-Transmit_IT`/`_DMA`, `HAL_I2C_Mem_Read_IT`/`_DMA`) on the same board in a
-scratch program with brio's crt, clock and ruler. At 400 kHz:
-
-| tenure | BEFORE irq, isr, fixed | now irq, isr, fixed | HAL irq, isr, fixed |
-|---|---|---|---|
-| write of 1 | 7, 853, 961 | 3, 327, 139 | 5, 758, 387 |
-| write of 2 | 7, 888, 865 | 3, 415, 174 | 6, 955, 426 |
-| write of 3 | 9, 1014, 961 | 4, 534, 153 | - |
-| register read 1+1 | 10, 1322, 816 | 5, 631, 389 | 9, 1996, 1171 |
-| register read 1+2 | 10, 1355, 880 | 5, 656, 424 | 10, 1837, 816 |
-| register read 1+16 | 24, 3253, 885 | 19, 2147, 458 | 23, 3843, 792 |
-| probe (ACK / NACK) | 2, 344 / 318 | 2, 198 / 198 | polled, fixed 578 |
-| write of 255, engines | 6, 774, x 1.00 | 4, 531, x 1.00 | 4, 807, x 1.00 |
-| register read 1+255, engines | 10, 1237, x 1.00 | 5, 618, x 1.00 | 1 + a polled index: busy 15648 |
-
-- **The pump costs 80 cycles of handler a byte written and 100 a byte
-  read** (99 at 100 kHz; 128 read before the receive step was inlined),
-  against the HAL's 148 and 153 - the margin between the 16- and the
-  255-byte rows, the stamps' own few cycles inside both. A 255-byte write
-  is x 1.00 on the pump and on the engines alike.
-- **The fixed cost of a short tenure fell to a fifth**: 961 to 139 cycles
-  for a one-byte write and 816 to 389 for a register read, under the
-  HAL's 387 and 816-1171. What went: the event vector's re-entries on a
-  standing BTF (sixteen extra entries a write at 100 kHz, three at 400),
-  the TxE entries EV8_1 saves, the repeated START's wait for BTF, start()'s
-  read-modify-writes (335 to 166 cycles on a quiet bus).
-- **The STOP's drain is the next tenure's**: start() called at a
-  completion waits 1830 cycles at 100 kHz and 270 at 400 for the STOP to
-  leave - before, a write's drain was spent in those re-entries instead,
-  with the thread starved; the HAL's own call waits for BUSY the same way
-  (1728 cycles at 100 kHz).
-- **The engines' fixed cost per tenure** is their start inside the
-  vector - the transmit stream's in the ADDR entry, the receive stream's
-  at the read's SB - and one completion entry: a 16-byte write is 4 interrupts and 531
-  cycles of handler, a register read of 255 is 5 and 618.
-- **The longest single entry** of each vector over the letter: events 203
-  cycles, errors 174, the streams 104 (295, 554 and 191 before - the
-  error vector rebound an idle receive stream on every NACK).
-- **The STMPE811 NACKs a read no write opened** - its address, at once -
-  so a plain read is measured here through the register read only.
-
 `test_stm32f4_i2c` on the Nucleo-F446RE, I2C1 on PB8/PB9 against the
 chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - SERVED FROM ITS OWN VECTORS as a register file (an identity at
@@ -752,27 +706,67 @@ ten runs of ten (below).
   same host carries the command channel again after `recover()`.
 
 **The host above the wire on the Nucleo-F446RE: `bench_stm32f4`'s letter
-`i`** on the same self-link, each block the host in turn and the other
-the target at 0x3A served from its own vectors on the same core (its
-entries counted apart, the instrument's share of the wall), the SCL
-period measured on PB8 - 456 core cycles at 400 kHz for I2C1, the stated
-rate - and the plain reads measured too, this target answering them. At
-400 kHz, I2C1 the host: a one-byte write 230 cycles beyond the wire in
-three interrupts, a register read 1+1 604 in five, a 255-byte write and
-read x 1.00 on the pump (256 interrupts) and on the engines (4 and 3);
-the pump 107 cycles of handler a byte written and 126 read; the STOP's
-drain 367 cycles; the longest entry 215 cycles of the event vector. The
-refusal's close costs an acknowledged tenure nothing measurable: the
-listing's transmit and receive steps are the same size, and the eight to
-ten cycles a byte the rows moved by between the two builds moved the
-FMPI2C1 host's rows too, whose code did not change - the image's layout
-under the flash accelerator, not the engine.
+`i`** on the same self-link (benchmark.md's grammar; the letter's header
+says how the wire is counted: the SCL period measured on PB8 - 1800 core
+cycles at 100 kHz and 456 at 400 for I2C1, the stated rates - a START and
+an Sr a period, nine a byte, the STOP left to the next tenure's line).
+Each block is the host in turn and the other the target at 0x3A, served
+from its own vectors on the same core: its entries are counted apart, and
+its stretch of SCL while its vector runs is inside the host's fixed cost,
+`fixed` being the wall less that wire. `irq` and `isr` are the host's I2C
+vectors alone, between the meter's stamps. At 400 kHz, I2C1 the host, on
+the pump:
+
+| tenure | brio on the Nucleo-F446RE: irq, isr, fixed | ST's HAL on the STM32F429I-DISC1: irq, isr, fixed |
+|---|---|---|
+| write of 1 | 3, 423, 212 | 5, 758, 387 |
+| write of 2 | 3, 458, 212 | 6, 955, 426 |
+| write of 3 | 4, 589, 204 | - |
+| register read 1+1 | 5, 708, 576 | 9, 1996, 1171 |
+| register read 1+2 | 5, 764, 619 | 10, 1837, 816 |
+| register read 1+16 | 19, 2481, 657 | 23, 3843, 792 |
+| probe (ACK / NACK) | 2, 252 / 253 | polled, fixed 578 |
+| write of 255 on the engines | 4, 569, x 1.00 | 4, 807, x 1.00 |
+
+The HAL's column is ST's v1.8.5 (`HAL_I2C_Master_Transmit_IT`/`_DMA`,
+`HAL_I2C_Mem_Read_IT`/`_DMA`) in a scratch program with brio's crt, clock
+and ruler, on the STM32F429I-DISC1's I2C3 at the same 180 MHz core and
+45 MHz APB1, against the board's STMPE811, which NACKs a read no write opened, so the HAL's
+plain reads are not in it, and its register read of 255 on the DMA was
+one transfer behind a polled index (busy 15648). Its `fixed` is that
+device's and is not set against brio's, whose target is served on the
+same core; the interrupts and the handler's cycles compare.
+
+- **The pump costs 97 cycles of handler a byte written and 116 a byte
+  read** (the slope between the 16- and the 255-byte rows; 99 and 123
+  between 2 and 16), against the HAL's 148 and 153. A 255-byte write and
+  read are x 1.00 on the pump (256 interrupts) and on the engines (4 and
+  3).
+- **The STOP's drain is the next tenure's**: `start()` called at a
+  completion waits for the STOP to leave the wire, 1848 to 1879 cycles at
+  100 kHz and 324 to 371 at 400 (the tenure before a write, a read or a
+  register read of two), where `start()` on a quiet bus is 199; the HAL's
+  own call waits for BUSY the same way (1728 cycles at 100 kHz).
+- **The engines' fixed cost per tenure** is their start inside the
+  vector - the transmit stream's in the ADDR entry, the receive stream's
+  at the read's SB - and their completion entries: a write of 255 is 4
+  interrupts and 569 cycles of handler, a read of 255 is 3 and 487, and
+  a register read under `dma`, its index on the transmit stream too, 7
+  and 1010 at 1+16 (the "Which engine" table below).
+- **The longest single entry** of each vector over the letter: events 216
+  cycles, errors 191, the streams 118.
+- **The same code placed elsewhere costs differently**: the FMPI2C1
+  host's rows, whose code was the same in two builds of this letter,
+  moved by eight to ten cycles a byte between them - the image's layout
+  under the flash accelerator. Rows are compared within one image.
 
 **Which engine, by the cycles** (the same letter on the same self-link,
 I2C1 the host, every row of one image; `irq` and `isr` the I2C vectors'
-and the two streams', between the meter's stamps; `start()` 189 to 200
-cycles on either engine, the streams being started in the vectors). At
-400 kHz, the 100 kHz rows within a few cycles of these:
+and the two streams', between the meter's stamps; `start()` 189 to 219
+cycles on either engine - the writes and register reads 189 to 200, the
+reads 207 to 219, and once 306 in one run of an engined read of 255 - the
+streams being started in the vectors).
+At 400 kHz, the 100 kHz rows within a few cycles of these:
 
 | phase | `interrupt`: irq, isr | `dma`: irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
@@ -787,8 +781,10 @@ cycles on either engine, the streams being started in the vectors). At
 | register read 1+2 | 5, 764 | 7, 1006 | +242 |
 | register read 1+16 | 19, 2481 | 7, 1010 | -1471 |
 
-The pump's figure a byte past the second is the slope, 97 cycles written
-and 123 read, one entry each, and an entry's own exception entry and
+The pump's figure a byte past the second is the slope of the table's
+rows from 2 to 16 bytes, 99 cycles written and 123 read, one entry each
+(97 and 116 between 16 and 255 bytes, the letter's own per-byte line),
+and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
 every interrupt counted. So, in core cycles:
@@ -803,15 +799,19 @@ every interrupt counted. So, in core cycles:
   rows has read -7 in another build of the same code), and a read of
   three is clearly the engines' (the pump's third byte costs it 123
   cycles and an entry);
-- **a register read with a one-byte index from about five read bytes**:
-  under `dma` the index rides the transmit stream too - its completion
-  and the TxE behind it, where the repeated START is requested, are two
-  interrupts the pump's ADDR entry does without - and that is 295 cycles
-  the read half's savings, 123 a byte, pay back from 1+5 (1+4 within the
-  two extra entries' own cost). A Request has one engine for both halves,
-  so a short register read is cheaper on the pump.
-The speed changes none of these figures: the streams and the vectors
-cost the same cycles at both rows, and the wire's time between them is
+- **a register read with a one-byte index from five read bytes**: under
+  `dma` the index rides the transmit stream too - its completion and the
+  TxE behind it, where the repeated START is requested, are two
+  interrupts the pump's ADDR entry does without - so the engines' register
+  read stays at about 1006 cycles and 7 interrupts whatever its length.
+  The pump's grows 56 cycles and no interrupt from 1+1 to 1+2 (708 to 764,
+  the two-byte procedure), then 123 cycles and one interrupt a byte: at
+  1+4 the two tie (764 + 2 x 123 = 1010 against about 1007, 7 interrupts
+  each), and from 1+5 the engines lead, by about 125 cycles and an entry
+  there and 123 and an entry more with every byte after. A Request has one
+  engine for both halves, so a short register read is cheaper on the pump.
+The speed moves none of these lengths: the streams and the vectors
+cost within a few cycles of the same at both rows, and the wire's time between them is
 the core's to spend elsewhere. The core sleeps while a stream works: the
 platform's idle is a WFI that asks no stream anything, and Sleep keeps
 the DMA clocked (RM0390 6.3.15: DMA1LPEN is set at reset and written by
@@ -1034,12 +1034,14 @@ Implemented, not bench-verified (each with what would measure it):
   32F469IDISCOVERY: letter `j`'s traces (the one-byte phases on the
   streams, `interrupt` touching none, `dma` refused on the engineless
   host) and "Which engine, by the cycles" were measured on the
-  Nucleo-F446RE's self-link alone, the two boards being off the desk; and
-  the DISC1's engined rows in the table above have a register read's
-  index loaded in the entry that clears ADDR, where a Request naming `dma`
-  puts it on the transmit stream (two interrupts and about 300 cycles
-  more on the Nucleo-F446RE). A run of the suite's `j` and the bench's
-  `i` on each board would close it.
+  Nucleo-F446RE's self-link alone, the two boards being off the desk. A
+  run of the suite's `j` and the bench's `i` on each board would close it.
+- ST's HAL and brio on one board: the HAL's column of the cost table is
+  the STM32F429I-DISC1's against its STMPE811, brio's the Nucleo-F446RE's
+  against the chip's own FMPI2C1, so the interrupts and the handler's
+  cycles compare and the fixed costs do not. The HAL's scratch program
+  on the Nucleo-F446RE's self-link, or the bench's `i` on the DISC1,
+  would put them on one board.
 - Letter `c`'s refusal of the reserved addresses on the STM32F429I-DISC1
   and the 32F469IDISCOVERY: the same verdict on the same engine, run on
   the Nucleo-F446RE alone, the two boards being off the desk; a run of
@@ -1056,11 +1058,11 @@ Implemented, not bench-verified (each with what would measure it):
   have a board's touch controller; the 32F469IDISCOVERY's CS43L22 audio
   DAC on I2C2 (PH4/PH5, 100 kHz at most, its identity register 01h
   documented) is the device that would measure the third instance.
-- The reworked engine on the 32F469IDISCOVERY (EV8_1's two bytes, the
+- The engine's sequences on the 32F469IDISCOVERY (EV8_1's two bytes, the
   repeated START behind a dummy, the event vector the tenure's, the
   refusal closed from the Sr): the board was off the desk; its suite
-  against the FocalTech controller is what would measure it, as letter
-  `i` measured it on the DISC1.
+  against the FocalTech controller is what would measure it, as the
+  suite and the bench's `i` measure it on the Nucleo-F446RE.
 - The refusal's close from the Sr on the STM32F429I-DISC1: measured on
   the Nucleo-F446RE's self-link (the same engine, the same register
   description); the DISC1's suite, off the desk, would say its device

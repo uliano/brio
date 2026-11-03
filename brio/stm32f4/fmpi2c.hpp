@@ -148,10 +148,12 @@
  *    cycled. The ratio is arithmetic this file can do, so it is published
  *    rather than hidden - fmpi2c_transmit_stall_risk() and the host's
  *    transmit_stall_risk() - and the choice of kernel clock, which is the
- *    manual's own second workaround, is the application's. The DMA path
- *    takes the first workaround by construction: the engines are started
- *    before the START bit, so TXDR is already loaded when the address goes
- *    out (23.4.16 asks for that order anyway).
+ *    manual's own second workaround, is the application's. The first
+ *    workaround (the first byte in TXDR before the transfer starts) is
+ *    taken by no path of the host: start() writes nothing into TXDR, and
+ *    the transmit engine, though started before the START bit, writes its
+ *    first byte on the first TXIS, which comes after the address's ACK
+ *    (23.4.9, figure 260) - the erratum names the DMA request beside TXIS.
  *  - 2.12.4, last-received byte loss in reload mode: with RELOAD set and
  *    NBYTES > 1 a receiver can lose the last byte. The host engine never
  *    sets RELOAD - a Request's spans are eight-bit lengths, so one tenure
@@ -435,8 +437,8 @@ constexpr uint32_t fmpi2c_datasheet_min_pclk_hz(FmpI2cSpeed s) {
  * The ratio is the one part of that a driver can compute, so it is
  * published: true means this pair of rates sits in the erratum's band, and
  * the two workarounds are the manual's own - load TXDR before the transfer
- * starts (which the DMA path does by construction), or choose a kernel
- * clock whose ratio is outside 1.5 .. 3.
+ * starts (which no path of FmpI2cHost does), or choose a kernel clock
+ * whose ratio is outside 1.5 .. 3.
  */
 constexpr bool fmpi2c_transmit_stall_risk(uint32_t pclk_hz, uint32_t kernel_hz) {
     if (pclk_hz == 0u || kernel_hz == 0u) {
@@ -1870,10 +1872,12 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * what it reads, and so does a half whose engine refuses its start (a
  * block still holding the stream): start() reads the refusal before the
  * START and the request completes. The engines are started BEFORE the
- * START bit, which is what 23.4.16 asks for and, incidentally, the first
- * of ES0298 2.12.8's two workarounds. Which engine to name is the
- * program's judgement; docs/stm32f4/fmpi2c.md gives the figures and the
- * length from which the engines cost the core fewer cycles.
+ * START bit, which is what 23.4.16 asks for; the transmit engine's first
+ * byte still waits for the first TXIS, after the address, so this is not
+ * ES0298 2.12.8's first workaround (the erratum, above). Which engine to
+ * name is the program's judgement; docs/stm32f4/fmpi2c.md gives the
+ * figures and the length from which the engines cost the core fewer
+ * cycles.
  *
  * THE DMA CONTROLLER IS THE APP'S: Dma<1>::init() before any engined
  * init(). The engines arm STREAMS of a controller somebody else owns.

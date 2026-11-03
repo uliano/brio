@@ -1262,9 +1262,9 @@ void tj_engines() {
                       fmpi2c_dma_placement_valid(false, 1, 2, 2));
 
     // A WRITE tenure whose data would ride the transmit engine: the engine
-    // is started before the START bit (23.4.16's own order, and ES0298
-    // 2.12.8's first workaround), and the address is NACKed before a byte
-    // leaves TXDR.
+    // is started before the START bit (23.4.16's own order; its first
+    // byte waits for the first TXIS, after the address), and the address
+    // is NACKed before a byte reaches TXDR.
     static const uint8_t out[4] = {0xA5, 0x5A, 0x00, 0xFF};
     arm_log();
     const uint8_t st = tenure<DmaHost>(0x42, out, 4, nullptr, 0);

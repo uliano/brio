@@ -1922,15 +1922,16 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *
  * Which to name is the program's judgement, and docs/stm32g0/i2c.md gives
  * the arithmetic: the engines' fixed cost to the core over the pump's,
- * 81 cycles for a write half and 63 for a read half, against the pump's
- * 160 and 166 a byte past the first (the pump's first byte of a half
- * takes no interrupt: the write's is preloaded, the read's taken at the
- * STOPF), so a half of two bytes or more costs the core fewer cycles on
- * the engines, at every speed (bench_stm32's letter i). The pump does not
- * stretch the clock at the top rung: SCL stretches only when TXDR is
- * still empty or RXDR still full a whole byte after TXIS or RXNE rose
- * (32.4.7), and at 64 MHz that byte is nine periods, at least 576 cycles,
- * against the pump's entry of about 200. And the core sleeps while a
+ * 89 cycles for a write half and 62 for a read half, against the pump's
+ * about 171 a byte past the first, the core's own entry and return
+ * included (the pump's first byte of a half takes no interrupt: the
+ * write's is preloaded, the read's taken at the STOPF), so a half of two
+ * bytes or more costs the core fewer cycles on the engines, at every
+ * speed (bench_stm32's letter i). The pump does not stretch the clock at
+ * the top rung: SCL stretches only when TXDR is still empty or RXDR still
+ * full a whole byte after TXIS or RXNE rose (32.4.7), and at 64 MHz that
+ * byte is nine periods, at least 576 cycles, against the pump's byte
+ * entry of about 171. And the core sleeps while a
  * channel works: the platform's idle() is a plain WFI that asks no
  * channel anything, and Sleep keeps the DMA clocked (RM0444 table 27,
  * 5.4.18: DMA1SMEN and DMA2SMEN set at reset, written by no verb here).
