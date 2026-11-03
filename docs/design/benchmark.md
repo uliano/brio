@@ -364,7 +364,7 @@ library was read). The rates named are SCK.
 |---|---|---|---|---|
 | AVR128DB48 (24 MHz; 6 and 1.5 MHz) | 1.09, 1.02 (two cycles a byte the block's, beyond the wire) | 1.09, 1.02 | 283 by the listing (the AVR64EA48's measured drop of 3 cycles on the same instructions; not re-run on this board), the stopwatch's 65 inside | the data sheet's buffer-mode sequence 1.09, 1.01 |
 | AVR64EA48 (20 MHz; 5 and 1.25 MHz) | 1.09, 1.02 (the DB's cycles a byte, to the cycle) | 1.09, 1.02 | 272, the stopwatch's 60 inside | not run on this board |
-| SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.32, 1.01 (42 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | 573 | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
+| SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.05, 1.01 | 1.32, 1.01 (41.0 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states) | 577 | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
 | STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.12, 1.01 | 390 with the loop in the flash, 360 in SRAM, the stopwatch's ~62 inside | HAL 5.46, 1.84 (one in flight and a tick call per turn) |
 | STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.47, 1.07 | 256 | HAL 3.02, 1.32 |
 | CH32V006K8U6 (48 MHz; 12 and 3 MHz) | 1.03, 1.00 | 1.80, 1.21 | 372 | not run on this board |
