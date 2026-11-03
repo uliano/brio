@@ -25,10 +25,13 @@ using I2cHw = brio::I2cHost<1, bus_pins>;
 using Sensors = brio::I2cBus<I2cHw, P, 4, brio::BusPassThrough,
                              brio::ticks_from_ms<P>(20)>;
 
-I2cHw::init(clock, brio::I2cClock::hsi16);   // independent of the core rate
-
 extern "C" void I2C1_IRQHandler() {
     if (I2cHw::isr()) { brio::post<Sensors>(brio::TransferDone{I2cHw::status()}); }
+}
+
+// In main(), after the clock task's init() and before the kernel runs:
+if (!I2cHw::init(clock, brio::I2cClock::hsi16)) {   // independent of the core rate
+    // not even 100 kHz at the kernel clock, or the filters refused: no bus
 }
 
 // In a handler of MyAo: read a register, a write and a read joined by a
@@ -46,8 +49,12 @@ brio::post<Sensors>(I2cHw::Request{
 
 An excerpt: it assumes the program's platform `P`, its clock object
 `clock` and an active object `MyAo` that handles `I2cDone`, whose `status`
-field is `i2c_ok` or the code that says what the wire did; `init()` runs
-in `main()`. What decides correctness even there: pull-up resistors on
+field is `i2c_ok` or the code that says what the wire did. `init()`
+answers whether there is a bus at all, and the empty branch is where a
+program decides what it does without one; `start()` is the arbiter's to
+call and to answer, so the active object reads the outcome in its
+`I2cDone`, a refused request included (`i2c_rejected`). What decides
+correctness even there: pull-up resistors on
 both wires,
 which are the board's and not the chip's; the two pads named with the
 alternate-function numbers the datasheet gives for that instance, which
@@ -263,9 +270,11 @@ below, prints it: the period less the register's tSCLL + tSCLH) states it,
 and runs nearer the rate asked (the findings give how near):
 
 ```cpp
-I2cHw::init(clock, brio::I2cClock::pclk, {},
-            brio::I2cBusTiming{.rise_ns = 300, .fall_ns = 300,
-                               .setup_ns = 100, .sync_ns = 430});
+if (!I2cHw::init(clock, brio::I2cClock::pclk, {},
+                 brio::I2cBusTiming{.rise_ns = 300, .fall_ns = 300,
+                                    .setup_ns = 100, .sync_ns = 430})) {
+    // not even 100 kHz on these edges at this kernel clock: no bus
+}
 ```
 
 A request is the complete script of one tenure, as the smallest use's
@@ -312,18 +321,30 @@ brio::post<Memories>(Engined::Request{
 });
 ```
 
-A target answers on its own vector:
+A target answers on its own vector. An excerpt: it assumes the pads
+`peer_pins` (an `I2cPins` like `bus_pins`) and the program's own
+`store()` and `next()`, the byte taken and the byte to give; `init()`
+leaves the interrupt line enabled with nothing armed, so the program
+arms what its handler serves:
 
 ```cpp
 using Peer = brio::I2cClient<2, peer_pins>;
-Peer::init(clock, {.own = 0x42}, brio::I2cSpeed::fast_400k,
-           brio::I2cClock::hsi16);
 extern "C" void BRIO_STM32G0_I2C2_HANDLER() {
     const uint32_t f = Peer::isr();
     if (f & brio::I2cFlag::addr)  { Peer::answer_address(); }
     if (f & brio::I2cFlag::rxne)  { store(Peer::take()); }
     if (f & brio::I2cFlag::txis)  { Peer::give(next()); }
     if (f & brio::I2cFlag::stop)  { Peer::clear_stop(); }
+}
+
+// In main(), after the clock task's init():
+if (Peer::init(clock, {.own = 0x42}, brio::I2cSpeed::fast_400k,
+               brio::I2cClock::hsi16)) {
+    Peer::interrupt(brio::I2cInterrupt::addr | brio::I2cInterrupt::rx |
+                    brio::I2cInterrupt::tx | brio::I2cInterrupt::stop, true);
+} else {
+    // I2C2 takes HSI16 on the G0B1/G0C1 class alone, or the timing or
+    // the address was refused: there is no target
 }
 ```
 

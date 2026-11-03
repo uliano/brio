@@ -26,13 +26,17 @@ first block of "How to use it" below, the STM32F429I-DISC1's I2C3 and
 the STMPE811 on it:
 
 ```cpp
+volatile bool done = false;                // set by the handlers, read by the loop
 constexpr brio::I2cPins pins{.scl = {'A', 8, brio::PinFunction::af4},
                              .sda = {'C', 9, brio::PinFunction::af4}};
 using Bus = brio::I2cHost<3, pins>;
-Bus::init(clock);                          // both speed rows solved for PCLK1
 extern "C" void I2C3_EV_IRQHandler() { if (Bus::isr()) { done = true; } }
 extern "C" void I2C3_ER_IRQHandler() { if (Bus::error_isr()) { done = true; } }
 
+// in main(), after the clock task's init():
+if (!Bus::init(clock)) {                   // both speed rows solved for PCLK1
+    // not even 100 kHz at this APB1 clock: there is no bus
+}
 const uint8_t index[1] = {0x00};
 uint8_t id[2] = {};
 Bus::Request r{};
@@ -42,10 +46,16 @@ r.tx_len = 1;
 r.rx = brio::lend<brio::Lease::reply>(id);
 r.rx_len = 2;
 done = false;
-Bus::start(r);                             // false: the completion is the ISR's
+if (!Bus::start(r)) {                      // false: on the wire, the handlers end it
+    while (!done) {}
+}
+const uint8_t outcome = Bus::status();     // i2c_ok, or what ended the tenure
 ```
 
-Line by line: `pins` names the two pads with the alternate-function
+An excerpt: the flag, `pins`, `Bus` and the two handlers sit at
+namespace scope, the rest in `main()`. Line by line: `done` is the
+program's own completion flag, `volatile` because a handler writes it
+and the loop reads it; `pins` names the two pads with the alternate-function
 number the datasheet gives I2C3's SCL and SDA on them, which nothing in
 the code can check; `Bus` is the host task over I2C3 on those pads, its
 two DMA engine slots left empty, so every byte moves on the interrupt;
@@ -54,15 +64,19 @@ two DMA engine slots left empty, so every byte moves on the interrupt;
 rows, standard and fast mode, for the APB1 clock; the two `extern "C"`
 functions are the instance's event and error interrupt handlers, as in
 C, under ST's names for the vectors, and each body returns true on the
-interrupt that completes the tenure (`done` is a flag of the program's
-own, its declaration not shown). The request is one tenure: write the
+interrupt that completes the tenure. `init()` answers whether there is
+a bus at all, and the empty branch is where a program decides what it
+does without one. The request is one tenure: write the
 one byte of `index` (the device's register index), then a repeated
 START and a read of two bytes into `id`, the last one NACKed, then the
 STOP; `addr` is the 7-bit address, and the speed is left at its default,
 `standard_100k`. `brio::lend<brio::Lease::reply>(...)` wraps each buffer
 as a loan that lasts until the reply ([design/kernel.md, "Payloads: what
 travels inside the event"](../design/kernel.md#4-payloads-what-travels-inside-the-event-kernelborrowedhpp)).
-`start()` begins the tenure and returns at once.
+`start()` begins the tenure, and its answer decides the wait: false
+means the tenure is on the wire and a handler will end it, so the loop
+waits for `done`; true means it ended before a byte moved, so there is
+nothing to wait for. Either way `status()` then says how it ended.
 
 What decides correctness even there. `init()` after the clock task's:
 FREQ, CCR and TRISE are computed from the APB1 rate the clock type
@@ -88,14 +102,17 @@ form 1111 0xx0 is sent as a 10-bit header and the address phase ends on
 ADD10 instead of ADDR (27.3.3); the engine ends such a tenure
 `i2c_bus_error` rather than spin on it ("Bench findings"), but only the
 refusal keeps it off the wire. And
-`start()`'s answer: false means the tenure is on the wire and a
-handler will complete it; true means it was refused before a byte moved (a speed the clock cannot produce, or an address outside 0x08..0x77), with
-`status()` already `i2c_rejected` and no interrupt to follow, so a loop
-that waits for `done` after a true waits for ever. `start()` itself
+`start()`'s answer: true means it was refused before a byte moved (a
+speed the clock cannot produce, an address outside 0x08..0x77, or `dma`
+named on a host without engines), with `status()` already
+`i2c_rejected` and no interrupt to follow, so a loop that waited for
+`done` after a true would wait for ever - the excerpt waits only after a
+false. `start()` itself
 waits in its caller, bounded: about 5 ms for the previous tenure's STOP
 to leave the wire, then about 100 us for BUSY to fall; a STOP still
-standing after 5 ms parks the tenure - no START, no vector - and only an
-arbiter's per-bus timeout answers it (the bus under `I2cBus` is the
+standing after 5 ms parks the tenure - no START, no vector, and still
+a false - and only an arbiter's per-bus timeout answers it, the
+excerpt's loop having no bound (the bus under `I2cBus` is the
 second block of "How to use it"). The trap of a bring-up that drives the
 resource by hand is that a block configured before its pads are handed
 over comes up BUSY over an idle wire and never gets a START out
@@ -449,16 +466,20 @@ the two ISR bodies `service` and `error_service`, each answering one
 ## How to use it
 
 A bus with one device, driven from the loop - the shape a bring-up
-starts from:
+starts from, the excerpt the opening of this page reads line by line:
 
 ```cpp
+volatile bool done = false;                // set by the handlers, read by the loop
 constexpr brio::I2cPins pins{.scl = {'A', 8, brio::PinFunction::af4},
                              .sda = {'C', 9, brio::PinFunction::af4}};
 using Bus = brio::I2cHost<3, pins>;
-Bus::init(clock);                          // both speed rows solved for PCLK1
 extern "C" void I2C3_EV_IRQHandler() { if (Bus::isr()) { done = true; } }
 extern "C" void I2C3_ER_IRQHandler() { if (Bus::error_isr()) { done = true; } }
 
+// in main(), after the clock task's init():
+if (!Bus::init(clock)) {                   // both speed rows solved for PCLK1
+    // not even 100 kHz at this APB1 clock: there is no bus
+}
 const uint8_t index[1] = {0x00};
 uint8_t id[2] = {};
 Bus::Request r{};
@@ -468,7 +489,10 @@ r.tx_len = 1;
 r.rx = brio::lend<brio::Lease::reply>(id);
 r.rx_len = 2;
 done = false;
-Bus::start(r);                             // false: the completion is the ISR's
+if (!Bus::start(r)) {                      // false: on the wire, the handlers end it
+    while (!done) {}
+}
+const uint8_t outcome = Bus::status();     // i2c_ok, or what ended the tenure
 ```
 
 The same bus under the kernel's arbiter, which is what a shared bus
@@ -496,30 +520,38 @@ probe.addr = a;                            // both spans empty
 
 A faster bus, a shaped duty and a wire whose rise times are known -
 what an `I2cHostConfig` is for, and the speed travels per request so
-one bus can serve a 100 kHz sensor and a 400 kHz converter:
+one bus can serve a 100 kHz sensor and a 400 kHz converter. An excerpt
+in the first block's setting, its `init()` replaced and its request
+given a speed:
 
 ```cpp
-Bus::init(clock, {.duty = brio::I2cDuty::ratio_16_9,
-                  .standard_rise_ns = 400, .fast_rise_ns = 120,
-                  .filter = {.analog = true, .digital = 1}});
-r.speed = brio::I2cSpeed::fast_400k;
+if (!Bus::init(clock, {.duty = brio::I2cDuty::ratio_16_9,
+                       .standard_rise_ns = 400, .fast_rise_ns = 120,
+                       .filter = {.analog = true, .digital = 1}})) {
+    // not even 100 kHz at this APB1 clock and rise time: there is no bus
+}
+r.speed = brio::I2cSpeed::fast_400k;       // refused by start() if unreachable
 ```
 
 With the DMA engines, on the cells the request mapping gives the
 instance, a Request that names `dma` moves every phase without the CPU,
 one byte included; one that names nothing still runs on the vectors. The
-first block again, the two I2C vectors bound as there, the streams' two
-vectors added and the request naming its engine:
+first block again, an excerpt in its setting (`done`, `pins`, the two I2C
+vectors, `index` and `id` as there), the streams' two vectors added and
+the request naming its engine:
 
 ```cpp
 using Bus = brio::I2cHost<3, pins, brio::DmaTxEngine<1, 4, 3>,
                                    brio::DmaRxEngine<1, 2, 3>>;
 static_assert(Bus::has_dma);               // or `dma` is answered i2c_rejected
-brio::Dma<1>::init();
-Bus::init(clock);
 extern "C" void DMA1_Stream4_IRQHandler() { if (Bus::dma_isr()) { done = true; } }
 extern "C" void DMA1_Stream2_IRQHandler() { if (Bus::dma_isr()) { done = true; } }
 
+// in main(), after the clock task's init():
+brio::Dma<1>::init();
+if (!Bus::init(clock)) {
+    // not even 100 kHz at this APB1 clock: there is no bus
+}
 Bus::Request r{};
 r.addr = 0x41;
 r.tx = brio::lend<brio::Lease::reply>(index);
@@ -528,7 +560,9 @@ r.rx = brio::lend<brio::Lease::reply>(id);
 r.rx_len = 2;
 r.engine = brio::I2cEngine::dma;           // the index and the two bytes on the streams
 done = false;
-Bus::start(r);
+if (!Bus::start(r)) {
+    while (!done) {}
+}
 ```
 
 The recovery ladder, which is two verbs and a decision:
