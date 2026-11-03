@@ -233,6 +233,7 @@
 
 #include "kernel/platform.hpp"
 #include "util/clock.hpp"
+#include "util/dma_owner.hpp"
 #include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
@@ -654,6 +655,20 @@ struct Pl011Uart {
 
 // ---- the task --------------------------------------------------------------------
 
+/// The claim a transport makes for one of its engine slots
+/// (docs/design/dma.md, "The ownership rule"): the slot the engine publishes
+/// goes to this instance's request. An empty slot has no `dma_slot` and claims
+/// nothing, and neither does an engine of a chip with no DMA controller behind
+/// it (the simulated PL011's). True, so that it reads as a static_assert.
+template <typename Engine, uint8_t n, DmaSignal signal>
+constexpr bool pl011_engine_claimed() {
+    if constexpr (requires { typename Engine::dma_slot; }) {
+        return dma_claim<typename Engine::dma_slot, DmaOwner<DmaPeriph::uart, n, signal>>;
+    } else {
+        return true;
+    }
+}
+
 /**
  * The interrupt-driven byte transport over Pl011Uart<Chip, n> (the file
  * header says who calls what). The family's own header aliases it to
@@ -683,6 +698,12 @@ class Pl011Transport {
                   "the engine slots must name a complete type");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA channels");
+    // One owner a channel and one channel a request, for the whole image: a
+    // second peripheral on either channel, or this request on a second channel
+    // (the DREQ rule: RP2040 2.5.3.2, RP2350 12.6.4.2), does not compile. Two
+    // transport types over one instance's request on one channel are one owner.
+    static_assert(pl011_engine_claimed<TxEngine, n, DmaSignal::tx>());
+    static_assert(pl011_engine_claimed<RxEngine, n, DmaSignal::rx>());
     static_assert(HotPlacement<Placement, typename Chip::Platform>,
                   "the placement is InFlash, or InRam on a family whose platform says "
                   "places_fast_text (util/placement.hpp)");

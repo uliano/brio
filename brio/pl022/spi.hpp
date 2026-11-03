@@ -358,6 +358,7 @@
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/dma_owner.hpp"
 #include "util/placement.hpp"
 #include "util/spi_bus.hpp"
 
@@ -807,6 +808,20 @@ static_assert(spi_control_word(SpiClock{254, 255}, SpiMode::mode2, SpiDataSize::
 static_assert(spi_control_word(SpiClocks::div2, SpiMode::mode1, SpiDataSize::bits8) ==
               ((2u << 16) | spi_cr0_of({.mode = SpiMode::mode1, .bits = 8, .clock = SpiClocks::div2})));
 
+/// The claim a host makes for one of its engine slots (docs/design/dma.md,
+/// "The ownership rule"): the slot the engine publishes goes to this
+/// instance's request. An empty slot has no `dma_slot` and claims nothing, and
+/// neither does an engine of a chip with no DMA controller behind it (the
+/// simulated PL022's). True, so that it reads as a static_assert.
+template <typename Engine, uint8_t n, DmaSignal signal>
+constexpr bool pl022_engine_claimed() {
+    if constexpr (requires { typename Engine::dma_slot; }) {
+        return dma_claim<typename Engine::dma_slot, DmaOwner<DmaPeriph::spi, n, signal>>;
+    } else {
+        return true;
+    }
+}
+
 /**
  * Pl022Host<Chip, n, pins, TxEngine, RxEngine, Placement>
  *
@@ -859,6 +874,11 @@ class Pl022Host {
                   "its completion is the RECEIVE block's");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "brio SpiHost: the two engines must ride two different DMA channels");
+    // One owner a channel and one channel a request, for the whole image: a
+    // second peripheral on either channel, or this request on a second channel
+    // (the DREQ rule: RP2040 2.5.3.2, RP2350 12.6.4.2), does not compile.
+    static_assert(pl022_engine_claimed<TxEngine, n, DmaSignal::tx>());
+    static_assert(pl022_engine_claimed<RxEngine, n, DmaSignal::rx>());
     static_assert(HotPlacement<Placement, Chip>,
                   "brio SpiHost: the placement is InFlash, or InRam on a family whose chip traits say "
                   "places_fast_text (util/placement.hpp)");

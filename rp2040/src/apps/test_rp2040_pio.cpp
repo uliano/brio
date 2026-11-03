@@ -100,7 +100,14 @@ using Edges15 = PwmEdgeCounter<15>;
 using Level9 = PwmLevelCounter<9>;
 using TxEngine = DmaTxEngine<9, uint8_t>;
 using RxEngine = DmaRxEngine<10, uint8_t>;
-using WordEngine = DmaRxEngine<10, uint32_t>;
+using WordEngine = DmaRxEngine<11, uint32_t>;
+// What each engine's channel serves, one owner a channel and one channel a
+// request (docs/design/dma.md, "The ownership rule"): a state machine's FIFO, the
+// instance numbered as its block times four plus its number. The DREQ is handed
+// at arm(), so the suite makes the claim the engine cannot.
+static_assert(dma_claim<DmaSlotId<0, 9>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::tx>>);   // Tx: PIO0 SM0
+static_assert(dma_claim<DmaSlotId<0, 10>, DmaOwner<DmaPeriph::pio, 1, DmaSignal::rx>>);   // Rx: PIO0 SM1
+static_assert(dma_claim<DmaSlotId<0, 11>, DmaOwner<DmaPeriph::pio, 2, DmaSignal::rx>>); // Sampler: PIO0 SM2
 
 volatile uint32_t line0_entries = 0;
 volatile uint32_t line1_entries = 0;
@@ -830,7 +837,7 @@ extern "C" void isr_dma_0() {
         (void)TxEngine::complete();
         dma_tx_done = true;
     }
-    const uint8_t r = RxEngine::service();   // channel 10, the byte or the word engine
+    const uint8_t r = static_cast<uint8_t>(RxEngine::service() | WordEngine::service());
     if ((r & RxEngine::flag_complete) != 0u) {
         dma_rx_done = true;
     }

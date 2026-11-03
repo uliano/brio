@@ -108,10 +108,10 @@
 //      ring nobody reads, the FIFO full behind the idle channel and four
 //      thousand frames lost on it - each episode one UART1 entry and one
 //      overrun counted, the vector quiet after it
-//   r  A RELEASED REQUESTER (the release contract, no wire): UART1's and
-//      SPI1's transmit, PWM slice 3's wrap and the ADC's FIFO, each
-//      released six ways and the next owner's channel watched - what
-//      outlives a release, at the peripheral and in the channel
+//   r  A RELEASED REQUESTER, THE SAME OWNER AGAIN (the release contract, no
+//      wire): UART1 released with both DMA enables set and four frames
+//      standing, initialized again, one block exact - and the control with no
+//      reset anywhere, the stale frames its first items
 //   w  THE CORNERS, no wire: the sniffer's other modes against their
 //      software twins (CRC-16 and CRC-32 over bit-reversed data, the
 //      even parity, BSWAP on word beats); a WRITE bus error; one
@@ -142,7 +142,6 @@
 
 #include <span>
 
-#include "rp2350/adc.hpp"
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/dma.hpp"
@@ -150,8 +149,6 @@
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
-#include "rp2350/pwm.hpp"
-#include "rp2350/spi.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
@@ -278,6 +275,12 @@ bool same(const uint8_t* a, const uint8_t* b, uint32_t n) {
     return true;
 }
 
+// The channels this suite programs by hand: a tag of its own on each, one tag a
+// slot (docs/design/dma.md, "The ownership rule").
+template <uint8_t ch>
+struct HandChannel {};
+static_assert(dma_claim<DmaSlotId<0, 4>, HandChannel<4>>);
+static_assert(dma_claim<DmaSlotId<0, 5>, HandChannel<5>>);
 using C4 = DmaChannel<4>;
 using C5 = DmaChannel<5>;
 
@@ -878,6 +881,8 @@ void tk_console_engine() {
 // =============================================================================
 using BeatTx = DmaTxEngine<8, uint32_t>;
 using QuietTx = DmaTxEngine<9, uint32_t>;
+static_assert(dma_claim<DmaSlotId<0, 8>, HandChannel<8>>);    // poured unpaced, by hand
+static_assert(dma_claim<DmaSlotId<0, 9>, HandChannel<9>>);
 using Copy = DmaCopyEngine<10>;
 volatile uint32_t quiet_entries = 0;   // line-0 entries QuietTx's service() answered
 volatile uint8_t quiet_flags = 0;
@@ -1030,8 +1035,8 @@ void tl_engines() {
 // =============================================================================
 // m, n - the diagnostic halves (by name)
 // =============================================================================
-using TxOnly = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<6>, NoDmaEngine>;
-using RxOnly = Uart<1, instrument_pins, 1024, 1024, NoDmaEngine, DmaRxEngine<7>>;
+using TxOnly = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, NoDmaEngine>;
+using RxOnly = Uart<1, instrument_pins, 1024, 1024, NoDmaEngine, DmaRxEngine<3>>;
 
 // UART1's vector goes to whichever transport owns the instance now.
 using IsrFn = bool (*)();
@@ -1052,10 +1057,10 @@ void half_loop(const char* name) {
         got += T::read_bulk(std::span<uint8_t>(in + got, 512u - got));
     }
     print(serial, "  ", name, ": up=", up, " got ", got, " in ", us_now() - t0, " us, exact=",
-          same(out, in, got), "; rx ch7 count ", DmaChannel<7>::count(), " busy ",
-          DmaChannel<7>::busy(), " credits ", DmaChannel<7>::debug_credits(), " raw ",
-          DmaChannel<7>::raised(), "; tx ch6 count ", DmaChannel<6>::count(), " busy ",
-          DmaChannel<6>::busy(), crlf);
+          same(out, in, got), "; rx ch3 count ", DmaChannel<3>::count(), " busy ",
+          DmaChannel<3>::busy(), " credits ", DmaChannel<3>::debug_credits(), " raw ",
+          DmaChannel<3>::raised(), "; tx ch2 count ", DmaChannel<2>::count(), " busy ",
+          DmaChannel<2>::busy(), crlf);
     bench.verdict(name, ": 512 bytes back exact", got == 512u && same(out, in, 512));
     const uint32_t pm = wire_permille<T>(3'000'000);
     print(serial, "  1024 frames out in ", pm, " thousandths of their wire time at 3 Mbaud", crlf);
@@ -1588,317 +1593,142 @@ void tp_ring_beside_copies() {
 }
 
 // -----------------------------------------------------------------------------
-// r  A RELEASED REQUESTER (the release contract, no wire)
+// r  A RELEASED REQUESTER, THE SAME OWNER AGAIN (the release contract,
+//    docs/design/dma.md; no wire)
 //
-// docs/design/dma.md's release contract asks whether a peripheral's DMA
-// request, once raised, outlives the peripheral's release. On this
-// controller a request is a one-cycle PULSE the CHANNEL counts (12.6.4.2):
-// each pulse on the DREQ the channel selects increments a counter of the
-// channel's own, and a nonzero counter is what asks the arbiter for a
-// transfer. So a request can outlive a release in two places - at the
-// peripheral, if its DREQ goes on pulsing, and in the channel, whose count
-// is no peripheral's. The letter measures both, with no wire.
+// UART1 owns channels 2 and 3 for the whole image (docs/design/dma.md, "The
+// ownership rule"), so what its block holds across a release can reach only
+// UART1, initialized again. The staging is the worst release: the block up on
+// its loop-back with both DMA enables set, its two channels stopped, four
+// frames sent so that they stand in the receive FIFO with its request raised,
+// the transmit FIFO's room raising the other - and then the block taken down
+// with both enables still set.
 //
-// The requesters, none on a pad: UART1's transmit (TXDMAE over an empty
-// FIFO's room), SPI1's transmit (TXDMAE, the same), PWM slice 3's wrap (a
-// pulse a period, 100 cycles) and the ADC's FIFO (DREQ_EN over one
-// sample). Each is brought up with its request standing and released one
-// of four ways; then the INCOMING OWNER - channel 12 bound on the
-// requester's DREQ, its credits read before the trigger, four items
-// between memory and the requester's own register - is triggered and
-// given 2000 cycles: every item it moves is a request that outlived the
-// release.
+//   contract  the block held in reset, which is this chip's gate and takes the
+//             enables and the FIFOs with it,
+//             then the transport's own init() and one block of sixteen frames
+//             through its engines: exactly sixteen frames back, in order, none
+//             of the four, no fault, inside the wire's time and a margin;
+//   control   the same with the reset removed: the block disabled, the enables
+//             left set and nothing held, then the bring-up by hand with the two
+//             channels bound as init() binds them and no reset anywhere, and the
+//             same block. With the block disabled the bound channel moves nothing:
+//             a disable withdraws the request (12.1.5, "all request signals are
+//             deasserted"). With the block enabled again the receive channel's
+//             first items are what stood in the FIFO: 4 of a run of 16, the block's
+//             last four frames still on their way. That is the request a reset at
+//             init() withdraws: the PL011 keeps its FIFOs across a disable.
 //
-//   A  the driver's release() - the request enable cleared, the block
-//      disabled and held in reset - and then the incoming owner's own
-//      reset: the hand-over as two transports make it (the PWM slice:
-//      stopped, the block's reset being every slice's)
-//   B  the request enable cleared, the block left enabled, no reset
-//   C  the block disabled with its request enable left set, no reset
-//   D  the control: nothing released - the request is live
-//
-// and two ways for the CHANNEL's half, the requester released as in A:
-//
-//   E  the channel bound on the live requester (EN set, untriggered) the
-//      way an engine's arm() leaves it, then DmaChannel::stop() - which an
-//      engine's stop() and arm() both run - and bound again on a request
-//      that never comes (pacing timer 3 at X = 0): every item the incoming
-//      owner moves is a credit the stop left in the channel
-//   F  the same through the ENGINES' own verbs: the requester's engine
-//      armed, then stop()ped, and the next owner's engine arm()ed on the
-//      silent timer and started - what a driver hands its successor
-
-using Det = DmaChannel<12>;
-alignas(4) uint32_t ho_cells[4];
-alignas(4) volatile uint32_t ho_sink = 0;
-
-/// What the incoming owner saw: the credits on its channel before the
-/// trigger, and the items it moved of four.
-struct Seen {
-    uint8_t credits = 0;
-    uint8_t moved = 0;
-    uint8_t stopped = 0;   ///< E and F: the credits the outgoing binding banked, then after stop()
-    uint8_t banked = 0;
-};
-
-DmaTransfer toward(Dreq dreq, volatile void* reg, bool from_peripheral, DmaSize size) {
-    DmaTransfer t{};
-    if (from_peripheral) {
-        t.read = reg;
-        t.write = ho_cells;
-        t.config.read_step = DmaStep::fixed;
-    } else {
-        t.read = ho_cells;
-        t.write = reg;
-        t.config.write_step = DmaStep::fixed;
-    }
-    t.count = 4;
-    t.config.size = size;
-    t.config.treq = dreq;
-    return t;
-}
-
-Seen incoming(const DmaTransfer& t) {
-    Seen s{};
-    if (!Det::prepare(t)) {
-        s.moved = 0xFFu;
-        return s;
-    }
-    spin_us(2);
-    s.credits = static_cast<uint8_t>(Det::debug_credits());
-    Det::trigger();
-    spin_us(16);   // 2400 cycles at 150 MHz
-    s.moved = static_cast<uint8_t>(4u - Det::count());
-    Det::stop();
-    return s;
-}
-
-/// The channel's half: bound on the live requester, stop()ped, the
-/// requester released, bound again on a silent request.
-Seen channel_half(const DmaTransfer& live, void (*release)()) {
-    Seen s{};
-    (void)Det::prepare(live);
-    spin_us(5);
-    s.banked = static_cast<uint8_t>(Det::debug_credits());
-    Det::stop();
-    s.stopped = static_cast<uint8_t>(Det::debug_credits());
-    release();
-    DmaTimer<3>::set(0, 1);
-    DmaTransfer silent{};
-    silent.read = ho_cells;
-    silent.write = &ho_sink;
-    silent.count = 4;
-    silent.config.size = DmaSize::word;
-    silent.config.write_step = DmaStep::fixed;
-    silent.config.treq = DmaTimer<3>::dreq();
-    const Seen in = incoming(silent);
-    s.credits = in.credits;
-    s.moved = in.moved;
-    return s;
-}
-
-/// The same through the engines' verbs: the requester's engine (a
-/// transmit engine, or for the ADC a receive engine) armed and stopped,
-/// the next owner's transmit engine armed on the silent timer and started.
-using DetTx = DmaTxEngine<12, uint32_t>;
-using DetRx = DmaRxEngine<12, uint16_t>;
-template <typename Outgoing>
-Seen engine_half(volatile void* reg, Dreq dreq, void (*release)()) {
-    Seen s{};
-    Outgoing::arm(reg, dreq, false, DmaReport::errors);
-    spin_us(5);
-    s.banked = static_cast<uint8_t>(Det::debug_credits());
-    Outgoing::stop();
-    s.stopped = static_cast<uint8_t>(Det::debug_credits());
-    release();
-    DmaTimer<3>::set(0, 1);
-    DetTx::arm(&ho_sink, DmaTimer<3>::dreq(), false, DmaReport::errors);
-    s.credits = static_cast<uint8_t>(Det::debug_credits());
-    (void)DetTx::start(ho_cells, 4u);
-    spin_us(16);
-    s.moved = static_cast<uint8_t>(4u - Det::count());
-    DetTx::stop();
-    return s;
-}
-
+// Bounds: at 1 Mbaud a frame is 10 us, the four stale frames are out of the
+// transmitter in 40 us and 60 are waited; the block of sixteen takes 160 us on
+// the wire, and 2000 us is the budget, a wire's time twelve times over, which only
+// a stalled channel spends. Four rounds of each, one line a round.
 using U1 = Pl011<1>;
-using S1 = Pl022<1>;
-using Pw = PwmSlice<3>;
+using InstrumentTxEngine = DmaTxEngine<2>;
+using InstrumentRxEngine = DmaRxEngine<3>;
 
-enum class Way : uint8_t { contract, enable_cleared, enable_left, live, channel, engines };
+constexpr uint8_t stale_frames = 4;
+constexpr uint8_t held_block = 16;
 
-void u1_up() {
+void hold_a_request() {
     (void)U1::reset();
-    (void)U1::divisor(*uart_divisor(SysClock::pclk_hz, 115200));
+    (void)U1::divisor(*uart_divisor(SysClock::pclk_hz, 1'000'000));
     (void)U1::line_control({}, true);
+    (void)U1::loopback(true);
     U1::enable(true);
-    U1::dma_requests(true, false);
-    spin_us(20);
+    InstrumentTxEngine::stop();
+    InstrumentRxEngine::stop();
+    U1::dma_requests(true, true);   // no channel bound: both requests stand
+    for (uint8_t i = 0; i < stale_frames; ++i) {
+        U1::regs().UARTDR = static_cast<uint32_t>(0xE0u + i);
+    }
+    spin_us(60);
 }
-void u1_release() {   // the transport's release(): requests off, disabled, held
+
+/// The contract: released with the enables left set, the gate closed, init().
+/// True when the block moved exactly its frames.
+bool reinit_exact() {
+    uint8_t out[held_block];
+    uint8_t in[held_block + 1u] = {};
+    fill(out, held_block, 0x5151u);
+    hold_a_request();
+    U1::hold();
+    uart1_isr = &Instrument::isr;
+    const bool up = Instrument::init(clock, 1'000'000, {}, UartRx::loopback);
+    const uint32_t t0 = us_now();
+    (void)Instrument::write_bulk(std::span<const uint8_t>(out, held_block));
+    uint32_t got = 0;
+    while (got < held_block && us_now() - t0 < 2000u) {
+        (void)Instrument::harvest();
+        got += Instrument::read_bulk(std::span<uint8_t>(in + got, held_block + 1u - got));
+    }
+    const uint32_t took = us_now() - t0;
+    spin_us(100);   // ten frame times: a seventeenth would have landed by now
+    (void)Instrument::harvest();
+    got += Instrument::read_bulk(std::span<uint8_t>(in + got, held_block + 1u - got));
+    const bool exact = up && got == held_block && same(out, in, held_block) && Instrument::dma_faults() == 0u;
+    print(serial, "  the contract: ", got, " of ", held_block, " frames in ", took, " us, first ", hex(in[0]), " (sent ",
+          hex(out[0]), "), faults ", Instrument::dma_faults(), exact ? ", exact" : ", NOT EXACT", crlf);
+    Instrument::release();
+    uart1_isr = nullptr;
+    return exact;
+}
+
+/// The control: no gate and no reset. How many of the run's first items are
+/// the frames that stood in the FIFO; `disabled_moved`, what the channel moved
+/// with the block still disabled.
+uint32_t disabled_moved = 0;
+uint8_t reinit_without_reset() {
+    uint8_t out[held_block];
+    uint8_t in[held_block] = {};
+    fill(out, held_block, 0x5151u);
+    hold_a_request();
+    U1::enable(false);   // the enables left set, the FIFOs kept, nothing held
+    InstrumentRxEngine::arm(&U1::regs().UARTDR, Dreq::uart1_rx, true, DmaReport::errors);
+    (void)InstrumentRxEngine::start(in, held_block);
+    InstrumentTxEngine::arm(&U1::regs().UARTDR, Dreq::uart1_tx, false, DmaReport::errors);
+    spin_us(20);
+    disabled_moved = held_block - DmaChannel<3>::count();
+    U1::enable(true);
+    (void)InstrumentTxEngine::start(out, held_block);
+    const uint32_t t0 = us_now();
+    while (!InstrumentRxEngine::idle() && us_now() - t0 < 2000u) {
+    }
+    uint8_t stale = 0;
+    while (stale < stale_frames && in[stale] == static_cast<uint8_t>(0xE0u + stale)) {
+        ++stale;
+    }
+    const uint32_t moved = held_block - DmaChannel<3>::count();
+    print(serial, "  the control: disabled, the receive channel moved ", disabled_moved, "; enabled, ", moved, " of ", held_block, ", its first ", hex(in[0]), " ",
+          hex(in[1]), " ", hex(in[2]), " ", hex(in[3]), " (the stale frames are E0 E1 E2 E3, the block starts ",
+          hex(out[0]), "): ", stale, " stale", crlf);
+    (void)InstrumentTxEngine::complete();
+    InstrumentTxEngine::stop();
+    InstrumentRxEngine::stop();
     U1::dma_requests(false, false);
     U1::enable(false);
     U1::hold();
-}
-void s1_up() {
-    (void)S1::reset();
-    (void)S1::configure(SpiConfig{});
-    S1::enable(true);
-    S1::dma_requests(true, false);
-    spin_us(20);
-}
-void s1_release() {   // the host's release(): disabled, held
-    S1::enable(false);
-    S1::hold();
-}
-void pw_up() {
-    (void)Pwm::reset();
-    (void)Pw::configure({.top = 99});
-    Pw::enable(true);
-    spin_us(20);
-}
-void pw_release() { Pw::enable(false); }
-void adc_up() {
-    (void)Adc::init(clock);
-    Adc::select(AdcInput::temperature);
-    Adc::fifo({.enable = true, .dreq = true, .threshold = 1});
-    (void)Adc::read();
-    spin_us(20);
-}
-void adc_release() { Adc::release(); }
-
-Seen uart1_handover(Way how) {
-    Det::stop();
-    Det::clear_credits();
-    u1_up();
-    const DmaTransfer t = toward(Dreq::uart1_tx, &U1::regs().UARTDR, false, DmaSize::byte);
-    Seen s{};
-    switch (how) {
-        case Way::contract: u1_release(); (void)U1::reset(); s = incoming(t); break;
-        case Way::enable_cleared: U1::dma_requests(false, false); s = incoming(t); break;
-        case Way::enable_left: U1::enable(false); s = incoming(t); break;
-        case Way::live: s = incoming(t); break;
-        case Way::channel: s = channel_half(t, u1_release); break;
-        case Way::engines: s = engine_half<DmaTxEngine<12>>(&U1::regs().UARTDR, Dreq::uart1_tx, u1_release); break;
-    }
-    u1_release();
-    return s;
-}
-Seen spi1_handover(Way how) {
-    Det::stop();
-    Det::clear_credits();
-    s1_up();
-    const DmaTransfer t = toward(Dreq::spi1_tx, S1::data_address(), false, DmaSize::half);
-    Seen s{};
-    switch (how) {
-        case Way::contract: s1_release(); (void)S1::reset(); s = incoming(t); break;
-        case Way::enable_cleared: S1::dma_requests(false, false); s = incoming(t); break;
-        case Way::enable_left: S1::enable(false); s = incoming(t); break;
-        case Way::live: s = incoming(t); break;
-        case Way::channel: s = channel_half(t, s1_release); break;
-        case Way::engines: s = engine_half<DmaTxEngine<12, uint16_t>>(S1::data_address(), Dreq::spi1_tx, s1_release); break;
-    }
-    s1_release();
-    return s;
-}
-Seen pwm_handover(Way how) {
-    Det::stop();
-    Det::clear_credits();
-    pw_up();
-    const DmaTransfer t = toward(Pw::dreq, Pw::cc_address(), false, DmaSize::word);
-    Seen s{};
-    switch (how) {
-        case Way::contract: pw_release(); s = incoming(t); break;
-        case Way::enable_cleared:
-        case Way::enable_left: s.moved = 0xFEu; break;   // no request enable: the wrap is the request
-        case Way::live: s = incoming(t); break;
-        case Way::channel: s = channel_half(t, pw_release); break;
-        case Way::engines: s = engine_half<DmaTxEngine<12, uint32_t>>(Pw::cc_address(), Pw::dreq, pw_release); break;
-    }
-    pw_release();
-    Pwm::hold();
-    return s;
-}
-Seen adc_handover(Way how) {
-    Det::stop();
-    Det::clear_credits();
-    adc_up();
-    const DmaTransfer t = toward(Adc::dreq, Adc::fifo_address(), true, DmaSize::half);
-    Seen s{};
-    switch (how) {
-        case Way::contract: adc_release(); (void)Adc::init(clock); s = incoming(t); break;
-        case Way::enable_cleared: Adc::fifo({.enable = true, .dreq = false, .threshold = 1}); s = incoming(t); break;
-        case Way::enable_left: Adc::enable(false); s = incoming(t); break;
-        case Way::live: s = incoming(t); break;
-        case Way::channel: s = channel_half(t, adc_release); break;
-        case Way::engines: s = engine_half<DetRx>(Adc::fifo_address(), Adc::dreq, adc_release); break;
-    }
-    adc_release();
-    return s;
-}
-
-void print_seen(const char* name, const Seen& s) {
-    print(serial, "  ", name);
-    if (s.moved == 0xFEu) {
-        print(serial, "   -   ");
-        return;
-    }
-    print(serial, " ", s.moved, "/", s.credits);
+    return stale;
 }
 
 void tr_released_requester() {
-    const char* names[6] = {"A release() + reset  ", "B enable cleared     ", "C disabled, enable on",
-                            "D live (control)     ", "E channel stop()     ", "F engines stop/arm   "};
-    Seen u[6];
-    Seen sp[6];
-    Seen pw[6];
-    Seen ad[6];
-    for (uint8_t i = 0; i < 6u; ++i) {
-        u[i] = uart1_handover(static_cast<Way>(i));
-        sp[i] = spi1_handover(static_cast<Way>(i));
-        pw[i] = pwm_handover(static_cast<Way>(i));
-        ad[i] = adc_handover(static_cast<Way>(i));
+    uint8_t contract = 0;
+    uint8_t held = 0;
+    uint8_t withdrawn = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        contract = static_cast<uint8_t>(contract + (reinit_exact() ? 1u : 0u));
+        held = static_cast<uint8_t>(held + (reinit_without_reset() == stale_frames ? 1u : 0u));
+        withdrawn = static_cast<uint8_t>(withdrawn + (disabled_moved == 0u ? 1u : 0u));
     }
-    DmaTimer<3>::stop();
-    print(serial, "  items moved of 4 / the incoming channel's credits before its trigger:", crlf);
-    for (uint8_t i = 0; i < 6u; ++i) {
-        print(serial, "  ", names[i], ":");
-        print_seen("UART1_TX", u[i]);
-        print_seen("SPI1_TX", sp[i]);
-        print_seen("PWM_WRAP3", pw[i]);
-        print_seen("ADC", ad[i]);
-        print(serial, crlf);
-    }
-    for (uint8_t i = 4; i < 6u; ++i) {
-        print(serial, "  ", names[i], ": banked by the outgoing binding / left after its stop():",
-              " UART1_TX ", u[i].banked, "/", u[i].stopped, " SPI1_TX ", sp[i].banked, "/",
-              sp[i].stopped, " PWM_WRAP3 ", pw[i].banked, "/", pw[i].stopped, " ADC ", ad[i].banked,
-              "/", ad[i].stopped, crlf);
-    }
-    bench.verdict("THE CONTROL: a live request moves the incoming owner's items on all four "
-                  "requesters - the detector sees a request (D)",
-                  u[3].moved >= 1u && sp[3].moved >= 1u && pw[3].moved >= 1u && ad[3].moved >= 1u);
-    bench.verdict("THE CONTRACT HANDS OVER CLEAN: a requester released by its driver and reset by "
-                  "the next owner leaves that owner nothing (A)",
-                  u[0].moved == 0u && sp[0].moved == 0u && pw[0].moved == 0u && ad[0].moved == 0u);
-    bench.verdict("THE PL011 AND THE PL022 WITHDRAW A REQUEST: a cleared DMA enable or a disabled "
-                  "block hands the next owner nothing, no reset needed (B, C) - 12.1.5's \"all "
-                  "request signals are de-asserted\"",
-                  u[1].moved == 0u && u[2].moved == 0u && sp[1].moved == 0u && sp[2].moved == 0u);
-    bench.verdict("THE ADC HOLDS ONE: a converter disabled with DREQ_EN left set keeps its sample in "
-                  "the FIFO and requests it - the next owner reads a stale sample (C); a cleared "
-                  "DREQ_EN withdraws it (B)",
-                  ad[2].moved >= 1u && ad[1].moved == 0u);
-    bench.verdict("A STOPPED PWM SLICE RAISES NOTHING: its wrap is the request, and a slice that "
-                  "does not count does not wrap (A)",
-                  pw[0].moved == 0u);
-    bench.verdict("THE CHANNEL'S CREDITS SURVIVE stop() AND A REBIND - banked by the PWM's pulses, "
-                  "read on the incoming channel before its trigger - BUT THE TRIGGER DROPS THEM: "
-                  "the next owner, on a request that never comes, moved nothing (E, F)",
-                  pw[4].stopped >= 1u && pw[4].credits >= 1u && pw[5].credits >= 1u &&
-                      u[4].moved == 0u && sp[4].moved == 0u && pw[4].moved == 0u &&
-                      ad[4].moved == 0u && u[5].moved == 0u && sp[5].moved == 0u &&
-                      pw[5].moved == 0u && ad[5].moved == 0u);
+    bench.verdict("THE RESET AT init(): UART1 released with both DMA enables set and frames standing, the gate closed, "
+                  "initialized again - its block moves exactly its frames, none of the old ones, no stall, four of four",
+                  contract == 4u);
+    bench.verdict("THE CONTROL, no reset anywhere: the frames that stood are the channel's first four items, four of four "
+                  "- the held request the reset withdraws",
+                  held == 4u);
+    bench.verdict("a disabled PL011 raises nothing: with the enables left set the bound channel moves nothing until the "
+                  "block is enabled, four of four",
+                  withdrawn == 4u);
 }
 
 
@@ -1919,6 +1749,10 @@ uint8_t reverse8(uint8_t b) {
 /// MULTI_CHAN_TRIGGER: word beats, fixed to fixed, permanent requests -
 /// every channel ready every cycle - but the FIRST, which `first_treq`
 /// paces. `high_mask` names the HIGH_PRIORITY ones.
+static_assert(dma_claim<DmaSlotId<0, 6>, HandChannel<6>>);
+static_assert(dma_claim<DmaSlotId<0, 7>, HandChannel<7>>);
+static_assert(dma_claim<DmaSlotId<0, 14>, HandChannel<14>>);
+static_assert(dma_claim<DmaSlotId<0, 15>, HandChannel<15>>);
 template <uint8_t first, uint8_t... chans>
 void race(uint32_t high_mask, uint32_t window_us, uint32_t (&moved)[1 + sizeof...(chans)],
           Dreq first_treq = Dreq::permanent) {
@@ -2059,7 +1893,7 @@ void tw_corners() {
                   lc && ends == 1u && same(src, dst, 1024));
 
     // THE ROUND: channel 14 at normal beside one, two and three of 15,
-    // 11, 9 at HIGH_PRIORITY, all started by one MULTI_CHAN_TRIGGER, all
+    // 6, 7 at HIGH_PRIORITY, all started by one MULTI_CHAN_TRIGGER, all
     // ready every cycle, 20 us.
     uint32_t r0[2] = {};
     uint32_t r1[2] = {};
@@ -2067,8 +1901,8 @@ void tw_corners() {
     uint32_t r3[4] = {};
     race<14, 15>(0, 20, r0);
     race<14, 15>(1u << 15, 20, r1);
-    race<14, 15, 11>((1u << 15) | (1u << 11), 20, r2);
-    race<14, 15, 11, 9>((1u << 15) | (1u << 11) | (1u << 9), 20, r3);
+    race<14, 15, 6>((1u << 15) | (1u << 6), 20, r2);
+    race<14, 15, 6, 7>((1u << 15) | (1u << 6) | (1u << 7), 20, r3);
     print(serial, "  transfers in 20 us (normal / HIGH...): two normal ", r0[0], " / ", r0[1], "; beside one HIGH ", r1[0],
           " / ", r1[1], "; beside two ", r2[0], " / ", r2[1], " ", r2[2], "; beside three ", r3[0], " / ", r3[1], " ", r3[2], " ",
           r3[3], crlf);
@@ -2082,8 +1916,8 @@ void tw_corners() {
     uint32_t p3[4] = {};
     race<14, 15>(0, 20, p0, DmaTimer<2>::dreq());
     race<14, 15>(1u << 15, 20, p1, DmaTimer<2>::dreq());
-    race<14, 15, 11>((1u << 15) | (1u << 11), 20, p2, DmaTimer<2>::dreq());
-    race<14, 15, 11, 9>((1u << 15) | (1u << 11) | (1u << 9), 20, p3, DmaTimer<2>::dreq());
+    race<14, 15, 6>((1u << 15) | (1u << 6), 20, p2, DmaTimer<2>::dreq());
+    race<14, 15, 6, 7>((1u << 15) | (1u << 6) | (1u << 7), 20, p3, DmaTimer<2>::dreq());
     print(serial, "  the normal channel PACED at one request in 20 cycles (150 in the window): beside a normal ", p0[0],
           " / ", p0[1], "; beside one HIGH ", p1[0], " / ", p1[1], "; beside two ", p2[0], " / ", p2[1], " ", p2[2],
           "; beside three ", p3[0], " / ", p3[1], " ", p3[2], " ", p3[3], crlf);
@@ -2254,9 +2088,16 @@ extern "C" void isr_dma_0() {
     } else {
         (void)SinkNormal::dma_isr();
     }
-    (void)Instrument::dma_isr();
-    (void)TxOnly::dma_isr();
-    (void)RxOnly::dma_isr();
+    // UART1's channels have three transport types over them, one at a time:
+    // the one that owns the instance now serves them.
+    const IsrFn uart1_now = uart1_isr;
+    if (uart1_now == &TxOnly::isr) {
+        (void)TxOnly::dma_isr();
+    } else if (uart1_now == &RxOnly::isr) {
+        (void)RxOnly::dma_isr();
+    } else {
+        (void)Instrument::dma_isr();
+    }
     const uint8_t quiet = QuietTx::service();
     if (quiet != 0u) {
         quiet_flags = static_cast<uint8_t>(quiet_flags | quiet);
@@ -2325,7 +2166,7 @@ int main() {
     bench.letter('t', "tx_idle() on the pad under the transmit engine", pair::guarded<bench, clock, tt_tx_idle>);
     bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", pair::guarded<bench, clock, tv_breaks>);
     bench.letter('o', "the overrun a stalled receive engine leaves: no storm", pair::guarded<bench, clock, to_stalled_overrun>);
-    bench.letter('r', "a released requester: what reaches the next owner", tr_released_requester);
+    bench.letter('r', "a released requester: the same owner initialized again", tr_released_requester);
     bench.letter('w', "the corners: sniffer modes, a write error, a chain aborted, the copy on a line, the round",
                  tw_corners);
     bench.letter('x', "a paced block's first transfer against the gap after arm() (diagnostic)", tx_paced_after_arm,

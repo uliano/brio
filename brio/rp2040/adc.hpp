@@ -310,9 +310,8 @@ struct Adc {
 
     /// The converter stopped and the block held in reset, its line
     /// disabled. Held and not merely disabled: a converter disabled with
-    /// DREQ_EN set keeps its sample in the FIFO and requests it, and the
-    /// next owner's DMA channel reads it (measured, test_rp2040_dma
-    /// letter r). Setup's verb.
+    /// DREQ_EN set keeps its sample in the FIFO and requests it, and a DMA
+    /// channel bound on the request reads it (measured). Setup's verb.
     static void release() {
         Nvic::disable(irq());
         interrupt(false);

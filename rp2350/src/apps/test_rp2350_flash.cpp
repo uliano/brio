@@ -134,6 +134,10 @@ TestBench<Serial> bench;
 /// Letter j's engine: a receive engine paced by the streaming FIFO's
 /// request, its completion on line 0.
 using StreamEngine = DmaRxEngine<5, uint32_t>;
+// The channel's owner, the XIP stream's request, which util/dma_owner.hpp's
+// kinds do not name: a tag (docs/design/dma.md, "The ownership rule").
+struct XipStreamRequest {};
+static_assert(dma_claim<DmaSlotId<0, 5>, XipStreamRequest>);
 volatile uint32_t stream_blocks = 0;
 volatile uint32_t stream_errors = 0;
 

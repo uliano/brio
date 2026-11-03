@@ -783,6 +783,9 @@ void tt_tick() {
 // =============================================================================
 using Copy = DmaCopyEngine<8>;
 using Paced = DmaTxEngine<9, uint32_t>;
+// The channel's owner, pacing timer 0: the DREQ is handed at arm(), so the
+// bench makes the claim (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<0, 9>, DmaOwner<DmaPeriph::tim, 0, DmaSignal::update>>);
 using Pace = DmaTimer<0>;
 constexpr uint32_t dma_bytes_per_cycle = 4;   // one 32-bit read and write a clock (12.6)
 constexpr uint32_t paced_words = 256;

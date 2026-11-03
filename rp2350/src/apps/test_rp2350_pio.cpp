@@ -138,6 +138,13 @@ using Window = PioSm<2, 0>;         ///< the machine letter b drives GP22 with
 using TxEngine = DmaTxEngine<9, uint8_t>;
 using RxEngine = DmaRxEngine<10, uint8_t>;
 using WordEngine = DmaRxEngine<11, uint32_t>;
+// What each engine's channel serves, one owner a channel and one channel a
+// request (docs/design/dma.md, "The ownership rule"): a state machine's FIFO, the
+// instance numbered as its block times four plus its number. The DREQ is handed
+// at arm(), so the suite makes the claim the engine cannot.
+static_assert(dma_claim<DmaSlotId<0, 9>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::tx>>);   // Tx: PIO0 SM0
+static_assert(dma_claim<DmaSlotId<0, 10>, DmaOwner<DmaPeriph::pio, 1, DmaSignal::rx>>);   // Rx: PIO0 SM1
+static_assert(dma_claim<DmaSlotId<0, 11>, DmaOwner<DmaPeriph::pio, 3, DmaSignal::rx>>); // Sampler: PIO0 SM3
 
 /// The free pad letter b drives: GP22 is in BOTH windows (index 22 with
 /// GPIOBASE 0, index 6 with GPIOBASE 16), which is what makes it the one

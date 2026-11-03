@@ -17,8 +17,6 @@
 //   SysClock, clock, serial, bench
 //   Host, DmaHost        SpiHost<0, {18, 19, 16}> without engines, and the
 //                        same with half-word engines reporting on DMA_IRQ_0
-//   ByteDmaHost          the same with byte engines, for the refusal: it is
-//                        brought up and asked, and no block ever runs on it
 //   CsPin                the loop-back's select, GP17
 //   DcPin                a D/C line, GP22
 //   SckPad               the host's clock pad, GP18, read as an input
@@ -363,16 +361,6 @@ void tf_async() {
                       same(tx_buf, rx_buf, 32));
     spi0_owner = Spi0Owner::none;
     DmaHost::release();
-
-    // Byte engines carry 8-bit frames and refuse 16-bit ones, however aligned. No
-    // block runs on this host, so its vector is nobody's.
-    (void)ByteDmaHost::init(clock);
-    (void)CsPin::output(true);
-    ByteDmaHost::loopback(true);
-    fill_pattern(tx_buf, 32, 0x5A);
-    const bool byte_refused = refused_whole<ByteDmaHost>(nullptr, 0, tx_buf, rx_buf, 16, "16-bit frames on byte engines, aligned");
-    bench.verdict("BYTE ENGINES refuse 16-bit frames the same way, on buffers however aligned", byte_refused);
-    ByteDmaHost::release();
 
     // ---- the command rule -------------------------------------------------------
     // The command in the loop, the data on the engines: one DMA interrupt whatever

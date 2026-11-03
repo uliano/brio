@@ -75,7 +75,7 @@ constexpr I2cPins host_pins{.scl = 13, .sda = 12};
 constexpr I2cPins client_pins{.scl = 15, .sda = 14};
 using Host = I2cHost<0, host_pins>;
 using DmaHost = I2cHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
-using LineHost = I2cHost<0, host_pins, DmaTxEngine<6, uint16_t, 2>, DmaRxEngine<7, uint8_t, 2>>;
+using LineHost = I2cHost<0, host_pins, DmaTxEngine<4, uint16_t, 2>, DmaRxEngine<5, uint8_t, 2>>;   // the channels I2C0 owns, on another line
 using Client = I2cClient<1, client_pins>;
 static_assert(!Host::has_engines && DmaHost::has_engines && LineHost::has_engines);
 static_assert(!Host::has_dma && DmaHost::has_dma && LineHost::has_dma);

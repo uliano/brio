@@ -228,7 +228,7 @@ driver follows the register description and the tables.
   `enable`, `ready` / `wait_ready`, `temperature_sensor`, `release` (the
   block held in reset: a converter merely disabled with DREQ_EN set keeps
   its sample in the FIFO and requests it - the next owner's channel reads
-  it, `test_rp2350_dma` letter r); the sampler's surface `select(input)` / `select_input()`,
+  it, measured); the sampler's surface `select(input)` / `select_input()`,
   `selected()` (AINSEL as it stands, moved by the round-robin),
   `selected_input()` (the last select), `input_code`, `start()` (one
   shot), `result()`, `read()` (one conversion waited for, nullopt on a

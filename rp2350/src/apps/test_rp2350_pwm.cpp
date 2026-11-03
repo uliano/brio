@@ -137,6 +137,11 @@ using Tick11 = PwmPeriodicTick<11, 1>;
 // paced by that slice's own wrap request. Channel 6 on DMA line 0, which
 // nothing else of this suite uses.
 using Stream = DmaTxEngine<6, uint32_t, 0>;
+using WireStream = DmaTxEngine<7, uint32_t, 0>;
+// One channel a slice's wrap: the DREQ is handed at arm(), so the suite makes the
+// claims (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<0, 6>, DmaOwner<DmaPeriph::pwm, 3, DmaSignal::update>>);
+static_assert(dma_claim<DmaSlotId<0, 7>, DmaOwner<DmaPeriph::pwm, 6, DmaSignal::update>>);
 constexpr uint32_t stream_levels = 64;
 uint32_t level_table[stream_levels];
 volatile bool stream_done = false;
@@ -1144,9 +1149,9 @@ void tk_stream() {
     (void)W::configure({.divider = khz10_div, .top = khz10_top});
     W::levels(0, 0);
     W::counter(0);
-    Stream::arm(W::cc_address(), W::dreq);
+    WireStream::arm(W::cc_address(), W::dreq);
     stream_done = false;
-    const bool started_wire = Stream::start(level_table, stream_levels);
+    const bool started_wire = WireStream::start(level_table, stream_levels);
     const uint32_t t1 = us_now();
     W::enable(true);
     while (!stream_done && us_now() - t1 < 40'000u) {
@@ -1155,7 +1160,7 @@ void tk_stream() {
     const uint32_t duty_pm = measure_duty_pm<Level7>();
     const uint16_t held_b = W::level(1);
     W::enable(false);
-    Stream::stop();
+    WireStream::stop();
     const uint32_t want_pm =
         static_cast<uint32_t>(level_table[stream_levels - 1u] >> 16) * 1000u / (khz10_top + 1u);
     print(serial, "  the same table into slice 6 (GP13 -> GP15): done in ", took_wire,
@@ -1323,6 +1328,10 @@ extern "C" void isr_systick() { brio::Ticker::tick(); }
 extern "C" void isr_dma_0() {
     if ((Stream::service() & Stream::flag_complete) != 0u) {
         (void)Stream::complete();
+        stream_done = true;
+    }
+    if ((WireStream::service() & WireStream::flag_complete) != 0u) {
+        (void)WireStream::complete();
         stream_done = true;
     }
 }

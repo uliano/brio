@@ -105,6 +105,9 @@ using Level4 = PwmLevelCounter<9>;
 using Pair6 = PwmPair<12, 13, 999>;    // slice 6 A on GP12, B on GP13
 using Tick3 = PwmPeriodicTick<3>;
 using Stream = DmaTxEngine<6, uint32_t>;
+// The channel's owner, slice 3's wrap: the DREQ is handed at arm(), so the suite
+// makes the claim (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<0, 6>, DmaOwner<DmaPeriph::pwm, 3, DmaSignal::update>>);
 
 volatile uint32_t wraps[8];
 volatile uint32_t wrap_entries = 0;

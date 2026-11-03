@@ -41,7 +41,7 @@ using SysClock = Clock<ClockSource::pll, 125'000'000>;
 constexpr UartPins u1{.tx = {4, PinFunction::uart}, .rx = {5, PinFunction::uart}};
 using Streamed = Uart<1, u1, 512, 512, DmaTxEngine<2>, DmaRxEngine<3>>;
 static_assert(Streamed::has_tx_engine && Streamed::has_rx_engine);
-using HalfStreamed = Uart<1, u1, 64, 256, NoDmaEngine, DmaRxEngine<4, uint8_t, 1>>;
+using HalfStreamed = Uart<1, u1, 64, 256, NoDmaEngine, DmaRxEngine<3, uint8_t, 1>>;   // the one channel UART1's receive owns, on the other line
 static_assert(!HalfStreamed::has_tx_engine && HalfStreamed::has_rx_engine);
 
 uint8_t src[64];

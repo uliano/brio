@@ -210,6 +210,7 @@
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/dma_owner.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/placement.hpp"
 
@@ -887,6 +888,20 @@ struct DwApbI2cBlock {
 /// util/i2c_bus.hpp holds.
 inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
 
+/// The claim a host makes for one of its engine slots (docs/design/dma.md,
+/// "The ownership rule"): the slot the engine publishes goes to this
+/// instance's request. An empty slot has no `dma_slot` and claims nothing, and
+/// neither does an engine of a chip with no DMA controller behind it (the
+/// simulated block's). True, so that it reads as a static_assert.
+template <typename Engine, uint8_t n, DmaSignal signal>
+constexpr bool dw_apb_i2c_engine_claimed() {
+    if constexpr (requires { typename Engine::dma_slot; }) {
+        return dma_claim<typename Engine::dma_slot, DmaOwner<DmaPeriph::i2c, n, signal>>;
+    } else {
+        return true;
+    }
+}
+
 /**
  * DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine, Placement>
  *
@@ -975,6 +990,11 @@ class DwApbI2cHost {
                   "and the bytes collected");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "brio I2cHost: the two engines must ride two different DMA channels");
+    // One owner a channel and one channel a request, for the whole image: a
+    // second peripheral on either channel, or this request on a second channel
+    // (the DREQ rule: RP2040 2.5.3.2, RP2350 12.6.4.2), does not compile.
+    static_assert(dw_apb_i2c_engine_claimed<TxEngine, n, DmaSignal::tx>());
+    static_assert(dw_apb_i2c_engine_claimed<RxEngine, n, DmaSignal::rx>());
     static_assert(HotPlacement<Placement, Chip>,
                   "brio I2cHost: the placement is InFlash, or InRam on a family whose chip traits say "
                   "places_fast_text (util/placement.hpp)");

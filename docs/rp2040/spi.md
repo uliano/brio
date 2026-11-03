@@ -488,7 +488,7 @@ desk partner's peer (the last group below).
   false, `dma_isr()` is the end, one DMA interrupt, the read exact, the select
   released. THE REFUSALS: 16-bit frames naming dma with the out buffer, the in
   buffer, both, a write, a read, a command alone, or a command ahead of such
-  data off a half-word, and 16-bit frames on byte engines however aligned, each
+  data off a half-word, each
   answered `spi_rejected` inside `start()` with the select held low beforehand
   still low, the D/C held high still high, the control word as it was though the
   request asked another mode, the block quiet and the in buffer untouched, no

@@ -82,6 +82,11 @@ constexpr SpiPins host_pins{.sck = sck_gpio, .tx = tx_gpio, .rx = rx_gpio, .cs =
 using Host = SpiHost<1, host_pins>;
 using PeerTx = DmaTxEngine<0, uint16_t>;
 using PeerRx = DmaRxEngine<1, uint16_t>;
+// The two channels' owners, the client machine's FIFOs (PIO0 SM0): the DREQ is
+// handed at arm(), so the peer makes the claim (docs/design/dma.md, "The
+// ownership rule").
+static_assert(dma_claim<DmaSlotId<0, 0>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::tx>>);
+static_assert(dma_claim<DmaSlotId<0, 1>, DmaOwner<DmaPeriph::pio, 0, DmaSignal::rx>>);
 
 uint32_t us_now() { return Timer::now_low(); }
 

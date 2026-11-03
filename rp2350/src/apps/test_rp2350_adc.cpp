@@ -121,8 +121,11 @@ using In2 = AnalogIn<Pin<adc_first_pin + 2u>>;
 constexpr uint8_t link_input = adc_first_pin == 40u ? 1u : 0xFFu;
 constexpr uint8_t judged_inputs = link_input < adc_pad_inputs ? adc_pad_inputs - 1u : adc_pad_inputs;
 
+// The FIFO's one request has one channel (RP2350 12.6.4.2), so the one engine
+// carries the 16-bit blocks and, a run's beat being at most its element, the bytes
+// of the shifted FIFO. The DREQ is handed at arm(), so the suite makes the claim.
 using Block = DmaRxEngine<10, uint16_t>;
-using ByteBlock = DmaRxEngine<11, uint8_t>;
+static_assert(dma_claim<DmaSlotId<0, 10>, DmaOwner<DmaPeriph::adc, 0, DmaSignal::rx>>);
 
 /// What the ADC_AVDD pin carries on the boards this suite runs on. There
 /// is no ADC_VREF pin on this chip: the converter's supply is its scale.
@@ -567,8 +570,8 @@ void tf_fifo() {
     (void)Adc::fifo({.enable = true, .dreq = true, .error_flag = true, .shift = true, .threshold = 1});
     Adc::drain();
     block_done = false;
-    ByteBlock::arm(Adc::fifo_address(), Adc::dreq);
-    (void)ByteBlock::start(byte_block, 64);
+    Block::arm(Adc::fifo_address(), Adc::dreq);
+    (void)Block::start(byte_block, 64);
     const uint32_t t0 = us_now();
     Adc::start_many(true);
     while (!block_done && us_now() - t0 < 100'000u) {
@@ -580,7 +583,7 @@ void tf_fifo() {
     }
     print(serial, "  the sensor as words: mean ", sum_w / 64u, " (in ", took_w, " us); as shifted bytes: mean ",
           sum_b / 64u, " (the word mean over sixteen = ", (sum_w / 64u) >> 4, ")", crlf);
-    bench.verdict("FCS.SHIFT delivers the top eight bits into a byte block through an eight-bit DMA engine: the byte "
+    bench.verdict("FCS.SHIFT delivers the top eight bits into a byte block at an eight-bit DMA beat: the byte "
                   "mean is the word mean over sixteen, within one",
                   block_done && took_w != 0u && (sum_b / 64u) + 1u >= ((sum_w / 64u) >> 4) &&
                       (sum_b / 64u) <= ((sum_w / 64u) >> 4) + 1u);
@@ -885,9 +888,7 @@ extern "C" void isr_adc_fifo() {
     }
 }
 extern "C" void isr_dma_0() {
-    const uint8_t w = Block::service();
-    const uint8_t b = ByteBlock::service();
-    if ((w & Block::flag_complete) != 0u || (b & ByteBlock::flag_complete) != 0u) {
+    if ((Block::service() & Block::flag_complete) != 0u) {
         if (stop_on_done) {
             // At 500 ksps the FIFO fills in microseconds after the block:
             // the converter is stopped here, not in the loop.

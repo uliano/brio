@@ -685,6 +685,9 @@ void tt_tick() {
 // =============================================================================
 using Copier = DmaCopyEngine<8>;
 using Paced = DmaTxEngine<9, uint32_t>;
+// The channel's owner, pacing timer 0: the DREQ is handed at arm(), so the
+// bench makes the claim (docs/design/dma.md, "The ownership rule").
+static_assert(dma_claim<DmaSlotId<0, 9>, DmaOwner<DmaPeriph::tim, 0, DmaSignal::update>>);
 
 constexpr SpiPins spi_pins{.sck = 18, .tx = 19, .rx = 16};
 /// Half-word engines: SSPDR's width, so 16-bit frames ride them too.

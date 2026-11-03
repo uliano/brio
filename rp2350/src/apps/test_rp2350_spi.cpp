@@ -165,7 +165,6 @@ TestBench<Serial, 19> bench;
 constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
 using Host = SpiHost<0, host_pins>;
 using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
-using ByteDmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint8_t>, DmaRxEngine<5, uint8_t>>;
 using CsPin = Pin<17>;
 using DcPin = Pin<22>;
 using SckPad = Pin<host_pins.sck>;

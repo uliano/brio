@@ -146,6 +146,7 @@
 #include "rp2040/dma_engine.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/resets.hpp"
+#include "util/dma_owner.hpp"
 
 namespace brio {
 
@@ -781,6 +782,10 @@ public:
     using element = Elem;
     /// DmaReport by a name the IP strata reach through the engine type.
     using Report = DmaReport;
+    /// The slot the ownership rule keys (util/dma_owner.hpp), which a
+    /// transport claims for its request: the request is handed at arm(), so
+    /// the engine alone cannot name its owner.
+    using dma_slot = DmaSlotId<0, ch>;
 
     static constexpr uint8_t flag_complete = 1u << 0;
     static constexpr uint8_t flag_half = 0;   ///< this controller has no half-transfer event
@@ -942,6 +947,7 @@ public:
     static constexpr DmaSize size = dma_size_of<Elem>();
     using element = Elem;
     using Report = DmaReport;
+    using dma_slot = DmaSlotId<0, ch>;   ///< as DmaTxEngine's
 
     static constexpr uint8_t flag_complete = 1u << 0;
     static constexpr uint8_t flag_half = 0;
@@ -1067,6 +1073,11 @@ private:
     static inline volatile uint32_t faults_ = 0;
 };
 
+/// The owner of a copy engine's channel: no request paces a copy, so the
+/// tag names the channel it runs on (util/dma_owner.hpp's tag owner).
+template <uint8_t ch>
+struct DmaCopyOwner {};
+
 /**
  * Copy and fill as an engine: one channel in memory-to-memory mode, the
  * controller's native case (2.5: "the DMA transfers data between two
@@ -1085,6 +1096,10 @@ private:
 template <uint8_t ch, uint8_t line = 0>
 class DmaCopyEngine {
     static_assert(ch < dma_channel_count, "no such DMA channel for this engine");
+    // No request paces a copy, so the engine owns its channel through a tag
+    // of its own (docs/design/dma.md, "The ownership rule"): a transport or a
+    // program's tag on the same channel does not compile.
+    static_assert(dma_claim<DmaSlotId<0, ch>, DmaCopyOwner<ch>>);
     static_assert(line < dma_line_count, "the RP2040 DMA has two interrupt lines, 0 and 1");
     using Channel = DmaChannel<ch>;
     using Binding = DmaBinding<ch>;

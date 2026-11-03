@@ -91,8 +91,11 @@ using In0 = AnalogIn<Pin<26>>;
 using In1 = AnalogIn<Pin<27>>;
 using In2 = AnalogIn<Pin<28>>;
 using In3 = AnalogIn<Pin<29>>;
+// The FIFO's one request has one channel (RP2040 2.5.3.2), so the one engine
+// carries the 16-bit blocks and, a run's beat being at most its element, the bytes
+// of the shifted FIFO. The DREQ is handed at arm(), so the suite makes the claim.
 using Block = DmaRxEngine<7, uint16_t>;
-using ByteBlock = DmaRxEngine<8, uint8_t>;
+static_assert(dma_claim<DmaSlotId<0, 7>, DmaOwner<DmaPeriph::adc, 0, DmaSignal::rx>>);
 
 constexpr uint16_t vref = ref_mv(Ref::vref_pin);   // the boards' filtered 3.3 V rail
 
@@ -477,8 +480,8 @@ void tf_fifo() {
     Adc::fifo({.enable = true, .dreq = true, .error_flag = true, .shift = true, .threshold = 1});
     Adc::drain();
     block_done = false;
-    ByteBlock::arm(Adc::fifo_address(), Adc::dreq);
-    (void)ByteBlock::start(byte_block, 64);
+    Block::arm(Adc::fifo_address(), Adc::dreq);
+    (void)Block::start(byte_block, 64);
     const uint32_t t0 = us_now();
     Adc::start_many(true);
     while (!block_done && us_now() - t0 < 100'000u) {
@@ -490,7 +493,7 @@ void tf_fifo() {
     }
     print(serial, "  the sensor as words: mean ", sum_w / 64u, " (in ", took_w, " us); as shifted bytes: mean ", sum_b / 64u,
           " (the word mean >> 4 = ", (sum_w / 64u) >> 4, ")", crlf);
-    bench.verdict("FCS.SHIFT delivers the top eight bits into a byte block through an eight-bit DMA engine: the byte mean is "
+    bench.verdict("FCS.SHIFT delivers the top eight bits into a byte block at an eight-bit DMA beat: the byte mean is "
                   "the word mean over sixteen, within one",
                   block_done && took_w != 0u && (sum_b / 64u) + 1u >= ((sum_w / 64u) >> 4) && (sum_b / 64u) <= ((sum_w / 64u) >> 4) + 1u);
     // The error flag per entry.
@@ -667,9 +670,7 @@ extern "C" void isr_adc_fifo() {
     }
 }
 extern "C" void isr_dma_0() {
-    const uint8_t w = Block::service();
-    const uint8_t b = ByteBlock::service();
-    if ((w & Block::flag_complete) != 0u || (b & ByteBlock::flag_complete) != 0u) {
+    if ((Block::service() & Block::flag_complete) != 0u) {
         if (stop_on_done) {
             // At 500 ksps the FIFO fills 16 us after the block: the
             // converter is stopped here, not in the loop (measured:

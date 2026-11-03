@@ -45,11 +45,12 @@ every channel at work. The two buffers belong to the transfer from
 destination untouched until then, which nothing checks. `load()` answers
 false and starts nothing for a channel still BUSY, a count of zero or
 past 2^28 - 1, or an end not aligned to the width (the DMA does not
-enforce alignment); the example discards that answer. A channel has one
-owner: an engine holds its channel from its `arm()` to its `stop()`, and
-a channel verb that rewrites the control register behind it breaks the
-binding. Two channels must not share one peripheral request, and a FIFO
-a channel serves must not be touched by the processor. A completion
+enforce alignment); the example discards that answer. **A channel has one
+owner for the whole image and a peripheral request one channel**, which the
+compiler checks for what claims them ("One owner a channel" below); an engine
+holds its channel from its `arm()` to its `stop()`, and a channel verb that
+rewrites the control register behind it breaks the binding. A FIFO a channel
+serves must not be touched by the processor. A completion
 reported on an interrupt line needs that line's vector bound by the
 program under the crt's name, the same on both architectures
 (`isr_dma_0` for line 0, core 0's by this stratum's convention). And the
@@ -290,6 +291,68 @@ and about 25 after it. The PL022 host's launch of a data phase is a
 receive start and a transmit start: about 70 instructions and six
 accesses to the controller, one of them a read (the receive channel's
 BUSY).
+
+## One owner a channel
+
+A DMA channel has one owner for the whole image, and a peripheral request
+one channel ([design/dma.md](../design/dma.md), "The ownership rule"). The
+compiler checks both, through `util/dma_owner.hpp`: the slot is the channel,
+`DmaSlotId<0, ch>` (this controller is not numbered, so the first number is
+zero), and each engine publishes it as `dma_slot`.
+
+On this chip a request is a field any channel takes, handed at `arm()` (DREQ
+numbers, table 1254), so an engine's type does not know its owner and cannot claim
+for itself. Whoever hands it the request does:
+
+- **A transport claims when its type is instantiated.** `Uart<n, ...>` claims
+  each engine's channel for `DmaOwner<DmaPeriph::uart, n, DmaSignal::tx>` or
+  `rx`, `SpiHost<n, ...>` for `DmaPeriph::spi`, `I2cHost<n, ...>` for
+  `DmaPeriph::i2c`; a slot left at `NoDmaEngine` claims nothing. A program writes
+  nothing for these. Two transport types over one instance's request on one
+  channel are one owner and pass, whatever their element types and lines.
+- **`DmaCopyEngine<ch>` claims its channel for a tag of its own**,
+  `DmaCopyOwner<ch>`.
+- **An engine a program arms itself, or a channel it programs by hand, is
+  claimed by the program**, in the source where it names them:
+
+  ```cpp
+  // Excerpt: a level table poured into PWM slice 3's compare register on its wrap.
+  using Stream = brio::DmaTxEngine<6, uint32_t>;
+  static_assert(brio::dma_claim<brio::DmaSlotId<0, 6>,
+                                brio::DmaOwner<brio::DmaPeriph::pwm, 3, brio::DmaSignal::update>>);
+
+  // Excerpt: a channel programmed by hand, under a tag the program names.
+  struct ByHand {};
+  static_assert(brio::dma_claim<brio::DmaSlotId<0, 4>, ByHand>);
+  ```
+
+  The owner names a PIO state machine as its block times four plus its number,
+  a pacing timer as `DmaPeriph::tim` with `DmaSignal::update`, the ADC as
+  `DmaPeriph::adc`; a request the vocabulary lacks takes a tag (the XIP
+  stream's). Nothing checks that a program wrote this claim: an engine armed
+  with no claim is invisible to the check, which is the programmer's duty and
+  not the compiler's.
+
+A second owner on a claimed channel does not compile. UART1's transmit on
+channel 2 beside an SPI0 host on the same channel reads
+`ambiguating new declaration of 'constexpr brio::DmaOwner<brio::DmaPeriph::spi, 0, brio::DmaSignal::tx> brio::dma_owner_of(DmaSlotId<0, 2>)'`
+with UART1's transmit on the note under it. A second channel for a request does
+not compile either, which is this chip's own rule ("Multiple channels must not be connected to the same DREQ", 12.6.4.2): the
+same transmit on channel 6 after channel 2 reads
+`ambiguating new declaration of 'constexpr brio::DmaSlotId<0, 6> brio::dma_slot_of(DmaOwner<brio::DmaPeriph::uart, 1, brio::DmaSignal::tx>)'`
+against the old declaration's `DmaSlotId<0, 2>`. Handing a channel from one
+peripheral to another as the program runs is the same refusal; the fixtures
+`test/family_rp2350/neg/dma_*` hold each shape. The claims add no byte and no cycle.
+
+**The map forces no choice here.** Any request reaches any channel, so nothing
+is chosen for a program but the channel numbers, and the only limit is their
+count: sixteen channels, against the nine a program uses with a console and a second
+UART with both engines each, an SPI host's two, an I2C host's transmit, one ADC
+stream and one paced stream. The one narrower fact is the DREQ rule above: a
+converter's or a state machine's one request stays on one channel, so a program that
+reads it at two widths uses one engine at the wider beat and gives the narrower
+letter a narrower run (a run's beat is at most the engine's element). No part of this
+family has a forced instance or an unavoidable group.
 
 ## Types and verbs
 
@@ -567,16 +630,18 @@ DMA engine, the console's transport naming one in its transmit slot.
   nothing lost ([../rp2040/dma.md](../rp2040/dma.md)): the round
   12.6.10 describes is not the RP2040's round once 12.6.1's idle cycle
   is gone, measured and not explained further.
-- **A RELEASED REQUESTER**, letter r (no wire), the RP2040's answer on
-  both halves: nothing reaches the next owner after the drivers'
-  `release()` and its own reset, nor from the PL011 or the PL022 with the
-  DMA enable cleared or the block disabled (12.1.5: "all request signals
-  are de-asserted"), nor from a stopped PWM slice; ONE stale sample from
-  the ADC disabled with DREQ_EN left set. The PWM's pulses bank credits
-  on a bound, untriggered channel, `DmaChannel::stop()` and a rebind
-  leave them (9 to 12 read on the next owner's channel), and the
-  TRIGGER drops them: the next owner, armed on a request that never
-  comes, moved nothing.
+- **A RELEASED REQUESTER, THE SAME OWNER AGAIN**, letter r (no wire), the release
+  contract on UART1, whose channels 2 and 3 are its own for the whole image. The
+  block is released the worst way: both DMA enables set, the channels stopped, four
+  frames standing in the receive FIFO, the block held in reset with the enables
+  left set. The transport's `init()`, then one block of sixteen frames at 1 Mbaud:
+  sixteen back in order, none of the four, no fault (162 to 180 us / 162 to 178 us on a wire of 160, Cortex-M33 / Hazard3, ten runs of four rounds each). THE
+  CONTROL, the reset removed - the block disabled with the enables left set, the
+  bring-up by hand, the channels bound as `init()` binds them: with the block still
+  disabled the bound channel moves nothing (12.1.5: "all request signals are de-asserted"), and with
+  it enabled the receive channel's first four items are the four stale frames, four
+  rounds of four. The PL011 keeps its FIFOs across a disable, so that is the request
+  a reset at `init()` withdraws.
 - **THE CORNERS, letter w** (ten runs on each half, no wire). THE
   SNIFFER'S OTHER MODES against util/crc.hpp's twins: CRC16R and CRC32R
   are the CRC-16-CCITT and the CRC-32 of the same bytes each
@@ -650,6 +715,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- A PIO state machine released with its request standing and started again, as letter
+  r stages the others: a machine's `init()` drains its FIFOs (`PioSm::init()`) and the
+  block's reset is every machine's, so no reset is at issue. Read from the driver and not
+  measured; a letter that leaves a word standing, runs `init()` and binds the channel
+  on the machine's request would measure it.
 - WHY two HIGH_PRIORITY byte copies starve a normal receive ring on a
   UART here and not on the RP2040 (letter p): letter w counted the round
   and it is not the cause - a paced normal channel between SRAM cells is
