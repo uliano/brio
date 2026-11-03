@@ -182,7 +182,7 @@ takes** - the inventory the costs below are read against:
 | START set while the last written byte shifts, the repeated START generated at its end (15.10.1) | yes, for a write-then-read | a polled CH32 target loses the last written byte when the repeated START comes after BTF ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)); requested on the TxE of that byte - the order WCH's interrupt example uses - it is on the wire as the byte ends (the findings) |
 | START cleared by the user code, a requested start withdrawn (15.10.1) | declined | behind a refused last byte the controller generates the repeated START all the same, and the withdrawal races it: won at 100 kHz, lost at 400 kHz with the bus left held (the findings); the refusal is closed from the Sr's SB instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.10.1) | yes | the chapter's procedures by count |
-| DMAEN with LAST (15.8, 15.10.2) | yes, when the request names `I2cEngine::dma` | every data half at any length, no entry a byte: a read of two or more under LAST, a read of one with its NACK and STOP set in the ADDR entry as the pump's are (15.3's one-byte procedure, the channel moving the byte); each block's completion interrupt is taken, the transmit block's handing its half back to the event vector with DMAEN down (15.8: no ITBUFEN under DMA) - BTF ends a plain write, the TxE of the last byte requests a write-then-read's repeated START |
+| DMAEN with LAST (15.8, 15.10.2) | yes, when the request names `I2cEngine::dma` | every data half at any length, no entry a byte: a read of two or more under LAST, a read of one with its NACK set in the SB entry, before the address, and its STOP in the ADDR entry, as the pump's are (15.3's one-byte procedure, the channel moving the byte); each block's completion interrupt is taken, the transmit block's handing its half back to the event vector with DMAEN down (15.8: no ITBUFEN under DMA) - BTF ends a plain write, the TxE of the last byte requests a write-then-read's repeated START |
 | PEC (15.9), 10-bit addresses as a host (15.3) | declined | no Request shape asks for them ("Not covered yet") |
 | one CTLR1 store for START with POS and ACK down | yes | the address phase's control written once; read after STAR1 it is also the second half of a stale STOPF's clear |
 
@@ -255,12 +255,15 @@ takes** - the inventory the costs below are read against:
   gets it -, moves every byte from the event vector and touches no
   channel; `dma` puts every data half on the engines at any length.
   Under `dma` a write ends as the pump's does once its block has
-  completed: the block's completion interrupt drops DMAEN, and a plain
-  write ends on BTF with the transmit channel's count read at zero,
-  while a write before a read raises the buffer line and requests its
-  repeated START on the TxE of its last byte. A BTF with the count
-  standing is a channel that stopped serving, and ends the tenure
-  `i2c_dma_fault` with its STOP; a read ends on the receive block's
+  completed: the block's completion interrupt drops DMAEN and hands the
+  half back to the event vector, so a plain write ends on BTF and a write
+  before a read raises the buffer line and requests its repeated START
+  on the TxE of its last byte. A BTF served before that completion reads
+  the transmit channel's count instead: at zero the event vector
+  completes the block itself, and a count standing is a channel that
+  stopped serving, which ends the tenure `i2c_dma_fault` - this host's
+  own status, declared in its header beyond the four wire codes of
+  util/i2c_bus.hpp - with its STOP; a read ends on the receive block's
   completion. A launch the transmit engine refuses - its claim held by
   another owner of `DmaTxEngine<6>` - is found in the ADDR entry with
   SCL held, and that half runs on the pump, the request completing; an
@@ -541,15 +544,6 @@ verdict green:
   byte under `dma` are letter `r`'s, the lost arbitration letter `j`'s
   (`i2c_arb_lost` with no transmit block started or thrown away).
 
-The control: the same letter over this engine's previous version, the
-`engine` field carried and read by nothing, failed all five rows - the
-one-byte read on the pump; the request naming the interrupt still
-writing both channels; the write under a held claim never answered (its
-launch refused unseen, DMAEN up and no byte moving, until the caller's
-bound recovered the host and took the other owner's claim with it);
-`dma` on the engineless host put on the wire; three faults counted for
-one data NACK.
-
 ### Which engine to name
 
 A wrong choice costs time or energy, never correctness, and the host
@@ -563,16 +557,23 @@ E <= F + N x b:
 
 | at | write: b, F, E | the engines from | read: b, F, E | the engines from |
 |---|---|---|---|---|
-| 400 kHz | 291, 1071, 1609 | 2 bytes ((1609 - 1071) / 291 = 1.8) | 322, 915, 1521 | 2 bytes ((1521 - 915) / 322 = 1.9) |
-| 100 kHz | 305, 1238, 1748 | 2 bytes ((1748 - 1238) / 305 = 1.7) | 337, 855, 1660 | 3 bytes ((1660 - 855) / 337 = 2.4) |
+| 400 kHz | 291 to 292, 1067 to 1071, 1609 | 2 bytes ((1609 - 1071) / 291 = 1.8) | 323 to 325, 903 to 911, 1521 | 2 bytes ((1521 - 911) / 323 = 1.9) |
+| 100 kHz | 304 to 306, 1011 to 1528, 1748 | 1 to 3 bytes, by the run | 337 to 339, 851 to 1404, 1660 | 1 to 3 bytes, by the run |
 
-Measured as such, a one-byte write costs the pump 1513 busy cycles at
-400 kHz and the engines 1609, a two-byte write 1661 and 1609; a read of
-one 1410 and 1521, of two 1449 to 1533 and 1503 (the pump's two-byte
-procedure takes one entry for both bytes, and the tick's entries move
-these figures by a hundred cycles), of four 2203 and 1497. So: the
-engines from two bytes written and three read; under that the
-interrupt. Against the wire: the pump spends 291 cycles of a 1098-cycle
+Each row is the range over seven runs of the letter. At 400 kHz the
+arithmetic holds still. At 100 kHz the pump's four-byte tenure, from
+which F is taken, lasts some 490 us, and in some runs the best of eight
+still holds one of the tick's entries (seven entries or eight for the
+write, five or six for the read): F moves by up to 550 cycles between
+runs and the count with it, so at that speed the small lengths are read
+directly instead. Measured as such, a one-byte write costs the pump 1513
+busy cycles at 400 kHz and the engines 1609, a two-byte write 1661 and
+1609 (at 100 kHz 1652 and 1748, 2023 and 1748); a read of one 1410 and
+1521 (1549 and 1660), of two 1449 and 1503 in most runs (1449 and 1642),
+the pump's two-byte procedure taking one entry for both bytes, and of
+four 2203 and 1497 at
+400 kHz. So: the engines from two bytes written and three read; under
+that the interrupt. Against the wire: the pump spends 291 cycles of a 1098-cycle
 byte at 400 kHz (a quarter of the core) and 305 of a 4338-cycle byte at
 100 kHz (a fourteenth); the engines spend none a byte.
 
@@ -692,10 +693,13 @@ a tenure longer than a tick period may hold one of the tick's.)
   transmit block's completion and BTF) and a read in three (SB, ADDR and
   the receive block's completion), at x 1.00, the core busy 3 086 and
   2 612 to 2 835 cycles of 282 429 and 282 503 (the tick's entries inside
-  them); their fixed cost is under the pump's (1219 cycles against 1394
-  for a write, 1293 against 1546 for a read). The transmit block's
-  completion is the price of carrying a write half before a read: 173
-  busy cycles over a write whose block was armed for its errors alone.
+  them); their fixed cost is under the pump's for a write of any length
+  (1219 cycles against 1394) and for a read of four bytes or more (1293
+  against 1520 to 1546), and over it for a read of one or two (1287 and
+  1299 against 1200 to 1252 and 1230 to 1256). The transmit block's
+  completion entry is the price of carrying a write half before a read:
+  it hands the half back to the event vector for the BTF or the TxE that
+  ends it.
 - **The register read** (one byte written, the repeated START on its
   TxE, one read) takes seven entries and 2016 cycles of fixed cost on the
   pump; under `dma`, both halves on the engines, seven entries and 1867.
@@ -710,11 +714,11 @@ a tenure longer than a tick period may hold one of the tick's.)
   no placement parameter on this family and a program that wants the
   pump from SRAM places its event vector.
 - **Against the EVT** the comparison is between two contracts: the
-  polled loop's fixed cost is 340 to 770 cycles under this engine's
+  polled loop's fixed cost is 379 to 805 cycles under this engine's
   (no vector entry, no idle turn, no instrument stamp inside it) and its
   CPU is the bus's for the whole tenure - 281 972 cycles for a 255-byte
   write at 400 kHz, where this engine's pump keeps the core busy for
-  75 436 of them and its engines for 3 086.
+  75 388 to 75 581 of them and its engines for 3 086.
 
 ## Not covered yet
 

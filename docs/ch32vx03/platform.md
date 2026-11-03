@@ -1104,8 +1104,8 @@ far end lets the line go), with the vector entered within 62 counts:
 those spend their time after the vector and before the dispatch, where
 the suite's instruments do not place it.
 No tick was dropped in any pass. The findings
-are the I2C page's: a preemption reaches the host only before its
-START, every tenure shape exact on both paths under every pressure, and
+are the I2C page's: a preemption reaches the host before its START or
+in `start()`'s last instructions after it, every tenure shape exact on both paths under every pressure, and
 on a held line the first START loses and the next ones park. The
 images: on the CH32V203C8 34760 bytes of text and 428 of data, 35188
 of the 60 KB the linker script gives it (57 %), and 2112 bytes of RAM of

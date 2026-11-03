@@ -1309,11 +1309,12 @@ in the control, and a preemption inside the host's `start()` is a later
 START, never a stretch (the findings are [i2c.md](i2c.md)'s, "The stack
 under the preemptive kernel"). Two of them are this kernel's:
 
-- **The tenure cycle locks to the pressure's period, at a phase the
-  placement moves.** Under 97 us x 3000, 400 writes landed TIM2's
-  interrupt inside `start()` 140 to 213 times with the scheduler path in
-  SRAM - five to eight times what independent ticks would give - and never
-  with the path in the flash, `start()` itself in the flash in both images.
+- **The tenure cycle locks to the pressure's period.** Under 97 us x
+  3000, 400 writes landed TIM2's interrupt inside `start()` 352 to 363
+  times with the scheduler path in SRAM and 308 to 316 with it in the
+  flash - six to seven times the 50 or 51 independent ticks would give -
+  `start()` itself in the flash in both images and its figure holding the
+  suite's own copy of the Request ([i2c.md](i2c.md)).
 - **Past this core's capacity the stack stays within the pack's count of
   runs.** A held-wire flood with a probe at every tick of 97 us x 3000
   asks more than the 4656 cycles of a period hold (a rejected probe's
@@ -1323,14 +1324,14 @@ under the preemptive kernel"). Two of them are this kernel's:
   run. The suite's letter `u` runs that flood by name for 2000 ticks, the
   pressure's vector stopping the timer itself, with the free stack
   painted again before it: the stack's high-water during the letter read
-  1304 bytes in ten runs with the scheduler path in SRAM and 1300 to 1320
-  in ten with it in the flash, against the 2144 bytes
+  1336 to 1400 bytes in ten runs with the scheduler path in SRAM and 1320
+  to 1432 in ten with it in the flash, against the 2144 bytes
   the kernel's bound derives - at most five runs for the pack's five
   objects, each object's deepest dispatch at most once, one empty run at
   an entry, by the release listing's frames (the letter's arithmetic).
-  Of the 2000 probes 1356 to 1368 were answered and 633 to 645 dropped by
-  the arbiter's full queue with the scheduler path in SRAM, 458 to 466
-  and 1535 to 1544 with it in the flash; after the flood the next tenure
+  Of the 2000 probes 1353 to 1359 were answered, the arbiter's full queue
+  dropping 642 to 648 requests, with the scheduler path in SRAM, 455 to
+  470 and 1531 to 1546 with it in the flash; after the flood the next tenure
   was `i2c_ok` and the arbiter idle in every run. Under the cooperative
   kernel no dispatch nests over another, so the same load would starve
   the lower objects at the stack's one level (not run: the suite is the
@@ -1339,8 +1340,8 @@ under the preemptive kernel"). Two of them are this kernel's:
   turned since the last), which keeps it under what the core serves and
   its held tenure answered in its place ([i2c.md](i2c.md)).
 
-The images: with the path in SRAM 36740 bytes of the 62 KB (58 %) and
-4600 of RAM (22 %); with the path in the flash 36504 and 2088.
+The images: with the path in SRAM 37740 bytes of the 62 KB (59 %) and
+4608 of RAM (22 %); with the path in the flash 37496 and 2092.
 
 ## A handler in SRAM
 
