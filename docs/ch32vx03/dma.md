@@ -1145,6 +1145,19 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The priority rule's reach below 1 Mbaud and under paced loads.**
+  Letter q measures the rule at 1 and 4.5 Mbaud against an unpaced copy
+  (the bench finding "The priority rule on the bench"). Two claims behind
+  the rule ([design/dma.md](../design/dma.md)) are not a suite's
+  measurement: that a ring armed at the lowest level loses data from
+  115200 baud up as soon as one block of a copy on a lower channel
+  outlasts a character time, its receive vector taking most of the core
+  while the channel is starved; and that paced loads - an SPI host's two
+  engines at 36 MHz, a timer stream at 1 and 4 MHz - starve no ring at
+  any level. What would measure them is letter q's control run at
+  115200 with a copy block of 4 KB, and letter q with SPI2's two engines
+  and a timer stream in the copy's place, each judged on the ring's bytes
+  and overrun count.
 - **UART4's receive request on DMA2's channel 3**: its transmit request
   is measured held on channel 5 (letter s); the receive side wants a
   frame on its pad, and both of that port's columns are the desk pair's

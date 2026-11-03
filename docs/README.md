@@ -54,7 +54,7 @@ Target-independent design, one page per decision:
 | [design/nv-journal.md](design/nv-journal.md) | NvJournal: a handful of small values kept in flash on a part with no EEPROM, with a reserve a panic handler can still write |
 | [design/usb.md](design/usb.md) | USB, the device side: the contract at the packet, the control endpoint and the standard requests written once, CDC ACM as a byte transport |
 | [design/power.md](design/power.md) | The power model: the sleep-depth ladder, the votes among stakeholders, and what a program may assume on the first event after a wake |
-| [design/dma.md](design/dma.md) | What a program is owed of a DMA engine whatever the controller: the priority levels and the release contract |
+| [design/dma.md](design/dma.md) | What a program is owed of a DMA engine whatever the controller: one owner per channel, the priority levels and the release contract |
 | [design/ring.md](design/ring.md) | Ring: the single-producer single-consumer FIFO, and the reading side of a ring a DMA channel fills |
 | [design/analog.md](design/analog.md) | Analog sampling in the kernel: the converter concept, attribution of results, the counts-to-millivolts arithmetic |
 | [design/meters.md](design/meters.md) | Meters: bridging a capture interrupt to the loop, and pacing publication rather than capture |

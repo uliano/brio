@@ -257,15 +257,13 @@ a request its engines cannot carry ([spi-bus.md](spi-bus.md), "Two ways to
 run a request"): there the fallback would be the polled loop inside
 `start()`, which holds the arbiter's dispatch for the request's whole
 wire time, so whether the dispatch is held would depend on details such
-as the memory a buffer sits in or another owner holding a channel. On
-I2C the interrupt path is itself asynchronous - `start()` returns
-false and the tenure ends on an interrupt either way - so carrying a half
-on the pump changes the core's cycles and nothing of the program's shape.
-The halves the engines leave to the pump: on every host with engines but
-the SAM C21's, a half whose channel refuses the launch (one another owner
-holds, and on the CH32V303's DMA1 a run across a 64 KB boundary), found
-before the half moves; on the STM32G0 and the STM32F4's FMPI2C1, a half
-with no buffer; on the DesignWare block, the write half, the read half's
+as the memory a buffer sits in. On I2C the interrupt path is itself
+asynchronous - `start()` returns false and the tenure ends on an
+interrupt either way - so carrying a half on the pump changes the core's
+cycles and nothing of the program's shape. The halves the engines leave
+to the pump: on the CH32V303's DMA1, a half whose run crosses a 64 KB
+boundary, found before the half moves; on the STM32G0 and the STM32F4's
+FMPI2C1, a half with no buffer; on the DesignWare block, the write half, the read half's
 first and last commands and the probe ([the DesignWare I2C
 page](../dw_apb_i2c/README.md) says which of those the silicon decides);
 on the SAM C21, whose channel is claimed at `init()` and whose launch

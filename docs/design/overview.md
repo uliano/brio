@@ -269,7 +269,9 @@ layers above, not what the peripheral is.
   until the completion event, so the channel may read and write them
   meanwhile), and the completion
   interrupt posts `TransferDone`. Nothing above the engine changes; the
-  DMA channel is a resource like a timer, and a receive stream fed by
+  DMA channel is a resource like a timer, owned by one peripheral
+  request for the whole image and never handed from one to another
+  ([dma.md](dma.md), "The ownership rule"), and a receive stream fed by
   DMA is a ring whose producer index is the hardware's counter
   ([dma.md](dma.md), [ring.md](ring.md)). The AVR DA and DB have no
   DMA; their engine boundary is already where a channel would go.
@@ -391,6 +393,9 @@ layers above, not what the peripheral is.
   list the resources an application claims and reject a double use
   when the program is compiled; that unit is born with the first
   portable example application, a stated gap of the learning route.
+  The DMA channels do not wait for it: a second owner of one is refused
+  by a check of util's own, wherever the drivers claim
+  ([dma.md](dma.md), "The ownership rule").
 - **A driver covers its family, not its bench chip.** The bench chip
   is the one part of a family on the desk. brio is a
   framework: the target is the whole device range, every instance,
@@ -565,7 +570,7 @@ stratum's.
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM; a family may have the medium and mount nothing on it, by a decision those pages record |
-| DMA engines | [dma.md](dma.md) | the levels and the release are the WCH strata's, the STM32G0's, the STM32F4's, the SAM C21's and the two RP families' (the RP2040 and the RP2350), the AVR having no controller; four levels or one bit, the arbiter's own tie rule |
+| DMA engines | [dma.md](dma.md) | the levels and the release are the WCH strata's, the STM32G0's, the STM32F4's, the SAM C21's and the two RP families' (the RP2040 and the RP2350), the AVR having no controller; four levels or one bit, the arbiter's own tie rule; the slot one owner is given is a channel, or the STM32F4's stream |
 | block streams | [block-stream.md](block-stream.md) | the engine names identical wherever block engines exist, and several strata's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter; a family with no capture unit has no meter at all |
 | analog | [analog.md](analog.md) | `Ref` is several vocabularies because a reference is several different things, one of them the rail alone; `set`/`write` on the DAC |

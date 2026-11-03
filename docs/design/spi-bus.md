@@ -191,9 +191,9 @@ copied nowhere else: the engine reads every field through the
 reference. An asynchronous one outlives the call, so the engine keeps
 what its tenure (the request's time on the bus) needs, and on every family
 with engines that is the request's two pins, its select and its D/C: the
-completion raises the select, and the D/C on a clean end (on a fault the
-CH32 families and the SAM C21 raise it too, while the STM32G0, the STM32F4
-and the PL022 leave it where the request left it). The SAM C21 keeps one
+completion raises both, whether the request ended clean or failed ("When a
+request ends, the wire has ended", below, which names the hosts that leave
+the D/C where a failed request left it). The SAM C21 keeps one
 more fact, whether the request reads, which its end needs. The buffers, the
 lengths and the width are the channels' once they are launched; the rate and
 the mode are written into the block and the setup time spent before
@@ -292,6 +292,25 @@ inside `start()`, and the arbiter replies with whatever the engine's
 `status()` reports; false means it is still on the wire and a
 `TransferDone` will arrive. The way travels per request in the
 `engine` field: like the clock, the client knows its transaction.
+
+**One busy check, before anything moves.** A host refuses a request
+while a transfer of its own is still in flight: `start()` returns true
+at once with `spi_rejected` in `status()`, before the select, the D/C or
+the block moves, whichever engine either request names, and every host
+makes the check the same way, first. It is the only busy check there
+is. Under the ownership rule ([dma.md](dma.md), "The ownership rule")
+no other owner can hold the host's channels, so "a channel another owner
+holds" is not a case a host tests for. The arbiter never starts a
+request over one in flight, so only a program that drives `SpiHost`
+directly can meet the refusal.
+
+No host makes the check in that form today. The CH32 families' hosts
+test their transmit channel, for a request naming `dma` alone, before
+anything moves; the STM32F4 and the STM32G0 test their channels at the
+launch, after the select fell and a command ahead of the data ran in the
+loop (their sections at the end of this page); the PL022 and the SAM
+C21 test nothing. On the AVR no transfer outlives `start()`, so nothing
+is ever in flight to test.
 
 - **Polled** (`SpiEngine::polled`), and **polled is an explicit loop**, at
   any length and on every host. `start()` runs the whole transaction in
@@ -412,25 +431,18 @@ inside `start()`, and the arbiter replies with whatever the engine's
   3. **What the engines cannot carry: refused**, the same way, before the
      select, the D/C or the wire: frames wider than a byte over engines
      that move bytes, a buffer of such frames off a half-word, a buffer the
-     channels cannot reach, a transmit channel another owner holds - each
-     family's list is in its section below. A request the engines cannot
-     carry is not run in the loop instead: that would make the answer to
-     "does `start()` hold the dispatch?" depend on where a buffer happens to
-     sit. One case is refused only at the launch, on the STM32F4 and the
-     STM32G0: a channel a program holds with `claim()` (on the STM32F4 also
-     a stream that has not stopped) refuses the block, after the select
-     fell and after a command ahead of the data ran in the loop, and the
-     request still ends `spi_rejected` inside `start()`, the select back up
-     and nothing of its data phase clocked.
+     channels cannot reach - each family's list is in its section below. A
+     request the engines cannot carry is not run in the loop instead: that
+     would make the answer to "does `start()` hold the dispatch?" depend on
+     where a buffer happens to sit.
   4. **A command followed by data:** the command runs in the polled loop
      inside `start()`, then the data phase on the engines. One fixed
      rule, whatever the lengths: a command is short by nature, and a block
      of its own would cost a second launch and a second interrupt. A stall
      in that loop ends the request as a polled one's does, `spi_stalled`
-     inside `start()`, the select released and the block reset. Where the
-     D/C stands after a command's stall is not part of the contract, the
-     select being up: the CH32 families raise it, the STM32G0, the STM32F4,
-     the PL022 and the SAM C21 leave it low.
+     inside `start()`, the select and the D/C released and the block
+     reset, as at every end ("When a request ends, the wire has ended",
+     below).
   5. **A command alone** is the block, on the engines.
 
   A host with engines that owes a reset after a fault may pay it before
@@ -501,6 +513,18 @@ the wait for the wire's end in the DMA interrupt has a bound, and when it
 runs out the request ends `spi_stalled` there, through `TransferDone`, the
 select released ("When a request ends, the wire has ended", below).
 
+**Every bound is a time, derived from the clocks once.** A wait's bound -
+the polled loop's for the whole transaction, the DMA interrupt's for the
+wire's end - is derived from the clocks it waits on (the core's rate and
+the wire's) when the host is configured, at `init()` and wherever a rate
+is applied, and is never a count of a loop's turns: a turn's length
+depends on the code the compiler emitted, where it runs from and what
+interrupts it, so a count of turns is a time nobody chose. Today every
+polled budget (every host's but the AVR's, which needs none) is a count of
+turns, sized by hand to be generous against the slowest frame, and so is
+the PL022's wait in the DMA interrupt; the STM32F4's is derived from the
+rate in force and counted in pad reads of at least a cycle each.
+
 `spi_dma_fault` is the engines' alone, defined by each stratum with engines
 and the same value on every one (the first of the range
 `util/bus_master.hpp` leaves to engines): a DMA block that could not finish -
@@ -520,9 +544,9 @@ has run. So:
 
 | code | what the host has done | who acts |
 |---|---|---|
-| `spi_rejected` | nothing: the request never reached the wire - but for a channel a program holds (on the STM32F4 also a stream that has not stopped), found at the launch on the STM32F4 and the STM32G0, where the select fell and rose again and a command ahead of the data was clocked, nothing of the data | the client: a full FIFO clears, so it may post again; on a host with no engines it never clears |
-| `spi_stalled` | select released first, then the block reset and reconfigured, inside `start()`; when the wait for the wire's end ran out in the DMA interrupt (the STM32F4, the PL022), select released and a reset marked as owed, as for `spi_dma_fault` | nobody: the next request starts on a clean block |
-| `spi_dma_fault` | in the DMA interrupt: select released (the D/C too on the CH32 families and the SAM C21), both channels put away, a reset marked as owed, which a later `start()` or `prime()` pays (below) | nobody: each family with engines provokes a real transfer error in its suite and reads the next request back exact |
+| `spi_rejected` | nothing: the request never reached the wire - but for the STM32F4's and the STM32G0's refusal at the launch, where the select fell and rose again and a command ahead of the data was clocked, nothing of the data ("One busy check, before anything moves") | the client: a full FIFO clears, so it may post again; on a host with no engines it never clears |
+| `spi_stalled` | select and D/C released first, then the block reset and reconfigured, inside `start()`; when the wait for the wire's end ran out in the DMA interrupt (the STM32F4, the PL022), select and D/C released and a reset marked as owed, as for `spi_dma_fault` (where a host leaves the D/C low instead, "When a request ends, the wire has ended") | nobody: the next request starts on a clean block |
+| `spi_dma_fault` | in the DMA interrupt: select and D/C released (the STM32G0, the STM32F4 and the PL022 leave the D/C where it was, "When a request ends, the wire has ended"), both channels put away, a reset marked as owed, which a later `start()` or `prime()` pays (below) | nobody: each family with engines provokes a real transfer error in its suite and reads the next request back exact |
 | `spi_timeout` | the arbiter has called `recover()`: the stale completion silenced, the select raised, the peripheral reset | nobody for the engine; the wire and the device stay the application's to judge |
 
 `SpiHost` does this itself because nobody else can. A request queued behind
@@ -635,12 +659,26 @@ edge has already passed. Each family's SPI page has the measured wait by
 rate. A wait whose bound runs out ends the request `spi_stalled` ("What
 follows each code", above).
 
-The rule is the select's and the end's; the D/C line between a command and
-its data is outside it. Every host but the SAM C21 ends a command phase as
-it ends any phase (a transmit-only tail, or a wait for the edge), so D/C
-flips after the command's last edge; the SAM C21 raises it on the last
-command character's RXC, half a bit before that character's last edge in
-modes 0 and 2 ([the SAM C21 SPI page](../samc21/spi.md)).
+**At its end, ok or failed, a request leaves the select high and the D/C
+high.** Whatever its code - `spi_ok`, `spi_stalled`, `spi_dma_fault` - the
+request's end raises both lines (a refusal moves neither: it comes before
+them), so the next request, and a device that watches the D/C between
+windows, find it where every clean end leaves it, however the last one
+ended. A caller that frames the select itself keeps its select, and a
+request with no D/C has none to raise. Where the hosts stand: the CH32
+families raise both at every end. After a command's stall, the STM32G0,
+the STM32F4 and the SAM C21 raise the D/C on a polled request and leave it
+low on one naming `dma` (its command run in the loop ahead of the data);
+the PL022 leaves it low on both. After a fault, or a stall met in the DMA
+interrupt, the STM32G0, the STM32F4 and the PL022 leave the D/C where the
+request left it.
+
+Between a command and its data the D/C is outside the rule of the end.
+Every host but the SAM C21 ends a command phase as it ends any phase (a
+transmit-only tail, or a wait for the edge), so D/C flips after the
+command's last edge; the SAM C21 raises it on the last command character's
+RXC, half a bit before that character's last edge in modes 0 and 2 ([the
+SAM C21 SPI page](../samc21/spi.md)).
 
 ## Two silicon facts the engine honours
 
@@ -805,8 +843,9 @@ engine slots, `has_dma` whether they are bound: a request naming `dma` rides
 them (`dma_isr()` the one interrupt body, the peripheral's own interrupts
 never armed and its NVIC line left alone). They refuse frames of 9 to 16
 bits on byte engines and a wide buffer off a half-word, and a transmit
-channel a program holds refuses the block at its launch (the refusal after
-the select, "Two ways to run a request"). A polled read's tail waits for
+channel a program holds refuses the block at its launch, after the select
+fell, against the one busy check ("Two ways to run a request"). A polled
+read's tail waits for
 the SCK pad's idle level; the transmit-only tail ends on FTLVL and then BSY,
 already after the edge, and nothing else waits for the SCK pad. `status()`
 is `spi_ok`, `spi_rejected`, `spi_dma_fault` or
@@ -827,8 +866,8 @@ a request naming `dma` rides them (`dma_isr()` the one interrupt body). They
 refuse a 16-bit frame on byte engines, a 16-bit buffer off a half-word and a
 buffer in 0x1000 0000 to 0x1FFF FFFF, the core-coupled memory's region, which
 the streams cannot reach; a stream a program holds, or one that has not
-stopped, receive or transmit, refuses the block at its launch (the refusal
-after the select, "Two ways to run a request"). Each
+stopped, receive or transmit, refuses the block at its launch, after the
+select fell, against the one busy check ("Two ways to run a request"). Each
 polled phase's tail and the DMA interrupt wait for the SCK pad's idle level,
 BSY falling with RXNE. `status()` is `spi_ok`, `spi_rejected`,
 `spi_dma_fault` or `spi_stalled`, the last also from the DMA interrupt's
@@ -847,8 +886,8 @@ F1 lineage's peripheral: `bits` is 8 or 16, the two widths this SPI has. The
 engine slots are fixed to DMA channels 3 (TX) and 2 (RX), because on this family
 the channel is the request, `has_dma` whether they are bound; `dma_isr()` is the
 one interrupt body. They refuse 16-bit frames over byte engines, a 16-bit buffer
-at an odd address and a transmit channel another owner holds, before anything
-moves. RXNE is not early on this block, so no wait is added for the wire's
+at an odd address and, as their busy check, a transmit channel still running,
+before anything moves. RXNE is not early on this block, so no wait is added for the wire's
 end; a transmit-only phase ends on TXE and then BSY, after the edge.
 `status()` is `spi_ok`, `spi_rejected` (a request naming `dma` on a host with no
 engines, or one they cannot carry), `spi_dma_fault` or `spi_stalled`. Also `prime(mode, clock, bits)`,
@@ -868,9 +907,9 @@ bus cannot make where the run-time one only reports it. `bits` is 8 or 16. The
 engine slots are fixed per instance (SPI1 on DMA1's channels 3 and 2, SPI2 on its
 5 and 4, SPI3 on DMA2's 2 and 1), because on this family the channel is the
 request; `has_dma` and the refusal on an engineless host. The engines refuse
-16-bit frames over byte engines, a 16-bit buffer at an odd address, a transmit
-channel another owner holds and, on the CH32V303's DMA1, a run across a 64 KB
-boundary, before anything moves. RXNE is not early on this block, so no wait
+16-bit frames over byte engines, a 16-bit buffer at an odd address, a run across
+a 64 KB boundary on the CH32V303's DMA1 and, as their busy check, a transmit
+channel still running, before anything moves. RXNE is not early on this block, so no wait
 is added for the wire's end; a transmit-only phase ends on TXE and then BSY,
 after the edge. `status()` is `spi_ok`, `spi_dma_fault`,
 `spi_stalled` or `spi_rejected`. Also `prime(mode, clock, bits)`,

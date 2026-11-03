@@ -1,25 +1,147 @@
 # DMA engines: what a program is owed
 
 This page decides what every family's DMA engines owe the program
-above them, whatever their controller: the level each engine arms at
-in its controller's arbitration, decided by what its peripheral does
-when the channel is starved; the one knob a program has over the level
-that matters most, the receive ring's; and the release contract, that
-a peripheral done with a channel leaves no request behind for the next
-owner. It is written for an embedded programmer who has set a DMA
-channel's priority by habit and seen a UART overrun under a memory
-copy. How a controller is driven (its registers, its engines' two
-moments, its costs) is each family's DMA page; this page is the part
-of it a program can rely on unchanged from one family to the next.
+above them, whatever their controller: that a DMA channel (a stream on
+the STM32F4) has one owner in an image, the peripheral request it
+serves, checked when the program is compiled; the level each engine
+arms at in its controller's arbitration, decided by what its peripheral
+does when the channel is starved; the one knob a program has over the
+level that matters most, the receive ring's; and the release contract,
+that a transport starts from a reset block whenever it is initialized,
+so a request its block held across its own release reaches nothing. It
+is written for an embedded programmer who has set a DMA channel's
+priority by habit, seen a UART overrun under a memory copy, or handed a
+channel from one peripheral to another and found one stray byte in the
+next transfer. How a controller is driven (its registers, its engines'
+two moments, its costs) is each family's DMA page; this page is the
+part of it a program can rely on unchanged from one family to the next.
 
 The smallest use is none: a transport that takes an engine in its slot
-(`DmaRxEngine`, `DmaTxEngine`) arms it at the rule's level, and a
-transport's `release()` leaves no DMA request of its block standing. The one knob is
+(`DmaRxEngine`, `DmaTxEngine`) arms it at the rule's level, and the
+image gives each channel to one request. The one knob is
 `UartOptions::rx_priority` where a program ranks something above its
-serial receive ring. The prerequisite that decides correctness: **a
-receive ring armed below a memory-to-memory copy can lose bytes**;
-the findings below say on which controllers, and under what copy, it
-did, so the knob is turned down only with that measurement in hand.
+serial receive ring. Two prerequisites decide correctness: **one
+channel, one owner, for the whole image** - two peripherals that would
+take one channel in turn are a design the rule refuses, not a schedule
+to get right; and **a receive ring armed below a memory-to-memory copy
+can lose bytes** - the findings below say on which controllers, and
+under what copy, it did, so the knob is turned down only with that
+measurement in hand.
+
+## The ownership rule
+
+A DMA slot belongs to one owner for the whole life of an image. A slot
+is what one engine runs on: a channel, or on the STM32F4 a stream - not
+the stream's channel cell (CHSEL), because two cells of one stream
+cannot run at once (RM0090 10.3.3), so they are one slot. Its owner is
+the peripheral request it serves: one peripheral's one direction
+(USART2's transmit, SPI1's receive) or one of a timer's events (TIM4's
+update). There is no sharing of any kind: no slot with two owners at
+once, no request bound to two slots, and no slot handed from one owner
+to another in turn as the program runs. A channel no peripheral paces -
+a memory-to-memory copy, a channel a program programs by hand - belongs
+to a tag its user names, one tag a slot, under the same rule.
+
+The owner is the request, not the engine type and not the transport
+type, so two things that look like two users are one. A host that moves
+its frames at two element widths over its channel (a display's 8-bit
+commands and 16-bit pixels on one SPI) is one owner; so is one
+peripheral driven by two transport types over the same request (a
+buffered UART and a direct one on USART2's transmit). Both are allowed.
+
+Why one owner and no hand-over:
+
+- **The hand-over is where the faults live.** A request a peripheral
+  raised and nobody acknowledged is held, on some controllers across
+  every disable but a reset, and the next user of the channel takes a
+  stray item from it at its first enable and stalls behind it, or has its
+  stream shifted by one ("The release contract", below, and each
+  family's DMA page). With one owner the only user that can meet a held
+  request is the same owner again, and its own `init()` answers it.
+- **The silicon says so where the map is free.** On the RP2040 and the
+  RP2350 any channel takes any request, and the datasheets forbid two
+  channels on one (RP2040 2.5.3.2, RP2350 12.6.4.2); on the SAM C21
+  three channels running at once corrupt their transfers (erratum 1.10.4
+  and the measurements beyond it, [the SAM C21 DMAC
+  page](../samc21/dmac.md)), so an image is held to two, and with every
+  channel given when the program is compiled that budget is a fact the
+  compiler can see instead of a claim made at run time.
+- **An engine keeps its bookkeeping in its type** (the channel's
+  configuration word, whether a block is in flight, its fault count), so
+  two engine types on one channel are two accounts of one register
+  block, each blind to the other's transfer in flight.
+
+What the rule costs is flexibility. A program cannot take a channel from
+one transport for another as it runs; on a controller whose map wires
+each request to one channel and ORs several onto it (the WCH families),
+or offers a request one or two streams (the STM32F4), choosing an
+instance for one peripheral can take another's only channel, and on the
+SAM C21 an image has at most two DMA engines. Which choices a part's map
+forces is that family's DMA page's to list.
+
+### The check
+
+The rule is checked when the program is compiled, by
+`util/dma_owner.hpp`. The type that binds a slot to its request claims
+the pair in its class body, and the claim binds it both ways. A second
+owner on a slot already claimed does not compile: the error names the
+slot and both owners, for DMA1's channel 7 asked for I2C1's receive
+after USART2's transmit
+`ambiguating new declaration of 'constexpr brio::DmaOwner<brio::DmaPeriph::i2c, 1, brio::DmaSignal::rx> brio::dma_owner_of(DmaSlotId<1, 7>)'`
+and, on the note below it, the old declaration with USART2's owner. A
+second slot for an owner already bound does not compile either, the
+error naming the owner and both slots through `dma_slot_of`: USART2's
+transmit on channel 5 after channel 4 reads
+`ambiguating new declaration of 'constexpr brio::DmaSlotId<1, 5> brio::dma_slot_of(DmaOwner<brio::DmaPeriph::usart, 2, brio::DmaSignal::tx>)'`
+against the old declaration's `DmaSlotId<1, 4>`. The slot is
+`DmaSlotId<controller, slot>`, never the element type; the owner is the
+request, `DmaOwner<kind, instance, signal>`, or the tag a program names.
+A claim counts where the type that makes it is instantiated, so a type a
+program names and never uses claims nothing, and the same claim made
+again, by the engine and by its transport, is one claim. A claim is a
+declaration the compiler checks and never emits: it adds no byte to the
+image and no cycle.
+
+The second direction is the silicon's own rule wherever a request can
+reach more than one channel. The RP families route any request to any
+channel and forbid two channels on one ("multiple channels should not be
+connected to the same DREQ", RP2040 2.5.3.2; "must not", RP2350
+12.6.4.2): the owner being the request, that is this direction, with no
+key of its own. The STM32G0's DMAMUX forbids one request id on two
+channels unless "the application guarantees that the two connected DMA
+channels are not simultaneously active" (RM0444 11.4.4, the caution) -
+in-turn use, which the rule forbids anyway. An STM32F4 request offered
+two streams would be served by both if both were bound to it. On the
+WCH families each request is wired to one channel, so this direction
+never fires there and costs nothing.
+
+The check sees one translation unit, as the compiler does. Every brio
+image's application is one source file, its other units (the startup
+code, the runtime) owning no channel, and that is why it suffices. A
+program split across files would keep the check inside each file and
+lose it between them: two files that give one slot to two owners each
+compile clean, and the linker sees nothing.
+
+### Realizations
+
+How each family names a slot, and what its request map leaves a
+program to choose. No family's engines or transports claim their slots
+through the check today; the table is the key the rule gives each
+family. The SAM C21 keeps a run-time claim at `init()`, a channel found
+held panicking ([the SAM C21 DMAC page](../samc21/dmac.md)).
+
+| stratum | the slot and its key | what the request map leaves to choose |
+|---|---|---|
+| avrxt | none | the AVR DA, DB and EA have no DMA controller |
+| samc21 | the DMAC's channel 0 or 1, `DmaSlotId<0, ch>` | any trigger on any channel, within the image's budget of two |
+| stm32g0 | a channel of DMA1 or DMA2 (DMA2 on the STM32G0B1 class alone), `DmaSlotId<c, ch>`; the request id the DMAMUX routes is not part of the key | any request on any channel |
+| stm32f4 | a stream of DMA1 or DMA2, `DmaSlotId<c, stream>`, never the cell | the cell: each request on one or two (stream, cell) pairs |
+| ch32v00x | a channel of DMA1, `DmaSlotId<1, ch>` | the instance: each request wired to one channel, several ORed onto it |
+| ch32vx03 | a channel of DMA1 or DMA2 (DMA2 on the CH32V303 alone), `DmaSlotId<c, ch>` | the instance, as on the CH32V00x |
+| ch32x035 | a channel of DMA1, `DmaSlotId<1, ch>` | the instance, as on the CH32V00x |
+| rp2040 | a channel, `DmaSlotId<0, ch>` | any DREQ on any channel, one channel a DREQ |
+| rp2350 | as the RP2040, over sixteen channels | as the RP2040 |
+| host | none | no DMA controller is simulated |
 
 ## The priority rule
 
@@ -51,21 +173,18 @@ what the channel's peripheral does when the channel is starved.
   STM32F1-lineage controllers the lower channel number wins), and the
   rule does not try to number channels.
 
-The measurement behind it, on the CH32V303VC and the CH32V203C8 (the
-receive ring USART2's, DMA1's channel 6): with every engine at the
-lowest level, the channel number deciding and the ring losing to
-channels 1 to 5, an unpaced copy on a lower channel lost data at
-115200 baud and above as soon as one block lasted longer than a
-character time, and in a stream the ring's receive vector took most of
-the core while it was starved; paced loads (an SPI host's two engines
-at 36 MHz, a timer stream at 1 and 4 MHz) never starved anything. With
-the ring at the highest level the reference suites carry the rule:
-`test_vx03_dma`'s letter q streams 16 KB at 1 Mbaud and 64 KB at
-4.5 Mbaud into the ring while a 2 KB copy runs back to back on a lower
-channel at the copy's level, every byte delivered on both parts, and
-the same load against a ring a program armed at the lowest level
-overruns it some nine hundred times in 8 KB
-([the CH32V203/CH32V303 DMA page](../ch32vx03/dma.md)).
+The rule is measured on the CH32V203C8 and the CH32V303VC, whose
+controller breaks a tie between equal levels by the lower channel
+number ([the CH32V203/CH32V303 DMA page](../ch32vx03/dma.md), "The
+priority rule on the bench"): a receive ring at the highest level, fed
+16 KB at 1 Mbaud and 64 KB at 4.5 Mbaud while a 2 KB copy ran back to
+back on a lower channel at the copy's level, took every byte on both
+parts, and the same load against a ring a program armed at the lowest
+level, the copy's channel then winning every tie, lost about seven
+bytes in eight to some nine hundred overruns at 1 Mbaud. What that page
+has not measured - where below 1 Mbaud a ring armed low starts to lose,
+and that paced loads starve nothing at any level - is in its "Not
+covered yet".
 
 What the rule costs: the items the ring takes from the copy, and no
 more. The copy beside a stream at 1 Mbaud ran at 0.96 to 1.00 of its
@@ -127,76 +246,64 @@ for its direction by default.
 
 ## The release contract
 
-A peripheral's DMA request, once raised, is held until the controller
-acknowledges it or the peripheral's reset line is pulsed: on the
-CH32V303 and the CH32V203 clearing its DMA enable, its block enable or
-a timer's counter does not withdraw it, and a gated clock freezes it
-on the channel's ORed request line. The next owner of the channel then
-moves one stray item on it at its first enable and stalls behind it,
-or, with the old requester still clocked, gets its stream shifted by
-one ([the CH32V203/CH32V303 DMA page](../ch32vx03/dma.md), "A released
-requester"); the CH32X035 gave the same answer
-([the CH32X035 DMA page](../ch32x035/dma.md), "A released requester").
+Every transport with an engine starts its `init()` from a reset block:
+once the block's clock is open, it pulses the peripheral's reset line
+before it writes a register of its own and before it arms a channel. Its
+`release()` gates the block's clock, gives its pads back and closes its
+interrupt line, and pulses no reset. (The RP families' transports stop a
+block by holding it in reset, and their `init()` completes the pulse by
+letting it go: the same contract, the reset line serving as the gate.)
 
-The STM32G0 measured the other answer, and the contract is the same
-sentence. Its DMAMUX routes one request line to each channel, so a
-stray could reach only the next owner of the same request; and there
-a gated block withdraws a raised request, and so does its DMA enable
-cleared with the clock on: USART1, SPI1 and TIM3 released every way
-with a request standing left the next owner nothing. What survives is
-the DMA enable left set: SPI1 and TIM3 ask again the moment anything
-opens the clock without a reset ([the STM32G0 DMA
-page](../stm32g0/dma.md), "A released requester holds nothing here").
-The STM32F4 gave a third answer: a cleared DMA enable withdraws the
-request, but a gated clock does not; USART6, SPI1, TIM1 and ADC1
-released with the enable left set and the clock gated handed the next
-owner of their cell a stray item while the clock was still off
-([the STM32F4 DMA page](../stm32f4/dma.md), "A released requester").
-The SAM C21 gave the same answer with no DMA enable at all: its
-SERCOM's transmit request is DRE's level, a disabled instance
-withdraws it, one gated with ENABLE still set holds it and handed the
-next channel bound to its trigger one stray beat, and the channel
-itself keeps no request across its own disable
-([the SAM C21 DMAC page](../samc21/dmac.md), "A released requester").
-The RP2040 and the RP2350 gave a fourth, the same on both: a request
-there is a one-cycle pulse the channel counts (RP2040 2.5.3.2, RP2350
-12.6.4.2), so it can outlive a release in two places. At the
-peripheral, the PL011 and the PL022 withdraw a raised request when
-their DMA enable is cleared or the block disabled ("all request
-signals are deasserted", RP2040 4.2.5), and a stopped PWM slice pulses
-nothing, but the ADC disabled with DREQ_EN left set keeps its sample
-in the FIFO and requests it, and the next owner's channel reads a
-stale sample. In the channel, the credits a pacing request banks on a
-bound channel survive its `stop()` and a rebind to another request,
-and the next owner's trigger drops them: nothing reached the next
-owner of a channel ([the RP2040 DMA page](../rp2040/dma.md), "A
-released requester"). The reset pulse clears every one of them, so the
-rule does not change with the answer.
+Why the reset is the first thing `init()` does. A peripheral's DMA
+request, once raised, is held until the controller acknowledges it or
+the peripheral's reset line is pulsed, and the families differ in what
+else withdraws it, each answer measured on its family's DMA page:
 
-So a transport's `release()` leaves no request of its block standing
-when it gates the block's clock, and the incoming owner needs nothing
-beyond its engine's `arm()`: the outgoing owner's release is the whole of
-the hand-over, because the incoming one cannot tell which requester holds
-the line, and its own enable is what would consume the stray. The means
-is the reset pulse before the gate, which clears a request on every
-family. Two kinds of release take another means, each with its
-evidence:
+- **the CH32V203 and CH32V303, the CH32X035**: nothing else. Clearing
+  the DMA enable, the block enable or a timer's counter leaves the
+  request standing, and a gated clock freezes it on the channel's ORed
+  request line; the channel's next enable then moves one stray item and
+  stalls behind it, or, with the requester still clocked, shifts the
+  stream by one ([the CH32V203/CH32V303 DMA page](../ch32vx03/dma.md)
+  and [the CH32X035 DMA page](../ch32x035/dma.md), "A released
+  requester");
+- **the STM32G0**: a gated block withdraws it, and so does the DMA
+  enable cleared with the clock on; a DMA enable left set asks again the
+  moment anything opens the clock without a reset (SPI1, TIM3; [the
+  STM32G0 DMA page](../stm32g0/dma.md), "A released requester holds
+  nothing here");
+- **the STM32F4 and the SAM C21**: a cleared DMA enable withdraws it
+  (on the SAM C21, whose SERCOM has none, a disabled instance), but a
+  gated clock holds one left enabled, and a channel bound to it took a
+  stray item while the clock was still off ([the STM32F4 DMA
+  page](../stm32f4/dma.md) and [the SAM C21 DMAC
+  page](../samc21/dmac.md), "A released requester");
+- **the RP2040 and the RP2350**: a request is a one-cycle pulse the
+  channel counts (RP2040 2.5.3.2, RP2350 12.6.4.2); the PL011 and the
+  PL022 withdraw theirs when their DMA enable is cleared or the block
+  disabled ("all request signals are deasserted", RP2040 4.2.5), but the
+  ADC disabled with DREQ_EN left set keeps a sample in its FIFO and
+  requests it, and the credits a pacing request banked on a channel
+  survive the channel's `stop()` ([the RP2040 DMA page](../rp2040/dma.md),
+  "A released requester").
 
-- a block measured not to hold a request needs no pulse: the SPI of the
-  CH32V203 and CH32V303 family, measured on SPI1, its host's `release()`
-  saying so; the CH32V00x's SPI host releases the same way, its block
-  the same lineage's and not measured on that chip;
-- the SAM C21's SPI host and its I2C host disable their SERCOM before
-  the gate and do not reset it: on that chip a disabled SERCOM withdraws
-  a raised request, measured on SERCOM1 in its UART mode, where the
-  disabled and gated instance read no flag and a channel bound to its
-  trigger moved nothing ([the SAM C21 DMAC page](../samc21/dmac.md), the
-  bench finding "A released requester"). The SPI host runs on that same
-  SERCOM on the bench; the I2C mode was not measured (the data sheet
-  says when the I2C host's transmit request rises and that writing DATA
-  clears it, and nothing of a disable, DS60001479M 33.6.4.1.2), so the
-  I2C host's release rests on the UART mode's evidence. Its UART resets the SERCOM before the gate, as
-  the rule says.
+Under the ownership rule nobody else uses the channel, so a request held
+across a release can reach only the same owner, when it is initialized
+again over the same channel. A reset at that `init()`, with the clock
+just opened and no channel armed, withdraws every one of those requests
+before an engine could take the stray, whatever left the block that way:
+the transport's own release, a program that stopped it some other way,
+a debugger. A reset at `release()` served the hand-over between two
+owners, the outgoing one cleaning the line for the incoming one that
+could not tell who held it; the rule forbids that hand-over, so a
+release has nothing to clean for anyone.
+
+What each family's transports do today is in the rows below: they reset
+their blocks in `release()`, before the gate. Where a family's `init()`
+starts from a reset block, and the measurement of the contract on that
+family - a transport released with a request standing, then initialized
+again, its channel moving nothing it should not -, is that family's DMA
+page's.
 
 ### Realizations
 
@@ -207,8 +314,14 @@ by direction, each driver's call naming its own), with
 bit and something can be ranked above a receive engine (not on the SAM
 C21, whose receive engine and its transmit engine are the image's
 whole budget), and every transport whose block can raise a request
-leaves none standing at `release()`: a reset before the gate, but for
-the two kinds of release "The release contract" names.
+resets it in `release()`, before the gate, but for two kinds of release:
+a block measured not to hold a request (the SPI of the CH32V203 and
+CH32V303, measured on SPI1, and the CH32V00x's of the same lineage, not
+measured on that chip), and the SAM C21's SPI and I2C hosts, which
+disable their SERCOM, the disable measured to withdraw a request in the
+SERCOM's UART mode and not measured in its I2C mode (DS60001479M
+33.6.4.1.2 says when the I2C host's transmit request rises and that
+writing DATA clears it, and nothing of a disable).
 
 | stratum | realization | beyond the contract |
 |---|---|---|
