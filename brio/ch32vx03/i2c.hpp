@@ -875,17 +875,16 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * the request completes. Both launches happen in the entry that takes
  * ADDR, before ADDR is cleared and with SCL held (19.3's note 1), so
  * nothing has moved yet: the channel is started first and DMAEN raised
- * only when it took the block. The transmit engine refuses a half while a
- * block of its own is in flight (its run-time claim() verb, the busy flag's
- * test-and-set; a correct program meets it only by holding this host's engine
- * by hand), and - on the CH32V303's DMA1, ch32vx03/dma.hpp's 64 KB rule - a run
- * across a 64 KB boundary, which a written half kept in flash can be; the
- * receive engine has no such verb and refuses only that crossing, which a
- * read half in SRAM meets on a CH32V303RC or VC whose option bytes give it 96
- * or 128 KB of SRAM (RM 32.4.6, FLASH_OBR's split). A read of two bytes that
- * falls back has its POS set before ADDR's clear, which 19.12.1's note
- * asks ("before receiving"); a read of one or of three or more is primed
- * for both paths alike.
+ * only when it took the block. The one refusal a correct program meets is
+ * on the CH32V303's DMA1, ch32vx03/dma.hpp's 64 KB rule: a run across a 64 KB
+ * boundary, which a written half kept in flash can be and a read half in SRAM
+ * can be on a CH32V303RC or VC whose option bytes give it 96 or 128 KB of SRAM
+ * (RM 32.4.6, FLASH_OBR's split). A read of two bytes that falls back has its
+ * POS set before ADDR's clear, which 19.12.1's note asks ("before
+ * receiving"); a read of one or of three or more is primed for both paths
+ * alike. The host never asks whether its engines are free: their channels
+ * are this instance's for the whole image (the claims below), and every way
+ * a tenure ends gives them back (complete(), abandon(), stop()).
  */
 template <uint8_t n, I2cPins pins = i2c_default_pins<n>, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine>
@@ -1257,20 +1256,22 @@ public:
                     // started before DMAEN raises its request. A launch the
                     // engine refuses (I2cHost's comment) leaves DMAEN down
                     // and the half to the event vector below - ADDR not yet
-                    // cleared, SCL still held. The claim and the launch
-                    // are spelt as two verbs, not start(): in that one
-                    // call's shape gcc took the launch out of this entry on
-                    // the CH32V303's images, a call and four saved
-                    // registers a tenure (a write of 16's ADDR entry 194
-                    // cycles, measured on the CH32V303VCT6, against 164
-                    // inline), where these two stay inline. (A launch
-                    // that refuses gives the claim back itself.)
-                    if (t_.dma && TxEngine::claim() &&
-                        TxEngine::launch(std::span<const uint8_t>(t_.tx, t_.tx_left))) {
-                        S::control2(t_.freq, idle_enables | i2c_itevten | i2c_dmaen);
-                        (void)S::status2();
-                        t_.phase = Phase::tx_dma;
-                        return false;
+                    // cleared, SCL still held. The busy flag and the launch
+                    // are spelt as two verbs, not one call: in start()'s
+                    // shape gcc took the launch out of this entry on the
+                    // CH32V303's images, a call and four saved registers a
+                    // tenure (a write of 16's ADDR entry 194 cycles,
+                    // measured on the CH32V303VCT6, against 164 inline),
+                    // where these two stay inline. (A launch that refuses
+                    // takes the flag down itself.)
+                    if (t_.dma) {
+                        TxEngine::mark_busy();
+                        if (TxEngine::launch(std::span<const uint8_t>(t_.tx, t_.tx_left))) {
+                            S::control2(t_.freq, idle_enables | i2c_itevten | i2c_dmaen);
+                            (void)S::status2();
+                            t_.phase = Phase::tx_dma;
+                            return false;
+                        }
                     }
                 }
                 (void)S::status2();   // ADDR cleared: EVT8_1 follows

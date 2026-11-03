@@ -1027,7 +1027,8 @@ struct DmaBinding {
  * mask over `claim()` alone - a claimed channel cannot complete under the
  * loader, there being no block in flight to complete - and programs
  * unmasked. `start()` is the two together, for an owner with no handler to
- * race.
+ * race. `mark_busy()` is the set without the test, for an owner whose own
+ * state already says no block of its is in flight.
  */
 template <uint8_t c, uint8_t ch, typename Elem = uint16_t>
 class DmaTxEngine {
@@ -1110,10 +1111,17 @@ public:
     }
     /// Give a claim back unused.
     static void unclaim() { busy_ = false; }
+    /// Set the busy flag with no test: claim()'s second half, for an owner
+    /// that knows no block of its is in flight (an I2C host, whose phase
+    /// says so). A launch() must follow, which takes the flag down if it
+    /// refuses. From the engine's owner, in the one context that starts its
+    /// blocks; it waits for nothing and masks nothing.
+    [[gnu::always_inline]] static void mark_busy() { busy_ = true; }
 
-    /// Program and start a block on a CLAIMED engine. False - and the
-    /// claim given back - for an empty run, one longer than CNTR counts, a
-    /// misaligned one, or one across 64 KB on the CH32V303's DMA1.
+    /// Program and start a block on an engine claimed or marked busy.
+    /// False - and the flag taken down - for an empty run, one longer than
+    /// CNTR counts, a misaligned one, or one across 64 KB on the CH32V303's
+    /// DMA1.
     static bool launch(std::span<const uint8_t> run) { return go(run.data(), run.size(), true); }
     static bool launch(std::span<const uint16_t> run)
         requires(sizeof(Elem) >= 2)

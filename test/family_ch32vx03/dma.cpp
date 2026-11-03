@@ -324,6 +324,9 @@ void engine_verbs() {
     if (Tx::claim()) {
         Tx::unclaim();
     }
+    // The set without the test, for an owner whose state says no block flies.
+    Tx::mark_busy();
+    (void)Tx::launch(std::span<const uint8_t>(src, 8));
     (void)Tx::start_fixed(src, 8);
     (void)Tx::start_fixed(half_src, 8);
     (void)Tx::kick(src, 8);

@@ -88,8 +88,8 @@
 //      engine: the shapes on the engines (a read of one among them), the
 //      shortest halves on them and a long tenure under `interrupt`, each
 //      channel's vector entries and its count against a sentinel saying
-//      which ran; a half the engine refuses (its claim held, and on the
-//      CH32V303 a span of flash across 64 KB) finished by the event vector;
+//      which ran; on the CH32V303 a half the engine refuses (a span of
+//      flash across 64 KB) finished by the event vector;
 //      `dma` on the plain host refused inside start(); a NACK on the
 //      address and on a byte under `dma`
 //   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
@@ -1508,9 +1508,7 @@ void dma_host_down() {
 
 /// ONE TENURE ON THE ENGINE NAMED, against a serve of its own: the
 /// status, each channel's vector entries and its count against a
-/// sentinel stored before the tenure, and the far end's report. `hold`
-/// takes the transmit engine's claim first, as another owner of the same
-/// DmaTxEngine would hold it, and gives it back after.
+/// sentinel stored before the tenure, and the far end's report.
 constexpr uint16_t count_sentinel = 0x0A5A;
 struct EngineRun {
     uint8_t status = no_answer;
@@ -1536,7 +1534,7 @@ struct EngineRun {
 };
 
 EngineRun engine_run(const uint8_t* tx, uint8_t tx_len, uint8_t rx_len, uint8_t seed,
-                     I2cEngine engine, bool hold = false) {
+                     I2cEngine engine) {
     EngineRun out{};
     for (uint8_t k = 0; k < tx_len; ++k) {
         out.sum = static_cast<uint16_t>(out.sum + tx[k]);
@@ -1551,9 +1549,6 @@ EngineRun engine_run(const uint8_t* tx, uint8_t tx_len, uint8_t rx_len, uint8_t 
     dma_host_up();
     (void)DmaChannel<1, 6>::set_count(count_sentinel);
     (void)DmaChannel<1, 7>::set_count(count_sentinel);
-    if (hold) {
-        (void)DmaTxEngine<1, 6>::claim();
-    }
     ch6_entries = 0;
     ch7_entries = 0;
     out.status = dma_tenure(twilink::dut_addr, tx, tx_len, rx_buf, rx_len, link_speed, engine);
@@ -1568,9 +1563,6 @@ EngineRun engine_run(const uint8_t* tx, uint8_t tx_len, uint8_t rx_len, uint8_t 
         if (rx_buf[k] != twilink::pattern_value(twilink::pattern_counting, seed, k)) {
             out.read_ok = false;
         }
-    }
-    if (hold) {
-        DmaTxEngine<1, 6>::unclaim();
     }
     dma_host_down();
     settle_ms(350);   // past the serve's own deadline: the peer is back
@@ -1705,15 +1697,10 @@ void tg_dma() {
                   wi.exact(32, 0) && !wi.on_tx() && !wi.on_rx() && wi.untouched() &&
                       ri.exact(0, 32) && !ri.on_tx() && !ri.on_rx() && ri.untouched());
 
-    // 6. A HALF THE ENGINE CANNOT CARRY, under dma: the transmit engine's
-    //    claim held by another owner, then - where DMA1 keeps to 64 KB, the
-    //    CH32V303 - a write from flash across 0x0801 0000, which the engine
-    //    refuses (ch32vx03/dma.hpp). Each completes on the event vector.
-    const EngineRun wc = engine_run(tx_buf + 3, 8, 0, 0xD0, I2cEngine::dma, true);
-    print_engine_run("dma, write of 8, the claim held", wc);
-    bench.verdict("dma with the transmit engine's claim held elsewhere: the write of 8 "
-                  "completes on the event vector, exact, the channel untouched",
-                  wc.exact(8, 0) && !wc.on_tx() && wc.left6 == count_sentinel);
+    // 6. A HALF THE ENGINE CANNOT CARRY, under dma: where DMA1 keeps to
+    //    64 KB, the CH32V303, a write from flash across 0x0801 0000, which
+    //    the engine refuses (ch32vx03/dma.hpp). It completes on the event
+    //    vector.
     if constexpr (dma1_bounded_to_64k) {
         const auto* across = reinterpret_cast<const uint8_t*>(0x0800FFF8UL);
         const EngineRun wx = engine_run(across, 16, 0, 0xD8, I2cEngine::dma);
@@ -3176,9 +3163,9 @@ uint32_t refusal_rate(const Clk& clk, I2cSpeed speed) {
 
 /// The longest service of a host vector in the tenure this letter times,
 /// a write of 16, hardware entry included, in core cycles: the event
-/// vector's longest entry of that write 158 on the pump and 144 on the
-/// engines on the CH32V203C8T6, 141 and 170 on the CH32V303VCT6, the error
-/// one's 166, the channels' 125, measured by bench_vx03's letter i
+/// vector's longest entry of that write 160 on the pump and 146 on the
+/// engines on the CH32V203C8T6, 153 and 175 on the CH32V303VCT6, the error
+/// one's 166, the channels' 128, measured by bench_vx03's letter i
 /// (docs/ch32vx03/i2c.md) between two reads of the body's own - and a
 /// margin for the entry itself and the CH32V303's trampoline. The image
 /// runs from the zero-wait window, so a cycle count holds at every core

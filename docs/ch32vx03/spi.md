@@ -426,9 +426,10 @@ the access to DATAR agreeing - when its buffers are half-word aligned
 (a misaligned one is refused: the controller would round its address
 down in silence, 11.3.6). And the requests are raised after
 both channels are programmed, in one store: a one-frame transaction can
-complete before the launch returns, and the old order - each request
-raised beside its own channel - raised both again after that completion
-and wedged the next transaction ([dma.md](dma.md)).
+complete before the launch returns, and a request raised after that
+completion would stand into the next transaction, whose transmit block
+would then complete with nothing clocked and whose receive block would
+never start (measured, [dma.md](dma.md)).
 
 In sleep the bus matrix serves the core alone on this family
 ([dma.md](dma.md)), so a transport with engines holds the program awake

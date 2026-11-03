@@ -276,7 +276,7 @@ memory-to-memory block on it runs whole through a frozen request, and a
 USART2 whose channel was never enabled holds one as well.
 
 The measurements behind that paragraph staged a second owner on the
-channel. The ownership rule now refuses such a staging ("One owner a
+channel. The ownership rule refuses such a staging ("One owner a
 channel" below) and no suite reproduces it, so they stand as measured
 facts of the silicon and cannot be re-run here. On both parts, with
 USART2, I2C1 and TIM4 on DMA1's channels 6 and 7:
@@ -703,8 +703,10 @@ and the error by default; the level high unless named -, `start()` over a span o
 or (where `Elem` is 32 bits) of words, and over a pointer and a length;
 the two halves of `start()`, `claim()` (the busy flag's test-and-set, what
 a transport racing its own completion handler masks) and `launch()` (the
-programming of a claimed engine, which gives the claim back when it
-refuses), `unclaim()`, `start_fixed(cell, n)` for a full-duplex bus
+programming of a claimed engine, which takes the flag down when it
+refuses), `unclaim()`, `mark_busy()` (the flag's set with no test, before
+a `launch()`, for an owner whose own state says no block of its is in
+flight: the I2C host's entry that takes ADDR), `start_fixed(cell, n)` for a full-duplex bus
 clocking a read, `complete()` (the channel stopped and how many elements
 the block carried, so the transport releases exactly that much of its ring),
 `kick()`, `abandon()`, `faults()`, `busy()`, `in_flight()`, `progress()`.
@@ -1111,10 +1113,7 @@ they differ each is named.
   nothing else: 100 bytes into the empty ring read back in order, the
   vectors reporting the edge and `harvest()` asked after it answering
   false; 60 more ACROSS THE STORAGE'S END with no read between their
-  bytes, all 60 in order and no overrun of either kind - where the run
-  engine this shape replaced, measured with the same letter, delivered
-  27 of the 60 and counted one hardware overrun, its run having stopped
-  at the storage's end; 200 bytes into the ring with nobody reading,
+  bytes, all 60 in order and no overrun of either kind; 200 bytes into the ring with nobody reading,
   ONE overrun counted, nothing of the overwritten lap delivered and the
   ten bytes after it read whole; and a run of 14 held while 140 more
   landed, refused at its release, the second overrun counted. The
@@ -1149,7 +1148,7 @@ they differ each is named.
   enabled with DMAR set made a later TIM6 staircase on the same DMA2
   channel move all sixteen items at once (the section above); with the
   port's block reset, the staircase ran at the timer's pace again. A
-  staging of two owners, which the check now refuses and no suite
+  staging of two owners, which the check refuses and no suite
   reproduces: a measured fact of the silicon, and why a channel has one.
 - **A held request is answered** (`test_vx03_i2c` letter q,
   `test_vx03_dma_serial` letter p, on the CH32V303VCT6 and the
@@ -1201,7 +1200,7 @@ they differ each is named.
   and 0.92 to 0.98 at 4.5 Mbaud (the lower figures the CH32V203C8T6's,
   whose sender shares DMA1 with the ring).
   The CONTROL, the ring told `rx_priority = low` - every engine at the
-  lowest level, the arrangement the rule replaced, channel 3 winning
+  lowest level, channel 3 winning
   every tie against 6 - lost about seven bytes in eight to some nine
   hundred overruns at 1 Mbaud. The CFGR read back carries the levels: PL
   3 for the ring, 2 for its transmit channel after its first block, 0
@@ -1220,24 +1219,24 @@ they differ each is named.
 `bench_vx03`'s letter d on the CH32V203C8T6 at 144 MHz, the core's
 counter the ruler, every number in HCLK cycles and the instrument's own
 cost included as the line carries it (a stopwatch is 28 cycles, a stamp
-pair in a vector 79 - the app's letter r). BEFORE is the same letter
-built against the engines this document replaced; the transaction's
-REQUEST COPY into the SPI host - 130 cycles of a 48-byte `Request` and a
-prologue, measured as the cost of `start()` with nothing to send - is
-the bus contract's and the same in both.
+pair in a vector 79 - the app's letter r). The SPI rows carry the
+transaction's request copy into the host - 130 cycles of a 48-byte `Request`
+and a prologue, measured as the cost of `start()` with nothing to send -
+which is the bus contract's and not the engines'. Three runs of the letter
+printed the same figures.
 
-| operation | BEFORE | AFTER |
-|---|---|---|
-| copy, 4096 bytes as 1024 words: wall | 6504 | 6389 |
-| copy: launch, completion's handler, fixed cost | 208, 94, 360 | 112, 84, 245 |
-| paced, 256 words at 100 kHz into one cell: launch, handler | 221, 106 | 82, 81 |
-| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 738, 2, 290, 1087 | 329, 1, 144, 514 |
-| SPI1 engined write at /16: fixed cost | 926 | 506 |
-| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 256 (one a frame), 36161 | 1, 523 |
-| bus masters still counted after the SPI requests | 1 | 0 |
+| operation | cycles |
+|---|---|
+| copy, 4096 bytes as 1024 words: wall | 6389 |
+| copy: launch, completion's handler, fixed cost | 112, 84, 245 |
+| paced, 256 words at 100 kHz into one cell: launch, handler | 82, 81 |
+| SPI1 engined write, 8-bit frames at /4: launch, interrupts, handlers, fixed cost | 329, 1, 147, 517 |
+| SPI1 engined write at /16: fixed cost | 509 |
+| SPI1, 16-bit frames at /4: interrupts for 256 frames, fixed cost | 1, 526 |
+| bus masters still counted after the SPI requests | 0 |
 
 - **Six cycles an item, by the difference of two sizes**: (wall at 4096
-  less wall at 256) over 960 words is 6.00 exactly, BEFORE and AFTER - the
+  less wall at 256) over 960 words is 6.00 exactly - the
   controller's own rate, independent of the engine; at 4096 bytes a copy
   moves 92 MB/s, against the 576 of one word a cycle (x = 6.2), and the
   runtime's memcpy does the same 4096 bytes in about 3130 cycles, half the
@@ -1247,18 +1246,14 @@ the bus contract's and the same in both.
   which the instrument is 107 (the stopwatch and the vector's stamp pair):
   138 cycles of the engine's own - the launch, five stores and the
   ledger's count, and the completion's handler.
-- **THE SPI TRANSACTION'S FIXED COST went from 1087 to 514 cycles**, one
-  interrupt where there were two, and one idle turn per wake. Less the
-  instrument (28 + one stamp pair of 79; BEFORE two) and the request's
-  copy (130), what the ENGINES cost a transaction is 277 cycles - their
-  launch, the receive channel's one completion, both channels stopped -
-  against 771 before. The per-frame
+- **The SPI transaction's fixed cost is 517 cycles**, with one interrupt.
+  Less the instrument (28 + one stamp pair of 79) and the request's copy
+  (130), what the engines cost a transaction is 280 cycles - their launch,
+  the receive channel's one completion, both channels stopped. The per-frame
   cost is the wire's: 256 frames at /4 are 8192 cycles of SCK and the
   block adds nothing per frame.
 - **A 16-bit frame is one 16-bit access**: a 256-frame write of half-words
-  takes 16907 cycles for 16384 of wire, with one interrupt, where an
-  interrupt a frame took 52545 and 256 interrupts (x 3.20 to 1.03 at /4)
-  - and the frames
+  takes 16910 cycles for 16384 of wire, with one interrupt, and the frames
   are the buffer's, judged with no wire by the SPI's own transmit CRC
   ([spi.md](spi.md)).
 - **The pace holds to the cycle**: the 256 words of a 1440-cycle pace
@@ -1266,20 +1261,14 @@ the bus contract's and the same in both.
   the counter's position - the watching loop's own turn is the spread -
   and the whole block took 368973 cycles for 368640 due, the first
   update's period and the completion's latency the difference.
-- **A ONE-FRAME ENGINED SPI REQUEST WEDGED THE NEXT, before the rework.**
-  The transaction completed inside the launch - the receive channel took
-  its one frame before the launch's last store - and that store raised
-  both DMA requests again after the completion had dropped them; the
-  next request's transmit block then "completed" with nothing clocked
-  and its receive block never started. The launch now programs both
-  channels first and raises both requests in ONE store after them, the
-  completion's store always the later; measured, a one-frame request
-  ahead of every point of the letter and no stall.
-- **AN ENGINED SPI TRANSACTION LEFT ITS RECEIVE CHANNEL COUNTED, before
-  the rework**: its EN stays set after the block, nothing stopped it, and
-  the bus-master count stood at one from the first transaction on - the
-  core never slept again. Every engine now stops its channel at the
-  block's end, and the count reads zero after the SPI letter's requests.
+- **A one-frame engined SPI request can complete inside the launch**: the
+  receive channel takes its one frame before the launch's last store, so a
+  request raised by that store would stand after the completion has dropped
+  it, and the next request's transmit block would complete with nothing
+  clocked and its receive block never start. The launch programs both
+  channels first and raises both requests in one store after them, the
+  completion's store always the later: a one-frame request runs ahead of
+  every point of the letter, and no point stalls.
 
 ## Not covered yet
 
