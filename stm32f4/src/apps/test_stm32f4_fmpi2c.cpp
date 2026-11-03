@@ -63,17 +63,23 @@
 //      absent address, a write, reads of one to four and eight bytes and
 //      a write-then-read at 100 and 400 kHz, the same through the DMA
 //      engines, the engine each Request names judged on the streams (a
-//      write and a read of one under `dma`, `interrupt` on the engined
-//      host touching no stream, `dma` refused on the engineless one), and
-//      the last written byte of a write-then-read refused on the pump and
-//      under `dma`; declined by name where nothing answers 0x3A
+//      write of one with no stream, of two with the stream on its second
+//      byte and a read of one under `dma`, `interrupt` on the engined host
+//      touching no stream, `dma` refused on the engineless one), the last
+//      written byte of a write-then-read refused on the pump and under `dma`,
+//      and the next write byte for byte after any refusal; declined by name
+//      where nothing answers 0x3A
 //
 // and against the desk partner's `twi_peer` (the second set, `t`):
 //   n  Fast-mode Plus acknowledged, a held SDA and a held clock, the rebase
-//   o  ES0298 2.12.8 ON TRIAL: long writes on the HSI, inside the clock-ratio
-//      band, on the interrupt and on the DMA engines, the partner's count
-//      and sum judging every byte, with the erratum's first workaround
-//      staged by the letter beside them
+//   o  ES0298 2.12.8: writes in and out of the clock-ratio band, on the
+//      interrupt and on the DMA engines, the partner's count and sum judging
+//      every byte, no stall on the host's own path, and the erratum's stall
+//      staged by the letter beside it as the control
+//   p  a refused write, position by position: on the address, on the first,
+//      second and a later data byte, a write of one and of two, under both
+//      engines and both speeds and in and out of the band, the partner's tally
+//      judging each, the next request whole
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -1606,6 +1612,43 @@ void self_refusals(FmpI2cSpeed speed, uint8_t& nacked, uint8_t& gone, uint8_t& n
     }
 }
 
+/// THE WRITE AFTER A FAILED ONE, byte for byte on the far end. Each refused
+/// position of writes of one, two, three and eight, and an absent address, on
+/// engine `e`, and straight after each - no init(), no PE cycle, at one speed -
+/// a write of eight on engine `next`, compared with what the far end kept. A
+/// byte the failed tenure left in TXDR would reach the wire ahead of this one
+/// (RM0390 23.4.7: TXE clear, its content goes to the shifter at the address's
+/// ninth pulse) and NBYTES would drop this one's last. Returns the failures.
+template <typename Bus>
+uint8_t self_next_write(FmpI2cSpeed speed, I2cEngine e, I2cEngine next) {
+    const uint8_t out[8] = {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18};
+    const uint8_t after[8] = {0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
+    const uint8_t lengths[4] = {1, 2, 3, 8};
+    uint8_t wrong = 0;
+    auto judge = [&](bool failed_right) {
+        Far::refuse_at = 0;
+        ClassicTarget::acknowledge(true);
+        Far::took = 0;
+        bool whole = failed_right &&
+                     tenure<Bus>(self_addr, after, 8, nullptr, 0, speed, next) == i2c_ok &&
+                     Far::took == 8u;
+        for (uint8_t i = 0; i < 8u && whole; ++i) {
+            whole = Far::sink[i] == after[i];
+        }
+        if (!whole) {
+            wrong = static_cast<uint8_t>(wrong + 1u);
+        }
+    };
+    for (const uint8_t n : lengths) {
+        judge(tenure<Bus>(0x42, out, n, nullptr, 0, speed, e) == i2c_nack_addr);
+        for (uint8_t k = 1; k <= n; ++k) {
+            Far::refuse_at = k;
+            judge(tenure<Bus>(self_addr, out, n, nullptr, 0, speed, e) == i2c_nack_data);
+        }
+    }
+    return wrong;
+}
+
 void tm_self_link() {
     // The far end first, so its pads are the peripheral's before a START.
     Far::live = true;
@@ -1662,7 +1705,7 @@ void tm_self_link() {
     using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
     struct Trace {
         uint8_t status;
-        bool tx;
+        uint32_t tx_at;   ///< the transmit stream's memory address, 0 when no block started
         bool rx;
         uint32_t tx_n;
         uint32_t rx_n;
@@ -1677,34 +1720,42 @@ void tm_self_link() {
         rx_dma_entries = 0;
         const uint8_t st = tenure<DmaHost>(self_addr, tx, tx_len, rx, rx_len,
                                            FmpI2cSpeed::fast_400k, e);
-        return Trace{st, tx != nullptr && TxRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx),
+        return Trace{st, TxRegs::regs().M0AR,
                      rx != nullptr && RxRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx),
                      tx_dma_entries, rx_dma_entries};
     };
-    static const uint8_t one_out[1] = {0x6C};
+    static const uint8_t one_out[2] = {0x6C, 0x7D};
     uint8_t one_in = 0xEE;
     Far::took = 0;
     Trace t = traced(one_out, 1, nullptr, 0, I2cEngine::dma);
-    const bool w1 = t.status == i2c_ok && t.tx && t.tx_n == 1u && Far::took == 1u &&
+    const bool w1 = t.status == i2c_ok && t.tx_at == 0u && t.tx_n == 0u && Far::took == 1u &&
                     Far::sink[0] == one_out[0];
+    Far::took = 0;
+    t = traced(one_out, 2, nullptr, 0, I2cEngine::dma);
+    const bool w2 = t.status == i2c_ok && t.tx_at == reinterpret_cast<uint32_t>(one_out + 1) &&
+                    t.tx_n == 1u && Far::took == 2u && Far::sink[0] == one_out[0] &&
+                    Far::sink[1] == one_out[1];
     t = traced(nullptr, 0, &one_in, 1, I2cEngine::dma);
     const bool r1 = t.status == i2c_ok && t.rx && t.rx_n == 1u && one_in == Far::value(0);
-    print(serial, "  dma, a write of one: ", w1 ? "on the transmit stream, exact" : "WRONG",
+    print(serial, "  dma, a write of one: ", w1 ? "no stream, exact" : "WRONG",
+          "; a write of two: ", w2 ? "the stream on the second byte, exact" : "WRONG",
           "; a read of one: ", r1 ? "on the receive stream, exact" : "WRONG", crlf);
-    bench.verdict("dma at one byte: a write and a read of one on the engines, each stream "
-                  "completing once, byte-exact",
-                  w1 && r1);
+    bench.verdict("dma with the first byte in TXDR before the START: a write of one starts no "
+                  "stream and enters no stream vector, a write of two starts the stream on its "
+                  "second byte, completing once, both byte-exact",
+                  w1 && w2);
+    bench.verdict("... and a read of one is on the receive stream, completing once, byte-exact", r1);
     uint8_t eight_in[8] = {};
     static const uint8_t eight_out[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     Far::took = 0;
     t = traced(eight_out, 8, eight_in, 8, I2cEngine::interrupt);
-    bool i8 = t.status == i2c_ok && !t.tx && !t.rx && t.tx_n == 0u && t.rx_n == 0u &&
+    bool i8 = t.status == i2c_ok && t.tx_at == 0u && !t.rx && t.tx_n == 0u && t.rx_n == 0u &&
               Far::took == 8u;
     for (uint8_t i = 0; i < 8u && i8; ++i) {
         i8 = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
     }
     print(serial, "  interrupt on the engined host, eight written and eight read: status ",
-          t.status, ", streams started tx ", t.tx, " rx ", t.rx, ", stream vector entries ",
+          t.status, ", streams started tx ", t.tx_at != 0u, " rx ", t.rx, ", stream vector entries ",
           t.tx_n + t.rx_n, crlf);
     bench.verdict("interrupt on the engined host touches no stream, and the tenure is exact", i8);
     uint8_t d_nacked = 0;
@@ -1719,6 +1770,29 @@ void tm_self_link() {
                   d_nacked == 16u && d_gone == 16u && d_next == 16u);
     dma_host_live = false;
     DmaHost::release();
+
+    // The write after a failed one, byte for byte, across the two engines.
+    {
+        dma_host_live = true;
+        (void)DmaHost::init(clock, base_config);
+        const FmpI2cSpeed v = FmpI2cSpeed::fast_400k;
+        const uint8_t dd = self_next_write<DmaHost>(v, I2cEngine::dma, I2cEngine::dma);
+        const uint8_t di = self_next_write<DmaHost>(v, I2cEngine::dma, I2cEngine::interrupt);
+        const uint8_t id = self_next_write<DmaHost>(v, I2cEngine::interrupt, I2cEngine::dma);
+        const uint8_t ii = self_next_write<DmaHost>(v, I2cEngine::interrupt, I2cEngine::interrupt);
+        dma_host_live = false;
+        DmaHost::release();
+        (void)host_ready();
+        const uint8_t pp = self_next_write<Host>(v, I2cEngine::interrupt, I2cEngine::interrupt);
+        print(serial, "  the write after a refusal, 18 of each, wrong on the far end: dma then dma ",
+              dd, ", dma then interrupt ", di, ", interrupt then dma ", id,
+              ", interrupt then interrupt ", ii, ", the engineless pump ", pp, crlf);
+        bench.verdict("after a refused address or any refused byte under dma, the next write is "
+                      "whole on the far end byte for byte, on either engine",
+                      dd == 0u && di == 0u);
+        bench.verdict("... and the same after one refused on the event vector",
+                      id == 0u && ii == 0u && pp == 0u);
+    }
 
     // `dma` on the host with no engines bound: refused inside start(), CR2
     // untouched (no START), BUSY low and no address match at the far end;
@@ -2043,17 +2117,19 @@ void tn_partner() {
 }
 
 // =============================================================================
-// o - ES0298 2.12.8 ON TRIAL: writes inside the erratum's clock-ratio band
+// o - ES0298 2.12.8: writes inside the erratum's clock-ratio band
 // =============================================================================
 //
 // The erratum: with the first byte not already in TXDR, two bytes are
 // requested in a row, and if the first is written "in less than two FMPI2C
 // kernel clock cycles after the TXIS/DMA request" while the APB-to-kernel
 // ratio is between 1.5 and 3, the second "is not internally detected" and the
-// block stalls until a PE cycle. This host never preloads TXDR, so the band
-// is the only thing between it and that stall. The HSI as the kernel against
-// the 45 MHz APB1 is a ratio of 2.81; two kernel cycles there are 125 ns, 22
-// core cycles at 180 MHz.
+// block stalls until a PE cycle. The host under `dma` has its first byte in
+// TXDR before the START, its one path in and out of the band, so these writes
+// judge that path. The HSI as the kernel against the 45 MHz APB1 is a ratio of
+// 2.81; two kernel cycles there are 125 ns, 22 core cycles at 180 MHz. THE
+// CONTROL is the sequence the erratum describes, staged by the letter through
+// the resource's verbs: it must stall, or the letter proves nothing.
 
 /// The longest write the Request's eight-bit length can name.
 uint8_t trial_out[255];
@@ -2092,7 +2168,7 @@ uint32_t trial_limit_ms(uint8_t len, FmpI2cSpeed s) {
     return 2u * clocks * 1000u / fmpi2c_speed_hz(s) + 3u;
 }
 
-/// One write of the trial's buffer, waited for on the tick: its status, or
+/// One write of the buffer below, waited for on the tick: its status, or
 /// `parked`.
 template <typename Bus>
 uint8_t trial_write(uint8_t len, FmpI2cSpeed s, I2cEngine e, uint32_t limit_ms) {
@@ -2112,12 +2188,12 @@ uint8_t trial_write(uint8_t len, FmpI2cSpeed s, I2cEngine e, uint32_t limit_ms) 
     return xfer_done ? Bus::status() : parked;
 }
 
-/// THE ERRATUM'S FIRST WORKAROUND, STAGED BY THE LETTER and not by the host:
-/// the first byte in TXDR before the START and the transmit stream started on
-/// the rest, through the resource's verbs with the host's vectors masked off
-/// and STOPF polled. What it answers is whether that sequence holds on this
-/// die, inside the band; a run of two bytes or more, as the letter asks it.
-uint8_t trial_preloaded(uint8_t len, FmpI2cSpeed s, uint32_t limit_ms) {
+/// THE CONTROL, staged by the letter and not by the host: TXDR left empty, the
+/// transmit stream started on the WHOLE run and its request enabled before the
+/// START, through the resource's verbs with the host's vectors masked off and
+/// STOPF polled. The erratum's own conditions, inside the band; a run of two
+/// bytes or more, as the letter asks it.
+uint8_t trial_unloaded(uint8_t len, FmpI2cSpeed s, uint32_t limit_ms) {
     S::interrupt(FmpI2cInterrupt::rx | FmpI2cInterrupt::tx | FmpI2cInterrupt::nack |
                      FmpI2cInterrupt::stop | FmpI2cInterrupt::error |
                      FmpI2cInterrupt::transfer_complete,
@@ -2126,8 +2202,7 @@ uint8_t trial_preloaded(uint8_t len, FmpI2cSpeed s, uint32_t limit_ms) {
     (void)S::disable();
     (void)S::timing(DmaHost::timing_of(s));
     S::enable();
-    S::data(trial_out[0]);
-    (void)TxEngine::start(std::span<const uint8_t>(trial_out + 1, len - 1u));
+    (void)TxEngine::start(std::span<const uint8_t>(trial_out, len));
     S::dma_transmit(true);
     (void)S::transfer_now(twilink::dut_addr, false, len, true);
     uint8_t st = parked;
@@ -2149,10 +2224,10 @@ uint8_t trial_preloaded(uint8_t len, FmpI2cSpeed s, uint32_t limit_ms) {
 /// last, the host brought up on `kernel`, `tenures` writes of `len`, a stall
 /// recovered by the PE cycle the erratum names, then the partner's count, sum
 /// and address matches read back on the APB1 kernel, outside the band.
-/// `staged` writes through trial_preloaded() in place of the host.
+/// `control` writes through trial_unloaded() in place of the host.
 template <typename Bus>
 TrialRow trial_batch(FmpI2cClock kernel, FmpI2cSpeed s, uint8_t len, uint16_t tenures,
-                     I2cEngine e, bool staged = false) {
+                     I2cEngine e, bool control = false) {
     TrialRow row{};
     row.tenures = tenures;
     const uint32_t limit = trial_limit_ms(len, s);
@@ -2177,8 +2252,8 @@ TrialRow trial_batch(FmpI2cClock kernel, FmpI2cSpeed s, uint8_t len, uint16_t te
                 trial_out[i] = trial_value(k, static_cast<uint8_t>(i));
                 sum = static_cast<uint16_t>(sum + trial_out[i]);
             }
-            const uint8_t st = staged ? trial_preloaded(len, s, limit)
-                                      : trial_write<Bus>(len, s, e, limit);
+            const uint8_t st = control ? trial_unloaded(len, s, limit)
+                                       : trial_write<Bus>(len, s, e, limit);
             if (st == i2c_ok) {
                 row.completed = static_cast<uint16_t>(row.completed + 1u);
                 row.sent = static_cast<uint16_t>(row.sent + len);
@@ -2233,13 +2308,13 @@ void trial_print(const char* kernel, const char* engine, FmpI2cSpeed s, uint8_t 
     }
 }
 
-void to_erratum_trial() {
+void to_erratum() {
     if (!need_twi_peer()) {
         return;
     }
     Dma<1>::init();
 
-    // ---- the trial's own controls: what a stall and a wrong byte look like ----
+    // ---- what a stall and a wrong byte look like to this letter ----
     // A tenure whose transmit interrupt the letter takes away after start() is a
     // stall made by hand: the address goes out and nobody ever writes TXDR. And
     // a byte changed after its sum was taken is what the partner's sum exists to
@@ -2285,15 +2360,20 @@ void to_erratum_trial() {
         print(serial, "  the control: a stall by hand parked ", staged, " with SCL low; the next "
               "write ", st, ", the partner took ", r.count, " with sum ", r.sum, " against ", sum,
               " for the bytes before one was changed", crlf);
-        bench.verdict("THE TRIAL CAN FAIL: a transmit interrupt taken away parks a tenure with "
+        bench.verdict("A STALL IS SEEN: a transmit interrupt taken away parks a tenure with "
                       "SCL low, inside the bound",
                       cmd && staged);
         bench.verdict("... and one byte changed after its sum was taken moves the partner's sum",
                       rep && st == i2c_ok && r.count == 16u && r.sum != sum);
     }
 
-    // ---- outside the band, the same writes: the trial's baseline ----
+    // ---- outside the band: the host's one path holds there too ----
     const FmpI2cSpeed speeds[2] = {FmpI2cSpeed::standard_100k, FmpI2cSpeed::fast_400k};
+    struct Shape {
+        uint8_t len;
+        uint16_t tenures;
+    };
+    const Shape shapes[3] = {{2, 100}, {16, 100}, {255, 20}};
     print(serial, "  APB1 / kernel: ", Host::reference_hz(), " / ", Host::kernel_hz(), " Hz", crlf);
     bool out_exact = true;
     {
@@ -2301,13 +2381,23 @@ void to_erratum_trial() {
                                        I2cEngine::interrupt);
         trial_print("APB1", "interrupt", FmpI2cSpeed::fast_400k, 16, r);
         out_exact = out_exact && trial_exact(r);
-        r = trial_batch<DmaHost>(FmpI2cClock::pclk, FmpI2cSpeed::fast_400k, 16, 100,
-                                 I2cEngine::dma);
-        trial_print("APB1", "dma", FmpI2cSpeed::fast_400k, 16, r);
+        r = trial_batch<DmaHost>(FmpI2cClock::pclk, FmpI2cSpeed::fast_400k, 1, 100, I2cEngine::dma);
+        trial_print("APB1", "dma", FmpI2cSpeed::fast_400k, 1, r);
         out_exact = out_exact && trial_exact(r);
+        for (const Shape& sh : shapes) {
+            r = trial_batch<DmaHost>(FmpI2cClock::pclk, FmpI2cSpeed::fast_400k, sh.len, sh.tenures,
+                                     I2cEngine::dma);
+            trial_print("APB1", "dma", FmpI2cSpeed::fast_400k, sh.len, r);
+            out_exact = out_exact && trial_exact(r);
+            r = trial_batch<DmaHost>(FmpI2cClock::sysclk, FmpI2cSpeed::fast_400k, sh.len, sh.tenures,
+                                     I2cEngine::dma);
+            trial_print("SYSCLK", "dma", FmpI2cSpeed::fast_400k, sh.len, r);
+            out_exact = out_exact && trial_exact(r);
+        }
     }
-    bench.verdict("outside the band (a ratio of 1.0), a hundred writes of sixteen on each engine, "
-                  "every byte judged by the partner's count and sum",
+    bench.verdict("outside the band, ratios of 1.0 and 0.25, the host's writes of one, two, "
+                  "sixteen and 255 on the DMA engines: no stall, every byte judged by the "
+                  "partner's count and sum, and a hundred of sixteen on the interrupt",
                   out_exact);
 
     // ---- inside the band ----
@@ -2318,16 +2408,13 @@ void to_erratum_trial() {
     bench.verdict("the HSI against the 45 MHz APB1 is inside the erratum's band, and the host "
                   "says so",
                   in_band);
-    struct Shape {
-        uint8_t len;
-        uint16_t tenures;
-    };
-    const Shape shapes[3] = {{2, 100}, {16, 100}, {255, 20}};
     bool pump_exact = true;
-    bool dma_accounted = true;
-    bool staged_exact = true;
+    bool dma_exact = true;
+    bool control_accounted = true;
     uint32_t dma_tenures = 0;
     uint32_t dma_stalls = 0;
+    uint32_t control_tenures = 0;
+    uint32_t control_stalls = 0;
     for (const FmpI2cSpeed s : speeds) {
         for (const Shape& sh : shapes) {
             const TrialRow p = trial_batch<Host>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
@@ -2337,31 +2424,398 @@ void to_erratum_trial() {
             const TrialRow d = trial_batch<DmaHost>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
                                                     I2cEngine::dma);
             trial_print("HSI", "dma", s, sh.len, d);
-            dma_accounted = dma_accounted && trial_accounted(d);
+            dma_exact = dma_exact && trial_exact(d);
             dma_tenures += d.tenures;
             dma_stalls += d.parked_n;
-            const TrialRow w = trial_batch<DmaHost>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
+            const TrialRow c = trial_batch<DmaHost>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
                                                     I2cEngine::dma, true);
-            trial_print("HSI", "dma, first byte staged in TXDR,", s, sh.len, w);
-            staged_exact = staged_exact && trial_exact(w);
+            trial_print("HSI", "the control, TXDR left empty,", s, sh.len, c);
+            control_accounted = control_accounted && trial_accounted(c);
+            control_tenures += c.tenures;
+            control_stalls += c.parked_n;
         }
     }
-    print(serial, "  inside the band, on the DMA engines: ", dma_stalls, " stalls in ",
-          dma_tenures, " tenures", crlf);
+    {
+        const TrialRow one = trial_batch<DmaHost>(FmpI2cClock::hsi, FmpI2cSpeed::fast_400k, 1, 100,
+                                                  I2cEngine::dma);
+        trial_print("HSI", "dma", FmpI2cSpeed::fast_400k, 1, one);
+        dma_exact = dma_exact && trial_exact(one);
+    }
+    print(serial, "  inside the band: the host on the DMA engines ", dma_stalls, " stalls in ",
+          dma_tenures, " tenures; the control ", control_stalls, " stalls in ", control_tenures,
+          crlf);
     bench.verdict("inside the band on the interrupt: no stall and every byte of every write - the "
                   "vector writes TXDR outside the erratum's two kernel cycles",
                   pump_exact);
-    bench.verdict("inside the band on the DMA engines, every tenure accounted byte for byte: "
-                  "whole, or stalled with its first byte on the wire and nothing after it, and "
-                  "the PE cycle recovers it",
-                  dma_accounted);
-    // THE BOUND: 1450 stalls in 8800 tenures of this letter measured, 16.5 per
-    // cent, so 440 tenures with none would come up less than once in 10^30 runs.
-    bench.verdict("... and the erratum is alive on this die: at least one stall in those tenures",
-                  dma_stalls != 0u);
-    bench.verdict("the erratum's first workaround staged by the letter, the first byte in TXDR "
-                  "before the START and the stream on the rest: no stall, every byte",
-                  staged_exact);
+    bench.verdict("inside the band on the DMA engines, the host's own path, a write of one "
+                  "included: no stall and every byte of every write",
+                  dma_exact && dma_stalls == 0u);
+    bench.verdict("the control, TXDR left empty, every tenure accounted byte for byte: whole, or "
+                  "stalled with its first byte on the wire and nothing after it, and the PE "
+                  "cycle recovers it",
+                  control_accounted);
+    // THE BOUND: 2798 stalls in 20240 tenures of this control measured, 13.8 per
+    // cent, so 440 tenures with none would come up (1 - 0.138)^440, less than once
+    // in 10^28 runs. A control with no stall is a letter that cannot fail.
+    bench.verdict("... and THE LETTER CAN FAIL: the erratum is alive on this die, at least one "
+                  "stall in the control's tenures",
+                  control_stalls != 0u);
+    (void)host_ready();
+    bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
+}
+
+// =============================================================================
+// p - A REFUSED WRITE, position by position, against the desk partner (set `t`)
+// =============================================================================
+//
+// The partner refuses by its own target byte control: `nack_at` names the
+// received byte, counted from one, and every byte after it; `flag_deaf` parks
+// its client at twi_link's deaf_addr, which is a NACK on the address at
+// dut_addr. Its tally counts the refused byte too: the byte reaches RXDR before
+// the ninth pulse is answered.
+//
+// THE RUN HAS NO init() AND NO PE CYCLE BETWEEN A FAILED TENURE AND THE NEXT
+// REQUEST, on purpose: either would flush TXDR (RM0390 23.7.7, TXE set when
+// PE = 0) and hide a byte the failed tenure left there. So the command channel
+// runs over the engined host itself, at the row's own speed (a change of speed
+// costs a PE cycle), and on the engine the row names.
+
+/// The command channel over the host under test, at the row's speed.
+FmpI2cSpeed link_speed = FmpI2cSpeed::standard_100k;
+
+template <I2cEngine e>
+struct EnginePort {
+    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                          uint8_t rx_len) {
+        return ::tenure<DmaHost>(addr, tx, tx_len, rx, rx_len, link_speed, e);
+    }
+    static void ready() { (void)DmaHost::recover(); }
+    static void wait_ms(uint32_t ms) { ::wait_ms(ms); }
+};
+using LinkOnPump = TwiLinkClient<EnginePort<I2cEngine::interrupt>>;
+using LinkOnDma = TwiLinkClient<EnginePort<I2cEngine::dma>>;
+
+/// A write of `tx` then a read of `rx`, refused at data byte `at` of the write,
+/// counted from one, or on the address at zero.
+struct Refusal {
+    uint8_t tx;
+    uint8_t rx;
+    uint8_t at;
+};
+
+constexpr Refusal refusal_rows[] = {
+    {1, 0, 0},    {2, 0, 0},  {16, 0, 0}, {1, 4, 0},  {2, 4, 0},     // the address
+    {1, 0, 1},    {1, 4, 1},                                         // a write of one
+    {2, 0, 1},    {2, 4, 1},  {16, 0, 1},                            // the first byte
+    {2, 0, 2},    {2, 4, 2},  {16, 0, 2},                            // the second
+    {3, 0, 3},    {16, 0, 3}, {16, 0, 7}, {16, 0, 16},               // a later byte
+    {255, 0, 200}, {255, 0, 255},
+};
+
+/// One position's rows: how many landed there and how many of those were right.
+struct Position {
+    uint16_t seen = 0;
+    uint16_t right = 0;
+    constexpr void add(const Position& o) {
+        seen = static_cast<uint16_t>(seen + o.seen);
+        right = static_cast<uint16_t>(right + o.right);
+    }
+    constexpr bool whole() const { return seen != 0u && right == seen; }
+};
+
+/// What the rows of a pass came to, by where the partner's count says each landed.
+struct RefusalPass {
+    uint16_t rows = 0;
+    uint16_t status_right = 0;   ///< start() asynchronous and status() the right NACK
+    uint16_t tally_right = 0;    ///< the partner's count, sum, first byte, matches and flag
+    uint16_t next_whole = 0;     ///< the next request whole on the partner
+    uint16_t slipped = 0;        ///< rows the partner refused one byte sooner than asked
+    Position address;            ///< refused on the address
+    Position first;              ///< the first byte, of a write of two or more
+    Position second;
+    Position later;
+    Position one;                ///< a write of one
+    Position two;                ///< a write of two, either byte
+};
+
+/// The bytes after a NACK on the address: a second tenure in the same serve, to
+/// the address the partner is parked at.
+constexpr uint8_t refusal_after(uint8_t i) { return static_cast<uint8_t>(0xC7u + 0x35u * i); }
+
+/// One row. `starve` takes the transmit request away just after start(), so the
+/// stream never answers and the count stands still under a byte already gone:
+/// the case the test of TXE exists for.
+template <typename Link>
+void refusal_row(const Refusal& row, I2cEngine e, FmpI2cSpeed s, bool starve, bool print_row,
+                 RefusalPass& pass) {
+    const uint8_t next_len = 16;
+    const uint32_t limit = trial_limit_ms(row.tx, s);
+    twilink::Params a{};
+    a.ms = static_cast<uint16_t>(limit + trial_limit_ms(next_len, s) + 10u);
+    a.addr = twilink::dut_addr;
+    if (row.at == 0u) {
+        a.flags = twilink::flag_deaf;
+    } else {
+        a.nack_at = row.at;
+    }
+    link_speed = s;
+    const bool served = Link::act(Op::serve, a);
+    const uint32_t t0 = Ticker::ticks();
+
+    uint16_t sum = 0;
+    for (uint16_t i = 0; i < row.tx; ++i) {
+        trial_out[i] = trial_value(static_cast<uint16_t>(row.tx + row.at), static_cast<uint8_t>(i));
+    }
+    uint8_t in[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(trial_out));
+    r.tx_len = row.tx;
+    r.rx = lend<Lease::reply>(row.rx != 0u ? in : nullptr);
+    r.rx_len = row.rx;
+    r.speed = s;
+    r.engine = e;
+    xfer_done = false;
+    const bool synchronous = DmaHost::start(r);
+    if (starve) {
+        S::dma_transmit(false);
+    }
+    const uint32_t w0 = Ticker::ticks();
+    while (!xfer_done && Ticker::ticks() - w0 < limit) {
+    }
+    const uint8_t status = xfer_done ? DmaHost::status() : parked;
+    if (status == parked) {
+        (void)DmaHost::recover();
+    }
+    bool untouched = true;
+    for (const uint8_t v : in) {
+        untouched = untouched && v == 0xEEu;
+    }
+
+    // THE NEXT REQUEST. After a refused address, a write in the same serve, the
+    // partner's tally judging it byte for byte; after a refused byte the partner
+    // keeps refusing until its deadline, so the next request is the report's
+    // frame: a stale byte ahead of it costs the frame its checksum.
+    uint8_t after[next_len];
+    uint16_t after_sum = 0;
+    for (uint8_t i = 0; i < next_len; ++i) {
+        after[i] = refusal_after(i);
+        after_sum = static_cast<uint16_t>(after_sum + after[i]);
+    }
+    bool next_ok = true;
+    if (row.at == 0u) {
+        next_ok = tenure<DmaHost>(twilink::deaf_addr, after, next_len, nullptr, 0, s, e) == i2c_ok;
+    }
+    while (Ticker::ticks() - t0 < a.ms + 5u) {
+    }
+    twilink::Report rep{};
+    bool first_try = false;
+    {
+        twilink::Frame f;
+        first_try = Link::command_once(Op::report, after, 0);
+        if (first_try) {
+            wait_ms(2);
+            first_try = Link::recv_frame(f) && f.op == Op::report_data &&
+                        f.len == twilink::report_size;
+            if (first_try) {
+                rep = twilink::get_report(f.data);
+            }
+        }
+    }
+    const bool reported = first_try || Link::report(rep);
+    if (row.at != 0u) {
+        next_ok = first_try;
+    }
+
+    const uint8_t want = row.at == 0u ? i2c_nack_addr : i2c_nack_data;
+    const bool status_right = !synchronous && status == want && untouched;
+    const bool nacked = (rep.flags & twilink::report_nacked) != 0u;
+    // WHERE THE PARTNER REALLY REFUSED IS ITS OWN COUNT, `at` or one sooner. Its
+    // target polls RXNE and TCR on separate passes and decides at TCR on what it
+    // has counted so far, so a pass that sees RXNE first counts the byte before
+    // the decision and refuses that one. The sum is taken over the count, which
+    // judges every byte the partner kept wherever the refusal landed.
+    uint16_t landed = 0;
+    if (row.at != 0u && reported && rep.count <= row.tx) {
+        landed = rep.count;
+        for (uint16_t i = 0; i < landed; ++i) {
+            sum = static_cast<uint16_t>(sum + trial_out[i]);
+        }
+    }
+    const bool tally_right =
+        served && reported && rep.addr_hits == 1u &&
+        (row.at == 0u ? rep.count == next_len && rep.sum == after_sum &&
+                            rep.first == after[0] && !nacked
+                      : landed != 0u && landed <= row.at && landed + 1u >= row.at &&
+                            rep.sum == sum && rep.first == trial_out[0] && nacked);
+    const bool whole = next_ok && (row.at != 0u || tally_right);
+    const bool right = status_right && tally_right && whole;
+    if (print_row || !right) {
+        print(serial, "    ", row.tx, "+", row.rx, " refused at ", row.at, ": start ", synchronous,
+              ", status ", status, " of ", want, "; the partner took ", rep.count, " sum ", rep.sum,
+              " first ", hex(rep.first), " matches ", rep.addr_hits, " flags ", hex(rep.flags),
+              "; the next request ", next_ok ? "whole" : "WRONG", right ? "" : " <- WRONG", crlf);
+    }
+    pass.rows = static_cast<uint16_t>(pass.rows + 1u);
+    pass.status_right = static_cast<uint16_t>(pass.status_right + (status_right ? 1u : 0u));
+    pass.tally_right = static_cast<uint16_t>(pass.tally_right + (tally_right ? 1u : 0u));
+    pass.next_whole = static_cast<uint16_t>(pass.next_whole + (whole ? 1u : 0u));
+    pass.slipped = static_cast<uint16_t>(pass.slipped + (landed != 0u && landed != row.at ? 1u : 0u));
+    auto count = [right](Position& p) {
+        p.seen = static_cast<uint16_t>(p.seen + 1u);
+        p.right = static_cast<uint16_t>(p.right + (right ? 1u : 0u));
+    };
+    if (row.at == 0u) {
+        count(pass.address);
+    } else if (row.tx == 1u) {
+        count(pass.one);
+    } else if (landed == 1u) {
+        count(pass.first);
+    } else if (landed == 2u) {
+        count(pass.second);
+    } else {
+        count(pass.later);
+    }
+    if (row.tx == 2u) {
+        count(pass.two);
+    }
+}
+
+/// A pass of every row: the host brought up once on `kernel`, nothing between
+/// the rows but the requests.
+template <typename Link>
+RefusalPass refusal_pass(FmpI2cClock kernel, FmpI2cSpeed s, I2cEngine e, const char* name) {
+    RefusalPass pass{};
+    FmpI2cHostConfig c = base_config;
+    c.kernel = kernel;
+    dma_host_live = true;
+    if (DmaHost::init(clock, c)) {
+        for (const Refusal& row : refusal_rows) {
+            refusal_row<Link>(row, e, s, false, false, pass);
+        }
+    }
+    dma_host_live = false;
+    print(serial, "  ", name, " ", s == FmpI2cSpeed::fast_400k ? "400" : "100", " kHz: ",
+          pass.rows, " rows, status right ", pass.status_right, ", the partner's tally right ",
+          pass.tally_right, ", the next request whole ", pass.next_whole, ", refused sooner ",
+          pass.slipped, crlf);
+    return pass;
+}
+
+void tp_refusals() {
+    if (!need_twi_peer()) {
+        return;
+    }
+    Dma<1>::init();
+    const FmpI2cSpeed speeds[2] = {FmpI2cSpeed::standard_100k, FmpI2cSpeed::fast_400k};
+    RefusalPass dma{};
+    bool pump_right = true;
+    uint32_t pump_rows = 0;
+    auto fold = [&](const RefusalPass& p) {
+        dma.rows = static_cast<uint16_t>(dma.rows + p.rows);
+        dma.status_right = static_cast<uint16_t>(dma.status_right + p.status_right);
+        dma.tally_right = static_cast<uint16_t>(dma.tally_right + p.tally_right);
+        dma.next_whole = static_cast<uint16_t>(dma.next_whole + p.next_whole);
+        dma.slipped = static_cast<uint16_t>(dma.slipped + p.slipped);
+        dma.address.add(p.address);
+        dma.first.add(p.first);
+        dma.second.add(p.second);
+        dma.later.add(p.later);
+        dma.one.add(p.one);
+        dma.two.add(p.two);
+    };
+    auto fold_pump = [&](const RefusalPass& p) {
+        pump_rows += p.rows;
+        pump_right = pump_right && p.rows != 0u && p.status_right == p.rows &&
+                     p.tally_right == p.rows && p.next_whole == p.rows;
+    };
+    for (const FmpI2cClock kernel : {FmpI2cClock::pclk, FmpI2cClock::hsi}) {
+        const bool hsi = kernel == FmpI2cClock::hsi;
+        for (const FmpI2cSpeed s : speeds) {
+            fold(refusal_pass<LinkOnPump>(kernel, s, I2cEngine::dma,
+                                          hsi ? "HSI dma, the next on interrupt"
+                                              : "APB1 dma, the next on interrupt"));
+            fold(refusal_pass<LinkOnDma>(kernel, s, I2cEngine::dma,
+                                         hsi ? "HSI dma, the next on dma" : "APB1 dma, the next on dma"));
+            fold_pump(refusal_pass<LinkOnPump>(kernel, s, I2cEngine::interrupt,
+                                               hsi ? "HSI interrupt, the next on interrupt"
+                                                   : "APB1 interrupt, the next on interrupt"));
+            fold_pump(refusal_pass<LinkOnDma>(kernel, s, I2cEngine::interrupt,
+                                              hsi ? "HSI interrupt, the next on dma"
+                                                  : "APB1 interrupt, the next on dma"));
+        }
+    }
+    print(serial, "  under dma, right of landed: the address ", dma.address.right, "/", dma.address.seen,
+          ", a write of one ", dma.one.right, "/", dma.one.seen, ", a first byte ", dma.first.right,
+          "/", dma.first.seen, ", a second ", dma.second.right, "/", dma.second.seen, ", a later ",
+          dma.later.right, "/", dma.later.seen, ", a write of two ", dma.two.right, "/", dma.two.seen,
+          "; refused sooner than asked ", dma.slipped, " of ", dma.rows, "; the event vector's rows ",
+          pump_rows, crlf);
+    bench.verdict("under dma a NACK on the ADDRESS answers i2c_nack_addr, nothing of the write on "
+                  "the partner, in a write of one, of two, of sixteen and with a read half behind",
+                  dma.address.whole());
+    bench.verdict("... on the FIRST data byte of two or more, i2c_nack_data, the partner's count, "
+                  "sum and first byte exact",
+                  dma.first.whole());
+    bench.verdict("... on the SECOND data byte, the same", dma.second.whole());
+    bench.verdict("... on a LATER byte, the last of sixteen and of 255 among the rows, the same",
+                  dma.later.whole());
+    bench.verdict("... on a WRITE OF ONE, i2c_nack_data, with no stream under it", dma.one.whole());
+    bench.verdict("... on either byte of a WRITE OF TWO", dma.two.whole());
+    bench.verdict("every one of them: start() asynchronous, status() the right NACK, a read half "
+                  "behind it never run",
+                  dma.status_right == dma.rows);
+    bench.verdict("... the partner's tally exact and the next request whole, on either engine",
+                  dma.tally_right == dma.rows && dma.next_whole == dma.rows);
+    bench.verdict("the same rows on the event vector", pump_right);
+
+    // THE STREAM THAT NEVER ANSWERED. A first byte gone to the shifter and the
+    // stream's request taken away: TXE stands and the count has not moved, so a
+    // test of the count alone would read this data NACK as the address's.
+    {
+        RefusalPass starved{};
+        dma_host_live = true;
+        if (DmaHost::init(clock, base_config)) {
+            const Refusal row{16, 0, 1};
+            refusal_row<LinkOnPump>(row, I2cEngine::dma, FmpI2cSpeed::fast_400k, true, true, starved);
+        }
+        dma_host_live = false;
+        bench.verdict("the first byte refused with the stream starved: TXE tells it from the "
+                      "address, i2c_nack_data, and the next request whole",
+                      starved.rows == 1u && starved.status_right == 1u && starved.tally_right == 1u &&
+                          starved.next_whole == 1u);
+    }
+    // A START LOST INTO A HELD LINE, the first byte already in TXDR and the stream
+    // armed. The partner's hold falling under a high SCL reads as a START, so BUSY
+    // would park the tenure behind it: the PE cycle takes BUSY down first, as the
+    // arbiter's recover() does, and the START then loses its address to the low
+    // line. The next request is the report's frame, with no PE cycle in between.
+    {
+        dma_host_live = true;
+        link_speed = FmpI2cSpeed::fast_400k;
+        const bool up = DmaHost::init(clock, base_config);
+        twilink::Params h{};
+        h.ms = 20;
+        const bool held = up && LinkOnPump::act(Op::hold_sda, h);
+        const uint32_t t0 = Ticker::ticks();
+        (void)DmaHost::recover();
+        for (uint8_t i = 0; i < 4u; ++i) {
+            trial_out[i] = trial_value(0x55u, i);
+        }
+        const uint8_t st = tenure<DmaHost>(twilink::dut_addr, trial_out, 4, nullptr, 0,
+                                           FmpI2cSpeed::fast_400k, I2cEngine::dma);
+        const bool stream_off = (DmaStream<TxEngine::controller, TxEngine::stream>::regs().CR &
+                                 DMA_SxCR_EN) == 0u;
+        while (Ticker::ticks() - t0 < h.ms + 5u) {
+        }
+        const bool next = LinkOnPump::command_once(Op::ping, trial_out, 0);
+        print(serial, "  a START lost into a held line, under dma: status ", st, ", the stream off ",
+              stream_off, "; the next request ", next ? "whole" : "WRONG", crlf);
+        bench.verdict("a START lost under dma: i2c_arb_lost, the stream taken back, the first byte "
+                      "gone with it and the next request whole",
+                      held && st == i2c_arb_lost && stream_off && next);
+        dma_host_live = false;
+    }
     (void)host_ready();
     bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
 }
@@ -2513,8 +2967,10 @@ int main() {
     bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
     bench.second_letter('n', "THE DESK PARTNER: Fm+ acknowledged, a held SDA, a held clock",
                         tn_partner);
-    bench.second_letter('o', "ES0298 2.12.8 ON TRIAL: writes inside the clock-ratio band",
-                        to_erratum_trial);
+    bench.second_letter('o', "ES0298 2.12.8: writes in and out of the clock-ratio band",
+                        to_erratum);
+    bench.second_letter('p', "A REFUSED WRITE, position by position, against the partner",
+                        tp_refusals);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

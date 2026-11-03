@@ -145,17 +145,15 @@
  *    byte is not already in TXDR, it is written within two kernel cycles
  *    of its request, and the ratio between the APB clock and the kernel
  *    clock is between 1.5 and 3, the second byte goes undetected and the
- *    peripheral stalls until PE is cycled - measured under the DMA engines,
- *    never on the event vector, whose first store comes later than that
- *    (docs/stm32f4/fmpi2c.md). The ratio is arithmetic this file can do, so it is published
- *    rather than hidden - fmpi2c_transmit_stall_risk() and the host's
- *    transmit_stall_risk() - and the choice of kernel clock, which is the
- *    manual's own second workaround, is the application's. The first
- *    workaround (the first byte in TXDR before the transfer starts) is
- *    taken by no path of the host: start() writes nothing into TXDR, and
- *    the transmit engine, though started before the START bit, writes its
- *    first byte on the first TXIS, which comes after the address's ACK
- *    (23.4.9, figure 260) - the erratum names the DMA request beside TXIS.
+ *    peripheral stalls until PE is cycled. A stream answers its request
+ *    inside that window, so under `dma` the host takes the manual's first
+ *    workaround on its one path, in the band and out of it: a write half's
+ *    first byte goes into TXDR before the START and the stream carries the
+ *    rest. The event vector's first store comes later than the window, so
+ *    `interrupt` does not take it (docs/stm32f4/fmpi2c.md has both
+ *    measurements). The ratio stays published - fmpi2c_transmit_stall_risk()
+ *    and the host's transmit_stall_risk() - for what is not this host: a
+ *    target's first byte and a program's own stream on the resource's verbs.
  *  - 2.12.4, last-received byte loss in reload mode: with RELOAD set and
  *    NBYTES > 1 a receiver can lose the last byte. The host engine never
  *    sets RELOAD - a Request's spans are eight-bit lengths, so one tenure
@@ -438,10 +436,14 @@ constexpr uint32_t fmpi2c_datasheet_min_pclk_hz(FmpI2cSpeed s) {
  * or a reset leaves.
  *
  * The ratio is the one part of that a driver can compute, so it is
- * published: true means this pair of rates sits in the erratum's band, and
- * the two workarounds are the manual's own - load TXDR before the transfer
- * starts (which no path of FmpI2cHost does), or choose a kernel clock
- * whose ratio is outside 1.5 .. 3.
+ * published: true means this pair of rates sits in the erratum's band. The
+ * two workarounds are the manual's own - load TXDR before the transfer
+ * starts, or choose a kernel clock whose ratio is outside 1.5 .. 3.
+ * FmpI2cHost needs neither answer from a program: its `dma` path takes the
+ * first and its `interrupt` path stores outside the window. What can still
+ * meet the band is what does not run through that host: a target's first
+ * byte (the erratum names target mode too) and a program's own stream on the
+ * resource's verbs.
  */
 constexpr bool fmpi2c_transmit_stall_risk(uint32_t pclk_hz, uint32_t kernel_hz) {
     if (pclk_hz == 0u || kernel_hz == 0u) {
@@ -1836,7 +1838,7 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * exit path serve the whole vocabulary.
  *
  * THE VOCABULARY, PRODUCED ON THE WIRE:
- *   i2c_nack_addr    NACKF with no data byte yet moved in this half
+ *   i2c_nack_addr    NACKF with no data byte of this half gone to the wire
  *   i2c_nack_data    NACKF after at least one data byte
  *   i2c_arb_lost     ARLO - another controller won; the silicon has already
  *                    released the bus and switched to target mode, so no
@@ -1864,22 +1866,22 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * `if constexpr`). With engines bound, THE PROGRAM NAMES THE ENGINE of
  * every Request (Request::engine, util/i2c_bus.hpp): `interrupt`, the
  * default, moves both halves on the event vector at any length; `dma`
- * puts every half with a length and a buffer on the engines, ONE BYTE
- * INCLUDED - 23.4.16 loads TXDR "whenever the TXIS bit is set" and empties
- * RXDR "whenever the RXNE bit is set", the NBYTES counter ending the
- * transfer, and names no length below which that does not hold - while
- * the address, the repeated START and the ending stay on the interrupt,
- * because 23.4.16 says the address "cannot be transferred with DMA". A
- * half with no buffer stays on the vector, writing its filler or draining
- * what it reads, and the request completes. A stream is this host's alone
- * (the ownership rule, docs/design/dma.md), so its start is not asked
- * whether it took. The engines are started BEFORE the START bit, which is
- * what 23.4.16 asks for; the transmit engine's first
- * byte still waits for the first TXIS, after the address, so this is not
- * ES0298 2.12.8's first workaround (the erratum, above). Which engine to
- * name is the program's judgement; docs/stm32f4/fmpi2c.md gives the
- * figures and the length from which the engines cost the core fewer
- * cycles.
+ * puts every half with a length and a buffer on the engines - 23.4.16 loads
+ * TXDR "whenever the TXIS bit is set" and empties RXDR "whenever the RXNE
+ * bit is set", the NBYTES counter ending the transfer, and names no length
+ * below which that does not hold - while the address, the repeated START
+ * and the ending stay on the interrupt, because 23.4.16 says the address
+ * "cannot be transferred with DMA". A half with no buffer stays on the
+ * vector, writing its filler or draining what it reads, and the request
+ * completes. A stream is this host's alone (the ownership rule,
+ * docs/design/dma.md), so its start is not asked whether it took. The
+ * engines are started BEFORE the START bit, which is what 23.4.16 asks for,
+ * and a write half's first byte goes into TXDR before them, ES0298 2.12.8's
+ * first workaround (the erratum, above): the transmit stream carries the
+ * rest, so a write of one byte starts none. A read of one byte is the
+ * receive stream's. Which engine to name is the program's judgement;
+ * docs/stm32f4/fmpi2c.md gives the figures and the length from which the
+ * engines cost the core fewer cycles.
  *
  * THE DMA CONTROLLER IS THE APP'S: Dma<1>::init() before any engined
  * init(). The engines arm STREAMS of a controller somebody else owns.
@@ -1967,8 +1969,9 @@ public:
         FmpI2cSpeed speed = FmpI2cSpeed::standard_100k;
         /// Which mechanism moves the data halves (util/i2c_bus.hpp): the
         /// event vector by default, the engines at any length when the
-        /// program names `dma` (a half with no buffer stays on the
-        /// vector); `dma` on a host with no engines bound is answered
+        /// program names `dma` (a write half's first byte stored in TXDR by
+        /// start(), a half with no buffer left on the vector); `dma` on a
+        /// host with no engines bound is answered
         /// i2c_rejected with nothing on the wire. The byte sits in the
         /// padding after `speed`: the Request is 28 bytes with it and
         /// without it.
@@ -1988,8 +1991,8 @@ public:
      * instance's APB1 clock, SYSCLK or the HSI. The HSI is worth choosing
      * for what an independent clock is for: it keeps the bus alive across a
      * change of the core's rate, and it holds a speed ES0298 2.12.2 would
-     * otherwise refuse at a slow core. What it costs on a 180 MHz part is
-     * ES0298 2.12.8's ratio - transmit_stall_risk() answers.
+     * otherwise refuse at a slow core. On a 180 MHz part it sits inside
+     * ES0298 2.12.8's band, which no path of this host stalls in.
      *
      * `cfg.bus` is the BUS'S own edges and the SCL detection budget: a rise
      * time the bus does not have lands tSCLL below the specification floor
@@ -2110,8 +2113,9 @@ public:
     /// The rate its registers are on, which is the other half of ES0298
     /// 2.12.8's ratio.
     static uint32_t reference_hz() { return pclk_hz_; }
-    /// ES0298 2.12.8: whether the two rates in force sit in the band where a
-    /// transmission can stall after its first byte.
+    /// ES0298 2.12.8: whether the two rates in force sit in the erratum's
+    /// band. A fact about the clocks, not about this host, whose writes do not
+    /// stall there on either engine.
     static bool transmit_stall_risk() {
         return fmpi2c_transmit_stall_risk(pclk_hz_, ker_hz_);
     }
@@ -2234,6 +2238,14 @@ public:
             // STOPF completes.
             S::clear(FmpI2cClear::nack);
             status_ = nacked_address() ? i2c_nack_addr : i2c_nack_data;
+            // AND TXDR IS LEFT EMPTY. A byte loaded ahead stays there through
+            // the NACK and the STOP - the next one on either engine, or a
+            // first byte stored before an address nobody answered - and with
+            // TXE clear the next write's address sends it to the shifter
+            // (23.4.7) ahead of that write's own bytes, NBYTES dropping its
+            // last. Only a NACK or a lost arbitration leaves one: a tenure
+            // that ends whole has moved every byte it loaded.
+            empty_txdr();
             // AND IT RETURNS. The STOP the peripheral sends by itself
             // arrives as its OWN interrupt a few microseconds later, and a
             // branch that fell through to the sweep at the bottom would
@@ -2324,6 +2336,7 @@ public:
             // STOPF will come.
             S::clear(FmpI2cClear::arb_lost);
             if (phase_ != Phase::idle) {
+                empty_txdr();   // as after a NACK: a byte loaded ahead stays
                 return finish(i2c_arb_lost);
             }
             return false;
@@ -2502,6 +2515,19 @@ private:
         SdaPin::function(pins.sda.function, c);
     }
 
+    /// TXDR emptied and TXIS down, for a tenure that ended with bytes still
+    /// to go. Writing TXE flushes the register (23.7.7) and leaves a request
+    /// nobody has served standing; only a store into TXDR takes TXIS down
+    /// (23.7.7), and left up it re-enters the vector as soon as TXIE is armed
+    /// again, with no owner and no ICR bit to clear it. So: the flush, the
+    /// store, the flush of that store. Three stores, on a failed tenure's path
+    /// alone.
+    static void empty_txdr() {
+        S::flush_tx();
+        S::data(0xFFu);
+        S::flush_tx();
+    }
+
     /// The one exit of every tenure: the status set, the phase idled, and
     /// every flag swept - a leftover level storms the vector.
     static bool finish(uint8_t st) {
@@ -2523,22 +2549,39 @@ private:
     /// A NACK on the address that opened the current half, rather than on
     /// one of its data bytes. A read half takes no NACK on its data - the
     /// target sends those bytes and the controller acknowledges them - so
-    /// there it is always the address. A write half's first TXIS comes
-    /// after the address's ACK and "the TXIS flag is not set when a NACK is
-    /// received" (23.4.9, figure 260): no byte delivered to TXDR means the
-    /// address. On the pump the delivered bytes are pos_ (the repeated
-    /// START resets it, so each half counts its own). On the transmit
-    /// engine they are the stream's: SxNDTR is post-decremented when a beat
-    /// is STORED into TXDR (9.3.3), not when direct mode preloads it from
-    /// memory (9.3.7), so a remaining count equal to the half's length
-    /// means no TXIS was served. One stream read, on the NACK path alone.
+    /// there it is always the address.
+    ///
+    /// On the pump, a write half's first TXIS comes after the address's ACK
+    /// and "the TXIS flag is not set when a NACK is received" (23.4.9, figure
+    /// 260): no byte delivered to TXDR means the address, and the delivered
+    /// bytes are pos_ (the repeated START resets it, so each half counts its
+    /// own).
+    ///
+    /// Under `dma` a write half's first byte is in TXDR before the START, so
+    /// the delivered bytes say nothing and two facts answer together. A byte
+    /// stays in TXDR, TXE clear, until the ninth pulse of an acknowledged
+    /// address sends it to the shifter (23.4.7), so TXE set means the first
+    /// byte left and the NACK is a data byte's; that alone answers a write of
+    /// one. TXE clear is not enough for two bytes or more: leaving sets TXIS
+    /// and the stream refills TXDR while the byte is on the wire, so TXE reads
+    /// clear after a data NACK as it does after the address's. There the
+    /// stream's count answers: SxNDTR is post-decremented when a beat is
+    /// STORED into TXDR (9.3.3), not when direct mode preloads it from memory
+    /// (9.3.7), so a count still at the stream's length means no refill. Both
+    /// are needed: a stream that has not been served yet leaves its count
+    /// standing under a byte already gone, and TXE tells that one. ISR is read
+    /// first, because a beat lands in TXDR before SxNDTR moves. One register
+    /// and one stream read, on the NACK path alone.
     static bool nacked_address() {
         if (phase_ == Phase::reading) {
             return true;
         }
         if constexpr (has_engines) {
-            if (tx_dma_) {   // launch_dma() put this write half on the engine
-                return TxEngine::progress().remaining == req_.tx_len;
+            if (req_.engine == I2cEngine::dma && req_.tx_len != 0u && req_.tx.get() != nullptr) {
+                if ((S::flags() & FmpI2cFlag::txe) != 0u) {
+                    return false;
+                }
+                return !tx_dma_ || TxEngine::progress().remaining == req_.tx_len - 1u;
             }
         }
         return pos_ == 0u;
@@ -2547,12 +2590,25 @@ private:
     /// The halves the engines carry this tenure, started before the START
     /// (23.4.16), each with its DMA request enabled and its vector's flag
     /// disarmed. Under `interrupt` none; under `dma` every half with a
-    /// length and a buffer. The start's answer is not read: the stream is
-    /// this host's alone, its last block ended with its last tenure
-    /// (finish(), recover()), and a length of one to 255 on a byte buffer is
-    /// a run every block start takes. A program that starts this host's
-    /// engine by hand has broken the ownership rule; its tenure stretches
-    /// SCL until the arbiter's timeout answers.
+    /// length and a buffer.
+    ///
+    /// A WRITE HALF'S FIRST BYTE GOES INTO TXDR HERE, which is ES0298 2.12.8's
+    /// first workaround and the host's one path, whatever the two clocks' ratio:
+    /// the erratum's stall needs a first byte not prepared, two bytes asked for
+    /// in a row and the first written within two kernel cycles of its request.
+    /// TXDR takes a write only with TXE set (23.7.11), so it is flushed first
+    /// (23.7.7), and the byte goes in before TXDMAEN, so no request can pour
+    /// over it. The transmit stream starts on the rest; the TXIS events count
+    /// NBYTES and the preload spends one (23.4.9), so a write of one byte starts
+    /// no stream and asks for nothing. TXIE stays down either way: nothing is
+    /// the vector's to write.
+    ///
+    /// The start's answer is not read: the stream is this host's alone, its
+    /// last block ended with its last tenure (finish(), recover()), and a
+    /// length of one to 255 on a byte buffer is a run every block start takes.
+    /// A program that starts this host's engine by hand has broken the
+    /// ownership rule; its tenure stretches SCL until the arbiter's timeout
+    /// answers.
     static void launch_dma() {
         if constexpr (has_engines) {
             tx_dma_ = false;
@@ -2567,12 +2623,17 @@ private:
                 S::interrupt(FmpI2cInterrupt::rx, false);
             }
             if (req_.tx_len != 0u && req_.tx.get() != nullptr) {
-                TxEngine::mark_busy();
-                (void)TxEngine::start_claimed(
-                    std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
-                tx_dma_ = true;
-                S::dma_transmit(true);
+                const uint8_t* const tx = req_.tx.get();
+                S::flush_tx();
+                S::data(tx[0]);
                 S::interrupt(FmpI2cInterrupt::tx, false);
+                if (req_.tx_len > 1u) {
+                    TxEngine::mark_busy();
+                    (void)TxEngine::start_claimed(
+                        std::span<const uint8_t>(tx + 1, req_.tx_len - 1u));
+                    tx_dma_ = true;
+                    S::dma_transmit(true);
+                }
             }
         }
     }
@@ -2601,11 +2662,15 @@ private:
     /// completed abandoned and counted, the receive stream stopped - and
     /// only those: a stream this tenure left alone is already stopped, and
     /// stopping it again would cost its wait for nothing. Then both
-    /// requests off and the vector's two data flags armed again.
+    /// requests off and the vector's two data flags armed again. A block not
+    /// completed may have stored a byte after the NACK's flush, a stream
+    /// served late, so TXDR is flushed again with the stream stopped.
     static void put_engines_away() {
         if constexpr (has_engines) {
             if (tx_dma_) {
-                (void)TxEngine::abandon();   // false, and nothing done, once completed
+                if (TxEngine::abandon()) {   // false, and nothing done, once completed
+                    S::flush_tx();
+                }
                 tx_dma_ = false;
             }
             if (rx_dma_) {

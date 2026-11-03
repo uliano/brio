@@ -82,15 +82,9 @@ a Fast-mode Plus bus
 wants the 20 mA pad drive turned on by the program
 (`Bus::fast_plus_drive(true)`), which nothing turns on by itself. A
 refused address and a refused DATA byte are told apart on both paths:
-`i2c_nack_addr` when nothing of the half's data reached the wire - the
-position of the interrupt that moves one byte at a time (the pump, on this
-page), or under the DMA engines the transmit stream's own
-count - and `i2c_nack_data` otherwise ("Bench findings"). And `dma` wants
-a kernel clock outside ES0298 2.12.8's band: `transmit_stall_risk()` says
-which side a pair of rates is on, and inside it about one write in six
-stalls after its first byte (the HSI against a 45 MHz APB1, measured
-below); nothing refuses it, and the tenure stands until a per-bus timeout
-answers it.
+`i2c_nack_addr` when nothing of the half's data reached the wire - the position of the interrupt that moves one byte at a time (the pump, on this
+page), or under the DMA engines TXE and the transmit stream's count - and
+`i2c_nack_data` otherwise ("Bench findings").
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does (the block's identity and what differs
@@ -246,7 +240,10 @@ carries the caution.
 **A NACK is an event and not an error.** NACKF sits on the event vector
 under NACKIE, and 23.4.9 says that on a NACK "the TXIS flag is not set,
 and a STOP condition is automatically sent" - so a tenure nobody answers
-ends by itself, and the completion is that STOP.
+ends by itself, and the completion is that STOP. A byte loaded ahead stays
+in TXDR through it, TXE clear, and with TXE clear the next address's ninth
+pulse sends it to the shifter (23.4.7): the host empties TXDR at the NACK and
+at a lost arbitration, so nothing of a failed request leads the next one.
 
 **Four errata are live in the driver.**
 - 2.12.3, a spurious bus error in controller mode: "detection of bus
@@ -258,19 +255,17 @@ ends by itself, and the completion is that STOP.
   byte is not already in TXDR, it is written less than two kernel cycles
   after its request, and the APB-to-kernel clock ratio is between 1.5 and
   3, the second byte "is not internally detected" and the block stalls
-  until a PE cycle or a reset. The ratio is arithmetic, so it is published
-  rather than hidden (`transmit_stall_risk()`). The erratum's two
-  workarounds are to write the first byte into TXDR before the transfer
-  starts, or to choose a kernel clock outside the band. This host takes
-  the first under neither engine: `start()` writes nothing into TXDR, and
-  the transmit stream, though started before the START, writes its first
-  byte on the first TXIS, which comes after the address's ACK (23.4.9,
-  figure 260). Which of the two engines meets the erratum is the silicon's
-  timing. A stream answers its request well inside two kernel cycles, and
-  in the band it stalls; the event vector does not ("ES0298 2.12.8 ON
-  TRIAL" below). So a program that names `dma` keeps its kernel clock out
-  of the band: on a 45 MHz APB1 the APB clock or SYSCLK (ratios 1.0 and
-  0.25), not the HSI (2.8).
+  until a PE cycle or a reset. The erratum's two workarounds are to write
+  the first byte into TXDR before the transfer starts, or to choose a
+  kernel clock outside the band. The host takes the first under `dma`, on
+  one path whatever the two clocks: `start()` flushes TXDR, stores the first
+  byte and starts the transmit stream on the rest, all before the START, and
+  a write of one byte starts no stream. `interrupt` needs neither, its first
+  store coming later than the window. Both are measured in the band and out
+  of it ("ES0298 2.12.8" below). The ratio stays published
+  (`transmit_stall_risk()`) for what does not go through this host: a
+  target's first byte, the erratum naming target mode too, and a program's
+  own stream on the resource's verbs.
 - 2.12.4, the reload-mode byte loss: answered by never using RELOAD.
 - 2.12.1, a 10-bit address whose first byte is NACKed, which leaves NACKF
   and START both standing and no new transfer possible. The host's Request
@@ -326,7 +321,9 @@ moves: 23.4.16 says the address "cannot be transferred with DMA", so a
 DMA tenure still costs the framing interrupts. The data moves at any
 length, one byte included: TXDR is loaded "whenever the TXIS bit is
 set", RXDR read whenever RXNE is, and the NBYTES counter ends the
-transfer (23.4.16), with no length below which either does not hold.
+transfer (23.4.16), with no length below which either does not hold. A
+write's first byte stored before the START spends one of NBYTES's TXIS
+events (23.4.9), and the stream answers the rest.
 
 ## Types and verbs
 
@@ -357,8 +354,9 @@ parameter list and the `Request` of [i2c.md](i2c.md)'s `I2cHost`, field
 for field, the speed an `FmpI2cSpeed` (with `fast_plus_1m`). `engine`
 names what moves the data, and the host never chooses: `interrupt`, the
 default, the event vector at any length; `dma` the engines at any
-length, one byte included, started in `start()` before the START
-(23.4.16), on a host with both engine parameters named - `has_dma` says so at
+length, started in `start()` before the START (23.4.16) with a write half's
+first byte already stored in TXDR, so that a write of one byte starts no
+stream, on a host with both engine parameters named - `has_dma` says so at
 compile time, and `dma` on a host without them is answered
 `i2c_rejected` inside `start()` with nothing on the wire. A half with no
 buffer stays on the vector under `dma` too, writing its filler or
@@ -436,8 +434,8 @@ Bus::init(clock, FmpI2cHostConfig{.kernel = FmpI2cClock::hsi});
 // 16 MHz whatever the core does - and Fm+ is refused there, because
 // ES0298 2.12.2 wants 20 MHz for it. speed_ok() says so before a
 // Request does. On a core whose APB1 sits at 24 to 48 MHz this is inside
-// ES0298 2.12.8's band: transmit_stall_risk() answers true, and a Request
-// naming `dma` can stall (Bench findings). `interrupt` does not.
+// ES0298 2.12.8's band: transmit_stall_risk() answers true, and neither
+// engine stalls there (Bench findings).
 ```
 
 **A bus whose edges are known.** The defaults are the specification's
@@ -491,7 +489,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - and letter m makes
-I2C1 the target. `test_stm32f4_fmpi2c` is 101 verdicts over thirteen
+I2C1 the target. `test_stm32f4_fmpi2c` is 104 verdicts over thirteen
 letters, and `z` was green in three runs of three, as was letter `f` in twenty of
 twenty.
 
@@ -520,9 +518,9 @@ read back from RCC_DCKCFGR2. Fast-mode Plus is reachable on the first two
 and REFUSED on the HSI, ES0298 2.12.2 wanting 20 MHz for it - which is
 the price of a 1 MHz bus stated as a compile-and-run-time fact rather
 than a footnote. ES0298 2.12.8's band lands the other way round: the HSI
-against a 45 MHz APB1 is a ratio of 2.8 and sits INSIDE the 1.5..3 window
-where a transmission can stall, while the APB clock (1.0) and SYSCLK
-(0.25) do not.
+against a 45 MHz APB1 is a ratio of 2.8 and sits INSIDE the 1.5..3 window,
+while the APB clock (1.0) and SYSCLK (0.25) do not; neither engine of the
+host stalls in it (below).
 
 **What the chooser produces at 45 MHz**, and the three speeds it makes:
 
@@ -702,14 +700,21 @@ this block has no repeated START to withdraw, the STOP after a NACK
 being its own (23.4.9). And THE ENGINE EACH REQUEST NAMES, judged on the
 streams - a stream's memory address, zeroed before the tenure, names the
 tenure's buffer after it only if a block start wrote it, and its vector
-is entered once by the block's completion: under `dma` a write and a
-read of one byte each start their stream, byte-exact; under `interrupt`
-the engined host's write of eight and read of eight start neither and
+is entered once by the block's completion: under `dma` a write of one
+byte starts no stream and enters no stream vector, a write of two starts the
+stream on its second byte, a read of one starts its stream, all byte-exact;
+under `interrupt` the engined host's write of eight and read of eight start
+neither and
 enter no stream vector; the last written byte refused under `dma`, 16
 refusals of 16 `i2c_nack_data`, the bus let go, the next tenure
 `i2c_ok`; and `dma` on the engineless host is answered `i2c_rejected`
 inside `start()`, CR2 untouched, BUSY low and no address match at I2C1
-over 200 us, the next write on that host exact. Ten runs of ten.
+over 200 us, the next write on that host exact. AND THE WRITE AFTER A FAILED
+ONE, byte for byte: an absent address and each refused position of writes of
+one, two, three and eight, 18 failures a pass with no PE cycle after them,
+each followed by a write of eight compared with what I2C1 kept: none wrong,
+under `dma` and `interrupt` followed by either, and on the engineless host.
+Ten runs of ten.
 
 **The target half answers a real controller.** As the peer of
 `test_stm32f4_i2c` on the same wires, `FmpI2cClient<1>` served from its
@@ -725,11 +730,11 @@ at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
 same wires, I2C1 the target served on the same core, its entries counted
 apart; the SCL period measured on the pad, 488 core cycles at the 400
 kHz row - 368.9 kHz, under the ceiling as above). At 400 kHz: a one-byte
-write 1162 cycles beyond the wire in two interrupts, a register read 1+1
-1751 in four, a 255-byte write and read x 1.00 on the pump (256 interrupts, 146 cycles
-of handler a byte written and 148 read) and on the engines (two
-interrupts), `start()` 326 to 343 cycles on the pump, the longest entry
-510 cycles of the event vector. The fixed cost carries the target's: the
+write 1142 cycles beyond the wire in two interrupts, a register read 1+1
+1699 in four, a 255-byte write and read x 1.00 on the pump (256 interrupts, 136
+cycles of handler a byte written and 141 read) and on the engines (two
+interrupts), `start()` 324 to 330 cycles on the pump, the longest entry 522
+cycles of the event vector. The fixed cost carries the target's: the
 classic block stretches SCL from its address match until its vector has
 run, on the same core; I2C1 as the host against this block as the target
 pays 212 for the same write ([i2c.md](i2c.md)).
@@ -738,44 +743,58 @@ pays 212 for the same write ([i2c.md](i2c.md)).
 `irq` and `isr` the two I2C vectors' and the two streams', between the
 meter's stamps; on this block the engines are started in `start()`,
 so its cycles are counted too). At 400 kHz; at 100 kHz every row is
-within a cycle of these but the engines' reads, whose `start()` is two
-cycles shorter there:
+within three cycles of these:
 
 | half | `interrupt`: start, irq, isr | `dma`: start, irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 331, 2, 412 | 477, 2, 495 | +229 |
-| write 2 | 330, 3, 538 | 477, 2, 495 | +104 |
-| write 3 | 331, 4, 683 | 477, 2, 495 | -42 |
-| write 16 | 330, 17, 2581 | 477, 2, 495 | -1939 |
-| read 1 | 331, 2, 401 | 457, 2, 619 | +344 |
-| read 2 | 331, 3, 549 | 457, 2, 619 | +196 |
-| read 16 | 331, 17, 2621 | 457, 2, 619 | -1876 |
-| register read 1+1 | 326, 4, 777 | 545, 4, 931 | +373 |
-| register read 1+2 | 326, 5, 925 | 545, 4, 931 | +225 |
-| register read 1+16 | 326, 19, 2997 | 545, 4, 931 | -1847 |
+| write 1 | 330, 2, 391 | 468, 1, 397 | +144 |
+| write 2 | 330, 3, 517 | 520, 2, 488 | +161 |
+| write 3 | 330, 4, 653 | 520, 2, 488 | +25 |
+| write 16 | 330, 17, 2425 | 520, 2, 488 | -1747 |
+| read 1 | 325, 2, 394 | 484, 2, 623 | +388 |
+| read 2 | 325, 3, 535 | 484, 2, 623 | +247 |
+| read 16 | 325, 17, 2509 | 484, 2, 623 | -1727 |
+| register read 1+1 | 326, 4, 745 | 532, 3, 828 | +289 |
+| register read 1+2 | 326, 5, 886 | 532, 3, 828 | +148 |
+| register read 1+16 | 326, 19, 2860 | 532, 3, 828 | -1826 |
 
-The pump's figure a byte past the first is the slope, 146 cycles written
-and 148 read, one entry each, and an entry's own exception entry and
+The first byte's place shows in the `dma` column. A write of two or more
+pays the TXDR flush and the store, seven instructions in the release listing
+of which two are stores across the bridge: 520 cycles of `start()` against
+the read's 484, whose stream program is the same and whose path holds neither.
+A write of one programs no stream and takes no stream vector, 468 cycles and
+one interrupt, the STOP's. The `interrupt` column stores nothing before the
+START.
+
+The pump's figure a byte past the first is the slope, 136 cycles written
+and 141 read, one entry each, and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
 every interrupt counted. So, in core cycles, **a write half costs the
-core fewer cycles on the engines from three bytes** (-42, with two
-interrupts fewer), **a read half from three or four** (a read of three by
-the slope ties, the entries counted, and the layout moves a tie), and **a
-register read with a one-byte index from a read of four**: the engines'
-fixed cost to the core, their program in `start()` and their completion,
-is about 230 cycles for a write half and 345 for a read half - a write
-tenure's end stops no receive stream - against a byte's 146 or so on the
-pump. The speed moves none of these lengths: the rows differ by two
-cycles at most between 100 and 400 kHz. The core
+core fewer cycles on the engines from three bytes** counting the entries
+(+25 on the stamps, with two interrupts fewer; from four on the stamps alone),
+**a read half from four**, and **a register read with a one-byte index from a
+read of three** counting the entries (+7 by the slope, three interrupts fewer).
+The engines' fixed cost to the core, their program in `start()` and their
+completion, is about 290 cycles for a write half of two or more and 390 for a
+read half - a write tenure's end stops no receive stream - against a byte's 140
+or so on the pump. The speed moves none of these lengths.
+
+These figures are of one image, and placement moves them. The pump's path
+is the same instructions in images that differ elsewhere, its `start()` the
+same size to the byte, and across three such images it read 124, 136 and 146
+cycles a byte written: at 180 MHz the flash has five wait states behind its
+accelerator, and where a handler's branches land changes what it pays. So a
+length above is good to about one byte, and a difference of a few dozen cycles
+between two images is no finding. The core
 sleeps while a stream works: the platform's idle is a WFI that asks no
 stream anything, and Sleep keeps the DMA clocked (RM0390
 6.3.15: DMA1LPEN is set at reset and written by no verb here) - so on
 this family `dma` costs no sleep, only its fixed cycles.
 
-**AGAINST THE DESK PARTNER** (set `t`, letters `n` and `o`, 21 verdicts):
-letter `n`'s 12 green ten runs of ten, letter `o`'s below; the STM32G0
-beside this board on the same two nodes,
+**AGAINST THE DESK PARTNER** (set `t`, letters `n`, `o` and `p`, 33
+verdicts): letter `n`'s 12 green ten runs of ten, the other two's below; the
+STM32G0 beside this board on the same two nodes,
 running `twi_peer` - with it on its dark console for `z`, whose letter e
 counts 112 NACKs that its command address would spoil.
 
@@ -809,45 +828,108 @@ counts 112 NACKs that its command address would spoil.
   kHz, and at 16 MHz at 1694; derived, the three cores give **955, 942
   and 901 thousandths**, byte-exact against the partner at each.
 
-**ES0298 2.12.8 ON TRIAL: THE ENGINES STALL IN THE BAND, THE VECTOR DOES
-NOT.** Letter `o` runs writes of 2, 16 and 255 bytes to the partner's
-target with the HSI as the kernel against the 45 MHz APB1, a ratio of
-2.81, on both engines, at 100 and 400 kHz; a stall is a tenure with no
-completion inside twice its wire time plus 3 ticks, recovered by
-`recover()`'s PE cycle, the partner's count, sum and address matches read
-back after each batch of a hundred writes (twenty of the 255). Over
-46 runs, 20240 tenures an engine inside the band:
+**ES0298 2.12.8: NO STALL ON THE HOST'S PATHS, IN THE BAND OR OUT OF IT.**
+Letter `o` runs writes of 2, 16 and 255 bytes to the partner's target with
+the HSI as the kernel against the 45 MHz APB1, a ratio of 2.81, on both
+engines, at 100 and 400 kHz; a stall is a tenure with no completion inside
+twice its wire time plus 3 ticks, recovered by `recover()`'s PE cycle, the
+partner's count, sum and address matches read back after each batch of a
+hundred writes (twenty of the 255). Beside them runs a CONTROL the host does
+not contain, staged by the letter through the resource's verbs: TXDR left
+empty, the stream started on the whole run before the START, STOPF polled -
+the sequence the erratum describes. Over 46 runs:
 
 | kernel | writes on | tenures | stalled |
 |---|---|---|---|
 | HSI, ratio 2.81 | the event vector | 20240 | 0 |
-| HSI, ratio 2.81 | the DMA engines | 20240 | 3336, 16.5 per cent |
-| HSI, ratio 2.81 | the DMA engines, the first byte staged in TXDR by the letter | 20240 | 0 |
-| APB1, ratio 1.0 | the event vector, and the DMA engines | 4600 each | 0 |
+| HSI, ratio 2.81 | the DMA engines | 20240 | 0 |
+| HSI, ratio 2.81 | the DMA engines, writes of one | 4600 | 0 |
+| HSI, ratio 2.81 | the control, TXDR left empty | 20240 | 2798, 13.8 per cent |
+| APB1, ratio 1.0 | the event vector, writes of 16 | 4600 | 0 |
+| APB1, ratio 1.0 | the DMA engines, writes of 1, 2, 16 and 255 | 14720 | 0 |
+| SYSCLK, ratio 0.25 | the DMA engines, writes of 2, 16 and 255 | 10120 | 0 |
 
-The rate does not follow the length or the speed: 15.8 to 17.5 per cent in
-every row, a two-byte write as often as a 255-byte one, which is the
-erratum's own account of a fault at the first two bytes. Every stall is
-the same: ISR showing BUSY alone, SCL low and SDA high, the transmit stream's
-count two beats down, and the partner holding exactly the first byte of
-that write, its count and sum exact across the batch. The next tenure
-after the PE cycle is whole. What the host's two engines differ in is the
-erratum's first clause. Two kernel cycles of the HSI are 125 ns, 22 core
-cycles at 180 MHz, a window a stream's request and its one-word store
-through the bridge fall inside. The event vector's first TXDR store comes
-after a 12-cycle entry and about 60 instructions (the release listing of
-`isr()`, the flags masked and each tested in turn), past 380 ns, and on
-any slower core later still, so `interrupt` is outside the erratum's
-window on every rate this family's APB1 can have in the band. The staged
-row is the erratum's first workaround as the letter's own sequence (the
-first byte in TXDR before the START, the stream on the rest, STOPF
-polled); the host does not run it. It says the workaround holds on this
-die. Two controls show the letter can fail: a transmit interrupt taken
-away after `start()` parks a tenure with SCL low inside the same bound, and
-a byte changed after its sum was taken moves the partner's sum by what
-was changed. A stall the program does not expect parks until a per-bus
-timeout answers it `i2c_timeout` and the arbiter calls `recover()`; on an
-arbiter with no timeout it stands.
+Every byte of every host row is on the partner, its count, sum and address
+matches exact. The control's rate does not follow the length or the speed:
+12.7 to 14.9 per cent in every row, a two-byte write as often as a 255-byte
+one, which is the erratum's own account of a fault at the first two bytes.
+Every stall of it is the same: ISR showing BUSY alone, SCL low and SDA high,
+the transmit stream's count two beats down, and the partner holding exactly
+the first byte of that write, its count and sum exact across the batch. The
+next tenure after the PE cycle is whole. What the two engines and the control
+differ in is the erratum's first clause. Two kernel cycles of the HSI are 125
+ns, 22 core cycles at 180 MHz, a window a stream's request and its one-word
+store through the bridge fall inside. With the first byte in TXDR before the
+START that clause cannot arise: the byte goes to the shifter at the address's
+acknowledge, and each request after it asks for one byte. The event vector's
+first TXDR store comes after a 12-cycle entry and about 60 instructions (the
+release listing of `isr()`, the flags masked and each tested in turn), past 380
+ns, and on any slower core later still, so `interrupt` is outside the window on
+every rate this family's APB1 can have in the band. Two more controls show the
+letter can fail: a transmit interrupt taken away after `start()` parks a tenure
+with SCL low inside the same bound, and a byte changed after its sum was taken
+moves the partner's sum by what was changed. Letter `o` was green in 46 runs of
+46. No Request is longer than 255 bytes, so no write runs through RELOAD.
+
+**A REFUSED WRITE, POSITION BY POSITION** (letter `p`, 12 verdicts): the partner
+refuses through its target byte control the data byte a command names, or parks
+at another address for a NACK on the address. Nineteen rows - the address under
+writes of one, two and sixteen and under a 1+4 and a 2+4; the first byte of one,
+of a 1+4, of two, of a 2+4 and of sixteen; the second of two, of a 2+4 and of
+sixteen; the third of three and of sixteen, the seventh and last of sixteen, the
+200th and last of 255 - run under each engine, at both speeds, on the APB1 and
+on the HSI, each followed by a request on either engine: 304 rows a run, with no
+`init()` and no PE cycle between a failure and what follows it, since either
+would flush TXDR. Each is judged on `start()`'s answer, on `status()` and on the
+partner's count, sum, first byte, address matches and word that it refused. Under
+`dma`, over twelve runs of twelve:
+
+| refused | rows | right |
+|---|---|---|
+| the address | 480 | 480, `i2c_nack_addr` |
+| a write of one | 192 | 192, `i2c_nack_data` |
+| the first byte of two or more | 304 | 304 |
+| the second | 278 | 278 |
+| a later byte | 570 | 570 |
+| either byte of a write of two (counted above too) | 576 | 576 |
+
+The 1824 rows on the event vector are right too. The positions land by the
+partner's own count, which is the byte asked for or one sooner, 35 rows of 1824
+sooner: its target polls RXNE and TCR on separate passes and decides at TCR on
+what it has counted, so a pass that sees RXNE first refuses the byte it has just
+counted. The letter judges the sum over that count.
+
+How the vector tells them apart, under `dma`. A byte stays in TXDR with TXE clear
+until the ninth pulse of an acknowledged address sends it to the shifter (23.4.7),
+so TXE set says the first byte left: a data NACK, and that alone answers a write
+of one. TXE clear does not answer two bytes or more: the byte leaving raises TXIS
+and the stream refills TXDR while it is on the wire, so TXE reads clear after a
+data NACK as after the address's. There the stream's count answers: SxNDTR is
+post-decremented when a beat is stored into TXDR (9.3.3), not when direct mode
+preloads it (9.3.7), so a count still at the stream's length means no refill. A
+stream not served yet leaves its count standing under a byte already gone, and
+TXE tells that one: the row that takes the transmit request away after `start()`
+answers `i2c_nack_data`, the first byte refused, the next request whole. One
+register read and one stream read, on the NACK path alone. A read half takes no
+NACK on its data, so a NACK there is the address's.
+
+And nothing of a failed request reaches the next one. The byte loaded ahead, the
+next one on either engine or a first byte stored before an address nobody
+answered, stays in TXDR through the NACK and the STOP, so the vector empties TXDR
+at the NACK: a flush, a store that takes down a TXIS nobody served, and a flush of
+that store, on the failed path alone. With that emptying taken out, the next
+write on the event vector sends the stale byte ahead of its own and drops its own
+last: 10 failures of 18 wrong on the far end of letter `m` after `interrupt`, 4 of
+18 after `dma` (the other rows' byte goes with the stream's abandon, and a next
+write under `dma` flushes before it stores, so that one is whole); and the row with
+the request taken away never returns, TXIS re-entering the vector the moment TXIE
+is armed again. A START lost into a line the partner holds low, with the
+first byte stored and the stream armed, answers `i2c_arb_lost`, the stream taken
+back and the next request whole, twelve runs of twelve. After a refused address the
+next request is a write in the same serve, the partner's sum judging it byte for
+byte; after a refused byte the partner refuses to its deadline, so the next
+request is a command frame, whose checksum judges it, and letter `m` judges the
+same case byte for byte against I2C1.
 
 **Under the preemptive kernel: `test_stm32f4_rubato_fmpi2c`**, the twin of
 [i2c.md](i2c.md)'s `test_stm32f4_rubato_i2c` - the same source over this
@@ -867,11 +949,11 @@ kernel's.
 - **Where a preemption reaches this host: before its one START store.**
   `start()` waits for nothing; it arms the engines and then writes CR2
   with START last, so a dispatch above the arbiter landing in it delays
-  the START. Letter `x`, 400 writes of 16 bytes: `start()` takes 377
-  cycles with TIM2 silent (the longest 539; the classic block's takes
-  174); under 97 us x 3000 the interrupt landed inside it 16 to 21 times
-  in three runs, against the 8.6 that independent ticks would give (400 x
-  377 / 17460), and 1 of the 57 with ISR.BUSY set - after the START
+  the START. Letter `x`, 400 writes of 16 bytes: `start()` takes 369
+  cycles with TIM2 silent (the longest 527; the classic block's takes
+  174); under 97 us x 3000 the interrupt landed inside it 14 to 17 times
+  in three runs, against the 8.5 that independent ticks would give (400 x
+  369 / 17460), and 1 of the 48 with ISR.BUSY set - after the START
   store, `start()`'s last register write, the engines already armed.
   Over twenty runs of the other letters it found BUSY set inside
   `start()` 15 times, the same shadow.
@@ -879,7 +961,7 @@ kernel's.
   (letter `o`, at 400 kHz against one serve counted to its last byte):
   the shared body's Requests name no engine, and the suite names `dma`
   for every one in a wrapper around `start()`, so every data half rides
-  the engines, a one-byte read and a one-byte write included - and the
+  the engines, a one-byte read included and a one-byte write its store alone - and the
   probe, the reads, the write-then-reads and the
   writes are every one `i2c_ok`, every read byte-exact, the partner's
   count, sum and address matches exact. The 32-byte write 819 to 821 us
@@ -904,14 +986,8 @@ kernel's.
   lets go with a STOP makes; a write to 0x7A and one to the general call
   answer `i2c_rejected`, the partner, answering the general call,
   matching only the probe that follows - 35 verdicts of 35 in ten runs
-  of the letter, and the twin's `z` 209 of 209 in three runs with it. The event
-  vector reads the transmit stream's count at the NACK: the first TXIS
-  comes after the address's ACK and none follows a NACK (23.4.9, figure
-  260), and SxNDTR is post-decremented when a beat is stored into TXDR
-  (9.3.3), not when direct mode preloads it (9.3.7), so a count still at
-  the half's length is the address. One stream read, on the NACK path
-  alone. The engineless host tells the two apart by its pump's position
-  (letter `m` above).
+  of the letter, and the twin's `z` 209 of 209 in three runs with it. How the event vector tells the two apart is "A REFUSED WRITE" above; the
+  engineless host does it by its pump's position (letter `m` above).
 - **The arbiter with three requesters of three priorities** (letter
   `w`): every reply `i2c_ok`, to its requester, in its order, nothing
   rejected, no timeout, the partner's tallies exact, in 5.8 to 6.3 ms a
@@ -976,17 +1052,6 @@ Driver gaps, each with its reason:
 - The recovery LADDER - when to unstick, when to retry, when to take a
   bus out of service - is the application's or a future policy type's, as
   on every other stratum.
-- ES0298 2.12.8's first workaround, the first byte in TXDR before the
-  START: no path of the host writes it, under either engine ("What the
-  silicon does"). The pump does not need it (no stall in the trial, and
-  the vector's first store is past the erratum's window); under `dma` a
-  program inside the band stalls, as measured, and takes the second
-  workaround, a kernel clock outside it, which `transmit_stall_risk()`
-  lets it check. A preload under `dma` would be `start()`'s first byte
-  stored after a TXDR flush, the stream started on the rest and left
-  unstarted for a write of one, and the NACK's address-or-data test
-  reading TXE as the STM32G0's pump does: not written, every rate the
-  bench runs having a kernel clock outside the band.
 - This chip as the bus's target, served from an active object, under the
   preemptive kernel. A target whose bytes come from an object (its vector
   posting "the host reads" and leaving SCL held, a dispatch giving the
@@ -1014,6 +1079,10 @@ Implemented, not bench-verified (each with what would measure it):
 - The noise filters ON THE WIRE: the register is written and read back
   and the refusals the filter delay causes are measured, but what a
   9-period digital filter does to a glitch wants a glitch generator.
+- ES0298 2.12.8 in target mode, which the erratum names: the client gives
+  its first byte on TXIS and nothing has read this block as a target inside
+  the band. The partner's `twi_peer` has no `host_read` (twi_link's extended
+  repertoire), and that op on the HSI kernel is what would measure it.
 - TIMEOUTB, this peripheral's own cumulative stretch, which only a
   target being read produces: the partner's `twi_peer` has no `host_read`
   (twi_link's extended repertoire) to read this block as a target, and
