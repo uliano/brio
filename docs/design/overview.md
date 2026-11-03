@@ -270,7 +270,8 @@ layers above, not what the peripheral is.
   meanwhile), and the completion
   interrupt posts `TransferDone`. Nothing above the engine changes; the
   DMA channel is a resource like a timer, owned by one peripheral
-  request for the whole image and never handed from one to another
+  request, or where no peripheral paces it by a tag, for the whole image
+  and never handed from one to another
   ([dma.md](dma.md), "The ownership rule"), and a receive stream fed by
   DMA is a ring whose producer index is the hardware's counter
   ([dma.md](dma.md), [ring.md](ring.md)). The AVR DA and DB have no

@@ -64,7 +64,7 @@ value `bus_engine_status + 4`, when a DMA channel reports a transfer
 error in the middle of a tenure. The host then ends the tenure and
 releases the bus (a STOP, or on the DesignWare block an abort, which
 sends one). `util/i2c_bus.hpp` does not declare it: each stratum whose
-host has engine slots defines it, with the same value, and the STM32F4's
+host has engine parameters defines it, with the same value, and the STM32F4's
 second design names it `fmpi2c_dma_fault` (`stm32f4/fmpi2c.hpp`). The
 AVR's host, which has no DMA, never produces it. A requester that
 compares against it names its family's constant; a portable one treats
@@ -107,7 +107,7 @@ bench against a partner its family's I2C page names: another board's
 a device its board carries. What differs is the resource
 under the task and the shape of the rate arithmetic each chapter
 imposes. In the table below a pump is the host's interrupt moving data
-byte by byte, an engine slot a DMA channel bound to the host ("Which
+byte by byte, an engine parameter the template argument that binds a DMA channel to the host ("Which
 engine moves a half") and smart mode the block's acknowledge riding the
 data read ("Engine behaviour on the wire").
 
@@ -268,7 +268,9 @@ first and last commands and the probe ([the DesignWare I2C
 page](../dw_apb_i2c/README.md) says which of those the silicon decides);
 on the SAM C21, whose launch refuses nothing, the read half, a write of 255 bytes and a write with no
 buffer ([the SAM C21 I2C page](../samc21/i2c.md)). Each family's
-document names its own.
+document names its own. Where a launch can refuse, only a program that holds
+the host's own engine by hand can make it refuse, and that half also goes to
+the pump.
 
 **`dma` on a host with no engines bound is refused**, a request that
 cannot be served as asked: `start()` returns true with `i2c_rejected` in
@@ -322,7 +324,7 @@ channel, `interrupt` lets the core sleep between bytes, and `dma` is
 how a program that wants the core free for other work during the half
 asks for the engines anyway.
 
-**Which hosts take the field**: every host with engine slots - the
+**Which hosts take the field**: every host with engine parameters - the
 STM32G0's, both designs of the STM32F4, the CH32V00x's, the CH32V203's and
 CH32V303's, the CH32X035's, the DesignWare host of the RP2040 and the
 RP2350, and the SAM C21's - on every instantiation, engines bound or

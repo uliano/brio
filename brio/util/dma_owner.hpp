@@ -5,17 +5,19 @@
  * is compiled. A slot is what one engine runs on: a DMA channel, or on the
  * STM32F4 a stream. Its owner is the peripheral request it serves -
  * USART2's transmit, SPI1's receive, TIM4's update - and, for a channel no
- * peripheral paces (a memory-to-memory copy, a channel programmed by hand),
- * a tag its user names. A second owner on a slot the image has already
+ * peripheral paces (a memory-to-memory copy), a tag its user names; a
+ * channel programmed by hand claims its request or a tag. A second owner on a slot the image has already
  * given is a compile error that names the slot and both owners; a second
  * slot for an owner that already has one is a compile error that names the
  * owner and both slots. The rule and its reasons are docs/design/dma.md,
  * "The ownership rule"; this header is its check.
  *
  * Who uses it. A driver author: the type that binds a slot to its request
- * (an engine, or the transport that takes one) claims the pair in its class
- * body, and a program that programs a channel by hand claims it with a tag
- * of its own. A program otherwise meets this header only in the error:
+ * claims the pair, a transport or a copy engine in its class body, or on the
+ * CH32V00x and the CH32X035 the verb that programs the channel, and a program
+ * that programs a channel by hand on a family whose bare engines claim nothing
+ * writes the claim itself. A program otherwise meets this header only in the
+ * error:
  *
  *     error: ambiguating new declaration of 'constexpr brio::DmaOwner<
  *         brio::DmaPeriph::i2c, 1, brio::DmaSignal::rx>
@@ -30,10 +32,10 @@
  * other function: 'constexpr brio::DmaSlotId<1, 5> brio::dma_slot_of(
  * DmaOwner<brio::DmaPeriph::usart, 2, brio::DmaSignal::tx>)' against the
  * old declaration's DmaSlotId<1, 4> is "USART2's transmit, already on
- * channel 4, asked again for channel 5". Nothing here runs: a claim is a declaration the
- * compiler checks and never emits, so it adds no byte to the image and no
- * cycle (only the debug information describes its types), and nothing waits,
- * masks or allocates.
+ * channel 4, asked again for channel 5". Nothing here runs: a claim is a
+ * declaration the compiler checks and never emits, so it adds no byte to the
+ * image and no cycle (only the debug information describes its types), and
+ * nothing waits, masks or allocates.
  *
  * The smallest use, an engine that binds DMA1's channel `ch` to the request
  * its owner names:
@@ -49,8 +51,8 @@
  * numbers them (DMA1 is 1), the controller 0 where the manual numbers none
  * (the SAM C21's DMAC, the RP families' DMA). On the STM32F4 the slot is the
  * stream, never the channel cell of the stream's CHSEL: two cells of one
- * stream cannot run at once (RM0090 10.3.3), so two cells are one slot. The owner says which request: `DmaOwner<periph,
- * instance, signal>`, one peripheral's one request, so the key leaves the
+ * stream cannot run at once (RM0090 10.3.3), so two cells are one slot. The
+ * owner says which request: `DmaOwner<periph, instance, signal>`, one peripheral's one request, so the key leaves the
  * element type out and the owner leaves the engine and the transport out -
  * a host that uses its channel at two element widths, or one peripheral
  * driven by two transport types over the same request, is one owner and
@@ -64,11 +66,12 @@
  * ("multiple channels should not be connected to the same DREQ", RP2040
  * datasheet 2.5.3.2; "must not", RP2350 12.6.4.2), the STM32G0's DMAMUX
  * forbids one request id on two channels at once (RM0444 11.4.4, the
- * caution), and an STM32F4 request offered two streams would be served by
- * both if both were bound to it. Where the map wires each request to one
- * channel (the WCH families) the second half can never fire and costs
- * nothing. The owner being the request, the RPs' one channel per DREQ is
- * this half and needs no key of its own.
+ * caution), and an STM32F4 request the map offers on two or three streams
+ * takes one of them. Where the map wires each request to one channel (the WCH
+ * families) a transport cannot reach the second half: it fires only on a
+ * program that claims one named request or one tag on two channels by hand.
+ * The owner being the request, the RPs' one channel per DREQ is this half and
+ * needs no key of its own.
  *
  * WHERE THE CLAIM IS MADE, AND WHEN IT COUNTS. `dma_claim<Slot, Owner>` is a
  * constant whose initializer instantiates `DmaClaim<Slot, Owner>`, and the
@@ -86,8 +89,10 @@
  *
  * A claim written in a class template's body (a `static_assert`, as above)
  * counts when that class is instantiated - when the program calls one of its
- * functions or otherwise needs it complete -, so an owner a program names
- * in an alias and never uses claims nothing. It is decided by the compiler's
+ * functions or otherwise needs it complete -, and one written in a verb when
+ * that verb is, so an owner a program names in an alias and never uses claims
+ * nothing, nor, for a claim in a verb, a type whose verb is never called. It
+ * is decided by the compiler's
  * front end, before any optimization: the same in a release and a debug
  * build, with inlining or without.
  *

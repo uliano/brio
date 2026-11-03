@@ -136,12 +136,12 @@ one event that tells the consumer (`LineReader`) that bytes are
 waiting; the interrupt glue posts it on that edge, and `LineReader`
 posts it to itself when it had to stop a drain early. Told once: the next
 `true` waits until the consumer has found the ring empty, so there is
-no flood of events and no lost wakeup. No owner polls for that edge on
+no flood of events and no lost wakeup. Nothing polls for that edge on
 a timer, with one exception: the tail of a burst under a receive
 engine where no flag of the silicon ends it, the PL011, whose receive
 time-out does not rise while a channel owns the FIFO
 ([the PL011 page](../pl011/README.md)); that tail reaches the consumer
-when the owner asks `harvest()` for it.
+when the program asks `harvest()` for it.
 
 Which event of the silicon makes the edge is the family's, chosen from
 its chapter and stated in its serial document with its cost in the
@@ -165,7 +165,7 @@ the receiver's idle frames between them.
 
 `harvest()` stays a public function on an engined transport (the
 receive errors read and counted, a stream a transfer error stopped
-bound again), and the vectors call it; it is idempotent, so an owner
+bound again), and the vectors call it; it is idempotent, so a program
 that still calls it changes nothing. Its edge test, made in an
 interrupt body over a `HardwareRing`, asks `waiting()`, the one look
 that writes nothing ([ring.md](ring.md)).

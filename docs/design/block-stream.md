@@ -121,7 +121,7 @@ step and would say nothing new.
 ## What is deliberately absent
 
 - **A playback active object.** Nothing to pace, nothing to publish;
-  an owner that wants laps as events arms its own `TimeEvent`.
+  a program that wants laps as events arms its own `TimeEvent`.
 - **A one-shot burst vocabulary.** A finite capture is a source
   started and stopped, or (below `util/`) a bare engine block taken
   once; it earns a concept when a second user shapes one.
