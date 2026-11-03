@@ -9,6 +9,7 @@
 // "A handler in SRAM").
 //
 // build: boards = c21j
+// build: groups = rmpteu,rmpti
 // build: monitor_speed = 115200
 
 #define BENCH_IMAGE "bench_samc_ram"

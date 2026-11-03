@@ -18,9 +18,9 @@
  *     }
  *
  * Who calls what. A transport's init() calls arm() (main context, a setup
- * verb), which claims the channel, brings the block up if it is the first
- * holder, configures the channel with bounded waits and opens the DMAC's
- * NVIC line; its release() calls release(). Blocks are started from the
+ * verb), which brings the block up if it is the first holder, configures the
+ * channel with bounded waits and opens the DMAC's NVIC line; its release()
+ * calls release(). Blocks are started from the
  * transport's verbs in main context and from its completion in the DMAC
  * handler. Every access to a channel's registers runs through one selector
  * (below) and is masked for those two stores or loads and no longer; the
@@ -33,8 +33,8 @@
  * clears its own channels' flags and nobody else's. The buffers a block
  * carries are lent to the channel until the owner hears its end.
  *
- *  Dmac            the block's public face: its NVIC line and the budget's
- *                  two questions, who holds a channel and how many are held.
+ *  Dmac            the block's public face: its NVIC line and the budget,
+ *                  the number of channels an engine may name.
  *
  *  DmaTxEngine<ch> a channel draining a run of bytes into a peripheral's
  *                  DATA register, one beat per trigger, ch being 0 or 1.
@@ -53,19 +53,19 @@
  * them, under every arbitration and quality-of-service setting the
  * controller offers.
  *
- * The budget, and how it is enforced. There are two channels to name: an
- * engine's number is 0 or 1 and any other does not compile, so the section
- * tables hold two entries and no image can make a third channel run. Two
- * transports may still name one channel, so a channel is claimed at arm() by
- * its owner (the SERCOM number plus one, whichever personality the instance
- * has) and the claim that finds it held by another owner PANICS - the third
- * claim of an image, or the second on one number - with the breadcrumb written
- * (PanicCode::assert_failed, context dma_claim_refused_context(owner)): at the
- * first boot that tries it, never silently. A claim is given back by release(),
- * so transports that take a channel in turn are legal. A build-time refusal is
- * not built: "two different instantiations name this type" is nothing C++ can
- * count without stateful metaprogramming, and it would also refuse that legal
- * shape.
+ * The budget, and how it is enforced: by the compiler, whole. An engine's
+ * number is 0 or 1 and any other does not compile, so the section tables hold
+ * two entries. Each of the two has one owner for the whole image, the
+ * peripheral request it serves (docs/design/dma.md, "The ownership rule"):
+ * the transport that binds an engine claims the channel's slot,
+ * DmaSlotId<0, ch>, for its SERCOM's transmit or receive request in its class
+ * body (util/dma_owner.hpp; samc21/sercom.hpp, sercom_dma_claimed()). A second
+ * owner on a number, or one SERCOM's request on both numbers, does not compile,
+ * and the error names the slot and the two owners. So an image holds two
+ * engines at most and no channel ever changes hands: two transport types of
+ * one SERCOM over the same request are one owner and may take the channel in
+ * turn, nobody else may. Nothing of it runs: the claim is a declaration the
+ * compiler checks, and the engines below keep no record of an owner.
  *
  * What is not offered, and what a driver here never does. No channel is
  * suspended: a software suspend of a running channel corrupts the OTHER
@@ -163,19 +163,11 @@
 
 #include "sam.h"
 
-#include "kernel/panic.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/platform.hpp"
 
 namespace brio {
-
-/// The panic context a refused claim writes: 0xD0 with the refused owner
-/// in the low nibble (an owner is its SERCOM number plus one, so 0xD1 ..
-/// 0xD6 name SERCOM0 .. SERCOM5).
-constexpr uint8_t dma_claim_refused_context(uint8_t owner) {
-    return static_cast<uint8_t>(0xD0u | (owner & 0x0Fu));
-}
 
 /// What a block's end does, chosen once at arm().
 ///  - interrupt: TCMPL armed, the owner's next step hangs on the block's end
@@ -209,14 +201,6 @@ public:
     /// the two section tables.
     static constexpr uint8_t budget = 2;
 
-    /// Who holds this channel; 0 when nobody does.
-    static uint8_t owner(uint8_t channel) { return owners_[channel]; }
-
-    /// The channels held now, 0 .. budget.
-    static uint8_t held() {
-        return static_cast<uint8_t>((owners_[0] != 0u ? 1u : 0u) + (owners_[1] != 0u ? 1u : 0u));
-    }
-
 private:
     template <uint8_t>
     friend class DmaChannel;
@@ -235,17 +219,6 @@ private:
 
     /// The bound on every wait of this file.
     static constexpr uint32_t spins = 0xFFFFu;
-
-    /// The decision of a claim, a test-and-set under the mask and nothing
-    /// else: true when the channel was free or already `owner`'s.
-    static bool claim(uint8_t channel, uint8_t owner) {
-        typename SamPlatform::CriticalSection cs;
-        if (owners_[channel] != 0u && owners_[channel] != owner) {
-            return false;
-        }
-        owners_[channel] = owner;
-        return true;
-    }
 
     /// One more holder of the block; the first brings it up.
     static bool hold() {
@@ -338,13 +311,12 @@ private:
     /// 16 asked.
     alignas(16) static inline volatile dmac_descriptor_registers_t slots_[budget];
     alignas(16) static inline volatile dmac_descriptor_registers_t write_backs_[budget];
-    static inline uint8_t owners_[budget] = {0u, 0u};
     /// Holders that armed: the block is clocked and up while this is not zero.
     static inline uint8_t armed_ = 0;
 };
 
 /**
- * One channel, what both engines do on it: the claim, the selector, the reset,
+ * One channel, what both engines do on it: the selector, the reset,
  * the configuration, the enable, the state's questions and the interrupt's
  * take. The engines add the run's direction.
  */
@@ -362,30 +334,14 @@ public:
     static constexpr uint8_t flag_complete = DMAC_CHINTFLAG_TCMPL_Msk;
 
     /**
-     * Claim the channel for `owner` (non-zero). True when it was free or already
-     * `owner`'s; false when another owner holds it - nothing is touched then.
+     * Configure the binding: `trigger` the peripheral's trigger code, `level`
+     * the arbitration level, `completion` what a block's end does. A setup verb,
+     * main context. The channel's owner is the compiler's business (the file
+     * header): nothing here records or checks one. False, the channel put
+     * back, when the block or the channel would not reset (a bounded wait ran
+     * out).
      */
-    static bool claim(uint8_t owner) { return Dmac::claim(ch, owner); }
-
-    /// Who holds the claim; 0 when nobody does.
-    static uint8_t owner() { return Dmac::owners_[ch]; }
-
-    /**
-     * Claim for `owner` and configure the binding: `fixed` the address of the
-     * peripheral's data register, `trigger` its trigger code, `level` the
-     * arbitration level, `completion` what a block's end does. A setup verb,
-     * main context.
-     *
-     * A claim held by another owner is a panic - the budget (the file header):
-     * the breadcrumb is written with PanicCode::assert_failed and
-     * dma_claim_refused_context(owner), and the program stops there. False, with
-     * the claim given back, when the block or the channel would not reset (a
-     * bounded wait ran out).
-     */
-    static bool arm(uint8_t owner, uint8_t trigger, uint8_t level, DmaCompletion completion) {
-        if (!claim(owner)) {
-            panic<SamPlatform>(PanicCode::assert_failed, dma_claim_refused_context(owner));
-        }
+    static bool arm(uint8_t trigger, uint8_t level, DmaCompletion completion) {
         trigger_ = trigger;
         level_ = level;
         irqs_ = completion == DmaCompletion::silent
@@ -406,18 +362,13 @@ public:
     }
 
     /**
-     * Stop, and give the claim back if `owner` holds it: the channel disabled
-     * (bounded), its interrupts disarmed; the last holder of the block takes the
-     * block down too. A claim that never armed touches no register (the block's
-     * clock may be off). The caller has waited for a block in flight, or knows
-     * no other channel runs: this disable is the one docs/samc21/dmac.md's rule
-     * speaks of.
+     * Stop: the channel disabled (bounded), its interrupts disarmed; the last
+     * holder of the block takes the block down too. A channel that never armed
+     * touches no register (the block's clock may be off). The caller has waited
+     * for a block in flight, or knows no other channel runs: this disable is the
+     * one docs/samc21/dmac.md's rule speaks of.
      */
-    static void release(uint8_t owner) {
-        if (Dmac::owners_[ch] == owner) {
-            give_back();
-        }
-    }
+    static void release() { give_back(); }
 
     /// The channel's own reset and configuration, whatever state it is in:
     /// disabled (bounded - an SWRST under ENABLE is ignored silently), reset, the
@@ -583,14 +534,12 @@ private:
             armed_ = false;
             Dmac::let_go();
         }
-        typename SamPlatform::CriticalSection cs;
-        Dmac::owners_[ch] = 0u;
     }
 
     static inline uint8_t trigger_ = 0;
     static inline uint8_t level_ = 0;
     static inline uint8_t irqs_ = 0;
-    /// arm() ran for the current claim: this channel counts among the block's
+    /// arm() ran and release() has not: this channel counts among the block's
     /// holders.
     static inline bool armed_ = false;
     static inline volatile uint32_t violations_ = 0;
@@ -600,9 +549,9 @@ private:
  * DmaTxEngine<ch> - drain a run of bytes into a peripheral's DATA register on
  * channel `ch`, one beat per trigger.
  *
- * The claim and the programming are two steps (reserve(), launch()), so an owner
+ * The reservation and the programming are two steps (reserve(), launch()), so an owner
  * that starts blocks from two contexts - the Uart's producer in main context and
- * its completion in the handler - masks the claim alone, a test-and-set of busy_,
+ * its completion in the handler - masks the reservation alone, a test-and-set of busy_,
  * and programs a reserved channel unmasked: no completion can land under the
  * programming, because no block is in flight. start() is both, for an owner that
  * starts from one context.
@@ -637,19 +586,15 @@ public:
     static constexpr uint8_t flag_error = Channel::flag_error;
     static constexpr uint8_t flag_complete = Channel::flag_complete;
 
-    /// DmaChannel::claim(), owner() and release(), for this channel.
-    static bool claim(uint8_t owner) { return Channel::claim(owner); }
-    static uint8_t owner() { return Channel::owner(); }
-
     /**
-     * Claim for `owner` and configure the binding (DmaChannel::arm(): a panic on
-     * a claim held by another): `data` the address of the peripheral's transmit
-     * data register, `trigger` its TX trigger code. A setup verb, main context.
+     * Configure the binding (DmaChannel::arm()): `data` the address of the
+     * peripheral's transmit data register, `trigger` its TX trigger code. A setup
+     * verb, main context, called by the transport that claims the channel.
      */
-    static bool arm(uint8_t owner, volatile void* data, uint8_t trigger,
+    static bool arm(volatile void* data, uint8_t trigger,
                     DmaCompletion completion = DmaCompletion::interrupt) {
         data_ = data;
-        if (!Channel::arm(owner, trigger, level, completion)) {
+        if (!Channel::arm(trigger, level, completion)) {
             return false;
         }
         constant_half();
@@ -659,16 +604,14 @@ public:
     }
 
     /// DmaChannel::release(): a block in flight is abandoned without counting.
-    static void release(uint8_t owner) {
-        if (Channel::owner() == owner) {
-            in_flight_ = 0;
-            busy_ = false;
-        }
-        Channel::release(owner);
+    static void release() {
+        in_flight_ = 0;
+        busy_ = false;
+        Channel::release();
     }
 
     /**
-     * The claim on the channel: false when a block is already in flight, otherwise
+     * The reservation of the engine: false when a block is already in flight, otherwise
      * the engine is the caller's until launch() or cancel(). An owner that starts
      * blocks from two contexts calls it under the platform's critical section (it
      * is a test-and-set of busy_ and masks nothing itself).
@@ -827,7 +770,7 @@ private:
  *
  * A block starts on an idle channel: its previous block completed (a single block
  * disables its channel at its end, 25.6.2.6) or it never ran, so the start writes the
- * slot and enables and waits for nothing. An owner whose claim must cover the enable
+ * slot and enables and waits for nothing. An owner whose critical section must cover the enable
  * and nothing before it splits the start: prepare() is the work, launch() the enable.
  */
 template <uint8_t ch>
@@ -853,16 +796,12 @@ public:
     static constexpr uint8_t flag_error = Channel::flag_error;
     static constexpr uint8_t flag_complete = Channel::flag_complete;
 
-    /// DmaChannel::claim(), owner() and release(), for this channel.
-    static bool claim(uint8_t owner) { return Channel::claim(owner); }
-    static uint8_t owner() { return Channel::owner(); }
-
     /// As DmaTxEngine::arm(), `data` the peripheral's receive data register and
     /// `trigger` its RX trigger code.
-    static bool arm(uint8_t owner, volatile void* data, uint8_t trigger,
+    static bool arm(volatile void* data, uint8_t trigger,
                     DmaCompletion completion = DmaCompletion::interrupt) {
         data_ = data;
-        if (!Channel::arm(owner, trigger, level, completion)) {
+        if (!Channel::arm(trigger, level, completion)) {
             return false;
         }
         constant_half();
@@ -871,12 +810,10 @@ public:
         return true;
     }
 
-    static void release(uint8_t owner) {
-        if (Channel::owner() == owner) {
-            capacity_ = 0;
-            taken_ = 0;
-        }
-        Channel::release(owner);
+    static void release() {
+        capacity_ = 0;
+        taken_ = 0;
+        Channel::release();
     }
 
     /// The slot written for a run of `count` (1 .. 65535) bytes on an idle channel;

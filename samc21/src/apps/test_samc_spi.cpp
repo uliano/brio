@@ -1,4 +1,5 @@
 // build: boards = c21j
+// build: groups = abcdefghijklmnpr,ao,aq
 // build: monitor_speed = 115200
 //
 // test_samc_spi - the SERCOM in SPI mode (DS60001479M ch. 32) and, over
@@ -105,8 +106,19 @@
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
+//
+// THREE IMAGES, one per arrangement of the DMA channels, each channel with
+// one owner for the whole image (util/dma_owner.hpp; the groups line above):
+// test_samc_spi-1 gives both to SERCOM1, the host's transmit engine on
+// channel 0 and its receive engine on channel 1, for every letter but o and
+// q; test_samc_spi-2 gives channel 0 to the console's transmit engine and
+// channel 1 to the write-only host, letter o's display shape;
+// test_samc_spi-3 gives channel 0 to SERCOM2's loop Uart and channel 1 to the
+// write-only host, letter q's. Letter a, wireless, rides in all three.
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "samc21/clock.hpp"
 #ifndef SPI_SELECT_CONTROL
@@ -2710,13 +2722,14 @@ void tk_host_paths() {
 // The engines (samc21/dmac.hpp, samc21/spi.hpp): letters l .. r
 // ===========================================================================
 //
-// THE ENGINED HOSTS name their channels from the budget of two: the pair
-// takes channels 0 (transmit) and 1 (receive), the transmit engine alone
-// channel 1, so that the console's transmit engine (channel 0) may run
-// beside it - a display's shape. Every engined host on SERCOM1 is owner 2
-// (the SERCOM plus one), whichever of them claims, so they take the
-// channels in turn by re-arming; a letter releases its host at its end, so
-// the next one finds the budget free.
+// THE ENGINED HOSTS name their channels from the budget of two, and each
+// image gives each channel to one request (the file header's three images):
+// in the first the pair takes channels 0 (transmit) and 1 (receive) and the
+// write-only hosts share the pair's transmit channel - SERCOM1's transmit
+// request, one owner however many host types serve it, taking the channel
+// in turn by re-arming; in the second and third the write-only hosts take
+// channel 1, so that the console's transmit engine or the loop Uart's
+// (channel 0) runs beside them. A letter releases its host at its end.
 //
 // THE SPY PIN: a PinRef whose group is a PORT group in SRAM, so the host's
 // OUTCLR and OUTSET stores land in a struct this suite reads - the proof
@@ -2727,12 +2740,26 @@ namespace dm {
 // SPI_SELECT_CONTROL builds letter l's polled half alone, over the headers of
 // the code before the engines - the control its verdict is shown failing on.
 #ifndef SPI_SELECT_CONTROL
-using DBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-using WBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<1>>;
-using DLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-using WLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<1>>;
-/// The console with its transmit engine on channel 0 (letter o).
-using UDma = Uart<5, console_pads, 64, 256, DmaTxEngine<0>>;
+/// The three images (the file header): letter o's, letter q's, and the
+/// first's, which a build with no groups compiles as. An engine slot of
+/// another image's transports is no engine here.
+constexpr bool display_image = test_letter_carried('o') && !test_letter_carried('m');
+constexpr bool rule_two_image = test_letter_carried('q') && !test_letter_carried('m');
+constexpr bool pair_image = !display_image && !rule_two_image;
+template <bool on, typename Engine>
+using EngineIf = std::conditional_t<on, Engine, NoDmaEngine>;
+/// The write-only hosts' transmit engine: the pair's channel in the first
+/// image, channel 1 beside another owner's channel 0 in the other two.
+using WEngine = DmaTxEngine<pair_image ? 0 : 1>;
+
+using DBus = SpiHost<link_sercom, host_pads, 0, EngineIf<pair_image, DmaTxEngine<0>>,
+                     EngineIf<pair_image, DmaRxEngine<1>>>;
+using WBus = SpiHost<link_sercom, host_pads, 0, WEngine>;
+using DLoop = SpiHost<link_sercom, loopback_pads, 0, EngineIf<pair_image, DmaTxEngine<0>>,
+                      EngineIf<pair_image, DmaRxEngine<1>>>;
+using WLoop = SpiHost<link_sercom, loopback_pads, 0, WEngine>;
+/// The console with its transmit engine on channel 0 (letter o's image).
+using UDma = Uart<5, console_pads, 64, 256, EngineIf<display_image, DmaTxEngine<0>>>;
 constexpr UDma udma{};
 #endif
 
@@ -3301,7 +3328,7 @@ void to_display() {
     Serial::release();
     (void)dm::UDma::init(clock, 115200);
     dm::console_engined = true;
-    DmaTxEngine<1>::clear_faults();
+    dm::WEngine::clear_faults();
     marked = 0;
     uint32_t turns = 0, windows = 0, loops = 0, bad_status = 0, bad_peer = 0, no_report = 0;
     dm::fill_stream(dm::big_tx, 1024, 0x13);
@@ -3345,7 +3372,7 @@ void to_display() {
         (void)link_command_mode();
     }
     print(dm::udma, "#count ", marked, crlf);
-    const uint32_t spi_faults = DmaTxEngine<1>::faults();
+    const uint32_t spi_faults = dm::WEngine::faults();
     const uint8_t console_faults = dm::UDma::dma_faults();
     while (!dm::UDma::tx_idle()) {
     }
@@ -3465,7 +3492,7 @@ constexpr UartPads loop2_pads{
     .tx_pin = {'A', 12, PinFunction::c},
     .rx_pin = {'A', 12, PinFunction::c},
 };
-using Loop2 = Uart<2, loop2_pads, 1024, 512, DmaTxEngine<0>>;
+using Loop2 = Uart<2, loop2_pads, 1024, 512, dm::EngineIf<dm::rule_two_image, DmaTxEngine<0>>>;
 volatile bool live = false;
 /// The stream: a count modulo 251, so a byte repeated or skipped is a step
 /// the receiver reads as a jump, back or forward, and resynchronizes on.
@@ -3504,7 +3531,7 @@ void tq_rule_two() {
         rq::next_out = 0;
         rq::expect = 0;
         rq::got = rq::back_jumps = rq::back_bytes = rq::fwd_jumps = rq::fwd_bytes = 0;
-        DmaTxEngine<1>::clear_faults();
+        dm::WEngine::clear_faults();
         if (!rq::Loop2::init(clock, 1'000'000u)) {
             bench.verdict("the loop's Uart comes up on SERCOM2, PA12", false);
             return;

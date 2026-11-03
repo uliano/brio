@@ -441,11 +441,15 @@ void task_verbs() {
 // slots DEFAULT to NoDmaEngine, so every use above compiles unchanged. A
 // receive engine comes with a transmit engine (neg/uart_receive_engine_alone.cpp),
 // on another channel (neg/uart_engines_one_channel.cpp), and no engine names a
-// third channel (neg/dmac_channel_past_budget.cpp).
+// third channel (neg/dmac_channel_past_budget.cpp). Each channel has one owner,
+// claimed when the program is compiled: two transport types of SERCOM0 over the
+// same requests, as here, are one owner each; a second SERCOM's request on a
+// channel (neg/dma_two_owners_on_one_slot.cpp) or one request on both
+// (neg/dma_one_request_on_two_slots.cpp) does not compile.
 #include "samc21/dmac.hpp"
 
 using TxEngined = Uart<0, pads, 64, 256, DmaTxEngine<0>>;
-using PairEngined = Uart<0, pads, 64, 256, DmaTxEngine<1>, DmaRxEngine<0>>;
+using PairEngined = Uart<0, pads, 64, 256, DmaTxEngine<0>, DmaRxEngine<1>>;
 
 static_assert(!NoDmaEngine::present);
 static_assert(!Serial::has_tx_engine && TxEngined::has_tx_engine && !TxEngined::has_rx_engine);
@@ -459,8 +463,6 @@ static_assert(ByteTransport<TxEngined> && BulkSink<TxEngined> && EdgeSink<TxEngi
 static_assert(ByteTransport<PairEngined> && BulkSink<PairEngined> && EdgeSink<PairEngined> &&
               SkippingSource<PairEngined> && ClockUser<PairEngined>);
 uint32_t edge_verbs_TxEngined() { return TxEngined::tx_room() + (TxEngined::tx_drained() ? 1u : 0u); }
-// The refused claim's breadcrumb names the refused owner.
-static_assert(dma_claim_refused_context(6) == 0xD6);
 
 void engined_uart_verbs() {
     constexpr SysClock clock;
@@ -480,12 +482,7 @@ void engined_uart_verbs() {
     (void)PairEngined::read_span();
     PairEngined::consume(1);
     PairEngined::release();
-    // The claim, as a verb: one owner a channel, two channels an image.
-    (void)DmaTxEngine<0>::claim(1);
-    (void)DmaTxEngine<0>::owner();
-    (void)Dmac::owner(0);
-    (void)Dmac::held();
-    DmaChannel<0>::release(1);
+    DmaChannel<0>::release();         // the channel stopped, by hand
     (void)Serial::dma_faults();      // engineless: 0, and free
     (void)Serial::harvest();         // engineless: false, and free
 }

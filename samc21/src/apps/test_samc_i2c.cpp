@@ -2702,7 +2702,7 @@ bool pumped(const EngineRun& x, uint32_t e) {
 
 void tp_engine() {
     if (!switch_to(Mode::engined)) {
-        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        bench.verdict("the engined host comes up (channel 1 armed)", false);
         (void)switch_to(Mode::pump);
         return;
     }
@@ -2711,8 +2711,8 @@ void tp_engine() {
         (void)switch_to(Mode::pump);
         return;
     }
-    print(serial, "  channel 1 held by owner ", Dmac::owner(1), " (SERCOM3 + 1), ", Dmac::held(),
-          " channel(s) held", crlf);
+    print(serial, "  channel 1 armed for SERCOM3's transmit request, the DMAC's line ",
+          Nvic::enabled(Dmac::irq()) ? "open" : "CLOSED", crlf);
 
     // 1. dma at ONE byte, then 2, 16 and the longest, 254, at 100 kHz, and
     // 254 at 400 kHz and 1 MHz.
@@ -2952,8 +2952,9 @@ void tp_engine() {
     bench.verdict("and the next engined write is exact on the engine", after_fault);
 
     (void)switch_to(Mode::pump);
-    bench.verdict("the channel is given back with the engined host: none held after release()",
-                  Dmac::held() == 0u);
+    bench.verdict("the channel is put away with the engined host: no block in flight and the "
+                  "DMAC's line closed after release()",
+                  !DmaTxEngine<1>::busy() && !Nvic::enabled(Dmac::irq()));
 }
 
 // ===========================================================================
@@ -2969,7 +2970,7 @@ void tp_engine() {
 
 void tq_under_dma() {
     if (!switch_to(Mode::engined)) {
-        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        bench.verdict("the engined host comes up (channel 1 armed)", false);
         (void)switch_to(Mode::pump);
         return;
     }
@@ -3060,7 +3061,7 @@ void soak_line(uint32_t batch, uint8_t len, uint8_t st) {
 
 void ts_soak() {
     if (!switch_to(Mode::engined)) {
-        bench.verdict("the engined host comes up (channel 1 claimed)", false);
+        bench.verdict("the engined host comes up (channel 1 armed)", false);
         (void)switch_to(Mode::pump);
         return;
     }

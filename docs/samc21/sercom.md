@@ -100,7 +100,7 @@ number of bytes the ring took, so a caller that writes directly
 handles the rest itself, where `print` waits for it; and on the
 transport without an engine nothing masks interrupts (the transmit
 interrupt is armed by a plain INTENSET store), where an engined one
-masks a few short decisions - an engine's claim, a channel register's
+masks a few short decisions - an engine's reservation, a channel register's
 select and use, who retires a finished receive block, the dead-block
 test's three readings - and never a copy or a wait ("The optional
 engines" below).
@@ -515,11 +515,12 @@ The engines are a policy, not a feature of the task:
   direction does not arm its interrupt - both armed would serve every
   byte twice.
 - **The budget's two channels, and the receive engine never alone.** The
-  engines name channel 0 or 1, each a channel the transport claims at
-  `init()` as the owner n + 1 for SERCOM n (0 meaning nobody) and holds
-  to `release()`; a claim that finds its channel held by another
-  transport panics, the breadcrumb's context 0xD0 with the refused owner
-  (0xD6 for SERCOM5, dmac.md). A receive
+  engines name channel 0 or 1, each a channel the transport claims for
+  SERCOM n's transmit or receive request when the program is compiled
+  (`sercom_dma_claimed()`): a channel another request of the image owns,
+  or this request on both channels, does not compile (dmac.md, "One
+  owner a channel"). The transport arms its engines at `init()` and holds
+  them to `release()`. A receive
   engine comes with the transmit engine
   (`neg/uart_receive_engine_alone.cpp`), on the other channel
   (`neg/uart_engines_one_channel.cpp`): a receive block on an idle line
@@ -537,7 +538,7 @@ The engines are a policy, not a feature of the task:
   the whole ring left the producer nothing to refill until the wire had
   gone idle - measured, 4096 bytes through a 2048-byte ring at 3 Mbaud
   ran at x 1.06, the second copy in the gap; cut at half, x 1.00
-  (letter u, below). The mask covers the claim: a block start (from
+  (letter u, below). The mask covers the reservation: a block start (from
   `write_byte`/`write_bulk` in main context or from the completion in
   the handler) takes the engine's reservation - a test-and-set of its
   busy flag under PRIMASK - and reads the run and programs the channel
@@ -581,7 +582,7 @@ The engines are a policy, not a feature of the task:
   1 KB block.
 - **The standing request, and why nothing kicks.** DRE is a level -
   "my transmit buffer is free" (31.6.4.1) - and the channel serves it as
-  it finds it: standing when the channel is enabled, or when the claim
+  it finds it: standing when the channel is enabled, or when `arm()`
   selects the trigger onto it, it fires the block's first beat at once.
   So the enable fires the first beat by itself, and a software kick on
   top of it is a second beat when the first has started (PEND clears as
@@ -806,12 +807,12 @@ window:
   lazy - 150 ms looking, 100 ms held, five holds each overflowing the
   ring - five gaps, every one announced by the skip epoch before the run
   after it, no silent join.
-- **The claim and its panic** (letters d and x): `claim()` refuses a
-  second owner while the first holds the engine and grants it once
-  `release()` has run; a second engined `init()` while the loop's
-  transport holds the engine stops the board, and the next boot reads
-  the breadcrumb: code 2 (`assert_failed`), context 0xD6 - SERCOM5, the
-  refused owner.
+- **One owner a channel**: the console's engined Uart and the loop's
+  name channel 0 for two requests, so `test_samc_uart` is two images, the
+  loop's (SERCOM1 owning both channels) and the console's (SERCOM5 owning
+  channel 0); the letters that would have handed the channel between
+  them are the family's negative fixtures (dmac.md, "One owner a
+  channel").
 
 - **The duplex link at speed**, the transmit engine beside the
   interrupt receiver, letter h: at 1 Mbaud 64000 bytes each way,

@@ -394,10 +394,12 @@ void ram_host_verbs() {
 // ---- the engines (samc21/dmac.hpp) ------------------------------------------------
 // The pair, and the transmit engine alone; a receive engine alone is refused
 // (neg/spi_receive_engine_alone.cpp), and so are two engines on one channel
-// (neg/spi_engines_one_channel.cpp). The placement after them places the loops,
+// (neg/spi_engines_one_channel.cpp). The write-only host names the pair's
+// transmit channel: SERCOM0's transmit request has that one channel in an image
+// (util/dma_owner.hpp), and the two host types take it in turn. The placement after them places the loops,
 // the engined command loop with them.
 using PairHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-using WriteHost = SpiHost<0, host_pads, 0, DmaTxEngine<1>>;
+using WriteHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>>;
 using RamPairHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>, InRam>;
 static_assert(PairHost::has_dma && PairHost::has_rx_engine);
 static_assert(WriteHost::has_dma && !WriteHost::has_rx_engine);

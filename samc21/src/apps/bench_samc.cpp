@@ -290,12 +290,14 @@
 // window's close counts in both.
 //
 // build: boards = c21j
+// build: groups = rmpteu,rmpti
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
 #include <array>
 #include <cstring>
+#include <type_traits>
 
 #include "samc21/clock.hpp"
 #include "samc21/delay.hpp"
@@ -345,6 +347,18 @@ using HotSpi = brio::InFlash;
 using HotEngine = brio::InFlash;
 constexpr const char* hot_in = "flash (InFlash)";
 #endif
+
+// TWO IMAGES, ONE PER OWNER OF CHANNEL 0 (the groups line above): each DMA
+// channel has one owner for the whole image (util/dma_owner.hpp). In
+// bench_samc-1 both are SERCOM1's - letter e's SPI host on channels 0 and 1,
+// letter u's Uart on the same SERCOM's transmit channel, the two transports
+// taking it in turn -; in bench_samc-2 channel 0 is SERCOM3's, letter i's
+// I2C host. Letters r, m, p and t ride in both, so each image carries the
+// instrument's own figures. An engine slot of the other image's transports
+// is no engine here (EngineIf), and claims nothing.
+constexpr bool i2c_image = brio::test_letter_carried('i') && !brio::test_letter_carried('e');
+template <bool on, typename Engine>
+using EngineIf = std::conditional_t<on, Engine, brio::NoDmaEngine>;
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -856,7 +870,8 @@ void req(const char* op) {
 /// turns - and F the rest of the second above the wire; E - F, the ruler's own
 /// cycles cancelling, is what the engines cost the core beyond the loop's
 /// turn-around, and the page turns it into the length from which they repay.
-using SpiDma = SpiHost<1, spi_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>, HotSpi>;
+using SpiDma = SpiHost<1, spi_pads, 0, EngineIf<!i2c_image, DmaTxEngine<0>>,
+                       EngineIf<!i2c_image, DmaRxEngine<1>>, HotSpi>;
 volatile bool spi_dma_live = false;
 volatile bool spi_dma_done = false;
 
@@ -982,7 +997,8 @@ constexpr UartPads loop_pads{
 /// the interrupt receiver - the Uart's transmit slot (samc21/sercom.hpp),
 /// claimed at init() and given back at release().
 using LoopIrq = Uart<1, loop_pads, 512, 4096>;
-using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine<0>, NoDmaEngine, HotEngine>;
+using LoopTxE = Uart<1, loop_pads, 512, 2048, EngineIf<!i2c_image, DmaTxEngine<0>>, NoDmaEngine,
+                     std::conditional_t<i2c_image, InFlash, HotEngine>>;
 
 enum class Live : uint8_t { none, irq, txe };
 volatile Live live = Live::none;
@@ -1330,9 +1346,9 @@ constexpr I2cPads bus_pads{
 using Pump = I2cHost<3, bus_pads>;
 /// The same SERCOM with the transmit engine on channel 0: a write named
 /// I2cEngine::dma rides the DMA, a read stays on the pump (samc21/i2c.hpp).
-/// The two take SERCOM3 in turn (`dma_live`), as letters e and u take
-/// channel 0 in turn.
-using Dma = I2cHost<3, bus_pads, 0, DmaTxEngine<0>>;
+/// The two take SERCOM3 in turn (`dma_live`), in the image that gives
+/// channel 0 to SERCOM3 (the groups above).
+using Dma = I2cHost<3, bus_pads, 0, EngineIf<i2c_image, DmaTxEngine<0>>>;
 volatile bool dma_live = false;
 
 /// The bus's rise time, measured on this node by the AVR128DA48's

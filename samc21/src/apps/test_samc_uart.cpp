@@ -13,12 +13,22 @@
 // checked here is the BYTES through each of them, on both sides at once,
 // with a pattern in which a lost, duplicated or reordered byte is
 // IDENTIFIED and not merely counted. Each engine is a channel of the
-// image's two (erratum 1.10.4, DS80000740S, docs/samc21/dmac.md), claimed
-// by one owner at a time: letter d exercises the claim as a value, letter x
-// the refusal of a second owner as the panic it is, letter 1 a third claim
-// beside two running channels, letter u the both-engine pair, and letter h
-// carries the duplex link on the transmit engine at a rate where the shape
-// matters.
+// image's two (erratum 1.10.4, DS80000740S, docs/samc21/dmac.md), and each
+// channel has one owner for the whole image, claimed when the program is
+// compiled (util/dma_owner.hpp): letter u runs the both-engine pair, letter
+// h carries the duplex link on the transmit engine at a rate where the
+// shape matters, and what the compiler refuses - a second owner on a
+// channel, a third engine - is the family's negative fixtures
+// (test/family_samc21/neg/dma_*.cpp), not a letter.
+//
+// TWO IMAGES, ONE PER OWNER OF CHANNEL 0 (the groups line below). The
+// loop's SERCOM1 owns both channels in the image test_samc_uart-1 - its
+// transmit engine on channel 0, the pair's receive engine on channel 1 -
+// and the console's SERCOM5 owns channel 0 in test_samc_uart-2, where the
+// host letters run it on the engine. Each image names the engines of the
+// other image's letters as no engine (EngineIf below), so it claims only the
+// channels its own letters use; the letters of the other image are not in
+// its menu.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
 // both ends (brio stress runs the identical arithmetic). The
@@ -35,10 +45,10 @@
 // 31.6.3.8's loop-back "through the pad" - nothing may drive PA18 but
 // this board (a far board's receiver on it, an input, is fine). z
 // runs what the board decides alone: the baud arithmetic, the frame
-// encoding, the ring contract, the engine's facts and its claim, and on
-// the loop the wire's idle, the interrupt receiver's edge and its skip
-// past a loss, the level loop at the generator's top rate, and what a
-// released transport leaves the next owner of the DMA channel.
+// encoding, the ring contract, the engine's facts, and on the loop the
+// wire's idle, the interrupt receiver's edge and its skip past a loss, the
+// level loop at the generator's top rate, and what a released transport
+// leaves its own next init().
 //
 // A LOOP PROVES THE BYTES, NEVER THE RATE: its receiver samples on the
 // divisor its transmitter shifts on. So every letter that loops or sets a
@@ -62,15 +72,16 @@
 //      verdicts.
 //
 // What is exercised, letter by letter - a..d, g, q, r, t and w need
-// nothing outside the board and are what z runs; e..p and s stream traffic over the
-// console and are driven by brio stress; x stops the board and runs by its
-// name alone:
+// nothing outside the board and are what z runs (c and d in the second
+// image, the others in the first); e..p and s stream traffic over the
+// console and are driven by brio stress; 2 and 3 run for minutes by their
+// names alone:
 //   a  the baud generator's arithmetic, and its ladder - 9600 baud to
 //      3 Mbaud - timed on the loop's wire
 //   b  every frame format, written and read back, and each one's frame
 //      timed on the loop's wire against its own bits
 //   c  the transmit ring's contract under pressure
-//   d  the transmit engine's facts and its claim: one owner at a time;
+//   d  the transmit engine's facts: the console's engine on channel 0,
 //      its level read back from the armed channel
 //   g  the RESOURCE past the console's regime, polled on the loop: every
 //      sampling regime and the synchronous host timed on the wire, RXEN
@@ -104,14 +115,12 @@
 //      every level an entry; the rate timed
 //   w  A RELEASED REQUESTER: the transmit engine's trigger standing, the
 //      transport released three ways (disabled and gated, gated with
-//      ENABLE set, Uart::release() with its reset), the one channel bound
-//      again - to no trigger, to the released SERCOM's own, and by the
-//      next Uart - and what each first enable moves (the release contract,
-//      docs/design/dma.md)
-//   x  THE ONE-USER RULE AS A PANIC: a second engined transport's init()
-//      while the loop's holds the claim - the board stops, and the boot
-//      banner after the next reset prints the breadcrumb (code 2,
-//      assert_failed; context 0xD6, the claim of SERCOM5 refused)
+//      ENABLE set, Uart::release()), what the gated instance holds, and
+//      the same Uart's next init() and first block - every byte, in order,
+//      nothing more (the release contract, docs/design/dma.md)
+//   u  the both-engine pair on the loop at 115200, 1 and 3 Mbaud
+//   2  the pair's shape for minutes, the console on its interrupt
+//   3  the console's transmit engine alone for minutes
 //
 // THE TWO-BOARD LETTERS (y; SERCOM1 on the desk's four wires against an
 // AVR's usart_peer, the desk's AVR64EA48 - the section below says how the
@@ -139,6 +148,7 @@
 //      collide: the abort, and what restarts the transmitter after it
 //
 // build: boards = c21j
+// build: groups = abcgqrtuw2JKLMNOQSCRW,cdefhijklmnps3
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -146,6 +156,7 @@
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <type_traits>
 
 #include "kernel/panic.hpp"
 #include "samc21/clock.hpp"
@@ -183,8 +194,17 @@ constexpr UartPads console_pads{
 constexpr uint32_t rx_ring = 512;
 constexpr uint32_t tx_ring = 512;
 
+/// The two images (the file header): the loop's (letter u carried) and the
+/// console's (letter f carried and u not, so that a build with no groups
+/// compiles as the loop's image). An engine slot of the other image's
+/// transports is no engine here, so those transports claim no channel.
+constexpr bool loop_image = test_letter_carried('u');
+constexpr bool console_image = test_letter_carried('f') && !loop_image;
+template <bool on, typename Engine>
+using EngineIf = std::conditional_t<on, Engine, NoDmaEngine>;
+
 using UPlain = Uart<5, console_pads, rx_ring, tx_ring>;
-using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<0>>;
+using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, EngineIf<console_image, DmaTxEngine<0>>>;
 
 constexpr UPlain plain;
 constexpr UTxDma utx;
@@ -198,10 +218,6 @@ TwoKeyTestBench<UPlain, 'y', 32> bench;
 using brio::crlf;
 using brio::print;
 
-/// The engine's owner id each engined transport claims with: its SERCOM
-/// number plus one (samc21/dmac.hpp, DmaTxEngine<0>::claim()).
-constexpr uint8_t console_owner = static_cast<uint8_t>(Sc5::index + 1u);
-
 // =============================================================================
 // The two transports behind one set of verbs
 // =============================================================================
@@ -211,8 +227,7 @@ constexpr uint8_t console_owner = static_cast<uint8_t>(Sc5::index + 1u);
 // so switching is a clean handover. The engine is ONE set of static
 // members shared by every Uart that names it, and each Uart's dma_isr()
 // consumes its OWN ring by a completed block's length - so DMAC_Handler
-// tells exactly one transport about a completion: the one that holds the
-// claim (DmaTxEngine<0>::owner()).
+// tells exactly one transport about a completion: the one that is live.
 
 // The numbers are brio stress's protocol.
 enum class Mode : uint8_t { plain = 0, txdma = 1 };
@@ -336,7 +351,7 @@ bool drain(uint32_t spins = 20'000'000UL) {
 struct EngineSnapshot {
     uint8_t sercom_flags, sercom_armed;
     uint16_t sercom_status;
-    uint8_t owner;
+    bool engaged;
     bool busy, waiting;
     uint16_t in_flight;
     uint32_t faults;
@@ -347,10 +362,10 @@ EngineSnapshot snapshot() {
     s.sercom_flags = Sc5::flags();
     s.sercom_armed = Sc5::armed();
     s.sercom_status = Sc5::status();
-    s.owner = DmaTxEngine<0>::owner();
+    s.engaged = UTxDma::has_tx_engine && live == Mode::txdma;
     s.busy = DmaTxEngine<0>::busy();
     s.in_flight = DmaTxEngine<0>::in_flight();
-    s.waiting = s.owner != 0u && DmaTxEngine<0>::waiting();
+    s.waiting = s.engaged && DmaTxEngine<0>::waiting();
     s.faults = DmaTxEngine<0>::faults();
     return s;
 }
@@ -358,7 +373,7 @@ EngineSnapshot snapshot() {
 void dump_engine(const EngineSnapshot& s) {
     print(plain, "  sercom intflag=", s.sercom_flags, " intenset=", s.sercom_armed,
           " status=", s.sercom_status, crlf);
-    print(plain, "  engine owner=", s.owner, " busy=", s.busy ? 1u : 0u, " in_flight=",
+    print(plain, "  engine engaged=", s.engaged ? 1u : 0u, " busy=", s.busy ? 1u : 0u, " in_flight=",
           s.in_flight, " channel waiting=", s.waiting ? 1u : 0u, " blocks abandoned=", s.faults,
           crlf);
 }
@@ -762,17 +777,6 @@ void tc_ring() {
     bench.verdict("and the whole lot goes out", drain());
 }
 
-/// Two owner ids no Uart of this image claims with (a Uart's is its SERCOM
-/// number plus one: 2 on the loop, 6 on the console), so letter d's claims
-/// can never be mistaken for a transport's.
-constexpr uint8_t owner_a = 9;
-constexpr uint8_t owner_b = 10;
-
-// The loop's engined transport for a reading of the armed engine (letter
-// d); the loop's section below holds the transport.
-bool arm_loop_engine();
-void release_loop_engine();
-
 void td_engine() {
     bench.verdict("the plain transport names no engine", !UPlain::has_tx_engine);
     bench.verdict("the engined one names the transmit engine", UTxDma::has_tx_engine);
@@ -785,41 +789,17 @@ void td_engine() {
     bench.verdict("SERCOM5's TX trigger code is the header's",
                   Sc5::dma_tx_trigger() == SERCOM5_DMAC_ID_TX);
 
-    // THE ONE-USER RULE AS A VALUE: the claim the engine's arm() makes,
-    // exercised directly with owners no transport uses. The console runs
-    // plain under z, so nobody holds the engine on entry. (A refused claim
-    // inside arm() is the panic letter x proves; claim() alone answers.)
-    const uint8_t on_entry = DmaTxEngine<0>::owner();
-    const bool a_first = DmaTxEngine<0>::claim(owner_a);
-    const bool b_refused = !DmaTxEngine<0>::claim(owner_b);
-    const uint8_t held_by = DmaTxEngine<0>::owner();
-    const bool a_again = DmaTxEngine<0>::claim(owner_a);
-    DmaTxEngine<0>::release(owner_a);
-    const uint8_t after_a = DmaTxEngine<0>::owner();
-    const bool b_now = DmaTxEngine<0>::claim(owner_b);
-    const uint8_t held_by_b = DmaTxEngine<0>::owner();
-    DmaTxEngine<0>::release(owner_b);
-    const uint8_t after_b = DmaTxEngine<0>::owner();
-    print(plain, "  owner on entry ", on_entry, "; claim(", owner_a, ") ", a_first, ", claim(",
-          owner_b, ") ", !b_refused, " while ", held_by, " holds, claim(", owner_a, ") again ",
-          a_again, "; after release(", owner_a, ") ", after_a, "; claim(", owner_b, ") ", b_now,
-          ", held by ", held_by_b, "; after release(", owner_b, ") ", after_b, crlf);
-    bench.verdict("nobody holds the engine while the console runs plain", on_entry == 0u);
-    bench.verdict("a free engine is claimed", a_first && held_by == owner_a);
-    bench.verdict("a second owner is refused while the first holds it", b_refused);
-    bench.verdict("the holder's own claim again is granted", a_again);
-    bench.verdict("release() gives the claim back", after_a == 0u);
-    bench.verdict("and the other owner may take it then (one user at a time)",
-                  b_now && held_by_b == owner_b);
-    bench.verdict("its release leaves nobody holding the engine", after_b == 0u);
-
-    // THE LEVEL, read back from the armed channel: the loop's engined
-    // transport holds the engine for the reading and gives it back.
+    // THE LEVEL, read back from the armed channel: the console's engined
+    // transport holds the engine for the reading, and the console goes back
+    // to its interrupt.
     std::optional<uint8_t> level;
-    if (arm_loop_engine()) {
+    (void)drain();
+    mode_release();
+    if (mode_init(Mode::txdma, 115200)) {
         level = DmaTxEngine<0>::priority();
-        release_loop_engine();
     }
+    mode_release();
+    (void)mode_init(Mode::plain, 115200);
     print(plain, "  the armed channel's level: ", level ? static_cast<uint32_t>(*level) : 0xFFu,
           level ? "" : " (not enabled in CTRL)", crlf);
     bench.verdict("the transmit engine arms at level 2 of four, the rule's NEXT for a transmit, "
@@ -1243,11 +1223,10 @@ constexpr UartPads loop_pads{
 };
 
 using LPlain = Uart<1, loop_pads, 512, 512>;
-using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine<0>>;
+using LTxDma = Uart<1, loop_pads, 512, 512, EngineIf<loop_image, DmaTxEngine<0>>>;
 using Sc1 = LPlain::Resource;
-constexpr uint8_t loop_owner = static_cast<uint8_t>(Sc1::index + 1u);
 
-enum class Loop : uint8_t { none, plain, txdma, link_dma, pair, tx1 };
+enum class Loop : uint8_t { none, plain, txdma, link_dma, pair };
 volatile Loop loop_live = Loop::none;
 /// The receive edges the loop's vector returned.
 volatile uint32_t loop_edges = 0;
@@ -1270,20 +1249,6 @@ void loop_settle(uint32_t baud) {
     }
     Sc1::data(b);
     return true;
-}
-
-bool arm_loop_engine() {
-    loop_live = Loop::txdma;
-    if (LTxDma::init(clock, 115'200u)) {
-        return true;
-    }
-    release_loop_engine();
-    return false;
-}
-
-void release_loop_engine() {
-    LTxDma::release();
-    loop_live = Loop::none;
 }
 
 // ---- the rate on the wire ----------------------------------------------------
@@ -2073,84 +2038,28 @@ void tt_levels() {
                   wire_rungs({3'000'000u}));
 }
 
-// ---- w - a released requester: what reaches the next owner -------------------
+// ---- w - a released requester: what reaches the same owner's next init() ------
 //
-// The release contract (docs/design/dma.md): a peripheral done with a
-// channel leaves no request behind for the next owner. On this controller
-// the request a channel serves is ITS TRIGGER SELECTION's - CHCTRLB.TRIGSRC
-// names one peripheral line - and the transmitter's line is a level, "set
-// when the transmit buffer is empty" (31.6.4.1). Two things could outlive
-// a release: a rise the channel kept from before, and the level in the
-// gated SERCOM. Each is staged with the transmit engine's trigger standing
-// - the last block over, its channel disabled by its end (25.6.2.6), DRE
-// up behind it - and the release is run three ways: the SERCOM disabled
-// and gated, as the release did before the reset (staged here by hand,
-// the resource's verbs in its order); gated with ENABLE left set, a
-// release that skips the disable too; and Uart::release(), which resets
-// the SERCOM before the gate. Then the one channel is bound again:
-//
-//   1. to NO trigger (TRIGSRC 0), its destination a word of RAM, and a
-//      block started: anything that moves is a rise the release and the
-//      next arm() let through;
-//   2. to the RELEASED SERCOM's own trigger, the instance still gated: a
-//      beat that moves is a request the gated instance holds;
-//   3. by the next Uart on the same SERCOM, the whole hand-over: its
-//      first block on the loop, every byte, in order, nothing more.
+// The release contract (docs/design/dma.md): a transport's init() starts
+// from a reset block, so a request its block held across its release
+// reaches nothing. Under the ownership rule the one transport that can meet
+// such a request is the same owner again: the channel serves SERCOM1's
+// transmit request and nobody else's in this image. The request a channel
+// serves is its trigger selection's - CHCTRLB.TRIGSRC names one peripheral
+// line - and the transmitter's line is a level, "set when the transmit
+// buffer is empty" (31.6.4.1). Each release is staged with the transmit
+// engine's trigger standing - the last block over, its channel disabled by
+// its end (25.6.2.6), DRE up behind it - and run three ways: the SERCOM
+// disabled and gated (staged here by hand, the resource's verbs in their
+// order); gated with ENABLE left set, a release that skips the disable too,
+// the worst case; and Uart::release(). Then what the gated instance holds is
+// read, and the same Uart's init() and first block run: its 256 bytes on the
+// loop, every byte, in order, nothing more.
 //
 // And a control first, on whether the channel keeps a rise at all: DATA
 // filled by hand behind the engine's last block - DRE falling and rising
 // again while the channel is disabled, then low - and a block of one
 // started: a kept rise would fire its beat into a full DATA at the enable.
-
-/// The owner id letter w's hand-staged bindings claim with: no Uart's (a
-/// Uart's is its SERCOM number plus one).
-constexpr uint8_t probe_owner = 11;
-/// What a hand-staged binding's channel writes: a word of RAM, the low
-/// byte a beat's.
-volatile uint32_t probe_sink = 0;
-constexpr uint32_t probe_mark = 0xA5A5A5A5u;
-/// Interrupt flags the DMAC raised while a hand-staged binding held the
-/// engine (DMAC_Handler takes them for it).
-volatile uint8_t probe_flags = 0;
-const uint8_t probe_run[4] = {0x5A, 0x5B, 0x5C, 0x5D};
-
-struct Bound {
-    bool armed;
-    bool moved;        ///< the sink was written
-    uint8_t beat;      ///< its low byte, a beat's
-    bool busy;         ///< the engine's block still claimed
-    bool waiting;      ///< the channel enabled with nothing pending or moving
-    uint8_t flags;     ///< what the DMAC raised
-};
-
-/// The one channel bound by hand to `trigger`, its destination the sink,
-/// a block of four started: what moved within a millisecond. The block is
-/// then abandoned and the claim given back.
-Bound bind_probe(uint8_t trigger) {
-    Bound b{};
-    probe_sink = probe_mark;
-    probe_flags = 0;
-    b.armed = DmaTxEngine<0>::arm(probe_owner, &probe_sink, trigger);
-    if (b.armed) {
-        (void)DmaTxEngine<0>::start(std::span<const uint8_t>(probe_run, sizeof probe_run));
-        spin_ms(1);
-        b.moved = probe_sink != probe_mark;
-        b.beat = static_cast<uint8_t>(probe_sink & 0xFFu);
-        b.busy = DmaTxEngine<0>::busy();
-        b.waiting = DmaTxEngine<0>::waiting();
-        b.flags = probe_flags;
-        (void)DmaTxEngine<0>::abandon();
-        DmaTxEngine<0>::clear_faults();
-    }
-    DmaTxEngine<0>::release(probe_owner);
-    return b;
-}
-
-void print_bound(const char* what, const Bound& b) {
-    print(plain, "    bound to ", what, ": armed ", b.armed ? 1u : 0u, ", moved ",
-          b.moved ? 1u : 0u, " (the sink's low byte ", hex(b.beat), "), busy ", b.busy ? 1u : 0u,
-          ", waiting ", b.waiting ? 1u : 0u, ", DMAC flags ", hex(b.flags), crlf);
-}
 
 /// The loop's engined transport up, a run out and drained to its last
 /// stop bit, the receiver's ring emptied: the engine's trigger standing.
@@ -2177,14 +2086,14 @@ bool stand_trigger(uint32_t baud, uint32_t n) {
 }
 
 /// The three releases letter w compares.
-enum class Way : uint8_t { disabled, enabled, reset };
+enum class Way : uint8_t { disabled, enabled, release };
 
 /// A release staged by hand: the engine's release, then the resource's
 /// teardown WITHOUT CTRLA.SWRST - interrupts off, disabled unless
 /// `keep_enabled`, the core clock and the bus clock gated - then the pin,
 /// in Uart::release()'s order.
 void release_unreset(bool keep_enabled) {
-    DmaTxEngine<0>::release(loop_owner);
+    DmaTxEngine<0>::release();
     Nvic::disable(Sc1::irq());
     Sc1::enable_interrupt(SercomFlag::all, false);
     if (!keep_enabled) {
@@ -2215,7 +2124,7 @@ struct Handover {
     bool idle;
 };
 
-/// The next owner: the Uart on SERCOM1 again, a run of 256 out on the loop
+/// The same owner again: the Uart on SERCOM1, a run of 256 out on the loop
 /// and read back - every byte, in order, nothing more a millisecond after.
 Handover next_uart(uint32_t baud) {
     Handover h{};
@@ -2286,40 +2195,32 @@ void tw_released_requester() {
     }
     print(plain, crlf);
 
-    // ---- the three releases, then the channel bound again ----------------
+    // ---- the three releases, then the same Uart's next init() ------------
     constexpr uint32_t baud = 1'000'000u;
-    static const char* const names[] = {"disabled and gated, no reset",
-                                        "gated with ENABLE set, no reset",
-                                        "Uart::release(), the reset before the gate"};
-    Bound none[3]{};
-    Bound own[3]{};
+    static const char* const names[] = {"disabled and gated", "gated with ENABLE set",
+                                        "Uart::release()"};
     Held held[3]{};
     Handover next[3]{};
     bool stood_all = true;
     for (uint8_t k = 0; k < 3u; ++k) {
         const Way way = static_cast<Way>(k);
         stood_all = stand_trigger(baud, 64) && stood_all;
-        if (way == Way::reset) {
+        if (way == Way::release) {
             LTxDma::release();
         } else {
             release_unreset(way == Way::enabled);
         }
         loop_live = Loop::none;
         held[k] = read_released();
-        none[k] = bind_probe(0u);
-        own[k] = bind_probe(Sc1::dma_tx_trigger());
         next[k] = next_uart(baud);
     }
-    bool none_still = true;
     bool next_whole = true;
     for (uint8_t k = 0; k < 3u; ++k) {
         print(plain, "  released ", names[k], ": the gated SERCOM1 reads INTFLAG ",
               hex(held[k].flags), ", CTRLA ", hex(held[k].ctrla), crlf);
-        print_bound("no trigger", none[k]);
-        print_bound("the released SERCOM1's own", own[k]);
-        print(plain, "    the next Uart on SERCOM1: ", next[k].got, " of 256 back, ", next[k].bad,
-              " off the pattern, faults ", next[k].faults, next[k].idle ? "" : ", NOT idle", crlf);
-        none_still = none_still && none[k].armed && !none[k].moved;
+        print(plain, "    the same Uart's next init(), its first block: ", next[k].got,
+              " of 256 back, ", next[k].bad, " off the pattern, faults ", next[k].faults,
+              next[k].idle ? "" : ", NOT idle", crlf);
         next_whole = next_whole && next[k].got == 256u && next[k].bad == 0u &&
                      next[k].faults == 0u && next[k].idle;
     }
@@ -2331,22 +2232,17 @@ void tw_released_requester() {
                   dre_low && n_seen == 3u && seen[0] == 0xC1u && seen[1] == 0xC2u &&
                       seen[2] == 0xB1u);
     bench.verdict("a disable withdraws the transmit request: the gated instance reads DRE clear, "
-                  "its configuration standing, and the channel bound to its trigger moves nothing",
-                  (held[0].flags & SercomFlag::dre) == 0u && held[0].ctrla != 0u &&
-                      own[0].armed && !own[0].moved);
-    bench.verdict("A GATED CLOCK HOLDS A REQUEST LEFT STANDING: gated with ENABLE set, the instance "
-                  "reads DRE up behind the gate, and the channel bound to its trigger takes ONE "
-                  "stray beat - the next block's first byte - and waits",
-                  (held[1].flags & SercomFlag::dre) != 0u && own[1].armed && own[1].moved &&
-                      own[1].beat == probe_run[0] && own[1].waiting);
+                  "its configuration standing",
+                  (held[0].flags & SercomFlag::dre) == 0u && held[0].ctrla != 0u);
+    bench.verdict("A GATED CLOCK HOLDS A REQUEST LEFT STANDING: gated with ENABLE set, the "
+                  "instance reads DRE up behind the gate",
+                  (held[1].flags & SercomFlag::dre) != 0u);
     bench.verdict("Uart::release() leaves the instance reset behind the gate - INTFLAG and CTRLA "
-                  "zero - and the channel bound to its trigger moves nothing",
-                  held[2].flags == 0u && held[2].ctrla == 0u && own[2].armed && !own[2].moved);
-    bench.verdict("bound to no trigger after any of the three releases, the channel moves nothing "
-                  "at its enable",
-                  none_still);
-    bench.verdict("the next Uart's first block after any of them: 256 of 256 in order, no fault - "
-                  "the hand-over needs nothing of the next owner",
+                  "zero",
+                  held[2].flags == 0u && held[2].ctrla == 0u);
+    bench.verdict("the same Uart's next init() after any of the three releases, the worst case "
+                  "among them: its first block 256 of 256 in order, no stray beat, no stall, no "
+                  "fault",
                   next_whole);
     bench.verdict("and the loop runs at the rate asked: 1 Mbaud, a run of frames in its wire time "
                   "within -1 % and +3 %",
@@ -2363,18 +2259,8 @@ void tw_released_requester() {
 // completion (half its ring) and the tail on harvest(), which the letters ask
 // at every turn of their loop.
 
-using LPair = Uart<1, loop_pads, 1024, 1024, DmaTxEngine<0>, DmaRxEngine<1>>;
-/// The loop's transmit engine on the budget's OTHER channel (letter 1).
-using LTx1 = Uart<1, loop_pads, 512, 512, DmaTxEngine<1>>;
-/// A third transport for letter 1's refused claim: SERCOM2 on PA12, function
-/// C, its own loop, naming channel 1 - which the loop then holds.
-constexpr UartPads third_pads{
-    .tx = SercomPad::pad0,
-    .rx = SercomPad::pad0,
-    .tx_pin = {'A', 12, PinFunction::c},
-    .rx_pin = {'A', 12, PinFunction::c},
-};
-using LThird = Uart<2, third_pads, 64, 64, DmaTxEngine<1>>;
+using LPair = Uart<1, loop_pads, 1024, 1024, EngineIf<loop_image, DmaTxEngine<0>>,
+                   EngineIf<loop_image, DmaRxEngine<1>>>;
 
 /// The pair's stream: the 32-bit xorshift of the file header, low byte, the
 /// receiver checking it from the same seed and counting what disagrees.
@@ -2485,44 +2371,6 @@ void tu_pair() {
     bench.verdict("at 3 Mbaud: every byte exact, nothing lost or abandoned", pair_clean(c, 16384u));
 }
 
-/**
- * 1 - THE BUDGET AS A PANIC: two channels held and running - the console's
- * transmit engine (channel 0, owner 6) printing, the loop's (channel 1, owner
- * 2) sending - and then a third transport's init(), SERCOM2's naming channel
- * 1, must PANIC with the breadcrumb PanicCode::assert_failed,
- * dma_claim_refused_context(3) = 0xD3. The proof is read at the next boot.
- * Reached past that init only when the refusal did NOT happen.
- */
-void t1_budget_panic() {
-    print(plain, "  two channels held and running, then a third transport's init (SERCOM2, owner 3)",
-          crlf, "  must PANIC: THE BOARD STOPS HERE. The banner after a reset prints code ",
-          static_cast<uint32_t>(PanicCode::assert_failed), ", context ",
-          hex(dma_claim_refused_context(3)), crlf);
-    (void)drain();
-    mode_release();
-    const bool console_up = mode_init(Mode::txdma, 115200);
-    loop_live = Loop::tx1;
-    const bool loop_up = LTx1::init(clock, 115'200u);
-    static const uint8_t junk[64] = {0x55};
-    (void)LTx1::write_bulk(std::span<const uint8_t>(junk, sizeof junk));
-    print(utx, "  console ", console_up, ", loop ", loop_up, ": channels held ", Dmac::held(),
-          ", owners ", Dmac::owner(0), " and ", Dmac::owner(1), ", the loop's block running ",
-          DmaTxEngine<1>::running(), crlf);
-    while (!UTxDma::tx_idle()) {
-    }
-    spin_ms(5);
-    (void)LThird::init(clock, 115'200u);
-    // Past this line only when the third claim was not refused.
-    LThird::release();
-    LTx1::release();
-    loop_live = Loop::none;
-    mode_release();
-    (void)mode_init(Mode::plain, 115200);
-    spin_ms(150);
-    print(plain, "  the third transport's init RETURNED: no panic", crlf);
-    bench.verdict("a third claim panics while two channels are held", false);
-}
-
 /// The marked line the shape letter prints each second, read by bin/brio's
 /// judge: whole, and as many as the closing "#count" says.
 uint32_t marked = 0;
@@ -2542,14 +2390,11 @@ void mark(Sink s, uint32_t sec, uint32_t a, uint32_t b, uint32_t c) {
 uint32_t shape_seconds = 600;
 
 /**
- * 2 - TWO SHAPES FOR MINUTES, `shape_seconds` each. THE PAIR: both engines of
- * the loop's Uart at 1 Mbaud, a stream that never stops, every byte checked and
- * every class of loss counted, the console on its interrupt printing a marked
- * line a second. THEN THE CONSOLE ALONE: the console's transmit engine the one
- * channel held, a marked line written as fast as the ring takes it - the
- * host's judge counts them whole (#count).
+ * 2 - THE PAIR'S SHAPE FOR `shape_seconds`: both engines of the loop's Uart at
+ * 1 Mbaud, a stream that never stops, every byte checked and every class of
+ * loss counted, the console on its interrupt printing a marked line a second.
  */
-void t2_shapes() {
+void t2_pair_shape() {
     marked = 0;
     loop_live = Loop::pair;
     const bool up = LPair::init(clock, 1'000'000u);
@@ -2578,7 +2423,14 @@ void t2_shapes() {
                   "abandoned",
                   up && r.got + 1024u >= r.sent && r.wrong == 0u && r.hw_overruns == 0u &&
                       r.rx_overruns == 0u && r.frame == 0u && r.skips == 0u && r.dma_faults == 0u);
+}
 
+/**
+ * 3 - THE CONSOLE ALONE FOR `shape_seconds`: the console's transmit engine the
+ * one channel held, a marked line written as fast as the ring takes it - the
+ * host's judge counts them whole (#count).
+ */
+void t3_console_shape() {
     (void)drain();
     mode_release();
     (void)mode_init(Mode::txdma, 115200);
@@ -2597,50 +2449,6 @@ void t2_shapes() {
           faults, crlf);
     bench.verdict("THE CONSOLE ALONE: no transmit block abandoned (the lines are the host's to count)",
                   faults == 0u);
-}
-
-// ---- x - the one-user rule as a panic ----------------------------------------
-
-/// THE REFUSAL, AS IT IS ENFORCED: the loop's engined transport holds the
-/// claim, and the console's engined transport's init() - a second owner's
-/// arm() - must panic (kernel/panic.hpp: the breadcrumb written with
-/// PanicCode::assert_failed and dma_claim_refused_context(6) = 0xD6, then
-/// the stop with interrupts masked). The proof is read at the next boot,
-/// where main() takes the record and the banner prints it. Reached past
-/// the init only when the refusal did NOT happen: everything is given
-/// back and the verdict is a failure.
-void tx_refusal() {
-    print(plain, "  the loop's engined transport (SERCOM1, owner ", loop_owner,
-          ") takes the claim; then the console's", crlf,
-          "  engined init (SERCOM5, owner ", console_owner,
-          ") must PANIC: THE BOARD STOPS HERE, interrupts masked.", crlf,
-          "  The proof is the breadcrumb at the next boot: the banner after a reset prints", crlf,
-          "  code ", static_cast<uint32_t>(PanicCode::assert_failed), " (assert_failed), context ",
-          hex(dma_claim_refused_context(console_owner)), crlf);
-    (void)drain();
-    loop_live = Loop::txdma;
-    const bool loop_up = LTxDma::init(clock, 115'200u);
-    const bool loop_holds = DmaTxEngine<0>::owner() == loop_owner;
-    if (!loop_up || !loop_holds) {
-        LTxDma::release();
-        loop_live = Loop::none;
-        print(plain, "  the loop's engined transport did not come up (init ", loop_up,
-              ", owner ", DmaTxEngine<0>::owner(), ")", crlf);
-        bench.verdict("the loop's engined transport holds the claim", false);
-        return;
-    }
-    mode_release();
-    const bool up = mode_init(Mode::txdma, 115200);
-    // Past this line only when the second owner's arm() was not refused.
-    const uint8_t owner = DmaTxEngine<0>::owner();
-    UTxDma::release();
-    LTxDma::release();
-    loop_live = Loop::none;
-    (void)mode_init(Mode::plain, 115200);
-    spin_ms(150);
-    print(plain, "  the console's engined init RETURNED (", up, ", owner ", owner,
-          "): no panic", crlf);
-    bench.verdict("a second engined transport's init() panics while the claim is held", false);
 }
 
 // =============================================================================
@@ -3424,7 +3232,7 @@ uint16_t burst(uint32_t n, uint16_t v0, uint16_t mask) {
 /// as the console's regime and the rung's configuration is written under
 /// it - the generator and the regime the letter judges -, the engine left
 /// armed. `n` frames of 0x30, 0x31, ... and their sum, or nullopt.
-using LkDma = Uart<1, link_pads, 64, 512, DmaTxEngine<0>>;
+using LkDma = Uart<1, link_pads, 64, 512, EngineIf<loop_image, DmaTxEngine<0>>>;
 
 std::optional<uint16_t> engine_burst(uint32_t n, const SercomUartConfig& u, uint8_t generator) {
     loop_live = Loop::link_dma;
@@ -5367,7 +5175,7 @@ void banner() {
     print(plain, crlf,
           "test_samc_uart - SAMC21J18A SERCOM5 USART (ch. 30/31), clk=",
           SysClock::hz, " Hz", crlf,
-          "  letters e..p and s need brio stress on the other end; x stops the board;", crlf,
+          "  letters e..p and s need brio stress on the other end;", crlf,
           "  J..W need the far board's usart_peer on SERCOM1's four wires", crlf);
     bench.menu();
 }
@@ -5387,7 +5195,6 @@ extern "C" void SERCOM1_Handler() {
         case Loop::txdma: (void)LTxDma::isr(); break;
         case Loop::link_dma: (void)LkDma::isr(); break;
         case Loop::pair: (void)LPair::isr(); break;
-        case Loop::tx1: (void)LTx1::isr(); break;
         default: break;
     }
 }
@@ -5400,30 +5207,21 @@ extern "C" void SERCOM5_Handler() {
     }
 }
 
-// THE ENGINE TELLS ITS OWNER ALONE - see the note beside `live`: the
-// completion goes to the transport that holds the claim, and to no other.
+// THE ENGINE TELLS ITS LIVE TRANSPORT ALONE - see the note beside `live`: in the
+// loop's image the channels are SERCOM1's, whichever of its transports is up;
+// in the console's image channel 0 is SERCOM5's.
 extern "C" void DMAC_Handler() {
-    if (loop_live == Loop::pair) {
-        (void)LPair::dma_isr();
-        return;
-    }
-    if (loop_live == Loop::tx1) {
-        (void)LTx1::dma_isr();
-    }
-    const uint8_t owner = brio::DmaTxEngine<0>::owner();
-    if (owner == loop_owner) {
-        // SERCOM1 has two engined transports, never live at once.
-        if (loop_live == Loop::link_dma) {
-            LkDma::dma_isr();
-        } else {
-            LTxDma::dma_isr();
+    if constexpr (loop_image) {
+        switch (loop_live) {
+            case Loop::pair: (void)LPair::dma_isr(); break;
+            case Loop::link_dma: (void)LkDma::dma_isr(); break;
+            case Loop::txdma: (void)LTxDma::dma_isr(); break;
+            default: break;
         }
-    } else if (owner == console_owner) {
-        UTxDma::dma_isr();
     } else {
-        // Letter w's hand-staged bindings: the flags taken and kept, so a
-        // completion nobody consumes cannot hold the line up.
-        probe_flags = static_cast<uint8_t>(probe_flags | brio::DmaTxEngine<0>::take_interrupt());
+        if (live == Mode::txdma) {
+            (void)UTxDma::dma_isr();
+        }
     }
 }
 
@@ -5461,13 +5259,12 @@ int main() {
                  tr_receiver_edge);
     bench.letter('s', "errors under the interrupt receiver (host)", ts_errors, false);
     bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
-    bench.letter('w', "a released requester: what reaches the next owner of the channel",
+    bench.letter('w', "a released requester: what reaches the same Uart's next init()",
                  tw_released_requester);
-    bench.letter('x', "a claim on a held channel as a PANIC (stops the board)", tx_refusal, false);
     bench.letter('u', "the both-engine Uart on the loop at 115200, 1 Mbaud and 3 Mbaud", tu_pair);
-    bench.letter('1', "THE BUDGET: two channels running, a third claim a PANIC (stops the board)",
-                 t1_budget_panic, false);
-    bench.letter('2', "two shapes for minutes: the Uart pair, then the console alone", t2_shapes, false);
+    bench.letter('2', "the Uart pair's shape for minutes, the console on its interrupt", t2_pair_shape,
+                 false);
+    bench.letter('3', "the console alone on its transmit engine for minutes", t3_console_shape, false);
 
     bench.second_letter('J', "the link and the far peer", tJ_link);
     bench.second_letter('K', "the rate, judged by a foreign receiver on a crystal", tK_rate);

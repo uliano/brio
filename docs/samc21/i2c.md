@@ -99,9 +99,9 @@ weak alias of the crt's silent spin, where the program stops at the
 first interrupt. A write that names `I2cEngine::dma` on an engined host
 moves its bytes on a DMA channel, with three interrupts whatever its
 length, and then the DMAC's vector must be bound to `dma_isr()` too, and
-the channel counts against the image's budget of two
-([dmac.md](dmac.md), "The rule": a claim on a channel another transport
-holds panics at `init()`). The
+the channel counts against the image's budget of two, its one owner
+SERCOM n's transmit request: a channel another request of the image owns
+does not compile ([dmac.md](dmac.md), "One owner a channel"). The
 request's buffers are lent: the client leaves them untouched and in
 scope from the post until its `I2cDone` arrives, whatever the status,
 and nothing checks it. And the wire decides the core rate this engine
@@ -332,7 +332,7 @@ byte's MB. What ends a write early:
   (`samc21/i2c.hpp`, the first engine-defined code after
   `util/i2c_bus.hpp`'s four).
 
-The engine's launch refuses nothing: the channel is claimed at `init()`,
+The engine's launch refuses nothing: the channel is armed at `init()`,
 the host checks the count before it writes ADDR, and a block is started
 only on an idle channel, every tenure that started one ending it.
 
@@ -519,7 +519,8 @@ brio::post<I2c>(I2cHw::Request{.addr = 0x3C,
 
 `DmaTxEngine<1>` puts the I2C host's writes on DMA channel 1 and the
 console's transmitter is on channel 0: the image's two channels
-([dmac.md](dmac.md), "The rule"), each claimed at its transport's `init()`.
+([dmac.md](dmac.md), "The rule"), each with one owner, claimed when the
+program is compiled ("One owner a channel" there).
 Both vectors are the program's. The SERCOM's still ends every tenure, and
 the DMAC's serves both owners, the cast discarding the console's answer
 (its receive edge, which a transport with no receive engine never raises);
@@ -601,10 +602,10 @@ What the rows say:
 
 The same letter runs a second host type on the same SERCOM3, given a
 transmit engine (`i2c.write.dma`, `i2c.wr.dma`), against the same peer
-inside the same serve. Its engine is on channel 0, which is free in this
-letter because the bench's console runs on its interrupt; a program like
-the excerpt above, whose console holds channel 0, gives the I2C host
-channel 1. The two host types take the SERCOM in turn, and the one
+inside the same serve. Its engine is on channel 0, which is SERCOM3's in
+the bench image that carries this letter (the bench's console runs on its
+interrupt); a program like the excerpt above, whose console holds
+channel 0, gives the I2C host channel 1. The two host types take the SERCOM in turn, and the one
 SERCOM3 vector the letter binds serves whichever holds it, by a flag; it
 calls the engined host's body out of line, so that the pump's body stays
 the vector's alone, as in a program that binds one host (flattened

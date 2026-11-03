@@ -1025,7 +1025,7 @@ public:
  *                         wire.
  *
  * The engine's launch refuses nothing: the host checks the count (1 to
- * 254) before it writes ADDR, the channel was claimed at init(), and a
+ * 254) before it writes ADDR, the channel was armed at init(), and a
  * block is started only on an idle channel - every tenure that started
  * one ends it, completed at its TCMPL or abandoned (below). Which to name
  * is the program's judgement, and docs/samc21/i2c.md gives the
@@ -1096,6 +1096,10 @@ class I2cHost {
                       requires(const uint8_t* p, uint16_t c) { TxEngine::start_run(p, c); },
                   "the I2C host's one engine slot takes a transmit engine (DmaTxEngine): "
                   "a read runs on the interrupt (the class comment)");
+    // The channel's one owner, this SERCOM's transmit request: a second owner
+    // of it in the image, or this request on both channels, does not compile
+    // (samc21/sercom.hpp, sercom_dma_claimed()).
+    static_assert(sercom_dma_claimed<TxEngine, n, DmaSignal::tx>());
 
     using SdaPin = Pin<pads.sda_pin.port, pads.sda_pin.pin>;
     using SclPin = Pin<pads.scl_pin.port, pads.scl_pin.pin>;
@@ -1172,9 +1176,7 @@ public:
     ///
     /// On an engined host the transmit engine is armed last, on this
     /// instance's DATA and its transmit trigger, its block's end an
-    /// interrupt: the channel claimed for owner n + 1 - a PANIC when
-    /// another transport holds it (docs/samc21/dmac.md, "The rule") -, the
-    /// DMAC brought up if this is its first holder and its NVIC line opened.
+    /// interrupt, the DMAC brought up if this is its first holder and its NVIC line opened.
     /// False when the channel would not reset within its bounded wait.
     template <typename Clock>
     static bool init(Clock clock, uint32_t rise_ns = 300u, uint32_t core_hz = 0u) {
@@ -1212,7 +1214,7 @@ public:
         }
         phase_ = Phase::idle;
         if constexpr (has_engines) {
-            if (!TxEngine::arm(owner, S::data_address(), S::dma_tx_trigger(),
+            if (!TxEngine::arm(S::data_address(), S::dma_tx_trigger(),
                                TxEngine::Completion::interrupt)) {
                 return false;
             }
@@ -1472,7 +1474,7 @@ public:
     /// Put the ENGINE back where start() is legal: the init() tail re-run
     /// from the cached configuration, and an engined write's block in
     /// flight abandoned first (TxEngine::abandon(), counted; the channel
-    /// stays claimed and armed). Clocks and pads are untouched - a SERCOM software reset
+    /// stays armed). Clocks and pads are untouched - a SERCOM software reset
     /// reaches neither GCLK routing nor PORT - and the baud table stands,
     /// so no Clock is needed.
     ///
@@ -1502,7 +1504,7 @@ public:
     }
 
     /// Hand the pins back, then the peripheral: on an engined host the
-    /// channel's claim first, so another transport may take it. A block in
+    /// channel first. A block in
     /// flight ends first (docs/samc21/dmac.md, "The rule": another owner's
     /// channel may be running), the wait on the channel itself and bounded
     /// by the block's time on the wire, nine SCL periods a byte; a block
@@ -1519,7 +1521,7 @@ public:
             uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * 9u * period;
             while (TxEngine::running() && spins-- != 0u) {
             }
-            TxEngine::release(owner);
+            TxEngine::release();
         }
         Nvic::disable(S::irq());
         S::release();
@@ -1540,8 +1542,6 @@ private:
         dma_tail,    ///< engined write: block done, MB armed for the last byte's edge
     };
 
-    /// The SERCOM's owner number in the DMA budget's claims (dmac.hpp).
-    static constexpr uint8_t owner = static_cast<uint8_t>(n + 1u);
 
     /// ~5 us at 48 MHz: a 100 kHz half bit, timed by a counted spin
     /// because this is a recovery path that must not depend on any

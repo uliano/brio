@@ -1117,7 +1117,8 @@ void ti_dark() {
                   !Nvic::enabled(Host::Resource::irq()) && !spi_live && !link_live && !ul::cmd_up &&
                       pad_is_dark<RxdPin>() && pad_is_dark<CsPin>() && pad_is_dark<TxdPin>() &&
                       pad_is_dark<XckPin>());
-    bench.verdict("the DMA transmit engine unclaimed", DmaTxEngine<0>::owner() == 0u);
+    bench.verdict("the DMA transmit engine released: no block in flight, the DMAC's line off",
+                  !DmaTxEngine<0>::busy() && !Nvic::enabled(Dmac::irq()));
     bench.verdict("the LED's pad PB23 is not an output", !Pin<'B', 23>::is_output());
     bench.verdict("the ceiling is the Console's and interrupts are enabled",
                   P::ceiling == console_index && P::interrupts_enabled());
@@ -1380,10 +1381,10 @@ extern "C" void SERCOM1_Handler() {
     }
 }
 
-/// The DMAC's one line: the transmit engine's completion, for the port
-/// that holds its claim.
+/// The DMAC's one line: the transmit engine's completion, for the engined
+/// port while a leg runs on it (its release closes the line).
 extern "C" void DMAC_Handler() {
-    if (brio::DmaTxEngine<0>::owner() != 0u) {
+    if (leg_dma) {
         PortDma::dma_isr();
     }
 }

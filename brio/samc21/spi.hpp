@@ -955,10 +955,13 @@ public:
  *    one, and false only when the engines have it.
  *
  * THE ENGINE SLOTS: both, the transmit one alone, or neither (the defaults). The
- * engines are samc21/dmac.hpp's, each a channel of the two an image may hold,
- * claimed at init() and held to release() whether a request runs or not. So a board
- * file spends the budget: the pair takes it whole, and the console beside it takes
- * no channel; the transmit engine alone leaves one, a display's writes beside a
+ * engines are samc21/dmac.hpp's, each a channel of the two an image may hold, claimed
+ * for this SERCOM's transmit and receive requests when the program is compiled
+ * (samc21/sercom.hpp's sercom_dma_claimed()): a channel another transport of the image
+ * names, or this SERCOM's request on both channels, does not compile. Each is armed
+ * at init() and held to release() whether a request runs or not. So a board file
+ * spends the budget: the pair takes it whole, and the console beside it takes no
+ * channel; the transmit engine alone leaves one, a display's writes beside a
  * console's transmitter.
  *
  * ONE INTERRUPT A REQUEST, TXC, in every shape. "In Host mode, this flag is set when
@@ -989,7 +992,7 @@ public:
  * at the first request's end. A polled request needs neither.
  *
  * A WRITE RIDES THE TRANSMIT CHANNEL ALONE (a null rx: a display's pixels), on a pair too, the
- * pair still holding both claims. The receiver stays on, its two levels overflow in silence,
+ * pair still holding both channels. The receiver stays on, its two levels overflow in silence,
  * ERROR is never armed, and the end drains them and clears BUFOVF (32.6.2.7). A read starts
  * its receive channel first: RXC is clear, every character of a command phase having been read
  * back, and it is the transmit channel's first beat that starts the clock. Neither is kicked:
@@ -1141,6 +1144,11 @@ class SpiHost {
             return true;
         }
     }(), "brio SpiHost: the two engines ride two different DMA channels, 0 and 1");
+    // The channels' one owner each, this SERCOM's two requests: a second owner
+    // of either channel in the image, or this SERCOM's request on both, does not
+    // compile (samc21/sercom.hpp, sercom_dma_claimed()).
+    static_assert(sercom_dma_claimed<TxEngine, n, DmaSignal::tx>());
+    static_assert(sercom_dma_claimed<RxEngine, n, DmaSignal::rx>());
 
     static_assert(spi_pads_valid(pads),
                   "these SERCOM pads cannot carry an SPI host: CTRLA.DOPO fixes the "
@@ -1235,9 +1243,8 @@ public:
 
     // ---- lifecycle -----------------------------------------------------------
 
-    /// Bring the instance up as a host: clocks, configuration, the engines'
-    /// claims (a panic when a channel is held by another owner: the budget,
-    /// samc21/dmac.hpp), pads, pins; on a host with no engines the NVIC line left
+    /// Bring the instance up as a host: clocks, configuration, the engines
+    /// armed, pads, pins; on a host with no engines the NVIC line left
     /// disabled (it arms no interrupt), on one with engines opened for TXC. Setup's
     /// call, main context; it waits, bounded, for the peripheral's synchronizations.
     ///
@@ -1289,16 +1296,15 @@ public:
         }
         status_ = spi_ok;
         if constexpr (has_engines) {
-            const uint8_t owner = static_cast<uint8_t>(n + 1u);
             dma_active_ = false;
-            if (!TxEngine::arm(owner, S::data_address(), S::dma_tx_trigger(),
+            if (!TxEngine::arm(S::data_address(), S::dma_tx_trigger(),
                                TxEngine::Completion::silent)) {
                 return false;
             }
             if constexpr (has_rx_engine) {
-                if (!RxEngine::arm(owner, S::data_address(), S::dma_rx_trigger(),
+                if (!RxEngine::arm(S::data_address(), S::dma_rx_trigger(),
                                    RxEngine::Completion::silent)) {
-                    TxEngine::release(owner);
+                    TxEngine::release();
                     return false;
                 }
             }
@@ -1475,7 +1481,7 @@ public:
 
 public:
     /// Put the ENGINE back where start() is legal: the select of a transaction on the
-    /// engines released first, its channels put away and re-claimed, the peripheral
+    /// engines released first, its channels put away and re-armed, the peripheral
     /// reset and reconfigured to the applied state. Clocks, pads and the ceiling
     /// arithmetic are untouched (a SERCOM software reset reaches none of them), so no
     /// Clock is needed.
@@ -1509,22 +1515,20 @@ public:
         return reset_block();
     }
 
-    /// Hand the pins back, then the peripheral: the engines and their claims first, so
-    /// another transport may take the channels. THE TRANSMIT BLOCK IN FLIGHT ENDS FIRST
+    /// Hand the pins back, then the peripheral: the engines first. THE TRANSMIT BLOCK IN FLIGHT ENDS FIRST
     /// (docs/samc21/dmac.md, "The rule": another owner's channel may be running), the wait
     /// on the channel itself, so no vector is needed, and bounded by that block's time on
     /// the wire; a block that outlives the bound is disabled anyway.
     static void release() {
         if constexpr (has_engines) {
-            const uint8_t owner = static_cast<uint8_t>(n + 1u);
             // A frame is 16 x (BAUD + 1) core cycles and a poll turn several.
             uint32_t spins = (static_cast<uint32_t>(TxEngine::in_flight()) + 2u) * 16u *
                              (static_cast<uint32_t>(applied_.baud) + 1u);
             while (TxEngine::running() && spins-- != 0u) {
             }
-            TxEngine::release(owner);
+            TxEngine::release();
             if constexpr (has_rx_engine) {
-                RxEngine::release(owner);
+                RxEngine::release();
             }
             dma_active_ = false;
         }

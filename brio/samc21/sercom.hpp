@@ -33,8 +33,8 @@
  * handler: each ring has one producer and one consumer, and the interrupt
  * body is the other end of both. Without an engine nothing here masks
  * interrupts (the transmit interrupt is armed by a plain INTENSET store,
- * which cannot race the handler's INTENCLR); with an engine, its claim
- * is taken under the platform's critical section and the channel
+ * which cannot race the handler's INTENCLR); with an engine, its
+ * reservation is taken under the platform's critical section and the channel
  * programmed unmasked (pump_tx(), rearm_rx()), the enable itself masked
  * for its two stores (samc21/dmac.hpp). Nothing in the task waits
  * except init() above, rebase() and set_baud(), main-context verbs
@@ -171,7 +171,9 @@
  *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
  *    the write-back): the Uart has two optional engine slots filled by
  *    samc21/dmac.hpp's DmaTxEngine and DmaRxEngine, each a channel of the
- *    two an image may hold (docs/samc21/dmac.md, "The rule"). A receive
+ *    two an image may hold (docs/samc21/dmac.md, "The rule"), each claimed
+ *    for this SERCOM's request when the program is compiled
+ *    (sercom_dma_claimed(), below). A receive
  *    engine comes with a transmit engine and never alone, so the pair
  *    holds the whole budget and no channel of another owner runs beside
  *    it. No engine in the receive slot is the interrupt receiver.
@@ -211,6 +213,7 @@
 #include "samc21/pin.hpp"
 #include "samc21/platform.hpp"
 #include "util/clock.hpp"
+#include "util/dma_owner.hpp"
 #include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
@@ -1699,6 +1702,27 @@ struct NoDmaEngine {
     static constexpr bool present = false;
 };
 
+/**
+ * The claim an engine slot makes (util/dma_owner.hpp; docs/design/dma.md,
+ * "The ownership rule"): the channel the engine names, DmaSlotId<0, ch> - the
+ * DMAC numbers no controller -, given to SERCOM `n`'s `signal` request, the
+ * transmit or the receive line whichever personality the instance has. A
+ * transport writes it in its class body for each of its slots,
+ * `static_assert(sercom_dma_claimed<TxEngine, n, DmaSignal::tx>())`, so the
+ * claim counts wherever the transport type is used. A second owner on a
+ * channel, or one request on both channels, then fails to compile; with two
+ * channel numbers that is the DMAC's budget of two (samc21/dmac.hpp) kept by
+ * the compiler. True, and nothing claimed, for an empty slot.
+ */
+template <typename Engine, uint8_t n, DmaSignal signal>
+constexpr bool sercom_dma_claimed() {
+    if constexpr (Engine::present) {
+        return dma_claim<DmaSlotId<0, Engine::channel>, DmaOwner<DmaPeriph::sercom, n, signal>>;
+    } else {
+        return true;
+    }
+}
+
 template <uint8_t n, UartPads pads, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
           typename Placement = InFlash>
@@ -1711,6 +1735,12 @@ class Uart {
                   "brio Uart: InRam places the engines' completions, and this port has no "
                   "engine - the per-byte isr() moves to SRAM with the vector the program places "
                   "in .fast_text (the file header)");
+
+    // The channels' one owner each, this SERCOM's two requests: a second owner
+    // of either channel in the image, or this SERCOM's request on both, does not
+    // compile (sercom_dma_claimed()).
+    static_assert(sercom_dma_claimed<TxEngine, n, DmaSignal::tx>());
+    static_assert(sercom_dma_claimed<RxEngine, n, DmaSignal::rx>());
 
     static_assert(uart_pads_valid(pads),
                   "these SERCOM pads cannot carry an asynchronous link: TxD exists "
@@ -1813,8 +1843,6 @@ class Uart {
     /// so a consumer told at each half drains one while the channel fills the
     /// other.
     static constexpr uint32_t rx_block_most = rx_size / 2u;
-    /// The engines' owner id (samc21/dmac.hpp): this SERCOM, plus one.
-    static constexpr uint8_t engine_owner = static_cast<uint8_t>(n + 1u);
 
 public:
     /// Instances are empty tags for concept-based call sites (print(serial, ...)).
@@ -1911,18 +1939,16 @@ public:
 
         // WITH AN ENGINE ITS INTERRUPT IS NEVER ARMED: the DMA trigger and the
         // interrupt are the SAME condition, so arming both would have the
-        // channel and the handler both serve one character. The claim is the
-        // budget (samc21/dmac.hpp): a claim that finds its channel held by
-        // another owner is a panic. Without the engine, DRE is armed on demand
-        // by write_byte(), and RXC here.
+        // channel and the handler both serve one character. Without the engine,
+        // DRE is armed on demand by write_byte(), and RXC here.
         if constexpr (has_tx_engine) {
-            if (!TxEngine::arm(engine_owner, S::data_address(), S::dma_tx_trigger())) {
+            if (!TxEngine::arm(S::data_address(), S::dma_tx_trigger())) {
                 return false;
             }
         }
         if constexpr (has_rx_engine) {
-            if (!RxEngine::arm(engine_owner, S::data_address(), S::dma_rx_trigger())) {
-                TxEngine::release(engine_owner);
+            if (!RxEngine::arm(S::data_address(), S::dma_rx_trigger())) {
+                TxEngine::release();
                 return false;
             }
             m_rx_armed = false;
@@ -2442,11 +2468,9 @@ public:
         }
     }
 
-    /// Stop the transport and hand everything back: the engines and their
-    /// claims first (a channel still writing DATA of a SERCOM being torn
-    /// down is the one teardown order that matters; the claim given back
-    /// is what lets another transport take the channel), then the NVIC
-    /// line, the peripheral - reset before its clocks are gated, so no
+    /// Stop the transport and hand everything back: the engines first (a
+    /// channel still writing DATA of a SERCOM being torn down is the one
+    /// teardown order that matters), then the NVIC line, the peripheral - reset before its clocks are gated, so no
     /// transmit request stands behind it (Sercom::release()) - both
     /// clocks and the two pins.
     ///
@@ -2466,10 +2490,10 @@ public:
             uint32_t spins = tx_block_spins(TxEngine::in_flight());
             while (TxEngine::running() && spins-- != 0u) {
             }
-            TxEngine::release(engine_owner);
+            TxEngine::release();
         }
         if constexpr (has_rx_engine) {
-            RxEngine::release(engine_owner);
+            RxEngine::release();
             m_rx_armed = false;
             m_rx_stalled = false;
         }
@@ -2617,7 +2641,7 @@ private:
                 run = run.first(tx_block_most);
             }
             // NO KICK. DRE is a level the channel serves as it finds it:
-            // standing at the enable - or when the claim selected the
+            // standing at the enable - or when arm() selected the
             // trigger onto it - it fires the first beat by itself (and a
             // DRE that rose and fell while the channel was disabled leaves
             // nothing, samc21/dmac.hpp). Measured on 3376 block

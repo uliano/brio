@@ -332,8 +332,11 @@ item a reader would apply without checking the row.
     true), or both (`DmaTxEngine<a>`, `DmaRxEngine<b>`, a and b the
     budget's two channels); a receive engine alone and two engines on
     one channel do not compile (`neg/spi_receive_engine_alone.cpp`,
-    `neg/spi_engines_one_channel.cpp`). The engines are claimed at
-    `init()` with SERCOM n's owner, n + 1, and held to `release()`.
+    `neg/spi_engines_one_channel.cpp`). Each channel is claimed for
+    SERCOM n's transmit or receive request when the program is compiled,
+    so a channel another request of the image owns does not compile
+    ([dmac.md](dmac.md), "One owner a channel"); the engines are armed at
+    `init()` and held to `release()`.
   - **`SpiEngine::polled`** - the loop, inside `start()`, at any length,
     no channel touched and no vector needed. It is the chapter's host
     sequence a character ahead: the command phase and any data phase
