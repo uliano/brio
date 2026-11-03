@@ -11,7 +11,7 @@
 // NOTHING TO WIRE. GP26, GP27 and GP28 (inputs 0..2) are read through
 // their pad pulls and must be free; GP29 (input 3) is printed and never
 // judged - a Pico has VSYS / 3 on it, the WeAct board on this desk the
-// pair's SPI select, 1.5 kOhm to its own 3V3 (docs/boards/weact-rp2040.md).
+// pair's SPI select, 4.7 kOhm to its own 3V3 (docs/boards/weact-rp2040.md).
 // GP0/GP1 are the console's, GP25 the LED.
 //
 // THE RULERS: the system timer for the rates, the clock chapter's

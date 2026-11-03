@@ -53,7 +53,7 @@
 //
 // THE WIRES, fixed on the desk (docs/boards/weact-rp2350b.md, the pair's ten
 // and two grounds): SPI1 GP30 -> RP2040 GP10 (SCK), GP31 -> GP8 (this end's
-// TX), GP28 <- GP11 (the peer's TX), GP41 -> GP29 (the select, 1.5 kOhm to
+// TX), GP28 <- GP11 (the peer's TX), GP41 -> GP29 (the select, 4.7 kOhm to
 // the RP2040's 3V3); UART1 GP4 -> GP5, GP5 <- GP4; the mode line GP21 -> the
 // peer's GP20; GP36/GP37, the I2C pair, the rail's sense. Key z wants the
 // RP2040 running `spi_peer`, key y `uart_peer`. NOTHING LIT: the LED's pad

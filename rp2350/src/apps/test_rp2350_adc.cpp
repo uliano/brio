@@ -17,7 +17,7 @@
 //
 // NOTHING TO WIRE, and the pads this suite reads are the EIGHT the
 // QFN-80 gives the converter - GP40..GP47, inputs 0..7 - which must be
-// free but one: GP41 (input 1) carries the pair's SPI select, 1.5 kOhm to
+// free but one: GP41 (input 1) carries the pair's SPI select, 4.7 kOhm to
 // the desk partner's 3V3 (docs/boards/weact-rp2350b.md), so its pull
 // readings are PRINTED and never judged, and the sampler reads input 2
 // instead; the sensor is input 8. In the QFN-60 the same letters read four

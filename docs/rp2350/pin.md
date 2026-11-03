@@ -291,7 +291,7 @@ below with the four wires fitted.
   correctly in BOTH directions - a wire has no direction, and neither
   does a pad.
 - **The pulls**: on the three link nets that carry a real pull-up -
-  GP36, GP37 and GP41, 1.5 kOhm to the partner's 3V3 - each pad reads
+  GP36 and GP37 with 1.5 kOhm, GP41 with 4.7 kOhm, to the partner's 3V3 - each pad reads
   high on its own pull-down with the buffer pulsed (so the HIGH is the
   resistor and never E9's history), low while it drives low, and high
   again once it lets go. The chip's own pull-up holds a free pad high.

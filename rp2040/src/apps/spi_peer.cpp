@@ -8,7 +8,7 @@
 //
 //  - THE BUS IS SPI1's PADS: GP10 SCK, GP8 this chip's receive pad (the
 //    host's MOSI), GP11 its transmit pad (the answer line), GP29 the select
-//    (1.5 kOhm to THIS board's 3V3), the pair's SPI wires to the WeAct
+//    (4.7 kOhm to THIS board's 3V3), the pair's SPI wires to the WeAct
 //    RP2350B's GP30 / GP31 / GP28 / GP41 (docs/boards/weact-rp2040.md). As
 //    the client they belong to PIO0's machine 0 (function 6); for
 //    host_burst to the PL022 (function 1), the select its frame signal.

@@ -98,7 +98,7 @@
 //
 // THE WIRES, fixed on the desk (docs/boards/weact-rp2040.md,
 // docs/boards/weact-rp2350b.md): SPI1 SCK, the two data lines and the
-// select (1.5 kOhm to the RP2040's 3V3), UART1 crossed, the two mode lines
+// select (4.7 kOhm to the RP2040's 3V3), UART1 crossed, the two mode lines
 // crossed, the I2C pair (unused here, the RP2350's sense of its partner's
 // rail), two grounds. Every letter brings its pads up and gives them back:
 // nothing here drives a link pad between letters.

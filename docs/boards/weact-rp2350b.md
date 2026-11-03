@@ -67,7 +67,7 @@ on one hub, no 3V3 wire between them:
 | 1 | GP30 | GP10 | SPI1 SCK |
 | 2 | GP28 | GP11 | the RP2040's SPI1 TX to this SPI1 RX |
 | 3 | GP31 | GP8 | this SPI1 TX to the RP2040's SPI1 RX, 47 Ohm in series at this end |
-| 4 | GP41 | GP29 | SPI1 CSn, 1.5 kOhm to the RP2040's 3V3 |
+| 4 | GP41 | GP29 | SPI1 CSn, 4.7 kOhm to the RP2040's 3V3 |
 | 5 | GP36 | GP2 | I2C SDA (I2C0 here), 1.5 kOhm to the RP2040's 3V3 |
 | 6 | GP37 | GP3 | I2C SCL, 1.5 kOhm to the RP2040's 3V3 |
 | 7 | GP5 | GP4 | the RP2040's UART1 TX to this UART1 RX |

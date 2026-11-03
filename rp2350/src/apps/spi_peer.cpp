@@ -10,7 +10,7 @@
 //
 //  - THE BUS IS SPI1's PADS: GP30 SCK, GP28 this chip's receive pad (the
 //    host's MOSI), GP31 its transmit pad (the answer line), GP41 the select
-//    (1.5 kOhm to the RP2040's 3V3), the pair's SPI wires to the WeAct
+//    (4.7 kOhm to the RP2040's 3V3), the pair's SPI wires to the WeAct
 //    RP2040's GP10 / GP11 / GP8 / GP29 (docs/boards/weact-rp2350b.md). As
 //    the client they belong to PIO0's machine 0 (function 6) with the
 //    block's window at GPIO16..47 (GPIOBASE 16, 11.1.1: GP41 is out of the

@@ -28,7 +28,8 @@
 // `pair_dma_isr()`.
 //
 // THE LINK'S RULES (docs/boards/weact-rp2040.md, weact-rp2350b.md): the
-// three pull-ups are 1.5 kOhm to the RP2040's 3V3; the partner runs
+// I2C pull-ups are 1.5 kOhm and the select's 4.7 kOhm, all to the RP2040's
+// 3V3; the partner runs
 // twi_peer, which is deaf but at 0x6B; nothing here drives a link pad but
 // the I2C's two. The DUT pulls SDA low BY HAND for the arbitration and
 // role letters - IO_BANK0's output overrides (RP2040 2.19.6.1, RP2350 9.4)

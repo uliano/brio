@@ -54,7 +54,7 @@ on one hub, and no 3V3 wire between them:
 | 1 | GP10 | GP30 | SPI1 SCK |
 | 2 | GP11 | GP28 | this SPI1 TX to the RP2350B's SPI1 RX |
 | 3 | GP8 | GP31 | the RP2350B's SPI1 TX to this SPI1 RX, 47 Ohm in series at the RP2350B's end (its reason is on that board's page) |
-| 4 | GP29 | GP41 | SPI1 CSn, 1.5 kOhm to this board's 3V3 |
+| 4 | GP29 | GP41 | SPI1 CSn, 4.7 kOhm to this board's 3V3 |
 | 5 | GP2 | GP36 | I2C SDA (I2C1 here), 1.5 kOhm to this board's 3V3 |
 | 6 | GP3 | GP37 | I2C SCL, 1.5 kOhm to this board's 3V3 |
 | 7 | GP4 | GP5 | this UART1 TX to the RP2350B's UART1 RX |

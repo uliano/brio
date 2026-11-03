@@ -17,8 +17,8 @@
 // WHAT IS WIRED. The console is a Debug Probe's UART bridge on GP0 (TX)
 // / GP1 (RX) = UART0. The board is wired to its desk partner, the WeAct
 // RP2040 (docs/boards/weact-rp2350b.md): three of those wires carry a
-// REAL PULL-UP, 1.5 kOhm to the RP2040's 3V3 at the far end - GP36 and
-// GP37 (the I2C link), GP41 (the SPI link's select). Those pull-ups are
+// REAL PULL-UP to the RP2040's 3V3 at the far end - GP36 and GP37 (the
+// I2C link, 1.5 kOhm), GP41 (the SPI link's select, 4.7 kOhm). Those pull-ups are
 // the only thing on this bench that can hold a pad high without the
 // chip's help, which is what makes them the witness in the pull letter;
 // they are read first through rp2350/src/apps/pair_power.hpp, which is
@@ -283,7 +283,7 @@ void tb_wires() {
 
 // -----------------------------------------------------------------------------
 /// One link net, judged from its one pad here: the far end is the
-/// partner's pad, at reset under the dark image it runs, and the 1.5 kOhm
+/// partner's pad, at reset under the dark image it runs, and the pull-up
 /// to its 3V3. Every read is taken the way E9 forces - the pad's own
 /// pull-down on, the buffer off and pulsed for the read alone - so a HIGH
 /// is the resistor and never the pad's history.

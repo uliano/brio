@@ -23,7 +23,7 @@
 //    the arbiter with no second peripheral. SPI0 hosts on GP18/19/16 with
 //    GP17 as its select; no wire is on those pads.
 //  - THE DESK PARTNER (n, o, p, q, r, m and x): SPI1 on GP10 (SCK), GP11
-//    (TX), GP8 (RX) with GP29 the select - 1.5 kOhm to this board's 3V3 -
+//    (TX), GP8 (RX) with GP29 the select - 4.7 kOhm to this board's 3V3 -
 //    wired to the WeAct RP2350B's GP30 / GP28 / GP31 / GP41
 //    (docs/boards/weact-rp2040.md). That board runs `spi_peer`
 //    (rp2350/src/apps/spi_peer.cpp, on either half: its client a PIO

@@ -307,9 +307,9 @@ handler's name is `isr_adc_fifo` on both architectures.
 
 On an RP2350 in the QFN-80 package, **stepping A2**, clk_sys at 150 MHz
 and clk_adc at 48 MHz off the USB PLL unless another rate is named, on
-BOTH architectures: `test_rp2350_adc` reports **32 pass, 0 fail** on the
-Cortex-M33 pair and on the Hazard3 pair, from one source, each on three
-flash-and-run cycles. Every verdict reads the same on the two halves.
+BOTH architectures: `test_rp2350_adc` reports **36 pass, 0 fail** on the
+Cortex-M33 pair and on the Hazard3 pair, from one source, each in three
+runs. Every verdict reads the same on the two halves.
 
 - **THE BLOCK'S RESET DOES NOT COMPLETE WITH clk_adc STOPPED**, which is
   why `init()` takes the clock first: asked to cycle the block with no
@@ -355,16 +355,16 @@ flash-and-run cycles. Every verdict reads the same on the two halves.
   which carries the pair's SPI select and its pull-up to the partner's
   3V3 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), printed
   and never judged - read through its own pulls with the digital input
-  buffer off: **3894 to 3899 counts
-  (3137 to 3141 mV) pulled up, 58 to 60 counts (47 to 48 mV) pulled
-  down**, and **397 to 434 counts (320 to 350 mV) floating** - the last
+  buffer off: **3895 to 3900 counts
+  (3138 to 3142 mV) pulled up, 58 to 60 counts (47 to 48 mV) pulled
+  down**, and **386 to 451 counts (311 to 363 mV) floating** - the last
   a number and not a level, and well clear of both pulls.
 - **ERRATUM RP2350-E9 IN MILLIVOLTS, WHICH IS WHAT THIS CONVERTER IS FOR.**
   A pad taken to the supply by its own pull-up and then released with its
   input buffer still enabled falls into the undefined region and is held
-  there: the converter reads **2348 to 2361 mV**, against the errata
+  there: the converter reads **2328 to 2391 mV**, against the errata
   sheet's "around 2.2 V", and the pad's own digital buffer reads it HIGH.
-  Turning the pad's PULL-DOWN on under that leak moves it to **2142 to
+  Turning the pad's PULL-DOWN on under that leak moves it to **2141 to
   2144 mV** and no further - the internal pull is far weaker than the
   ~120 uA the leak sources, exactly as the sheet says, and 8.2 kOhm is
   the impedance that would win. Clearing the input buffer removes the

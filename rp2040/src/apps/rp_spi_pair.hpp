@@ -41,7 +41,7 @@
 // `pair_dma_isr()`.
 //
 // THE LINK'S RULES (docs/boards/weact-rp2040.md, weact-rp2350b.md): the
-// select carries 1.5 kOhm to the RP2040's 3V3; the partner's peer is DARK
+// select carries 4.7 kOhm to the RP2040's 3V3; the partner's peer is DARK
 // in command mode - its answer line an input with no pull, so an undriven
 // wire reads this end's own pull-up, the host receive pad's; nothing here
 // drives a link pad but SPI1's four, and every letter gives them back.
