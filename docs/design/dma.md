@@ -186,13 +186,17 @@ evidence:
   CH32V203 and CH32V303 family, measured on SPI1, its host's `release()`
   saying so; the CH32V00x's SPI host releases the same way, its block
   the same lineage's and not measured on that chip;
-- the SAM C21's SPI host disables its SERCOM before the gate and does not
-  reset it: on that chip a disabled SERCOM withdraws a raised request,
-  measured on the same SERCOM in its UART mode, where the disabled and
-  gated instance read no flag and a channel bound to its trigger moved
-  nothing ([the SAM C21 DMAC page](../samc21/dmac.md), "A released
-  requester"). Its UART resets the SERCOM before the gate, as the rule
-  says.
+- the SAM C21's SPI host and its I2C host disable their SERCOM before
+  the gate and do not reset it: on that chip a disabled SERCOM withdraws
+  a raised request, measured on SERCOM1 in its UART mode, where the
+  disabled and gated instance read no flag and a channel bound to its
+  trigger moved nothing ([the SAM C21 DMAC page](../samc21/dmac.md), the
+  bench finding "A released requester"). The SPI host runs on that same
+  SERCOM on the bench; the I2C mode was not measured (the data sheet
+  says when the I2C host's transmit request rises and that writing DATA
+  clears it, and nothing of a disable, DS60001479M 33.6.4.1.2), so the
+  I2C host's release rests on the UART mode's evidence. Its UART resets the SERCOM before the gate, as
+  the rule says.
 
 ### Realizations
 
@@ -209,7 +213,7 @@ the two kinds of release "The release contract" names.
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrxt | none | the AVR DA, DB and EA have no DMA controller |
-| samc21 | `DmaTxEngine<ch>` at level 2 and `DmaRxEngine<ch>` at level 3 of four (CHCTRLB.LVL), the rule's two, CTRL.LVLEN enabling those (`samc21/dmac.hpp`); the Uart takes the transmit engine or the pair, the SPI host the pair or the transmit engine alone | a budget of two channels an image, numbered 0 and 1, a claim that finds its channel held panicking, and no channel suspended or disabled mid-block beside a running one: the controller corrupts or starves the other channel otherwise (erratum 1.10.4 and the measurements beyond it), so a receive engine comes only with its transmit engine; its release answer is the one "The release contract" above gives, the UART resetting its SERCOM before the gate and the SPI host disabling it ([the SAM C21 DMAC page](../samc21/dmac.md)) |
+| samc21 | `DmaTxEngine<ch>` at level 2 and `DmaRxEngine<ch>` at level 3 of four (CHCTRLB.LVL), the rule's two, CTRL.LVLEN enabling those (`samc21/dmac.hpp`); the Uart takes the transmit engine or the pair, the SPI host the pair or the transmit engine alone, the I2C host the transmit engine alone | a budget of two channels an image, numbered 0 and 1, a claim that finds its channel held panicking, and no channel suspended or disabled mid-block beside a running one: the controller corrupts or starves the other channel otherwise (erratum 1.10.4 and the measurements beyond it), so a receive engine comes only with its transmit engine; its release answer is the one "The release contract" above gives, the UART resetting its SERCOM before the gate, the SPI host and the I2C host disabling it ([the SAM C21 DMAC page](../samc21/dmac.md)) |
 | stm32g0 | `DmaPriority` (`stm32g0/dma_engine.hpp`); the engines' defaults: receive and ping-pong source very_high, transmit and player high, copy low (`stm32g0/dma.hpp`) | the UART's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C host's two at high; the DMAMUX ranks nothing (priority, then number), and a memory-to-memory channel alternates with any other requester (RM0444 10.4.4), so it takes two copies to starve a ring, and behind a starved channel the receive FIFO can wedge, which the UART's vector cures with a kick (DMAR dropped and raised, [the STM32G0 USART page](../stm32g0/usart.md)); a released block measured to hold no request, but a DMA enable left set re-raises it when the clock returns, so every transport's `release()` resets its block ([the STM32G0 DMA page](../stm32g0/dma.md)) |
 | stm32f4 | `DmaPriority` (`stm32f4/dma_engine.hpp`); the engines' defaults: receive (both shapes) very_high, transmit high, copy low (`stm32f4/dma.hpp`) | the UART's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C and FMPI2C hosts' two at high; a DAC stream the program's to rank, its underrun disabling the transfers (RM0090 14.3.7); the arbiter ranks per port, and it takes three copies above a ring on its controller to starve it; a gated clock holds a raised request, a cleared enable withdraws it: the UART, the SPI host and client, the I2C host and client and the FMPI2C block reset in `release()`, the timers and the DAC already did, the ADC clears CR2 with the clock on (its reset line is every converter's), measured clean ([the STM32F4 DMA page](../stm32f4/dma.md)) |
 | ch32v00x | `DmaPriority` (`ch32v00x/dma_engine.hpp`); the engines' defaults: receive very_high, transmit high, copy low (`ch32v00x/dma.hpp`) | the UART's ring at `rx_priority`, its transmit at high; the SPI host's receive at very_high and transmit at high; the I2C host's two at high; the UART and the I2C host reset their blocks in `release()`: the held request is the CH32V203's measurement, applied here by reading, the pulse correct either way; the SPI host disables its block with no pulse, as the CH32V203's does, not measured on this chip ([the CH32V00x DMA page](../ch32v00x/dma.md)) |

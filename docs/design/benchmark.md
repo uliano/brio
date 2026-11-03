@@ -550,67 +550,74 @@ its own interrupt, a peer board's `twi_peer`, or a device soldered to
 the board; the family's document says which): `i2c.write` and
 `i2c.read` of 1, 2, 16 and 255 bytes, `i2c.wr` the register read (one
 byte written, a repeated START, 1, 2 or 16 read), `i2c.probe`, the same
-through each engine, at 100 kHz, 400 kHz and Fm+ where the wire
-carries it; `wire` the bus's own time for the tenure at the measured
-SCL period, so the fixed cost (wall minus wire, in core cycles) is the
+through each engine where the host has engines (a request naming
+`I2cEngine::dma`), at 100 kHz, 400 kHz and Fm+ where the wire carries
+it; `wire` the bus's own time for the tenure at the measured SCL
+period, so the fixed cost (wall minus wire, in core cycles) is the
 price a requester pays for a tenure beyond the bits; the vendor's own
 tenure on the same board in a scratch program. The busy column is the
 400 kHz one, every meter's, the partner's handlers included where they
-run on the same core.
+run on the same core. Each row names its
+family's I2C page, which describes the letter on that family; a cell
+reading "not taken" is a figure the family's letter does not print.
 
-| family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
+| family (clock; the partner) | 1-byte write, fixed cost at 400 kHz | register read 1+1, fixed | 255-byte write: x, interrupts | 255-byte read: interrupts, handler cycles | busy of a 1-byte write | the vendor | longest host entry |
 |---|---|---|---|---|---|---|---|
-| AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP four clocks) | 509 (599) | 1003 (1112) | 1.12 (1.16), one interrupt a byte; the data sheet's own loop 1.11 | 1.14, smart mode | 1056 metered; the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95 (120); 305 metered |
-| AVR64EA48 (20 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP eight clocks) | 406 bare | 703 bare (the 1 + 1 register read, smart mode) | 1.21 bare, one interrupt a byte | 1.23, smart mode | 998 metered; the plain binding is busy for the tenure | not run on this board | not taken on this board |
-| ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR's `twi_peer`, which stretches every byte about 220 cycles) | 978 through the pump, the plain binding (1205); 1341 metered | 1371 plain, 1835 metered | the pump 1.24 | the pump 104 575 (137 679) | 1505 metered | the data sheet's loop: about 320 fixed on a one-byte write, the pump's wall about a fifth behind it; within half a per cent on long tenures | 383 |
-| STM32F429ZI (180 MHz; the board's STMPE811 on I2C3; the F429's figures, its board not on the desk) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
-| STM32F446RE (180 MHz; FMPI2C1 on the self-link, served on the same core) | 230, three interrupts | 611, five | 1.00 through the pump (256 interrupts, 98 cycles a byte) and the engines (4) | 256 through the pump (117 cycles a byte), 3 through the engines | 1225 | - | 214 |
-| STM32F446RE's FMPI2C1 (180 MHz; I2C1 on the self-link, served on the same core, its address-match stretch inside the figure) | 1131, two interrupts | 1680, four | 1.00 through the pump (256 interrupts, 128 cycles a byte) and the engines (2) | 256 through the pump (141 cycles a byte), 2 through the engines | 1168 | - | 509 |
-| CH32V203C8T6 (120 MHz for the letter, the bus clock's 60 MHz ceiling; the CH32V303VCT6's `twi_peer`, its target polled by its own core) | 835, three interrupts | 1468, five | 1.00 through the pump (256 interrupts, 118 cycles a byte) and the engine (4, the core kept awake under a DMA block: 486 k busy against the pump's 51 k) | - | 838 | the EVT, against a target on the same core: 174 and 227 cycles a byte written and read, against 118 and 131 | 165 |
-| CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core) | 767, three interrupts | 1393, five | 1.00 through the pump (256 interrupts, 93 cycles a byte) and the engine (4, the core kept awake: 505 k busy against the pump's 44 k) | - | 746 | not run on this board | 183 |
-| CH32V006K8U6 (48 MHz; the CH32X035F8U6's `twi_peer`) | 1373 (1896), four interrupts (five) | 1905 through the pump (2456) | 1.00 through the pump (264 interrupts) and the engine (10) | 262 through the pump, 9 through the engine | 1488 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
-| STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 374.4 kHz on the desk's wire) | 1050 (1554), one interrupt (two) | 1659 (2377), two interrupts (four) | 1.00 through the pump (255 interrupts, 123 cycles a byte against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1426 | HAL v1.4.7: 1362 and 2289 fixed | 487, an engined write to an absent address |
-| RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires) | 725, the same at 100 kHz and 1 MHz | 787 | 1.00, 31 | 32, 13 064 | 748 | the pico-sdk 2.3.1's polled loop: 398 fixed on a one-byte write, the core held the whole tenure (6528 busy) | 439 |
-| RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`) | 392, the same at 100 kHz and 1 MHz | 441 | 1.00, 31 | 32, 9008 | 767 | the pico-sdk: 362 fixed (7714 busy) | 298 |
-| RP2350, Hazard3 (150 MHz; the same) | 403 | 447 | 1.00, 31 | 32, 8417 | 385 | the pico-sdk: 354 fixed (7706 busy) | 279 |
+| AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP four clocks; [the AVR TWI page](../avrxt/twi.md)) | 509 | 1003 | 1.12, one interrupt a byte; the data sheet's own loop 1.11 | 1.14, smart mode | 1056 metered; the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95; 305 metered |
+| AVR64EA48 (20 MHz; the same TWI's client on PC2/PC3, served on the same core, SDASETUP eight clocks; [the AVR TWI page](../avrxt/twi.md)) | 412 bare | 676 bare (smart mode) | 1.21 bare, one interrupt a byte | 1.22 bare, smart mode | 1004 metered; the plain binding is busy for the tenure | not run on this board | not taken |
+| ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR64EA48's `twi_peer`; [the SAM C21 I2C page](../samc21/i2c.md)) | 954 plain; 1357 metered | 1412 plain; 1991 metered | the pump 1.30 plain, one interrupt a byte; the engine 1.16 on a 254-byte write, three interrupts | the pump alone: 263 metered entries (one a byte, the tick's beside them), 45 205 cycles | 1473 metered | not run on this host | not taken |
+| STM32F446RE (180 MHz; FMPI2C1 on the self-link, served on the same core; [the STM32F4 I2C page](../stm32f4/i2c.md)) | 212, three interrupts | 576 to 580, five | 1.00 through the pump (256 interrupts, 98 cycles a byte) and the engines (4) | 256 through the pump (117 cycles a byte), 3 through the engines | 1172 | - | 216 |
+| STM32F446RE's FMPI2C1 (180 MHz; I2C1 on the self-link, served on the same core, its address-match stretch inside the figure; [the STM32F4 FMPI2C page](../stm32f4/fmpi2c.md)) | 1146, two interrupts | 1701, four | 1.00 through the pump (256 interrupts, 140 cycles a byte) and the engines (2) | 256 through the pump (138 cycles a byte), 2 through the engines | 1189 to 1273 | - | 520 |
+| CH32V203C8T6 (120 MHz for the letter, the bus clock's 60 MHz ceiling; the CH32V303VCT6's `twi_peer`, its target polled by its own core; [the CH32V203/CH32V303 I2C page](../ch32vx03/i2c.md)) | 826, three interrupts | 1450, five | 1.00 through the pump (256 interrupts, 115 cycles a byte) and the engine (4, the core kept awake through the block: 485 k of its 692 k cycles busy, against the pump's 50 k) | 256 through the pump (128 cycles a byte), 3 through the engines | 826 | the EVT, against a target on the same core: 174 and 227 cycles a byte written and read, against 115 and 128 | 166 |
+| CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core; [the CH32V203/CH32V303 I2C page](../ch32vx03/i2c.md)) | 745, three interrupts | 1386, five | 1.00 through the pump (256 interrupts, 91 cycles a byte) and the engine (4, the core kept awake: 500 k busy against the pump's 43 k) | 256 through the pump (99 cycles a byte), 3 through the engines | 726 | not run on this board | 185 |
+| CH32V006K8U6 (48 MHz; the CH32X035F8U6's `twi_peer`; [the CH32V00x I2C page](../ch32v00x/i2c.md)) | 1394, four interrupts | 2016 through the pump | 1.00 through the pump (264 interrupts) and the engine (10) | 261 or 262 through the pump, 8 or 9 through the engine | 1513 | WCH's polled master, its library having no interrupt-driven tenure: 780 and 1221 fixed, the core held the whole tenure | not taken |
+| STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 374.4 kHz on the desk's wire; [the STM32G0 I2C page](../stm32g0/i2c.md)) | 1059 to 1060, one interrupt | 1671, two interrupts | 1.00 through the pump (255 interrupts, 127 cycles a byte net of the meter's stamps, against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1454 | HAL v1.4.7: 1362 and 2289 fixed | 505, an engined write to an absent address |
+| RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires; [the RP2040 I2C page](../rp2040/i2c.md)) | 725, the same at 100 kHz and 1 MHz | 787 | 1.00, 31 | 32, 13 064 | 748 | the pico-sdk 2.3.1's polled loop: 398 fixed on a one-byte write, the core held the whole tenure (6528 busy) | 428, a 255-byte read's; 478 in one run's engined 255-byte read at 100 kHz |
+| RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`; [the RP2350 I2C page](../rp2350/i2c.md)) | 400 to 403, the same at 100 kHz and 1 MHz | 449 to 452 | 1.00, 31 | 32, 8557 | 527 | the pico-sdk: 362 fixed (7714 busy) | 282 at 400 kHz; up to 439 at the other rungs |
+| RP2350, Hazard3 (150 MHz; the same; [the RP2350 I2C page](../rp2350/i2c.md)) | 524, the same at 100 kHz and 1 MHz | 566 to 569 | 1.00, 31 | 32, 8619 | 436 | the pico-sdk: 354 fixed (7706 busy) | 394, a 255-byte read's; 410 in one run's 255-byte write at 100 kHz |
 
 What the rows say:
 
 - The DW_apb_i2c host reads at half its receive FIFO and pours read
   commands as the bytes come back, so a tenure of eight bytes or less
-  is one interrupt and a 255-byte read 32 where it was 285; every
-  tenure ends on its own STOP, and the block's disable (a wait the bus
-  timing sets, 1.5 us at 400 kHz and 6 at 100) is paid only when the
-  address or the speed moves, which is what made the fixed cost the
-  same at every speed ([the DesignWare I2C page](../dw_apb_i2c/README.md)).
-  The far end of the RP rows is the desk partner's polled client, which
-  gives a FIFO ahead and runs on the other chip, so nothing of it is in
-  the figures. The two RP2350 rows and the RP2040's longest entry were
-  measured before the STOP entry's read of IC_RAW_INTR_STAT, which tells
-  a tenure's own STOP from the one an abort leaves and adds 5 to 8
-  cycles to that entry ([the DesignWare I2C page](../dw_apb_i2c/README.md)).
+  is one interrupt and a 255-byte read 32; every tenure ends on its own
+  STOP, and the block's disable (a wait the bus timing sets, 1.5 us at
+  400 kHz and 6 at 100) is paid only when the address or the speed
+  moves, which is why a one-byte write's fixed cost is the same at every
+  speed ([the DesignWare I2C page](../dw_apb_i2c/README.md)). The far
+  end of the RP rows is the desk partner's polled client, which gives a
+  FIFO ahead and runs on the other chip, so nothing of it is in the
+  figures. The host's entries run from the flash here, so a figure moves
+  with the XIP cache's misses, which the letter counts: the Hazard3's
+  one-byte write spends 84 cycles more in its one entry than the
+  Cortex-M33's, two misses counted in its tenure against none.
 - On the F1 lineage's event machine (the STM32F4, the CH32V203, the
   CH32V303, the CH32V006) one interrupt a byte is the silicon's, and
   the tenure's fixed cost is the engine's: the event interrupt raised
-  by `start()` and dropped at the completion (the BTF a write's STOP
-  leaves standing had re-entered the vector sixteen times a write at
-  100 kHz on the F4), the first two data bytes loaded in the ADDR
-  entry. The F429's one-byte write costs 139 cycles beyond the wire,
-  the HAL's 387. The wait in `start()` for the last STOP stays (nothing
-  in either chapter signals it leaving) and costs about one bit period
-  when a tenure follows another at once. On the CH32V203 the pump's
-  busy is 51 k for 255 bytes against the far board's target, the idle
-  path taking one turn per wake, and the CH32V006's one-byte write
-  1488 where it was 1759, the same cause.
+  by `start()` and dropped at the completion, so the BTF a write's STOP
+  leaves standing does not re-enter the vector, and the first two data
+  bytes loaded in the ADDR entry. The STM32F446RE's one-byte write
+  costs 212 cycles beyond the wire. The wait in `start()` for the last
+  STOP is kept (nothing in either chapter signals it leaving) and costs
+  about one bit period when a tenure follows another at once. On the
+  CH32V203 the pump's busy is 50 k for 255 bytes against the far
+  board's target, and the CH32V006's one-byte write is busy 1513
+  cycles, the idle path taking one turn per wake on both.
 - The AVR's TWI holds SCL from each flag until the software answers,
   so a long tenure at 400 kHz runs at the handler's pace: 1.12, the
   data sheet's own loop 1.11 ([the AVR TWI page](../avrxt/twi.md)).
+- The SAM C21's pump holds SCL on a written byte until its entry
+  writes DATA, so a long write runs at x 1.30 there; the transmit
+  engine, which takes the bytes off the pump, runs a 254-byte write at
+  x 1.16 on three interrupts, and a read is the pump's alone
+  ([the SAM C21 I2C page](../samc21/i2c.md) says what each figure
+  holds).
 - A block with a byte counter and AUTOEND but no FIFO (the STM32G0's)
   takes the pump's one interrupt a byte, and the tenure's fixed cost
   is what is left to cut: the first data byte preloaded into TXDR
   before the START, a read's last byte and a NACK both taken at STOPF,
   the enables written in one store each way; one interrupt for a
-  one-byte write where there were two, a quarter under the HAL's
+  one-byte write, and a fixed cost under the HAL's on every shape
   ([the STM32G0 I2C page](../stm32g0/i2c.md), whose table is the same
   rung's). A request naming `dma` puts each data half on the engines at
   any length ([i2c-bus.md](i2c-bus.md), "Which engine moves a half"),
@@ -619,11 +626,10 @@ What the rows say:
   the core fewer cycles from a half of two bytes, the same at every
   rung (the figures are the STM32G0 I2C page's).
 - On the RP2350's Cortex-M33 a handler's cost from flash moves with
-  where the linker puts it (188 to 365 cycles across three builds of
-  one handler, up to six XIP misses a tenure); from SRAM 84. The
-  default benches run both I2C vectors from the flash and their `_ram`
-  images from SRAM, warm and cold side by side in the two families'
-  platform documents ("A handler in SRAM").
+  where the linker puts it; the default benches run both I2C vectors
+  from the flash and their `_ram` images from SRAM, warm and cold side
+  by side in the two families' platform documents ("A handler in
+  SRAM").
 
 ## Letter j: the line writer, and letter l: the line without it
 
@@ -739,7 +745,7 @@ Gaps, each with what would explain or measure it:
   628 cycles against 400, three of them missed by the poll. Not
   explained; what would: the request credits at the block's start and
   its first step read as the RP2350's letter reads them.
-- The STM32G0's busy of a one-byte write is 976, 1426 and 830 cycles at
+- The STM32G0's busy of a one-byte write is 1003, 1454 and 851 cycles at
   the three rungs, its handlers and `start()` the same at each: the
   idle turns between the host's, the client's and the tick's entries,
   not split. What would: the stamps on each of the three vectors in
