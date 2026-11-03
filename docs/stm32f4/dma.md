@@ -8,10 +8,10 @@ STM32F4 has two DMA controllers of eight streams each, and
 (its clock, its reset, its flag registers); `DmaStream<n, s>`, one
 stream's registers under the chapter's enable discipline, for a program
 that drives a stream by hand; `DmaTxEngine` and `DmaRxEngine`, the
-engines a transport's slots are filled with (an engine, in brio, is a
-driver layer that owns one stream and moves a run - a buffer and its
-length - into or out of a peripheral's register; the `Uart` task has two
-optional engine slots, the SPI and I2C hosts a pair each); and
+engines a transport takes as template parameters (an engine, in brio, is a
+driver layer that drives one stream and moves a run - a buffer and its
+length - into or out of a peripheral's register; the `Uart` transport has
+two optional engine parameters, the SPI and I2C hosts a pair each); and
 `DmaCopyEngine`, copy and fill from memory to memory on DMA2. Most
 programs meet the engines only as template arguments of a transport
 ([usart.md](usart.md), [spi.md](spi.md)); this page is where their
@@ -43,30 +43,26 @@ flags and stays true until the block has ended; `fill()` writes 320 x 40
 copies of the half-word `background` holds into `pixels`, reading that
 cell at every beat.
 
-What decides correctness even there. The buffers are lent to the
+What decides correctness even there. A stream belongs to one owner for
+the whole image: the request it serves, or a tag where no peripheral paces
+it. A second owner does not compile where both are claimed: a transport and
+a copy engine claim by themselves, as this copy does, and an engine or a
+stream a program drives itself claims nothing until the program writes the
+claim ("One owner a stream"). The buffers are lent to the
 stream: `frame_in`, `frame_out`, `pixels` and the fill's cell stay in
 place and untouched from the start until `busy()` answers false, and
-nothing checks it. A buffer the stream writes must be `volatile` where
-the program reads it back, because the compiler sees only an address
-handed to a register and may keep the old bytes in a register of its own
+nothing checks it. A buffer the stream writes needs the compiler told
+before the program reads it back, because the compiler sees only an address
+handed to a register and may keep the old bytes in a register of its own:
+a `volatile` read, or a compiler fence between the completion and the read
 ("Bench findings" below). An address no DMA master reaches - the
 core-coupled memory at 0x1000 0000 - ends the block with a transfer
 error, which `busy()` counts in `faults()`. The engine's state is not
-guarded by a mask, so one context owns an engine. And the level is a
-choice with a cost: a copy arms at `low` by default because three copies
-ranked above a receive ring on the same controller starve it (measured
+guarded by a mask, so only one context may call an engine's verbs. And the
+level is a choice with a cost: a copy arms at `low` by default because three
+copies ranked above a receive ring on the same controller starve it (measured
 below), so an excerpt that arms one at `high`, as this one does, is a
 program's decision to weigh.
-
-The rest of this page, in order: the documents of record; what the
-silicon does (streams and their request cells, memory to memory, the
-FIFO and direct mode, the enable, the count register, suspend, circular
-mode and the double buffer, the flow controller, the flags, the arbiter,
-the errors, the F411's erratum); the types and verbs; the engines
-against the chapter, with the table of what the controller offers and
-what the engines take of it; how to use it, one example per shape; the
-bench findings, most of the page, with a block start's cost and what a
-copy can starve; and what is not covered.
 
 ## Documents of record
 
@@ -100,7 +96,7 @@ of memory pointers, a counter and a vector of its own, and it selects one
 of eight request lines with `SxCR.CHSEL` (10.3.3). That is the opposite
 economy of the STM32G0's controller, where a channel is the unit and a
 multiplexer points it at any of 77 request lines: here **a peripheral can
-be served by the one or two (controller, stream, channel) cells the request
+be served by the one to three (controller, stream, channel) cells the request
 mapping gives it, and by no other**. The mapping is a fixed wiring per part
 class and no device header carries it, so it is keyed on the device-select
 define in the reserve exactly as the frequency ladders are - and only for
@@ -264,8 +260,8 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
 - `dma_control_word(config)`, `dma_fifo_word(config)`, `dma_beat_word(w)`
   - SxCR's configuration fields, SxFCR's two and a beat's PSIZE/MSIZE pair
   as words: `configure()` writes them, an engine computes its own once.
-- `DmaTxEngine<n, s, ch, Elem>` and `DmaRxEngine<n, s, ch, Elem>` - the
-  slots `stm32f4/usart.hpp`'s `Uart` and the bus hosts declare, with the
+- `DmaTxEngine<n, s, ch, Elem>` and `DmaRxEngine<n, s, ch, Elem>` - what
+  the engine parameters of `stm32f4/usart.hpp`'s `Uart` and the bus hosts take, with the
   other strata's surface: `present`, `controller`, `stream`, `channel`,
   `width` and `element` (the WIDEST beat the binding takes),
   `flag_complete` / `flag_half` / `flag_error` / `flag_fifo_error`,
@@ -287,8 +283,8 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
   (the element is the beat, the fill's cell an element in memory),
   `busy()`, `abandon()`, `faults()`; `controller`, `stream`. Refused at
   compile time on DMA1.
-- In `stm32f4/dma_engine.hpp`, beside the empty slot's `NoDmaEngine`,
-  what a slot's owner names without including the controller:
+- In `stm32f4/dma_engine.hpp`, beside `NoDmaEngine`, the empty engine
+  parameter, what a driver names without including the controller:
   `DmaPriority` (the level an engine arms at, by docs/design/dma.md's
   rule), `DmaInterrupts` (`completion`, `errors_only`, `none`) and
   `dma_max_items` (65535, SxNDTR's sixteen bits).
@@ -332,15 +328,15 @@ is already stopped: EN falls in hardware at the end of a non-circular
 block (10.3.13) and at a transfer error (10.5.5), and `abandon()` and
 `stop()` wait for it themselves. So a start reads SxCR once, BEFORE any
 store, and REFUSES while EN stands - no poll, which is what lets a
-transport mask its claim alone - and nothing reads SxCR after the EN
+transport mask its test of the engine alone, the run-time `claim()` - and nothing reads SxCR after the EN
 store (the wedge below).
 
 **The beat is the element of the run.** `Elem` is the widest beat the
 binding allows - the width of the register the stream is pointed at -
 and a start takes a span of any narrower element too: one engine pair
 carries an SPI's bytes and its half-word frames, the width from the
-span's type. An address not aligned on its element is refused (10.3.6),
-and the caller takes its pump.
+span's type. An address not aligned on its element is refused (10.3.6);
+the SPI host asks first and answers such a request `spi_rejected`.
 
 **The receive engine has two shapes, and the stream decides which a
 consumer wants.** A BOUNDED block - the data phase of a bus read, a block
@@ -363,7 +359,7 @@ a stream that never falls silent tells its consumer twice a lap. What the
 circular shape cannot do is wait for
 a consumer: one that falls a lap behind is written over, and the view
 counts that as its overrun and skips. Its own ISR body, so the one-shot
-shape's owners pay nothing for a count they have no use for.
+shape's drivers pay nothing for a count they have no use for.
 
 **What the chapter offers, and what the engines take of it:**
 
@@ -400,7 +396,7 @@ slot, and USART1's transmit (DMA2 stream 7, cell 4) and QUADSPI (stream 7,
 cell 3) are two owners of one stream. Who claims, all at compile time
 through `util/dma_owner.hpp`, at no byte and no cycle:
 
-- **a transport, for the engines in its slots**: `Uart` claims its
+- **a transport, for the engines it is given**: `Uart` claims its
   streams for the instance's transmit and receive (`DmaOwner<DmaPeriph::
   usart, n, ...>`, the UARTs under the same kind), `SpiHost`, `I2cHost`
   and `FmpI2cHost` theirs, in the class body - so a second owner on a
@@ -411,22 +407,28 @@ through `util/dma_owner.hpp`, at no byte and no cycle:
 - **`DmaCopyEngine<2, s>`, for itself**: no request paces a copy, so the
   engine claims its stream for its own tag, `DmaCopyOwner<2, s>`;
 - **the program, for every engine it arms itself and every stream it
-  drives through `DmaStream`**: an engine filled into no transport - a
+  drives through `DmaStream`**: an engine given to no transport - a
   converter's or a DAC's stream ([adc.md](adc.md), [dac.md](dac.md)), a
-  paced transfer - is claimed beside its name with `dma_engine_claim<E,
-  Owner>()`, the same helper the transports use, and a stream driven by
-  hand takes a tag of the program's own, any empty class, one tag a
-  stream (the examples below).
+  paced transfer - and a stream a peripheral paces by hand are claimed by
+  number for that request, `dma_claim<DmaSlotId<c, s>, DmaOwner<...>>`; a
+  stream no peripheral paces takes a tag of the program's own, any empty
+  class, one tag a stream (the examples below). `dma_engine_claim<E,
+  Owner>()`, the helper the transports use in their class bodies, names the
+  engine's type, so outside a class body it can move the image with no
+  instruction changed (`util/dma_owner.hpp`).
 
 What the map leaves to choose is the cell, and with it the instance: each
-request is wired to one or two (stream, cell) pairs, so two requests
+request is wired to one to three (stream, cell) pairs, so two requests
 whose every cell lies on one stream exclude each other, and only another
 instance separates them. The choices that forces, read off RM0090 tables
 43 and 44 (the F405 class without the rows of their note 1, the F42x/F43x
 with them), RM0390 tables 28 and 29 (F446), RM0383 tables 27 and 28
 (F411), RM0368 tables 28 and 29 (F401) and RM0386 tables 29 and 30
-(F469/F479) - a pair where one request has a second cell is not listed,
-the cell separating them:
+(F469/F479). A pair where one request has a second cell is not listed, the
+cell separating them, and neither is a timer's request: a stream bound to
+one timer also excludes what shares it (TIM6_UP against USART3's receive on
+DMA1 S1; TIM4_UP against USART2's transmit and DAC channel 2 on DMA1 S6, in
+the manuals above), and no driver here takes an engine for a timer:
 
 | parts | stream | on DMA, this ... | ... forbids |
 |---|---|---|---|
@@ -439,17 +441,18 @@ the cell separating them:
 | F42x/F43x, F469/F479 | DMA1 S0, S1, S3, S6 | UART8's transmit; UART7's transmit; UART7's receive; UART8's receive | UART5's receive; USART3's receive; SPI2's receive; USART2's transmit |
 | F446, F469/F479 | DMA2 S7 | QUADSPI | USART1's transmit (USART6's has S6 and S7) |
 | F446 | DMA1 S1 | SPDIFRX's data | USART3's receive |
-| F415, F417, F437, F439, F479 | DMA2 S5, S6, S7 | CRYP's output; CRYP's input; HASH's input | SPI6's transmit; SPI6's receive; USART1's transmit |
+| F437, F439, F479 | DMA2 S5, S6, S7 | CRYP's output; CRYP's input; HASH's input | SPI6's transmit; SPI6's receive; USART1's transmit |
+| F415, F417 | DMA2 S7 | HASH's input | USART1's transmit |
 
 The SPDIFRX, CRYP and HASH rows are silicon no driver here takes an
 engine for. Counted over the uses most programs combine - a console UART
 with both engines, an SPI host's two, one converter stream, one DAC
 stream, one timer-paced stream, a second UART with both engines and an
 I2C host's transmit - every class with a manual on the desk places them
-all at once (sixteen streams and two cells a request leave room), so no
-group is unavoidable on this family; the one pair no choice separates is
-the F479's QUADSPI and HASH's input, both wired to DMA2's stream 7 alone
-(RM0386 table 30).
+all at once (sixteen streams and the second cells most of these requests
+have leave room). The F410, F412 and F413/F423 are unread. The one pair no
+choice separates is the F479's QUADSPI and HASH's input, both wired to
+DMA2's stream 7 alone (RM0386 table 30).
 
 ## How to use it
 
@@ -490,7 +493,7 @@ if (Copy::load(t)) {
 ```
 
 **A console whose bytes leave and arrive without the CPU** - the two
-engine slots the `Uart` task declares, filled with the cells
+engine parameters of `Uart`, given the cells
 USART1's requests are wired to; the receive engine runs circular over the
 transport's whole receive ring ([usart.md](usart.md)):
 
@@ -520,8 +523,8 @@ shape under any peripheral, read through the view whose producer it is:
 
 ```cpp
 using Rx = brio::DmaRxEngine<2, 2, 4>;          // USART1's receive cell
-static_assert(brio::dma_engine_claim<Rx, brio::DmaOwner<brio::DmaPeriph::usart, 1,
-                                                        brio::DmaSignal::rx>>());
+static_assert(brio::dma_claim<brio::DmaSlotId<2, 2>,
+                              brio::DmaOwner<brio::DmaPeriph::usart, 1, brio::DmaSignal::rx>>);
 static uint8_t ring[256];                       // a power of two, one lap
 using Bytes = brio::HardwareRing<ring, Rx>;     // remaining() and laps() are the producer
 extern "C" void DMA2_Stream2_IRQHandler() { (void)Rx::service_ring(); }   // a lap counted
@@ -557,7 +560,10 @@ brio::Usart<1>::dma_transmit(true);
 ```
 
 **Two buffers filled in turn** - the double buffer, with the half the
-stream is not using replaced under it:
+stream is not using replaced under it. This excerpt and the next continue
+the block above: `t` is its transfer and `Stream` its `DmaStream<2, 7>`, with
+its claim; `second_half`, `next_block`, `buffer` and `length` are the
+program's:
 
 ```cpp
 t.memory1 = second_half;
@@ -580,12 +586,13 @@ if (Stream::abort()) {                       // waits for EN to read 0
 
 ## Bench findings
 
-Measured on the STM32F429ZI at 180 MHz (over-drive) and on the
-STM32F469NI, where the console's engines sit on DMA1 (USART3: stream 3
-out, stream 1 in, channel 4 both - RM0386 table 29), before the receive
-engine's circular shape; `test_stm32f4_dma` runs 109 verdicts in `z` on
-the STM32F446RE with it, and letters u and p beside `brio stress`. The engines'
-costs are `bench_stm32f4`'s letter d on the STM32F446RE at 180 MHz.
+Unless a finding names its part, the figures are the STM32F429ZI's at 180
+MHz (over-drive) and the STM32F469NI's, whose console engines sit on DMA1
+(USART3: stream 3 out, stream 1 in, channel 4 both - RM0386 table 29); neither
+has run the receive engine's circular shape (the gap list). `test_stm32f4_dma`
+runs 112 verdicts in `z` on the STM32F446RE with that shape, and letters u and
+p beside `brio stress`. The engines' costs are `bench_stm32f4`'s letter d on
+the STM32F446RE at 180 MHz.
 
 **A block start is one read and four stores, 37 cycles.** One
 `DmaTxEngine::start()` on an idle stream, timed on the DWT with its read
@@ -599,9 +606,8 @@ the same letter:
 | | the block start rebuilt (647 cycles) | two moments (37 cycles) |
 |---|---|---|
 | an engined SPI request, wall minus its wire (SCK 22.5 MHz) | 2472 cycles, 2 interrupts | 652 to 664 cycles, 1 interrupt |
-| the same, 16-bit frames | the pump: 1 interrupt a frame, 2.35 x the wire at 256 frames | the engines: 1 interrupt, 1.01 x |
 | a 16-byte copy, start to completion | 1040 cycles | 86 cycles |
-| a transport's masked window | the whole start | the claim: twelve instructions |
+| a transport's masked window | the whole start | the run-time `claim()`: twelve instructions |
 
 The SPI's numbers are spi.md's, the masked window usart.md's.
 
@@ -633,9 +639,9 @@ start - and on the STM32F446 that load WEDGES the stream (below).
 letter b's "it starts on the enable alone" is what stands guard over
 that.
 
-**A memory-to-memory block is over in microseconds**, which is the second
-reason `enable()` accepts a completion as an answer: 256 bytes take about
-1.4 us at 180 MHz, less than the time a print takes to reach the wire.
+**A memory-to-memory block is over in microseconds**: 256 bytes take about
+1.4 us at 180 MHz, less than the time a print takes to reach the wire, so a
+later look at `enabled()` can find the block already done.
 
 **The throughput ladder**, 2048 bytes SRAM to SRAM, both ports at the same
 width and the same burst, threshold full:
@@ -670,18 +676,6 @@ for the company - what sharing two AHB ports costs - and what the winner
 pays is within the measurement (2626 and 2285 against 2340 alone, the
 second figure for the stream enabled first).
 
-**Two enables back to back can STALL the second stream.** On the STM32F411,
-a `low` memory-to-memory stream whose EN was stored right after a
-`very_high` stream's EN on the same controller started - its FIFO filled,
-SxNDTR dropped by 16 - and then never moved again, no flag raised, EN still
-set, long after the winner had completed: deterministic over five runs of
-two builds with that spacing, gone with eight NOPs between the two stores,
-and gone again with a not-taken branch between them - a window a few cycles
-wide, which is why the suite's back-to-back probe reports what it sees and
-judges nothing. The STM32F429 did not show it at 180 MHz. `stop()` recovers
-such a stream like any other. A program that starts two streams of one
-controller together gives the second enable a few cycles.
-
 **A load of SxCR in the cycles after the EN store WEDGES the stream - on
 the STM32F446 and the STM32F411, every other time.** A memory-to-memory block enabled and
 then asked at once whether EN took (a read of SxCR in the instruction
@@ -694,10 +688,11 @@ never reads back, never sees it. It looked like a property of the second
 block (twenty variants of register sequence, memory, width, stream, clock
 and reset all "hung"), until a program built on that library alone ran
 the blocks back to back on the same board and the one difference left
-was the read-back. The STM32F429 takes the read-back without harm (and
-the STM32F411's earlier "stall of a low-priority stream enabled right
-after a very-high one" was this: the second enable's read-back). No
-errata sheet has an item. `enable()` therefore stores
+was the read-back. The STM32F429 takes the read-back without harm. On the
+STM32F411 a `low` stream enabled right after a `very_high` one on the same
+controller stalled the same way, FIFO full and EN standing, while its enable
+read back; with `enable()` as it stands the suite's back-to-back probe reads
+both streams finished on the STM32F446RE. No errata sheet has an item. `enable()` therefore stores
 EN and reads nothing back - the one refusal the silicon could make at
 that point, 10.3.18's burst against the threshold, is `configure()`'s
 before the store - and a program that wants to know whether a stream is
@@ -738,19 +733,21 @@ controllers meeting only in the bus matrix's round robin.
 **A released requester: a gated clock holds a raised request, a cleared
 enable or the reset at `init()` withdraws it.** Letter r, no wire. The
 release contract (docs/design/dma.md): a transport's `release()` gates
-its block and pulses no reset, its `init()` starts from the reset line;
-under one owner a stream, the only stream a request held across a
-release can reach is the owner's own, on its own cell, when it is
-initialized again. Four requesters are brought up with their request
+its block and pulses no reset, its `init()` starts from the reset line.
+Under one owner a stream, a request held across a release can reach only
+that owner's stream, on its own cell, and only when the owner is initialized
+again. Four requesters are brought up with their request
 standing and no stream listening, released five ways, then a stream on
-the requester's own cell is enabled for 2000 cycles, moving four items
-between memory and the requester's register (and once more after the
-requester's clock reopens, no reset). Items moved, of four, before /
-after the clock reopened, on the STM32F446RE:
+the requester's own cell is enabled for 2000 cycles, set up to move four items
+between memory and the requester's register (and read once more after the
+requester's clock reopens, no reset). A live requester moves what it asks for
+in that time: one for a timer's single update or a single conversion, two for
+a USART (the data register and the shifter, then the wire's pace), all four
+for an SPI. Items moved, before / after the clock reopened, on the STM32F446RE:
 
 | release | USART6_TX | SPI1_TX | TIM1_UP | ADC1 |
 |---|---|---|---|---|
-| A: the contract - released as the transports release (the DMA enable LEFT SET, gated, no reset), then `init()`'s first step, the clock opened and the reset pulsed (the ADC: CR2 and CR1 cleared with the clock on), before the stream | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| A: the contract - the DMA enable left set, gated, no reset, then `init()`'s first step, the clock opened and the reset pulsed (the ADC: CR2 and CR1 cleared with the clock on), before the stream | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | ... and the owner brought up again, its block on the stream | 4 | 4 | 1 | 1 |
 | B: the DMA enable cleared, gated | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | C: the control - as A with the reset at init removed: the DMA enable left SET, gated, the stream enabled under the gate, then the clock opened | 1 / 2 | 1 / 2 | 1 / 1 | 1 / 2 |
@@ -762,13 +759,15 @@ So THIS controller is neither the CH32V203's nor the STM32G0's: a request
 standing when the clock is gated reaches a stream on its cell while the
 clock is still off - the stream takes the stray item from the frozen
 request line, as the CH32V203's channel does - but clearing the DMA
-enable withdraws it, as on the STM32G0. The transports' `release()` is
-C: UE, SPE or PE cleared, the request bit left set, the gate closed (the
-Uart, the SPI host and client, the I2C host and client, the FMPI2C block
-for host and client; the DAC's clears its channels, which by its own
-erratum does not withdraw a pending request, "DMA request not
-automatically cleared by clearing DMAEN", ES0206 2.6.1, ES0298 2.7.1; the
-timers' clears DIER). Their `init()` opens the clock and pulses the reset
+enable withdraws it, as on the STM32G0. A transport's `release()` closes
+the gate over whatever request bit stands, which is C: the `Uart`'s stands
+always, and the I2C and FMPI2C hosts' only after an abandoned tenure. The SPI
+host raises and drops its bits around each block, so one released idle has
+none set. The DAC's `release()` clears its channels, which by its own erratum
+does not withdraw a pending request ("DMA request not automatically cleared by
+clearing DMAEN", ES0206 2.6.1, ES0298 2.7.1), and the timers' clears DIER, so
+letter r's TIM1 column, with UDE left set, is a worst case staged by hand.
+Their `init()` opens the clock and pulses the reset
 before it configures the block or arms a stream - A: nothing moved, and
 the owner's block exact. The ADC is the one transport without a reset
 line of its own: it is every converter's and the common block's (RM0090
@@ -799,11 +798,9 @@ the core-coupled memory is on the CPU's own D-bus and no DMA master reaches
 it (and on the parts without a CCM nothing is mapped there at all). A
 memory-to-memory block writing there raises TEIF alone - no FIFO error, no
 direct-mode error - the hardware clears EN, and SxNDTR says where the block
-died (47 of 64 items left: the FIFO had already absorbed the rest). What
-the enable ANSWERS there is a race the core clock decides - `false` on the
-STM32F429 at 180 MHz, where the stream is dead before the read-back poll
-ends, `true` on the STM32F411 at 100 MHz - so a caller judges an error by
-the flags, never by the enable; the stream takes the next block once the
+died (47 of 64 items left: the FIFO had already absorbed the rest). The
+enable says nothing of it: `enable()` stores EN and answers true, so a caller
+judges an error by the flags; the stream takes the next block once the
 flags are cleared.
 
 **The console's own transmitter is a DMA console**: 575 bytes through the
@@ -816,12 +813,15 @@ HDSEL the receiver listens on the transmit pad, so everything the port
 sends it also hears - 128 bytes out through the transmit stream and 128
 back in through the receive stream, byte for byte, on one pad and no wire.
 
-**A buffer a bus master writes must be `volatile`.** The compiler sees
+**A buffer a bus master writes needs the compiler told.** The compiler sees
 an address handed to a register as an integer nothing dereferences, and
 is free to keep the buffer's old bytes in a register across the
 transfer: a value that printed as zero compared equal to the pattern in
 the same function said so (measured in the accelerator's chapter, true
-of every stream here).
+of every stream here). A `volatile` read answers it, and so does a compiler
+fence between the completion and the read: `HardwareRing` reads plain storage
+behind its own fences, and a block read after the kernel delivers its
+completion event is behind the event queue's.
 
 **The circular receive loses nothing between laps - and the one-shot one
 did lose between runs.** The receive side of an engined `Uart` was a run
@@ -861,7 +861,7 @@ taken off): 57 core cycles with nothing new and 84 with bytes waiting -
 the restart flag, one look of the view (SxNDTR and the lap count) and the
 gate, no call and no register of the USART: the edge is the vectors' now
 ([usart.md](usart.md)), and `harvest()` the same gate asked from the
-consumer's side by an owner that still asks.
+consumer's side by a driver that still asks.
 
 **The copy engine at every width and every misalignment** (letter `s`):
 37 elements - an odd count, so no width divides into whole bursts -

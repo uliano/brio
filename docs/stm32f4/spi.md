@@ -100,18 +100,20 @@ needs no interrupt vector bound**, and its loop waits with interrupts enabled;
 the buffers are read and written inside `start()` and are the caller's again
 when it returns. **It holds the core for its whole wire time**: under the
 cooperative kernel (`Tenuto`) every other active object waits with it, only
-handlers running, and a stall holds them for the budget (the request's wire time
-and two frames more at the applied rate, in polls: 1.49 s on a request of 2048
-frames at PCLK1/256, whose wire is 93 ms). Through the
+handlers running, and a stall holds them for the budget. The budget is one poll
+for each core cycle of the request's wire time and two frames more, and a poll
+takes 16 cycles or more, so a request of 2048 frames at PCLK1/256, whose wire is
+93 ms, stalls for 1.49 s. Through the
 arbiter a request is posted instead (the block "The same bus shared, through the
 arbiter" below): the post returns at once, the loop runs later in the arbiter's
 dispatch, and the buffers are lent from the post until the `SpiDone` reply
 arrives, untouched and in scope until then, which nothing checks.
 
-A request naming `SpiEngine::dma` runs on the DMA engines at any length. Four
-things make that work. The host's type names its two DMA engines. `Dma<n>::init()`
-runs before the host's `init()`. The host's `init()` arms both streams, which opens
-their NVIC lines. The program binds the two streams' vectors to `Bus::dma_isr()`,
+A request naming `SpiEngine::dma` runs on the DMA engines at any length. Three
+things make that work. The host's type names its two DMA engines. The host's
+`init()` arms both streams, which opens the controller's clock gate and their NVIC
+lines (`Dma<n>::init()` before it is the program's choice, a controller at its reset
+values; after another engine's arming it would undo that arming). The program binds the two streams' vectors to `Bus::dma_isr()`,
 whose true answer is the edge the glue posts `TransferDone` on. What the engines
 cannot carry - on a host with none, everything - is refused with `spi_rejected`
 before the select falls, and so is any request while this host's own block is still
@@ -370,7 +372,7 @@ is on the streams, the busy check, the block in flight going on untouched;
 peripheral reset and reconfigured, inside `start()` - or, on the engines, the vector's
 wait for the wire's end run out, the select and the D/C released and the reset left
 to the next `start()`;
-`spi_dma_fault`, the requests dropped, both streams put away and the select and the
+`spi_dma_fault`, the DMA requests dropped, both streams put away and the select and the
 D/C released in the streams' vector, which does no more: the peripheral's reset is left
 to the next `start()`, which tests a flag first and pays it before anything else, so
 until then a frame can still be on the wire and another stand in the receive buffer.
@@ -402,7 +404,7 @@ buffer holds one frame, and a receive stream the transmit one outran finds it fu
 OVR, "all other subsequently transmitted bytes are lost" (RM0090 28.3.10) - where a
 waiting transmit only stops the clock between two frames. `release()` stops both
 streams, disables the peripheral and gates its clock, no reset pulse; `init()` starts
-from the RCC reset, which withdraws a request held through the gated clock before the
+from the RCC reset, which withdraws a DMA request held through the gated clock before the
 streams are armed - the release contract ([dma.md](dma.md)).
 
 Three verbs are this stratum's own: `sck_speed` and
@@ -457,8 +459,8 @@ predictable branch, inline through the family's own `PinRef::set()` and
 calls, four a transaction). The setup time is tested before any call. **The receive buffer is not
 flushed per request**: the receive loop and the receive stream read every
 frame they clock and the transmit-only loop clears what stands at its tail, so
-nothing stands in it when a transaction ends well. A stall, `spi_dma_fault` and
-`recover()` reset the block, which empties it; `init()` flushes it once ("Types and verbs").
+nothing stands in it when a transaction ends well. A stall, `spi_dma_fault`,
+`recover()` and `init()` reset the block, which empties it.
 
 **Two polled shapes, by the request's fields.** A request naming
 `SpiEngine::polled` runs one of them at every length and on every host, and never the
@@ -487,8 +489,8 @@ dispatch above the caller. That decides the shapes:
   the DR read and the DR write adjacent; after the last frame, the SCK pad's
   idle level.
 
-One budget bounds the whole transaction's spins, a time derived from the clocks
-and not a count chosen by hand: the request's frames and two more at the applied rate,
+One budget bounds the whole transaction's spins, a count of polls derived from the
+clocks and not one chosen by hand: the request's frames and two more at the applied rate,
 a frame being the division times its bits in PCLK cycles and log2(HCLK/PCLK) more in
 core cycles, in polls of at least a cycle each, so a wait ends no sooner than the wire
 could have (the shift is worked out wherever the rate, the width or the clock
@@ -501,7 +503,7 @@ shows what it left as a stall of its own.
 
 **The reset, once, cold and out of line.** The stall, the owed reset and `recover()` call one
 function: the RCC's pulse (RM0390 6.3.8 and 6.3.9), the applied configuration written back,
-the enable, under a thousand cycles. It declines 26.3.10's disable: that procedure lets a last
+the enable; `recover()` around it measures 934 to 1091 cycles (Bench findings). It declines 26.3.10's disable: that procedure lets a last
 frame out, behind a released select nobody wants it, and on a block with SPE down or its
 gate closed it returns at once anyway. On a host with engines `start()` pays for it one
 byte load and one branch a request (`ldrb`, `cbz` in the release listing), the call only
@@ -527,7 +529,7 @@ the transmit buffer goes out the moment the one before it ends.
 **The engines** ([design/spi-bus.md](../design/spi-bus.md),
 "Two ways to run a request"). A request naming `SpiEngine::dma` rides the
 host's two engines at any length: `start()` keeps the select and the D/C,
-starts both streams and raises both requests in one CR2 store, and returns
+starts both streams and raises both DMA requests in one CR2 store, and returns
 false; the receive stream's completion is the one interrupt a request, and
 `dma_isr()` answering true is the edge the program's glue posts `TransferDone`
 on. The instance's own interrupt is never armed, and `init()` leaves its NVIC
@@ -700,7 +702,7 @@ or declined:
   resource's `isr()` is measured against the STM32G0B1RE (letter `g`).
 - **The DMA requests** (SPI2_TX on DMA1 stream 4 and SPI2_RX on stream 3,
   channel 0 both, RM0390 table 28) - DECLINED in the driver: SpiClient
-  has no engine slots (the gap list); a program binds the streams raw, as
+  has no engine parameters (the gap list); a program binds the streams raw, as
   the stm32f4 `spi_peer`'s exchange does, started before SPE in
   26.3.11's order so the transmit stream's first beat is the preload.
 - **The overrun** (26.3.13) - `answer()` reads nothing, so OVR rises from
@@ -1376,7 +1378,7 @@ ladder, are judged at PCLK1/2 too:
   ERRIE's vector runs ONCE on that fault, SR 0x22 (MODF, TXE standing beside it). The request is full
   duplex on purpose: on a transmit-only one OVR would come first, since nothing reads
   the receive buffer.
-- **The next request after a stall or a transfer error** (letter `k`, fifteen runs and three of `z`;
+- **The next request after a stall or a transfer error** (letter `k`, twelve runs and three of `z`;
   `recover()` called only where named). The peer's window is commanded first, and the engined host
   is then not initialized again, so the request judged is the first the host has seen
   since the failure and a frame left behind is a window out of place at both ends. A
@@ -1387,8 +1389,8 @@ ladder, are judged at PCLK1/2 too:
   polled or on the streams, exact at both ends. The wall in `start()` is the budget at 180
   MHz: 11264 polls at PCLK1/32 (1024 core cycles a frame), 1.01 ms for the nine-frame write and
   for the read, 16 cycles a poll on APB1, and 768 polls for the command phase at PCLK1/8, 75
-  us, 18 cycles a poll; a poll's turn moves with the image's layout. The reset's share is under a thousand
-  cycles, `recover()` over a frame standing with SPE down measuring 934 to 1091 (5 to 6 us).
+  us, 18 cycles a poll; a poll's turn moves with the image's layout. `recover()` over a frame standing
+  with SPE down measures 934 cycles in twelve of the fifteen runs and 1083 or 1091 in three (5 to 6 us).
 - **The order is on the pad** (letter `k`). This block drives SCK only while SPE is set: with
   the pad's pull-down on in mode 3 it falls when SPE falls and rises on the enable, and with no
   pull it held its level through the reset and no edge came within 1 ms on these wires. So
@@ -1400,7 +1402,8 @@ ladder, are judged at PCLK1/2 too:
   2.2.2's reserved 0x2003 0000 to 0x3FFF FFFF, gives a bus error and no fault of the core. A
   transmit buffer there stops the stream on its first beat, no frame clocked; a receive buffer
   there stops the receive stream on the first frame back, and a frame stands in the receive
-  buffer behind it every run. `dma_isr()` answers true once, in 572 to 623 cycles, `status()` is
+  buffer behind it every run. `dma_isr()` answers true once, in some 650 cycles on the transmit
+stream and 683 on the receive, `status()` is
   `spi_dma_fault` and the select the request named is high. The next window, polled or on the
   streams, is exact at both ends with no `recover()`; with the reset taken out, the frame standing
   is read in front of a window on the streams, all 32 frames out of place.
@@ -1409,10 +1412,10 @@ ladder, are judged at PCLK1/2 too:
   order, `spi_stalled` then `spi_ok` and `spi_dma_fault` then `spi_ok`, the second's window exact
   at both ends, polled and on the streams.
 - **The clock gate closed under the host** (letter `k`): the reset's limit. A polled write
-  stalls in 38.93 ms, the next in 38.85 ms, `recover()` answers false; the gate opened and
+  stalls in 1014 us, the next in 1014 us, `recover()` answers false; the gate opened and
   `recover()` called, it answers true and the next window is exact. With the gate opened and no
   `recover()`, CR1 reads 0x0000 (the pulse reached the block through the closed gate), one more
-  request stalls in 38.85 ms and its own reset is the way back, the next window exact.
+  request stalls in 1015 us and its own reset is the way back, the next window exact.
 - **A CLIENT ON TXEIE, AND ERRIE ON A CLIENT THAT READS NOTHING** (letter
   `g`): enabling TXEIE with the buffer empty and the select high runs the
   vector at once, and that first entry is the preload; then one entry
@@ -1509,9 +1512,9 @@ Driver gaps:
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
-- No DMA engine slots on `SpiClient`: a program that wants its client
+- No DMA engine parameters on `SpiClient`: a program that wants its client
   on the streams binds them raw (the stm32f4 `spi_peer` does, "The
-  client run"); a slot pair is born with a device-shaped client.
+  client run"); a pair is born with a device-shaped client.
 - The I2S beyond a master transmitter: no codec on the board, so
   reception, the slave modes, the full-duplex extension block on the
   wire (the F42x/F43x class's: the F446 has none, RM0390 26.1.3 "only

@@ -3652,8 +3652,9 @@ uint8_t* copy_bytes_at(volatile uint32_t* words) {
 /// One sink leg with the pair running: announce it to brio stress, move
 /// the console's rate, judge every byte for the window, launch the pair
 /// every copy_period_ms (each copy `pair` bytes of big_src into its own
-/// destination), come back to 115200. The pair's channels are polled -
-/// armed for their errors alone - so no copy vector runs in the window.
+/// destination), come back to 115200. The pair's channels are polled, armed
+/// for their errors alone, so no completion of theirs enters the third line;
+/// the console's entries on that line leave their flags alone.
 template <class Port>
 LoadedLeg loaded_leg(uint32_t baud, uint16_t pair) {
     using CopyA = typename Pair<Port>::A;
@@ -3742,6 +3743,15 @@ LoadedLeg loaded_leg(uint32_t baud, uint16_t pair) {
     return leg;
 }
 
+/// The least pairs a loaded leg launches if the load stands. The next launch
+/// is set copy_period_ms after the last and taken on the first pass of the
+/// loop that finds it due. A pair ends long before that (the longest, 2 KB
+/// each, is some 15000 cycles, 0.24 ms of the 5 ms) and a pass of the loop,
+/// 64 bytes judged, stays under a tick, so one launch can land at most one
+/// tick late: a launch every 6 ms at the worst, 416 in the 2.5 s window. A
+/// lost completion stops the launches for the rest of the leg, far below this.
+constexpr uint32_t leg_min_pairs = loaded_window_ms / (copy_period_ms + 1u);
+
 /// What the window could carry: the host pumps for the window less half a
 /// second, ten bits a character.
 constexpr uint32_t leg_capacity(uint32_t baud) {
@@ -3763,6 +3773,11 @@ void print_leg(const LoadedLeg& l) {
 bool leg_clean(const LoadedLeg& l) {
     return l.got >= leg_capacity(l.baud) / 2u && l.gaps == 0u && l.bad == 0u &&
            l.unplaced == 0u && l.tail_in_sequence && l.skips == 0u && l.ore == 0u;
+}
+
+/// A leg with copies kept launching them for the whole window.
+bool leg_loaded(const LoadedLeg& l) {
+    return l.pair == 0u || l.episodes >= leg_min_pairs;
 }
 
 struct PairCell {
@@ -3790,11 +3805,15 @@ void tp_ring_outranks_the_pair() {
         bool clean = true;
         bool very_high = true;
         bool unkicked = true;
+        bool loaded = true;
         for (const LoadedLeg& l : legs) {
             clean = clean && leg_clean(l);
             very_high = very_high && l.level == 3u;
             unkicked = unkicked && l.kicks == 0u;
+            loaded = loaded && leg_loaded(l);
         }
+        bench.verdict("THE LOAD STOOD: every leg launched its pair for the whole window "
+                      "(leg_min_pairs or more)", loaded);
         bench.verdict("the receive ring arms at VERY_HIGH by default (CCR.PL read back "
                       "off its channel - UartOptions::rx_priority)", very_high);
         bench.verdict("THE RING OUTRANKS THE PAIR: every byte of every leg delivered in "
@@ -3840,11 +3859,15 @@ void tq_ring_ranked_low() {
             print_leg<Serial>(legs[i]);
         }
         bool low = true;
+        bool loaded = true;
         uint32_t kicks = 0;
         for (const LoadedLeg& l : legs) {
             low = low && l.level == 0u;
+            loaded = loaded && leg_loaded(l);
             kicks += l.kicks;
         }
+        bench.verdict("THE LOAD STOOD: every loaded leg launched its pair for the whole "
+                      "window (leg_min_pairs or more)", loaded);
         const bool within = leg_clean(legs[0]) && leg_clean(legs[1]) && leg_clean(legs[2]);
         const LoadedLeg& past = legs[3];
         const LoadedLeg& after = legs[4];
@@ -3872,9 +3895,9 @@ void tq_ring_ranked_low() {
 //
 // docs/design/dma.md's release contract: a transport's release() gates its
 // clock and pulses no reset, its init() starts from the reset line. The
-// DMAMUX routes ONE request line to each channel (RM0444 11.4.4), and under
-// one owner a channel the only channel a request held across a release can
-// reach is its own owner's, when that owner is initialized again. The
+// DMAMUX routes ONE request line to each channel (RM0444 11.4.4). Under one
+// owner a channel, a request held across a release can reach only that
+// owner's channel, and only when the owner is initialized again. The
 // letter measures that with no wire: a requester brought up with its
 // request standing and no channel listening, released one of five ways,
 // then DMA1's channel 5 routed to the same request - four bytes of memory
@@ -4244,23 +4267,29 @@ extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
         brio::DmaMux::clear_overrun(brio::DmaMux::overruns());
     }
 
-    if (pong_is_capture) {
-        const uint8_t f = PongCap::service();
-        if ((f & PongCap::flag_error) != 0u) {
-            PongCap::fail();
-        } else if ((f & PongCap::flag_complete) != 0u) {
-            (void)PongCap::complete();
-            pong_blocks = pong_blocks + 1u;
-        }
-    } else {
-        const uint8_t f = Pong::service();
-        if ((f & Pong::flag_error) != 0u) {
-            Pong::fail();
-        } else if ((f & Pong::flag_complete) != 0u) {
-            (void)Pong::complete();
-            pong_blocks = pong_blocks + 1u;
-            if (kernel_mode) {
-                brio::post<Relay>(brio::BlockDone{});
+    // Channel 4 is the ping-pong engine's only in the instrument image. In
+    // the image with the copy pair it is copy A's, whose completion poll()
+    // waits for: this line's every console entry calling Pong::service()
+    // there would clear that flag, and the pair would never launch again.
+    if constexpr (image_has_instrument) {
+        if (pong_is_capture) {
+            const uint8_t f = PongCap::service();
+            if ((f & PongCap::flag_error) != 0u) {
+                PongCap::fail();
+            } else if ((f & PongCap::flag_complete) != 0u) {
+                (void)PongCap::complete();
+                pong_blocks = pong_blocks + 1u;
+            }
+        } else {
+            const uint8_t f = Pong::service();
+            if ((f & Pong::flag_error) != 0u) {
+                Pong::fail();
+            } else if ((f & Pong::flag_complete) != 0u) {
+                (void)Pong::complete();
+                pong_blocks = pong_blocks + 1u;
+                if (kernel_mode) {
+                    brio::post<Relay>(brio::BlockDone{});
+                }
             }
         }
     }

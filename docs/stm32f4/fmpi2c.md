@@ -43,7 +43,7 @@ Line by line (the names are in `brio::`, the block written as inside a
 `using namespace brio`): `pins` names the two pads with the
 alternate-function number the datasheet gives FMPI2C1's SCL and SDA on
 them, which nothing in the code can check; `Bus` is the host task over
-the one instance, its two DMA engine slots left empty; `BusAo` is the
+the one instance, its two DMA engine parameters left empty; `BusAo` is the
 arbiter over it for the platform `P`, with four requests of queue, an
 active object listed in the program's `Tenuto` like any other; `init()`
 takes the clock task's tag (`constexpr SysClock clock;`,
@@ -83,7 +83,8 @@ wants the 20 mA pad drive turned on by the program
 (`Bus::fast_plus_drive(true)`), which nothing turns on by itself. A
 refused address and a refused DATA byte are told apart on both paths:
 `i2c_nack_addr` when nothing of the half's data reached the wire - the
-byte pump's position, or under the DMA engines the transmit stream's own
+position of the interrupt that moves one byte at a time (the pump, on this
+page), or under the DMA engines the transmit stream's own
 count - and `i2c_nack_data` otherwise ("Bench findings").
 
 The page is long because the chapter is. In order: the documents of
@@ -350,7 +351,7 @@ for field, the speed an `FmpI2cSpeed` (with `fast_plus_1m`). `engine`
 names what moves the data, and the host never chooses: `interrupt`, the
 default, the event vector at any length; `dma` the engines at any
 length, one byte included, started in `start()` before the START
-(23.4.16), on a host with both engine slots named - `has_dma` says so at
+(23.4.16), on a host with both engine parameters named - `has_dma` says so at
 compile time, and `dma` on a host without them is answered
 `i2c_rejected` inside `start()` with nothing on the wire. A half with no
 buffer stays on the vector under `dma` too, writing its filler or

@@ -987,7 +987,7 @@ public:
     }
 
     /// Stop the stream and put its flags and interrupt enables back.
-    /// After this the stream is safe to hand to another owner.
+    /// After this the stream is safe to program again.
     static void stop() {
         Block::bus_clock(true);
         (void)abort();
@@ -1055,7 +1055,8 @@ constexpr uint32_t dma_interrupt_enables(DmaInterrupts i) {
  * through one engine, the width from the span's element type. 10.3.6: an
  * address is aligned on the width of the accesses through it, so a run
  * whose address is not is REFUSED - a 16-bit span built over a byte
- * buffer can be misaligned, and the caller then takes its pump.
+ * buffer can be misaligned, and the SPI host asks first and answers such a
+ * request spi_rejected.
  *
  * THE CLAIM IS ITS OWN VERB. start() = claim() + the block start. A
  * transport whose two contexts can race for the stream (a print in the
@@ -1705,8 +1706,9 @@ class DmaCopyEngine {
                   "(RM0090 10.3.6, figures 33 and 34 note 1)");
     // No request paces a copy, so the engine is its stream's owner: the
     // tag DmaCopyOwner<n, s> claims it for the whole image
-    // (util/dma_owner.hpp), and a transport or a second engine naming the
-    // same stream does not compile.
+    // (util/dma_owner.hpp), and a transport or a claimed stream on the same
+    // number does not compile. A bare DmaTxEngine there claims nothing, so
+    // only the program's own claim beside it would be refused.
     static_assert(dma_claim<DmaSlotId<n, s>, DmaCopyOwner<n, s>>);
     using Stream = DmaStream<n, s>;
 

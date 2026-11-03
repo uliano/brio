@@ -351,7 +351,7 @@ Driver gaps:
 - **Dual-flash mode (DFM, FSEL, BK2)**: one flash on this board, so the
   second bank's pads and the even-length rule are neither exposed nor
   measured; a board with two devices would.
-- **A DMA engine slot** (DMAEN over the request cell the reserve knows):
+- **A DMA engine parameter** (DMAEN over the request cell the reserve knows):
   the indirect verbs pump the FIFO with the CPU; a `DmaRxEngine`/`DmaTxEngine`
   pair on DMA2 stream 7 channel 3 is the next step when a program needs
   the core elsewhere during a transfer.

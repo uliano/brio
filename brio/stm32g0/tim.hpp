@@ -591,8 +591,9 @@ public:
     /// off, the clock closed - no reset pulse: init() starts from one
     /// (docs/design/dma.md, the release contract). Pads NOT touched (a pad
     /// is the caller's claim - TimPad::release() is its release). The
-    /// outputs go off through CCER and, on a timer with a break unit,
-    /// BDTR.MOE, neither of which a LOCK level protects (21.4.18).
+    /// outputs go off through CCER's enable bits and, on a timer with a break
+    /// unit, BDTR.MOE, which no LOCK level protects (RM0444 Rev 6, TIM1_CCER
+    /// and TIM1_BDTR: levels 2 and 3 lock only the polarity bits beside them).
     static void release() {
         enable(false);
         TIM_TypeDef& t = regs();

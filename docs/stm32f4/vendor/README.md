@@ -24,27 +24,27 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 
 | Document | Number / revision of record | File name here | Notes |
 |----------|-----------------------------|----------------|-------|
-| STM32F405/415, F407/417, F427/437, F429/439 reference manual | **RM0090 Rev 22** | symlink to `~/Documenti/Elettronica/STM32/STM32F4/STM32F407_429_Reference_Manual.pdf` | the F429's manual and the F405 class's in one document, with separate RCC and PWR chapters for the two classes (ch. 6 and 7, 5.4 and 5.5): a citation names the class's chapter |
-| STM32F446xx reference manual | **RM0390 Rev 6** | symlink to `.../STM32F446_Reference_Manual.pdf` | the F446's; the same peripherals under the same names, the F446's own additions (QUADSPI, SAI2, SPDIFRX, FMPI2C, CEC) |
-| STM32F411xC/xE reference manual | **RM0383 Rev 4** | symlink to `.../STM32F411_Reference_Manual.pdf` | the F411's: the 100 MHz ladder, no over-drive, one ADC, no DAC/CAN |
-| STM32F401xB/C and STM32F401xD/E reference manual | **RM0368 Rev 5** | symlink to `.../STM32F401_Reference_Manual.pdf` | the F401's: read for its DMA request map (9.3.3, tables 28 and 29; [../dma.md](../dma.md), "One owner a stream") and nothing else yet - no part on the bench |
-| STM32F469xx/F479xx reference manual | **RM0386 Rev 6** | symlink to `.../rm0386-*.pdf` | the F469/F479's: the F42x/F43x's frequency ladder row for row (3.3.2 table 9, 6.3.3), the same DMA request mapping with QUADSPI added (tables 29 and 30), ch. 13 (QUADSPI), ch. 18 (the DSI host, its wrapper and D-PHY) with the RCC's figure 17 for its clock tree, the 48 MHz domain switchable to PLLSAI's P output (DCKCFGR.CK48MSEL); its chapters are numbered differently from RM0090's (FLASH 3, PWR 5, RCC 6, DMA 9, FMC 12, ADC 14, DAC 15, LTDC 17, DSI 18, RTC 28, SPI/I2S 31, bxCAN 34, USB OTG 35) |
-| STM32F427xx/F437xx, F429xx/F439xx datasheet | **DocID024030 Rev 10** | symlink to `.../STM32F429_Data_Sheet.pdf` | pinout and the alternate-function table 12 (the AF numbers no header carries), electrical characteristics |
-| STM32F446xC/xE datasheet | **DS10693 Rev 11** | symlink to `.../STM32F446_Datasheet.pdf` | alternate-function table 11 |
-| STM32F411xC/xE datasheet | **DS10314 Rev 8** | symlink to `.../STM32F411_Data_Sheet.pdf` | alternate-function table 9 |
-| STM32F469xx datasheet | **DS11189 Rev 8** | symlink to `.../DS_stm32f469ae.pdf` | alternate-function table 12 (DSIHOST_TE on PJ2 at AF13); the 2 MB / 320 + 64 KB memories; 5.3.13 .. 5.3.15 (tables 45 .. 48: the D-PHY's unit interval and transition times, the DSI PLL's and regulator's ranges) |
-| STM32F427/437 and F429/439 device errata | **ES0206 Rev 24** | symlink to `.../es0206-*.pdf` | silicon revisions A, Y, 1, 3, 4/5/B by REV_ID (table 2); the STM32F429I-DISC1's part reads REV_ID 0x2003 = markings 4, 5 and B |
-| STM32F446xC/xE device errata | **ES0298 Rev 8** | symlink to `.../es0298-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the Nucleo-F446RE's part reads it |
-| STM32F411xC/xE device errata | **ES0287 Rev 6** | symlink to `.../es0287-*.pdf` | revisions A, 1 and 2 share REV_ID 0x1000; the black pill's part reads it |
-| STM32F469xx/F479xx device errata | **ES0321 Rev 14** | symlink to `.../es0321-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the 32F469IDISCOVERY's part reads it; its bxCAN item is 2.15.1, its RTC items 2.11.x, its OTG_FS items 2.16.x, its QUADSPI items 2.4.x, its DSI items 2.8.1 .. 2.8.3 |
-| STM32 Cortex-M4 programming manual | **PM0214 Rev 10** | symlink to `~/Documenti/Elettronica/STM32/pm0214-*.pdf` | the core: PRIMASK/BASEPRI, SysTick, the NVIC, the FPU's CPACR and lazy stacking, the ISB the pending-interrupt test needs |
-| ARMv7-M Architecture Reference Manual | ARM DDI 0403E.e | symlink to `~/Documenti/Elettronica/STM32/ARM-CORTEX References/DDI0403E_e_armv7m_arm.pdf` | the architecture behind PM0214; B1.5.19 (the WFI's wake-up events, PRIMASK ignored in deciding one), B3.3.1 (SysTick's reload after a write to its current value) |
-| Cortex-M4 Technical Reference Manual | ARM DDI 0439B | symlink to `~/Documenti/Elettronica/STM32/ARM-CORTEX References/DDI0439B_cortex_m4_r0p0_trm.pdf` | 3.9.1: the exception entry's and return's twelve cycles at zero wait states, the tail chain's six |
-| Cortex-M4 Devices Generic User Guide | ARM DUI 0553B | symlink to `.../DUI0553.pdf` | |
-| Introduction to system memory boot mode | AN2606 Rev 70 | symlink to `~/Documenti/Elettronica/STM32/an2606-*.pdf` | the ROM bootloader (DFU through BOOT0), the CLI's future fourth flash mechanism |
-| STM32F429I-DISC1 user manual | UM1670 Rev 6 | symlink to `.../STM32F429I-DISC1/um1670-*.pdf` | + the MB1075 schematics B01/C01/D02/E01 beside it |
-| STM32 Nucleo-64 boards (MB1136) user manual | UM1724 Rev 17 | symlink to `~/Documenti/Elettronica/STM32/ST Boards/um1724-*.pdf` | + the MB1136 schematics C03/C04 |
-| 32F469IDISCOVERY user manual | UM1932 Rev 5 | symlink to `.../STM32F469I-DISCO/um1932-*.pdf` | + the MB1189 schematics B-07/B-08/C-01 (the MCU sheet is where the SDRAM's pads come from) and the display board's MB1166 A-08/A-09/A-10 beside it |
+| STM32F405/415, F407/417, F427/437, F429/439 reference manual | **RM0090 Rev 22** | `STM32F407_429_Reference_Manual.pdf` | the F429's manual and the F405 class's in one document, with separate RCC and PWR chapters for the two classes (ch. 6 and 7, 5.4 and 5.5): a citation names the class's chapter |
+| STM32F446xx reference manual | **RM0390 Rev 6** | `STM32F446_Reference_Manual.pdf` | the F446's; the same peripherals under the same names, the F446's own additions (QUADSPI, SAI2, SPDIFRX, FMPI2C, CEC) |
+| STM32F411xC/xE reference manual | **RM0383 Rev 4** | `STM32F411_Reference_Manual.pdf` | the F411's: the 100 MHz ladder, no over-drive, one ADC, no DAC/CAN |
+| STM32F401xB/C and STM32F401xD/E reference manual | **RM0368 Rev 5** | `STM32F401_Reference_Manual.pdf` | the F401's: read for its DMA request map (9.3.3, tables 28 and 29; [../dma.md](../dma.md), "One owner a stream") and nothing else yet - no part on the bench |
+| STM32F469xx/F479xx reference manual | **RM0386 Rev 6** | `rm0386-*.pdf` | the F469/F479's: the F42x/F43x's frequency ladder row for row (3.3.2 table 9, 6.3.3), the same DMA request mapping with QUADSPI added (tables 29 and 30), ch. 13 (QUADSPI), ch. 18 (the DSI host, its wrapper and D-PHY) with the RCC's figure 17 for its clock tree, the 48 MHz domain switchable to PLLSAI's P output (DCKCFGR.CK48MSEL); its chapters are numbered differently from RM0090's (FLASH 3, PWR 5, RCC 6, DMA 9, FMC 12, ADC 14, DAC 15, LTDC 17, DSI 18, RTC 28, SPI/I2S 31, bxCAN 34, USB OTG 35) |
+| STM32F427xx/F437xx, F429xx/F439xx datasheet | **DocID024030 Rev 10** | `STM32F429_Data_Sheet.pdf` | pinout and the alternate-function table 12 (the AF numbers no header carries), electrical characteristics |
+| STM32F446xC/xE datasheet | **DS10693 Rev 11** | `STM32F446_Datasheet.pdf` | alternate-function table 11 |
+| STM32F411xC/xE datasheet | **DS10314 Rev 8** | `STM32F411_Data_Sheet.pdf` | alternate-function table 9 |
+| STM32F469xx datasheet | **DS11189 Rev 8** | `DS_stm32f469ae.pdf` | alternate-function table 12 (DSIHOST_TE on PJ2 at AF13); the 2 MB / 320 + 64 KB memories; 5.3.13 .. 5.3.15 (tables 45 .. 48: the D-PHY's unit interval and transition times, the DSI PLL's and regulator's ranges) |
+| STM32F427/437 and F429/439 device errata | **ES0206 Rev 24** | `es0206-*.pdf` | silicon revisions A, Y, 1, 3, 4/5/B by REV_ID (table 2); the STM32F429I-DISC1's part reads REV_ID 0x2003 = markings 4, 5 and B |
+| STM32F446xC/xE device errata | **ES0298 Rev 8** | `es0298-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the Nucleo-F446RE's part reads it |
+| STM32F411xC/xE device errata | **ES0287 Rev 6** | `es0287-*.pdf` | revisions A, 1 and 2 share REV_ID 0x1000; the black pill's part reads it |
+| STM32F469xx/F479xx device errata | **ES0321 Rev 14** | `es0321-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the 32F469IDISCOVERY's part reads it; its bxCAN item is 2.15.1, its RTC items 2.11.x, its OTG_FS items 2.16.x, its QUADSPI items 2.4.x, its DSI items 2.8.1 .. 2.8.3 |
+| STM32 Cortex-M4 programming manual | **PM0214 Rev 10** | `pm0214-*.pdf` | the core: PRIMASK/BASEPRI, SysTick, the NVIC, the FPU's CPACR and lazy stacking, the ISB the pending-interrupt test needs |
+| ARMv7-M Architecture Reference Manual | ARM DDI 0403E.e | `DDI0403E_e_armv7m_arm.pdf` | the architecture behind PM0214; B1.5.19 (the WFI's wake-up events, PRIMASK ignored in deciding one), B3.3.1 (SysTick's reload after a write to its current value) |
+| Cortex-M4 Technical Reference Manual | ARM DDI 0439B | `DDI0439B_cortex_m4_r0p0_trm.pdf` | 3.9.1: the exception entry's and return's twelve cycles at zero wait states, the tail chain's six |
+| Cortex-M4 Devices Generic User Guide | ARM DUI 0553B | `DUI0553.pdf` | |
+| Introduction to system memory boot mode | AN2606 Rev 70 | `an2606-*.pdf` | the ROM bootloader (DFU through BOOT0), the CLI's future fourth flash mechanism |
+| STM32F429I-DISC1 user manual | UM1670 Rev 6 | `um1670-*.pdf` | + the MB1075 schematics B01/C01/D02/E01 beside it |
+| STM32 Nucleo-64 boards (MB1136) user manual | UM1724 Rev 17 | `um1724-*.pdf` | + the MB1136 schematics C03/C04 |
+| 32F469IDISCOVERY user manual | UM1932 Rev 5 | `um1932-*.pdf` | + the MB1189 schematics B-07/B-08/C-01 (the MCU sheet is where the SDRAM's pads come from) and the display board's MB1166 A-08/A-09/A-10 beside it |
 
 The black pill's own documents (WeAct's schematic) are the board
 page's business ([../../boards/blackpill-f411ce.md](../../boards/blackpill-f411ce.md)).

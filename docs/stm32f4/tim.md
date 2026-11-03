@@ -600,7 +600,7 @@ Driver gaps:
   request mapping (RM0090 tables 43 and 44, RM0390 28 and 29, RM0383 27
   and 28), the `tim_dma_placements()` that would say which stream and
   channel serves which timer request. The reason is that no task in this
-  file names a DMA engine slot yet - a duty table played into CCRy or a
+  file names a DMA engine parameter yet - a duty table played into CCRy or a
   capture run harvested out of it is a task that has to exist first, and
   the placement table is born with it.
 - **TIM8's second break input, TRGO2 and the ADC trigger.** This family's

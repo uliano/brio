@@ -2614,8 +2614,8 @@ private:
         // The budget: the request's wire time and two frames more, in polls
         // (budget_for(): derived from the rate and the frame applied, never a
         // count chosen by hand). A poll takes at least a cycle - an empty one
-        // measures 23 to 37 by where the image puts the flattened body, the
-        // command phase's own function 10 (docs/stm32g0/spi.md, the stall's
+        // measures 24 to 34 by where the image puts the flattened body, the
+        // command phase's own function 11 (docs/stm32g0/spi.md, the stall's
         // wall) - so the wait never gives up before the wire could have ended.
         uint32_t budget = budget_for(static_cast<uint32_t>(r.cmd_len) + r.len);
         bool ok = true;
@@ -2806,11 +2806,11 @@ private:
         return static_cast<uint32_t>(spi_division(c)) * spi_data_bits(bits);
     }
 
-    /// THE BOUNDED WAIT, a time derived from the clocks and not a count chosen
-    /// by hand (docs/design/spi-bus.md, "Every bound is a time"): `frames` and
-    /// two more at the applied rate, in polls of at least a cycle each, so a
+    /// THE BOUNDED WAIT, a count of polls derived from the clocks and not one
+    /// chosen by hand (docs/design/spi-bus.md, "Every bound is a time"): `frames`
+    /// and two more at the applied rate, in polls of at least a cycle each, so a
     /// wait ends no sooner than the wire could have; how much later is the
-    /// poll's own length, 10 to 37 cycles in the release listing. Two loads, a
+    /// poll's own length, measured at 11 to 34 cycles. Two loads, a
     /// multiply and an add once a request; at 65535 frames of 16 bits at
     /// PCLK/256 the product stays under 2^32.
     [[gnu::always_inline]] static uint32_t budget_for(uint32_t frames) {

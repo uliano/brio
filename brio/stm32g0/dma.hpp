@@ -979,8 +979,8 @@ constexpr uint8_t dmamux_trigger_event(uint8_t event) {
  * an engine's `Elem` is the WIDEST beat its binding allows - the
  * peripheral register's width - and a wider span is a compile error at
  * the call. A buffer misaligned for its beat (10.4.3's note) is refused
- * at run time, false, so a driver can fall back to its pump; a driver
- * that can ask first does (dma_engine.hpp's dma_beat_aligned).
+ * at run time, false; a driver that can ask first does (dma_engine.hpp's
+ * dma_beat_aligned), and the SPI host answers such a request spi_rejected.
  */
 namespace dma_detail {
 
@@ -1574,8 +1574,9 @@ class DmaCopyEngine {
 
     // No request paces a copy, so the engine is its channel's owner: the
     // tag DmaCopyOwner<n, ch> claims it for the whole image
-    // (util/dma_owner.hpp), and a transport or a second engine naming the
-    // same channel does not compile.
+    // (util/dma_owner.hpp), and a transport or a claimed channel on the same
+    // number does not compile. A bare DmaTxEngine there claims nothing, so
+    // only the program's own claim beside it would be refused.
     static_assert(dma_claim<DmaSlotId<n, ch>, DmaCopyOwner<n, ch>>);
 
 public:

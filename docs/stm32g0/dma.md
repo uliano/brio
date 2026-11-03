@@ -5,8 +5,9 @@ the path: a serial port or a bus whose blocks a channel carries, a
 waveform played into a converter for ever, a stream captured into two
 buffers in turn, a memory copy. Most programs meet the DMA only by
 naming an engine in a transport's template (`Uart`, `SpiHost` and
-`I2cHost` take `DmaTxEngine` and `DmaRxEngine` as optional slots); the
-engines and the raw channel are here for the rest. `Dma<n>` is a
+`I2cHost` take `DmaTxEngine` and `DmaRxEngine` as optional parameters,
+called engine parameters on this page); the engines and the raw channel
+are here for the rest. `Dma<n>` is a
 controller, `DmaChannel<n, ch>` one channel, `DmaMux` the request
 multiplexer that routes a peripheral's request to a channel, and the
 five engines over them are the shapes a program uses.
@@ -25,10 +26,12 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 }
 ```
 
-What decides correctness even there. A channel belongs to one owner,
-the request it serves, for the whole image, and a second owner on it
-does not compile ("One owner a channel", below - the copy above claims
-its channel itself); and `arm()`
+What decides correctness even there. A channel belongs to one owner for
+the whole image: the request it serves, or a tag where no peripheral paces
+it. A second owner does not compile where both are claimed: a transport
+and a copy engine claim by themselves, as the copy above does, and an
+engine a program arms itself claims nothing until the program writes the
+claim ("One owner a channel", below). `arm()`
 runs once before the first block: it opens the clock, routes the
 request and keeps the channel's control word, which the register
 cannot hold between blocks. The channel's vector is the program's to
@@ -54,12 +57,14 @@ from `stm32g0/device_tables.hpp` (the reserve: the table of what each
 part has, read off the device header), and the request ids from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma`, three images on every part because of the ownership
-rule - the instrument letters `a` to `n` and `r`, then `o` with the
-serial streaming, then `x` ("One owner a channel") - 17 letters in their
-`z` and 85 verdicts, wireless (a letter is one command key of the suite's
-console and the group of verdicts it runs, `z` the key that runs them
-all; letters `p`, `q`, `u` and `w` outside `z` need `brio stress`); the engines' cost is
+`test_stm32_dma`, three images on every part, because an image gives a
+channel to one owner. The first holds the instrument letters `a` to `n`
+and `r`; the second letter `o` and the serial streaming letters `p`, `q`,
+`u` and `w`; the third letter `x`, letter `o`'s ring on an LPUART. Across
+the three, 17 letters in their `z` and 85 verdicts, no wire (a letter is
+one command key of the suite's console and the group of verdicts it runs,
+`z` the key that runs them all; letters `p`, `q`, `u` and `w` stay outside
+`z` and need `brio stress`). The engines' cost is
 `bench_stm32`'s letter `d`. Family fixture
 `test/family_stm32g0/dma.cpp` plus its negatives under
 `brio check stm32g0` (`dma*.cpp`), three of them the ownership check's.
@@ -143,7 +148,7 @@ as the silicon numbers it - from ONE. `DmaMux` addresses the multiplexer
 by DMAMUX channel (`DmaChannel<n, ch>::mux_channel` is the map) and
 `DmaMuxGenerator<x>` is one of the four request generators.
 
-Five engines sit on top, each owning one channel and knowing nothing
+Five engines sit on top, each driving one channel and knowing nothing
 about the peripheral it serves - the data address and the request id are
 handed in at `arm()`:
 
@@ -152,8 +157,8 @@ handed in at `arm()`:
   from it. The receive engine has a SECOND SHAPE on the same binding, the
   CIRCULAR one: a ring's whole storage handed to `arm()`, written lap
   after lap with its count register as the ring's producer index (below,
-  "The circular receive"). They are the OPTIONAL slots `Uart`'s,
-  `SpiHost`'s and `I2cHost`'s templates take - the bus hosts run the
+  "The circular receive"). They are what the engine parameters of `Uart`,
+  `SpiHost` and `I2cHost` take - the bus hosts run the
   one-shot receive, the `Uart` the ring. Their `abandon()` is cold and
   out of line, so a driver that flattens its interrupt body into its
   vector or into SRAM ([platform.md](platform.md), "Code in SRAM")
@@ -200,8 +205,9 @@ uint32_t and takes its beat from the span: an SPI's engines are uint16_t
 and serve a byte frame with a byte beat and a 16-bit frame with a
 half-word one, and a span wider than `Elem` is a compile error at the
 call. A run misaligned for its beat (10.4.3's note) is refused at run
-time, false, so a driver can fall back to its pump - and one that can
-ask first does, with `dma_engine.hpp`'s `dma_beat_aligned()`.
+time, false. A driver that can ask first does, with `dma_engine.hpp`'s
+`dma_beat_aligned()`: the SPI host answers such a request `spi_rejected`
+before anything moves.
 
 ### Two moments: arm() once, five stores a block
 
@@ -232,26 +238,28 @@ The controller's offer, item by item:
 | a self-trigger or a chain between channels | none on this controller: a channel is one block; the DMAMUX's channel events (EGE) and request generators chain channels through the fabric, measured below and used by no engine |
 | the gate (5.4.9) | opened by `arm()`, once |
 | the flags (10.6.1, 10.6.2) | cleared by a write-one IFCR store of the three specific bits, never CGIFx (ES0548 2.4.1): one store a block start, one a completion |
-| the interrupt enables (10.5) | in the kept word: `DmaIrq` (`dma_engine.hpp`) - the error always, the completion unless the owner holds another proof of it |
+| the interrupt enables (10.5) | in the kept word: `DmaIrq` (`dma_engine.hpp`) - the error always, the completion unless the driver holds another proof of it |
 | memory to memory (MEM2MEM, 10.4.5) | `DmaCopyEngine` |
 | the request sources: table 55 through the DMAMUX, its synchronization and request generators (11.4.4, 11.4.5) | the request is the peripheral's, handed to `arm()`; a timer's update paces `bench_stm32`'s `paced` |
 
-**One interrupt per transaction.** An owner that holds another edge
+**One interrupt per transaction.** A driver that holds another edge
 arms an engine for its errors alone (`DmaIrq::error_only`). The SPI host
 does it to its transmit engine - the receive block's completion is
 strictly after the transmit block's last beat, since every frame that
 came back was clocked out first - and the I2C host to both of its, the
-tenure's STOP after NBYTES proving both blocks; the owner completes the
+tenure's STOP after NBYTES proving both blocks; the driver completes the
 engine on that proof (`complete()`).
 
-**The mask covers the claim.** A transport starts blocks from two
-contexts, its thread and its completion handler, so `DmaTxEngine` has
-the claim as a verb of its own: `claim()` (a test-and-set of `busy()`),
-`launch(span)` (the five stores on a claimed engine), `unclaim()`;
-`start()` is the three for an owner with one starting context. The
-USART's `pump_tx()` holds its guard around `claim()` alone - seven
-instructions - and launches unmasked: a free engine has no block in
-flight, so no completion can run under the programming.
+**The mask covers one test-and-set.** A transport starts blocks from two
+contexts, its thread and its completion handler, so `DmaTxEngine` splits
+a start into three verbs: the run-time `claim()`, a test-and-set of
+`busy()` that takes the engine for one block (nothing to do with the
+compile-time claim of "One owner a channel"); `launch(span)`, the five
+stores; and `unclaim()`. `start()` is the three together, for a driver
+with one starting context. The USART's `pump_tx()` holds its guard around
+`claim()` alone - seven instructions - and launches unmasked: a free
+engine has no block in flight, so no completion can run under the
+programming.
 
 ### Reading a channel's progress costs nothing
 
@@ -286,7 +294,7 @@ accounting of a lap the consumer did not keep up with (`overruns()`),
 which is the view's because only the consumer knows where its tail is.
 The half-transfer flag is not the view's: it reads the counter whenever
 it looks, and the wrap is the one edge its arithmetic needs. It is the
-OWNER'S: the ring's word carries HTIE beside TCIE, and `service()`
+transport's: the ring's word carries HTIE beside TCIE, and `service()`
 reports the half mark while the ring runs, so the transport's handler
 can tell its consumer twice a lap on a stream that never pauses for the
 line's own end-of-burst flag. The one-shot verbs stay usable on a ring binding - `start(run)` runs a block
@@ -298,7 +306,7 @@ a ring wider than the engine's element likewise.
 **Stopping one has an order.** 10.4.5 stops a circular transfer by
 stopping the peripheral's requests FIRST and disabling the channel
 after, a channel that never ends having no idle moment of its own; so
-the owner sequences it, and `Uart::release()` disables the USART before
+the transport sequences it, and `Uart::release()` disables the USART before
 it stops its engines.
 
 `stm32g0/usart.hpp`'s `Uart` runs its receive engine in this shape over
@@ -331,6 +339,10 @@ proof.
 
 ### One example per use
 
+Each block is an excerpt: the buffers, the timers and the USART's pins are
+the program's, brought up as their own pages say, and each vector name is
+the program's to bind.
+
 Memory to memory - no peripheral, no request, runs on the enable:
 
 ```cpp
@@ -357,7 +369,7 @@ Player::arm(Tim2::ccr_address(0), Tim2::dma_update_request());
 Tim2::interrupts(Tim2::update_dma, true);
 Player::start(duty_table, 8);          // and that is all: CIRC does the rest
 extern "C" void DMA1_Channel1_IRQHandler() {
-    if ((Chan::isr() & brio::DmaFlag::complete) != 0u) { Player::complete(); }
+    if ((Player::service() & Player::flag_complete) != 0u) { (void)Player::complete(); }
 }
 ```
 
@@ -374,9 +386,9 @@ Source::start(buffer_a, buffer_b, 32);
 brio::post<Relay>(brio::BlockDone{});
 ```
 
-A USART that moves its bytes without the CPU - the slots are empty by
-default and cost an engineless image nothing; the receive side is the
-ring above:
+A USART that moves its bytes without the CPU - the engine parameters are
+empty by default and cost an engineless image nothing; the receive side is
+the ring above:
 
 ```cpp
 using Serial = brio::Uart<2, pins, 64, 256,
@@ -418,7 +430,7 @@ other half of the check, which RM0444 11.4.4's caution allows only for
 which the rule forbids anyway. Who claims, all at compile time through
 `util/dma_owner.hpp`, at no byte and no cycle:
 
-- **a transport, for the engines in its slots**: `Uart` and `LpUart` claim
+- **a transport, for the engines it is given**: `Uart` and `LpUart` claim
   their channels for the instance's transmit and receive
   (`DmaOwner<DmaPeriph::usart, n, ...>`, `lpuart` for an LPUART),
   `SpiHost` and `I2cHost` for theirs, in the class body, so a second owner
@@ -432,12 +444,13 @@ which the rule forbids anyway. Who claims, all at compile time through
   programs through `DmaChannel`**: `DmaTxEngine`, `DmaRxEngine`,
   `DmaLoopEngine` and `DmaPingPongEngine` learn their request at `arm()`,
   at run time, so they claim nothing; a program that arms one names the
-  request in a claim beside it (the examples above), and one that programs
-  a channel by hand names a tag of its own, any empty class, one tag a
-  channel.
+  request in a claim beside it (the examples above). One that programs a
+  channel by hand does the same where a peripheral paces the channel, and
+  names a tag of its own, any empty class, one tag a channel, where none
+  does.
 
 What the map leaves to choose is the count alone: the DMAMUX routes any
-request to any channel (11.3.2, table 54), so no instance excludes
+request to any channel (11.4.4), so no instance excludes
 another and no choice is forced; the only conflict is more requests than
 channels (10.3.1, table 49). Counted over the uses most programs combine -
 a console UART with both engines, an SPI host's two (or its transmit
@@ -450,7 +463,7 @@ once:
 | STM32G030, G031, G041 | 5 | the console's two, the SPI host's two, the converter and a paced stream: six for five (with the host's transmit alone they take all five) |
 | STM32G050, G070 | 7 | the console's two, the SPI host's two, the converter, a paced stream and a second UART's two: eight for seven |
 | STM32G051, G061, G071, G081 | 7 | the console's two, the SPI host's two or its transmit alone, the converter, the DAC, a paced stream and a second UART's two |
-| STM32G0B0, G0B1, G0C1 | 12 | none of these: the set takes ten |
+| STM32G0B0, G0B1, G0C1 | 12 | none of these: the set takes nine |
 
 No choice of instances changes a row, the map being free: what a program
 on a five-channel part gives up is a stream, never an instance.
@@ -559,36 +572,38 @@ memory channel and ANY other requester, so a single copy of any length
 never starved USART2's receive ring (16 KB copies, 127 character times at
 921600, lost nothing). Two copies launched together on channels 4 and 5
 alternate with EACH OTHER, and a ring on channel 7 at their level waits
-for the pair: 2.6 character times at 115200 with 2 KB copies, 4.3 to 22
-at 921600 with 256 B to 2 KB ones. At the ring's default `very_high` the
-same pairs starved nothing - every byte of three 2.5 s legs in sequence,
-no overrun, no kick of the FIFO's cure, on the STM32G0B1RE and the
-STM32G071RB alike; told `rx_priority = low`, the ring was starved for
-real and the receive FIFO's kick absorbed every starvation up to nine
-characters with no byte lost, and past that every gap was counted
-([usart.md](usart.md), "The receive FIFO under a starved channel", has
-the table). The pair ran its blocks at about 3.5 cycles a byte each, the
-two together.
+for the pair: 2.6 character times at 115200 with 2 KB copies, 3.7 to 22
+at 921600 with 256 B to 2 KB ones (ten runs of each letter on the
+STM32G0B1RE, each leg launching 500 or 501 pairs, the verdicts' floor 416).
+At the ring's default `very_high` the same pairs starved nothing - every
+byte of three 2.5 s legs in sequence, no overrun, no kick of the FIFO's
+cure; told `rx_priority = low`, the ring was starved for real and the
+receive FIFO's kick absorbed every starvation up to nine characters with
+no byte lost, and past that every gap was counted ([usart.md](usart.md),
+"The receive FIFO under a starved channel", has the table). The pair ran
+its blocks at about 3.5 cycles a byte each, the two together.
 
 **A RELEASED REQUESTER HOLDS NOTHING HERE, AND THE RESET AT `init()`
 TAKES THE ONE THING THAT COMES BACK** (`test_stm32_dma` letter `r`, no
 wire). docs/design/dma.md's release contract: a transport's `release()`
 gates its block and pulses no reset, its `init()` starts from the reset
-line. The DMAMUX routes ONE request line to each channel (11.4.4), and
-under one owner a channel the only channel a request held across a
-release can reach is its own owner's, when it is initialized again.
+line. The DMAMUX routes one request line to each channel (11.4.4). Under
+one owner a channel, a request held across a release can reach only that
+owner's channel, and only when the owner is initialized again.
 Measured with USART1's transmit (TXE behind DMAT), SPI1's transmit (TXE
 behind TXDMAEN) and TIM3's update (one software update behind UDE), each
 brought up with its request standing and no channel listening, then
-released, then DMA1's channel 5 routed to the same request - the shape
-of the owner's own channel - and enabled over four bytes into the
-requester's own register; where the clock was gated it is opened again
-afterwards and the count read once more. Items moved, before / after the
-clock reopened, on the STM32G0B1RE:
+released, then DMA1's channel 5 routed to the same request and enabled
+over four bytes into the requester's own register, the shape of the
+owner's channel; where the clock was gated it is opened again afterwards
+and the count read once more. One channel routed to three requests in
+turn is this instrument's alone: a program may not do it, and the suite's
+single tag on channel 5 is why the check does not see it. Items moved,
+before / after the clock reopened, on the STM32G0B1RE:
 
 | the release | USART1_TX | SPI1_TX | TIM3_UP |
 |---|---|---|---|
-| A: the contract - released as the transports release (the DMA enable LEFT SET, clock gated, no reset), then `init()`'s first step, the clock opened and the reset pulsed, before the channel | 0 / 0 | 0 / 0 | 0 / 0 |
+| A: the contract - the DMA enable left set, clock gated, no reset, then `init()`'s first step, the clock opened and the reset pulsed, before the channel | 0 / 0 | 0 / 0 | 0 / 0 |
 | ... and the owner brought up again, its block on the channel | 4 | 4 | 1 |
 | B: DMA enable cleared, clock gated, no reset | 0 / 0 | 0 / 0 | 0 / 0 |
 | C: the control - as A with the reset at init removed: the DMA enable left SET, clock gated, then opened, no reset | 0 / 0 | 0 / 4 | 0 / 1 |
@@ -600,17 +615,18 @@ does a DMA enable cleared with the clock on: nothing reaches a channel
 while the gate is closed. What does survive is a DMA ENABLE LEFT SET: the
 moment anything opens the block's clock again without a reset, SPI1 asks
 again for every frame and TIM3 serves its pending update (USART1 asked
-for nothing, its UE being clear) - C, the control. The transports'
-`release()` leaves that enable set (the USART and LPUART tasks, the SPI
-host and client, the I2C resource; the ADC's and the DAC's `release()`
-clear theirs, the timers' clears DIER), and their `init()` opens the
-clock and pulses the reset before it configures the block or arms a
-channel, which clears every enable: A, the request gone and the owner's
-block exact. THE DIRECTION MATTERS TO THE DETECTOR:
-USART1's standing transmit request moved nothing into a channel reading a
-RAM cell into RAM and two items into one writing TDR (the second into
-the shift register, then the wire's pace), so the detector's channel
-writes where the line's owner's would.
+for nothing, its UE being clear) - C, the control. Most transports'
+`release()` leaves that enable set: the USART and LPUART tasks, the SPI
+host and client, the I2C resource and the ADC, whose `release()` does not
+touch CFGR1.DMAEN. The DAC's `release()` clears its channels and
+the timers' clears DIER, so letter `r`'s TIM3 column, with UDE left set,
+is a worst case staged by hand. Their `init()` opens the clock and pulses
+the reset before it configures the block or arms a channel, which clears
+every enable: A, the request gone and the owner's block exact. THE
+DIRECTION MATTERS TO THE DETECTOR: USART1's standing transmit request
+moved nothing into a channel reading a RAM cell into RAM and two items
+into one writing TDR (the second into the shift register, then the wire's
+pace), so the detector's channel writes where the owner's channel would.
 
 **Throughput.** 512 words (2048 bytes) memory to memory in 2638 cycles =
 5.15 cycles a word, about 49.7 MB/s at 64 MHz - the two AHB accesses
@@ -667,7 +683,7 @@ peripheral of its own and never sees an interrupt.
 per-byte feed costs nothing.** A kilobyte took 88.97 ms fed byte by byte
 (11510 B/s) and 88.98 ms fed in bulk (11508 B/s), against the 11520 B/s
 115200 8N1 carries: the wire is five hundred times slower than the
-pump, the ring is always full when a block ends, and every
+core feeding it, the ring is always full when a block ends, and every
 block the engine gets is a long one. TIMED AGAINST THE WIRE at the rate
 ASKED - the kilobyte from its first store to TC against 1024 frames of
 ten bits at 115200, which no reader sharing the rate could tell - both
@@ -702,7 +718,7 @@ the seams hold, the accounting agrees. The estimator is
 the tightest thing in the suite, an equality between consecutive
 free-running TIM2 readings taken by the DMA on TIM3's update, so a
 single late request shows as a whole failed verdict. It is recorded
-rather than tuned: whoever next owns this suite has the choice of a
+rather than tuned: whoever next maintains this suite has the choice of a
 tolerance or of finding what is late.
 
 **THE RECEIVE ENGINE AS A RING** (letter `o`). USART1 in single-wire
@@ -735,7 +751,7 @@ board"):
   of the 64, 60 bytes landed with nobody reading, harvesting or
   re-arming, and all 60 read back exact - the ring wrapped the storage by
   itself. The same stimulus on the ONE-SHOT shape (a run to the end of
-  the storage, re-armed by the owner's poll) delivered 22 of the 60: the
+  the storage, re-armed by a poll) delivered 22 of the 60: the
   run ended with the storage, the receiver's FIFO and RDR took a few
   more, and ORE stood over the rest.
 - **A consumer a lap behind is told and the stream goes on.** 80 bytes
@@ -744,7 +760,7 @@ board"):
   no ORE: the silicon lost nothing, the consumer did.
 - **The edge comes from the vectors** over a ring nobody publishes into:
   the line's IDLE tells once for bytes landing on a ring the consumer had
-  drained, an owner's `harvest()` asked after it hears nothing new, a
+  drained, a `harvest()` asked after it hears nothing new, a
   consumer that has not drained is not told again, the next byte after a
   drain is an edge again.
 - **What a harvest costs**, best of eight on the ruler with the ruler's
@@ -951,13 +967,14 @@ periods, rising moves 10 words, falling 10, both 20.
 
 ## On the STM32G071RB
 
-`test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **76/76** against the G0B1RE's 80, the four missing
-verdicts being the two the part cannot have and the two that skip with
-them; letter `o`'s circular receive, letter `r`'s released requesters
-gated, cleared and live (rows B to E; row A, the reset at `init()`, is
-owed a run there) and, outside `z`, letters `p`, `q` and `u` pass there as
-on the bigger part (the receive FIFO's kick fired on this die too - [usart.md](usart.md)):
+The three images are built for the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and not run there in this form; one `z` of each gives today's
+count (the gap list). Run as one image before the split, the suite scored
+76 of 76 there against the G0B1RE's 80 of the same run, the missing four
+being the two verdicts the part cannot have and the two that skip with
+them, and letters `o`, `p`, `q` and `u` passed, the receive FIFO's kick
+firing on this die too, with the copy pair then on channels 1 and 2
+([usart.md](usart.md)):
 
 - **There is ONE controller.** `dma_present(2)` is false, so `Dma<2>` and
   `DmaChannel<2, n>` do not compile there at all and DMA1's seven channels
@@ -1071,13 +1088,14 @@ the transports' own verbs (letter `r` stages each requester's release and
 `init()` at the register level, in the order the transports take them -
 read in their code; a run that releases an engined transport mid-block
 and initializes it again, its next block judged at both ends, would
-measure the verbs themselves). On the STM32G031K8,
-letter `o`, letter `h`'s rate verdict on the interrupt console, and
-letters `p` and `q` (built for it, the board not on the desk; one run of
-the suite measures them - the console has no engines
-there, so `p` and `q` skip by name). On the STM32G071RB and the
-STM32G031K8, letter `r` with the reset at `init()` (one run of each
-part's first image measures it), and 10.4.5's peripheral-to-peripheral transfer: the leg is
+measure the verbs themselves). On the STM32G031K8, letter `o` and letter `h`'s rate verdict on the
+interrupt console, built and with no board here (one run of the suite
+measures them); letters `p` and `q` skip by name there, the console having
+no engines. On the STM32G071RB, the three images as they stand, letter `r`
+with the reset at `init()` and letters `p` and `q` with the pair on
+channels 4 and 5 (one run of each image measures them). On the STM32G031K8
+too, letter `r` (one run of its first image). On both, 10.4.5's
+peripheral-to-peripheral transfer: the leg is
 arranged over TIM6's update moving TIM3's compare into TIM4's, and those
 parts have no TIM4 (the STM32G031K8 no TIM6 either), so it skips by name
 there; rearranging it over the timers they have would measure it.

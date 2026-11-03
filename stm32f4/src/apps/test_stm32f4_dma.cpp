@@ -919,8 +919,8 @@ void tj_transfer_error() {
                   "is unreachable",
                   taken);
     print(serial, "  the enable answered ", up ? "true" : "false",
-          " - whether the stream is already dead when the read-back sees it is a race "
-          "the core clock decides", crlf);
+          " - it stores EN and reads nothing back, so it says nothing of the block",
+          crlf);
     bench.verdict("an address no DMA master reaches raises TEIF",
                   (flags & DmaFlag::transfer_error) != 0u);
     bench.verdict("and the hardware clears EN with it", !still_enabled);

@@ -264,6 +264,8 @@ A table played by hardware, with no CPU in the loop:
 ```cpp
 using DacStream = brio::DmaTxEngine<1, 5, 7, uint32_t>;   // DAC1's own cell
 static_assert(brio::Dac::engine_placed<DacStream>(0));
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 5>,
+                              brio::DmaOwner<brio::DmaPeriph::dac, 1, brio::DmaSignal::tx>>);
 static const uint32_t table[8] = { /* ... */ };
 
 brio::DacChannelConfig cfg{};

@@ -132,8 +132,8 @@ tx_size, TxEngine, RxEngine, opts>` the task, the vocabulary
 `IrdaConfig`, `SmartcardConfig`, `UsartSyncConfig`, `UsartFlag`, the
 divisor arithmetic), over the reserve's instance facts
 (`stm32f4/device_tables.hpp`, the table of what each part has, read
-off the device header), with the engine slots filled from
-[dma.md](dma.md) (`stm32f4/dma_engine.hpp` the empty slot's tag). The
+off the device header), with the engine parameters filled from
+[dma.md](dma.md) (`stm32f4/dma_engine.hpp` the empty parameter's tag). The
 family fixture is `test/family_stm32f4/usart.cpp` with the negatives
 that refuse an absent instance, flow control on a UART, an engine off
 the instance's cells of the request mapping, an engine on a part class
@@ -327,8 +327,8 @@ TX and RX inside the chip and leaves the RX pad alone.
   starting the ring's next run - so the decision is masked: the ring's
   run read and the engine's test-and-set, twelve instructions in the
   listing. The block start (four stores and one read of the stream,
-  dma.md) runs with interrupts on, because a claimed stream is not
-  running and cannot complete under it.
+  dma.md) runs with interrupts on, because a stream the run-time `claim()`
+  took is not running and cannot complete under it.
 - WITH A RECEIVE ENGINE THE RECEIVE RING IS THE STREAM'S. The engine
   runs in its circular shape over the whole receive storage, bound once
   at `init()` and never re-armed (dma.md), and the consumer verbs -
@@ -382,7 +382,7 @@ TX and RX inside the chip and leaves the RX pad alone.
   lost to either: they bound the COUNTS.
 - `harvest()` IS THE SAME GATE FROM THE CONSUMER'S SIDE: true when the
   ring holds bytes and the consumer has found it empty since the last
-  true, from a vector or from here - so an owner that still asks is told
+  true, from a vector or from here - so a program that still asks is told
   nothing twice. It reads neither SR nor DR, and it binds again a stream
   a transfer error stopped (as every read verb does: the restart is the
   consumer's, the view being its).
@@ -491,7 +491,7 @@ verbs on the same instance.
 - The engined console (`test_stm32f4_dma` letters l, m, n and u, the
   F446's USART2 on DMA1 streams 6 and 5): 575 bytes leave through the
   transmit stream in 50 ms where the line's own time is 49, no block
-  thrown away. A block start masks the claim alone - from the `cpsid` to
+  thrown away. A block start masks the run-time `claim()` alone - from the `cpsid` to
   the `msr PRIMASK` twelve instructions, the ring's indices, the engine's
   flag and its store - where the whole stream start ran masked before,
   some 650 cycles of interrupt latency on the first byte of every run.
@@ -585,8 +585,7 @@ and under a critical section, where PRIMASK is set and IPSR still zero.
 **The cost** (`bench_stm32f4` letter u on the same loop; each line raw,
 the instrument's 4 cycles a stamp pair in every isr): the receive engine
 takes 2 USART interrupts a burst and 1 stream interrupt a half lap; a
-16-byte burst at 115200 costs 1702 busy cycles (the BEFORE, the owner's
-poll a tick, 1716 and the edge 0.51 ms after the last stop bit), the
+16-byte burst at 115200 costs 1702 busy cycles (the BEFORE, a poll a tick, 1716 and the edge 0.51 ms after the last stop bit), the
 edge comes 15904 cycles after it (1.0 frame), 2000 at 1 Mbaud (1.1),
 508 at 5.625 Mbaud (1.6, the handler's 197 cycles six tenths of a frame
 there). The interrupt receiver is one entry a byte, 90 cycles each; at

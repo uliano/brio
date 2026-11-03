@@ -16,14 +16,14 @@ guessable from a neighbour's (verify on st.com before citing).
 
 | Document | Number / revision of record | File name here | Notes |
 |----------|-----------------------------|----------------|-------|
-| STM32G0x1 reference manual | **RM0444 Rev 6** (December 2024) | symlink to `~/Documenti/Elettronica/STM32/STM32G0/rm0444-*.pdf` | the whole x1 line (G031/041/051/061/071/081/0B1/0C1); the x0 value line is RM0454 (same peripherals minus a few) |
-| STM32G0B1xB/xC/xE datasheet | **DS13560 Rev 5** (June 2024) | symlink to `.../stm32g0b1ce.pdf` | pinout, alternate-function tables 13..24 (the AF numbers no header carries), electrical characteristics |
-| STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | symlink to `.../es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
-| STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | symlink to `.../es0418-*.pdf` | the STM32G071RB's (the Nucleo-G071RB, revision B); READ AT THE BENCH - see "STM32G071RB: its errata read at the bench" below |
+| STM32G0x1 reference manual | **RM0444 Rev 6** (December 2024) | `rm0444-*.pdf` | the whole x1 line (G031/041/051/061/071/081/0B1/0C1); the x0 value line is RM0454 (same peripherals minus a few) |
+| STM32G0B1xB/xC/xE datasheet | **DS13560 Rev 5** (June 2024) | `stm32g0b1ce.pdf` | pinout, alternate-function tables 13..24 (the AF numbers no header carries), electrical characteristics |
+| STM32G0B1xB/xC/xE device errata | **ES0548 Rev 3** (October 2022) | `es0548-*.pdf` | silicon revisions A (REV_ID 0x1000) and Z (0x1001) in one document with a per-item column each |
+| STM32G071x8/xB device errata | **ES0418 Rev 5** (November 2023) | `es0418-*.pdf` | the STM32G071RB's (the Nucleo-G071RB, revision B); READ AT THE BENCH - see "STM32G071RB: its errata read at the bench" below |
 | STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the STM32G031K8's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
-| STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | symlink to `.../es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the STM32G031K8's (the Nucleo-G031K8, revision Y); READ AT THE BENCH against the letters - see "STM32G031K8: ES0487 read against the letters" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
-| Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
-| STM32 Nucleo-64 boards (MB1360) user manual | **UM2324 Rev 5** (July 2024) | symlink to `.../um2324-stm32-nucleo64-boards-mb1360-stmicroelectronics.pdf` | the Nucleo-G0B1RE's and Nucleo-G071RB's board: the Arduino and morpho connectors (table 12 for the Arduino pins; the morpho map is a FIGURE, and it differs from the MB1136's of the Nucleo-F446RE), the solder bridges, the ST-LINK's virtual COM port |
+| STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | `es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the STM32G031K8's (the Nucleo-G031K8, revision Y); READ AT THE BENCH against the letters - see "STM32G031K8: ES0487 read against the letters" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
+| Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | `an5096-*.pdf` | decoupling, clocks, boot pins |
+| STM32 Nucleo-64 boards (MB1360) user manual | **UM2324 Rev 5** (July 2024) | `um2324-stm32-nucleo64-boards-mb1360-stmicroelectronics.pdf` | the Nucleo-G0B1RE's and Nucleo-G071RB's board: the Arduino and morpho connectors (table 12 for the Arduino pins; the morpho map is a FIGURE, and it differs from the MB1136's of the Nucleo-F446RE), the solder bridges, the ST-LINK's virtual COM port |
 
 Canonical URLs (redirect to the current revision):
 `https://www.st.com/resource/en/reference_manual/rm0444-stm32g0x1-advanced-armbased-32bit-mcus-stmicroelectronics.pdf`,

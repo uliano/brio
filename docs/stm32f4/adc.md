@@ -384,6 +384,8 @@ A sequence of four channels into memory, which is what the DMA is for:
 ```cpp
 using AdcStream = brio::DmaRxEngine<2, 0, 0, uint16_t>;   // ADC1's own cell
 static_assert(Adc1::engine_placed<AdcStream>());
+static_assert(brio::dma_claim<brio::DmaSlotId<2, 0>,
+                              brio::DmaOwner<brio::DmaPeriph::adc, 1, brio::DmaSignal::rx>>);
 static const uint8_t seq[4] = {4, 5, 17, 18};
 static uint16_t block[4];
 

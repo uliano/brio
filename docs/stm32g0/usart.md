@@ -75,7 +75,7 @@ one-register transport on the G031.
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does; the types and verbs; how to use it; what
 the default buys and an option costs; the receive side; the two DMA
-engine slots; the bench findings, most of the page; what the two
+engine parameters; the bench findings, most of the page; what the two
 smaller parts change; the peer firmware a far board's suite drives; what
 is not covered.
 
@@ -524,7 +524,7 @@ being the ring's `waiting()`, which writes nothing and so is a vector's
 to ask while the consumer holds a run. The consumer sets its "looked"
 flag before it looks and clears it when the look found bytes, so a byte
 landing between the two is reported twice at worst and never not at
-all. `harvest()` stays public and idempotent; no owner polls it.
+all. `harvest()` stays public and idempotent; nothing needs to poll it.
 
 **THE COST**, counted in the release listing and measured with
 `bench_stm32` letter `u` on the Nucleo-G0B1RE at 64 MHz (USART1's single
@@ -561,7 +561,7 @@ receiver 1.06 frames at 115200 (the time-out's ten bits, its two
 samples and the entry), and at 1 Mbaud the tail taken by the level's
 own entry before the stop bit has ended; the engine's IDLE 1.06 frames
 at 115200 and 1.40 at 1 Mbaud. Before this shape the engine's edge was
-its owner's poll - 4.4 and 15 frames on a 1 ms tick - and the
+a poll - 4.4 and 15 frames on a 1 ms tick - and the
 one-register receiver's every character.
 
 **`tx_idle()` is the wire's**: the ring empty, no transmit block in
@@ -594,17 +594,17 @@ the last stop bit at 115200 and 1.34 at 1 Mbaud (its transmit-complete
 callback the reference), brio's engine 1.06 and 1.40: the same edge,
 within the instrument's own reach.
 
-## The two optional DMA engine slots
+## The two optional DMA engine parameters
 
 `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` takes a
 `stm32g0/dma.hpp` `DmaTxEngine` and/or `DmaRxEngine`; both default to
 `NoDmaEngine`, which is a TAG and not a base class - `present` is all the
 task asks about and it asks with `if constexpr`. It lives in
 `stm32g0/dma_engine.hpp`, a file of two lines and a paragraph, and NOT
-in `dma.hpp`: that separation is the whole point of an optional slot,
+in `dma.hpp`: that separation is the whole point of an optional parameter,
 since a driver with one must not include the DMA driver or every program
 with a console (or a bus) would carry the controller. Two headers need
-the same tag - this one and `stm32g0/spi.hpp`, which has two slots of
+the same tag - this one and `stm32g0/spi.hpp`, which has two parameters of
 its own - and neither is the other's natural home, so it belongs to
 neither. `uart_engines_distinct()` lives here.
 
@@ -672,7 +672,7 @@ neither. `uart_engines_distinct()` lives here.
   platform's guard - seven instructions - and programs the channel
   unmasked: a free engine has no block in flight, so no completion,
   error or `consume()` can run under the five stores
-  ([dma.md](dma.md), "Two moments"). A claim that finds the ring empty
+  ([dma.md](dma.md), "Two moments"). A `claim()` that finds the ring empty
   is given back.
 - **In FIFO mode** - the default where the instance has one - the two
   requests are TXFNF and RXFNE (33.5.19's two notes): still one request
@@ -1045,7 +1045,7 @@ RTC's wake-up timer as the backstop:
 
 **A RECEIVE FIFO BEHIND A STARVED CHANNEL CAN WEDGE, AND IT IS THE
 SILICON.** Measured on the STM32G0B1RE (revision Z) with USART2's ring on
-DMA1's channel 7 and two memory-to-memory copies on channels 4 and 5 -
+DMA1's channel 7 and two memory-to-memory copies on channels 1 and 2 -
 the pair alternating with each other (RM0444 10.4.4) and the ring ranked
 below them: after a starvation of a little over one character time - two
 entries queued - the receiver can stop for good. RXFNE stands with one to
@@ -1063,6 +1063,9 @@ number, starved by number or by level) was measured shared or harmless.
 Neither ES0548 Rev 3 nor ES0418 Rev 5 lists it. How often a starvation
 wedges depends on the cycle at which the grant comes back - 0 to 17 % of
 the episodes for one length, moved by a few cycles of the copies' launch.
+This paragraph and the next table are measured facts of the silicon, taken
+with registers read by hand under that staging; no suite letter reprints
+them.
 
 What releases a wedge, and what does not:
 
@@ -1095,26 +1098,31 @@ staying dead. A healthy stream never kicks - the channel empties the FIFO
 within a few bus cycles of each character.
 
 Measured, the ring told `rx_priority = low` so the pair starves it for
-real (letter `q`, the host as the sender through the ST-LINK's bridge,
-two copies launched together every 5 ms, a 2.5 s window each, every byte
-of the xorshift stream judged with gaps located and measured):
+real (letter `q`, ten runs on the STM32G0B1RE, the host as the sender
+through the ST-LINK's bridge, two copies launched together on channels 4
+and 5 every 5 ms, 500 or 501 pairs in each 2.5 s window, every byte of the
+xorshift stream judged with gaps located and measured; a kick count
+saturates at 255 a leg, and the host's pump decides the bytes sent):
 
-| baud, pair | longest starvation | STM32G0B1RE | STM32G071RB |
-|---|---|---|---|
-| 115200, 2 x 2048 B | 2.6 characters | 23104 bytes in sequence, 0 kicks | 23104 in sequence, 0 kicks |
-| 921600, 2 x 256 B | 4.3 characters | 153180 in sequence, 27 kicks | 146280 in sequence, 29 kicks |
-| 921600, 2 x 512 B | 6.8 to 7.2 characters | 153180 in sequence, 223 kicks | 146740 in sequence, 90 kicks |
-| 921600, 2 x 2048 B | 22 characters | 401 gaps of 2715 bytes, every one counted (`rx_skips()` 2715), the stream in sequence to its end | 401 gaps of 2584 bytes, `rx_skips()` 2584, in sequence to its end |
-| 921600, no copies, after | - | 153180 in sequence | 146280 in sequence |
+| baud, pair | longest starvation | bytes and kicks over the ten runs |
+|---|---|---|
+| 115200, 2 x 2048 B | 2.6 characters | 23040 to 23104 bytes in sequence, 0 or 1 kick |
+| 921600, 2 x 256 B | 3.7 to 4.3 characters | 137080 to 158700 in sequence, 22 to 36 kicks |
+| 921600, 2 x 512 B | 6.8 to 6.9 characters | 146740 to 158700 in sequence, 77 to 114 kicks |
+| 921600, 2 x 2048 B | 21.8 to 22.2 characters | 397 to 402 gaps of 2696 to 2988 bytes, each run's bytes lost equal to its `rx_skips()`, the stream in sequence to its end |
+| 921600, no copies, after | - | 149960 to 158700 in sequence, no kick |
 
-A kick at 4.3 characters is a wedge cured: that starvation alone queues
-five entries, short of the seven RXFT watches and with no IDLE inside a
-continuous stream. The same board without the kick, the oracle's
-measurement on the STM32G0B1RE: 28 of 992 frames delivered at 921600 with
-a 256-byte pair, the receiver dead at the end; with the FIFO off, 580 of
-993. With the ring at its default `very_high` the pair starves nothing
-(letter `p`: 115200 with a 2 KB pair, 921600 with 512 B and 2 KB pairs -
-every byte in sequence, no overrun, no kick, on both boards).
+A kick at 3.7 characters is a wedge cured: that starvation alone queues
+four entries, short of the seven RXFT watches and with no IDLE inside a
+continuous stream. The same board without the kick, with the pair on
+channels 1 and 2 and the oracle's measurement: 28 of 992 frames delivered
+at 921600 with a 256-byte pair, the receiver dead at the end; with the FIFO
+off, 580 of 993. On the STM32G071RB, the pair on those channels too, the
+same four legs gave 29 and 90 kicks at 256 B and 512 B and 401 gaps of 2584
+bytes, all counted; letter `q` has not run there with the pair on 4 and 5.
+With the ring at its default `very_high` the pair starves nothing (letter
+`p`, ten runs on the STM32G0B1RE: 115200 with a 2 KB pair, 921600 with 512 B
+and 2 KB pairs - every byte in sequence, no overrun, no kick).
 
 WHAT THE KICK COSTS, read in the release listing of `test_stm32_dma`'s
 USART2 vector: an entry that does not kick pays a literal load, a mask

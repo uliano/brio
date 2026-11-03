@@ -157,13 +157,13 @@ takes** - the inventory every cost below is read against:
 | NBYTES with AUTOEND (32.4.9) | yes | one CR2 store starts a tenure and the hardware NACKs a read's last byte and sends the STOP; the tenure's frame costs no interrupt but the STOPF |
 | TC with AUTOEND clear (32.4.9, 32.9.2) | yes, for a write-then-read alone | the repeated START is the CR2 store at TC; every other shape never raises TC and its enable stays down |
 | RELOAD and TCR past 255 bytes (32.4.9) | resource only | the Request's lengths are eight bits on every target (below, "Not covered yet") |
-| one TXDR and one RXDR, no FIFO (32.9.10, 32.9.11) | the silicon's | one interrupt per data byte is this block's pump; the DMA engines below carry a longer run |
+| one TXDR and one RXDR, no FIFO (32.9.10, 32.9.11) | the silicon's | one interrupt per data byte, called the pump on this page; the DMA engines below carry a longer run |
 | the first byte written before the START (TXE stands at rest, 32.9.7) | yes | the TXIS for that byte never rises (the TXIS events count NBYTES, 32.4.9): a one-byte write is the STOPF alone, the vendor's library does the same |
 | a TXDR flush by writing TXE (32.9.7) | yes, at every start() with a write half, whichever engine fills it | without it a byte an unanswered address left in TXDR goes out first: on the pump it refuses the preload (32.9.11) and is sent in the preloaded byte's place; on the engines it is sent ahead of the block, whose last byte is then never sent (measured, below) |
 | the last byte of a read left in RXDR | yes | nothing follows it - the controller NACKs it and stops under AUTOEND - so RXIE goes down after the second-to-last and the STOPF entry reads it: a one-byte read is one interrupt |
 | NACKIE (table 181) | declined | a STOP follows every NACK by itself (32.4.9), so the STOPF entry reads NACKF from the status register and one entry serves a refused tenure |
 | the six enables at their flags' bit positions (table 181, 32.9.7) | yes | the pending mask is CR1 masked and shifted, no test per enable |
-| TXDMAEN and RXDMAEN (32.7) | yes, two engine slots | the program names the engine per request, one compare at `start()` (`Request::engine`, below): under `dma` every half with a buffer rides a channel at any length, one byte included, and takes no data interrupt; a half with no buffer stays on the pump |
+| TXDMAEN and RXDMAEN (32.7) | yes, two engine parameters | the program names the engine per request, one compare at `start()` (`Request::engine`, below): under `dma` every half with a buffer rides a channel at any length, one byte included, and takes no data interrupt; a half with no buffer stays on the pump |
 | the independent kernel clock, the Fm+ drive, the wake, SMBus, the PEC, both filters | yes, measured (below) | none of them bears on a transfer's cost but the filters' share of the SCL period |
 
 ## Types and verbs
@@ -216,7 +216,7 @@ same.
 `spurious_bus_errors()`. A tenure writes its interrupt and DMA enables
 in one store at `start()` and puts them back to ERRIE alone at its end,
 so nothing one tenure armed or dropped reaches the next. The two DMA
-engine slots default to `NoDmaEngine` and every DMA branch folds away,
+engine parameters default to `NoDmaEngine` and every DMA branch folds away,
 and `has_dma` says which a host is. Named, they carry the data of a
 tenure (32.7: the address cannot be moved by DMA) when the Request says
 so in `engine`, and the host never chooses: `interrupt`, the default,
@@ -960,8 +960,8 @@ prices an 8-byte tenure at the 16 ms the model predicts.
 
 **A rule of the suite about the vector and not the wire**, shared with the
 SPI suite: a peer command re-inits the host, which hands
-I2C1's vector back to the suite's bare pump, so an arbiter that owned it must
-re-state its claim afterwards or every later completion is consumed by
+I2C1's vector back to the suite's bare pump, so an arbiter that held it must
+take it again afterwards or every later completion is consumed by
 the wrong branch and answered `i2c_timeout` on a tenure that ran
 perfectly.
 
@@ -1173,8 +1173,8 @@ Driver gaps:
   `host_read` to read from this board's target. Born with the first util
   target object.
 
-- **No client DMA slots.** `I2cClient` has none, as `SpiClient` has
-  none, and a slot waits for a device-shaped user. The target
+- **No client engine parameters.** `I2cClient` has none, as `SpiClient`
+  has none, and a pair waits for a device-shaped user. The target
   side of a DMA tenure is therefore not measured at all: letter `h`
   runs the host's two engines against a client on its byte pump, which
   proves the host's half and says nothing about the client's.
@@ -1213,8 +1213,8 @@ Implemented but not bench-verified:
   it rests on what that letter measures of the other three requesters
   ([dma.md](dma.md), "A released requester holds nothing here") - the
   self-link's engined letters pass with the pulse in place. A
-  tenure abandoned mid-block, then released, then followed by the next
-  owner of its request line, would measure it.
+  tenure abandoned mid-block, then released and initialized again, would
+  measure it.
 - **I2C3** - present on the STM32G0B1RE, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
 - **The suite as it stands on the two smaller parts.** It is built for the

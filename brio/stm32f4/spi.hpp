@@ -2025,8 +2025,8 @@ private:
         (void)reset_block();
     }
 
-    /// THE BOUNDED WAIT of a polled transaction, a time derived from the clocks
-    /// and not a count chosen by hand (docs/design/spi-bus.md, "Every bound is a
+    /// THE BOUNDED WAIT of a polled transaction, a count of polls derived from the
+    /// clocks and not one chosen by hand (docs/design/spi-bus.md, "Every bound is a
     /// time"): `frames` and two more at the applied rate, in polls of at least a
     /// cycle each, so a wait ends no sooner than the wire could have; how much
     /// later is the poll's own length (docs/stm32f4/spi.md, the stall's wall).

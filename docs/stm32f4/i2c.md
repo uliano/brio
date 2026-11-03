@@ -58,7 +58,7 @@ program's own completion flag, `volatile` because a handler writes it
 and the loop reads it; `pins` names the two pads with the alternate-function
 number the datasheet gives I2C3's SCL and SDA on them, which nothing in
 the code can check; `Bus` is the host task over I2C3 on those pads, its
-two DMA engine slots left empty, so every byte moves on the interrupt;
+two DMA engine parameters left empty, so every byte moves on the interrupt;
 `init()` takes the clock task's tag (`constexpr SysClock clock;`,
 [clock.md](clock.md)), hands the pads over and solves the two speed
 rows, standard and fast mode, for the APB1 clock; the two `extern "C"`
@@ -194,7 +194,7 @@ cannot keep up):
   and reads N-2, the second sets STOP and reads N-1 and N.
 That is the whole reason the buffer interrupt (ITBUFEN) is switched on
 and off during a tenure: TxE and RxNE reach the vector only while the
-byte pump wants them, and BTF - under ITEVTEN alone - carries the tail.
+interrupt that moves one byte at a time (the pump, on this page) wants them, and BTF - under ITEVTEN alone - carries the tail.
 
 **Up to three instances, two vectors each, all on APB1.** I2C1 and I2C2
 on every part of the family, I2C3 on every one but the F410. Each has
@@ -429,7 +429,7 @@ read, a write-then-read with a repeated START, or the empty probe.
 `engine` names what moves the data, and the host never chooses:
 `interrupt`, the default, the vectors at any length; `dma` the DMA
 engines at any length, one byte included (27.3.8, above), on a host with
-both engine slots named - `has_dma` says so at compile time, and `dma` on
+both engine parameters named - `has_dma` says so at compile time, and `dma` on
 a host without them is answered `i2c_rejected` inside `start()` with
 nothing on the wire. The field sits in the padding after `speed`: the
 Request is 28 bytes with it and without it, a `static_assert` beside it
@@ -1136,7 +1136,7 @@ Implemented, not bench-verified (each with what would measure it):
   Whether a measured case reaches it is not recorded; what would is a
   clock stopped under the block between the two bytes (a client holding
   SCL past the bound), and whether the verdict should then be a timeout
-  rather than a success is the driver owner's open question.
+  rather than a success is open.
 - The 88 kHz workaround for ES0206 2.10.4: the suite reports that a
   100 kHz bus sits inside the errata's window, and every repeated start
   it made succeeded - which is not proof the timing is met, only that

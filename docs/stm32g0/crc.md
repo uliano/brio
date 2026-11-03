@@ -152,6 +152,8 @@ destination FIXED:
 ```cpp
 brio::Crc::configure(brio::crc32_ieee_config);
 using Ch = brio::DmaChannel<1, 1>;
+struct CrcFeed {};                                 // no request paces it: a tag owns the channel
+static_assert(brio::dma_claim<brio::DmaSlotId<1, 1>, CrcFeed>);
 Ch::prepare(brio::DmaTransfer{
     .peripheral = const_cast<uint32_t*>(region),   // the SOURCE, incrementing
     .memory = brio::Crc::data_address(),           // the FIXED destination
