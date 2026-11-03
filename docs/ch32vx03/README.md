@@ -543,21 +543,17 @@ the sweep and the link guard are the only checks there are.
   RxNE for the byte, in silence (the chip's two controllers on one bus,
   the target polled by the core that also serves the host, at every
   count and both speeds); a CH32V203C8T6 target on another board, under
-  a CH32V303VCT6 host, took it in all twelve of the suite's late-START
-  probes, whether it took a standing byte before answering the address
-  or after. Requested while that byte still shifts, as WCH's own
+  a CH32V303VCT6 host, took it in all eight of the suite's late-START
+  probes. Requested while that byte still shifts, as WCH's own
   example does, every byte arrives at both, and that is where the
   engine requests it ([i2c.md](i2c.md)).
 - **An I2C START on a busy bus leaves at the controller's tick, not at
   the STOP.** With SDA held low and SCL standing high, a pending START
-  reaches the wire about 85 us after the edge that made the bus busy,
-  or a multiple of 80 us after that; one set on a free bus, or pending
-  when a STOP frees it, reaches SDA some 5 us later whatever the wire
-  does meanwhile. Two controllers' STARTs meet only where one STOP
-  releases both or the second is set within those 5 us, and a tenure
-  into a line a stuck target holds is answered at once instead of
-  parked (measured on the CH32V303VCT6, a CH32V203C8T6's START on the
-  same beat; [i2c.md](i2c.md)).
+  reaches the wire by itself, and a tenure into such a line is answered
+  `i2c_arb_lost` 170 to 350 us from its `start()` instead of parked. One
+  set on a free bus, or pending when a STOP frees it, leaves within
+  microseconds, so two controllers' STARTs meet only where one STOP
+  releases both ([i2c.md](i2c.md)).
 
 ## Not covered yet
 

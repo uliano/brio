@@ -798,11 +798,12 @@ counted, and the lap's half and full marks are the receive edge, its true
 answer the edge `isr()` gives -, `harvest()` the same edge asked from the
 consumer's side and the ring's restart after an error
 ([usart.md](usart.md)), and `dma_faults()` counts the
-blocks thrown away. A block's start masks interrupts only around the
-transmit engine's run-time `claim()` verb, the busy flag's test-and-set of
-eight instructions, and programs the channel unmasked, no block being in
-flight that could complete under it. An engine is refused on any slot but the instance's
-own, controller and channel, which the request table answers; each
+blocks thrown away. A block's start masks interrupts for a few instructions,
+twice at most: on every start around the ledger's count of working bus
+masters (ch32vx03/bus_activity.hpp), and on the `Uart`'s transmit around the
+engine's `claim()`, the busy flag's test-and-set. It programs the channel
+unmasked, no block being in flight that could complete under it. An engine
+is refused on any slot but the instance's own, controller and channel, which the request table answers; each
 resource publishes its two slots as `dma_tx_slot` and `dma_rx_slot`.
 Without an engine every branch is compiled out: `init()`'s reset leaves
 CTLR3 zero and nothing writes it, a half duplex, RTS or CTS option apart.
@@ -1220,10 +1221,9 @@ they differ each is named.
 counter the ruler, every number in HCLK cycles and the instrument's own
 cost included as the line carries it (a stopwatch is 28 cycles, a stamp
 pair in a vector 79 - the app's letter r). The SPI rows carry the
-transaction's request copy into the host - 130 cycles of a 48-byte `Request`
-and a prologue, measured as the cost of `start()` with nothing to send -
-which is the bus contract's and not the engines'. Three runs of the letter
-printed the same figures.
+transaction's copy of the 48-byte `Request` into the host, which is the bus
+contract's and not the engines', and which the letter does not print apart.
+Three runs of the letter printed the same figures.
 
 | operation | cycles |
 |---|---|
@@ -1247,9 +1247,9 @@ printed the same figures.
   138 cycles of the engine's own - the launch, five stores and the
   ledger's count, and the completion's handler.
 - **The SPI transaction's fixed cost is 517 cycles**, with one interrupt.
-  Less the instrument (28 + one stamp pair of 79) and the request's copy
-  (130), what the engines cost a transaction is 280 cycles - their launch,
-  the receive channel's one completion, both channels stopped. The per-frame
+  Less the instrument (28 + one stamp pair of 79) that leaves 410: the
+  request's copy and what the engines cost a transaction - their launch, the
+  receive channel's one completion, both channels stopped. The per-frame
   cost is the wire's: 256 frames at /4 are 8192 cycles of SCK and the
   block adds nothing per frame.
 - **A 16-bit frame is one 16-bit access**: a 256-frame write of half-words

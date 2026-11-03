@@ -479,9 +479,10 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     // NOT A STOP: a target transmitter's sequence ends in the closing NACK
     // (19.4, figure 19-6's EVT3_2) where a receiver's ends in STOPF (figure
     // 19-7's EVT4, "after the response" in 19.12.6), and a read of eight
-    // closed by NACK and Stop - the flush's PE cycle between the two -
-    // moves this loop's Stop count not at all (measured, test_vx03_i2c
-    // letter d). Nor the moment the count is
+    // closed by NACK and Stop - the flush's PE cycle between the two - is
+    // not on this loop's Stop count (measured over one serve of nine such
+    // tenures and six closed by a plain Stop, seven Stops counted,
+    // test_vx03_rubato_i2c letter o). Nor the moment the count is
     // reached: a transmitter is asked for its bytes ahead of the wire, and
     // a re-init then would take the last one out of DATAR (read as 0xFF).
     // The read that collects the command's ack ends after the action has

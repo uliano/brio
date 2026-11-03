@@ -878,8 +878,8 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * only when it took the block. The one refusal a correct program meets is
  * on the CH32V303's DMA1, ch32vx03/dma.hpp's 64 KB rule: a run across a 64 KB
  * boundary, which a written half kept in flash can be and a read half in SRAM
- * can be on a CH32V303RC or VC whose option bytes give it 96 or 128 KB of SRAM
- * (RM 32.4.6, FLASH_OBR's split). A read of two bytes that falls back has its
+ * can be on a CH32V303RC or VC whose option bytes give it more than 64 KB of
+ * SRAM (RM 32.4.6, FLASH_OBR's split). A read of two bytes that falls back has its
  * POS set before ADDR's clear, which 19.12.1's note asks ("before
  * receiving"); a read of one or of three or more is primed for both paths
  * alike. The host never asks whether its engines are free: their channels

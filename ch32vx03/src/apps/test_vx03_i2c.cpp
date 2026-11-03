@@ -76,10 +76,10 @@
 //      counted by the timer
 //   c  THE PEER: the twi_link command channel, ident, ten round trips
 //   d  the tenure shapes against the peer, the four receive
-//      procedures, the counted serve ending at the STOP of the read that
-//      moved its count, 0x7A and the general call refused inside start()
-//      with nothing on the wire, the repeated START counted at the far
-//      end
+//      procedures, the counted serve ending with the wire at rest after
+//      the read that moved its count, 0x7A and the general call refused
+//      inside start() with nothing on the wire, the repeated START counted
+//      at the far end
 //   e  the vocabulary on the wire (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the speeds against a second chip, each timed on the wire and
@@ -1100,8 +1100,9 @@ void td_shapes() {
                   counts_ok);
 
     // THE COUNTED SERVE (twi_link.hpp's `count`): a serve armed for eight
-    // bytes and a deadline far beyond them must end at the STOP of the read
-    // that moved the eighth - every byte the peer's own, the last one
+    // bytes and a deadline far beyond them must end with the wire at rest
+    // after the read that moved the eighth (twi_peer.cpp's counted exit, not
+    // a STOP) - every byte the peer's own, the last one
     // included, and the peer back in command mode long before its
     // deadline. The bound: the read takes under a millisecond at either
     // speed and the peer's re-init a few more, the poll below looks every
@@ -1144,8 +1145,8 @@ void td_shapes() {
                   hex(rx_buf[7]), "; the peer back in ", back_ms, " ms of its ", deadline_ms,
                   " ms deadline, its count=", cr.count, " stops=", cr.stops, " flags=",
                   hex(cr.flags), crlf);
-            bench.verdict("a COUNTED SERVE ends at the STOP of the read that moved its count: "
-                          "the eight bytes the peer's own, the last included, and the peer "
+            bench.verdict("a COUNTED SERVE ends with the wire at rest after the read that moved "
+                          "its count: the eight bytes the peer's own, the last included, and the peer "
                           "back in command mode well inside half its deadline, not timed out",
                           st == i2c_ok && mism == 0u && back && back_ms < deadline_ms / 2u &&
                               crep && cr.count == 8u &&
