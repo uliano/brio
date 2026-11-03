@@ -1102,7 +1102,7 @@ SRAM (letter r), at 48 MHz:
 | the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 42.3 | 38.8 | the driver's alone | the transaction 696 B |
 | the SPI polled write loop at 12 MHz, a frame | 33.6 | 33.5 | the driver's alone | (above) |
 | a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 632, 923, 2676 | 627, 915, 2652 | the driver's alone | (above) |
-| the I2C event entry at 100 kHz: a written byte, a read one (letter i) | 191, 164 | not offered (183 against 195, 167 against 161) | 118, 104 | - |
+| the I2C event entry: a written byte, a read one (letter i, the same at the three speeds) | 205, 176 | not offered (183 against 195, 167 against 161) | 127, 112 | - |
 
 What the rows say:
 
