@@ -224,6 +224,8 @@ void engines_at(Elem* table, Buf* a, Buf* b) {
     if (Tx::claim() && !Tx::launch(std::span<const Elem>(table, 4))) {
         Tx::unclaim();
     }
+    Tx::mark_busy();
+    (void)Tx::launch(std::span<const Elem>(table, 4));
     (void)Tx::service();
     (void)Tx::complete();
     (void)Tx::busy();

@@ -1063,7 +1063,8 @@ constexpr uint32_t dma_interrupt_enables(DmaInterrupts i) {
  * loop, the completion handler starting the ring's next run) masks
  * claim() - a test-and-set, a dozen cycles - and calls start_claimed()
  * with the mask off: a claimed stream cannot complete under the loader's
- * feet, because it is not running.
+ * feet, because it is not running. mark_busy() is the set without the test,
+ * for an owner whose own state already says no block of its is in flight.
  *
  * DIRECT MODE, NOT THE FIFO. 10.3.12's direct mode is "an immediate and
  * single transfer after each DMA request" with the one datum preloaded,
@@ -1160,6 +1161,13 @@ public:
         return true;
     }
 
+    /// claim()'s second half, the flag set with no test: for an owner that
+    /// knows no block of its is in flight (an I2C host, whose tenures end
+    /// their blocks). A start_claimed() must follow, which takes the flag
+    /// down if it refuses. From the engine's owner, in the one context that
+    /// starts its blocks; it waits for nothing and masks nothing.
+    [[gnu::always_inline]] static void mark_busy() { st_.busy = true; }
+
     /// Start moving `run` - claim() and the block start. The buffer is the
     /// CALLER'S and must stay put until complete() reports the block.
     /// False, and nothing started, when a block holds the stream, the run
@@ -1179,8 +1187,8 @@ public:
         return claim() && launch(run.data(), run.size(), DMA_SxCR_MINC);
     }
 
-    /// The block start on a stream the caller has already claim()ed; the
-    /// claim is given back if the start is refused.
+    /// The block start on a stream the caller has already claim()ed or
+    /// marked busy; the flag is given back if the start is refused.
     [[gnu::always_inline]] static bool start_claimed(std::span<const uint8_t> run) {
         return launch(run.data(), run.size(), DMA_SxCR_MINC);
     }

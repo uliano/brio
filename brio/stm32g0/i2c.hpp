@@ -1913,15 +1913,14 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * empties RXDR "whenever the RXNE bit is set", the NBYTES counter ending
  * the transfer, and neither names a length below which it does not hold. WHAT THE ENGINES CANNOT CARRY IS A HALF
  * WITH NO BUFFER: under either value it stays on the pump, writing its
- * filler or draining what it reads, and the request completes. An engine
- * whose start() refuses (a block still holding its channel) leaves its
- * half to the pump the same way, decided in start() before the START.
- * `dma` on a host with no engines bound is refused, i2c_rejected with
+ * filler or draining what it reads, and the request completes. A channel is
+ * this host's alone (the ownership rule, docs/design/dma.md), so its start
+ * is not asked whether it took. `dma` on a host with no engines bound is refused, i2c_rejected with
  * nothing on the wire (start()).
  *
  * Which to name is the program's judgement, and docs/stm32g0/i2c.md gives
  * the arithmetic: the engines' fixed cost to the core over the pump's,
- * 89 cycles for a write half and 62 for a read half, against the pump's
+ * 79 cycles for a write half and 65 for a read half, against the pump's
  * about 171 a byte past the first, the core's own entry and return
  * included (the pump's first byte of a half takes no interrupt: the
  * write's is preloaded, the read's taken at the STOPF), so a half of two
@@ -2681,9 +2680,13 @@ private:
     /// The halves the engines carry this tenure, started, and the DMA
     /// request enables they need (start() writes them with the rest).
     /// Under `interrupt` none; under `dma` every half with a length and a
-    /// buffer, and a half whose engine refuses its start (a block still
-    /// holding the channel) is the pump's like a half with no buffer -
-    /// the flags below say which, read by start() and the vector.
+    /// buffer - the flags below say which, read by start() and the vector.
+    /// The start's answer is not read: the channel is this host's alone,
+    /// its last block ended with its last tenure (finish(), recover()), and
+    /// a length of one to 255 on a byte buffer is a run every block start
+    /// takes. A program that starts this host's engine by hand has broken
+    /// the ownership rule; its tenure stretches SCL until the arbiter's
+    /// timeout answers.
     [[gnu::always_inline]] static uint32_t launch_dma(I2cEngine e) {
         uint32_t en = 0;
         if constexpr (has_dma) {
@@ -2693,16 +2696,15 @@ private:
                 return en;
             }
             if (t_.rx_len != 0u && t_.rx.get() != nullptr) {
-                rx_dma_ = RxEngine::start(std::span<uint8_t>(t_.rx.get(), t_.rx_len));
-                if (rx_dma_) {
-                    en |= I2cDmaEnable::rx;
-                }
+                (void)RxEngine::start(std::span<uint8_t>(t_.rx.get(), t_.rx_len));
+                rx_dma_ = true;
+                en |= I2cDmaEnable::rx;
             }
             if (t_.tx_len != 0u && t_.tx.get() != nullptr) {
-                tx_dma_ = TxEngine::start(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
-                if (tx_dma_) {
-                    en |= I2cDmaEnable::tx;
-                }
+                TxEngine::mark_busy();
+                (void)TxEngine::launch(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
+                tx_dma_ = true;
+                en |= I2cDmaEnable::tx;
             }
         }
         return en;

@@ -773,13 +773,11 @@ struct I2cHostConfig {
  * gives a one-byte receive its own sequence - ACK cleared before ADDR is
  * cleared, which prime_receive() does at the read's SB for the pump as
  * well, the STOP programmed after ADDR's clear - while CR2.LAST makes the
- * block NACK the last byte of a longer receive run. A phase whose engine
- * refuses its start (a block still holding the stream) stays on the
- * vectors, and the request completes; the refusal is read before that
- * phase's data:
- * the transmit stream's at the ADDR entry, before ADDR's clear, the
- * receive stream's at the read's SB, before the address goes out. Both
- * engines or neither: a write-then-read tenure needs both directions
+ * block NACK the last byte of a longer receive run. A stream is this
+ * host's alone (the ownership rule, docs/design/dma.md), so its start is not
+ * asked whether it took: the transmit stream's comes at the ADDR entry,
+ * before ADDR's clear, the receive stream's at the read's SB, before the
+ * address goes out. Both engines or neither: a write-then-read tenure needs both directions
  * inside one tenure.
  *
  * Which to name is the program's judgement; docs/stm32f4/i2c.md gives
@@ -1127,11 +1125,12 @@ public:
                     return finish(i2c_ok);
                 }
                 if constexpr (has_engines) {
-                    // The stream started first, DMAEN only if it did -
-                    // before the ADDR flag is cleared (24.3.8) - so a
-                    // start the engine refuses leaves the phase to
-                    // EV8_1's pump below, nothing requested.
-                    if (t_.dma && TxEngine::start(std::span<const uint8_t>(t_.tx, t_.tx_left))) {
+                    // The stream started first, DMAEN after it, both
+                    // before the ADDR flag is cleared (24.3.8).
+                    if (t_.dma) {
+                        TxEngine::mark_busy();
+                        (void)TxEngine::start_claimed(
+                            std::span<const uint8_t>(t_.tx, t_.tx_left));
                         t_.tx_dma = true;
                         S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_DMAEN);
                         (void)S::status2();
@@ -1782,13 +1781,15 @@ private:
 
     /// At the read's SB, before the address goes out: under `dma` the
     /// receive stream started on the read phase's buffer, the stream
-    /// waiting for DMAEN (raised at ADDR, begin_receive()). A start the
-    /// engine refuses (a block still holding the stream) leaves the phase
-    /// to the vectors, decided before prime_receive() sets ACK and POS for
-    /// the one or the other.
+    /// waiting for DMAEN (raised at ADDR, begin_receive()). The start's
+    /// answer is not read: the stream is this host's alone, and its last
+    /// block ended with its last tenure.
     [[gnu::always_inline]] static void launch_rx() {
         if constexpr (has_engines) {
-            t_.rx_dma = t_.dma && RxEngine::start(std::span<uint8_t>(t_.rx, t_.rx_len));
+            if (t_.dma) {
+                (void)RxEngine::start(std::span<uint8_t>(t_.rx, t_.rx_len));
+                t_.rx_dma = true;
+            }
         }
     }
     /// A tenure ended by an error: an engine block this tenure started and
@@ -1796,8 +1797,7 @@ private:
     /// a block: an idle stream needs nothing, and rebinding one waits for
     /// its EN and writes three registers (a NACKed probe took 573 cycles
     /// through the error vector with the rebinding unconditional,
-    /// measured); and a stream whose start this tenure was refused holds a
-    /// block that is not this host's to stop.
+    /// measured).
     static void put_engines_away() {
         if constexpr (has_engines) {
             if (t_.tx_dma) {   // started in the ADDR entry

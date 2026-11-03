@@ -372,6 +372,8 @@ void engine_verbs() {
     (void)Tx::start_fixed(&cell, 4);
     (void)Tx::claim();
     (void)Tx::start_claimed(std::span<const uint8_t>(buffer));
+    Tx::mark_busy();
+    (void)Tx::start_claimed(std::span<const uint8_t>(buffer));
     (void)Tx::complete();
     (void)Tx::busy();
     (void)Tx::in_flight();

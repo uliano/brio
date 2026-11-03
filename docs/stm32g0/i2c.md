@@ -225,9 +225,9 @@ engines at any length, one byte included - 32.7.1 loads TXDR whenever
 TXIS is set and 32.7.2 empties RXDR whenever RXNE is, with no length below
 which either does not hold. The one half the engines do not carry is a
 half with no buffer, which stays on the pump under `dma` too, writing its
-filler or draining what it reads, and the request completes; a channel
-whose start refuses (a block still holding it) leaves its half to the
-pump the same way, decided in `start()` before the START. `dma` on a host
+filler or draining what it reads, and the request completes. A channel
+is this host's alone ([../design/dma.md](../design/dma.md), the ownership
+rule), so `start()` does not ask it whether it started. `dma` on a host
 with no engines is refused like the address above (`i2c_rejected`,
 nothing on the wire). Which to name is the program's: "Which engine, by
 the cycles" below gives the length from which `dma` costs the core fewer
@@ -359,13 +359,13 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 217 verdicts
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 215 verdicts
 in two sets, `z` green in three runs, `w` in three and letter `u` in ten
 (the letters named below are the suite's console keys, each the group of
 verdicts it runs). The findings down to
 "ES0548 2.10.2 did not fire once" are the self-link's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
-letters `a`..`m` and `u`, **182 verdicts**. The ones under "The peer bus" are a
+letters `a`..`m` and `u`, **180 verdicts**. The ones under "The peer bus" are a
 second chip's, the STM32F446RE running `twi_peer` on the same two nodes:
 the second all-key `w`, letters `n`..`t`, **35 verdicts**.
 
@@ -656,11 +656,11 @@ the HAL's TIMINGR words solved against the manual's budgets:
   the engineless host: the tenure copies the five fields its entries read
   and not the whole Request, and the CR2 word is built inline. The
   engined host's `start()`, timed the same way under "Which engine"
-  below, is 363 or 364 cycles naming `interrupt` and 426 to 434 naming
-  `dma`. The 71 cycles it adds under `interrupt` are its own code and not
+  below, is 351 or 352 cycles naming `interrupt` and 403 to 424 naming
+  `dma`. The 59 cycles it adds under `interrupt` are its own code and not
   the instrument's, which is the same ruler read in both: the engine
   field's compares, the two engine flags cleared, and a function about
-  twice the engineless one's size (604 bytes against 316 in this image)
+  twice the engineless one's size (588 bytes against 316 in this image)
   that keeps more of its state on the stack.
 - **The engines' fixed cost** is measured whole under "Which engine, by
   the cycles" below. On the wire a 255-byte write or read through them
@@ -714,14 +714,14 @@ at 100 kHz, 400 kHz and 1 MHz, to the cycle:
 
 | half | `interrupt`: start + vector (entries) | `dma`: start + vector (entries) | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 363 + 294 (1) | 426 + 320 (1) | +89 |
-| write 2 | 364 + 472 (2) | 426 + 320 (1) | -90 |
-| write 3 | 364 + 650 (3) | 426 + 320 (1) | -268 |
-| write 16 | 364 + 2964 (16) | 426 + 320 (1) | -2582 |
-| read 1 | 340 + 323 (1) | 429 + 296 (1) | +62 |
-| read 2 | 346 + 506 (2) | 434 + 296 (1) | -122 |
-| read 3 | 346 + 684 (3) | 434 + 296 (1) | -300 |
-| read 16 | 346 + 2998 (16) | 434 + 296 (1) | -2614 |
+| write 1 | 351 + 297 (1) | 403 + 324 (1) | +79 |
+| write 2 | 352 + 475 (2) | 403 + 324 (1) | -100 |
+| write 3 | 352 + 653 (3) | 403 + 324 (1) | -278 |
+| write 16 | 352 + 2967 (16) | 403 + 324 (1) | -2592 |
+| read 1 | 325 + 326 (1) | 418 + 298 (1) | +65 |
+| read 2 | 332 + 509 (2) | 424 + 298 (1) | -119 |
+| read 3 | 332 + 687 (3) | 424 + 298 (1) | -297 |
+| read 16 | 332 + 3001 (16) | 424 + 298 (1) | -2611 |
 
 On this block the engines cost the core fewer cycles than the pump from
 the smallest length N where E - F <= (N - 1) x b ([the I2C bus design
@@ -731,9 +731,9 @@ byte, and N - 1 because a half's first byte takes the pump no interrupt -
 the write's is preloaded, the read's taken at the STOPF.
 
 - **E - F** is the one-byte row, one entry on each side, so the stamps
-  cancel: **89 written** (63 at `start()`, the channel's program over the
-  preload; 26 at the STOPF, completing the transmit engine) and **62
-  read** (89 at `start()`; -27 at the STOPF, the pump's last byte no longer
+  cancel: **79 written** (52 at `start()`, the channel's program over the
+  preload; 27 at the STOPF, completing the transmit engine) and **65
+  read** (93 at `start()`; -28 at the STOPF, the pump's last byte no longer
   read there).
 - **b** is the slope of this engined host's pump, 178 cycles written and
   178 read between the stamps (the engineless host's 169 and 176 above
@@ -748,16 +748,16 @@ the write's is preloaded, the read's taken at the STOPF.
   figures on the desk), the return unstacks the same eight words, and
   this flash adds two wait states to the vector's fetch. So b is **about
   171 both ways**, and 136 at the least.
-- **So N = 2 in both directions, at every speed**: 89 <= 171 and 62 <= 171
-  at N - 1 = 1, and still with b at its least, 136 (the rows' -90 and -122
+- **So N = 2 in both directions, at every speed**: 79 <= 171 and 65 <= 171
+  at N - 1 = 1, and still with b at its least, 136 (the rows' -100 and -119
   measure the same with the meter's extra stamp in them). A half of one
-  byte costs the core 89 or 62 cycles more on the engines; any longer
+  byte costs the core 79 or 65 cycles more on the engines; any longer
   half costs it fewer, and the saving grows by about 171 cycles with
   every byte past the second. A
   channel's two bus beats a byte are not in E: the core sleeps through
   them, and a running program would lose a few cycles of contention at
-  most, against the slack between b and E - F - 171 - 89 = 82 cycles
-  written, 171 - 62 = 109 read - that the choice at two bytes has.
+  most, against the slack between b and E - F - 171 - 79 = 92 cycles
+  written, 171 - 65 = 106 read - that the choice at two bytes has.
 - **The speed changes neither figure.** The pump does not stretch at the
   top rung: SCL stretches only when TXDR is still empty or RXDR still full
   a whole byte after TXIS or RXNE rose (32.4.7), which at 64 MHz is at
@@ -809,10 +809,7 @@ a write and a read of two, 2 entries and no channel; `interrupt` on 64
 bytes both ways, 64 entries; `dma` on one byte both ways and on a register
 read of one and one, both channels started, the STOPF (and the TC) alone;
 `dma` on a write and a read with no buffer, the pump's filler and drain, 3
-entries each; and `dma` with the transmit engine held by a block of the
-letter's own (started on its channel, its request never raised), which
-`start()` finds busy: the write of four on the pump, 4 entries, the
-channel still naming the holder, byte-exact. The refusal is judged on the engineless host with
+entries each. The refusal is judged on the engineless host with
 the Request naming the client's own address, so anything on the wire would
 raise ADDR at the client within 28 us (a START and nine periods at the
 slowest rate letter `d` reads at this speed): over 400 us, no address match,
@@ -986,10 +983,10 @@ store that carries START, so a dispatch above the arbiter that lands in
 it delays the START: a gap between tenures. Inside a tenure every byte
 decision is the vector's, and a late vector is a held SCL (32.4.8,
 32.4.9). Letter `x` counts it on 400 writes of 16 bytes on the engines:
-`start()` takes 435 cycles with TIM14 silent, the suite's naming of the
+`start()` takes 429 cycles with TIM14 silent, the suite's naming of the
 engine (below) included; under 97 us x 3000 the interrupt landed inside
 it 0 times in each of three runs, against the 28 that independent ticks
-would give (400 x 435 / 6208). Nothing the thread does after the START
+would give (400 x 429 / 6208). Nothing the thread does after the START
 store, `start()`'s last register write with the engines armed before
 it, can reach the wire: the tenure on the wire is the vector's from its
 first bit.

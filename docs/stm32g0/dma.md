@@ -256,7 +256,9 @@ a start into three verbs: the run-time `claim()`, a test-and-set of
 `busy()` that takes the engine for one block (nothing to do with the
 compile-time claim of "One owner a channel"); `launch(span)`, the five
 stores; and `unclaim()`. `start()` is the three together, for a driver
-with one starting context. The USART's `pump_tx()` holds its guard around
+with one starting context; `mark_busy()` is the flag alone, for an owner
+whose own state says no block of its is in flight (the I2C host, whose
+tenures end their blocks). The USART's `pump_tx()` holds its guard around
 `claim()` alone - seven instructions - and launches unmasked: a free
 engine has no block in flight, so no completion can run under the
 programming.

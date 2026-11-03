@@ -64,11 +64,16 @@
 //      a write-then-read at 100 and 400 kHz, the same through the DMA
 //      engines, the engine each Request names judged on the streams (a
 //      write and a read of one under `dma`, `interrupt` on the engined
-//      host touching no stream, a stream that refuses its start leaving
-//      its half to the event vector, `dma` refused on the engineless
-//      one), and
+//      host touching no stream, `dma` refused on the engineless one), and
 //      the last written byte of a write-then-read refused on the pump and
 //      under `dma`; declined by name where nothing answers 0x3A
+//
+// and against the desk partner's `twi_peer` (the second set, `t`):
+//   n  Fast-mode Plus acknowledged, a held SDA and a held clock, the rebase
+//   o  ES0298 2.12.8 ON TRIAL: long writes on the HSI, inside the clock-ratio
+//      band, on the interrupt and on the DMA engines, the partner's count
+//      and sum judging every byte, with the erratum's first workaround
+//      staged by the letter beside them
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -651,6 +656,8 @@ struct SclReading {
     /// edge is dated to within one turn, so the mean of the gaps is good
     /// to a turn over their number - the instrument's own resolution.
     uint32_t poll = 0;
+    /// The gaps `average` is the mean of: the edges the loop dated, less one.
+    uint32_t gaps = 1;
 };
 
 template <typename Pad = SclPad>
@@ -662,10 +669,27 @@ SclReading count_scl() {
     uint32_t total = 0;
     uint32_t turns = 0;
     uint32_t turns_at_last = 0;
-    bool prev = Pad::read();
-    for (uint32_t spins = 40'000'000u; spins != 0u && !xfer_done; --spins) {
+    uint32_t dated = 0;   ///< the edges the loop dated, the last pass's left out
+    // IDR read here and not through Pad::read(), which gcc takes out of line
+    // once this file calls it often enough: a call in the loop takes a turn from
+    // 26 cycles to 46, past SCL's high phase at Fm+ on this wire, and an edge
+    // goes uncounted.
+    GPIO_TypeDef& pads = Pad::port();
+    bool prev = (pads.IDR & Pad::mask) != 0u;
+    for (uint32_t spins = 40'000'000u; spins != 0u; --spins) {
+        const bool done = xfer_done;
         const uint32_t v = SysTick->VAL;
-        const bool now = Pad::read();
+        const bool now = (pads.IDR & Pad::mask) != 0u;
+        // THE PASS THAT SAW THE COMPLETION READS THE PAD TOO. A completion
+        // landing between a rise and this read would otherwise end the count
+        // with that rise unread. It is counted and left out of the mean: it is
+        // dated only to the completion's handler, which ran over it.
+        if (done) {
+            if (now && !prev) {
+                ++r.edges;
+            }
+            break;
+        }
         if (r.edges != 0u) {
             ++turns;
         }
@@ -679,19 +703,35 @@ SclReading count_scl() {
             }
             last_val = v;
             ++r.edges;
+            dated = r.edges;
             turns_at_last = turns;
         }
         prev = now;
     }
     r.shortest = shortest == 0xFFFFFFFFu ? 0u : shortest;
     // Rounded to the nearest cycle, as the turn below.
-    const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
-    r.average = r.edges > 1u ? (total + gaps / 2u) / gaps : 0u;
+    r.gaps = dated > 1u ? dated - 1u : 1u;
+    r.average = dated > 1u ? (total + r.gaps / 2u) / r.gaps : 0u;
     r.poll = turns_at_last == 0u ? 0u : (total + turns_at_last / 2u) / turns_at_last;
     return r;
 }
 
+/// The console's last line out before a stretch the pad is timed over: its
+/// transmit interrupt, one every 87 us at 115200 and some hundred cycles an
+/// entry, lands inside a clock count and dates its last edge late (one run of
+/// the Fm+ row in 43 read 210 cycles of mean gap for 179). The longest line
+/// here takes 30 ms; the bound is its double and more. The tick stays on: its
+/// entry on a last edge is about 100 cycles in the 180000 of a tick, one run in
+/// 1800, and the told row's slack holds about 64 of them (four per cent over
+/// eight gaps of 180 cycles), so that is the rate left.
+void console_quiet() {
+    const uint32_t t0 = Ticker::ticks();
+    while (!Serial::tx_idle() && Ticker::ticks() - t0 < 100u) {
+    }
+}
+
 SclReading timed_probe(uint8_t addr, FmpI2cSpeed s) {
+    console_quiet();
     Host::Request r{};
     r.addr = addr;
     r.speed = s;
@@ -783,8 +823,7 @@ void tf_speeds() {
             // THE CEILING: the mean period is at least the one asked for,
             // to the poll's resolution (a turn of the counting loop over
             // the gaps, and the cycle the mean is rounded to).
-            const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
-            if (measured_ns + gap_ns(r.poll / gaps + 1u) < asked_ns) {
+            if (measured_ns + gap_ns(r.poll / r.gaps + 1u) < asked_ns) {
                 never_faster = false;
             }
             if (rows[k].kernel == FmpI2cClock::pclk) {
@@ -833,13 +872,12 @@ void tf_speeds() {
         // Within the prescaler's resolution below the speed, and above it
         // no further than the poll resolves: a turn of the counting loop
         // over the gaps, and the cycle the mean is rounded to.
-        const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
-        const uint32_t slack = r.poll / gaps + 1u;
+        const uint32_t slack = r.poll / r.gaps + 1u;
         const uint32_t want_cycles = SysClock::hz / want;
         print(serial, "  APB1   ", speed_name(i), " told its wire (tSYNC ", sync_pclk[i],
               " ns): the arithmetic states ", Host::scl_hz(s), " Hz, the pad's mean ", mean_hz,
               " Hz = ", r.average, " core cycles against ", want_cycles, ", the poll's turn ",
-              r.poll, " over ", gaps, " gaps", crlf);
+              r.poll, " over ", r.gaps, " gaps", crlf);
         if (mean_hz < want - want / 25u || r.average + slack < want_cycles) {
             exact = false;
         }
@@ -861,6 +899,7 @@ void tf_speeds() {
             ClassicHost::Request rq{};
             rq.addr = 0x42;
             rq.speed = s;
+            console_quiet();
             xfer_done = false;
             if (ClassicHost::start(rq)) {
                 classic_ran = false;
@@ -872,13 +911,14 @@ void tf_speeds() {
             print(serial, "  I2C1 (CCR) ", s == I2cSpeed::fast_400k ? "Fm  " : "Sm  ",
                   ": CCR states ", stated, " Hz, the pad's mean ", mean_hz, " Hz (",
                   r.edges, " rising edges), status ", ClassicHost::status(), crlf);
-            // THE NINTH RISE MAY GO UNCOUNTED AT 400 kHz: the loop stops at
-            // the completion, and this engine's completion is the AF the
-            // ninth clock raises - inside a 0.6 us high phase that the
-            // error vector's entry can fill before the poll reads the pad
-            // (measured: 8 edges every run on one image's layout, 9 on
-            // another's). At 100 kHz the high phase is 4 us and the rise is
-            // always seen first.
+            // THE NINTH RISE. This engine's completion is the AF that rise
+            // raises, and count_scl() reads the pad once more behind it. At
+            // 100 kHz the high phase is 4 us, 720 core cycles, against the
+            // error vector's longest entry of about 200: the read still finds
+            // the line high, and nine is the bound. At 400 kHz it is 0.6 us,
+            // 108 cycles: the handler outlasts it, the line is low again, and
+            // whether the loop's own last read caught the rise is the image's
+            // layout (eight every run on this one), so eight is the bound.
             const uint8_t least = s == I2cSpeed::fast_400k ? 8u : 9u;
             if (r.edges < least || ClassicHost::status() != i2c_nack_addr) {
                 classic_ran = false;
@@ -1629,14 +1669,10 @@ void tm_self_link() {
     };
     auto traced = [](const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
                      I2cEngine e) {
-        // SxM0AR takes a write only with EN down (RM0390 9.5.8); a stream
-        // the test holds keeps its holder's address, and is not written.
-        if (!TxRegs::enabled()) {
-            TxRegs::regs().M0AR = 0;
-        }
-        if (!RxRegs::enabled()) {
-            RxRegs::regs().M0AR = 0;
-        }
+        // SxM0AR takes a write only with EN down (RM0390 9.5.8); between two
+        // tenures both streams have stopped.
+        TxRegs::regs().M0AR = 0;
+        RxRegs::regs().M0AR = 0;
         tx_dma_entries = 0;
         rx_dma_entries = 0;
         const uint8_t st = tenure<DmaHost>(self_addr, tx, tx_len, rx, rx_len,
@@ -1671,49 +1707,6 @@ void tm_self_link() {
           t.status, ", streams started tx ", t.tx, " rx ", t.rx, ", stream vector entries ",
           t.tx_n + t.rx_n, crlf);
     bench.verdict("interrupt on the engined host touches no stream, and the tenure is exact", i8);
-    // A STREAM WHOSE START REFUSES leaves its half to the event vector:
-    // each engine held in turn by a block of the test's own, started on its
-    // stream with no request raised (TXDMAEN and RXDMAEN are the tenure's),
-    // so start() finds the stream running before the START. The stream's
-    // memory address keeps naming the holder and its vector is never
-    // entered; the tenure completes byte-exact.
-    static uint8_t tx_holder[4] = {0xA1, 0xA2, 0xA3, 0xA4};
-    static uint8_t rx_holder[4] = {};
-    for (uint8_t i = 0; i < 8u; ++i) {
-        eight_in[i] = 0;
-    }
-    Far::took = 0;
-    const bool tx_held = TxEngine::start(std::span<const uint8_t>(tx_holder, 4));
-    t = traced(eight_out, 8, eight_in, 8, I2cEngine::dma);
-    TxEngine::stop();
-    bool tx_refused = tx_held && t.status == i2c_ok && !t.tx && t.rx && t.tx_n == 0u &&
-                      t.rx_n == 1u && Far::took == 8u &&
-                      TxRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx_holder);
-    for (uint8_t i = 0; i < 8u && tx_refused; ++i) {
-        tx_refused = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
-    }
-    for (uint8_t i = 0; i < 8u; ++i) {
-        eight_in[i] = 0;
-    }
-    Far::took = 0;
-    const bool rx_held = RxEngine::start(std::span<uint8_t>(rx_holder, 4));
-    t = traced(eight_out, 8, eight_in, 8, I2cEngine::dma);
-    RxEngine::stop();
-    bool rx_refused = rx_held && t.status == i2c_ok && t.tx && !t.rx && t.tx_n == 1u &&
-                      t.rx_n == 0u && Far::took == 8u &&
-                      RxRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx_holder);
-    for (uint8_t i = 0; i < 8u && rx_refused; ++i) {
-        rx_refused = Far::sink[i] == eight_out[i] && eight_in[i] == Far::value(i);
-    }
-    print(serial, "  dma with a stream held, eight written and eight read: the write ",
-          tx_refused ? "on the event vector" : "WRONG", ", the read ",
-          rx_refused ? "on the event vector" : "WRONG", crlf);
-    bench.verdict("dma with the transmit stream refusing its start: the write rides the event "
-                  "vector, the read the receive stream, byte-exact",
-                  tx_refused);
-    bench.verdict("... and with the receive stream refusing: the read rides the event vector, "
-                  "byte-exact",
-                  rx_refused);
     uint8_t d_nacked = 0;
     uint8_t d_gone = 0;
     uint8_t d_next = 0;
@@ -2050,6 +2043,330 @@ void tn_partner() {
 }
 
 // =============================================================================
+// o - ES0298 2.12.8 ON TRIAL: writes inside the erratum's clock-ratio band
+// =============================================================================
+//
+// The erratum: with the first byte not already in TXDR, two bytes are
+// requested in a row, and if the first is written "in less than two FMPI2C
+// kernel clock cycles after the TXIS/DMA request" while the APB-to-kernel
+// ratio is between 1.5 and 3, the second "is not internally detected" and the
+// block stalls until a PE cycle. This host never preloads TXDR, so the band
+// is the only thing between it and that stall. The HSI as the kernel against
+// the 45 MHz APB1 is a ratio of 2.81; two kernel cycles there are 125 ns, 22
+// core cycles at 180 MHz.
+
+/// The longest write the Request's eight-bit length can name.
+uint8_t trial_out[255];
+
+struct TrialRow {
+    uint16_t tenures = 0;
+    uint16_t completed = 0;   ///< answered i2c_ok
+    uint16_t parked_n = 0;    ///< no completion inside the bound: stalled, and recovered
+    uint16_t other = 0;       ///< answered anything else
+    uint16_t sent = 0;        ///< the bytes that should have reached the partner
+    uint16_t sum = 0;         ///< and their sum, as the partner keeps it
+    uint32_t stall_isr = 0;   ///< at the first stall: ISR
+    uint32_t stall_ndtr = 0;  ///< the transmit stream's count
+    bool stall_scl = true;    ///< and the clock line
+    bool stall_sda = true;    ///< and the data line
+    twilink::Report peer{};
+    bool reported = false;
+};
+
+/// A byte of tenure `k`: every tenure and every position different, so that a
+/// lost or a repeated byte moves the peer's sum as well as its count.
+constexpr uint8_t trial_value(uint16_t k, uint8_t i) {
+    return static_cast<uint8_t>(0x35u + 0x4Bu * k + 0x1Du * i + ((i * i) >> 3));
+}
+
+/// THE BOUND ON ONE TENURE, in ticks of 1 ms. On the wire: nine clocks for the
+/// address and for each byte, at the speed's period - a rate that letter f
+/// measures within 6 per cent of the speed at 100 kHz and 400 kHz on this
+/// kernel clock - plus the START and the STOP, under a period each. The
+/// partner's polled target adds what the preemptive suite measures, at most
+/// 66 us of a 382 us write of sixteen bytes, 17 per cent. Twice the wire holds
+/// all of that, and 3 ticks cover the tick's own reading on either side and a
+/// tenure far shorter than a tick.
+uint32_t trial_limit_ms(uint8_t len, FmpI2cSpeed s) {
+    const uint32_t clocks = 9u * (static_cast<uint32_t>(len) + 1u) + 2u;
+    return 2u * clocks * 1000u / fmpi2c_speed_hz(s) + 3u;
+}
+
+/// One write of the trial's buffer, waited for on the tick: its status, or
+/// `parked`.
+template <typename Bus>
+uint8_t trial_write(uint8_t len, FmpI2cSpeed s, I2cEngine e, uint32_t limit_ms) {
+    typename Bus::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(trial_out));
+    r.tx_len = len;
+    r.speed = s;
+    r.engine = e;
+    xfer_done = false;
+    if (Bus::start(r)) {
+        return Bus::status();
+    }
+    const uint32_t t0 = Ticker::ticks();
+    while (!xfer_done && Ticker::ticks() - t0 < limit_ms) {
+    }
+    return xfer_done ? Bus::status() : parked;
+}
+
+/// THE ERRATUM'S FIRST WORKAROUND, STAGED BY THE LETTER and not by the host:
+/// the first byte in TXDR before the START and the transmit stream started on
+/// the rest, through the resource's verbs with the host's vectors masked off
+/// and STOPF polled. What it answers is whether that sequence holds on this
+/// die, inside the band; a run of two bytes or more, as the letter asks it.
+uint8_t trial_preloaded(uint8_t len, FmpI2cSpeed s, uint32_t limit_ms) {
+    S::interrupt(FmpI2cInterrupt::rx | FmpI2cInterrupt::tx | FmpI2cInterrupt::nack |
+                     FmpI2cInterrupt::stop | FmpI2cInterrupt::error |
+                     FmpI2cInterrupt::transfer_complete,
+                 false);
+    S::clear(FmpI2cClear::all);
+    (void)S::disable();
+    (void)S::timing(DmaHost::timing_of(s));
+    S::enable();
+    S::data(trial_out[0]);
+    (void)TxEngine::start(std::span<const uint8_t>(trial_out + 1, len - 1u));
+    S::dma_transmit(true);
+    (void)S::transfer_now(twilink::dut_addr, false, len, true);
+    uint8_t st = parked;
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 < limit_ms) {
+        const uint32_t f = S::flags();
+        if ((f & FmpI2cFlag::stop) != 0u) {
+            st = (f & FmpI2cFlag::nack) != 0u ? i2c_nack_data : i2c_ok;
+            break;
+        }
+    }
+    S::dma_transmit(false);
+    TxEngine::stop();
+    S::clear(FmpI2cClear::all);
+    return st;
+}
+
+/// A batch: the partner told to take bytes for as long as all of it could
+/// last, the host brought up on `kernel`, `tenures` writes of `len`, a stall
+/// recovered by the PE cycle the erratum names, then the partner's count, sum
+/// and address matches read back on the APB1 kernel, outside the band.
+/// `staged` writes through trial_preloaded() in place of the host.
+template <typename Bus>
+TrialRow trial_batch(FmpI2cClock kernel, FmpI2cSpeed s, uint8_t len, uint16_t tenures,
+                     I2cEngine e, bool staged = false) {
+    TrialRow row{};
+    row.tenures = tenures;
+    const uint32_t limit = trial_limit_ms(len, s);
+    twilink::Params a{};
+    a.count = 0;   // the deadline alone ends the serve
+    a.ms = static_cast<uint16_t>(tenures * limit + 20u);
+    a.addr = twilink::dut_addr;
+    (void)host_ready();
+    if (!Link::act(Op::serve, a)) {
+        return row;
+    }
+    const uint32_t t0 = Ticker::ticks();
+    FmpI2cHostConfig c = base_config;
+    c.kernel = kernel;
+    if constexpr (Bus::has_dma) {
+        dma_host_live = true;
+    }
+    if (Bus::init(clock, c)) {
+        for (uint16_t k = 0; k < tenures; ++k) {
+            uint16_t sum = 0;
+            for (uint16_t i = 0; i < len; ++i) {
+                trial_out[i] = trial_value(k, static_cast<uint8_t>(i));
+                sum = static_cast<uint16_t>(sum + trial_out[i]);
+            }
+            const uint8_t st = staged ? trial_preloaded(len, s, limit)
+                                      : trial_write<Bus>(len, s, e, limit);
+            if (st == i2c_ok) {
+                row.completed = static_cast<uint16_t>(row.completed + 1u);
+                row.sent = static_cast<uint16_t>(row.sent + len);
+                row.sum = static_cast<uint16_t>(row.sum + sum);
+            } else if (st == parked) {
+                // "Stalled after first byte": that byte is on the wire, and
+                // the partner's tally is expected to hold it and nothing more.
+                row.sent = static_cast<uint16_t>(row.sent + 1u);
+                row.sum = static_cast<uint16_t>(row.sum + trial_out[0]);
+                if (row.parked_n == 0u) {
+                    row.stall_isr = S::flags();
+                    row.stall_ndtr = DmaStream<TxEngine::controller, TxEngine::stream>::regs().NDTR;
+                    row.stall_scl = SclPad::read();
+                    row.stall_sda = SdaPad::read();
+                }
+                row.parked_n = static_cast<uint16_t>(row.parked_n + 1u);
+                (void)Bus::recover();
+            } else {
+                row.other = static_cast<uint16_t>(row.other + 1u);
+            }
+        }
+    }
+    dma_host_live = false;
+    while (Ticker::ticks() - t0 < a.ms + 5u) {
+    }
+    (void)host_ready();
+    row.reported = Link::report(row.peer);
+    return row;
+}
+
+/// The partner's tally is the host's, byte for byte: every tenure whole, or
+/// stalled with its first byte delivered and nothing after it.
+bool trial_accounted(const TrialRow& r) {
+    return r.reported && r.other == 0u && r.completed + r.parked_n == r.tenures &&
+           r.peer.count == r.sent && r.peer.sum == r.sum && r.peer.addr_hits == r.tenures;
+}
+
+/// ... and no tenure stalled.
+bool trial_exact(const TrialRow& r) { return trial_accounted(r) && r.parked_n == 0u; }
+
+void trial_print(const char* kernel, const char* engine, FmpI2cSpeed s, uint8_t len,
+                 const TrialRow& r) {
+    print(serial, "  ", kernel, " ", engine, " ", s == FmpI2cSpeed::fast_400k ? "400" : "100",
+          " kHz, write of ", len, ": ", r.tenures, " tenures, ", r.completed, " ok, ", r.parked_n,
+          " STALLED, ", r.other, " other; the partner took ", r.peer.count, " bytes of ", r.sent,
+          " accounted, sum ", r.peer.sum, " of ", r.sum, ", ", r.peer.addr_hits,
+          " address matches", crlf);
+    if (r.parked_n != 0u) {
+        print(serial, "    the first stall: ISR ", hex(r.stall_isr), ", the transmit stream's "
+              "count ", r.stall_ndtr, ", SCL ", r.stall_scl ? "high" : "LOW", ", SDA ",
+              r.stall_sda ? "high" : "LOW", crlf);
+    }
+}
+
+void to_erratum_trial() {
+    if (!need_twi_peer()) {
+        return;
+    }
+    Dma<1>::init();
+
+    // ---- the trial's own controls: what a stall and a wrong byte look like ----
+    // A tenure whose transmit interrupt the letter takes away after start() is a
+    // stall made by hand: the address goes out and nobody ever writes TXDR. And
+    // a byte changed after its sum was taken is what the partner's sum exists to
+    // see. Each on the APB1 kernel, outside the band.
+    {
+        twilink::Params a{};
+        a.ms = 80;
+        a.addr = twilink::dut_addr;
+        (void)host_ready();
+        const bool cmd = Link::act(Op::serve, a);
+        const uint32_t t0 = Ticker::ticks();
+        (void)host_ready();
+        for (uint8_t i = 0; i < 16u; ++i) {
+            trial_out[i] = trial_value(0, i);
+        }
+        Host::Request q{};
+        q.addr = twilink::dut_addr;
+        q.tx = lend<Lease::reply>(static_cast<const uint8_t*>(trial_out));
+        q.tx_len = 16;
+        q.speed = FmpI2cSpeed::fast_400k;
+        xfer_done = false;
+        const bool sync = Host::start(q);
+        S::interrupt(FmpI2cInterrupt::tx, false);
+        const uint32_t limit = trial_limit_ms(16, FmpI2cSpeed::fast_400k);
+        const uint32_t w0 = Ticker::ticks();
+        while (!xfer_done && Ticker::ticks() - w0 < limit) {
+        }
+        const bool staged = !sync && !xfer_done && !SclPad::read();
+        (void)Host::recover();
+        S::interrupt(FmpI2cInterrupt::tx, true);
+        uint16_t sum = 0;
+        for (uint8_t i = 0; i < 16u; ++i) {
+            sum = static_cast<uint16_t>(sum + trial_out[i]);
+        }
+        trial_out[3] = static_cast<uint8_t>(trial_out[3] ^ 0x01u);
+        const uint8_t st = trial_write<Host>(16, FmpI2cSpeed::fast_400k, I2cEngine::interrupt,
+                                             limit);
+        while (Ticker::ticks() - t0 < a.ms + 5u) {
+        }
+        (void)host_ready();
+        twilink::Report r{};
+        const bool rep = Link::report(r);
+        print(serial, "  the control: a stall by hand parked ", staged, " with SCL low; the next "
+              "write ", st, ", the partner took ", r.count, " with sum ", r.sum, " against ", sum,
+              " for the bytes before one was changed", crlf);
+        bench.verdict("THE TRIAL CAN FAIL: a transmit interrupt taken away parks a tenure with "
+                      "SCL low, inside the bound",
+                      cmd && staged);
+        bench.verdict("... and one byte changed after its sum was taken moves the partner's sum",
+                      rep && st == i2c_ok && r.count == 16u && r.sum != sum);
+    }
+
+    // ---- outside the band, the same writes: the trial's baseline ----
+    const FmpI2cSpeed speeds[2] = {FmpI2cSpeed::standard_100k, FmpI2cSpeed::fast_400k};
+    print(serial, "  APB1 / kernel: ", Host::reference_hz(), " / ", Host::kernel_hz(), " Hz", crlf);
+    bool out_exact = true;
+    {
+        TrialRow r = trial_batch<Host>(FmpI2cClock::pclk, FmpI2cSpeed::fast_400k, 16, 100,
+                                       I2cEngine::interrupt);
+        trial_print("APB1", "interrupt", FmpI2cSpeed::fast_400k, 16, r);
+        out_exact = out_exact && trial_exact(r);
+        r = trial_batch<DmaHost>(FmpI2cClock::pclk, FmpI2cSpeed::fast_400k, 16, 100,
+                                 I2cEngine::dma);
+        trial_print("APB1", "dma", FmpI2cSpeed::fast_400k, 16, r);
+        out_exact = out_exact && trial_exact(r);
+    }
+    bench.verdict("outside the band (a ratio of 1.0), a hundred writes of sixteen on each engine, "
+                  "every byte judged by the partner's count and sum",
+                  out_exact);
+
+    // ---- inside the band ----
+    (void)host_ready(FmpI2cClock::hsi);
+    const bool in_band = Host::transmit_stall_risk();
+    print(serial, "  APB1 / kernel: ", Host::reference_hz(), " / ", Host::kernel_hz(),
+          " Hz, transmit_stall_risk() ", in_band, crlf);
+    bench.verdict("the HSI against the 45 MHz APB1 is inside the erratum's band, and the host "
+                  "says so",
+                  in_band);
+    struct Shape {
+        uint8_t len;
+        uint16_t tenures;
+    };
+    const Shape shapes[3] = {{2, 100}, {16, 100}, {255, 20}};
+    bool pump_exact = true;
+    bool dma_accounted = true;
+    bool staged_exact = true;
+    uint32_t dma_tenures = 0;
+    uint32_t dma_stalls = 0;
+    for (const FmpI2cSpeed s : speeds) {
+        for (const Shape& sh : shapes) {
+            const TrialRow p = trial_batch<Host>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
+                                                 I2cEngine::interrupt);
+            trial_print("HSI", "interrupt", s, sh.len, p);
+            pump_exact = pump_exact && trial_exact(p);
+            const TrialRow d = trial_batch<DmaHost>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
+                                                    I2cEngine::dma);
+            trial_print("HSI", "dma", s, sh.len, d);
+            dma_accounted = dma_accounted && trial_accounted(d);
+            dma_tenures += d.tenures;
+            dma_stalls += d.parked_n;
+            const TrialRow w = trial_batch<DmaHost>(FmpI2cClock::hsi, s, sh.len, sh.tenures,
+                                                    I2cEngine::dma, true);
+            trial_print("HSI", "dma, first byte staged in TXDR,", s, sh.len, w);
+            staged_exact = staged_exact && trial_exact(w);
+        }
+    }
+    print(serial, "  inside the band, on the DMA engines: ", dma_stalls, " stalls in ",
+          dma_tenures, " tenures", crlf);
+    bench.verdict("inside the band on the interrupt: no stall and every byte of every write - the "
+                  "vector writes TXDR outside the erratum's two kernel cycles",
+                  pump_exact);
+    bench.verdict("inside the band on the DMA engines, every tenure accounted byte for byte: "
+                  "whole, or stalled with its first byte on the wire and nothing after it, and "
+                  "the PE cycle recovers it",
+                  dma_accounted);
+    // THE BOUND: 1450 stalls in 8800 tenures of this letter measured, 16.5 per
+    // cent, so 440 tenures with none would come up less than once in 10^30 runs.
+    bench.verdict("... and the erratum is alive on this die: at least one stall in those tenures",
+                  dma_stalls != 0u);
+    bench.verdict("the erratum's first workaround staged by the letter, the first byte in TXDR "
+                  "before the START and the stream on the rest: no stall, every byte",
+                  staged_exact);
+    (void)host_ready();
+    bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
+}
+
+// =============================================================================
 // the menu
 // =============================================================================
 
@@ -2196,6 +2513,8 @@ int main() {
     bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
     bench.second_letter('n', "THE DESK PARTNER: Fm+ acknowledged, a held SDA, a held clock",
                         tn_partner);
+    bench.second_letter('o', "ES0298 2.12.8 ON TRIAL: writes inside the clock-ratio band",
+                        to_erratum_trial);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

@@ -267,8 +267,10 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
   `flag_complete` / `flag_half` / `flag_error` / `flag_fifo_error`,
   `service()`, `arm(data, priority, interrupts)`, `start()` over a span of
   bytes, half-words or words up to the element, `start_fixed()` (transmit)
-  and `start_discard()` (receive) over a cell of each width, `claim()` and
-  `start_claimed()` (transmit), `take()` / `idle()` / `full()` /
+  and `start_discard()` (receive) over a cell of each width, `claim()`,
+  `mark_busy()` (the flag alone, for an owner whose own state says no
+  block of its is in flight, an I2C host) and `start_claimed()` (transmit),
+  `take()` / `idle()` / `full()` /
   `capacity()` / `taken()` (receive), `complete()` / `busy()` /
   `in_flight()` (transmit), `progress()`, `abandon()`, `faults()` /
   `clear_faults()`, `stop()`. The receive engine's CIRCULAR shape:

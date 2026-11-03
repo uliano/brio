@@ -85,7 +85,12 @@ refused address and a refused DATA byte are told apart on both paths:
 `i2c_nack_addr` when nothing of the half's data reached the wire - the
 position of the interrupt that moves one byte at a time (the pump, on this
 page), or under the DMA engines the transmit stream's own
-count - and `i2c_nack_data` otherwise ("Bench findings").
+count - and `i2c_nack_data` otherwise ("Bench findings"). And `dma` wants
+a kernel clock outside ES0298 2.12.8's band: `transmit_stall_risk()` says
+which side a pair of rates is on, and inside it about one write in six
+stalls after its first byte (the HSI against a 45 MHz APB1, measured
+below); nothing refuses it, and the tenure stands until a per-bus timeout
+answers it.
 
 The page is long because the chapter is. In order: the documents of
 record; what the silicon does (the block's identity and what differs
@@ -249,21 +254,23 @@ ends by itself, and the completion is that STOP.
   such transfer continues normally". The host clears BERR, counts it
   (`spurious_bus_errors()`) and never reports `i2c_bus_error` from it. A
   client's BERR is outside the erratum and is reported.
-- 2.12.8, a transmission stalled after its first byte when the first byte
-  is not already in TXDR, the second is written within two kernel cycles
-  of its request, and the APB-to-kernel clock ratio is between 1.5 and 3.
-  The ratio is arithmetic, so it is published rather than hidden
-  (`transmit_stall_risk()`). The erratum's two workarounds are to write
-  the first byte into TXDR before the transfer starts, or to choose a
-  kernel clock outside the band. This host takes the first under neither
-  engine: `start()` writes nothing into TXDR, and the transmit stream,
-  though started before the START bit, writes its first byte on the first
-  TXIS, which comes after the address's ACK (23.4.9, figure 260) - the
-  erratum's own description names the DMA request beside TXIS. So a
-  program whose rates sit in the band takes the second: on a 45 MHz APB1
-  the APB clock or SYSCLK as the kernel (ratios 1.0 and 0.25), not the
-  HSI (2.8, measured below). The band has not been entered with a
-  transmission long enough to trip it ("Not covered yet").
+- 2.12.8, a transmission stalled after its first byte: when the first
+  byte is not already in TXDR, it is written less than two kernel cycles
+  after its request, and the APB-to-kernel clock ratio is between 1.5 and
+  3, the second byte "is not internally detected" and the block stalls
+  until a PE cycle or a reset. The ratio is arithmetic, so it is published
+  rather than hidden (`transmit_stall_risk()`). The erratum's two
+  workarounds are to write the first byte into TXDR before the transfer
+  starts, or to choose a kernel clock outside the band. This host takes
+  the first under neither engine: `start()` writes nothing into TXDR, and
+  the transmit stream, though started before the START, writes its first
+  byte on the first TXIS, which comes after the address's ACK (23.4.9,
+  figure 260). Which of the two engines meets the erratum is the silicon's
+  timing. A stream answers its request well inside two kernel cycles, and
+  in the band it stalls; the event vector does not ("ES0298 2.12.8 ON
+  TRIAL" below). So a program that names `dma` keeps its kernel clock out
+  of the band: on a 45 MHz APB1 the APB clock or SYSCLK (ratios 1.0 and
+  0.25), not the HSI (2.8).
 - 2.12.4, the reload-mode byte loss: answered by never using RELOAD.
 - 2.12.1, a 10-bit address whose first byte is NACKed, which leaves NACKF
   and START both standing and no new transfer possible. The host's Request
@@ -355,9 +362,11 @@ length, one byte included, started in `start()` before the START
 compile time, and `dma` on a host without them is answered
 `i2c_rejected` inside `start()` with nothing on the wire. A half with no
 buffer stays on the vector under `dma` too, writing its filler or
-draining what it reads, and so does a half whose stream refuses its
-start (a block still holding it), read in `start()` before the START:
-the request completes either way. The field sits in the padding after
+draining what it reads, and the request completes. A stream is this
+host's alone (the ownership rule, [../design/dma.md](../design/dma.md)),
+so `start()` does not ask it whether it started: a program that starts
+the host's own engine by hand stalls its next tenure, for the per-bus
+timeout to answer. The field sits in the padding after
 `speed`, the Request 28 bytes with it and without it. The verbs: `init`, `rebase`, `speed_ok`, `timing_of`, `scl_hz`,
 `kernel_hz`, `reference_hz`, `transmit_stall_risk`,
 `spurious_bus_errors`, `fast_plus_drive`, `claim_smba_pad`, `idle`,
@@ -426,12 +435,14 @@ neighbour has not:
 Bus::init(clock, FmpI2cHostConfig{.kernel = FmpI2cClock::hsi});
 // 16 MHz whatever the core does - and Fm+ is refused there, because
 // ES0298 2.12.2 wants 20 MHz for it. speed_ok() says so before a
-// Request does.
+// Request does. On a core whose APB1 sits at 24 to 48 MHz this is inside
+// ES0298 2.12.8's band: transmit_stall_risk() answers true, and a Request
+// naming `dma` can stall (Bench findings). `interrupt` does not.
 ```
 
 **A bus whose edges are known.** The defaults are the specification's
 worst-case edges for the delays and no measured tSYNC, so each speed asked
-is a ceiling the wire stays at or under (about 2, 7 and 13 per cent under
+is a ceiling the wire stays at or under (about 2, 8 and 14 per cent under
 on this bench's wire at 45 MHz). A board that has measured its wire - the
 period less the register's tSCLL + tSCLH, which `test_stm32f4_fmpi2c`'s
 letter `f` prints - states it, and gets the rate asked for:
@@ -480,22 +491,9 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - and letter m makes
-I2C1 the target. `test_stm32f4_fmpi2c` is 103 verdicts over thirteen
-letters, and `z` is not green on every run: one verdict of letter `f`
-fails about one run in seven. It is the check that I2C1, the chip's other
-I2C, runs the same unanswered probe on the same wire, its address
-phase's clocks counted on PB8's input buffer: the letter asks for nine
-rising edges at 100 kHz and eight at 400 kHz, and at 100 kHz it counted
-eight in 9 of 62 runs of the letter on this image (6 of 30 and 3 of 32,
-two series), every probe still answered `i2c_nack_addr`. The eight at
-400 kHz is the letter's own allowance - its counting loop stops at the
-completion, which the ninth clock raises - and the nine at 100 kHz rests
-on the timing (a high phase of 4 us against the completion's entry), not
-on a derivation: the loop tests the completion flag before it reads the
-pad, so a completion that lands between the ninth rise and the loop's
-next read ends the count without that rise, at either speed (by the
-reading of the loop; not isolated). The host's own code is not in
-question there: the probe completes as it must.
+I2C1 the target. `test_stm32f4_fmpi2c` is 101 verdicts over thirteen
+letters, and `z` was green in three runs of three, as was letter `f` in twenty of
+twenty.
 
 **The register file at reset is the chapter's**, and the one non-zero
 value is ISR = 0x0001: TXE stands out of reset, so a transmitter that
@@ -547,34 +545,37 @@ wire - and the period measured less the tSCLL + tSCLH the register
 programs is the detection delay 23.4.9 calls tSYNC1 + tSYNC2, judged on
 the MEAN gap of the probe's clocks (nothing stretches them; the shortest
 gap moves with the polling loop's phase by up to a hundred core cycles).
-On the 2.2 kOhm wire it came out **between about 160 and 390 ns** over
-the eight rows (three speeds on two kernel clocks, two on the third) -
-always above the floor the chooser charges (22, 89 and 250 ns at 180, 45
-and 16 MHz), and well under the 1000 / 750 / 500 ns tables 134 and 135
-assume. Letter `f`, the mean rate on the pad:
+On the 2.2 kOhm wire it came out **between about 170 and 400 ns** over
+the six rows that count the STOP's rise (three speeds on the APB1, two on
+the HSI, standard mode on SYSCLK) - always above the floor the chooser
+charges (22, 89 and 250 ns at 180, 45 and 16 MHz), and well under the
+1000 / 750 / 500 ns tables 134 and 135 assume. SYSCLK's two faster rows
+read more, 328 and 523 ns: their completion arrives before the STOP's
+rise, and the NACK's handler, on the core the loop runs on, dates the last
+counted rise late. Letter `f`, the mean rate on the pad:
 
 | kernel | speed | stated (the ceiling) | measured | tSYNC measured |
 |--------|-------|----------------------|----------|----------------|
-| APB1 45 MHz | Sm | 99557 Hz | 97985 Hz | 250 ns |
-| APB1 45 MHz | Fm | 394736 Hz | 372670 Hz | 239 ns |
-| APB1 45 MHz | Fm+ | 1000000 Hz | 865384 Hz | 245 ns |
-| SYSCLK 180 MHz | Sm | 98955 Hz | 97613 Hz | 161 ns |
-| SYSCLK 180 MHz | Fm | 396475 Hz | 375782 Hz | 162 ns |
-| SYSCLK 180 MHz | Fm+ | 1000000 Hz | 873786 Hz | 167 ns |
-| HSI 16 MHz | Sm | 98765 Hz | 98468 Hz | 280 ns |
-| HSI 16 MHz | Fm | 400000 Hz | 378947 Hz | 388 ns |
+| APB1 45 MHz | Sm | 99557 Hz | 97826 Hz | 267 ns |
+| APB1 45 MHz | Fm | 394736 Hz | 367346 Hz | 278 ns |
+| APB1 45 MHz | Fm+ | 1000000 Hz | 857142 Hz | 256 ns |
+| SYSCLK 180 MHz | Sm | 98955 Hz | 97560 Hz | 167 ns |
+| SYSCLK 180 MHz | Fm | 396475 Hz | 330882 Hz | 523 ns |
+| SYSCLK 180 MHz | Fm+ | 1000000 Hz | 765957 Hz | 328 ns |
+| HSI 16 MHz | Sm | 98765 Hz | 98522 Hz | 275 ns |
+| HSI 16 MHz | Fm | 400000 Hz | 378151 Hz | 394 ns |
 
 Not one row runs above the speed asked. The APB1 delays STATED to
-`init()` give 99778, 389610 and 1005586 Hz on the pad (1803 to 1805, 462
-and 179 core cycles of mean gap) against the 99778, 391304 and 1000000
-the arithmetic states - the period formula with the wire's own tSYNC, to
-the prescaler's resolution and to the instrument's. A turn of the loop
-that counts the edges is 26 to 29 core cycles at 180 MHz (the letter
-measures it: the cycles between the first and the last edge over the
-turns between them), each edge is dated to within one turn, so a mean of
-eight gaps is good to about four cycles - two per cent at Fm+, where the
-last row read 178 to 181 cycles from one image to the next at the same
-TIMINGR. The letter allows exactly that above the speed and no more. A word solved against
+`init()` give 99722, 403587 and 1000000 Hz on the pad (1805, 446 and 180
+core cycles of mean gap) against the 99557, 398230 and 1000000 the
+arithmetic states - the period formula with the wire's own tSYNC, to the
+prescaler's resolution and to the instrument's. A turn of the loop that
+counts the edges is 40 to 43 core cycles at 180 MHz (the letter measures
+it: the cycles between the first and the last edge over the turns between
+them), each edge is dated to within one turn, so a mean of eight gaps is
+good to about five cycles - three per cent at Fm+, where the last row read
+178 to 181 cycles from one image to the next at the same TIMINGR. The
+letter allows exactly that above the speed and no more. A word solved against
 the manual's budgets runs this wire FAST - 107.4 kHz, 497 kHz and 1.36
 MHz on APB1, past fast mode's 400 kHz ceiling - which is why the default
 is the floor.
@@ -599,12 +600,19 @@ bounds, 23.4.3's conditions) and differ in that one charge;
 
 **THE OTHER I2C OF THIS FAMILY KEEPS ITS STATED RATE.** The classic I2C1
 (CCR, RM0390 27.6.8), run as a host through the same probe on the same
-wire and counted on PB8: 100111 Hz against the 100000 its CCR states,
-396475 Hz against 394736 - within two core cycles of a period at 180 MHz,
+wire and counted on PB8: 100055 Hz against the 100000 its CCR states,
+394736 Hz against 394736 - within one core cycle of a period at 180 MHz,
 the poll's resolution. Its arithmetic is [i2c.md](i2c.md)'s; what the
 comparison shows is that its period does not grow by a detection delay
 the way this block's does, and that, CCR rounded up, its stated rate is
-its ceiling too.
+its ceiling too. The pad gives nine rising edges at 100 kHz and eight at
+400 kHz, 23 runs of 23 each. This host's completion is the AF the ninth
+clock raises, inside that rise's high phase, so the letter reads the pad
+once more in the pass that sees the completion. At 100 kHz the high phase
+is 4 us, 720 core cycles, against the error vector's longest entry of
+about 200, and that read finds the rise. At 400 kHz it is 0.6 us, 108
+cycles: the handler outlasts it and the line is low again, so nine is
+what the letter asks at 100 kHz and eight at 400.
 
 **A NACK on the address is a complete transaction, and its two flags come
 in order.** All 112 addresses from 0x08 to 0x77 answered `i2c_nack_addr`
@@ -701,20 +709,14 @@ enter no stream vector; the last written byte refused under `dma`, 16
 refusals of 16 `i2c_nack_data`, the bus let go, the next tenure
 `i2c_ok`; and `dma` on the engineless host is answered `i2c_rejected`
 inside `start()`, CR2 untouched, BUSY low and no address match at I2C1
-over 200 us, the next write on that host exact; and with each stream in
-turn held by a block of the letter's own (started, its request never
-raised), `start()` is refused that stream before the START and the half
-rides the event vector, the held stream's address still the holder's
-and its vector never entered - the tenure's end leaves a block it did
-not start alone - eight written and eight read byte-exact. Ten runs of
-ten.
+over 200 us, the next write on that host exact. Ten runs of ten.
 
 **The target half answers a real controller.** As the peer of
 `test_stm32f4_i2c` on the same wires, `FmpI2cClient<1>` served from its
 own two vectors is a register file at 0x2C - the address match, each
 byte received and wanted, the controller's closing NACK (its byte asked
 for ahead dropped by 23.7.7's TXE flush) all reported by `service()` -
-through that suite's 75 verdicts, and CR2's NACK bit set as the byte
+through that suite's 73 verdicts, and CR2's NACK bit set as the byte
 before is taken refuses a chosen written byte (23.7.2: "a NACK is sent
 after current received byte"), 192 refusals of 192 on time with the core
 at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
@@ -723,11 +725,11 @@ at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
 same wires, I2C1 the target served on the same core, its entries counted
 apart; the SCL period measured on the pad, 488 core cycles at the 400
 kHz row - 368.9 kHz, under the ceiling as above). At 400 kHz: a one-byte
-write 1146 cycles beyond the wire in two interrupts, a register read 1+1
-1701 in four, a 255-byte write and read x 1.00 on the pump (256 interrupts, 140 cycles
-of handler a byte written and 137 read) and on the engines (two
-interrupts), `start()` 324 to 336 cycles on the pump, the longest entry
-520 cycles of the event vector. The fixed cost carries the target's: the
+write 1162 cycles beyond the wire in two interrupts, a register read 1+1
+1751 in four, a 255-byte write and read x 1.00 on the pump (256 interrupts, 146 cycles
+of handler a byte written and 148 read) and on the engines (two
+interrupts), `start()` 326 to 343 cycles on the pump, the longest entry
+510 cycles of the event vector. The fixed cost carries the target's: the
 classic block stretches SCL from its address match until its vector has
 run, on the same core; I2C1 as the host against this block as the target
 pays 212 for the same write ([i2c.md](i2c.md)).
@@ -736,45 +738,44 @@ pays 212 for the same write ([i2c.md](i2c.md)).
 `irq` and `isr` the two I2C vectors' and the two streams', between the
 meter's stamps; on this block the engines are started in `start()`,
 so its cycles are counted too). At 400 kHz; at 100 kHz every row is
-within a cycle of these but three, which take more there - the read of
-16 and the pump's register read 1+16 by 8 to 16 cycles, the engines'
-register read 1+16 by 34:
+within a cycle of these but the engines' reads, whose `start()` is two
+cycles shorter there:
 
 | half | `interrupt`: start, irq, isr | `dma`: start, irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 325, 2, 395 | 475, 2, 489 | +244 |
-| write 2 | 325, 3, 521 | 475, 2, 489 | +118 |
-| write 3 | 325, 4, 661 | 475, 2, 489 | -22 |
-| write 16 | 324, 17, 2481 | 475, 2, 489 | -1841 |
-| read 1 | 329, 2, 376 | 463, 2, 614 | +372 |
-| read 2 | 329, 3, 513 | 463, 2, 614 | +235 |
-| read 16 | 329, 17, 2431 | 463, 2, 614 | -1683 |
-| register read 1+1 | 324, 4, 746 | 546, 4, 906 | +382 |
-| register read 1+2 | 324, 5, 883 | 546, 4, 906 | +245 |
-| register read 1+16 | 324, 19, 2801 | 546, 4, 906 | -1673 |
+| write 1 | 331, 2, 412 | 477, 2, 495 | +229 |
+| write 2 | 330, 3, 538 | 477, 2, 495 | +104 |
+| write 3 | 331, 4, 683 | 477, 2, 495 | -42 |
+| write 16 | 330, 17, 2581 | 477, 2, 495 | -1939 |
+| read 1 | 331, 2, 401 | 457, 2, 619 | +344 |
+| read 2 | 331, 3, 549 | 457, 2, 619 | +196 |
+| read 16 | 331, 17, 2621 | 457, 2, 619 | -1876 |
+| register read 1+1 | 326, 4, 777 | 545, 4, 931 | +373 |
+| register read 1+2 | 326, 5, 925 | 545, 4, 931 | +225 |
+| register read 1+16 | 326, 19, 2997 | 545, 4, 931 | -1847 |
 
-The pump's figure a byte past the first is the slope, 140 cycles written
-and 137 read, one entry each, and an entry's own exception entry and
+The pump's figure a byte past the first is the slope, 146 cycles written
+and 148 read, one entry each, and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
 every interrupt counted. So, in core cycles, **a write half costs the
-core fewer cycles on the engines from three bytes** (-22, with two
-interrupts fewer), **a read half from four** (a read of three by the
-slope is about 50 cycles dearer on the engines, the entries counted),
-and **a register read with a one-byte index from a read of four**: the
-engines' fixed cost to the core, their program in `start()` and their
-completion, is about 240 cycles for a write half and 370 for a read half
-- a write tenure's end stops no receive stream - against a byte's 140 or
-so on the pump. The speed moves none of these lengths: the three rows
-that differ at 100 kHz differ by 34 cycles at most, a quarter of a
-byte's cost on the pump. The core
+core fewer cycles on the engines from three bytes** (-42, with two
+interrupts fewer), **a read half from three or four** (a read of three by
+the slope ties, the entries counted, and the layout moves a tie), and **a
+register read with a one-byte index from a read of four**: the engines'
+fixed cost to the core, their program in `start()` and their completion,
+is about 230 cycles for a write half and 345 for a read half - a write
+tenure's end stops no receive stream - against a byte's 146 or so on the
+pump. The speed moves none of these lengths: the rows differ by two
+cycles at most between 100 and 400 kHz. The core
 sleeps while a stream works: the platform's idle is a WFI that asks no
 stream anything, and Sleep keeps the DMA clocked (RM0390
 6.3.15: DMA1LPEN is set at reset and written by no verb here) - so on
 this family `dma` costs no sleep, only its fixed cycles.
 
-**AGAINST THE DESK PARTNER** (set `t`, letter `n`, 12 verdicts, green ten
-runs of ten): the STM32G0 beside this board on the same two nodes,
+**AGAINST THE DESK PARTNER** (set `t`, letters `n` and `o`, 21 verdicts):
+letter `n`'s 12 green ten runs of ten, letter `o`'s below; the STM32G0
+beside this board on the same two nodes,
 running `twi_peer` - with it on its dark console for `z`, whose letter e
 counts 112 NACKs that its command address would spoil.
 
@@ -808,6 +809,46 @@ counts 112 NACKs that its command address would spoil.
   kHz, and at 16 MHz at 1694; derived, the three cores give **955, 942
   and 901 thousandths**, byte-exact against the partner at each.
 
+**ES0298 2.12.8 ON TRIAL: THE ENGINES STALL IN THE BAND, THE VECTOR DOES
+NOT.** Letter `o` runs writes of 2, 16 and 255 bytes to the partner's
+target with the HSI as the kernel against the 45 MHz APB1, a ratio of
+2.81, on both engines, at 100 and 400 kHz; a stall is a tenure with no
+completion inside twice its wire time plus 3 ticks, recovered by
+`recover()`'s PE cycle, the partner's count, sum and address matches read
+back after each batch of a hundred writes (twenty of the 255). Over
+46 runs, 20240 tenures an engine inside the band:
+
+| kernel | writes on | tenures | stalled |
+|---|---|---|---|
+| HSI, ratio 2.81 | the event vector | 20240 | 0 |
+| HSI, ratio 2.81 | the DMA engines | 20240 | 3336, 16.5 per cent |
+| HSI, ratio 2.81 | the DMA engines, the first byte staged in TXDR by the letter | 20240 | 0 |
+| APB1, ratio 1.0 | the event vector, and the DMA engines | 4600 each | 0 |
+
+The rate does not follow the length or the speed: 15.8 to 17.5 per cent in
+every row, a two-byte write as often as a 255-byte one, which is the
+erratum's own account of a fault at the first two bytes. Every stall is
+the same: ISR showing BUSY alone, SCL low and SDA high, the transmit stream's
+count two beats down, and the partner holding exactly the first byte of
+that write, its count and sum exact across the batch. The next tenure
+after the PE cycle is whole. What the host's two engines differ in is the
+erratum's first clause. Two kernel cycles of the HSI are 125 ns, 22 core
+cycles at 180 MHz, a window a stream's request and its one-word store
+through the bridge fall inside. The event vector's first TXDR store comes
+after a 12-cycle entry and about 60 instructions (the release listing of
+`isr()`, the flags masked and each tested in turn), past 380 ns, and on
+any slower core later still, so `interrupt` is outside the erratum's
+window on every rate this family's APB1 can have in the band. The staged
+row is the erratum's first workaround as the letter's own sequence (the
+first byte in TXDR before the START, the stream on the rest, STOPF
+polled); the host does not run it. It says the workaround holds on this
+die. Two controls show the letter can fail: a transmit interrupt taken
+away after `start()` parks a tenure with SCL low inside the same bound, and
+a byte changed after its sum was taken moves the partner's sum by what
+was changed. A stall the program does not expect parks until a per-bus
+timeout answers it `i2c_timeout` and the arbiter calls `recover()`; on an
+arbiter with no timeout it stands.
+
 **Under the preemptive kernel: `test_stm32f4_rubato_fmpi2c`**, the twin of
 [i2c.md](i2c.md)'s `test_stm32f4_rubato_i2c` - the same source over this
 block - against the same partner's `twi_peer`: `util/i2c_bus.hpp`'s
@@ -826,11 +867,11 @@ kernel's.
 - **Where a preemption reaches this host: before its one START store.**
   `start()` waits for nothing; it arms the engines and then writes CR2
   with START last, so a dispatch above the arbiter landing in it delays
-  the START. Letter `x`, 400 writes of 16 bytes: `start()` takes 368
-  cycles with TIM2 silent (the longest 520; the classic block's takes
-  189); under 97 us x 3000 the interrupt landed inside it 4 to 15 times
-  in five runs, against the 8.4 that independent ticks would give (400 x
-  368 / 17460), and 5 of the 36 with ISR.BUSY set - after the START
+  the START. Letter `x`, 400 writes of 16 bytes: `start()` takes 377
+  cycles with TIM2 silent (the longest 539; the classic block's takes
+  174); under 97 us x 3000 the interrupt landed inside it 16 to 21 times
+  in three runs, against the 8.6 that independent ticks would give (400 x
+  377 / 17460), and 1 of the 57 with ISR.BUSY set - after the START
   store, `start()`'s last register write, the engines already armed.
   Over twenty runs of the other letters it found BUSY set inside
   `start()` 15 times, the same shadow.
@@ -937,13 +978,15 @@ Driver gaps, each with its reason:
   on every other stratum.
 - ES0298 2.12.8's first workaround, the first byte in TXDR before the
   START: no path of the host writes it, under either engine ("What the
-  silicon does"), so a program whose rates sit in the erratum's band
-  takes the second workaround, a kernel clock outside it, which
-  `transmit_stall_risk()` lets it check. A preload on the pump (the
-  STM32G0 host's, [../stm32g0/i2c.md](../stm32g0/i2c.md)) and, under
-  `dma`, a preload with the stream started on the rest of the half would
-  take the first; not written, the band having a choice of kernel clock
-  outside it on every rate the bench runs.
+  silicon does"). The pump does not need it (no stall in the trial, and
+  the vector's first store is past the erratum's window); under `dma` a
+  program inside the band stalls, as measured, and takes the second
+  workaround, a kernel clock outside it, which `transmit_stall_risk()`
+  lets it check. A preload under `dma` would be `start()`'s first byte
+  stored after a TXDR flush, the stream started on the rest and left
+  unstarted for a write of one, and the NACK's address-or-data test
+  reading TXE as the STM32G0's pump does: not written, every rate the
+  bench runs having a kernel clock outside the band.
 - This chip as the bus's target, served from an active object, under the
   preemptive kernel. A target whose bytes come from an object (its vector
   posting "the host reads" and leaving SCL held, a dispatch giving the
@@ -971,12 +1014,6 @@ Implemented, not bench-verified (each with what would measure it):
 - The noise filters ON THE WIRE: the register is written and read back
   and the refusals the filter delay causes are measured, but what a
   9-period digital filter does to a glitch wants a glitch generator.
-- ES0298 2.12.8's stall: the ratio is computed and published, and the
-  band was never entered with a transmission long enough to trip it -
-  every tenure on the HSI ended on its address. The desk partner accepts
-  bytes now; a write to it with this block on the HSI, at the ratio the
-  erratum names, on the pump and on the engines, would put the erratum on
-  trial.
 - TIMEOUTB, this peripheral's own cumulative stretch, which only a
   target being read produces: the partner's `twi_peer` has no `host_read`
   (twi_link's extended repertoire) to read this block as a target, and

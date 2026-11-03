@@ -369,9 +369,9 @@ drain on the Nucleo-F446RE:
   stream's completion is 27.3.8's EOT: the requests go off, and the event
   vector ends the write on BTF - or, with a read half to follow, the
   buffer vector is armed for the TxE behind the last byte, where the
-  repeated START is requested as on the pump. A stream whose start
-  refuses (a block still holding it) leaves its phase to the pump, the
-  refusal read before that phase's data moves.
+  repeated START is requested as on the pump. A stream is this host's
+  alone ([../design/dma.md](../design/dma.md), the ownership rule), so
+  the host does not ask it whether it started.
 - *PEC, SMBus, the 10-bit header, the noise filters' effect.* No tenure
   shape asks for them (the gap lists below).
 - *The FMPI2C* of the F410/F412/F413/F446 is the STM32G0's block, its own
@@ -649,13 +649,8 @@ the Nucleo-F446RE alone ("Not covered yet").
   before the tenure, names the tenure's buffer after it - and enter its
   vector once; under `interrupt` the engined host starts no stream; and
   `dma` on the engineless host is answered `i2c_rejected`, CR1 and CR2
-  untouched and MSL clear, the next read on that host exact; and with
-  each stream in turn held by a block of the letter's own (started, its
-  request never raised), the start the host makes of it is refused - the
-  transmit stream's in the ADDR entry, the receive stream's at the read's
-  SB - and that phase rides the vectors, the held stream's address still
-  the holder's and its vector never entered, the read byte-exact. Ten
-  runs of ten.
+  untouched and MSL clear, the next read on that host exact. Ten runs of
+  ten.
 - **SWRST puts the WHOLE register file back**, the configuration
   included (CCR 0x00E1 -> 0, OAR1 -> 0, PE down), which is why
   `recover()` rewrites the timing behind it; the bus works immediately
@@ -687,7 +682,7 @@ the Nucleo-F446RE alone ("Not covered yet").
 chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - SERVED FROM ITS OWN VECTORS as a register file (an identity at
 0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
-first written byte sets), at 0x2C. `z` is 75 verdicts: every letter of
+first written byte sets), at 0x2C. `z` is 73 verdicts: every letter of
 the DISC1's runs against it, and one more - with the desk partner, an
 STM32G0 on the same two nodes, on its dark console, since letter d's
 scan would otherwise meet the partner's command address. A SECOND SET,
@@ -786,11 +781,11 @@ same core; the interrupts and the handler's cycles compare.
 - **The engines' fixed cost per tenure** is their start inside the
   vector - the transmit stream's in the ADDR entry, the receive stream's
   at the read's SB - and their completion entries: a write of 255 is 4
-  interrupts and 569 cycles of handler, a read of 255 is 3 and 487, and
+  interrupts and 563 cycles of handler, a read of 255 is 3 and 498, and
   a register read under `dma`, its index on the transmit stream too, 7
-  and 1010 at 1+16 (the "Which engine" table below).
-- **The longest single entry** of each vector over the letter: events 216
-  cycles, errors 191, the streams 118.
+  and 1012 at 1+16 (the "Which engine" table below).
+- **The longest single entry** of each vector over the letter: events 224
+  cycles, errors 197, the streams 120.
 - **The same code placed elsewhere costs differently**: the FMPI2C1
   host's rows, whose code was the same in two builds of this letter,
   moved by eight to ten cycles a byte between them - the image's layout
@@ -806,20 +801,20 @@ At 400 kHz, the 100 kHz rows within a few cycles of these:
 
 | phase | `interrupt`: irq, isr | `dma`: irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 3, 423 | 4, 564 | +141 |
-| write 2 | 3, 458 | 4, 565 | +107 |
-| write 3 | 4, 589 | 4, 565 | -24 |
-| write 16 | 17, 1850 | 4, 565 | -1285 |
-| read 1 | 3, 403 | 3, 480 | +77 |
-| read 2 | 3, 468 | 3, 483 | +15 |
-| read 16 | 17, 2184 | 3, 487 | -1697 |
-| register read 1+1 | 5, 708 | 7, 1003 | +295 |
-| register read 1+2 | 5, 764 | 7, 1006 | +242 |
-| register read 1+16 | 19, 2481 | 7, 1010 | -1471 |
+| write 1 | 3, 419 | 4, 562 | +143 |
+| write 2 | 3, 458 | 4, 563 | +105 |
+| write 3 | 4, 600 | 4, 563 | -37 |
+| write 16 | 17, 1874 | 4, 563 | -1311 |
+| read 1 | 3, 422 | 3, 500 | +78 |
+| read 2 | 3, 479 | 3, 502 | +23 |
+| read 16 | 17, 2233 | 3, 498 | -1735 |
+| register read 1+1 | 5, 716 | 7, 1008 | +292 |
+| register read 1+2 | 5, 758 | 7, 1020 | +262 |
+| register read 1+16 | 19, 2519 | 7, 1012 | -1507 |
 
 The pump's figure a byte past the second is the slope of the table's
-rows from 2 to 16 bytes, 99 cycles written and 123 read, one entry each
-(97 and 116 between 16 and 255 bytes, the letter's own per-byte line),
+rows from 2 to 16 bytes, 101 cycles written and 125 read, one entry each
+(98 and 118 between 16 and 255 bytes, the letter's own per-byte line),
 and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
@@ -827,24 +822,24 @@ every interrupt counted. So, in core cycles:
 - **a write costs the core fewer cycles on the engines from three
   bytes**: EV8_1 loads the first two in the entry that clears ADDR, so the
   pump takes no interrupt for a write of one or two and the engines add
-  their stream's start and its completion entry (+141 and +107, one
+  their stream's start and its completion entry (+143 and +105, one
   interrupt more);
 - **a read from two or three bytes**: the engines' receive run under LAST
   ends in one completion entry, within a few cycles of the pump's
-  two-byte procedure (+15, the same three interrupts; the same pair of
+  two-byte procedure (+23, the same three interrupts; the same pair of
   rows has read -7 in another build of the same code), and a read of
-  three is clearly the engines' (the pump's third byte costs it 123
+  three is clearly the engines' (the pump's third byte costs it 125
   cycles and an entry);
 - **a register read with a one-byte index from five read bytes**: under
   `dma` the index rides the transmit stream too - its completion and the
   TxE behind it, where the repeated START is requested, are two
   interrupts the pump's ADDR entry does without - so the engines' register
-  read stays at about 1006 cycles and 7 interrupts whatever its length.
-  The pump's grows 56 cycles and no interrupt from 1+1 to 1+2 (708 to 764,
-  the two-byte procedure), then 123 cycles and one interrupt a byte: at
-  1+4 the two tie (764 + 2 x 123 = 1010 against about 1007, 7 interrupts
+  read stays at about 1010 cycles and 7 interrupts whatever its length.
+  The pump's grows 42 cycles and no interrupt from 1+1 to 1+2 (716 to 758,
+  the two-byte procedure), then 125 cycles and one interrupt a byte: at
+  1+4 the two tie (758 + 2 x 125 = 1008 against about 1010, 7 interrupts
   each), and from 1+5 the engines lead, by about 125 cycles and an entry
-  there and 123 and an entry more with every byte after. A Request has one
+  there and 125 and an entry more with every byte after. A Request has one
   engine for both halves, so a short register read is cheaper on the pump.
 The speed moves none of these lengths: the streams and the vectors
 cost within a few cycles of the same at both rows, and the wire's time between them is
@@ -875,10 +870,10 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
   vector and sets START last, so a dispatch above the arbiter landing in
   it lengthens the gap between tenures and moves nothing on the wire.
   Letter `x`, 400 writes of 16 bytes on the transmit engine: `start()`
-  takes 173 cycles with TIM2 silent (the longest 287), the suite's naming
+  takes 174 cycles with TIM2 silent (the longest 287), the suite's naming
   of the engine (below) included; under 97 us x 3000 the interrupt landed
-  inside it 3 to 7 times in four runs, against the 4.0 that independent
-  ticks would give (400 x 173 / 17460) - no phase lock of the kind the
+  inside it 4 to 10 times in three runs, against the 4.0 that independent
+  ticks would give (400 x 174 / 17460) - no phase lock of the kind the
   STM32G0's host shows ([../stm32g0/i2c.md](../stm32g0/i2c.md)) - and
   never with MSL set. In letter `h`, where the preempting object's
   probes follow one another back to back, the interrupt found MSL set

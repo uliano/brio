@@ -1053,7 +1053,8 @@ constexpr uint32_t beat_bits() {
  * - claim() under its guard, then launch() unmasked, since a claimed
  * channel has no block in flight and so no completion that could run
  * under the programming - and unclaim() gives back a claim that found
- * nothing to send.
+ * nothing to send. mark_busy() is the set without the test, for an owner
+ * whose own state already says no block of its is in flight.
  */
 template <uint8_t n, uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -1147,9 +1148,15 @@ public:
         busy_ = false;
         in_flight_ = 0;
     }
-    /// Program and enable a block on a CLAIMED engine - start() less the
-    /// claim. False, the claim kept, for a run start() would refuse or an
-    /// engine that was not claimed.
+    /// claim()'s second half, the flag set with no test: for an owner that
+    /// knows no block of its is in flight (an I2C host, whose tenures end
+    /// their blocks). A launch() must follow. From the engine's owner, in
+    /// the one context that starts its blocks; it waits for nothing and
+    /// masks nothing.
+    static void mark_busy() { busy_ = true; }
+    /// Program and enable a block on an engine claimed or marked busy -
+    /// start() less the claim. False, the flag kept, for a run start() would
+    /// refuse.
     static bool launch(std::span<const uint8_t> run) { return go<uint8_t, true>(run.data(), run.size()); }
     static bool launch(std::span<const uint16_t> run) { return go<uint16_t, true>(run.data(), run.size()); }
     static bool launch(std::span<const uint32_t> run) { return go<uint32_t, true>(run.data(), run.size()); }
@@ -1228,7 +1235,7 @@ private:
     static bool go(const T* memory, size_t length) {
         static_assert(sizeof(T) <= sizeof(Elem),
                       "brio DmaTxEngine: a beat wider than the engine's element");
-        if (!busy_ || !dma_detail::run_ok(memory, length)) {
+        if (!dma_detail::run_ok(memory, length)) {
             return false;
         }
         program<T, increment>(memory, static_cast<uint16_t>(length));

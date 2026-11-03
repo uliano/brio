@@ -142,10 +142,12 @@
  *    from it - on this silicon a controller's BERR is not evidence. A
  *    client's BERR is untouched by the erratum and is reported.
  *  - 2.12.8, transmission stalled after the first byte: when the first
- *    byte is not already in TXDR, the second is written within two kernel
- *    cycles of its request, and the ratio between the APB clock and the
- *    kernel clock is between 1.5 and 3, the peripheral stalls until PE is
- *    cycled. The ratio is arithmetic this file can do, so it is published
+ *    byte is not already in TXDR, it is written within two kernel cycles
+ *    of its request, and the ratio between the APB clock and the kernel
+ *    clock is between 1.5 and 3, the second byte goes undetected and the
+ *    peripheral stalls until PE is cycled - measured under the DMA engines,
+ *    never on the event vector, whose first store comes later than that
+ *    (docs/stm32f4/fmpi2c.md). The ratio is arithmetic this file can do, so it is published
  *    rather than hidden - fmpi2c_transmit_stall_risk() and the host's
  *    transmit_stall_risk() - and the choice of kernel clock, which is the
  *    manual's own second workaround, is the application's. The first
@@ -429,10 +431,11 @@ constexpr uint32_t fmpi2c_datasheet_min_pclk_hz(FmpI2cSpeed s) {
 }
 
 /**
- * ES0298 2.12.8: with the first transmit byte not already in TXDR, the
- * second written within two kernel cycles of its request, and THE RATIO
+ * ES0298 2.12.8: with the first transmit byte not already in TXDR, that
+ * byte written within two kernel cycles of its request, and THE RATIO
  * BETWEEN THE APB CLOCK AND THE KERNEL CLOCK BETWEEN 1.5 AND 3, the
- * peripheral stalls in a state only a PE cycle or a reset leaves.
+ * peripheral misses the second byte and stalls in a state only a PE cycle
+ * or a reset leaves.
  *
  * The ratio is the one part of that a driver can compute, so it is
  * published: true means this pair of rates sits in the erratum's band, and
@@ -1868,10 +1871,10 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * the address, the repeated START and the ending stay on the interrupt,
  * because 23.4.16 says the address "cannot be transferred with DMA". A
  * half with no buffer stays on the vector, writing its filler or draining
- * what it reads, and so does a half whose engine refuses its start (a
- * block still holding the stream): start() reads the refusal before the
- * START and the request completes. The engines are started BEFORE the
- * START bit, which is what 23.4.16 asks for; the transmit engine's first
+ * what it reads, and the request completes. A stream is this host's alone
+ * (the ownership rule, docs/design/dma.md), so its start is not asked
+ * whether it took. The engines are started BEFORE the START bit, which is
+ * what 23.4.16 asks for; the transmit engine's first
  * byte still waits for the first TXIS, after the address, so this is not
  * ES0298 2.12.8's first workaround (the erratum, above). Which engine to
  * name is the program's judgement; docs/stm32f4/fmpi2c.md gives the
@@ -2544,9 +2547,12 @@ private:
     /// The halves the engines carry this tenure, started before the START
     /// (23.4.16), each with its DMA request enabled and its vector's flag
     /// disarmed. Under `interrupt` none; under `dma` every half with a
-    /// length and a buffer, and a half whose engine refuses its start (a
-    /// block still holding the stream) stays on the vector, its request
-    /// never enabled - the refusal read here, before the wire moves.
+    /// length and a buffer. The start's answer is not read: the stream is
+    /// this host's alone, its last block ended with its last tenure
+    /// (finish(), recover()), and a length of one to 255 on a byte buffer is
+    /// a run every block start takes. A program that starts this host's
+    /// engine by hand has broken the ownership rule; its tenure stretches
+    /// SCL until the arbiter's timeout answers.
     static void launch_dma() {
         if constexpr (has_engines) {
             tx_dma_ = false;
@@ -2554,14 +2560,16 @@ private:
             if (req_.engine != I2cEngine::dma) {
                 return;
             }
-            if (req_.rx_len != 0u && req_.rx.get() != nullptr &&
-                RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len))) {
+            if (req_.rx_len != 0u && req_.rx.get() != nullptr) {
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
                 rx_dma_ = true;
                 S::dma_receive(true);
                 S::interrupt(FmpI2cInterrupt::rx, false);
             }
-            if (req_.tx_len != 0u && req_.tx.get() != nullptr &&
-                TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len))) {
+            if (req_.tx_len != 0u && req_.tx.get() != nullptr) {
+                TxEngine::mark_busy();
+                (void)TxEngine::start_claimed(
+                    std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
                 tx_dma_ = true;
                 S::dma_transmit(true);
                 S::interrupt(FmpI2cInterrupt::tx, false);
@@ -2591,8 +2599,8 @@ private:
 
     /// The engines this tenure started taken back - a transmit block not
     /// completed abandoned and counted, the receive stream stopped - and
-    /// only those: a stream whose start this tenure's launch_dma() was
-    /// refused holds a block that is not this host's to stop. Then both
+    /// only those: a stream this tenure left alone is already stopped, and
+    /// stopping it again would cost its wait for nothing. Then both
     /// requests off and the vector's two data flags armed again.
     static void put_engines_away() {
         if constexpr (has_engines) {

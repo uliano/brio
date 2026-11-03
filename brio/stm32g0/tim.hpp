@@ -88,7 +88,7 @@
  *
  * 3. The prescaler and the auto-reload are shadowed. PSC is copied into
  *    the working register at the next update event and never before
- *    (21.4.11); ARR is too when CR1.ARPE is set, and is taken at once
+ *    (21.4.13); ARR is too when CR1.ARPE is set, and is taken at once
  *    when it is clear. So a configuration is only in force after an
  *    update, which is why configure() ends with EGR.UG - a software
  *    update that loads both shadows - and then clears the UIF that
@@ -101,7 +101,7 @@
  *    which can produce a runt pulse if it lands past the current count);
  *    every output channel this driver configures sets it, because a
  *    PwmChannel::duty() that can glitch is not one an actuator above can
- *    use. 21.3.10's "PWM mode" recipe asks for it too. The unbuffered
+ *    use. 21.3.11's "PWM mode" recipe asks for it too. The unbuffered
  *    behaviour is still reachable - TimChannelConfig::preload = false.
  *
  * 5. The pad map is the datasheet's and nothing checks it. Which AF
@@ -213,7 +213,7 @@ enum class TimMasterMode : uint8_t {
     oc4ref = 7,
 };
 
-/// CCMRx.OCyM - what a compare match does to the output (21.4.7). The
+/// CCMRx.OCyM - what a compare match does to the output (21.4.8). The
 /// field is four bits, split by the silicon across bit 16 and bits 6:4.
 enum class TimOutputMode : uint8_t {
     frozen = 0,
@@ -243,7 +243,7 @@ enum class TimChannelSelect : uint8_t {
 };
 
 /// CCER.CCyP/CCyNP for an input channel: 00 rising, 01 falling, 11 both
-/// (21.4.9; 10 is reserved).
+/// (21.4.11; 10 is reserved).
 enum class TimCapturePolarity : uint8_t { rising = 0, falling = 1, both = 3 };
 
 /// CCMRx.ICyPSC - capture one edge in 1, 2, 4 or 8 (21.4.7).
@@ -251,7 +251,7 @@ enum class TimCapturePrescaler : uint8_t { every = 0, every2 = 1, every4 = 2, ev
 
 /**
  * TIMx_DCR.DBA - the DMA burst engine's base, as a word offset from
- * TIMx_CR1 (21.4.20's own example list). Named rather than computed,
+ * TIMx_CR1 (21.4.21's own example list). Named rather than computed,
  * because the offsets are the register map's and an application that
  * arithmetics them itself has written a bug no header can catch.
  *
@@ -266,7 +266,7 @@ enum class TimBurstBase : uint8_t {
     rcr = 12, ccr1 = 13, ccr2 = 14, ccr3 = 15, ccr4 = 16, bdtr = 17,
 };
 
-/// The time base. `period` is ARR and is refused at zero: 21.4.12 says a
+/// The time base. `period` is ARR and is refused at zero: 21.4.14 says a
 /// null auto-reload leaves the counter blocked, which is a stopped timer
 /// wearing the face of a running one.
 struct TimConfig {
@@ -303,7 +303,7 @@ struct TimCaptureConfig {
     TimChannelSelect select = TimChannelSelect::direct;
     TimCapturePolarity polarity = TimCapturePolarity::rising;
     TimCapturePrescaler prescaler = TimCapturePrescaler::every;
-    /// ICyF, 0..15: how many consecutive samples at the rate table 105
+    /// ICyF, 0..15: how many consecutive samples at the rate its code
     /// gives must agree before an edge is believed. The sampling clock
     /// is tDTS or the timer clock, per the code.
     uint8_t filter = 0;
@@ -339,11 +339,11 @@ constexpr bool tim_etr_config_valid(const TimEtrConfig& c) {
 }
 
 /// BDTR, the break and dead-time unit of the four timers that have one
-/// (21.4.18). LOCK is one-way: once written non-zero, the level's
+/// (21.4.20). LOCK is one-way: once written non-zero, the level's
 /// registers are read-only until the next peripheral reset - which is
 /// why it is spelled here and defaulted to none.
 struct TimBreakDeadTime {
-    /// DTG, raw: 21.4.18's four ranges, 0xx = DTG x tDTG, 10x =
+    /// DTG, raw: 21.4.20's four ranges, 0xx = DTG x tDTG, 10x =
     /// (64 + DTG[5:0]) x 2, 110 = (32 + DTG[4:0]) x 8, 111 =
     /// (32 + DTG[4:0]) x 16, all in tDTS units. `tim_dead_time_ticks()`
     /// below decodes it and `tim_dead_time_code()` searches for a code.
@@ -358,7 +358,7 @@ struct TimBreakDeadTime {
     uint8_t lock = 0;                   ///< LOCK 0..3, one-way (this struct's comment)
 };
 
-/// The dead time a DTG code produces, in tDTS ticks (21.4.18's four
+/// The dead time a DTG code produces, in tDTS ticks (21.4.20's four
 /// ranges). tDTS is the timer clock divided by CR1.CKD.
 constexpr uint16_t tim_dead_time_ticks(uint8_t dtg) {
     if ((dtg & 0x80u) == 0u) {
@@ -464,7 +464,7 @@ constexpr uint32_t tim_clock_hz(Clock) {
 /// comment. Both claims configure the pad through stm32g0/pin.hpp, a
 /// read-modify-write of the port's registers: from setup or an active
 /// object's handler, not from an interrupt handler.
-/// The pad's input buffer stays live in alternate mode (7.3.1), so a
+/// The pad's input buffer stays live in alternate mode (7.3.12), so a
 /// driven waveform is readable on IDR and an EXTI line can watch it,
 /// which is what makes this chapter measurable with no wire.
 template <PinSel sel>
@@ -609,7 +609,7 @@ public:
     /// The one assumption tim_clock_hz() makes about the clock tree.
     static bool clock_ok() { return Rcc::bus_prescalers_are_unity(); }
 
-    // ---- the time base (21.4.1, 21.4.11, 21.4.12) ---------------------------
+    // ---- the time base (21.4.1, 21.4.13, 21.4.14) ---------------------------
 
     /// Whether a configuration is legal for this instance - the same
     /// judgment configure() makes, available at compile time so a task
@@ -686,7 +686,7 @@ public:
     static bool enabled() { return (regs().CR1 & TIM_CR1_CEN) != 0u; }
 
     /// The counter. 32 bits on TIM2 and 16 everywhere else, masked so a
-    /// UIFREMAP copy in bit 31 (21.4.13) never reads back as count.
+    /// UIFREMAP copy in bit 31 (21.4.12) never reads back as count.
     static uint32_t count() {
         const uint32_t v = regs().CNT;
         return counter_bits == 32u ? v : (v & 0xFFFFu);
@@ -700,12 +700,12 @@ public:
     }
 
     static uint16_t prescaler() { return static_cast<uint16_t>(regs().PSC); }
-    /// PSC takes effect at the next update event, not now (21.4.11).
+    /// PSC takes effect at the next update event, not now (21.4.13).
     static void set_prescaler(uint16_t p) { regs().PSC = p; }
 
     static uint32_t period() { return regs().ARR & max_period; }
     /// ARR: at once with ARPE clear, at the next update with it set
-    /// (21.4.12). Refuses zero and anything past this counter's width.
+    /// (21.4.14). Refuses zero and anything past this counter's width.
     static bool set_period(uint32_t v) {
         if (v == 0u || v > max_period) {
             return false;
@@ -876,7 +876,7 @@ public:
     // a walk of `length` consecutive registers starting at `base`, all
     // through the single address TIMx_DMAR - so a DMA channel whose
     // peripheral address never changes writes ARR, then CCR1, then CCR2,
-    // and starts again at the next update event. 21.4.19/21.4.20 (and
+    // and starts again at the next update event. 21.4.21/21.4.22 (and
     // the same pair in every other timer chapter) describe it; nothing
     // in this driver had a verb for it until a caller wanted a whole
     // waveform updated atomically per period.
@@ -888,7 +888,7 @@ public:
     // CCMR at all) is refused by `has_dma_burst` before it can.
 
     /// Point the burst engine at `length` registers starting at `base`.
-    /// 21.4.20's DBL is the length minus one and this argument is the
+    /// 21.4.21's DBL is the length minus one and this argument is the
     /// length, so nobody has to remember which - the ES0548-shaped
     /// mistake that off-by-one would be.
     static bool dma_burst(TimBurstBase base, uint8_t length) {
@@ -916,7 +916,7 @@ public:
 
     /// The one address a burst channel is pointed at: every access to it
     /// lands on `base + index` and the index is the controller's own
-    /// (21.4.19). Null where this timer has no burst engine.
+    /// (21.4.22). Null where this timer has no burst engine.
     static volatile void* dmar_address() {
         return has_dma_burst ? static_cast<volatile void*>(&regs().DMAR) : nullptr;
     }
@@ -960,7 +960,7 @@ public:
         return hit;
     }
 
-    // ---- capture/compare channels (21.4.7 .. 21.4.9) ------------------------
+    // ---- capture/compare channels (21.4.7 .. 21.4.11) ------------------------
 
     /// CCRy. Reading a capture channel's register is what clears its
     /// CCyIF (21.4.5), so this verb is the acknowledgement as well as
@@ -1010,7 +1010,7 @@ public:
 
         if constexpr (has_break) {
             // OISy / OISyN live in CR2 and are write-protected by
-            // BDTR.LOCK level 1 and up (21.4.18) - a caller that has
+            // BDTR.LOCK level 1 and up (21.4.20) - a caller that has
             // locked the timer gets what it locked, not an error.
             const uint32_t ois_shift = 8u + 2u * ch;
             uint32_t cr2 = t.CR2 & ~(0x3u << ois_shift);
@@ -1027,7 +1027,7 @@ public:
     }
 
     /// CCMRx.OCyM of channel `ch` as it stands, its four bits split as
-    /// output_channel() writes them (21.4.7) - what a write under LOCK
+    /// output_channel() writes them (21.4.8) - what a write under LOCK
     /// level 3 actually left. `frozen` for a channel this timer has not.
     static TimOutputMode output_mode(uint8_t ch) {
         if (ch >= channels) {
@@ -1042,7 +1042,7 @@ public:
     }
 
     /// Configure channel `ch` as an input. The channel is disabled in
-    /// CCER first, because 21.4.9 makes CCyS writable only then - the
+    /// CCER first, because 21.4.7 makes CCyS writable only then - the
     /// silicon's own rule, and the reason this is not one store.
     static bool capture_channel(uint8_t ch, const TimCaptureConfig& c) {
         if (ch >= channels || c.select == TimChannelSelect::output) {
@@ -1163,7 +1163,7 @@ public:
         return static_cast<TimMasterMode>((regs().CR2 & TIM_CR2_MMS_Msk) >> TIM_CR2_MMS_Pos);
     }
 
-    // ---- break and dead time (21.4.18) --------------------------------------
+    // ---- break and dead time (21.4.20) --------------------------------------
 
     /// BDTR in one store. False, with nothing written, on a timer without
     /// a break unit or for a filter or lock code outside its field; a
@@ -1205,7 +1205,7 @@ public:
     static bool main_output() { return has_break && (regs().BDTR & TIM_BDTR_MOE) != 0u; }
 
     /// BDTR's fields read back as they stand - what a write under LOCK
-    /// actually left (21.4.18: LOCK itself is written once, and each
+    /// actually left (21.4.20: LOCK itself is written once, and each
     /// level makes its fields read-only until the next peripheral
     /// reset). Zero / false on a timer without a break unit.
     static uint8_t lock_level() {
@@ -1219,14 +1219,14 @@ public:
     static bool off_state_idle() { return has_break && (regs().BDTR & TIM_BDTR_OSSI) != 0u; }
     static bool off_state_run() { return has_break && (regs().BDTR & TIM_BDTR_OSSR) != 0u; }
 
-    // ---- the external trigger input (21.4.3, 21.4.28) -----------------------
+    // ---- the external trigger input (21.4.3, 21.4.27) -----------------------
 
     /// ETP / ETPS / ETF / ECE, the SMCR half the slave configuration
     /// leaves alone. Refused on a timer without ETR (TIM15 and the
     /// one-channel timers) and for a code outside its field. 21.4.3:
-    /// "the external clock frequency must be at most a quarter of the
-    /// TIMxCLK" after the prescaler - the caller's arithmetic, since
-    /// this file does not know the source's rate.
+    /// "External trigger signal ETRP frequency must be at most 1/4 of
+    /// fCK_INT frequency" - the caller's arithmetic, since this file does
+    /// not know the source's rate.
     static bool external_trigger(const TimEtrConfig& c) {
         if constexpr (!has_external_trigger) {
             (void)c;
@@ -1319,7 +1319,7 @@ public:
 
 private:
     static volatile uint32_t& ccr_ref(uint8_t ch) {
-        // CCR1..CCR4 are four consecutive words at 0x34 (21.4.13..16).
+        // CCR1..CCR4 are four consecutive words at 0x34 (21.4.16..19).
         return *(&regs().CCR1 + ch);
     }
     static uint32_t ccr(uint8_t ch) { return ccr_ref(ch); }
@@ -1336,7 +1336,7 @@ private:
     }
 
     /// CCER's four bits of one channel: E, P, NE, NP at 4 x ch. Channel 4
-    /// has no NE bit (21.4.9 leaves it reserved), and `ne` is only ever
+    /// has no NE bit (21.4.11 leaves it reserved), and `ne` is only ever
     /// true for a channel with a complementary output, which channel 4
     /// never is.
     static void write_ccer(uint8_t ch, bool e, bool p, bool ne, bool np) {
@@ -1382,7 +1382,7 @@ struct TimPwm {
 
     /// Bring the timer up as an edge-aligned PWM generator on this
     /// channel. On a break-capable timer MOE is raised too, without which
-    /// nothing reaches the pad at all (21.4.18) - the trap that makes a
+    /// nothing reaches the pad at all (21.4.20) - the trap that makes a
     /// first TIM1 PWM look dead. From setup, after Tim<n>::init(); false
     /// when the timer refuses the period or the channel.
     static bool setup(uint16_t prescaler = 0, TimOutputMode mode = TimOutputMode::pwm1,
@@ -1469,7 +1469,7 @@ struct TimPairPwm {
 
 /**
  * TimPeriodMeter<T>: the period and the high time of a signal on TI1, in
- * one capture arrangement - the chapter's "PWM input mode" (21.3.6).
+ * one capture arrangement - the chapter's "PWM input mode" (21.3.8).
  *
  * Two channels watch the same input: channel 1 directly on the rising
  * edge (the period), channel 2 indirectly on the falling one (the
@@ -1487,7 +1487,7 @@ struct TimPeriodMeter {
     TimPeriodMeter() = delete;
     static_assert(T::channels >= 2,
                   "brio TimPeriodMeter: PWM input mode watches one input with TWO "
-                  "channels (RM0444 21.3.6)");
+                  "channels (RM0444 21.3.8)");
     static_assert(T::has_slave_mode,
                   "brio TimPeriodMeter: PWM input mode resets the counter on every "
                   "rising edge, which is the slave controller's job");
@@ -1495,7 +1495,7 @@ struct TimPeriodMeter {
     /// Configure both channels and the slave reset, and start the
     /// counter; false when the timer refuses. `invert` measures the low
     /// time and the period from falling edges instead (the whole
-    /// arrangement mirrored, 21.3.6's own note).
+    /// arrangement mirrored, 21.3.8's own note).
     static bool setup(uint16_t prescaler = 0, uint8_t filter = 0, bool invert = false) {
         if (!T::configure({.prescaler = prescaler, .period = T::max_period})) {
             return false;
@@ -1612,7 +1612,7 @@ private:
 
 /**
  * TimEventCounter<T>: a timer whose clock is another timer's trigger -
- * external clock mode 1 on an ITRx link (21.3.15). With the master
+ * external clock mode 1 on an ITRx link (21.3.26). With the master
  * publishing its update event on TRGO, the count is the number of master
  * periods, so a frequency is measured with no wire, no pad and no CPU in
  * the path.
@@ -1649,7 +1649,7 @@ struct TimEventCounter {
 
 /**
  * TimGatedCounter<T>: a timer that counts its own clock only while the
- * trigger is high (slave gated mode, 21.3.15). Pointed at a master whose
+ * trigger is high (slave gated mode, 21.3.26). Pointed at a master whose
  * TRGO is OC1REF - the PWM waveform itself - the count over a known
  * window is the high time, so a duty cycle is measured internally, with
  * no pad and no sampling.
@@ -1712,7 +1712,7 @@ struct TimPeriodicTick {
 
 /**
  * TimOnePulse<T, ch>: one pulse of a chosen width, after a chosen delay,
- * on a trigger - CR1.OPM plus a compare channel (21.3.7). The counter
+ * on a trigger - CR1.OPM plus a compare channel (21.3.20). The counter
  * stops itself at the next update, so the pulse happens once per
  * trigger and the timer costs nothing between them.
  *

@@ -120,8 +120,7 @@
 //   u  THE ENGINE NAMED (Request::engine, util/i2c_bus.hpp): a Request
 //      naming nothing on the pump, `interrupt` on a long half touching no
 //      channel, `dma` on halves of one byte and on a register read, a half
-//      with no buffer left to the pump under `dma`, a transmit engine that
-//      refuses its start leaving its half to the pump, and `dma` on the
+//      with no buffer left to the pump under `dma`, and `dma` on the
 //      engineless host refused with nothing on the wire
 //   n  THE PEER: the twi_link command channel to the peer board, its
 //      ident and ten command round trips
@@ -2336,22 +2335,14 @@ struct EnginePath {
     bool rx_carried;
 };
 
-/// A block of the test's own that holds the transmit engine when a tenure
-/// asks for it (`hold_tx`): started on the channel, its request never
-/// raised (TXDMAEN is the tenure's), so the host's start() finds the engine
-/// busy.
-const uint8_t tx_holder[4] = {0xA1, 0xA2, 0xA3, 0xA4};
-
 EnginePath engined_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
-                          uint8_t rx_len, I2cEngine engine, I2cSpeed speed,
-                          bool hold_tx = false) {
+                          uint8_t rx_len, I2cEngine engine, I2cSpeed speed) {
     using TxChannel = DmaChannel<1, 1>;
     using RxChannel = DmaChannel<1, 2>;
     HostTx::stop();
     HostRx::stop();
     TxChannel::regs().CMAR = 0;
     RxChannel::regs().CMAR = 0;
-    const bool held = hold_tx && HostTx::start(std::span<const uint8_t>(tx_holder, 4));
     DmaHost::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(tx);
@@ -2377,14 +2368,9 @@ EnginePath engined_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8
             (void)DmaHost::recover();
         }
     }
-    const EnginePath path{
-        status, host_isr_entries, dma_isr_entries,
-        tx != nullptr && TxChannel::regs().CMAR == reinterpret_cast<uint32_t>(tx),
-        rx != nullptr && RxChannel::regs().CMAR == reinterpret_cast<uint32_t>(rx)};
-    if (held) {
-        HostTx::stop();   // the holder's block, never requested, taken back
-    }
-    return hold_tx && !held ? EnginePath{no_answer, 0, 0, false, false} : path;
+    return {status, host_isr_entries, dma_isr_entries,
+            tx != nullptr && TxChannel::regs().CMAR == reinterpret_cast<uint32_t>(tx),
+            rx != nullptr && RxChannel::regs().CMAR == reinterpret_cast<uint32_t>(rx)};
 }
 
 /// The bytes a tenure wrote, judged at the client.
@@ -2483,20 +2469,6 @@ void engine_rule(I2cSpeed speed, const char* rate, const uint8_t* serve) {
     bench.verdict("a stale byte the pump left in TXDR never reaches the engines' tenure",
                   nacked == i2c_nack_addr && p.status == i2c_ok && client_got(tx_buf, 4));
 
-    // ---- an engine whose start refuses leaves its half to the pump ----
-    // The transmit engine held by a block of the test's own: start() finds
-    // it busy before the START, and the write of four under `dma` goes to
-    // the pump - four entries, the channel naming the holder and not the
-    // tenure's buffer - and completes byte-exact.
-    fill_pattern(tx_buf, 4, 0x63);
-    p = engined_tenure(peer_addr, tx_buf, 4, nullptr, 0, I2cEngine::dma, speed, true);
-    print(serial, "    dma write 4, the transmit engine held: status ", p.status,
-          ", host entries ", p.host_entries, ", tx channel ", p.tx_carried, ", client got ",
-          peer_rx_n, crlf);
-    bench.verdict("dma with the transmit engine refusing its start: the write rides the pump, "
-                  "four entries, byte-exact, the tenure completing",
-                  p.status == i2c_ok && p.host_entries == 4u && p.dma_entries == 0u &&
-                      !p.tx_carried && client_got(tx_buf, 4));
 }
 
 void tu_engine_choice() {

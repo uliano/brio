@@ -86,9 +86,8 @@
 //   i  THE KERNEL: I2cBus over I2cHost, the rejection, the sleep votes
 //   j  the engine named: `dma` refused on the engineless host, the
 //      tenures through the two DMA engines at their shortest - a write
-//      and a read of one byte - `interrupt` on the engined host touching
-//      no stream, and a stream that refuses its start leaving its phase
-//      to the vectors
+//      and a read of one byte - and `interrupt` on the engined host
+//      touching no stream
 //   k  the recovery verbs: SWRST, recover() and unstick()
 //   l  (the 32F469IDISCOVERY, by name only) A FINGER ON THE GLASS: the
 //      touch controller in interrupt trigger mode, its INT counted on
@@ -1318,14 +1317,10 @@ struct EngineTrace {
 template <typename Bus>
 EngineTrace traced(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
                    I2cEngine engine) {
-    // SxM0AR takes a write only with EN down (RM0390 9.5.8); a stream the
-    // test holds keeps its holder's address, and is not written.
-    if (!TxStreamRegs::enabled()) {
-        TxStreamRegs::regs().M0AR = 0;
-    }
-    if (!RxStreamRegs::enabled()) {
-        RxStreamRegs::regs().M0AR = 0;
-    }
+    // SxM0AR takes a write only with EN down (RM0390 9.5.8); between two
+    // tenures both streams have stopped.
+    TxStreamRegs::regs().M0AR = 0;
+    RxStreamRegs::regs().M0AR = 0;
     tx_dma_entries = 0;
     rx_dma_entries = 0;
     const uint8_t st = tenure<Bus>(peer_addr, tx, tx_len, rx, rx_len, I2cSpeed::standard_100k,
@@ -1441,45 +1436,6 @@ void tj_engines() {
     bench.verdict("interrupt on the engined host touches no stream, and the read is exact",
                   t.status == i2c_ok && !t.tx_carried && !t.rx_carried && t.tx_entries == 0u &&
                       t.rx_entries == 0u && same(reference, got, 8));
-
-    // A STREAM WHOSE START REFUSES leaves its phase to the pump: each
-    // engine held in turn by a block of the test's own, started on its
-    // stream with no request raised (DMAEN is the tenure's), so the host's
-    // start of it is refused - the transmit stream's in the ADDR entry,
-    // before ADDR's clear, the receive stream's at the read's SB, before
-    // the address. The stream's memory address keeps naming the holder
-    // (SxM0AR takes no write while EN stands), its vector is never
-    // entered, and the tenure completes byte-exact on the vectors.
-    static uint8_t tx_holder[4] = {0xA1, 0xA2, 0xA3, 0xA4};
-    static uint8_t rx_holder[4] = {};
-    for (uint8_t i = 0; i < 8u; ++i) {
-        got[i] = 0;
-    }
-    const bool tx_held = TxEngine::start(std::span<const uint8_t>(tx_holder, 4));
-    t = traced<DmaHost>(index, 1, got, 8, I2cEngine::dma);
-    TxEngine::stop();
-    const bool tx_refused = tx_held && t.status == i2c_ok && !t.tx_carried && t.rx_carried &&
-                            t.tx_entries == 0u && t.rx_entries == 1u &&
-                            TxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(tx_holder) &&
-                            same(reference, got, 8);
-    for (uint8_t i = 0; i < 8u; ++i) {
-        got[i] = 0;
-    }
-    const bool rx_held = RxEngine::start(std::span<uint8_t>(rx_holder, 4));
-    t = traced<DmaHost>(index, 1, got, 8, I2cEngine::dma);
-    RxEngine::stop();
-    const bool rx_refused = rx_held && t.status == i2c_ok && t.tx_carried && !t.rx_carried &&
-                            t.tx_entries == 1u && t.rx_entries == 0u &&
-                            RxStreamRegs::regs().M0AR == reinterpret_cast<uint32_t>(rx_holder) &&
-                            same(reference, got, 8);
-    print(serial, "  dma with a stream held: the index's ", tx_refused ? "on the pump" : "WRONG",
-          ", the read's ", rx_refused ? "on the pump" : "WRONG", crlf);
-    bench.verdict("dma with the transmit stream refusing its start: the index rides the pump, "
-                  "the read the receive stream, byte-exact",
-                  tx_refused);
-    bench.verdict("... and with the receive stream refusing: the read rides the pump, "
-                  "byte-exact",
-                  rx_refused);
 
     // A write of two bytes through the transmit engine, read back on the
     // pump: the engined write path really moves the bytes. Without the

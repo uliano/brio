@@ -95,9 +95,9 @@ family's own EXTI, which makes this the one register in the stratum
 where the reflex is wrong.
 
 **The prescaler and the auto-reload are shadowed.** PSC is copied into
-the working register at the next UPDATE event and never before (21.4.11);
+the working register at the next UPDATE event and never before (21.4.13);
 ARR is too when `CR1.ARPE` is set and is taken at once when it is clear
-(21.4.12). A configuration is therefore only in force after an update,
+(21.4.14). A configuration is therefore only in force after an update,
 which is why `configure()` ends with `EGR.UG` - a software update that
 loads both shadows - and then clears the UIF that update raised.
 
@@ -105,7 +105,7 @@ loads both shadows - and then clears the UIF that update raised.
 choice.** `CCyPE` is clear out of reset, so a write to CCRy acts at once
 and can produce a runt pulse; every output channel `output_channel()`
 configures sets it, because a `PwmChannel::duty()` that can glitch is
-not one a generic actuator can use. 21.3.10's own PWM recipe asks for
+not one a generic actuator can use. 21.3.11's own PWM recipe asks for
 the same. The unbuffered behaviour is still reachable
 (`TimChannelConfig::preload = false`), and letter `k` uses it.
 
@@ -202,7 +202,7 @@ stated on the verb.
   crystal, and MCO = HSI16/8 into it a 2 MHz counter that runs only
   while the part is awake ([clock.md](clock.md), [platform.md](platform.md)).
 - Free functions: `tim_dead_time_ticks(dtg)` and `tim_dead_time_code(ticks)`
-  (21.4.18's four ranges, the code search always rounding UP),
+  (21.4.20's four ranges, the code search always rounding UP),
   `tim_internal_trigger(n, itr)` / `tim_internal_trigger_is_oc1(n, itr)`
   / `tim_trigger_index_for(slave, master)` (tables 119, 123, 130, both
   directions), `tim_clock_hz(clock)`.
@@ -306,7 +306,7 @@ Shifted-and-added, the same pair reads 469 and 467.
 measures a line watching a pad its own application drives; here line 5
 counted 200 rising edges of TIM2's waveform in 200002 us - one every
 1000 us, the frequency TIMPCLK / (PSC + 1) / (ARR + 1) predicts - with
-PA5 in alternate-function mode. 7.3.1's live input buffer holds for AF
+PA5 in alternate-function mode. 7.3.12's live input buffer holds for AF
 mode too.
 
 **One timer counts another, exactly.** TIM2 publishing its update on
@@ -387,7 +387,7 @@ rising edges gave 12800 periods in 12800151 cycles edge-aligned
 (**1000.0 ticks where ARR + 1 = 1000**) and 6406 periods in 12800139
 cycles centre-aligned (**1998.1 ticks where 2 x ARR = 1998 and
 2 x (ARR + 1) = 2000**), so the measurement tells the two candidate
-formulas apart and 21.3.3's "0 to ARR-1 up, ARR to 1 down" is right. The
+formulas apart and 21.3.2's "0 to ARR-1 up, ARR to 1 down" is right. The
 three CMS codes differ only in WHEN the compare flag rises: 100 flags in
 100 ms counting up, 200 counting both.
 
@@ -442,7 +442,7 @@ ten):
   OSSI 0 releases both pads (2000 of 2000 reads high) and OSSI 1 drives
   them to their idle level 0 (none high); with MOE set and only CH1
   enabled, OSSR 0 releases CH1N and OSSR 1 drives it inactive while CH1
-  keeps running (21.4.18 table 124).
+  keeps running (21.4.20, table 120).
 - **`BDTR.LOCK`'s three levels**, each undone by the peripheral reset:
   every level keeps DTG at its locked 10 against a write of 20 and keeps
   LOCK itself against a write of 0; level 1 still lets OSSI move, level
@@ -485,7 +485,7 @@ is the off-by-one this driver refuses to make a caller carry - and
 `dmar_address()` is the one address a channel is pointed at.
 
 **THE MAP HAS HOLES AND THE WALK DOES NOT SKIP THEM.** `DBA` is a WORD
-OFFSET from `TIMx_CR1` (21.4.20's own example list), so "ARR then CCR1
+OFFSET from `TIMx_CR1` (21.4.21's own example list), so "ARR then CCR1
 then CCR2" is not a burst of three but a burst of FOUR: offset 12
 between `ARR` and `CCR1` is the repetition counter, which TIM2 does not
 implement. A table meaning those three registers carries a zero there.
