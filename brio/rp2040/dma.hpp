@@ -463,9 +463,36 @@ public:
      *
      * Out of line and cold, with stop(): a fault's or a bring-up's
      * path, never a block's, which a flattened hot body
-     * (util/placement.hpp) would otherwise carry inline.
+     * (util/placement.hpp) would otherwise carry inline. A transport's path
+     * that placed itself in SRAM takes the *_inline form of this verb and
+     * of those above it, the same stores inline in the caller, because an
+     * out-of-line one would be a fetch from the flash. Each pair is one body
+     * written twice on purpose: a body the out-of-line verb called would move
+     * where the compiler emits this file's other verbs in every image, placed
+     * or not (the gate's census).
      */
     [[gnu::noinline, gnu::cold]] static bool abort() {
+        const bool on0 = routed(0);
+        const bool on1 = routed(1);
+        route(0, false);
+        route(1, false);
+        Dma::abort_raw(bit);
+        bool settled = false;
+        for (uint32_t spins = 100'000u; spins != 0u; --spins) {
+            if (!busy()) {
+                settled = true;
+                break;
+            }
+        }
+        Dma::clear_raw(bit);
+        DMA->INTS0 = bit;
+        DMA->INTS1 = bit;
+        route(0, on0);
+        route(1, on1);
+        return settled;
+    }
+
+    [[gnu::always_inline]] static bool abort_inline() {
         const bool on0 = routed(0);
         const bool on1 = routed(1);
         route(0, false);
@@ -490,6 +517,15 @@ public:
     /// off both lines, the errors and the status cleared.
     [[gnu::noinline, gnu::cold]] static void stop() {
         (void)abort();
+        route(0, false);
+        route(1, false);
+        ctrl() = 0;
+        clear_errors();
+        Dma::clear_raw(bit);
+    }
+
+    [[gnu::always_inline]] static void stop_inline() {
+        (void)abort_inline();
         route(0, false);
         route(1, false);
         ctrl() = 0;
@@ -733,6 +769,16 @@ struct DmaBinding {
         }
     }
 
+    /// bind() inline in the caller, for a path placed in SRAM (DmaChannel::abort()).
+    [[gnu::always_inline]] static void bind_inline(uint32_t word, uint8_t line, bool routed) {
+        Channel::stop_inline();
+        ctrl = word;
+        Channel::ctrl() = word;
+        if (routed) {
+            Channel::route(line, true);
+        }
+    }
+
     /// Back to nothing, the held word with it.
     [[gnu::noinline, gnu::cold]] static void release() {
         Channel::stop();
@@ -881,6 +927,15 @@ public:
         busy_ = false;
         in_flight_ = 0;
         bind();
+        return true;
+    }
+    /// abandon() inline in the caller, for a path placed in SRAM (DmaChannel::abort()).
+    [[gnu::always_inline]] static bool abandon_inline() {
+        faults_ = faults_ + 1u;
+        busy_ = false;
+        in_flight_ = 0;
+        Binding::bind_inline(base_ | dma_beat_bits<Elem>() | DMA_CH0_CTRL_TRIG_INCR_READ_BITS, line, true);
+        Channel::write_addr() = data_;
         return true;
     }
     static uint32_t faults() { return faults_; }
@@ -1048,6 +1103,27 @@ public:
             return std::nullopt;
         }
         return run != nullptr ? (next - dma_address(run)) / sizeof(T) : 0u;
+    }
+    /// settle() inline in the caller, for a path placed in SRAM (DmaChannel::abort()).
+    template <typename T>
+    [[gnu::always_inline]] static std::optional<uint32_t> settle_inline(const T* run) {
+        const bool settled = Channel::abort_inline();
+        const uint32_t next = Channel::write_addr();
+        rebind_inline();
+        if (!settled) {
+            return std::nullopt;
+        }
+        return run != nullptr ? (next - dma_address(run)) / sizeof(T) : 0u;
+    }
+
+    /// The channel stopped and bound as arm() left it, whatever ran, with nothing
+    /// counted: what stop() and arm() do with the same words, inline in the caller, for
+    /// a path placed in SRAM (DmaChannel::abort()).
+    [[gnu::always_inline]] static void rebind_inline() {
+        capacity_ = 0;
+        taken_ = 0;
+        Binding::bind_inline(base_ | dma_beat_bits<Elem>() | DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS, line, true);
+        Channel::read_addr() = data_;
     }
 
     static void stop() {

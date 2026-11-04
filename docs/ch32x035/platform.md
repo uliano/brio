@@ -1508,7 +1508,9 @@ masked, so no vector reaches SRAM the copy has not written. A driver's
 prologue (the default) the vector passes the address of the closure -
 the object holding the body's captured variables - in one instruction
 and calls; in an image built without it the vector saves the
-caller-saved registers in software around the call.
+caller-saved registers in software around the call. `InRam` promises the body: a USART's
+`tx_fault()` and `rx_fault()`, on a bus error, stay in the flash, and the kernel, the arbiter
+and the vector's own code are the program's to place.
 
 ## Not covered yet
 

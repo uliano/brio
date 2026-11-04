@@ -408,7 +408,10 @@ family has a forced instance or an unavoidable group.
   `clear_errors()`, `raised()` / `clear_raised()`, `route(line, on)` /
   `routed` / `pending(line)` / `clear_pending`, `abort()` (the routes
   lifted from all four lines, the erratum's sequence, the routes back),
-  `stop()`, the debug trio `debug_credits()` / `clear_credits()` /
+  `stop()` (both out of line in the flash, with the binding's `bind()` and `release()`; a
+  transport's path already in SRAM takes `abort_inline()`, `stop_inline()`, `bind_inline()` and
+  the engines' `abandon_inline()` and `settle_inline(run)`: [platform.md](platform.md), "A handler in SRAM"),
+  the debug trio `debug_credits()` / `clear_credits()` /
   `debug_reload()`, and `security()` / `security_locked()`. Every
   programming verb refuses a BUSY channel.
 - `DmaLine<n>` (0..3): `irq()`, `routed()`, `pending()`, `clear(mask)`,
@@ -436,7 +439,7 @@ family has a forced instance or an unavoidable group.
   as `flag_complete` / `flag_error`; no half event on this controller),
   `complete()`, `busy()` / `idle()`, `take()` (beats, from TRANS_COUNT, with the
 mode masked off), `full`, `capacity`, `settle(run)` (a run ended now, by the abort:
-the beats in memory, from WRITE_ADDR), `abandon()`,
+the beats in memory, from WRITE_ADDR), `rebind_inline()` (bound again, nothing counted), `abandon()`,
   `faults()`, `stop()`, and `Report` - `DmaReport` by a name a template
   reaches through the engine type. A receive engine clears the channel's
   request credits before every run.

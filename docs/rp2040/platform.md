@@ -735,38 +735,37 @@ the two images a define gives between them; cycles at 125 MHz, each
 cell WARM / COLD - cold read by letter c, the XIP cache flushed before
 every timed run). F: every driver InFlash and every vector in the flash
 (the default); R: the drivers InRam; V: the vectors placed; B: both.
-Each cell is the range over three runs or more where the runs spread
-(ten warm on F, thirteen on B, six on R); the I2C rows are letter i's over five
+Each cell is the range where the runs spread, three warm and three cold on F and B and two
+and two on R and V; the I2C rows are letter i's over five
 warm and five cold runs on each image.
 
 | path | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes (`spi.req`) | 816 / 12046 | 834 / 2881 | 816 / 12046 | 834 / 2881 |
-| SPI on the engines, 16 frames, wall | 1399 to 1584 / 32588 | 1429 to 1800 / 17884 | 1399 / 21820 | 1420 to 1607 / 10620 |
-| ... the DMA line's handler | 191 to 374 / 8264 | 207 to 577 / 4578 | 191 / 191 | 198 / 198 |
-| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1575 to 1913 / 14076 | 886 to 1533 / 8151 to 9759 | 805 to 840 / 1271 | 877 to 912 / 1342 to 2950 |
-| UART transmit engine, 256 bytes at 1 Mbaud, completions | 4513 to 6091 / 8682 to 9798 | 1778 to 3173 / 6239 to 7077 | 390 to 425 / 2090 to 2930 | 645 to 1446 / 2218 to 2774 |
-| I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5129 to 5504 | 362 / 12640 to 16076 | 379 / 5504 |
+| SPI polled request, a command byte and 2 data bytes (`spi.req`) | 809 / 11678 | 827 / 2873 | 809 / 11678 | 827 / 2873 |
+| SPI on the engines, 16 frames, wall | 1416 / 28436 to 28712 | 1449 / 17904 | 1416 / 17116 | 1440 / 10640 |
+| ... the DMA line's handler | 204 / 8830 | 223 / 4594 | 204 / 204 | 214 / 214 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 4060 to 4512 / 14166 | 1256 to 1626 / 8151 | 805 / 1271 to 2879 | 877 to 912 / 2950 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 4379 to 5350 / 9140 to 9418 | 1370 to 1683 / 6703 to 6889 | 1164 to 1538 / 2181 to 2651 | 516 to 550 / 2032 to 2588 |
+| I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 270 / 2412 | 362 / 12640 | 270 / 2412 |
 | ... its longest handler entry | 169 / 6382 | 201 / 3174 | 169 / 169 | 192 / 192 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 51137 to 51788 / 72418 to 72970 | 49602 (an older image) / 61334 | 49553 to 49738 (an older image) / 61758 | 49602 / 54754 to 54822 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 49564 / 72326 | 49505 / 58246 | 49564 / 61758 | 49496 / 51730 |
 
 What the rows say:
 
 - WARM, THE PLACEMENT BUYS NOTHING ON THIS CORE AND COSTS THE VENEER:
   a polled request 18 cycles dearer under InRam, an I2C entry 23 to 32 - the cache serves a warm path at the SRAM's pace,
   and the polled loops read the same to the cycle in both places
-  (`spi.poll` of 256 frames 5739 against 5757). A warm figure that
+  (`spi.poll` of 256 frames 5736 against 5754). `I2cHost`'s `start()` is the exception, 270 against
+  362: the placed one writes the `Request` out where the default's calls `memcpy` in the flash. A warm figure that
   differs more is the cache's set conflicts in that one image (the UART
   rows: the ops of letter u each run once, after other code). The engined
-  block's wall spreads warm on every image but V (1399 to 1584 under F,
-  1429 to 1800 under R, 1420 to 1607 under B), and its handler wherever
-  the vector stays in the flash (191 to 374 under F, 207 to 577 under R);
-  no XIP count was read around it, so the spread's cause is not split.
+  block's wall and handler read one figure a column in these runs and spread over more
+  ([spi.md](spi.md), letter d's item); no XIP count was read around them, so the spread's cause is not split.
 - COLD IS WHERE IT PAYS, and it pays on every path: a three-byte request
-  12046 cycles from the flash against 2881 with the host InRam (`spi.req`
+  11678 cycles from the flash against 2873 with the host InRam (`spi.req`
   with letter c's switch on; `spi.cold`, the same request after a flush with
-  the cache's misses read around it, 12140 cycles and 142 misses against
-  2881 and 41, the 41 the caller's); the I2C and SPI handlers cold from the flash 6382 and 8264
+  the cache's misses read around it, 11772 cycles and 139 misses against
+  2873 and 41, the 41 the caller's); the I2C and SPI handlers cold from the flash 6382 and 8830
   cycles, from SRAM what they cost warm.
 - THE VECTOR PLACED REACHES WHAT A VECTOR RUNS, and nothing else: the
   handlers read their warm figures cold, but a host's `start()` stays
@@ -787,21 +786,48 @@ What the rows say:
   in the engined host's `start()` or in the letter's own code. With the
   flush in SRAM, letter i under the switch runs to its end in five runs of
   five on each of the four images, every line printed and every byte
-  read the peer's: the engined 16-byte read at 400 kHz cold 71946 to
-  73838 cycles on F and 54810 in every run on B.
+  read the peer's: the engined 16-byte read at 400 kHz cold 72326
+  cycles on F and 51730 on B.
 - THE SRAM IT COSTS, one instance a path and host type: the SPI host's
   `start()` 816 bytes without engines and 1548 with them (the engines'
   launch folded in), the DMA line's body 712 (the wait for the end of the
   last frame there); the
-  I2C host's 624 to 1872; the UART's 156 to 740 - the bench's three
-  drivers, in all their types, 11320 bytes (11.1 KB: 3076 the SPI host's,
-  5536 the I2C host's, 2708 the UART's).
+  I2C host's 480 to 1744, the late read's 500 and the channels' putting away's 480
+  among them; the UART's 156 to 740 - the bench's three
+  drivers, in all their types, 11900 bytes (11.6 KB: 3076 the SPI host's,
+  6116 the I2C host's, 2708 the UART's).
 
 So: a program that cannot afford the cold path - a first transaction
 after `init()` on a deadline, a handler that must answer within a frame
 whatever ran before - places the vectors it binds and gives `InRam` to
 the hosts whose `start()` is on that deadline; every other program
 leaves both alone, since a warm path gains nothing here.
+
+**What `InRam` promises, and what it does not.** It places the bodies the driver's
+header names. On `I2cHost` that takes in what the three bodies call on a path a correct
+program takes, the release listing read for it
+([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "What `InRam` promises"). `SpiHost`
+and `Uart` promise the transfer's own path and call the flash off it: `SpiHost`'s `start()`
+on a change of mode, rate or width (`reconfigure()`, which a program with two
+devices on one bus meets) and after a stall, both on a DMA bus error, each through a veneer. Everything
+else is the program's to place: the vector's own code, the vector table, the arbiter, the
+kernel and its requesters. Code a program places itself has the compiler's calls to read
+for, all in the flash: `memcpy` for a structure copy, a division,
+`__gnu_thumb1_case_*` for a dense `switch` (`bench_rp2040_ram`'s UART vector calls one), and its
+constant tables.
+
+**A flash window on the other core.** [flash.md](flash.md) asks that while a window
+is open the other core execute nothing from the flash and no DMA channel read it. A
+core 1 that keeps running through a window needs in SRAM every instruction it fetches
+and every constant it loads: its loop, the kernel's, every object's handlers, the arbiter,
+each vector. The vector table is out of reach: the image has one, in the flash, core 1 is
+launched with core 0's, and brio has no verb that moves it, so an interrupt taken inside a
+window reads its address from the flash. What a program can do today is mask core 1's
+interrupts and spin in SRAM for the window. The host holds up its end of that: under
+`InRam` its bodies fetch nothing from the flash and its transmit channel pours from SRAM,
+so a read on `dma` may run across the window on its channels, into a buffer in SRAM, SCL
+held when a pump's entry falls due, and the core takes the vector when it unmasks. Under
+`InFlash` that channel pours a constant from the flash, so no read on `dma` may be under way.
 
 ## Not covered yet
 
@@ -815,9 +841,15 @@ Driver gaps, each with its reason:
 - A vector table per core, the other way two Rubato kernels could share
   PendSV: declined, five cycles a request against a second table ("How to
   use it").
+- A vector table in SRAM, which a core taking interrupts inside the other core's flash
+  window would need ("A handler in SRAM"): born with the first program that does.
 
 Implemented but not bench-verified, each with what would measure it:
 
+- A flash window over a read on `dma` of the other core, the host `InRam`: the release
+  listing has nothing on the host's path in the flash, and no suite opens a window over a
+  tenure. A letter opening one on core 0 while core 1, masked in SRAM, has a read under way
+  would measure it.
 - Another master reading the flash while `Xip::flush()` runs - core 1
   executing out of the flash, a DMA channel reading the window: the
   flush's caller owes the flash to no other master ([flash.md](flash.md),

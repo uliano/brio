@@ -195,7 +195,14 @@
  * be without it under `InFlash`, the default, one flattened instance each
  * in `.fast_text.brio` under `InRam`, on a family whose chip traits say
  * `places_fast_text` (what it buys: the family's platform document, "A
- * handler in SRAM"). The client is the program's own code to place.
+ * handler in SRAM"). `InRam` reaches what those three bodies call on a
+ * path a correct program takes: the late read's settling and the channels
+ * put away at a NACK, each one more instance there, and the word the
+ * transmit channel pours. It stops at the three: init(), recover(),
+ * release(), unstick() and rebase() stay in the flash, and so do the vector
+ * that calls isr(), the arbiter that calls start(), the kernel around them
+ * and the client, the program's own code to place (docs/dw_apb_i2c/README.md,
+ * "What `InRam` promises").
  *
  * Not built, each with its reason in docs/dw_apb_i2c/README.md: the
  * high-speed mode, SMBus, the stuck-bus timeouts, the bus clear of the
@@ -1024,6 +1031,7 @@ class DwApbI2cHost {
     // (the DREQ rule: RP2040 2.5.3.2, RP2350 12.6.4.2), does not compile.
     static_assert(dw_apb_i2c_engine_claimed<TxEngine, n, DmaSignal::tx>());
     static_assert(dw_apb_i2c_engine_claimed<RxEngine, n, DmaSignal::rx>());
+    static constexpr bool placed_in_ram = std::same_as<Placement, InRam>;
     static_assert(HotPlacement<Placement, Chip>,
                   "brio I2cHost: the placement is InFlash, or InRam on a family whose chip traits say "
                   "places_fast_text (util/placement.hpp)");
@@ -1203,7 +1211,20 @@ private:
     /// start()'s body (util/placement.hpp: inline where the placement
     /// puts it).
     [[gnu::always_inline]] static bool start_body(const Request& r) {
-        req_ = r;
+        // A structure's assignment is a call of memcpy where the compiler prefers one, the
+        // Cortex-M0+ and rv32 here, and memcpy lies in the flash: a placed body names the fields.
+        if constexpr (placed_in_ram) {
+            req_.addr = r.addr;
+            req_.tx = r.tx;
+            req_.tx_len = r.tx_len;
+            req_.rx = r.rx;
+            req_.rx_len = r.rx_len;
+            req_.reply = r.reply;
+            req_.speed = r.speed;
+            req_.engine = r.engine;
+        } else {
+            req_ = r;
+        }
         want_ = r.tx_len == 0u && r.rx_len == 0u ? uint8_t{1} : r.rx_len;
         total_ = static_cast<uint16_t>(r.tx_len + want_);
         issued_ = 0;
@@ -1306,7 +1327,11 @@ private:
                 // own. A tenure on the interrupt touched no channel, and
                 // leaves none touched here.
                 if (dma_active_) {
-                    put_engines_away();
+                    if constexpr (placed_in_ram) {
+                        put_engines_away_in_ram();
+                    } else {
+                        put_engines_away();
+                    }
                 }
             }
             const uint32_t src = S::clear_abort();
@@ -1359,7 +1384,11 @@ private:
                             received_ = read_len();
                             return finish(i2c_ok);
                         }
-                        return finish(settle_late_read());
+                        if constexpr (placed_in_ram) {
+                            return finish(settle_late_read_in_ram());
+                        } else {
+                            return finish(settle_late_read());
+                        }
                     }
                 }
                 return false;
@@ -1407,7 +1436,11 @@ private:
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
             if ((tx & TxEngine::flag_error) != 0u) {
-                put_engines_away();
+                if constexpr (placed_in_ram) {
+                    put_engines_away_in_ram();
+                } else {
+                    put_engines_away();
+                }
                 S::abort();
                 addressed_ = false;
                 return finish(i2c_dma_fault);
@@ -1433,7 +1466,11 @@ private:
             }
             const uint8_t rx = RxEngine::service();
             if ((rx & RxEngine::flag_error) != 0u && dma_active_) {
-                put_engines_away();
+                if constexpr (placed_in_ram) {
+                    put_engines_away_in_ram();
+                } else {
+                    put_engines_away();
+                }
                 S::abort();
                 addressed_ = false;
                 return finish(i2c_dma_fault);
@@ -1780,6 +1817,28 @@ private:
         }
     }
 
+    /// settle_late_read() in SRAM with the host that asked for it, what it calls included:
+    /// one more instance in `.fast_text.brio`, behind the same load and branch. From the
+    /// flash, beside a load of the DMA on the flash, this path held the vector, and no
+    /// other interrupt enters, for some thirty thousand cycles (the family's page).
+    [[gnu::always_inline]] static uint8_t settle_late_read_in_ram() {
+        return Hot<InRam>::run([] {
+            const uint8_t* const run = req_.rx.get();
+            const std::optional<uint32_t> landed = RxEngine::settle_inline(run);
+            if (!landed) {
+                addressed_ = false;
+                return i2c_dma_fault;
+            }
+            received_ = static_cast<uint8_t>(*landed);
+            take();
+            if (run == nullptr || received_ >= read_len()) {
+                return i2c_ok;
+            }
+            addressed_ = false;
+            return i2c_dma_fault;
+        });
+    }
+
     /// The read half onto the engines, with its first entry in the FIFO.
     /// True when the transmit engine took the middle block (dma_isr()
     /// writes the last entry), false when the pump writes the commands
@@ -1808,7 +1867,11 @@ private:
             }
             S::dma_requests(false, true);
             if (poured) {
-                (void)TxEngine::start_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
+                if constexpr (placed_in_ram) {
+                    (void)TxEngine::start_fixed(&read_cmd_in_ram_, static_cast<uint32_t>(want) - 2u);
+                } else {
+                    (void)TxEngine::start_fixed(&read_cmd_, static_cast<uint32_t>(want) - 2u);
+                }
                 S::dma_requests(true, true);
             }
             return poured;
@@ -1879,6 +1942,21 @@ private:
         }
     }
 
+    /// put_engines_away() as a vector's path takes it under `InRam`, on a NACK under `dma`,
+    /// which a correct program meets, and on a bus error: one more instance in
+    /// `.fast_text.brio`. The channel the tenure read on is left as arm_rx_engine() binds it.
+    [[gnu::always_inline]] static void put_engines_away_in_ram() {
+        Hot<InRam>::run([] {
+            S::dma_requests(false, false);
+            if (poured_) {
+                (void)TxEngine::abandon_inline();
+                poured_ = false;
+            }
+            RxEngine::rebind_inline();
+            dma_active_ = false;
+        });
+    }
+
     /// The block is disabled here (start() did it).
     static void apply(I2cSpeed s) {
         if (s == applied_) {
@@ -1921,6 +1999,10 @@ private:
         static_cast<uint8_t>(has_engines ? I2cEngine::dma : I2cEngine::interrupt);
     static inline uint8_t rx_sink_ = 0;
     static constexpr uint16_t read_cmd_ = i2c_read_entry({});
+    /// The same word where a placed host's transmit channel reads it: read_cmd_ lies in
+    /// the flash, and a channel with the flash as its source is one more thing a flash
+    /// operation on the other core has to wait for (the family's flash document).
+    static inline uint16_t read_cmd_in_ram_ = i2c_read_entry({});
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     /// The address IC_TAR holds, and whether it and applied_ may be
     /// trusted by the next start() (false after anything but a tenure

@@ -1145,7 +1145,10 @@ already moves the section, a word a turn of its loop. A placed function
 exists only from that copy on - a vector taken earlier, a fault inside
 the crt itself, would enter SRAM the copy has not written yet. A
 default image (`InFlash` everywhere, no vector placed) has no byte of
-code in SRAM.
+code in SRAM. `InRam` places the bodies the driver's
+header names and nothing it keeps out of line; a placed vector keeps its calls to what is
+out of line too: `I2cHost::settle()` once a tenure, the USART's error and full-ring paths,
+the fault paths. The kernel, the arbiter and the vector's own code are the program's to place.
 
 ## Not covered yet
 

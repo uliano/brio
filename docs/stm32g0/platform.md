@@ -774,7 +774,9 @@ inline in its vector or in `start()`; both placements FLATTEN it, so
 what it calls on its common path is inline in it - the transmit
 engine's completion carries the next block's launch (`pump_tx()`) - and
 what it calls once a burst or on an error stays out of line in the
-flash (the USART's `harvest()`, the engines' `abandon()`). The I2C host takes no placement:
+flash (the USART's `harvest()`, the engines' `abandon()`). That is what `InRam` promises:
+the body and not what it keeps out of line. The kernel, the arbiter and the vector's own
+code are the program's to place. The I2C host takes no placement:
 measured, its event pump as an instance behind a vector in the flash
 came out no shorter ([i2c.md](i2c.md)). A third tag, and a placement on
 the I2C host, do not compile (`test/family_stm32g0/neg/`). THE NAME IS

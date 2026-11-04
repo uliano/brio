@@ -608,16 +608,14 @@ desk partner's peer (the last group below).
   rule). `bench_rp2040` letter e's `spi.cold` is the instrument for the
   request: `spi.req`'s three-byte polled request after every line of the
   XIP cache is flushed (`Xip::flush()`), under the mask, the cache's
-  misses (accesses less hits) read around it - **12140 cycles and 142
-  misses with the host in the flash, 2881 and 41 with it InRam, against
-  821 and 834 warm**; the 41 are the caller's (the ruler's reads, the call
+  misses (accesses less hits) read around it - **11772 cycles and 139 misses with the host in the flash, 2873 and 41 with it
+InRam, against 814 and 827 warm**; the 41 are the caller's (the ruler's reads, the call
   site, the veneer). Warm the two read the same but for the veneer, 13
   cycles a request here and 18 in `spi.req`'s line - in nine runs of ten
   with the host in the flash; the tenth read 1379 with two misses. The
   engined block cold (letter d after letter c, 16 frames at 31.25 MHz,
-  warm 1399 to 1584) splits the same way: 32588 cycles from the flash,
-  17884 with the host InRam, 21820 with the vectors placed, 10620 with
-  both - the host's code some 14700 of the difference, the vectors' some
+  warm 1416) splits the same way: 28436 to 28712 cycles from the flash, 17904 with
+the host InRam, 17116 with the vectors placed, 10640 with both - the host's code some 14700 of the difference, the vectors' some
   10800, the caller's the rest. THE SRAM IT COSTS under InRam: `start()`
   824 bytes without engines and 1572 with them, the engines' launch folded
   in, the DMA line's body 684. Every call across the boundary goes through

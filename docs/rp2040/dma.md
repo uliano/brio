@@ -248,7 +248,12 @@ family has a forced instance or an unavoidable group.
   `route(line, on)` / `routed` / `pending(line)` / `clear_pending`,
   `abort()` (E13's workaround as one verb), `stop()`, the debug pair
   `debug_credits()` / `clear_credits()` and `debug_reload()`. Every
-  programming verb refuses a BUSY channel.
+  programming verb refuses a BUSY channel. `abort()` and `stop()` are out of line in
+  the flash, as are the binding's `bind()` and `release()` under them, because a flattened hot
+  body would carry them inline otherwise. A transport's path already in SRAM takes
+  `abort_inline()`, `stop_inline()`, the binding's `bind_inline()` and the engines'
+  `abandon_inline()` and `settle_inline(run)`: the same stores, nothing to call
+  ([platform.md](platform.md), "A handler in SRAM").
 - `DmaLine<n>` (0, 1): `irq()`, `routed()`, `pending()`, `clear(mask)`,
   `force(mask, on)`, `enable()` / `disable()` in the calling core's
   NVIC - the line a channel reports on is the core's whose kernel
@@ -284,7 +289,8 @@ family has a forced instance or an unavoidable group.
   `progress()`. Receive: `start(run)`, `start_discard(cell, n)`,
   `idle()`, `take()` (beats arrived since the last take, from TRANS_COUNT), `full`,
 `capacity`, `taken`, `settle(run)` (a run ended now, by E13's abort: the beats in
-memory, from WRITE_ADDR on an incrementing run). Both: `service()` (this
+memory, from WRITE_ADDR on an incrementing run), `rebind_inline()` (bound again, nothing
+counted). Both: `service()` (this
   channel's status on its line, cleared and handed back as
   `flag_complete` / `flag_error`; no half event on this controller),
   `abandon()`, `faults()`, `stop()`. A receive engine clears the

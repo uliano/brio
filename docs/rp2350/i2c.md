@@ -579,7 +579,7 @@ with no suite named is `test_rp2350_i2c`'s.
   Where it runs is the program's: the vector it binds, and `I2cHost`'s placement
   tag for `start()` and the bodies. The one-byte write's longest entry, warm then
   cold (every line of the XIP cache invalidated), reads 95 then 3048 on the Cortex-M33 and 71 then 1631 on Hazard3 with both in the
-  flash, and 119 both times and 79 both times with both placed. `bench_rp2350` runs the handler from
+  flash, and 119 both times and 80 both times with both placed. `bench_rp2350` runs the handler from
   the flash, `bench_rp2350_ram` from SRAM.
 - **The vendor's tenure on the same wire:** the pico-sdk 2.3.1's polled
   `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
@@ -791,20 +791,29 @@ TX_EMPTY mirror. The tables above hold both. Letter i's read of one on `dma`, ag
 without them: 384 cycles against 373 on the Cortex-M33, `start()` 279 against 271 and the vector 105
 against 102; 357 against 349 on Hazard3.
 
-The late path is out of line in the flash. **Its short figures come from the stage**, no load running: at most
+The late path is out of line. **In the flash its short figures come from the stage**, no load running: at most
 4927 cycles on the Cortex-M33 and 4913 on Hazard3 between stamps in the vector over letter `s`, the abort's
 poll and the XIP's misses in it. Under letter `u`'s loads the same stamp reads more, Cortex-M33 / Hazard3:
 at most 3794 / 4918 cycles beside loads in SRAM or across the bridge, and 36 683 / 39 440 (245 / 263 us) beside
-copies out of the uncached flash, 32 168 / 36 573 with the host in SRAM, the late path still in the flash. Those are
-the most seen in 12 and 3 runs, no bound. What is not established: how much of it is the abort's poll
-and how much the path's fetches beside the load, and what it reaches beside the longer flash blocks the letter
-does not run. No other interrupt nests over that vector meanwhile.
+copies out of the uncached flash.
+
+**With the host in SRAM the late path runs from SRAM** (`InRam`; one more instance, 640 / 694 bytes, with
+the abort and the channel's rebind inline in it and nothing from the flash on it in the release
+listings): at most 819 / 764 cycles on the stage, and at most 953 / 915 (6.4 / 6.1 us) under every load of
+letter `u`, the uncached flash included, late in 43 604 / 42 863 of 67 500 reads over ten runs. Called out to the
+flash from that same host it read 32 168 / 36 573, so what the flash loads added was the path's own fetches and not
+the abort's poll.
+
+These are the most seen, not a bound. What the code bounds is the abort's poll, at most 100 000 reads of
+ABORT and as many again in the channel's rebind; the beat it waits for waits on the DMA's turn at the bus, and 12.6
+does not bound that. Under `InFlash` the figures above stand, and neither image has been run beside the flash
+blocks of 16 KB. No other interrupt nests over that vector meanwhile.
 
 A write takes the same two loads. The transmit channel's BUSY at the STOP entry reads down in every row
 of letter `u`, reads and writes alike: the last entry is the pump's, written behind the DMA block's end.
 
-The same body on the RAM image (`test_rp2350_i2c_ram`, the engined host and the two vectors in
-SRAM, the late path called out to the flash): letters `u` and `s` the same on both halves, 3 runs.
+The same verdicts on the RAM image (`test_rp2350_i2c_ram`, the engined host and the two vectors in
+SRAM): letter `u` ten runs and letter `s` five, both halves.
 
 ### The stack under the preemptive kernel (`test_rp2350_rubato_i2c`)
 

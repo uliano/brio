@@ -1126,32 +1126,30 @@ program either places the vector it binds or gives `SpiHost`, `Uart` or
 each architecture; cycles at 150 MHz, each cell WARM / COLD, cold read by
 letter c, every line of the XIP cache invalidated before every timed
 run; F the default, R the drivers InRam, V the vectors placed, B both;
-the I2C rows are letter i's, each the least of five runs, a range where the
-runs spread by more than ten cycles; the R column's come from another session,
-and a wall moves between sessions, so its walls are not to be read against the
-others to the cycle):
+the I2C rows are letter i's, each the least of five warm runs and three cold, the others two
+warm and two cold on R, V and B, a range where the runs spread):
 
 | Cortex-M33 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 678 / 5693 | 687 / 922 | 678 / 5693 | 687 / 922 |
-| SPI on the engines, 16 frames, wall | 1688 to 2020 / 13028 | 781 / 3896 | 765 / 7862 | 779 / 1639 |
-| ... the DMA line's handler | 459 to 730 / 4416 | 158 / 1701 | 136 / 136 | 154 / 154 |
-| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
-| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
-| I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 189 / 537 | 185 / 4291 | 188 / 536 |
-| ... its longest handler entry | 96 / 2880 | 123 / 1094 | 96 / 96 | 119 / 119 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58937 to 58941 / 67612 to 67615 | 58963 / 61466 (an older image) | 58941 / 63544 (an older image) | 58964 to 58968 / 59582 to 59584 |
+| SPI polled request, a command byte and 2 data bytes | 678 / 5693 | 687 / 922 | 685 / 5394 | 686 / 921 |
+| SPI on the engines, 16 frames, wall | 1688 to 2020 / 13028 | 798 / 4029 | 776 / 7744 | 796 / 1772 |
+| ... the DMA line's handler | 459 to 730 / 4416 | 167 / 1710 | 140 / 140 | 164 / 164 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 756 to 893 / 3137 to 4010 | 472 / 472 | 536 to 687 / 536 to 1409 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 272 to 418 / 2810 to 2894 | 238 to 274 / 1111 | 264 / 1101 to 1137 |
+| I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 162 / 510 | 185 / 4291 to 6234 | 163 / 511 |
+| ... its longest handler entry | 95 / 3048 | 123 / 1094 | 97 / 97 | 119 / 119 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58939 to 58941 / 67614 to 67617 | 58928 to 58932 / 61433 to 61445 | 58942 to 58944 / 63316 to 63436 | 58934 to 58936 / 59549 or 59550 |
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
-| SPI polled request, a command byte and 2 data bytes | 656 / 5061 | 660 / 757 | 656 / 4994 | 662 / 829 |
-| SPI on the engines, 16 frames, wall | 882 to 992 / 10143 | 727 / 3928 | 725 / 6948 | 727 / 2457 |
-| ... the DMA line's handler | 103 to 263 / 2857 | 125 / 1180 | 105 / 105 | 125 / 125 |
-| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
-| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
-| I2C one-byte write at 400 kHz, `start()` | 188 / 4138 | 188 / 1845 | 188 / 4153 | 192 / 1782 |
-| ... its longest handler entry | 70 / 1649 | 79 / 545 | 70 / 70 | 80 / 80 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58942 to 58952 / 64976 to 64979 | 58972 / 61940 to 62222 (an older image) | 58955 / 62552 (an older image) | 58972 to 58975 / 60720 to 60723 |
+| SPI polled request, a command byte and 2 data bytes | 656 / 5061 | 656 / 753 | 659 / 5065 | 663 / 760 |
+| SPI on the engines, 16 frames, wall | 882 to 992 / 10143 | 739 / 3806 | 735 / 6579 | 745 / 2429 to 2478 |
+| ... the DMA line's handler | 103 to 263 / 2857 | 136 / 1124 | 113 / 113 | 138 / 138 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 766 / 2056 | 461 / 461 to 1104 | 462 / 462 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 328 to 361 / 1779 to 1812 | 243 / 853 | 220 to 253 / 830 to 1155 |
+| I2C one-byte write at 400 kHz, `start()` | 185 / 4087 | 115 / 321 | 185 / 4100 | 116 / 322 |
+| ... its longest handler entry | 71 / 1631 | 80 / 545 | 71 / 71 | 80 / 80 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58956 to 58958 / 64978 to 64981 | 58912 or 58913 / 60440 or 60441 | 58957 to 58962 / 62678 to 62851 | 58907 to 58909 / 59273 or 59274 |
 
 What the rows say - the RP2040's reading on both halves:
 
@@ -1161,20 +1159,51 @@ What the rows say - the RP2040's reading on both halves:
   handlers miss lines warm that the other three images do not, and so
   does
   its engined SPI transaction, whose DMA line's handler reads 459 to 730 /
-  103 to 263 warm from the flash against 136 / 105 with the vector placed
+  103 to 263 warm from the flash against 140 / 113 with the vector placed
   ([spi.md](spi.md), letter d's item; which lines share its sets is not
   counted in this image).
+- `I2cHost`'s `start()` is the exception to that, cheaper warm under InRam: 163 / 116 against
+  182 / 185, the placed one writing the `Request` out where Hazard3's default calls `memcpy` in the
+  flash. The Cortex-M33 makes no call there either, and what its 19 cycles are is not split.
 - COLD it pays on every path, on both cores: a three-byte request 5693
   cycles from the flash against 922 with the host InRam on the M33, a
-  handler cold from the flash 1649 to 6390 cycles across the table's rows,
+  handler cold from the flash 1631 to 6390 cycles across the table's rows,
   from SRAM what it costs warm.
 - The vector placed reaches what the vector runs; InRam reaches
   `start()`; BOTH is the image whose cold transaction is closest to its
   warm one. On Hazard3 the crt's dispatch in front of a placed vector
   stays in the flash and still misses cold; the SPI, UART receiver and
-  I2C handler rows time the body, which reads cold what it reads warm
+  I2C handler rows time the body, whose least reads cold what it reads warm
   under V and B on both halves, and what the dispatch adds to a cold
   entry is not split.
+
+**What `InRam` promises, and what it does not.** It places the bodies the driver's
+header names, as on the RP2040
+([../rp2040/platform.md](../rp2040/platform.md), "A handler in SRAM"). On `I2cHost` that takes in what the
+three bodies call on a path a correct program takes, read in both architectures' release
+listings ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "What `InRam` promises"), at
+the cost of 768 bytes of SRAM on the Cortex-M33 and 852 on Hazard3 in the suite's image.
+`SpiHost` and `Uart` promise the transfer's own path and call the flash off it: `SpiHost`'s `start()` on a
+change of mode, rate or width (`reconfigure()`, which a program with two devices
+on one bus meets) and after a stall, both on a DMA bus error. Everything else is the program's to place:
+the vector's own code, the vector table, on Hazard3 the crt's dispatch, the arbiter, the kernel
+and its requesters. Code a program places itself has the compiler's calls to read for,
+`memcpy` for a structure copy on Hazard3 above all, and its constant tables.
+
+**A flash window on the other core.** [flash.md](flash.md) says the other core must not
+fetch or read the flash while a window is open and no DMA channel may have it as a source;
+an access is a bus error (5.4.8.10). A core 1 that keeps running through a window needs in
+SRAM every instruction it fetches and every constant it loads: its loop, the kernel's,
+every object's handlers, the arbiter, each vector. The rest is out of reach. The image has one
+vector table, in the flash, core 1 is launched with core 0's and brio has no verb that
+moves it, and on Hazard3 the dispatch in front of every vector lies in the flash too, so an
+interrupt taken inside a window faults. What a program can do today is mask core 1's
+interrupts and spin in SRAM for the window. The host holds up its end of that: under
+`InRam` its bodies fetch nothing from the flash and its transmit channel pours from SRAM,
+so a read on `dma` may run across the window on its channels, into a buffer in SRAM, SCL
+held when a pump's entry falls due, and the core takes the vector when it unmasks. Under
+`InFlash` that channel pours a constant from the flash, a bus error inside a window, so no
+read on `dma` may be under way.
 
 ## Not covered yet
 
@@ -1219,9 +1248,16 @@ Driver gaps, each with its reason:
 - The Cortex-M33's own extensions - the MPU, the SAU and TrustZone,
   MSPLIM, BASEPRI, the coprocessor ports: everything here runs Secure, as
   the bootrom hands over, and nothing has needed one.
+- A vector table and a Hazard3 dispatch in SRAM, which a core taking interrupts inside the
+  other core's flash window would need ("A handler in SRAM"): born with the first program
+  that does.
 
 Implemented but not bench-verified, each with what would measure it:
 
+- A flash window over a read on `dma` of the other core, the host `InRam`: the release
+  listings have nothing on the host's path in the flash, and no suite opens a window over a
+  tenure. A letter opening one on core 0 while core 1, masked in SRAM, has a read under way
+  would measure it.
 - CORE 1, on either architecture. The platform is per core and the
   tickers are per core by construction, and the suite proves that
   `on_own_core()` agrees with CPUID on core 0; this suite launches no

@@ -349,8 +349,18 @@ using HotPath = InFlash;
 #if defined(BENCH_VECTORS_IN_SRAM)
 #define BENCH_VECTOR [[gnu::section(".fast_text"), gnu::flatten]]
 constexpr bool vectors_in_sram = true;
+#define BENCH_I2C_VECTOR BENCH_VECTOR
 #else
 #define BENCH_VECTOR
+// I2C1'S VECTOR ON A BOUNDARY OF ITS OWN, so that letter i's rows of the default image read the
+// driver and not where the link happened to leave it. The XIP cache has 16 kB in two ways and
+// 8-byte lines (2.6.3.1, 2.6.3.2): 1024 sets, a way of 8 KB, a line's set the address's bits 12:3.
+// A tenure's path is start(), this vector, the DMA line's and the letter's own code; three of them
+// on one set evict each other at every tenure, a miss a line. 4 KB is half a way: a vector shorter
+// than that, as this one is, starts at the first or the middle set and wraps round neither, however
+// the code ahead of it moves. That fixes the vector's sets, not the other paths' (start() is a COMDAT
+// placed by the link), so it is no bound: the letter's `xip` figure says whether this link holds.
+#define BENCH_I2C_VECTOR [[gnu::aligned(0x1000)]]
 constexpr bool vectors_in_sram = false;
 #endif
 
@@ -2136,7 +2146,7 @@ extern "C" BENCH_VECTOR void isr_dma_0() {
     }
     dma_meter.leave();
 }
-extern "C" BENCH_VECTOR void isr_i2c1() {
+extern "C" BENCH_I2C_VECTOR void isr_i2c1() {
     i2c_meter.enter();
     bool edge = false;
     switch (i2c_mode) {

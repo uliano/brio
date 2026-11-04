@@ -1250,9 +1250,10 @@ void tp_ring_beside_copies() {
                   whole[0] && whole[1] && device_clean[0] && device_clean[1]);
     bench.verdict("WHEREVER BYTES WERE LOST THE TRANSPORT SAID SO: every leg with a gap in the stream "
                   "counted an overrun and moved the ring's skips", reported);
-    bench.verdict("AND A RING AT NORMAL LOSES NOTHING EITHER - beside two or one HIGH_PRIORITY copies "
-                  "and beside two normal ones: the arbiter serves one normal channel every round "
-                  "(2.5.7) - the level decides no correctness on this chip",
+    // The round's text (2.5.7, CTRL.HIGH_PRIORITY) is no reason for this: the RP2350's chapter has
+    // the same text, and there this arrangement loses bytes (docs/rp2040/dma.md, "THE LEVEL").
+    bench.verdict("AND A RING AT NORMAL LOST NOTHING EITHER, at these three rates - beside two or one "
+                  "HIGH_PRIORITY copies of 16 KB and beside two normal ones",
                   whole[2] && whole[3] && whole[4] && device_clean[2] && device_clean[3] &&
                       device_clean[4]);
 }

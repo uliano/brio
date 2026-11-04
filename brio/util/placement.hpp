@@ -29,8 +29,9 @@
  *
  * The mechanism. A driver writes its hot body once, always inline, and
  * calls it through `Hot<P>::run(lambda)`; both specializations flatten it
- * (every call in the body inlined, so the path has no call left to
- * another place):
+ * (every call in the body inlined, but for a function marked noinline, which
+ * stays a call to the flash and which a path a correct program takes must not
+ * meet: the DesignWare host gives such a path a placed instance of its own):
  *  - `Hot<InFlash>` - inline where it is called, in the ordinary text:
  *    the path is what it would be without the trampoline, an ISR body
  *    inside the vector that binds it (docs/design/overview.md, "ISR

@@ -284,6 +284,32 @@ it buys). An
 application that says `brio::I2cHost<0, pins>` has no idea this stratum
 exists, which is the point.
 
+### What `InRam` promises
+
+Under `InRam` a tenure that a correct program makes fetches and reads nothing from the
+flash on the host's own paths, and that was read in each family's release listing. The
+three bodies run from SRAM, and so does what they call: the STOP entry's late path
+(`settle_late_read()`, the engine's settle and the channel's abort), the channels put away
+at a NACK under `dma`, each one more instance in `.fast_text.brio`. The transmit
+engine pours its read command from a word in SRAM, where under `InFlash` it pours a constant
+in the flash, and `start()` writes the `Request` out field by field, where a structure
+copy would call `memcpy` on the Cortex-M0+ and on Hazard3.
+
+It promises that and no more:
+
+- **The rest of a tenure is the program's to place.** The vector that calls `isr()` and
+  `dma_isr()`, the vector table, the arbiter that calls `start()`, the kernel that runs the
+  arbiter and posts its reply, and the requester.
+- **The other verbs stay in the flash:** `init()`, `recover()`, `release()`, `unstick()`,
+  `rebase()` and the client.
+- **One call stays, on a path no correct program takes.** A receive start that finds its
+  channel still busy aborts it from the flash, and the channel is busy there only behind
+  an abort whose poll ran out, `i2c_dma_fault` already answered.
+- **The buffers are the requester's.** A channel reads and writes where the request points.
+
+The family's platform page, "A handler in SRAM", says what that leaves a program that
+must stay out of the flash altogether.
+
 A family whose device description names the same bits holds the two
 against each other where it defines its traits: this file spells every
 bit itself because it may not read a vendor header, and a `static_assert`
@@ -561,7 +587,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
     completes" (RP2040 2.5.7's register list; RP2350 12.6.10's). Each suite polled it
     down and read the buffer's last byte next: stale in none of 400 trials on either
     chip. A pure write has no run on the channel and reads down too.
-  - **Up: `settle_late_read()`**, cold and out of line. The DMA requests are already
+  - **Up: `settle_late_read()`**, cold and out of line, under `InRam` in SRAM with the
+    host. The DMA requests are already
     down, but the channel counts the requests it has not yet issued (a banked request),
     and that count outlives `IC_DMA_CR`: it falls "when the transfer is issued" (RP2040
     2.5.3.2, RP2350 12.6.4.2). A channel paused over a read of four shows at most one

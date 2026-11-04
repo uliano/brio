@@ -603,7 +603,9 @@ object for that part) and the restart 208 - a third of the part's SRAM
 for the two - which is why nothing is placed by default. A placed
 function exists only from the crt's copy on, and the crt enters
 `main()` with interrupts masked, so no vector reaches SRAM the copy has
-not written.
+not written. `InRam` promises the body: a USART's
+`tx_fault()` and `rx_fault()`, on a bus error, stay in the flash, and the kernel, the arbiter
+and the vector's own code are the program's to place.
 
 ## Not covered yet
 
