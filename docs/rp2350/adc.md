@@ -77,18 +77,18 @@ is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.4 whole
+The RP2350 datasheet (build 80d627281ed5), 12.4 whole
 (12.4 the overview with the two connection diagrams, 12.4.1 what changed
-from the RP2040, 12.4.2 the controller with tables 1118 and 1119 - the
+from the RP2040, 12.4.2 the controller with tables 1171 and 1172 - the
 channel map of each package -, 12.4.3 the SAR converter and its clock,
 12.4.3.1 the one-shot, 12.4.3.2 the free run and the pacing divider,
 12.4.3.3 the round-robin, 12.4.3.4 the FIFO, 12.4.3.5 the DMA, 12.4.3.6
 the interrupt, 12.4.3.7 the supply, 12.4.4 and 12.4.5 the figures of
 merit, 12.4.6 the temperature sensor, 12.4.7 the registers), 6.1.5 (the
-ADC supply, which is also its reference), 14.9 table 1438 (the input
+ADC supply, which is also its reference), 14.9 table 1685 (the input
 voltage range and the ENOB), 8.1.3 and 8.6 (clk_adc and the USB PLL),
 9.7 and 9.11.3 (the pad, its isolation latch and its pulls), 12.6.4.1 (the
-DREQ table); Appendix E carries no erratum of this block, and RP2350-E9
+DREQ table); Appendix D carries no erratum of this block, and RP2350-E9
 is the GPIO one this chapter meets at the pad. `util/analog.hpp` and
 `util/analog_sampler.hpp` for the arithmetic and the sampler. The
 driver: `brio/rp2350/adc.hpp` (`Adc` the resource, `AnalogIn<Pin>`,
@@ -127,7 +127,7 @@ feels.
   number.** The QFN-60 brings out four inputs on GPIO 26..29 as AINSEL
   0..3 with the sensor on AINSEL 4 - the RP2040's arrangement exactly -
   and the QFN-80 brings out eight, on GPIO 40..47 as AINSEL 0..7, with
-  the sensor on AINSEL 8 (tables 1118 and 1119). So AINSEL is four bits
+  the sensor on AINSEL 8 (tables 1171 and 1172). So AINSEL is four bits
   wide here against three, and RROBIN nine against five. The register
   description of AINSEL states that the field "is corrected for the
   package option so only ADC channels which are bonded are available,
@@ -144,15 +144,15 @@ feels.
   spikes at codes 0x200, 0x600, 0xa00 and 0xe00 are gone, "improving
   the ADC's precision by around 0.5 ENOB" (12.4.1), where the RP2040's
   figure was 8.7 bits. The sheet gives two numbers for what is left:
-  12.4's own feature list says 9.2 ENOB, table 1438 says 9 minimum and
+  12.4's own feature list says 9.2 ENOB, table 1685 says 9 minimum and
   9.5 typical, and 12.4.5 says the integral and differential
-  nonlinearity are still to come. Appendix E has no ADC erratum at
+  nonlinearity are still to come. Appendix D has no ADC erratum at
   all - and the erratum numbered E11 in this chip's sheet is an XIP one,
   which is why nothing here cites an erratum by its bare number.
 - **There is no ADC_VREF pin.** The converter's supply is its full
   scale: ADC_AVDD, on a pin of its own so that it can be filtered
   (6.1.5, 12.4.3.7), with the input voltage range stated as 0 to
-  ADC_AVDD (table 1438). So `Ref` has one enumerator, `avdd_pin`, and
+  ADC_AVDD (table 1685). So `Ref` has one enumerator, `avdd_pin`, and
   what that pin carries is the application's to state. The ceiling on
   an ADC pad is IOVDD's and not ADC_AVDD's: above IOVDD the ESD diodes
   leak, whatever the converter is powered at.
@@ -192,7 +192,7 @@ the erratum and one that only thinks it has.
 One sentence of the chapter is stale. 12.4.3.3 says each RROBIN bit
 "corresponds to one of the five possible values of CS.AINSEL", which is
 the RP2040's count; the register description in 12.4.7 gives RROBIN nine
-bits and AINSEL four, and tables 1118 and 1119 give the channels. The
+bits and AINSEL four, and tables 1171 and 1172 give the channels. The
 driver follows the register description and the tables.
 
 ## Types and verbs

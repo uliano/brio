@@ -66,7 +66,7 @@ findings, both architectures; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), chapter 8 whole - 8.1 (the
+The RP2350 datasheet (build 80d627281ed5), chapter 8 whole - 8.1 (the
 generators, their two multiplexers and the switching sequences of
 8.1.3.2, the 16.16 divider, duty cycle correction, the clock enables of
 8.1.3.5, the frequency counter of 8.1.4 with its interval table, the
@@ -75,7 +75,7 @@ resus circuit of 8.1.5, and the programmer's model), 8.2 (XOSC, with
 randomiser of 8.3.6), 8.4 (the low-power oscillator, whose registers are
 POWMAN's), 8.5 (the tick generators) and 8.6 (the two PLLs) - plus 7.5
 (the reset controller), 3.2 (the interrupt lines) and 2.1.3 (the atomic
-register aliases). Appendix E names no erratum in this chapter. The
+register aliases). Appendix D names no erratum in this chapter. The
 driver: `brio/rp2350/clock.hpp`, with the microsecond busy-wait beside
 it in `brio/rp2350/delay.hpp`. The reference suite: `test_rp2350_clock`,
 which runs on both of this chip's architectures from one source - every
@@ -373,10 +373,10 @@ fail** on the Hazard3 pair, from one source.
   0.1 per cent of where it was; its divider doubled halves the output
   (11 165 562 -> 5 582 593 Hz); its range stepped LOW to MEDIUM and back
   reads 11 165 562 -> 13 861 937 -> 11 164 687 Hz, which is the
-  datasheet's "about 1.33 times"; and THE RANDOMISER raises it by 8 per
+  datasheet's "approximately 1.33 times"; and THE RANDOMISER raises it by 8 per
   cent with both stages randomised (12 060 562 Hz) and 3 with one
   (11 511 656 Hz), against 11 159 843 Hz with neither - the same
-  direction as the datasheet's "up to 22 per cent", and less of it.
+  direction as the datasheet's "up to 22%", and less of it.
 - **BADWRITE, and what it caught.** ROSC.BADWRITE stands at every boot
   before brio writes anything: it is not cleared by a processor reset,
   by the debug port's rescue or by the bootrom, so what a program finds

@@ -132,16 +132,16 @@ the IP stratum's page.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.3 whole
+The RP2350 datasheet (build 80d627281ed5), 12.3 whole
 (12.3.1 what changed from the RP2040, 12.3.2 the overview with the four
 interrupt sources, 12.3.3 the functional description - 12.3.3.3 the
 prescaler, 12.3.3.4 and 12.3.3.5 the two FIFOs, 12.3.3.7 the combined
 interrupt -, 12.3.4 the operation - 12.3.4.2 the disabled-write rule,
 12.3.4.4 the clock ratios, 12.3.4.6.1 the bit rate, 12.3.4.7 to 12.3.4.14
 the three framings and the four Motorola modes, 12.3.4.16 the DMA
-interface -, 12.3.5 the registers), 9.4 (table 645, the GPIO function
+interface -, 12.3.5 the registers), 9.4 (table 677, the GPIO function
 table), 12.6.4.1 (the system DREQ table), 7.5 (the reset controller), 3.2
-(the interrupt lines), 2.1.3 (the atomic register aliases); Appendix E
+(the interrupt lines), 2.1.3 (the atomic register aliases); Appendix D
 names no erratum of this block, and the one that shapes its pads is E9
 ([pin.md](pin.md)). `docs/design/spi-bus.md` for the Request and the two
 ways to run one.
@@ -149,7 +149,7 @@ ways to run one.
 The driver is ARM's and not this chip's, so it lives in the IP stratum:
 `brio/pl022/spi.hpp` holds the resource, the host engine and the client
 ([../pl022/README.md](../pl022/README.md)), and `brio/rp2350/spi.hpp`
-holds what this chip owes it - the pin table of table 645, the
+holds what this chip owes it - the pin table of table 677, the
 `Rp2350Pl022` chip traits over `pin.hpp`, `resets.hpp`, `clock.hpp`,
 `core.hpp`, `delay.hpp` and `dma_engine.hpp`, and the public names
 `Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
@@ -186,7 +186,7 @@ is bit 3 of the pad number: GP0..GP7 are SPI0's, GP8..GP15 SPI1's,
 GP16..GP23 SPI0's, up to GP47 on the QFN-80. That is the RP2040's rule
 over a longer bank. Unlike the UART, which gained a second data pair on
 every group's flow-control pads under function 11, the SPI appears in
-one column of table 645 and one only: F1, on every pad that carries it,
+one column of table 677 and one only: F1, on every pad that carries it,
 on both packages. So a pin set here is four plain pad numbers.
 
 Every signal of both instances is reachable in the QFN-60 as well: SPI0
@@ -212,8 +212,8 @@ output when deselected in client mode, which it offers as the reason
 software need not manage the output enable even where several clients
 share the data lines. The idle-level list printed under each of the four
 Motorola modes and under Microwire (12.3.4.10 to 12.3.4.14) says the
-opposite, in the same words all five times: the nSSPOE pad enable signal
-is forced high, "this is not connected to the pad in RP2350" - which is
+opposite, all five times: the nSSPOE pad enable signal
+is forced high, "not connected to the pad in RP2350" - which is
 what the RP2040's chapter says, and what the RP2040's pads do
 ([../rp2040/spi.md](../rp2040/spi.md)). On this chip 12.3.1 holds: the
 pad's own output enable, read in GPIO_STATUS under a foreign host's
@@ -268,7 +268,7 @@ body, the DMA line's, the client's surface) is in
 - `spi_pad_instance(pin)` - which instance the four pads of that pin's
   group belong to: bit 3 of the pad number.
 - `spi_rx_pin(n, pin)`, `spi_cs_pin(n, pin)`, `spi_sck_pin(n, pin)`,
-  `spi_tx_pin(n, pin)` - table 645 as constexpr facts, in the table's own
+  `spi_tx_pin(n, pin)` - table 677 as constexpr facts, in the table's own
   order.
 - `spi_pins_valid(n, pins)` - a legal pin set for instance n. The package
   is not asked here: the table is the die's, and a pad the QFN-60 has not
@@ -504,14 +504,23 @@ the same.
     loop off cannot overrun it, whatever its length.
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
-    9.375 MHz): wall less the wire's cycles **205 / 182 for one byte,
-    294 / 272 for three, 615 / 589 for sixteen** (the band across builds
-    is the XIP cache's line alignment, which every link moves) - of which
-    the block's mode-0 gap is 24 / 72 / 384, the wait for the end of each
-    phase's last frame one SCK period, 16 cycles a phase, and the
-    phase boundary's drain (the data frames wait for the command frame to
-    come back whole and its last edge, so D/C flips on the wire) one frame's
-    latency; the host's own code under 200.
+    9.375 MHz): wall less the wire's cycles **211 / 181 for one byte,
+    301 / 266 for three, 622 / 585 for sixteen**, each the same in three runs
+    of the letter on `bench_rp2350`; `bench_rp2350_ram`, the host in SRAM,
+    reads 216 / 187, 303 / 279 and 625 / 596, so a figure belongs to its image.
+    No XIP miss is in the three-byte figure: `spi.cold`'s warm repeat reads
+    the same wall with no miss, in one run of three on each half. What moves
+    the figure between images no letter splits. Of these cycles the block's
+    gap between the frames of a phase is 0 / 24 / 336, at 1.5 SCK periods (16
+    frames in mode 0 less mode 3 read 368 / 366: fifteen gaps and the 8 cycles
+    that follow); the wait for the end of each phase's last frame is one SCK
+    period from the receive flag, 16 cycles, 8 of them past the frame's last
+    edge; and the phase boundary's drain (the data frames wait for the command
+    frame to come back whole and its last edge, so D/C flips on the wire) means
+    a second frame start. What remains, 203 / 173, 261 / 226 and 270 / 233, is
+    the host's own code and each phase's frame start, which no letter splits;
+    a request of 16 frames in one phase in mode 3, with neither gap nor wait,
+    reads 181 / 159 over the wire.
   - THE VENDOR'S LOOP ON THE SAME BOARD (pico-sdk 2.3.1's
     `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
     the SDK's own placement, built by its CMake with its crt, the select a
@@ -667,8 +676,8 @@ the same.
   completion reads a 256-byte block in 5294 cycles where the sleeping core
   reads 6087 to 6330. Warm code misses when more of its lines fall in one
   set of the cache than the set holds: the cache is two-way, and it does
-  not evict the least recently used line (4.4.1 names no replacement
-  policy; measured, three lines of one set touched in the order A, B, A, C,
+  not evict the least recently used line (4.4.1.3: "Cache eviction policy is
+  random"; measured, three lines of one set touched in the order A, B, A, C,
   the line A - the more recent of the two C found - is gone 112 to 145
   times in 256), so a path whose lines share a set with two more lines of
   the code around it refetches some of them every time it runs, at 66 to

@@ -92,7 +92,7 @@ is the IP stratum's page.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.1 (UART: two ARM PL011s,
+The RP2350 datasheet (build 80d627281ed5), 12.1 (UART: two ARM PL011s,
 revision r1p5 - the FIFO depths and the feature list in its opening, the
 programmer's model and the registers below it), 9.4 (the GPIO function
 table, which is where this chip differs most from its predecessor),

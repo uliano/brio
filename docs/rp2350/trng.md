@@ -69,13 +69,13 @@ what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.12 (the
+The RP2350 datasheet (build 80d627281ed5), 12.12 (the
 generator: 12.12.1 what it is and what it yields, 12.12.2 the two
 settings and the chapter's own working values, 12.12.3 the operating
 sequence, 12.12.4 the caveats and the two reference drivers - 12.12.4.1
 the bootrom's, which bypasses every check on purpose - 12.12.5 the
 registers), 7.5 (the reset controller), 3.2 (the interrupt line). No item
-of Appendix E is filed against this block. The driver:
+of Appendix D is filed against this block. The driver:
 `brio/rp2350/trng.hpp`. The reference suite: `test_rp2350_blocks`,
 letters e, f and g, which runs on both of this chip's architectures from
 one source (a letter is one command key of the suite's console and the
@@ -129,7 +129,7 @@ about 800 ns makes the autocorrelation test fail four times in a row
 within microseconds and the block ceases functioning. The chapter's two
 figures together name their own clock: a collection takes some 680
 samples (below), and 680 samples of 25 cycles in 2 ms is a clk_sys near
-8.5 MHz, the order of the ring oscillator this chip boots on. **25 cycles
+8.5 MHz, the order of the ring oscillator stepping A2 boots on. **25 cycles
 is 2.9 us there and 167 ns at 150 MHz**, and only the first of those
 works. So this driver states the
 setting as a time - `trng_default_sample_ns`, 2 us - and turns it into a

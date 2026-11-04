@@ -77,7 +77,7 @@ not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), chapter 9 whole - 9.1 (the two
+The RP2350 datasheet (build 80d627281ed5), chapter 9 whole - 9.1 (the two
 banks and what they carry), 9.2 ("changes from RP2040"), 9.3 (the reset
 state), 9.4 (function select, the four overrides and the STATUS
 register), 9.5 (the interrupts, their twelve outputs and the summary
@@ -85,7 +85,7 @@ registers), 9.6 (the pads, with 9.6.1's bus keeper), 9.7 (the pad
 isolation latches), 9.8 (the processors' own path through SIO), 9.9 (the
 Cortex-M33's GPIO coprocessor port) and 9.11 (the registers) - plus
 3.1.3 (SIO's GPIO registers), 7.5 (the reset controller), 3.2 (the
-interrupt lines), 12.15.1 (SYSINFO's PACKAGE_SEL) and appendix E's
+interrupt lines), 12.15.1 (SYSINFO's PACKAGE_SEL) and appendix D's
 **RP2350-E9**, which is live on the bench silicon and changes what a
 pull-down means. The driver: `brio/rp2350/pin.hpp`. The reference suite:
 `test_rp2350_pin`, which runs on both of this chip's architectures from

@@ -142,7 +142,7 @@ against SYSINFO's PACKAGE_SEL.
 **There is no second-stage bootloader**, unlike the RP2040: the bootrom
 sets the XIP interface up itself while scanning the flash. It tries
 EBh, BBh, 0Bh and 03h reads at SCK divisors 3, 6, 12 and 24, sixteen
-attempts (5.2.7's table 452), and keeps the first that works, so an
+attempts (5.2.7's table 463), and keeps the first that works, so an
 image begins with its own first byte, a vector table on Arm and one
 jump instruction on RISC-V, and what marks it an image is the
 twenty-byte IMAGE_DEF block the crt places right behind that, well

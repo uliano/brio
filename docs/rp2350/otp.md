@@ -38,7 +38,9 @@ this stratum's board, and `otp_clk_ref_max_hz` is the bound a program
 that moves clk_ref checks. And the two guarded windows (`ecc_guarded()`,
 `raw_guarded()`) fault instead of answering where a read is refused, so
 a caller asks `readable()` before using them, as the last lines of the
-block below do. No verb here waits or masks interrupts: a read is one
+block below do; `readable()` does not see erratum RP2350-E17, the
+guarded ECC read that also faults on the row beside it ("What the
+silicon does" below). No verb here waits or masks interrupts: a read is one
 or a few bus loads.
 
 The rest of this page, in order: the documents of record; why there is
@@ -50,7 +52,7 @@ findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), chapter 13
+The RP2350 datasheet (build 80d627281ed5), chapter 13
 (13.1 the address map and the four read windows with 13.1.1 the guarded
 ones, 13.2 and 13.3 the IP and the hardware around it with 13.3.1 the
 lock shim, 13.3.2 the two interfaces and the interrupt, 13.3.3 the boot
@@ -60,8 +62,8 @@ oscillator, 13.3.4 the power-up state machine, 13.4 the critical flags,
 correction with 13.6.1 bit repair by polarity and 13.6.2 the modified
 Hamming code, 13.7 decommissioning, 13.9 the registers, 13.10 the
 predefined data locations), 4.5 (what the boot path reads out of it) and
-10.8 (its place in the security architecture); Appendix E, RP2350-E16 and
-RP2350-E28. The driver: `brio/rp2350/otp.hpp`. The reference suite:
+10.8 (its place in the security architecture); Appendix D, RP2350-E16,
+RP2350-E17 and RP2350-E28. The driver: `brio/rp2350/otp.hpp`. The reference suite:
 `test_rp2350_blocks`, letters a, h and j, which runs on both of this
 chip's architectures from one source (a letter is one command key of
 the suite's console and the group of verdicts it runs; `z` is the key
@@ -112,6 +114,13 @@ value a function can return. So this driver offers both, and offers a
 lock-checked `read()` above them: the page's permission is read first and
 only then is the array touched, so a caller gets an answer or an empty
 optional and never a fault.
+
+**A guarded ECC read judges a pair of rows** (RP2350-E17, every stepping).
+The hardware reads the even row and the odd row after it together, so
+`ecc_guarded()` faults when either of the two is not valid ECC data,
+whatever the row asked for holds and whatever `readable()` said. A row is
+safe beside a blank one (zero is valid ECC) and at risk beside a programmed
+raw row or a half-written ECC row.
 
 The windows answer only while USR.DCTRL stands (13.1's own note). It is
 set at reset and clear only while the programming bridge owns the array,
@@ -328,8 +337,8 @@ Driver gaps, each with its reason:
   here writes or boots from them.
 - **RP2350-E16 and RP2350-E28.** The first is a set of correctness checks
   the A3 stepping adds to the power-up state machine; the second is about
-  the lock word of page 62 and is worked around by the factory's default
-  permissions. Neither is a thing a read-only driver acts on, and the
+  the key protection of the lock words, which pages 62 and 63 define for
+  all of them, and is partly mitigated by the factory's default permissions. Neither is a thing a read-only driver acts on, and the
   bench part is an A2.
 
 Implemented but not bench-verified, each with what would measure it:

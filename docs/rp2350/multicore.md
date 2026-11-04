@@ -85,16 +85,16 @@ is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 3.1.2 (SIO's
+The RP2350 datasheet (build 80d627281ed5), 3.1.2 (SIO's
 CPUID, and MHARTID answering the same), 3.1.5 (the inter-processor FIFOs
 and their interrupt), 3.1.6 (the doorbells: eight flags each way behind
 one core-local line), 3.1.8 (the platform timer, one counter and a
 comparator per core), 3.3 and 3.4 (the two architectures' event signals:
 `sev`/`wfe` and `h3.unblock`/`h3.block`), 3.8.6.3 (where those two
 Hazard3 instructions are encoded), 3.9.2 (mixed architecture
-combinations), 5.2 and its table 451 (core 1's wait state in the ROM),
+combinations), 5.2 and its table 462 (core 1's wait state in the ROM),
 5.3 (the launch protocol), 7.4 (the power-on state machine, whose
-FRCE_OFF.PROC1 holds core 1 in reset). Appendix E: RP2350-E2 (writes to
+FRCE_OFF.PROC1 holds core 1 in reset). Appendix D: RP2350-E2 (writes to
 SIO registers at 0x180 and above release the spinlock 128 bytes below)
 and RP2350-E19 (a reboot hangs with any FRCE_OFF bit but PROC1 set). The
 drivers: `brio/rp2350/multicore.hpp` (the doorbell, the mailbox, the
@@ -131,9 +131,8 @@ Two cross-core channels, and the datasheet says plainly what each is for:
   and reads FIFO_RD; FIFO_ST carries a room bit, a data bit and two
   sticky misuse flags (a read of an empty FIFO, a write to a full one).
   One interrupt line per core, SIO_IRQ_FIFO, number 25. The depth is
-  stated twice and differently: 3.1.5 says four entries, the FIFO_ST
-  register description says eight - which is why the driver states no
-  depth and the suite measures one.
+  four entries (3.1.5, and four words in the FIFO_ST register
+  description); the driver states no depth and the suite measures one.
 - **The doorbells** (3.1.6), eight flags in each direction, "for events
   which are accumulative (i.e. may post multiple times, but only answered
   once) and which can be responded to in any order". DOORBELL_OUT_SET
@@ -143,7 +142,7 @@ Two cross-core channels, and the datasheet says plainly what each is for:
   is core-local: the same number on each core, notifying the core that
   reads it.
 
-Out of reset core 1 goes to the ROM's wait state (5.2, table 451): it
+Out of reset core 1 goes to the ROM's wait state (5.2, table 462): it
 waits for its RCP salt, drains its FIFO, pushes a 0, and waits for the
 six-word sequence of 5.3 - 0, 0, 1, a vector base, a stack pointer, an
 entry point, each word echoed back and the sequence restarted from the
@@ -193,10 +192,9 @@ stay safe.
 - The RP2040's memory-mapped divider is gone (3.1.7) and the doorbells,
   the RISC-V soft interrupt and the platform timer stand in that address
   space instead - which is what RP2350-E2 is about.
-- The mailbox FIFO is four words deep here against the RP2040's eight -
-  measured, which also settles the two places this datasheet states it
-  differently: 3.1.5 is right and the FIFO_ST register description's
-  "8 words deep" is not.
+- The mailbox FIFO is four words deep here against the RP2040's eight:
+  3.1.5 and the FIFO_ST register description both say so, and it is
+  measured.
 
 ## Types and verbs
 
@@ -333,7 +331,7 @@ about it was carried by an event that crossed.
   debug port with no program's help, core 1 sits at 0x0000_00DA on the
   Arm pair and 0x0000_76DE on the RISC-V one, both inside the ROM, with
   its stack pointer at its reset value - the wait state of 5.2's table
-  451, reached because the chip-level rescue reset precedes the
+  462, reached because the chip-level rescue reset precedes the
   programming. That is the state a launch has to work from, and it does,
   flash after flash.
 - **A RUNNING core 1 does not answer the protocol.** With no reset
@@ -393,9 +391,8 @@ about it was carried by an event that crossed.
   both cores; core 1 acknowledges its own bell, so nothing stands in the
   outbound register's read-back after a round trip.
 - **THE MAILBOX IS FOUR WORDS DEEP.** It takes four pushes and refuses
-  the fifth, with the sticky write-on-full flag still clear - so 3.1.5's
-  "four entries deep" is the truth and the FIFO_ST register
-  description's "8 words deep" is not.
+  the fifth, with the sticky write-on-full flag still clear - 3.1.5's
+  "four entries deep".
 - **A launch runs with the bell interrupt ENABLED** - 16 us (Arm) and
   12 us (RISC-V) with it on throughout, and core 1 answering afterwards.
   That is the whole gain of the doorbell over the RP2040's FIFO bell.

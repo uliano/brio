@@ -27,7 +27,7 @@ Red::setup_hz(clock, 10'000);              // the slice at 10 kHz
 ```
 
 Line by line: `Red` names the output on GP12, which is slice 6's A
-output (every GPIO has its one slice and output, table 1130), with a
+output (every GPIO has its one slice and output, table 1183), with a
 TOP of 999, so its levels run from 0 (always low) to 1000, TOP + 1
 (always high); `Pwm::reset()` takes the block through the subsystem
 reset controller to its reset state; and `setup_hz()` solves the
@@ -61,15 +61,15 @@ what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.5 whole (12.5.1 the overview,
+The RP2350 datasheet (build 80d627281ed5), 12.5 whole (12.5.1 the overview,
 12.5.1.1 what changed from the RP2040, 12.5.2 the programmer's model
-with table 1130 - the slice and channel of every GPIO -, 12.5.2.1 the
+with table 1183 - the slice and channel of every GPIO -, 12.5.2.1 the
 counter and the compare, 12.5.2.2 the 0 % and 100 % levels, 12.5.2.3 the
 double buffering, 12.5.2.4 the fractional divider, 12.5.2.5 the level
 and edge input modes, 12.5.2.6 the period, 12.5.2.7 the two interrupt
 lines and the DMA request, 12.5.2.8 the phase nudges, 12.5.3 the
 registers), 9.4 (the GPIO function table the pin map also appears in),
-12.6.4.1 (the DREQ table); Appendix E names no erratum of this block.
+12.6.4.1 (the DREQ table); Appendix D names no erratum of this block.
 `util/pwm_channel.hpp` for the PwmChannel contract. The driver:
 `brio/rp2350/pwm.hpp` (`Pwm` the block, `PwmSlice<n>` the resource, the
 tasks `PwmOutput`, `PwmPair`, `PwmEdgeCounter`, `PwmLevelCounter`,

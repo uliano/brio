@@ -62,14 +62,14 @@ the bench findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), chapter 7
+The RP2350 datasheet (build 80d627281ed5), chapter 7
 whole (7.1 the three tiers, 7.2 what changed from the RP2040, 7.3
 chip-level resets with their table of causes, 7.4 the power-on state
 machine, 7.5 the subsystem reset controller), 6.4 (POWMAN's CHIP_RESET
 and its password), 12.9 (the watchdog's REASON and trigger), 3.5.8 (the
 rescue reset), 3.8.5.3 (what a RISC-V hart's reset controls are), 13.9
 (ARCHSEL and the warm reset that samples it), 5.2 (the bootrom's boot
-path); Appendix E, RP2350-E19. The drivers: `brio/rp2350/reset.hpp` (the
+path); Appendix D, RP2350-E19. The drivers: `brio/rp2350/reset.hpp` (the
 causes and the two reboots) and the power-on state machine beside the
 subsystem reset controller in `brio/rp2350/resets.hpp` - the controller
 itself is [platform.md](platform.md)'s, which every chapter reaches its

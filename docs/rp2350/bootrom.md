@@ -57,8 +57,8 @@ what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 5.4 (the
-bootrom APIs: 5.4.1 locating them, with table 453 for Arm and table 454
+The RP2350 datasheet (build 80d627281ed5), 5.4 (the
+bootrom APIs: 5.4.1 locating them, with table 464 for Arm and table 465
 for RISC-V, 5.4.2 which architectures and security states each entry
 point serves, 5.4.3 the return codes, 5.4.4 the boot locks, 5.4.6 and
 5.4.7 the lists, 5.4.8.16 `get_partition_table_info`, 5.4.8.17
@@ -152,7 +152,9 @@ same way: an address the optimizer cannot fold.
   flash driver.
 - **`reboot()`.** This stratum's reboot is the watchdog's
   ([reset.md](reset.md)), which is what the reset chapter measured. A
-  second spelling of the same act would be a second thing to keep true.
+  second spelling of the same act would be a second thing to keep true,
+  and the ROM's fails to reboot for a `delay_ms` of zero on every stepping
+  (RP2350-E30).
 - **`otp_access()`** (5.4.8.21). It is the ROM's OTP read AND WRITE entry
   point: its `row_and_flags` argument carries an IS_WRITE bit. This
   project's rule is that no write path to OTP exists in the tree

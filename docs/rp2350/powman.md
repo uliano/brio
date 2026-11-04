@@ -64,12 +64,12 @@ bench findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 6.2 (the core power domains, the
+The RP2350 datasheet (build 80d627281ed5), 6.2 (the core power domains, the
 twelve power states and the transitions between them), 6.3 (the core
 voltage regulator), 6.4 (the register list and the password), 12.10 (the
 always-on timer), 3.5.10 (what the debug port's RP-AP can see and do to
 the power sequencers), 7.3 (the chip-level reset record, which lives in
-this block). Appendix E carries no erratum against POWMAN or its timer.
+this block). Appendix D carries no erratum against POWMAN or its timer.
 The driver: `brio/rp2350/powman.hpp` (`Powman`, `AonTimer`) over
 `clock.hpp` (the low-power oscillator's trim and the frequency counter)
 and `core.hpp`. The reference suite: `test_rp2350_sleep` (a letter is
@@ -113,10 +113,9 @@ registers are ordinary.
 which is what the silicon obeys): a request may not combine a power-up
 with a power-down; it may not leave the switched core powered with the
 XIP domain unpowered; and a P1.m state may only be left for a P0.m one.
-The prose of 6.2.3 states a fourth rule - that leaving a P1.m state may
-not power a powered-off SRAM domain back on - which its own table
-contradicts, P1.1 -> P0.0 being listed as valid, and which the register
-description does not repeat. `power_transition_legal` enforces the
+The prose of 6.2.3 adds that leaving a P1.m state may not power a
+powered-on SRAM domain off, which the first rule already says, and its
+table 508 lists the same set. `power_transition_legal` enforces the
 register's three.
 
 **The regulator and the detector are read-only in this tree**, by
@@ -192,7 +191,9 @@ is the answer.
 - `AonTimer`, the counter in the same block: `init(clock)` (the divisors
   written from a measurement of the low-power oscillator and from the
   clock task's own crystal rate, the time zeroed, the counter started,
-  the alarm left disarmed), `running` / `run`, `now` (12.10.3's read
+  the alarm left disarmed), `running` / `run` (`run(true)` loads the
+  counter from the SET_TIME registers, so a stop and a start is no pause:
+  12.10.3's note), `now` (12.10.3's read
   procedure) / `now_low`, `set` (refused while running), `clear`;
   `alarm_at` / `alarm_in` / `alarm_time` / `alarm_enable` /
   `alarm_enabled` / `alarm_fired` / `clear_alarm`, `powerup_on_alarm`,

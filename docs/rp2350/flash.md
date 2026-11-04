@@ -72,7 +72,7 @@ covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.14 (the
+The RP2350 datasheet (build 80d627281ed5), 12.14 (the
 QSPI memory interface: the two memory windows with their timing,
 transfer formats and command constants, the four address translation
 panes a window, and direct mode), 4.4 (execute-in-place: the four
@@ -81,7 +81,7 @@ the two performance counters), 4.3 (boot RAM, where the XIP setup
 function lives), 5.4.8.3 and 5.4.8.6 to 5.4.8.14 (the bootrom's flash
 functions and the two ROM data pointers beside them), and 5.2.7 for how
 the bootrom leaves the interface set up before it enters an image.
-Appendix E carries one erratum this chapter answers, RP2350-E11, and one
+Appendix D carries one erratum this chapter answers, RP2350-E11, and one
 it only states, RP2350-E14. The drivers: `brio/rp2350/flash.hpp` over
 `bootrom.hpp`, and `brio/rp2350/nvm_flash.hpp` over that. The reference
 suite: `test_rp2350_flash` (a letter is one command key of the suite's
@@ -180,14 +180,14 @@ bytes were a checksummed stage whose job was to set the flash interface
 up, and whose second job was to be the way back after a flash operation.
 Here the bootrom does the setup itself while scanning the flash: it
 tries sixteen combinations in turn - EBh, BBh, 0Bh and 03h reads at SCK
-divisors 3, 6, 12 and 24 (5.2.7's table 452) - keeps the first that
+divisors 3, 6, 12 and 24 (5.2.7's table 463) - keeps the first that
 works, and writes a position-independent XIP setup function into the
 first 256 bytes of boot RAM that restores it. **On the bench board that
 is the first of the sixteen, EBh quad-I/O at CLKDIV 3**, and what that
 costs is a fact of the program and not of the boot: the divisor divides
 clk_sys, so the same register that is 3.7 MHz of SCK while the bootrom
-runs on the ring oscillator is 50 MHz once a program has raised clk_sys
-to 150 MHz. Boot RAM is 1 kB on the APB and is physically not
+runs on the ring oscillator (stepping A2; Appendix C has A3's boot clock
+four times faster) is 50 MHz once a program has raised clk_sys to 150 MHz. Boot RAM is 1 kB on the APB and is physically not
 executable, so a program that wants that function must copy it into SRAM
 and call the copy. The datasheet gives two routes to that one address -
 the ROM data entry 'X','F' names it, and 4.3 and 5.2.7 say it is at the
@@ -449,7 +449,7 @@ flash endurance: `h`, `i` and `w`.
   cooldown 1, MAX_SELECT 0, MIN_DESELECT 7, select setup and hold 0;
   a read format of an eight-bit SERIAL prefix, then a QUAD address, a
   quad eight-bit suffix, 16 quad dummy bits and quad data; and a read
-  command of **EBh** with a zero suffix. That is table 452's first
+  command of **EBh** with a zero suffix. That is table 463's first
   attempt, so the scan stopped at once. The write format beside it is
   serial throughout with command 02h and suffix A0h - the ROM writes it
   and nothing here uses it. WINDOW 1 CARRIES THE SAME TRIO although

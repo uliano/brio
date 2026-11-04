@@ -86,7 +86,7 @@ what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.7 (the
+The RP2350 datasheet (build 80d627281ed5), 12.7 (the
 controller: 12.7.1 what it is and the 4 kB of dual-port RAM that is its
 whole interface, 12.7.2 "Changes from RP2040" - 12.7.2.1 the errata fixed,
 12.7.2.2 the new features, 12.7.2.2.3 the device ones and 12.7.2.2.4 the
@@ -94,9 +94,9 @@ error handling -, 12.7.3 the architecture with 12.7.3.7.1 the concurrent
 access rule, 12.7.3.7.2 the memory map, 12.7.3.7.3 and 12.7.3.7.4 the
 endpoint and buffer control words, 12.7.3.8 the device controller packet
 by packet, 12.7.3.10 the VBUS signals, 12.7.5 the registers), 9.4 (the
-function tables, and table 647's BANK 1, which is where the DP and DM
+function tables, and table 679's BANK 1, which is where the DP and DM
 pads live), 8.6 (the PLLs), 7.5 (the subsystem resets), 3.2 (the
-interrupt line), and Appendix E's **RP2350-E12**, the one item filed
+interrupt line), and Appendix D's **RP2350-E12**, the one item filed
 against this block. docs/design/usb.md for the stack and the contracts.
 The driver: `brio/rp2350/usb.hpp` (`Usb`, the endpoint controller) over
 `clock.hpp` (`Clocks::usb_select`, `PllUsb`) and `resets.hpp`; the stack
@@ -133,7 +133,7 @@ lives in the register alone. The dual-port RAM answers no alias
 A buffer is handed over by writing its control word in two steps, the
 length and the PID first and AVAILABLE after a few cycles, because the
 controller reads the word at 48 MHz while the core writes it at 150
-(12.7.3.7.1 and the warning under table 1194).
+(12.7.3.7.1 and the warning under table 1305).
 
 **Everything of the RP2040's controller is here and works the same
 way** - 12.7.2 says so in as many words - and what is added is the following.
@@ -169,7 +169,7 @@ register whole rather than setting bits into it:
 | `SIE_CTRL` | 0x00000000 | 0x00008000 | PULLDOWN_EN set - the host's termination, so the pins do not float while the block is unused; a device must drop it |
 
 **DP and DM can be ordinary pads.** They are GPIO 56 and 57 of **bank
-1** (table 647), whose function-select registers are the IO_QSPI block's
+1** (table 679), whose function-select registers are the IO_QSPI block's
 `USBPHY_DP_CTRL` and `USBPHY_DM_CTRL` and whose SIO face is the high
 bank's bits 24 and 25; `USB_MUXING.USBPHY_AS_GPIO` is the other half of
 the route. Neither is ever taken here: bank 1's FUNCSEL resets to NULL
@@ -184,8 +184,9 @@ flags cross from clk_usb to clk_sys without adequate synchronisation and
 can be lost when clk_sys is at or below clk_usb. The workaround is a
 frequency rule: **clk_sys at least ten per cent above clk_usb** - 52.8
 MHz, not 48 - while the peripheral is in use. The quasi-static bus states
-(reset, suspend, resume) are exempt. It affects stepping A2, which is the
-one on the bench.
+(reset, suspend, resume) are exempt. It affects A2, the bench's stepping, A3 and
+A4; A3's mitigation covers the signals the bootrom uses, and "software
+must not rely on these fixes".
 
 **LINESTATE_TUNING is a register to leave alone.** 12.7.2 says so
 plainly, and its reset value 0x0f8 already has every device-side fix on:
@@ -440,7 +441,7 @@ Driver gaps, each with its reason:
   controller off.
 - **Isochronous endpoints and a double-buffered IN**: no class here
   streams, and the buffer control's isochronous offset field
-  (table 1194, bits 28:27) goes with them. A second half on the IN would
+  (table 1305, bits 28:27) goes with them. A second half on the IN would
   be the first thing a streaming class asks for.
 - **VBUS detection and overcurrent from a pad** (12.7.3.10, and 9.4's
   VBUS functions on bank 0): the board wires neither, so detection is

@@ -68,7 +68,7 @@ started on one cycle; the bench findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), chapter 11
+The RP2350 datasheet (build 80d627281ed5), chapter 11
 whole - 11.1.1 (what this chip added to the RP2040's PIO), 11.2 (the
 programmer's model: the programs, the control flow, the registers and
 shift counters, the FIFOs, the stalls, the pin mapping, the flags), 11.4
@@ -76,7 +76,7 @@ shift counters, the FIFOs, the stalls, the pin mapping, the flags), 11.4
 new), 11.5 (the functional details: the side-set, the wrap, the FIFO
 join, autopush and autopull, the clock dividers, the GPIO mapping and its
 priority, the forced instructions), 11.6 (the examples), 11.7 (the
-registers) - and 9.4 for the pin functions. Appendix E carries no erratum
+registers) - and 9.4 for the pin functions. Appendix D carries no erratum
 against this block; RP2350-E9, which is the pads', is why no letter of
 the suite reads an undriven pin. The driver: `brio/rp2350/pio.hpp` (the
 assembler, `Pio<n>` the block, `PioSm<n, sm>` the machine, the four

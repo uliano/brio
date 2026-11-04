@@ -65,10 +65,10 @@ and verbs; how to use it; the bench findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.8 (the system timers: the
+The RP2350 datasheet (build 80d627281ed5), 12.8 (the system timers: the
 64-bit counter, the latching pair, the four alarms, and the two
 registers this chip added) and 8.5 (the tick generators that feed them).
-Appendix E carries no erratum against this block. The driver:
+Appendix D carries no erratum against this block. The driver:
 `brio/rp2350/timer.hpp` over `clock.hpp` and `resets.hpp`. The reference
 suite: `test_rp2350_timer`, letters b, c, d, e, f, g, h and k - and
 every timing letter of that suite, which `Timer<0>` is the ruler of (a

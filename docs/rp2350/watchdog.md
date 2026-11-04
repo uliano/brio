@@ -55,11 +55,11 @@ covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.9 (the
+The RP2350 datasheet (build 80d627281ed5), 12.9 (the
 watchdog: the countdown, what it resets, the scratch registers), 8.5 (the
 tick generator that feeds it), 7.4 (the power-on state machine and its
 WDSEL), 5.2.4 (the bootrom's use of the upper scratch registers);
-Appendix E, RP2350-E19. The driver: `brio/rp2350/watchdog.hpp` over
+Appendix D, RP2350-E19. The driver: `brio/rp2350/watchdog.hpp` over
 `clock.hpp` and `resets.hpp`. The reference suite: `test_rp2350_timer`,
 letters a, j, m and i (a letter is one command key of the suite's
 console and the group of verdicts it runs; `z` is the key that runs
@@ -78,8 +78,8 @@ driving the bus fabric; ENABLE clears, so unlike the other families'
 watchdogs this one is not one-way. **The RP2040's erratum E1 is not this
 chip's**: there the counter decremented twice per tick, so every LOAD was
 doubled and the reach halved; here LOAD is microseconds as written and
-the register's 0xffffff is about 16.8 s, which is what 12.9's LOAD
-description states. The suite measures the decrement rate against the
+the register's 0xffffff is about 16.8 s, which 12.9's LOAD description
+rounds to "approximately 16 seconds". The suite measures the decrement rate against the
 system timer rather than trusting either sentence, and measures one
 decrement per microsecond (below).
 
@@ -99,7 +99,7 @@ words. The datasheet is not of one mind about what a watchdog reset does
 to them: 7.2's note says they are kept by a system or a subsystem reset
 and lost to a chip-level one, while 7.3.1's table of chip-level causes
 lists the watchdog's own power-on-state-machine reset among its rows and
-says every row resets the watchdog peripheral "including watchdog scratch
+says every row resets the watchdog peripheral, including "watchdog scratch
 registers SCRATCH0 -> SCRATCH7". The mechanism argues for 7.2: the
 bootrom's own watchdog boot vector exists to divert a reboot into user
 code and reads SCRATCH4..7 to do it, which only works if a watchdog

@@ -72,14 +72,14 @@ is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 6.5 (the power reduction
+The RP2350 datasheet (build 80d627281ed5), 6.5 (the power reduction
 strategies: 6.5.1 the top-level clock gates, 6.5.2 the SLEEP state,
 6.5.3 DORMANT and 6.5.3.1 what ends it, 6.5.4 the memory periphery,
 6.5.5 the memory power domains), 8.2.6 and 8.3.10 (the two oscillators'
 DORMANT registers), 9.5 (the IO bank's dormant-wake destination), 6.2.2
 (the P1.m states, which are off this ladder and in
 [powman.md](powman.md)); `docs/design/power.md` for the model the sites
-serve. Appendix E carries no erratum against any of it. The driver:
+serve. Appendix D carries no erratum against any of it. The driver:
 `brio/rp2350/sleep.hpp` (`DormantWake`, `Rp2350SleepSite`,
 `Rp2350TimedSleepSite` and the gate sets) over `clock.hpp` (the gate
 registers, the two oscillators' `dormant()`), `powman.hpp` (the alarm
@@ -118,10 +118,10 @@ stopped by a keyword written into its DORMANT register, every clock
 derived from it stands still - the core included - and it restarts on a
 GPIO event the IO bank's dormant-wake destination detects or on the
 always-on timer's alarm; execution resumes at the next instruction. The
-crystal's restart is the datasheet's "more than 1 ms", the ring
+crystal's restart is the datasheet's ">1 ms", the ring
 oscillator's about a microsecond. The PLLs are not stopped by the
 silicon: a program stops them first, and must, because a VCO whose
-reference goes away behaves erratically (8.2.6's note).
+reference goes away behaves erratically (6.5.3; 8.2.6's note).
 
 **And a dormant's alarm needs clk_ref running** - which is this chapter's
 one finding that changes how the driver is written. See the bench

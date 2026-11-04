@@ -113,7 +113,7 @@ interrupt controller, and 3.8.1.23 on `wfi`), 3.8.4.2 (the interrupt
 numbering the two architectures share), 7.5 (the subsystem reset
 controller), 9.11 (the pad registers and their isolation latch), 12.15.1
 (SYSINFO) and 12.15.3 (TBMAN), 2.1.3 (the atomic register aliases),
-appendix C (the hardware revisions) and appendix E (the errata,
+appendix C (the hardware revisions) and appendix D (the errata,
 RP2350-E9 among them). For the preemptive platform: 3.7.2 (the
 Cortex-M33's configuration: the Security Extension, the FPU, four
 priority bits), the M33 register list's FPCCR table (3.7.5), 3.1.2 (SIO's

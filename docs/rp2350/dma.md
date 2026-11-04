@@ -75,7 +75,7 @@ each parameter; the bench findings; and what is not covered.
 
 ## Documents of record
 
-The RP2350 datasheet (build d126e9e), 12.6 (the controller: 12.6.1 what
+The RP2350 datasheet (build 80d627281ed5), 12.6 (the controller: 12.6.1 what
 changed from the RP2040, 12.6.2 the four live registers with the count
 modes and the address steps, 12.6.3 the trigger aliases, chaining and
 null triggers, 12.6.4 the credit-based data request and its table,
@@ -83,7 +83,7 @@ null triggers, 12.6.4 the credit-based data request and its table,
 memory protection unit, 12.6.7 bus errors and the halt timing, 12.6.8
 the pacing timers, the sniffer, the abort and the debug registers,
 12.6.10 the registers), 12.1 (the UART's DMA interface), 7.5 (the reset
-controller), 3.2 (the interrupt lines); Appendix E, RP2350-E5 and
+controller), 3.2 (the interrupt lines); Appendix D, RP2350-E5 and
 RP2350-E8. The driver: `brio/rp2350/dma.hpp` (the block, a channel, a
 line, a timer, the sniffer, the read-only MPU view, the three engines)
 with the request numbers in `dma_engine.hpp` beside `NoDmaEngine`, the
