@@ -3,27 +3,43 @@
 This page decides how a program drives I2C devices through the same
 arbiter as the SPI bus: one request is one bus tenure from START to
 STOP (a write, a read, a write-then-read or a probe), the active object
-that wants it (the requester) posts it and receives an `I2cDone` with a
-status that says what the wire did, and the bus active object runs one
+that wants it posts it and receives an `I2cDone` with a status that says
+what the wire did, and an active object called the arbiter runs one
 tenure at a time on the family's host. It also decides the arbiter
 itself, `BusMaster`, which both buses share, and its per-bus timeout. It
 is written for an embedded programmer who has read a register over I2C
 with a vendor library and wants the same from several active objects
 without collisions. [spi-bus.md](spi-bus.md) is the reference form of
-the pattern; this page repeats nothing it says. Three words are used one
-way throughout: the host is the chip's controller and the `I2cHost` type
-that drives it, a client is a device on the wire that answers a host,
-and the engines are the DMA channels bound to a host.
+the pattern; this page repeats nothing it says.
 
-The smallest use has four parts. An `I2cHost<n, ...>` of the family. An
-`I2cBus<Host, P>` in the list of active objects given to `Tenuto`, the
-cooperative kernel (`P` is the target's platform type,
+These words are used one way throughout:
+
+- A **tenure** is one START to its STOP, the bus held for one request.
+- The **requester** is the active object that posts a request. A
+  **client** is a device on the wire that answers a host.
+- The **host** is the chip's controller and the `I2cHost` type, the task
+  that drives it; that task is never called an engine.
+- The **engines** are the DMA channels bound to a host, and nothing else.
+  `I2cEngine` is the request's field: it names the mechanism that moves
+  the data, and its values read "under `interrupt`" and "under `dma`";
+  neither is an engine. A DMA channel's own request line is a DMA request.
+- The **peripheral** (or the I2C block) is the chip's I2C hardware; a
+  **DMA block** is one DMA transfer.
+- A **half** is the bytes a tenure writes, or the bytes it reads. The
+  **pump** is the host's interrupt moving a half, one entry per byte or
+  per FIFO level.
+- A **refusal** is the host's own `i2c_rejected`. A device says no with a
+  NACK, and an address nobody answered is an address not acknowledged.
+
+The smallest use has four parts. An `I2cHost<n, ...>` of the family. The
+arbiter, an `I2cBus<Host, P>` in the list of active objects given to
+`Tenuto`, the cooperative kernel (`P` is the target's platform type,
 [kernel.md](kernel.md)).
 The family's vectors bound to the host's handler bodies, posting
-`TransferDone{Host::status()}` to the bus when a body answers true. And
+`TransferDone{Host::status()}` to the arbiter when a body answers true. And
 a requester that posts a request and handles `I2cDone` in its own
 dispatch. An excerpt, from a handler of an active object `MyAo`, with
-`Host` and `Bus` the two types above:
+`Host` the host's type and `Bus` the arbiter's:
 
 ```cpp
 // Read a register: a write and a read joined by a repeated START.
@@ -52,8 +68,8 @@ below).
 
 The arbiter never looks at a byte. It owns the pending FIFO, the
 reject-when-full policy, the `ReplyTo` return channel and the handshake
-with the host (`Bus::start`, then `TransferDone`). Nothing in that is
-specific to a bus, so one class serves both: `BusMaster<Bus, P,
+with the host (`Host::start`, then `TransferDone`). Nothing in that is
+specific to a bus, so one class serves both: `BusMaster<Host, P,
 pending_depth>` in `util/bus_master.hpp`, with `BusDone{status}`,
 `bus_ok`, `bus_rejected` and `TransferDone` as its own vocabulary.
 
@@ -78,20 +94,21 @@ the same thing from the host's refusal as from the arbiter's: nothing
 was executed and no byte moved. SPI has no
 wire-level outcome to report (no ACK, no arbitration), so the codes it
 adds to the arbiter's are its hosts' own ([spi-bus.md](spi-bus.md)); I2C
-adds the four an I2C master can observe, declared in
+adds the four an I2C host can observe, declared in
 `util/i2c_bus.hpp`:
 
 | Code | Meaning |
 |------|---------|
-| `i2c_nack_addr` | no ACK on the address: nobody home (the probe result an address scanner reads) |
-| `i2c_nack_data` | no ACK on a written byte: the device refused or finished early |
-| `i2c_arb_lost` | lost arbitration to another master: not our bus, no STOP sent |
-| `i2c_bus_error` | a protocol violation on the wire, or a block `start()` found not its own: the tenure is over ("What a host does on the wire", "The transaction descriptor") |
+| `i2c_nack_addr` | no ACK on the address: no device answered (the probe result an address scanner reads) |
+| `i2c_nack_data` | no ACK on a written byte: the device would not take it, or had finished early |
+| `i2c_arb_lost` | lost arbitration to another host: not our bus, no STOP sent |
+| `i2c_bus_error` | the tenure is over on any other fault: a protocol violation, on a host that acts on one ("What a host does on the wire"), or, from `start()`, a peripheral out of its control ("The transaction descriptor") |
 
 A host with DMA engines adds a fifth, its own: `i2c_dma_fault`, the
 value `bus_engine_status + 4`, when a DMA channel reports a transfer
-error in the middle of a tenure. The host then ends the tenure and
-releases the bus (a STOP, or on the DesignWare block an abort, which
+error in the middle of a tenure or, on the CH32V00x, the CH32X035 and the
+CH32V203/V303, when BTF finds the transmit channel's count standing. The host then ends the tenure and
+releases the bus (a STOP, or on the DesignWare peripheral an abort, which
 sends one). `util/i2c_bus.hpp` does not declare it: each stratum whose
 host has engine parameters defines it, with the same value, and the STM32F4's
 second design names it `fmpi2c_dma_fault` (`stm32f4/fmpi2c.hpp`). The
@@ -102,22 +119,24 @@ any code it does not know as a failure.
 ## The stack
 
 ```
-     requester AO                       scanner / DAC driver
+     requester                          scanner / DAC driver
         \  post(Request{...})              /
          v                                v
-     I2cBus<Bus, P>          util/i2c_bus.hpp   = BusMaster: arbitration + replies
-         |  Bus::start(req)
+     I2cBus<Host, P>         util/i2c_bus.hpp   = BusMaster: arbitration + replies
+         |  Host::start(req)
          v
-     I2cHost<n>              <stratum>/{twi,i2c}.hpp   START/Sr/STOP, ACK policy, the per-byte interrupt
+     I2cHost<n>              <stratum>/{twi,i2c}.hpp   START/Sr/STOP, ACK policy, the pump
          |
-     ISR glue in the app     posts TransferDone{I2cHw::status()} on completion
+     ISR glue in the app     posts TransferDone{Host::status()} on completion
 ```
 
 Layering as for SPI: `I2cBus` and `BusMaster` are `util/`'s, pure and
 tested on the host through the SPI alias in `test_spi_bus` (the same
-class); the `I2cHost<n>` belongs to a target stratum, as a task
-over that silicon's own resource. The application's interrupt handler
-binds the vector.
+class); the `I2cHost<n>` belongs to a target stratum, as a task over that
+silicon's own resource: the resource is one peripheral instance's
+registers as verbs, the task the driver with state of its own above it
+([overview.md](overview.md), "A driver is a task over a resource"). The
+application's interrupt handler binds the vector.
 
 ### Realizations
 
@@ -130,7 +149,7 @@ the CH32V203's and CH32V303's, the CH32X035's and the STM32F4's classic
 host stop at `fast_400k`, those peripherals having no Fm+); the
 host's functions `init`, `start`, `isr`, `status`, `rebase`,
 `recover`, `release`, `unstick`; the empty probe (both lengths zero)
-served by every row, on the DesignWare block as a one-byte read, its
+served by every row, on the DesignWare peripheral as a one-byte read, its
 command FIFO having no address-only entry; `start()`'s refusal of an
 address outside 0x08..0x77 (below); and the vocabulary `I2cDone` and
 `i2c_*`, produced on the wire. Every silicon row's host is measured on
@@ -151,20 +170,24 @@ values outside it are reserved: 0x00 is the general call and, with the
 read bit, the START byte; 0x01 is CBUS, 0x02 other bus formats, 0x03 a
 future purpose and 0x04 to 0x07 the Hs-mode codes; 0x78 to 0x7B are the
 first byte of a 10-bit address, and 0x7C to 0x7F the device ID and a
-future purpose. The reason is the wire and not tidiness. The controller
-of the STM32F1's event machine, which the STM32F4's classic I2C and the
-three WCH families carry, has no setting for 7-bit or 10-bit addressing:
-it goes by the byte it is told to send. A 7-bit address of 0x78 to 0x7B
-with its write bit is a byte of the form 1111 0xx0, and that machine
-sends it as a 10-bit header, where every other block sends it as a plain
-7-bit address, so the same request would mean two different things on
-two families. The general call is refused with the rest until it is a
-feature of its own, and 10-bit addressing is offered by no host. Behind
-the contract, each host of that lineage is also total in its address
-phase: an event that phase does not serve, ADD10 above all, ends the
-tenure with `i2c_bus_error` instead of re-entering the vector for ever
-(measured on the STM32F446, the CH32V303, the CH32X035 and the
-CH32V006 with the refusal compiled out, each family's I2C page).
+future purpose. The reason is the wire and not tidiness. The STM32F1's
+I2C controller, which the STM32F4's classic I2C and the three WCH
+families carry (the F1 lineage), is an event machine: no byte counter and
+no automatic bus condition, each step of a tenure a flag (SB, ADDR, TxE,
+RxNE, BTF) that software answers while SCL is held low. It has no setting
+for 7-bit or 10-bit addressing: it goes by the byte it is told to send. A
+7-bit address of 0x78 to 0x7B with its write bit is a byte of the form
+1111 0xx0, and that machine sends it as a 10-bit header, where every
+other peripheral sends it as a plain 7-bit address, so the same request
+would mean two different things on two families. The general call is
+refused with the rest until it is a feature of its own, and 10-bit
+addressing is offered by no host. Behind the refusal, each host of that
+lineage also ends a tenure on any event its address phase does not serve,
+ADD10 above all, with `i2c_bus_error` instead of re-entering the vector
+for ever. That end is measured on the STM32F446 and the CH32V303 with the
+refusal compiled out (each family's I2C page); on the CH32X035 and the
+CH32V00x no suite reaches it past the refusal, and their pages list it as
+not bench-verified.
 
 | stratum | realization | what decides |
 |---|---|---|
@@ -175,37 +198,30 @@ CH32V006 with the refusal compiled out, each family's I2C page).
 | stm32f4 (2) | `FmpI2cHost<n, pins, TxEngine, RxEngine>` over `FmpI2c<n>` (`stm32f4/fmpi2c.hpp`, the second I2C design of this family: the STM32G0's register file under the name FMPI2C1, on the F410, F412, F413/F423 and F446) | three speeds under `FmpI2cSpeed`; `start()` does not wait for the last STOP |
 | ch32v00x | `I2cHost<1, pins, TxEngine, RxEngine>` over `I2c<1>` (`ch32v00x/i2c.hpp`, the F1's event machine with no rise-time register) | `start()` waits for the last STOP; two speeds; the channels fixed |
 | ch32vx03 | `I2cHost<n, pins, TxEngine, RxEngine>` over `I2c<n>` (`ch32vx03/i2c.hpp`, the F1's event machine with a rise-time register, two instances on PB1) | `start()` waits for the last STOP; the bus clock refused outside 4..60 MHz; the channels fixed per instance |
-| ch32x035 | `I2cHost<1, pins, TxEngine, RxEngine, Placement>` over `I2c<1>` (`ch32x035/i2c.hpp`, the F1's event machine with no rise-time register, one instance, every bus at HCLK) | `start()` waits for the last STOP; the block asked for at `init()`, some lots having none; no open-drain GPIO |
+| ch32x035 | `I2cHost<1, pins, TxEngine, RxEngine, Placement>` over `I2c<1>` (`ch32x035/i2c.hpp`, the F1's event machine with no rise-time register, one instance, every bus at HCLK) | `start()` waits for the last STOP; the peripheral asked for at `init()`, some lots having none; no open-drain GPIO |
 | rp2040 | `I2cHost<n, pins, TxEngine, RxEngine, Placement>` over `DwApbI2c<n>` (`rp2040/i2c.hpp`, the family's aliases of the IP stratum's templates in `dw_apb_i2c/i2c.hpp`) | a command FIFO, one interrupt per eight bytes; `dma` carries the read phase alone |
 | rp2350 | `I2cHost<n, pins, TxEngine, RxEngine, Placement>` over `DwApbI2c<n>` (`rp2350/i2c.hpp`, the same IP stratum's templates) | as the RP2040, and `dma` also carries a pure write of three bytes or more |
 | host | none | `I2cBus` = `BusMaster`, host-tested through the SPI alias (`test_spi_bus`, `test_bus_master`, the same class); the IP stratum's own driver against a DW_apb_i2c made of RAM (`test_dw_apb_i2c`, `host/sim_dw_apb_i2c.hpp`) |
 
-None of the differences in those paragraphs is a spelling of the same
-function: `actual_scl_hz` and `scl_hz` answer different questions (the
-register in force against a cached speed), `bus_state()` and `idle()`
-look at different things (the wire against the host), and `quick_command`
-is a hardware mode the other families do not have (their empty probe
-is the same tenure with no data, which the AVR serves too).
-`speed_ok(speed)` is one function on every row that caches its rates.
-
-The client side is a surface per position (`I2cClient` on each
-stratum, the application's protocol over `Twi<n>`, `I2cs<n>`,
-`I2c<n>`, `I2c<1>` or `DwApbI2c<n>`). Every stratum but the AVR speaks
+The client side is an `I2cClient` on each stratum, over `Twi<n>`,
+`I2cs<n>`, `I2c<n>`, `I2c<1>` or `DwApbI2c<n>`, the protocol above it
+being the application's. Every stratum but the AVR speaks
 one vocabulary back (`addressed`, `data_ready`, `stop_seen`,
 `give`/`take`, `host_reads`; the CH32V00x, the CH32V203, the CH32X035,
 the STM32F4 and the DesignWare families add `service()`, one
-`I2cClientEvent` per interrupt body; the DesignWare block has no
+`I2cClientEvent` per interrupt body; the DesignWare peripheral has no
 `addressed`, raising no address-match event, so a tenure is known by its
 first byte or its first read request, and the clock stretch of a read
-request is the block's own). The AVR's is its own (`addressed`,
-`data_ready`, `receive`/`respond`, `complete`). A convergence, not a task.
+request is the peripheral's own). The AVR's is its own (`addressed`,
+`data_ready`, `receive`/`respond`, `complete`). These names agree by hand:
+no concept checks them, and nothing in `util/` is written over them.
 
 The peripherals share almost nothing below the contract: a TWI with
 its own baud three-step, a SERCOM with a select-then-use register
 file, an I2C with one timing word, the F1's event machine with a
-clock register and no rise-time one, and a command FIFO whose entries
+clock register, and a command FIFO whose entries
 carry the bus conditions as bits. That one descriptor serves them all is
-the point worth recording. Where two families carry the same block the
+the point worth recording. Where two families carry the same peripheral the
 descriptor stops being a claim: the DesignWare's driver is one file
 both of them alias ([the DesignWare I2C page](../dw_apb_i2c/README.md)).
 
@@ -214,9 +230,10 @@ both of them alias ([the DesignWare I2C page](../dw_apb_i2c/README.md)).
 `addr`, `tx` and `tx_len`, `rx` and `rx_len`, `reply`, `speed`, and
 `engine` in the padding after `speed` on a host that takes it: 10 bytes
 on the AVR and 28 on a 32-bit target, over the kernel's guideline of
-about 8 bytes for an event, legal as on SPI because the request is the
-arbitration token. One request is one bus tenure from START to STOP, in
-the shapes I2C devices actually use:
+about 8 bytes for an event. That is legal as on SPI: a request is posted
+to the arbiter alone and the queues are per object, so no other object
+pays for its size. One request is one tenure, in the shapes I2C devices
+actually use:
 
 | Shape | Fields | On the wire |
 |-------|--------|-------------|
@@ -239,18 +256,20 @@ a speed the clock in force cannot produce (`speed_ok(speed)` says so),
 an address outside the range above, or `dma` with no engines bound is
 answered `i2c_rejected` inside `start()`, through the host's `status()`,
 with no byte moved; a tenure is never run at a rate nobody asked for and
-never approximated in silence. And on the blocks where `start()` can
-find the peripheral not its own, `i2c_bus_error` the same way: a system
-operation that never settled on the SAM
-C21, a block that would not disable on the two DesignWare families, and a
-START still standing on the STM32G0, which only a program's own use of the
-resource can leave. The
+never approximated in silence. And where `start()` can find the
+peripheral out of its control, `i2c_bus_error` the same way: a system
+operation that never settled on the SAM C21, a peripheral that would not
+disable on the two DesignWare families, and a START still standing on the
+STM32G0, which only a program's own use of the resource can leave. The
 arbiter replies with `status()` on every synchronous
 return (`util/bus_master.hpp`'s contract), so the requester sees these
-in the same `I2cDone` as any outcome of the wire; the
-completion policy does not judge them, and no retry would change a
-refusal. Every host completes them the same way: status set, nothing
-armed, true returned.
+in the same `I2cDone` as any outcome of the wire; the arbiter's retry hook
+(`Policy`, "Not built, noted") judges asynchronous completions only, and
+no retry would change a refusal. Every `i2c_rejected` completes the same
+way: status set, nothing armed, true returned. An `i2c_bus_error` from
+`start()` returns true too but may leave something behind: on the STM32G0
+the channels of a request under `dma` have already started, and on the
+SAM C21 the interrupt enables stay up for the idle guard to sweep.
 
 The `tx` and `rx` buffers are `Lease::reply` loans and say so in their
 field types (`Borrowed`, [kernel.md](kernel.md), "Payloads"): the
@@ -265,15 +284,14 @@ actually moves and never per byte. How MBAUD is solved, and why the
 bus's rise and fall times are arguments rather than assumptions,
 belongs to the host ([the AVR TWI page](../avrxt/twi.md)).
 
-## Which engine moves a half (`Request::engine`)
+## Which mechanism moves a half (`Request::engine`)
 
-A tenure has up to two data halves, the bytes it writes and the bytes it
-reads. Everything else in it - the address, the repeated START, the end -
-belongs to the host's interrupt on every block, and a host may move the
-data the same way: the interrupt pump, one entry per byte or per FIFO
-level, is present on every host. Where DMA channels are bound to the
-host (its engines, each a template argument of the host), each half can
-ride them instead, and the program names which, per request:
+A tenure has up to two data halves. Everything else in it - the address,
+the repeated START, the end - belongs to the host's interrupt on every
+peripheral, and the pump moves the data the same way on every host. Where
+DMA channels are bound to the host (its engines, each a template argument
+of the host), each half can ride them instead, and the program names
+which, per request:
 
 | `I2cEngine` | what it asks |
 |---|---|
@@ -283,10 +301,10 @@ ride them instead, and the program names which, per request:
 **The host never chooses.** No value hides a threshold set by cost: under
 `dma`, a half the engines can carry goes on them at one byte as readily
 as at 255. The lengths that stay off them are the silicon's, listed
-below (a DesignWare write of one or two bytes; on the FMPI2C1 and the
-STM32G0 a write of one starts no engine). The host could count only its own core cycles,
-while the program knows what else must run, and whether the core should
-sleep, while the wire does. A wrong choice costs core cycles or a sleep.
+below. The host could count only its own core cycles; the program knows
+what else must run, and whether the core should sleep during the tenure.
+A wrong choice costs core cycles, a sleep, or wire time when a pump
+stretches the clock (below).
 The one case where it costs correctness is a buffer no DMA master
 reaches: under `dma`, a half in the core-coupled memory of an STM32F4 part
 that has one should end in `i2c_dma_fault` where `interrupt` would succeed
@@ -307,8 +325,10 @@ its own; the halves the engines leave to the pump are:
 
 - on the CH32V303's DMA1, a half whose run crosses a 64 KB boundary, found
   before the half moves;
-- on the STM32G0 and the STM32F4's FMPI2C1, a half with no buffer;
-- on the DesignWare block, the read half's first and last commands, the
+- on the STM32G0 and the STM32F4's FMPI2C1, a write's first byte, which
+  goes into TXDR before the START so that a write of one starts no
+  channel, and a half with no buffer;
+- on the DesignWare peripheral, the read half's first and last commands, the
   probe, a write of one or two bytes and a write before a read, and on the
   RP2040 every write half, its bus fabric landing a byte beat replicated
   across the command register ([the DesignWare I2C
@@ -317,12 +337,15 @@ its own; the halves the engines leave to the pump are:
   buffer ([the SAM C21 I2C page](../samc21/i2c.md)).
 
 A half with no buffer is a length with a null pointer. The `Request` does
-not offer it (a buffer may be null only with a length of zero); the hosts
-named above tolerate it, writing a filler or draining what they read.
+not offer it (a buffer may be null only with a length of zero), so no
+correct program reaches it and none may rely on what follows: the STM32G0
+and the FMPI2C1 write 0xFF or drain what they read, and the SAM C21 drains
+a read but writes from address 0.
 
-One host asks a channel's start whether it took: the CH32V203's and
-CH32V303's, because that is how the 64 KB boundary is found, a refusal
-leaving the half to the event vector. Every other host starts the channel
+One host asks a channel's start whether it took: `ch32vx03`'s, one source
+for the CH32V203 and the CH32V303, because that is how the CH32V303's
+64 KB boundary is found, a refusal leaving the half to the event vector.
+Every other host starts the channel
 without asking: it is the host's alone (the ownership rule, [dma.md](dma.md)).
 
 **`dma` on a host with no engines bound is refused**, a request that
@@ -359,10 +382,11 @@ byte outlasts that byte on the wire stretches the clock, which costs the
 wire's time and no core cycle, so the tenure runs slower than the speed
 asked. Where a family's document has measured it, it says whether this
 happens at the family's top speed; a program that needs the rate names
-`dma`. The measured count can still differ at 100 kHz, for reasons other
-than the stretch: on the RP2040 from the flash, through the XIP cache's
-misses on the engined path, and on the CH32V006's and the CH32X035's
-written half by the run. Each family's document gives its count per speed.
+`dma`. The length N measured can still differ at 100 kHz, for reasons
+other than the stretch: on the RP2040 from the flash, through the XIP
+cache's misses on the path with the engines, and on the CH32V006 and the
+CH32X035 for a write, whose N moves from run to run. Each family's
+document gives its N per speed.
 
 What the cycles do not count is time awake. A platform whose idle cannot
 sleep while a DMA channel works keeps the core awake for the whole half
@@ -375,7 +399,7 @@ does not sleep while a channel works. The CH32V006 shares the CH32V003's
 stratum but not its core: its QingKe V2C's Sleep lets the DMA work
 (measured, [the CH32V00x DMA page](../ch32v00x/dma.md)), so there the
 question is the constant false (`ch32v00x/parts/ch32v006.hpp`) and
-`idle()` sleeps through a block. On the parts that do not sleep over a
+`idle()` sleeps through a DMA block. On the parts that do not sleep over a
 channel, `interrupt` lets the core sleep between bytes, and `dma` is
 how a program that wants the core free for other work during the half
 asks for the engines anyway.
@@ -396,27 +420,28 @@ request that names it does not compile
 - On any NACK the host still ends the tenure with a STOP. The STM32G0 and
   the FMPI2C1 report the failure at the STOP's own edge (STOPF), so there
   the bus is released first. The F1 lineage, the AVR and the SAM C21's
-  pump report when the STOP is requested, and the DesignWare block at
+  pump report when the STOP is requested, and the DesignWare peripheral at
   TX_ABRT, so there the STOP may still be going out when the requester
   hears; the next `start()` copes (the F1 lineage waits for it, the AVR's
   silicon holds the START).
-- Arbitration lost: the flag is cleared, no STOP (the other master
+- Arbitration lost: the flag is cleared, no STOP (the other host
   owns the bus), `i2c_arb_lost` reported.
 - Bus error: the flag is cleared, the tenure ends and `i2c_bus_error` is
   reported. What goes to the wire differs: the AVR forces its bus state
   to idle, the SAM C21 sends nothing, and the three WCH hosts request a
-  STOP. On the DesignWare block the same code is any TX_ABRT reason other
-  than a NACK or a lost arbitration. On the STM32G0 and the STM32F4's two
-  blocks a controller's bus error is no evidence (an erratum's spurious
-  flag): it is counted in `spurious_bus_errors()` and the tenure goes on.
+  STOP. On the DesignWare peripheral the same code is any TX_ABRT reason
+  other than a NACK or a lost arbitration. On the STM32G0 and the STM32F4's
+  two peripherals a controller's bus error flag proves no fault on the wire
+  (an erratum's spurious flag): it is counted in `spurious_bus_errors()`
+  and the tenure goes on.
 - The ACK policy is the host's: each received byte is answered with
   ACK and receive-next, or NACK and STOP. Smart mode, where the
   silicon has it, is an option of the host (the acknowledge then
   rides the data read), invisible here.
 - Pull-ups are external, their value the board's: the internal ones are
   far too weak for I2C edges. The RP2040's and RP2350's pads still take
-  theirs, as their chapters' setup asks, and the FMPI2C1 offers its own
-  as an option. On the AVR, the SAM C21 and the CH32X035 the peripheral
+  theirs, as their chapters' setup asks, and the FMPI2C1's host offers
+  its own as a bench option (`internal_pull_up`). On the AVR, the SAM C21 and the CH32X035 the peripheral
   drives the pins open-drain by itself and `init` only routes them; the
   STM32s, the CH32V00x, the CH32V203 and the CH32V303 configure their
   pads open-drain at `init`.
@@ -425,49 +450,54 @@ request that names it does not compile
 
 A client holding a line low for ever (SDA, or the clock in the middle
 of a byte) leaves a tenure in flight: the kernel keeps running, since
-nothing waits, but the bus active object stays busy and later requests
-pile up until rejected. Loud, but not recovered. The silicon does not
-close this. Only the SAM C21 ends a tenure on a client's held clock by
-itself, and only with its time-outs armed; no silicon time-out watches a
-held SDA, though some blocks answer a START into one. Measured, each row
-from its family's I2C page, the arbiter's limit at 20 ms in those stagings,
-a dash where this page has no staging to report:
+nothing waits, but the arbiter keeps waiting and later requests pile up
+until the arbiter rejects them. The requesters hear those rejections, and
+nothing recovers the bus. The silicon does not close this. Of the
+peripherals staged, only the SAM C21 ends a tenure on a client's held
+clock by itself, and only with its time-outs armed; no silicon time-out
+staged here watches a held SDA, though some peripherals answer a START
+into one. Measured, each row from its family's I2C page, the arbiter's
+limit 20 ms wherever it answers (35 ms on the AVR):
 
-| block | a client holding SCL | a START into a held SDA |
+| peripheral | a client holding SCL | a START into a held SDA |
 |---|---|---|
-| [AVR TWI](../avrxt/twi.md) | no time-out at all | parks with BUSY standing |
-| [SAM C21](../samc21/i2c.md) | SMBus time-outs, armed, bound it as 33.6.3.1 reads: a 40 ms stretch ends the tenure at 29 ms, `i2c_bus_error` | parks; after a forced IDLE (`recover()`, or the enable a speed change costs) it goes out and loses its address, `i2c_arb_lost`, or `i2c_bus_error` where BUSERR stands beside the loss |
+| [AVR TWI](../avrxt/twi.md) | not staged against the limit: a hold of 1 ms a byte completes inside it; `TwiTimeout`, the inactive-bus supervisor, not measured on a held SCL | parks with BUSY standing |
+| [SAM C21](../samc21/i2c.md) | SMBus time-outs, armed, bound it as 33.6.3.1 reads: a 40 ms stretch ends the tenure at 29 ms, `i2c_bus_error` | parks; after a forced IDLE (`recover()`, or the enable a speed change costs) it goes out and loses its address, `i2c_arb_lost` |
 | [STM32G0](../stm32g0/i2c.md) | the arbiter answers: the host's own unserved hold trips TIMEOUTA, a peer's 6 ms hold trips neither TIMEOUTA nor TIMEOUTB, though RM0444 32.4.12 reads otherwise ("if SCL is tied low for longer than ...") | parks with BUSY standing; after a PE cycle (a speed change, or `recover()`), which clears BUSY, it goes out and loses its address, `i2c_arb_lost` |
 | [STM32F4's FMPI2C1](../stm32f4/fmpi2c.md) | the arbiter answers: TIMEOUTA armed at 25 ms reaches the error vector 25 ms into a partner's 40 ms hold, the host sweeps it and the tenure goes on | as the STM32G0's |
 | [STM32F4's classic I2C](../stm32f4/i2c.md) | the arbiter answers a 40 ms hold | parks at the speed in force and after a speed change alike, a PE cycle not forgetting the held line; the arbiter answers both |
 | [CH32V00x](../ch32v00x/i2c.md) | no clock-low time-out: a 45 ms hold stands until the arbiter answers | comes back ARLO at once, `i2c_arb_lost` well before any limit |
 | [CH32V203, CH32V303](../ch32vx03/i2c.md) | no clock-low time-out outside SMBus mode: a 45 ms hold stands until the arbiter answers | the first goes out at the controller's tick and loses, `i2c_arb_lost` in under 0.4 ms; one set after that loss inside the same hold parks until the arbiter answers |
-| [CH32X035](../ch32x035/i2c.md) | a 45 ms hold stands until the arbiter answers | goes out and loses at the address's first one bit, `i2c_arb_lost`; a block brought up over a line already held keeps its START pending until the arbiter answers |
-| [RP2040](../rp2040/i2c.md), [RP2350](../rp2350/i2c.md) | no clock-low time-out: a hold through a read request stands until the arbiter answers | - |
+| [CH32X035](../ch32x035/i2c.md) | a 45 ms hold stands until the arbiter answers | goes out and loses at the address's first one bit, `i2c_arb_lost`; a peripheral brought up over a line already held keeps its START pending until the arbiter answers |
+| [RP2040](../rp2040/i2c.md), [RP2350](../rp2350/i2c.md) | no clock-low time-out: a hold through a read request stands until the arbiter answers | parks at the speed in force and after a speed change alike; the arbiter answers both |
 
-The right-hand column on the STM32G0, the STM32F4's two blocks, the SAM
-C21 and the CH32V203 and CH32V303 was measured under the preemptive
-kernel. The STM32G0's and the FMPI2C1's left-hand cells disagree over one
-register file, on different stagings (a 4 ms limit and a 6 ms hold, a
+The right-hand column on the STM32G0, the STM32F4's two peripherals, the
+SAM C21, the CH32V203 and CH32V303 and the two RP families was measured
+under the preemptive kernel ([kernel.md](kernel.md)). The STM32G0's and
+the FMPI2C1's left-hand cells disagree over one register file, on
+different stagings (a 4 ms limit and a 6 ms hold, a
 25 ms limit and a 40 ms hold at the address). What separates them is not
 established, and on both the tenure stands until the arbiter answers.
 
-So one held SDA has two honest replies, parked and timed out on some
-strata and refused by the silicon on others. A requester reads both as
-"the bus is not mine", and the recovery ladder ("Not built, noted")
-stays the application's. So the timeout is the arbiter's: the one object
-that knows a completion is owed, living in the kernel that has time
-events.
+So a START into a held SDA gets one of two answers, by host and by state:
+it parks and the arbiter times it out, or the silicon answers
+`i2c_arb_lost`. A requester reads both as "the bus
+is not mine", and the recovery ladder ("Not built, noted") stays the
+application's. And since the silicon answers only some of these cases, the
+timeout belongs to the arbiter: the one object that knows a completion is
+owed, living in the kernel that has time events.
 
-`BusMaster`'s `timeout_ticks` template argument (surfaced here as
-`I2cBus`'s) arms a one-shot `TimeEvent` for every tenure that goes
-asynchronous. If it matures first, the host is declared dead:
-`Bus::recover()` puts the peripheral back where `start()` is legal
-(the AVR host's enable-cycle errata workaround, the SAM's cached
-re-init, the G0's PE cycle, which RM0444 32.4.9 offers for a deadlock at
-the START, "restores the normal operation ... by toggling the PE bit",
-the RP2040's block reset through the reset controller, because a host
-holding SCL with no STOP in sight never disables); the requester is
+`timeout_ticks`, the fifth template argument of `BusMaster` and `I2cBus`
+(after `pending_depth` and `Policy`, whose default `BusPassThrough`
+retries nothing), arms a one-shot `TimeEvent` for every tenure that goes
+asynchronous. If it matures first, the arbiter declares the host dead and
+calls `Host::recover()`, which puts the peripheral back where `start()` is
+legal. On the AVR that is the errata's enable cycle; on the SAM C21 a
+re-init from the cached configuration; on the STM32G0 a PE cycle, which
+RM0444 32.4.9 offers for a deadlock at the START ("restores the normal
+operation ... by toggling the PE bit"); on the RP2040 a reset of the
+peripheral through the reset controller, because a host holding SCL with
+no STOP in sight never disables. The requester is
 answered `i2c_timeout` in its place, and the queue moves on. The races
 with the real completion are closed by construction (a sequence number
 and a drain state; the whole story is in `util/bus_master.hpp`, staged
@@ -479,11 +509,11 @@ Three decisions worth their line:
   of the wire, so the limit is a property of the bus. It must sit
   above legal clock stretching, which is flow control and not a fault,
   so size it to a whole worst-case tenure at the slowest device, and
-  convert with `ticks_from_ms<P>()`. A 255-byte request at 100 kHz is
-  23 ms of wire: the 20 ms of the families' examples and of the stagings
+  convert with `ticks_from_ms<P>()`. The longest request, a write-then-read of 255 + 255 bytes, is 46 ms of
+  wire at 100 kHz: the 20 ms of the families' examples and of most stagings
   above covers shorter tenures only.
 - **The wire stays the application's.** The timeout guarantees only
-  that the bus active object and its queue survive to be asked;
+  that the arbiter and its queue survive to be asked;
   whether to `unstick()`, power-cycle a client or re-probe the bus is
   the recovery ladder below, still policy. After a fault, re-verifying
   the clients one by one is the application's decision.
@@ -509,7 +539,7 @@ multi-host backoff remain on demand.
   is the application's, or a future policy type's, born with the
   device that needs it.
 - **Multi-host policy.** The host reports `i2c_arb_lost` and the
-  arbiter passes it to the requester untouched. A bus active object
+  arbiter passes it to the requester untouched. An arbiter
   that knows it shares the wire (retrying a lost tenure, backing off,
   refusing to start while another host is in the middle of a
   transaction) is not designed.
@@ -526,10 +556,18 @@ application that talks to it, never here.
 ## The hosts, family by family
 
 What each host adds beyond the contract; each family's I2C page has the
-detail. A pump is the host's interrupt moving data byte by byte. Smart
-mode is the block's acknowledge riding the data read. A row that caches
-its rates takes the rate its block is clocked from at `init` and answers
-`speed_ok(speed)` and `scl_hz(speed)`.
+detail. Smart mode is the peripheral's acknowledge riding the data read. A
+row that caches its rates takes the rate its peripheral is clocked from at
+`init` and answers `speed_ok(speed)` and `scl_hz(speed)`, one function on
+every such row.
+
+Three pairs of names below look like spellings and are not.
+`actual_scl_hz` and `scl_hz` answer different questions (the register in
+force against a cached speed). `bus_state()` and `idle()` look at different
+things (the wire against the host). And the host's `quick_command` is the
+AVR's alone, where the SAM C21 keeps the same mode on the resource
+(`I2cmConfig::quick_command`) and declines it for the probe, which every
+host serves as the contract's empty request.
 
 **AVR (`avrxt`).** The rate readback is `actual_scl_hz(t_rise_ns)`, what
 the register in force gives under the chapter's rise-time budget, with
@@ -557,13 +595,14 @@ reconfigures the peripheral behind the host.
 **STM32G0 (`stm32g0`).** `timing_of` and `kernel_hz()` for the kernel-clock
 multiplexer; two optional engine slots with `dma_isr()`; `fast_plus_drive()`
 (SYSCFG's Fm+ pad drive); `spurious_bus_errors()` (an erratum's counter);
-`idle()` as the SAM's. The byte counter with AUTOEND carries the tenure, a
-write half's first byte preloaded into TXDR before the START on either engine
-(ES0418 2.11.6's first workaround on the STM32G071, one path in and out of its
-band, a write of one starting no channel), a read's last byte
-taken at STOPF, a NACK named at STOPF with no NACKIE armed (the address's
-when TXE is clear and nothing refilled TXDR, the byte pump's position or the
-transmit channel's count saying so). A tenure's interrupt and DMA
+`idle()` as the SAM's. The byte counter with AUTOEND carries the tenure. A
+write half's first byte goes into TXDR before the START under `interrupt` and
+under `dma`, a write of one starting no channel: that is ES0418 2.11.6's first
+workaround on the STM32G071, so the host takes one path inside that erratum's
+band of clock ratios and outside it. A read's last byte is taken at STOPF. A
+NACK is named at STOPF with no NACKIE armed; it is the address's when TXE is
+clear and nothing refilled TXDR, which the pump's position or the transmit
+channel's count tells. A tenure's interrupt and DMA
 enables go in one CR1 store each way (`enables()`), so an engined tenure
 leaves no enable behind. `dma` carries a half at any length, a half with no
 buffer staying on the pump.
@@ -573,8 +612,8 @@ These four share an event machine and its consequences:
 
 - Two vectors, `isr()` for the events and `error_isr()`; `timing_of` and
   `reference_hz()`; `unstick()` returns the clocks it took; `dma_isr()`,
-  `Request::engine` and `has_dma`, `dma` carrying every half at any length,
-  the one-byte read included.
+  `Request::engine` and `has_dma`, `dma` carrying a half at any length, the
+  one-byte read included, but for the CH32V303's 64 KB case above.
 - **`start()` spends dispatch time on the bus.** This lineage cannot queue
   a START behind a STOP and nothing in its chapters signals the STOP's
   leaving, so `start()` waits for it: about one bit period when a tenure
@@ -584,27 +623,30 @@ These four share an event machine and its consequences:
 - The event line is raised by `start()` and dropped at the completion, so
   the BTF a STOP leaves standing does not re-enter the vector.
 - A write-then-read requests its repeated START on the TxE of the last
-  written byte, while that byte shifts, and not at BTF. One measurement
-  decided it: with the START at BTF, a CH32V303VCT6 and a CH32V203C8T6 each
-  lost that byte when the chip's own two controllers were host and target
-  and the target was polled by the core that also served the host's
-  vectors. The CH32V203C8T6's target served from its own vector took every
-  byte, and so did a target polled by a core of its own on another board
-  (both those parts, and the CH32X035). So the loss needs one core serving
-  both ends, and the TxE order, where WCH's interrupt example also puts it,
-  costs nothing against a target that does not lose it ([the CH32V203/CH32V303
-  I2C page](../ch32vx03/i2c.md), [the CH32V00x I2C page](../ch32v00x/i2c.md)).
-- The price is a NACK of that byte arriving with the START pending. No host
+  written byte, while that byte shifts, and not at BTF. Measured: with the
+  START at BTF, a CH32V303VCT6 and a CH32V203C8T6 each lost that byte when
+  the chip's own two controllers were host and target and the target was
+  polled by the core that also served the host's vectors. The CH32V203C8T6's
+  target served from its own vector took every byte, and so did a target
+  polled by a core of its own on another board (both those parts, and the
+  CH32X035). The TxE order, where WCH's interrupt example also puts it,
+  delivered in every arrangement measured ([the CH32V203/CH32V303 I2C
+  page](../ch32vx03/i2c.md), [the CH32V00x I2C page](../ch32v00x/i2c.md)). On
+  the STM32F4 it also saves the host's own stretch at the turnaround ([the
+  STM32F4 I2C page](../stm32f4/i2c.md)).
+- The price is a NACK of that byte arriving with the START pending; an
+  acknowledged tenure pays only the SB entry's test, a few instructions. No host
   stores to the control register there: the controller generates the
   repeated START anyway, and a withdrawal races it (measured: it hung the
   event vector on the STM32F4 with the core at 48 MHz, wedged the bus on the
-  CH32V00x at 400 kHz, and lost on the CH32V203/V303 with the core at 8 MHz).
+  CH32V00x at 400 kHz, and lost on the CH32V203 with the core at 8 MHz).
   The host answers `i2c_nack_data` and closes behind that repeated START with
   a void write: the address with the write bit and its STOP, one address byte
-  on the wire when a byte is refused.
+  on the wire when the client NACKs that byte.
 - An ADD10, or any event the address phase does not serve, ends the tenure
   `i2c_bus_error` with the STOP and then a data-register store that clears
-  ADD10, which the STOP alone does not (measured).
+  ADD10, which the STOP alone does not (measured on the STM32F446 and the
+  CH32V303).
 
 **STM32F4's classic host (`stm32f4`).** `reference_hz()` is the instance's
 own APB1 clock. An `I2cHostConfig` at init holds fast mode's duty shape, the
@@ -620,23 +662,25 @@ interrupt. `claim_smba_pad()` is for the SMBus alert.
 **STM32F4's FMPI2C1 (`stm32f4 (2)`).** The STM32G0's surface almost entire,
 `recover()` being 23.4.6's PE cycle and nothing more, and three speeds where
 the family's other host has two. `reference_hz()` is the APB clock the
-registers are on while `kernel_hz()` is the one the arithmetic divides, here
-two different rates. Two vectors, with a NACK on the event one (it is
-not an error on this block). A NACK is the address's when nothing of the half
+registers are on and `kernel_hz()` the clock the arithmetic divides: the same
+rate by default (`FmpI2cHostConfig::kernel` at `pclk`), two different rates on
+SYSCLK or the HSI. Two vectors, with a NACK on the event one (it is
+not an error on this peripheral). A NACK is the address's when nothing of the half
 reached the wire, told from the byte pump's position or, under the engines,
 from TXE and the transmit stream's count. A controller's BERR is counted and
 never acted on. The engine slots sit on the mapping's single cell per
 direction, `dma` carrying both phases, a half with no buffer apart, with the
 engines armed before the START (23.4.16's order) and a write half's first
-byte in TXDR ahead of the transmit stream (ES0298 2.12.8's first workaround, one path in and
-out of the band, a write of one byte starting no stream; `interrupt` stores
-outside the erratum's window). `start()` does not wait for the last STOP,
-since this block queues a START behind one itself. `claim_smba_pad()` is for
+byte in TXDR ahead of the transmit stream (ES0298 2.12.8's first workaround,
+the same path inside that erratum's band of clock ratios and outside it, a
+write of one byte starting no stream; `interrupt` stores outside the erratum's
+window). `start()` does not wait for the last STOP,
+since this peripheral queues a START behind one itself. `claim_smba_pad()` is for
 the SMBus alert.
 
 **CH32V00x (`ch32v00x`).** `reference_hz()` is HCLK; a `duty` at init gives
 fast mode's shape. The engine slots are fixed to DMA channels 6 and 7, the
-transmit block's completion handing the tenure back to the event vector. On
+transmit DMA block's completion handing the tenure back to the event vector. On
 the pump the ADDR entry stores no data but raises the buffer interrupt, so a
 one-byte write takes four entries. `unstick()` also clears the STOPF its own
 STOP leaves.
@@ -653,9 +697,9 @@ three enables down) and has `flush()`, the PE cycle for a byte the
 controller never clocked.
 
 **CH32X035 (`ch32x035`).** `reference_hz()` is HCLK, with a `duty` at init.
-The block is asked for first: the datasheet withdraws the I2C from some lots
-and no register names one, so `I2c<1>::present()` and both `init()`s check
-the block holds its timing. Six columns, the part's first off the debug port
+The peripheral is asked for first: the datasheet withdraws the I2C from some
+lots and no register names one, so `I2c<1>::present()` and both `init()`s check
+it holds its timing. Six columns, the part's first off the debug port
 the default, the debug port's refused while the probe owns it and the USB
 pads while USB_IOEN does. The engine slots are fixed to DMA channels 6 and 7
 (ORs shared with USART2). On the pump the first two bytes load in the ADDR
@@ -668,24 +712,26 @@ SRAM.
 
 **RP2040 (`rp2040`).** The Synopsys command FIFO, where an entry carries its
 RESTART and STOP bits and one TX_ABRT carries every failure. `reference_hz()`
-is clk_sys; `timing_of`; `idle()` as the SAM's. `start()` answers a second
-refusal synchronously, `i2c_bus_error` for a block that would not disable to
+is clk_sys; `timing_of`; `idle()` as the SAM's. `start()` also answers
+synchronously `i2c_bus_error` for a peripheral that would not disable to
 take the address. `dma` puts the read phase alone on the engine slots at any
 length, with `dma_isr()`: the receive engine collects every byte and a
 transmit engine of `uint16_t` entries pours the read commands between the
 first and the last, so a read of one or two takes the receive engine alone.
 The write half stays on the pump, a byte beat landing in the command register
 replicated across the word, its copy in bit 8 a read command (RP2040 2.1.4).
-The pump reads at half the FIFO, so a tenure of eight bytes or less is one
-interrupt and a longer one one per eight. A tenure that completes ends on its
+The pump reads at half the FIFO and refills at half: a read of eight bytes or
+less and a write of sixteen or less take one interrupt, and a longer one one per
+eight. A tenure that completes ends on its
 own STOP_DET and a failure on TX_ABRT. The disable / IC_TAR / enable cycle is
 skipped while the address and the speed stand and the last tenure ended on
-its STOP, which takes the block's bus-timed disable (the whole cycle 1.4 to
-1.6 us at 400 kHz, 7.6 to 12 at 100) out of the dispatch. `unstick()` returns the clocks it took; `recover()`
-resets the block through the reset controller, the one way out of a host
+its STOP, which takes the peripheral's bus-timed disable (the whole cycle 1.4
+to 1.6 us at 400 kHz, 7.6 to 12 at 100) out of the dispatch. `unstick()`
+returns the clocks it took; `recover()`
+resets the peripheral through the reset controller, the one way out of a host
 holding SCL with no STOP in sight. `Placement` as the CH32X035's.
 
-**RP2350 (`rp2350`).** The same block and the same driver, over a traits type
+**RP2350 (`rp2350`).** The same peripheral and the same driver, over a traits type
 this family supplies: the RP2040's paragraph holds but for the write half.
 Under `dma` a pure write of three bytes or more rides the transmit engine
 (`dma_carries_writes`), in byte beats from the request's own buffer, through
@@ -693,7 +739,7 @@ the alias of the command register that zero-fills the unused byte lanes
 (RP2350 2.1.5, measured on both architectures); its first entry and its last,
 with the STOP, are the pump's, as a read's commands are, and a write before a
 read and a write of one or two bytes stay on the pump. What is the chip's lies
-around the block: the pad functions, the GPIO bank, the request table, the
+around the peripheral: the pad functions, the GPIO bank, the request table, the
 reset controller and the microsecond ruler a bus clear by hand is paced by
 ([the RP2350 I2C page](../rp2350/i2c.md), [the DesignWare I2C
 page](../dw_apb_i2c/README.md)).

@@ -482,7 +482,7 @@ kernel's idle does not sleep while a channel works
 (`qingke/platform.hpp`), so the engines keep the core awake for the
 wire's time; a polled transfer keeps it spinning that long too. An I2C
 host on its interrupts, by contrast, lets the core sleep between bytes, so
-there the choice weighs time awake as well ([i2c-bus.md](i2c-bus.md), "Which engine moves
+there the choice weighs time awake as well ([i2c-bus.md](i2c-bus.md), "Which mechanism moves
 a half").
 
 On a synchronous completion the arbiter replies immediately, and

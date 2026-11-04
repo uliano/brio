@@ -11,36 +11,42 @@ served from its peripheral's interrupt or called by an active object;
 an active object, AO for short, is a component of a brio program with
 its own event queue, served one event at a time by the kernel,
 [../learn/introduction.md](../learn/introduction.md)). `I2cHost<n,
-route>` is the transfer engine: it moves one bus tenure per request
-(the time the host holds the bus, from its START to its STOP), one
+route>` is the host: it moves one bus tenure per request (one START to
+its STOP, the bus held for one request), one
 interrupt per byte, and it is driven by the bus arbiter `I2cBus` of
 `util/i2c_bus.hpp`, an active object that queues the requests of every
 AO sharing the bus and answers each with an `I2cDone`.
 `I2cClient<n, route, on_dual_pins>` is the other end of the wire: the
 address-match space as options and the chapter's four client cases as
 verbs. [design/i2c-bus.md](../design/i2c-bus.md) is the contract above
-the engine.
+the host.
 
-The smallest use, a host on TWI0's default route through the arbiter,
-from "How to use it" below:
+The smallest use, a host on TWI0's default route through the arbiter. An
+excerpt: the program supplies `P`, `clock`, the active object `Me`, `addr`
+and the static buffers `tx` and `rx`.
 
 ```cpp
 using I2cHw = brio::I2cHost<0>;                 // PA2 SDA / PA3 SCL
 using I2c = brio::I2cBus<I2cHw, P>;
 ISR(TWI0_TWIM_vect) { if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
-...
-I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k});
+
+// In main(), after the clock task's init():
+if (!I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k})) {
+    // this clock cannot make that speed: no bus
+}
+
+// In a handler of Me:
 brio::post<I2c>(I2cHw::Request{addr, brio::lend<brio::Lease::reply>(tx), 3,
                                brio::lend<brio::Lease::reply>(rx), 2,
                                brio::reply_to<Me, brio::I2cDone>(), brio::I2cSpeed::fast_400k});
 ```
 
-Line by line: `I2cHw` names the engine on TWI0 with its route at the
+Line by line: `I2cHw` names the host on TWI0 with its route at the
 default, `TwiRoute::def`, which puts SDA on PA2 and SCL on PA3; `I2c`
-names the arbiter over that engine, `P` being the platform
+names the arbiter over that host, `P` being the platform
 (`brio::AvrPlatform`, [platform.md](platform.md)); the `ISR()` line
 binds the host vector to `isr()`, which returns true on the interrupt
-that ends the tenure, and the handler then posts the engine's
+that ends the tenure, and the handler then posts the host's
 `status()` to the arbiter as a `TransferDone`, which the arbiter
 forwards to the requester; `init()` takes the clock task's tag
 (`constexpr SysClock clock;`, [clkctrl.md](clkctrl.md)) and the
@@ -60,7 +66,7 @@ What decides correctness even there:
   read from the hardware, so a host initialized while the chip still
   runs at its reset rate drives SCL off by the ratio of the two rates
   until the clock task brings CLK_PER to the claimed rate, and nothing
-  refuses it. A `DynamicClock` must list the engine
+  refuses it. A `DynamicClock` must list the host
   among its users, or `init()` fails to compile.
 - **The host vector bound by the program.** `init()` enables RIEN and
   WIEN, so the address packet's interrupt arrives at
@@ -83,17 +89,8 @@ What decides correctness even there:
   the kernel's list (`brio::Tenuto<P, Me, I2c>::run()`), interrupts
   enabled (`sei()`) before `run()`. With its default `timeout_ticks` of
   0 it never answers a tenure that never completes; a timed `I2cBus`
-  answers `i2c_timeout` and recovers the engine ("A wedged tenure" under
+  answers `i2c_timeout` and recovers the host ("A wedged tenure" under
   "Bench findings").
-
-The rest of this page, in order: the documents of record with the three
-errata items that shape the code; what the silicon does (the two
-halves, the bus state machine, the host and client cases, the
-address-match space, Smart mode, Quick Command, the two conditions on
-CLK_PER, the routes, the baud arithmetic, the AVR EA's SCL clock); the
-types and verbs; how to use it; what the silicon offers for the cost and
-the host's cost measured; the bench findings, most of the page, with a
-second chip on the wire and on the AVR64EA48; what is not covered.
 
 ## Documents of record
 
@@ -133,7 +130,8 @@ Driver: `avrxt/twi.hpp`. The arbiter above it:
 command key of the suite's console and the group of verdicts it runs;
 `z` runs the single-board set, letters a to j and, on the AVR EA, u and
 v, and `y` the set that needs a partner board, letters k to t, against
-a second board running `twi_peer`, on this page a SAM C21).
+a second board running `twi_peer`, on this page a SAM C21). A letter on
+this page is that suite's unless another suite is named.
 
 ## What the silicon does
 
@@ -199,8 +197,8 @@ BAUD the register holds with the period at or above the request - and
 that one is enforced: `twi_baud_for` has no solution below BAUD 0 (the
 divider cannot go that fast: BAUD = 0 is CLK_PER/10, so any reachable
 speed also satisfies the four-times condition) or above 255, the
-resource refuses to program such a speed, and the host engine refuses
-a request naming it. The answer is cached per speed and recomputed
+resource refuses to program such a speed, and the host answers a request
+naming it `i2c_rejected`. The answer is cached per speed and recomputed
 when the clock or the timing moves, never at a request. The client
 side keeps the four-times condition as a readback only (`max_scl_hz`,
 `can_follow`): a slower clock is legal there and only blinds those two
@@ -293,10 +291,10 @@ FMPEN on MBAUD 0 and 1 none. The driver takes it whole:
   duty (the data sheet's "- 3" matches neither its own 3.2 nor the
   silicon). The DA/DB keep equation 29-4's BAUD + 5 at every speed
   (`twi_ea_scl`, device_tables.hpp, keys the die).
-- FMEN is used: the engine sets it with the Fm speed (`set_speed()`, and
+- FMEN is used: the host sets it with the Fm speed (`set_speed()`, and
   `init()` for a host configured at Fm) as it sets FMPEN with Fm+. At
   20 MHz with the specification's edges charged, Fm is MBAUD 21 with it
-  - 364 kHz on this desk's bus - and would be MBAUD 26 without, 308 kHz:
+  - 364 kHz on the bench's bus - and would be MBAUD 26 without, 308 kHz:
   the low phase the floor needs is bought from the high phase instead of
   from the period. `Twi::fm_duty()` is the raw verb, where the bit
   exists.
@@ -307,7 +305,7 @@ FMPEN on MBAUD 0 and 1 none. The driver takes it whole:
 The duty has one consequence the 50/50 clock has not: the floor step's
 period at tR = 0 is two CLK_PER under 50/50's, so on a bus whose rise is
 under two CLK_PER the SCL runs up to two CLK_PER fast - at the rise the
-speed charges it never does (equation 2), and this desk's 150 ns rise
+speed charges it never does (equation 2), and the bench's 150 ns rise
 reads 99.5 kHz at 20 MHz and 101.0 kHz at 10 MHz.
 
 ## Types and verbs
@@ -316,14 +314,14 @@ reads 99.5 kHz at 20 MHz and 101.0 kHz at 10 MHz.
 
 | Knob | Values | Default | Effect |
 |---|---|---|---|
-| `TwiRoute` | `def`, `alt1`, `alt2`, and `alt3` on the AVR EA | `def` | PORTMUX.TWIROUTEA. The values ARE the header's group values; there is no pinless code |
+| `TwiRoute` | `def`, `alt1`, `alt2`, and `alt3` on the AVR EA | `def` | PORTMUX.TWIROUTEA. The values are the header's group values; there is no pinless code |
 | `I2cSpeed` | `standard_100k`, `fast_400k`, `fast_plus_1m` | `standard_100k` | the bus speed class; MBAUD is solved from it and Fm+ also demands FMPEN |
 | `rise_ns` / `fall_ns` | nanoseconds, 0 = the mode's specification maximum | 0 | the bus's own edges, the only inputs equations 29-3 and 29-5 take beyond the clock |
 | `TwiInputLevel` | `i2c`, `smbus` | `i2c` | CTRLA/DUALCTRL.INPUTLVL, the input transition level |
-| `TwiSdaSetup` | `cycles4`, `cycles8` | `cycles8` | CTRLA.SDASETUP: the clocks the CLIENT stretches SCL to set up its SDA output - eight in every default, not the reset value's four (below, "The client's data setup") |
-| `TwiSdaHold` | `off`, `ns50`, `ns300`, `ns500` | `off` | SDAHOLD in TRUE nanoseconds (the DA encoding swap undone) |
+| `TwiSdaSetup` | `cycles4`, `cycles8` | `cycles8` | CTRLA.SDASETUP: the clocks the client stretches SCL to set up its SDA output - eight in every default, not the reset value's four (below, "The client's data setup") |
+| `TwiSdaHold` | `off`, `ns50`, `ns300`, `ns500` | `off` | SDAHOLD in true nanoseconds (the DA encoding swap undone) |
 | `TwiTimeout` | `disabled`, `us50`, `us100`, `us200` | `disabled` | MCTRLA.TIMEOUT, the SMBus inactive-bus supervisor |
-| `quick_command` | bool | false | MCTRLA.QCEN: the address packet IS the transaction |
+| `quick_command` | bool | false | MCTRLA.QCEN: the address packet is the transaction |
 | `host_smart` / `client_smart` | bool | false | SMEN on either half |
 | `address`, `general_call`, `address_mask`, `second_address`, `promiscuous` | - | 0 / false | the client's whole match space (SADDR, SADDRMASK, PMEN) |
 | `dual` + `dual_input_level` / `dual_sda_hold` / `dual_fm_plus` | bool + the CTRLA knobs | false | DUALCTRL: the client on the route's second pin pair with its own copies |
@@ -375,8 +373,8 @@ application AO reads unchanged when it moves. The pin claim in the
 template arguments stays in this silicon's words - `TwiRoute::def` is a
 PORTMUX code and nothing else. [The contract the tasks implement](../design/i2c-bus.md).
 
-**`I2cHost<n, route>`** is the transfer engine the bus AO drives. One
-`Request` is ONE bus tenure - `{addr, tx span, rx span, reply, speed}` -
+**`I2cHost<n, route>`** is the host the arbiter drives. One
+`Request` is one bus tenure - `{addr, tx span, rx span, reply, speed}` -
 in the four shapes I2C devices actually use (write, read, write-then-read
 with a repeated START, probe); `start()` is asynchronous whenever the
 wire moves and `isr()` is the per-byte pump that reports through
@@ -386,19 +384,19 @@ naming a speed the divider cannot make at the clock in force
 general call and the 10-bit prefixes among them, which every host
 refuses ([../design/i2c-bus.md](../design/i2c-bus.md)) - is answered
 `i2c_rejected` inside `start()`, no byte moved, and the arbiter delivers that status like any
-outcome of the wire - the contract every stratum's engine follows. It
+outcome of the wire - the contract every stratum's host follows. It
 is a `ClockUser`: `rebase` re-derives MBAUD, and when the speed in force
 no longer fits the new clock MBAUD stays as it was and every request at
-that speed is refused until the clock moves again. A speed CHANGE costs
+that speed is refused until the clock moves again. A speed change costs
 an ENABLE cycle and a force-idle, because MBAUD may not be written under
 a running host - paid at `start()`, only when the speed actually moves,
 never per byte. `quick_command(true)` turns every request into an
-address-only frame. Smart mode is the engine's default (`Options::smart`,
+address-only frame. Smart mode is the host's default (`Options::smart`,
 the measured reason below), and `i2c_nack_addr` answers any address
-nobody acknowledged - a write's, a read's, the repeated START's -
-`i2c_nack_data` a written byte refused.
+not acknowledged - a write's, a read's, the repeated START's -
+`i2c_nack_data` a written byte the client NACKed.
 
-**The engine of a request.** On a family with DMA a Request names the
+**What moves a request's data.** On a family with DMA a Request names the
 mechanism that moves its data in an `engine` field (`I2cEngine` of
 `util/i2c_bus.hpp`: `interrupt`, the default, or `dma`). This TWI has no
 DMA request and the AVR DA, DB and EA no DMA controller, so every tenure
@@ -426,31 +424,26 @@ them.
 
 ## How to use it
 
-**A host on the default route, through the bus AO** (the usual case):
-
-```cpp
-using I2cHw = brio::I2cHost<0>;                 // PA2 SDA / PA3 SCL
-using I2c = brio::I2cBus<I2cHw, P>;
-ISR(TWI0_TWIM_vect) { if (I2cHw::isr()) brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }
-...
-I2cHw::init(clock, {.speed = brio::I2cSpeed::fast_400k});
-brio::post<I2c>(I2cHw::Request{addr, brio::lend<brio::Lease::reply>(tx), 3,
-                               brio::lend<brio::Lease::reply>(rx), 2,
-                               brio::reply_to<Me, brio::I2cDone>(), brio::I2cSpeed::fast_400k});
-```
+**A host on the default route, through the arbiter** is the usual case: the
+excerpt at the top of this page. Each excerpt below has its setup.
 
 **A bus whose edges are known** - declare them and get the speed back:
 
 ```cpp
-I2cHw::init(clock, {.speed = brio::I2cSpeed::standard_100k,
-                    .rise_ns = 200, .fall_ns = 150});   // 1.5k pull-ups, short wires
+if (!I2cHw::init(clock, {.speed = brio::I2cSpeed::standard_100k,
+                         .rise_ns = 200, .fall_ns = 150})) {   // 1.5k pull-ups, short wires
+    // this clock cannot make that speed: no bus
+}
 ```
 
-**A client answering one address, polled:**
+**A client answering one address, polled.** `next()` and `store()` are the
+program's:
 
 ```cpp
 using C = brio::I2cClient<0>;
-C::init(clock, {.address = 0x42, .stop_interrupt = true});
+if (!C::init(clock, {.address = 0x42, .stop_interrupt = true})) {
+    // this package cannot bond the pins: no client
+}
 const auto s = C::isr();
 if (s.address_or_stop()) { s.is_address() ? C::respond() : C::complete(); }
 else if (s.data()) { s.host_reading() ? C::transmit(next()) : store(C::receive()); }
@@ -461,15 +454,18 @@ pair for its own bus):
 
 ```cpp
 using C = brio::I2cClient<0, brio::TwiRoute::def, true>;   // PC2/PC3
-C::init(clock, {.address = 0x42});
+if (!C::init(clock, {.address = 0x42})) {
+    // this package cannot bond the pair: no client
+}
 ```
 
-**An address range, a second address, or everything:**
+**An address range, a second address, or everything.** Three alternatives,
+`no_client()` the program's:
 
 ```cpp
-C::init(clock, {.address = 0x40, .address_mask = 0x03});                    // 0x40..0x43
-C::init(clock, {.address = 0x42, .address_mask = 0x55, .second_address = true});
-C::init(clock, {.address = 0x42, .promiscuous = true});                     // every address
+if (!C::init(clock, {.address = 0x40, .address_mask = 0x03})) { no_client(); }   // 0x40..0x43
+if (!C::init(clock, {.address = 0x42, .address_mask = 0x55, .second_address = true})) { no_client(); }
+if (!C::init(clock, {.address = 0x42, .promiscuous = true})) { no_client(); }    // every address
 ```
 
 **A wedged host** - the errata's remedy, never FLUSH:
@@ -478,7 +474,7 @@ C::init(clock, {.address = 0x42, .promiscuous = true});                     // e
 if (I2cHw::bus_state() == brio::TwiBusState::unknown) I2cHw::recover();
 ```
 
-**A wedged WIRE** - a different fault and a different remedy. `recover()`
+**A wedged wire** - a different fault and a different remedy. `recover()`
 puts the peripheral back in a known state; it cannot make a client that
 is holding SDA low let go. Only clocks can:
 
@@ -493,91 +489,44 @@ Noticing that a transaction is stuck at all is the timed arbiter's: an
 findings"). Deciding when to spend `unstick()` on the wire is a policy
 for the application and is not built ([i2c-bus.md](../design/i2c-bus.md)).
 
-## What the silicon offers for the cost, and what the engine takes
+## What the silicon offers for the cost, and what the host takes
 
 The chapter's whole offer that bears on what a tenure costs the core
 and the bus, each item used or declined:
 
-| item | where | the engine |
+| item | where | the host |
 |---|---|---|
-| one host interrupt per byte, WIF after a write, RIF after a read, SCL held while the flag stands | 29.3.2.2.4, 29.3.2.2.5, 29.3.4 | THE SHAPE: there is no FIFO, no byte counter, no automatic STOP and no DMA request on this TWI, so the byte is software's and the handler's latency to its MDATA access is time the BUS waits, every byte. The handler is written for that latency: the two common cases asked first with one masked compare each, a cursor and a count set up once per phase, every verb it touches inline so the vector carries no call |
-| Smart mode, host side (MCTRLA.SMEN) | 29.3.3.3, 29.5.9 | USED, the default: ACKACT = ACK is armed once per reading tenure and every byte but the last is answered by the MDATA read itself; the last sets ACKACT = NACK before the read (with ACK standing the read would acknowledge and clock one more byte in; with NACK it sends nothing) and the STOP command carries it. Nothing on a write: the action is not taken on a DATA write |
-| MCTRLB with ACKACT and MCMD in one store | 29.5.5, table 29-2 note 1 | USED: every command is one store |
-| the held START on a Busy bus | 29.3.2.2.3 | USED by construction: `start()` writes MADDR and never waits for the bus |
-| Quick Command (QCEN) | 29.3.3.5 | EXPOSED (`quick_command(true)`), not the probe's shape: the empty probe costs one interrupt either way |
-| FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | DECLINED: broken on every DA/DB revision; `recover()` is the errata's ENABLE cycle. The AVR EA has no such item, and 1000 strobes on an idle host never left it stuck (letter v); still unexposed - `recover()` is the verb on every die, and a FLUSH in the middle of a tenure is unmeasured |
+| one host interrupt per byte, WIF after a write, RIF after a read, SCL held while the flag stands | 29.3.2.2.4, 29.3.2.2.5, 29.3.4 | The shape: there is no FIFO, no byte counter, no automatic STOP and no DMA request on this TWI, so the byte is software's and the handler's latency to its MDATA access is time the bus waits, every byte. The handler is written for that latency: the two common cases asked first with one masked compare each, a cursor and a count set up once per phase, every verb it touches inline so the vector carries no call |
+| Smart mode, host side (MCTRLA.SMEN) | 29.3.3.3, 29.5.9 | Used, the default: ACKACT = ACK is armed once per reading tenure and every byte but the last is answered by the MDATA read itself; the last sets ACKACT = NACK before the read (with ACK standing the read would acknowledge and clock one more byte in; with NACK it sends nothing) and the STOP command carries it. Nothing on a write: the action is not taken on a data write |
+| MCTRLB with ACKACT and MCMD in one store | 29.5.5, table 29-2 note 1 | Used: every command is one store |
+| the held START on a Busy bus | 29.3.2.2.3 | Used by construction: `start()` writes MADDR and never waits for the bus |
+| Quick Command (QCEN) | 29.3.3.5 | Exposed (`quick_command(true)`), not the probe's shape: the empty probe costs one interrupt either way |
+| FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | Declined: broken on every DA/DB revision; `recover()` is the errata's ENABLE cycle. The AVR EA has no such item, and 1000 strobes on an idle host never left it stuck (letter v); still unexposed - `recover()` is the verb on every die, and a FLUSH in the middle of a tenure is unmeasured |
 | the client's Smart mode | 29.3.3.3 | the client task's option; the bench's own client runs it |
-| CTRLA.SDASETUP, the client's own setup stretch | 29.5.1, DS40002443A 27.5.1 | USED at EIGHT clocks, every default of the driver: four are shorter than the I2C specification's Standard-mode data setup (250 ns) above 16 MHz, and on the AVR EA's wire at 20 MHz they lose a Smart-mode client in a long read (On the AVR64EA48, "The client's data setup"); the price is four clocks of stretch on a byte whose clock the client releases |
-| CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | USED with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
-| the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | USED: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
+| CTRLA.SDASETUP, the client's own setup stretch | 29.5.1, DS40002443A 27.5.1 | Used at eight clocks, every default of the driver: four are shorter than the I2C specification's Standard-mode data setup (250 ns) above 16 MHz, and on the AVR EA's wire at 20 MHz they lose a Smart-mode client in a long read (On the AVR64EA48, "The client's data setup"); the price is four clocks of stretch on a byte whose clock the client releases |
+| CTRLA.FMEN, the AVR EA's Fm duty | DS40002443A 27.5.1 | Used with the Fm speed: the floor's low phase bought from the high phase (The AVR EA's SCL clock) |
+| the inactive-bus time-out's base, CLKCTRL.MCLKTIMEBASE | DS40002443A 27.3.3.1 | Used: the clock writes TIMEBASE at every init and rate change, so `TwiTimeout` is microseconds; at TIMEBASE 0, its reset value, every setting fires at once (letter v) |
 
 ### The host's cost, measured (the benchmark skeleton's letter i)
 
 The benchmark skeleton is the app that measures the drivers' costs
 ([../design/benchmark.md](../design/benchmark.md)). The bench: TWI0's
-host on PA2/PA3 against the SAME instance's client on the dual pair
-PC2/PC3, served from its own vector in Smart mode at SDASETUP four clocks (the dual loop of the findings below), 1.5k to 5 V,
-CLK_PER 24 MHz. Both handlers run on one
-core, so every byte waits TWO handler latencies - the client's before
+host on PA2/PA3 against the same instance's client on the dual pair
+PC2/PC3, served from its own vector in Smart mode (the dual loop of the
+findings below), 1.5k to 5 V. Both handlers run on one
+core, so every byte waits two handler latencies - the client's before
 the acknowledge, the host's after it - and wall minus wire holds both.
-The SCL period is measured on PA3 (TCB0 between rising edges): 244, 82
-and 34 cycles at 100 kHz, 400 kHz and Fm+ with the default timing
-(98.4 kHz, 292.7 kHz, 705.9 kHz; the node's rise is 166 ns, over Fm+'s
-120 ns specification, so the divider's own Fm+ figure is the one run).
 `wire` is the tenure's SCL rising edges - nine a frame, one for a
-repeated START, one for the STOP - times that period; the engine's
-completion edge is the STOP's command, a period before the STOP's edge.
-Plain bindings (no stamps), the thread spinning on the edge, best of 8,
-in CLK_PER cycles; the vendor's column is the data sheet's own polled
-sequence (29.3.2.2.3 - 29.3.2.2.5) against the same client:
+repeated START, one for the STOP - times the SCL period measured on PA3
+(TCB0 between rising edges); the host's completion edge is the STOP's
+command, a period before the STOP's edge. Plain bindings (no stamps), the
+thread spinning on the edge, best of 8, in CLK_PER cycles.
 
-| tenure | wire | before | after | the data sheet's loop |
-|---|---|---|---|---|
-| 1-byte write, 100 kHz | 4636 | 5437 | 5392 | 5150 |
-| 255-byte write, 100 kHz | 562420 | 587198 (x 1.04) | 579784 (x 1.03) | 576405 (x 1.02) |
-| 1-byte write, 400 kHz | 1558 | 2157 | 2067 | 1874 |
-| 1 + 1 register read, 400 kHz | 3116 | 4228 | 4125 | 3924 |
-| 255-byte write, 400 kHz | 189010 | 220307 (x 1.16) | 212733 (x 1.12) | 210715 (x 1.11) |
-| 255-byte read, 400 kHz | 189010 | 223278 (x 1.18) | 216381 (x 1.14) | 215202 (x 1.13) |
-| 255-byte write, Fm+ | 78370 | 114193 (x 1.45) | 106403 (x 1.35) | 104344 (x 1.33) |
-| 255-byte read, Fm+ | 78370 | 116684 (x 1.48) | 109601 (x 1.39) | 109198 (x 1.39) |
-
-(The reads after are the engine's default, Smart mode; before, the
-engine without it.)
-
-What the rows say:
-
-- A written byte costs the bus 29 to 30 cycles less than it did, at
-  every speed (the 255-byte writes, divided by their 256 frames): the
-  handler's path from the flag to the MDATA store is 31 cycles of body
-  after a 12-instruction prologue where it was about 50 after 15, and
-  its whole entry 76 cycles where it was about 105 (counted in the
-  release listing). The handler carried no call in the benchmark
-  skeleton's image either way; in `test_avr_twi` it called `Twi::address_read` and
-  `Twi::ack_action`, which that image had outlined for their several
-  call sites, and saved the whole call-clobbered set - every verb the
-  handler touches is always_inline now, so no image can.
-- Smart mode moves the bus on at the MDATA read instead of at the
-  command after it: 9 to 14 cycles less SCL held per received byte at
-  the three speeds (219862 against 216381 at 400 kHz, 112155 against
-  109601 at Fm+), the same bytes. It is the engine's default for that.
-- Against the data sheet's polled loop the interrupt engine is within 1
-  to 2 per cent on 255 bytes at every speed - the loop busy for the
-  whole tenure, the engine's thread free between the bytes - and 170 to
-  240 cycles behind on one-byte tenures: the request's fields, the START
-  through `start()` and the completion edge, where the loop has none.
-- What remains above the wire on a long tenure is the two handlers per
-  frame on one core - 85 cycles a frame in the polled loop, where the
-  host spins and only the client's handler is left, 92 under the engine
-  at 400 kHz. A client on another chip pays its own turnaround instead.
-
-**On the AVR64EA48 at 20 MHz** (rev B1, the same dual loop on PA2/PA3
-and PC2/PC3, the same image; plain bindings, the thread spinning, best
-of 8, in CLK_PER cycles). The SCL period measured on PA3: 201, 55 and
+**On the AVR64EA48 at 20 MHz** (rev B1, `bench_avr` letter i on the code
+as it stands). The SCL period measured on PA3: 201, 55 and
 21 cycles at 100 kHz, 400 kHz and Fm+ (99.5 kHz, 363.6 kHz with FMEN,
 952.4 kHz - MBAUD 94, 21 and 4, the register's floor 198, 52 and 18
-plus the bus's rise); `wire` is the tenure's SCL rises times that
-period:
+plus the bus's rise):
 
 | tenure | wire | measured | x |
 |---|---|---|---|
@@ -594,15 +543,58 @@ period:
 | 255-byte read, Smart, Fm+ | 48405 | 83040 | 1.72 |
 | 1 + 1 register read, Fm+ | 798 | 1507 | 1.89 |
 
-The cycles above the wire are the DB's to within an eighth - the same
-core and the same handlers: a 255-byte write at 400 kHz carries 26910
-above the wire here, 23723 on the DB at 24 MHz; at Fm+ 28965 against
-28033. A long write is wire-bound at 100 kHz and the two
-handlers on one core cost a fifth at 400 kHz and three fifths at Fm+,
-as on the DB. The client runs SDASETUP at eight clocks here, the
-driver's default (Bench findings, "The client's data setup"), which a
-long read pays on each byte whose clock the client releases; across ten
-runs of letter i each 255-byte row spreads by 0.2 per cent at most.
+A long write is wire-bound at 100 kHz, and the two handlers on one core
+cost a fifth at 400 kHz and three fifths at Fm+: a 255-byte write carries
+26910 cycles above the wire at 400 kHz and 28965 at Fm+. The client runs
+SDASETUP at eight clocks, the driver's default (Bench findings, "The
+client's data setup"), which a long read pays on each byte whose clock the
+client releases; across ten runs of `bench_avr` letter i each 255-byte row
+spreads by 0.2 per cent at most.
+
+**The handler, in the release listing** (`bench_avr` for the AVR128DB48, on
+the code as it stands): a written byte's path from the flag to the MDATA
+store is 14 instructions, about 30 cycles, after a 12-instruction prologue,
+and its whole entry about 76 cycles. The host's handler calls nothing: every
+verb it touches is always_inline, so no image can outline one and save the
+whole call-clobbered set.
+
+**On the AVR128DB48 at 24 MHz: an older image.** This table is of an older image,
+with the client at SDASETUP four clocks where today's
+default is eight, and `avrxt/twi.hpp` has changed since. It has no run on the
+code as it stands; `bench_avr` letter i on an AVR128DB48 would replace it
+("Not covered yet"). The SCL period measured on PA3: 244, 82 and 34 cycles at
+100 kHz, 400 kHz and Fm+ with the default timing (98.4 kHz, 292.7 kHz,
+705.9 kHz; the node's rise is 166 ns, over Fm+'s 120 ns specification, so the
+divider's own Fm+ figure is the one run). The vendor's column is the data
+sheet's own polled sequence (29.3.2.2.3 - 29.3.2.2.5) against the same client,
+and the reads are in Smart mode, the host's default:
+
+| tenure | wire | measured | the data sheet's loop |
+|---|---|---|---|
+| 1-byte write, 100 kHz | 4636 | 5392 | 5150 |
+| 255-byte write, 100 kHz | 562420 | 579784 (x 1.03) | 576405 (x 1.02) |
+| 1-byte write, 400 kHz | 1558 | 2067 | 1874 |
+| 1 + 1 register read, 400 kHz | 3116 | 4125 | 3924 |
+| 255-byte write, 400 kHz | 189010 | 212733 (x 1.13) | 210715 (x 1.11) |
+| 255-byte read, 400 kHz | 189010 | 216381 (x 1.14) | 215202 (x 1.14) |
+| 255-byte write, Fm+ | 78370 | 106403 (x 1.36) | 104344 (x 1.33) |
+| 255-byte read, Fm+ | 78370 | 109601 (x 1.40) | 109198 (x 1.39) |
+
+What those rows say, on that image:
+
+- Smart mode moves the bus on at the MDATA read instead of at the
+  command after it: 9 to 14 cycles less SCL held per received byte
+  (219862 against 216381 at 400 kHz, 112155 against
+  109601 at Fm+), the same bytes. It is the host's default for that.
+- Against the data sheet's polled loop the host is within 2 per cent on
+  255 bytes at every speed - the loop busy for the whole tenure, the core
+  free between the bytes under the host - and 190 to 240 cycles behind on
+  one-byte tenures: the request's fields, the START through `start()` and
+  the completion edge, where the loop has none.
+- What remains above the wire on a long tenure is the two handlers per
+  frame on one core - 85 cycles a frame in the polled loop, where the
+  host spins and only the client's handler is left, 92 under the host
+  at 400 kHz. A client on another chip pays its own turnaround instead.
 
 ## Bench findings
 
@@ -613,8 +605,8 @@ one open-drain bus with 1.5k pull-ups - and on an AVR128DA48 rev. A7
 bus rise as the same 166 ns. `test_avr_twi`: `z` = the
 single-board half; `y` = the two-board half, with an ATSAMC21J18A on
 the same node running the instrument firmware `twi_peer` (its SERCOM3
-on PA22/PA23, commanded in band over the bus under test). The desk gives
-that bus three taps of the DUT - PA2/PA3 (the host and the combined
+on PA22/PA23, commanded in band over the bus under test). The bench gives
+that bus three taps of the chip under test (the DUT) - PA2/PA3 (the host and the combined
 client), PC2/PC3 (the dual client, and a plain-GPIO bit-bang injector
 whenever Dual mode is off) and PB2/PB3 - plus the peer's pair, so a
 host, several clients, a foreign chip and a foreign agitator all sit on
@@ -645,15 +637,15 @@ every speed** (it is the pull-up's job, and FMPEN does not help it), and
 the x10 pad drive of FMPEN collapses the fall below the meter's 42 ns
 tick. Charging nothing for tOF would leave the low phase the floor
 itself in register ticks (113 and 32) and the pins that less the
-measured fall - 4541 ns and 1166 ns, BELOW the specified floor at both
+measured fall - 4541 ns and 1166 ns, below the specified floor at both
 Sm and Fm: the equations' tOF is the difference.
 
 **Declaring the bus's real edges buys the speed back.** The same
 Standard mode with `rise_ns = 206, fall_ns = 206` gives MBAUD 113 and
 measures 100.000 kHz with tLOW 4750 ns - still above the floor.
 
-**The rate on the wire, against the rate ASKED.** Every letter of
-`test_avr_twi` that sets an SCL rate judges the MEAN of the SCL periods
+**The rate on the wire, against the rate asked.** Every letter of
+`test_avr_twi` that sets an SCL rate judges the mean of the SCL periods
 inside the bytes of its run - every capture of the period meter within an
 eighth of the shortest, which leaves out the gaps between bytes where the
 host holds SCL for its software and a client stretches it - on the
@@ -673,10 +665,10 @@ within a quarter below it. In thousandths of the rate asked:
 | Sm at 24, 12 and 24 MHz again (a rebase) | 115, 55, 115 | 98.18, 98.36, 98.16 kHz | 981, 983, 981 | 98.36 kHz |
 
 Nothing runs above the rate asked. Fm and Fm+ with the specification's
-edges charged run MORE than a quarter below it, and that is this TWI's
+edges charged run more than a quarter below it, and that is this TWI's
 clock and not its divider: the SCL clock "is designed to have a 50/50
 duty cycle" (29.3.2.2.1), its high phase as long as its low, so step 3
-of the chapter's procedure - which lengthens the LOW phase to the mode's
+of the chapter's procedure - which lengthens the low phase to the mode's
 tLOW floor plus the fall charged (equation 29-5) - lengthens the high
 phase with it, where the I2C modes ask far less of the high (0.6 us at
 Fm against a tLOW of 1.3). At Fm that is 2 x 39 ticks plus the bus's
@@ -695,17 +687,17 @@ pad's output fall, tOF in 39.16 (table 39-22), is 250 ns at both. With
 250 the floor's rate at Fm would be 2 x 38 + 4 = 80 ticks, 300.0 kHz,
 exactly on the quarter.
 
-**A host and a client of the SAME instance talk to each other.** Every
+**A host and a client of the same instance talk to each other.** Every
 Request shape moves real data both ways with the two halves on one pin
 pair (combined) and with the client moved to PC2/PC3 through DUALCTRL
 (dual): a five-byte write, a four-byte read, a write-then-read whose
 repeated START shows up as two address matches in one tenure, and the
 probe. The dual case is the proof that DUALCTRL really moves the client
-to the second pair, since only the desk's wire closes that circuit.
+to the second pair, since only the bench's wire closes that circuit.
 
 **The address-match space behaves exactly as 29.3.2.3.1 describes**,
 proven by who ACKs a probe: the exact address; a mask of 0x03 over
-0x40 answers 0x40..0x43 and refuses 0x44 and 0x3F; ADDREN = 1 turns the
+0x40 answers 0x40..0x43 and does not acknowledge 0x44 and 0x3F; ADDREN = 1 turns the
 same field into a second exact address (0x42 and 0x55 ACK, 0x43 and 0x54
 do not); PMEN answers everything asked of it, 0x08 to 0x77. The general
 call and 0x7A are answered `i2c_rejected` inside `start()` with the
@@ -716,17 +708,17 @@ cannot reach SADDR[0] from this host. The address the client was called on is re
 **The chapter's cases, as MSTATUS values.** M1 reads 0x62 (WIF, ACK
 received, clock held, bus Owner); M2 reads 0xA2 (RIF, not WIF - the two
 are mutually exclusive); M3 reads 0x72 (WIF with RXACK set) - for a
-read's address as for a write's, which the engine reports
-`i2c_nack_addr` either way (bench_avr letter i's one-byte read to an
+read's address as for a write's, which the host reports
+`i2c_nack_addr` either way (`bench_avr` letter i's one-byte read to an
 address nobody holds). A client
 that NACKs the second byte of a five-byte write stops the write there:
-the engine reports `i2c_nack_data`, the client kept exactly the two
+the host reports `i2c_nack_data`, the client kept exactly the two
 bytes it acknowledged, and the host's closing NACK on a read is visible
 on the client side as RXACK.
 
 **Smart mode costs three MCMD strobes fewer per four-byte read** (one
-instead of four) and returns the same four bytes; on a WRITE it changes
-nothing, because the acknowledge action is not performed on a DATA
+instead of four) and returns the same four bytes; on a write it changes
+nothing, because the acknowledge action is not performed on a data
 write. On the client, a read of SDATA alone takes DIF down.
 
 **Quick Command is one frame, and every transaction carries one extra
@@ -738,35 +730,35 @@ quick command shows 10: one frame and the STOP, whatever the request's
 data spans say. QCEN + W raises WIF and QCEN + R raises RIF.
 
 **The bus state machine, driven by a foreign agitator.** An injected
-START moves an Idle bus to Busy and it STAYS Busy with no time-out
+START moves an Idle bus to Busy and it stays Busy with no time-out
 configured; an injected STOP puts it back. The inactive-bus time-out
 measured **32 us at the 50 us setting, 81 us at 100 us and 183 us at
 200 us** - each a little early, none of them late. A START directly
-followed by a STOP raises BUSERR on the host half AND on the client
+followed by a STOP raises BUSERR on the host half and on the client
 half.
 
 **A host told to start on a Busy bus really does hold.** Its address
 had not reached the client after 2 ms, and forcing the bus Idle sent it
 out at once, reliably.
 
-**The time-out release of a HELD transaction is a race, not a
+**The time-out release of a held transaction is a race, not a
 contract.** When the inactive-bus time-out itself matures with a
 transaction held, the pending launch races the bus-state logic at the
-maturation instant and BOTH outcomes are observed on the bench: a clean
+maturation instant and both outcomes are observed on the bench: a clean
 launch (address out, ACK, WIF), or the launch dying in a **naked
-BUSERR** - BUSERR with NO WIF and NO ARBLOST (unlike the chapter's M4
+BUSERR** - BUSERR with no WIF and no ARBLOST (unlike the chapter's M4
 signature), nothing on the wire, the client silent, and CLKHOLD
-possibly left standing so a flags-clear alone does not reopen the road.
-Which outcome comes out is DETERMINISTIC for a given firmware image and
-desk - the phase of the last bus edge against the launcher decides -
+possibly left standing so a flags-clear alone does not free the bus.
+Which outcome comes out is deterministic for a given firmware image and
+wiring - the phase of the last bus edge against the launcher decides -
 which is how a suite can promote one lucky outcome to a false contract
 and then "break" when a wire moves. Neither errata document has an item
-for this. The reliable half, bench-proven: the time-out DOES release
+for this. What held in every run: the time-out does release
 the bus, and after `recover()` the retried address goes out at once.
 Software must treat a naked BUSERR after a held start as "recover and
 retry", never as "bus dead".
 
-**Where the bus is left matters.** A STOP injected in the MIDDLE of a
+**Where the bus is left matters.** A STOP injected in the middle of a
 byte is itself a protocol violation: the host raises BUSERR and the
 transaction it was holding stays pending until BUSERR is cleared and the
 bus declared Idle. The same STOP after a complete nine-bit frame is
@@ -785,7 +777,7 @@ milliseconds of idle bus with both enables on raise none at all.
 **A clock rebase re-derives MBAUD and the wire does not notice.** Across
 24 -> 12 -> 24 MHz under traffic MBAUD moved 115 -> 55 -> 115 and the
 measured SCL period stayed at 98.36 kHz at every step, with every
-exchange exact. The `I2cBus`/`BusMaster` stack rides the engine
+exchange exact. The `I2cBus`/`BusMaster` stack rides the host
 unchanged: one arbitrated write-then-read against the instance's own
 client replied `i2c_ok` with the right bytes in both directions.
 
@@ -798,7 +790,7 @@ land inside every range it gives (the 1 ms hold's
 tenure 162100 ticks, the unstretched one 16814).
 
 **Clock stretching is exactly what the client's hold costs.** A foreign
-client that holds its answer to every DATA byte for a commanded time
+client that holds its answer to every data byte for a commanded time
 (the SAM C21's client stretches SCL at DRDY until its software speaks)
 lengthens the whole tenure by that time times the number of data bytes;
 the address is answered at once. A six-byte write at 100 kHz:
@@ -816,13 +808,13 @@ with the hold, so most of it is the peer's own timing of the hold, not
 the wire. The register's own SCL low time is 120 ticks (5 us), so **even
 an unstretched exchange with a polled client runs at the client's
 speed, not the divider's**: 185 ticks instead of 120. The host meanwhile
-reports CLKHOLD whenever ITS own flag stands and the bus reads Owner
+reports CLKHOLD whenever its own flag stands and the bus reads Owner
 throughout - the two holds are different things and both are visible.
 An unstretched exchange immediately after a stretched one is back to
 nominal.
 
 **Both NACKs, injected by a chip that is alive and listening.** A peer
-that parks its address elsewhere produces an ADDRESS NACK: the engine
+that parks its address elsewhere produces an address NACK: the host
 reports `i2c_nack_addr` and MSTATUS reads 0x72 (WIF, CLKHOLD, RXACK, bus
 Owner), while the peer's own report says it matched nothing at all. A
 peer told to NACK its third byte turns a six-byte write into
@@ -833,17 +825,17 @@ client: the SAM C21's STATUS sampled at that instant reads 0x8C
 
 **Multi-host arbitration is staged from the SAM C21's side.** This
 host's held START on a Busy bus fires when an injected STOP frees it
-(29.3.2.2.3), which is the race letter n stages - but it needs BOTH
+(29.3.2.2.3), which is the race letter n stages - but it needs both
 held STARTs to fire on the one edge, and the SAM C21's does not after a
 phantom hold ([../samc21/i2c.md](../samc21/i2c.md), "A tenure into a
 busy bus parks in hardware"), so against that peer the letter is
 skipped and says so. The live race between the two chips runs in
-`test_samc_i2c` o, both STARTs queued behind one REAL STOP: this
+`test_samc_i2c` o, both STARTs queued behind one real STOP: this
 chip's host, as the peer there, raises ARBLOST when the address
 decides against it and its tenure completes when the address decides
 for it ([../samc21/i2c.md](../samc21/i2c.md), "TWO LIVE HOSTS").
 
-**The collision case S4 is the wired-AND read.** Two clients at ONE
+**The collision case S4 is the wired-AND read.** Two clients at one
 address both acknowledge the same read and both put a byte on SDA, so
 the host reads the AND of the two. The client that tried a high bit
 against the other's low cannot drive it: it raises COLL and un-drives,
@@ -858,7 +850,7 @@ gone.
 **A stuck wire needs clocks, not an ENABLE cycle.** With the peer
 holding SDA low from PORT - taken after this host's STOP - the DUT's
 host reads MSTATUS 0x03, BUSSTATE Busy, because a falling SDA against a
-high SCL IS a Start condition to the state machine (letter p judges it),
+high SCL is a Start condition to the state machine (letter p judges it),
 and the address it was told to send never goes out, 2 ms of waiting
 later. A peer that takes SDA BEFORE this host's STOP leaves the host
 Owner instead (MSTATUS 0x02, its STOP pending): the remedy below frees
@@ -903,30 +895,30 @@ MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, the
 mean in-byte SCL read 983 thousandths at every step, and every exchange
 across the wire was exact.
 
-**A WEDGED TENURE IS THE ARBITER'S TO ANSWER, AND IT DOES (letter t).**
-`I2cBus` with a 35 ms `timeout_ticks` over this engine, against the
+**A wedged tenure is the arbiter's to answer, and it does (letter t).**
+`I2cBus` with a 35 ms `timeout_ticks` over this host, against the
 peer holding SDA low from its PORT for 60 ms: the tenure's START parks
 behind the held line (the address never goes out, as above), no
 interrupt follows, and the reply comes back `i2c_timeout` on the
-arbiter's clock (the RTC PIT at 1024 Hz, 36 ticks) at 35 ms WITH SDA
-STILL LOW - the diagnosis is the timeout's, not the release's. The
+arbiter's clock (the RTC PIT at 1024 Hz, 36 ticks) at 35 ms with SDA
+still low - the diagnosis is the timeout's, not the release's. The
 arbiter's `recover()` (the ENABLE cycle and a forced Idle) runs in that
-same dispatch, and once the line is free the same bus AO carries the
-next tenure `i2c_ok` with no hand on the engine and no stale completion
+same dispatch, and once the line is free the same arbiter carries the
+next tenure `i2c_ok` with no hand on the host and no stale completion
 to drain. A client stretching every byte by 1 ms under the same limit
 completes `i2c_ok` in 9 ms: stretching is flow control, and the limit
 sits above a whole tenure.
 
-**The client's address match wakes this chip from STANDBY and from
-POWER-DOWN, and the host pays the restart on SCL** (`test_avr_sleep` m,
+**The client's address match wakes this chip from standby and from
+power-down, and the host pays the restart on SCL** (`test_avr_sleep` m,
 the SAM C21 as the host timing the tenure, twelve runs): three bytes at
 100 kHz take 393.5 us awake and out of a standby with the clock kept
 alive, 1865 us out of power-down - the crystal's restart held on SCL
 from the match to the first serviced byte. The figures and the rule
 (the data interrupts are no wake source) are in
 [platform.md](platform.md), "Wake-up latency, measured from the partner
-board". On the **AVR64EA48** (rev B1, ten runs of ten) the client over
-the DB's engine does the same on TWI0's default pins: 393.4 us awake and
+board". On the **AVR64EA48** (rev B1, ten runs of ten) the client, the DB's driver,
+does the same on TWI0's default pins: 393.4 us awake and
 out of standby, about 1.0 ms out of power-down - the crystal's cold
 restart (0.6 ms) held on SCL; DS40002443A 27.3.5 promises the stretch.
 
@@ -1035,7 +1027,7 @@ client holds SDA at that byte's bit 6: low after 0x00..0x3F and
 0x80..0xBF, released after 0x40..0x7F and 0xC0..0xFF, both read off the
 record. In Smart mode the SDATA write is the release: at SDASETUP four
 (200 ns at 20 MHz) the new byte's first bit and SCL's rise land in the
-same turn of the record. Where the two levels differ the WRONG way - bit
+same turn of the record. Where the two levels differ the wrong way - bit
 6 set, the next byte's first bit 0, so SDA falls as SCL rises, within
 one turn of the record (a START, if SCL rises first) - the client drives
 that first bit and the next, then nothing, and its vector is not entered
@@ -1043,25 +1035,26 @@ again: the rest of the read is 0xFF (the host sampling the first bit
 either side of the fall, 0x7F or 0xFF for that byte), the host saw no
 bus error at any of its 255 entries, and both halves read BUSERR after
 the STOP, the request complete with `i2c_ok` - a read carries no check
-the engine could apply. The byte is the data's: 65 of a read serving 0,
+the host could apply. The byte is the data's: 65 of a read serving 0,
 1, 2 ... (after 0x40), 128 with the top bit inverted (after 0xFF); 100
 reads of 100 at 400 kHz lost it there, host Smart mode on or off, the
 thread spinning or asleep, the vectors marked or plain. It wants the
-CLIENT to release SCL (at 400 kHz its stretch, about 4 us, outlasts the
+client to release SCL (at 400 kHz its stretch, about 4 us, outlasts the
 host's low phase every byte): at 100 kHz the host's own low phase mostly
 ends later and SCL rises with SDA long settled - one read of ten lost
 its client, at byte 91 after 0x5A - and 48 cycles more in the client's
 vector lose ten of ten; at Fm+ the client's pads run FMPEN and ten of
-ten are exact. At SDASETUP EIGHT (400 ns) SDA moves a record or more
+ten are exact. At SDASETUP eight (400 ns) SDA moves a record or more
 before SCL, and 420 reads of 420 are exact - 100 kHz, 400 kHz and Fm+,
 both patterns, the same variants, the 48 cycles included. Microchip's
 bare-metal TWI client example for the AVR128DB48 (the same chapter) runs
 Smart mode off and writes SDATA, then SCMD's RESPONSE: 11 reads of 11
 exact at four clocks too, the store between the two the setup. The
 driver's default is eight on every die (Configuration); `bench_avr`
-letter i reads 255 bytes exact at every speed with it (the table above).
+letter i reads 255 bytes exact at every speed with it ("The host's cost,
+measured").
 
-**A desk fact, not a silicon one**: TWI1's dual pair PB2/PB3 would make
+**A fact of the bench's wiring, not of the silicon**: TWI1's dual pair PB2/PB3 would make
 a third tap of this bus - the suite drives PB2 low and prints whether the
 SDA node follows, instead of assuming either way.
 
@@ -1074,9 +1067,9 @@ implement):
   give 1 MHz only over 10 MHz of CLK_PER; `twi_fm_plus_min_clk_hz` is 0
   there, so the divider alone decides (it reaches 1 MHz's floor from
   about 9 MHz). Enforcing it moves every DA/DB image that builds the
-  engine, owed with a DA/DB board on the desk.
+  host, owed with a DA/DB board on the bench.
 - **The AVR EA's ALT3** (SDA PA0, SCL PA1): in the route table and the
-  fixture only - this desk's EA board has its quartz on PA0/PA1, and no
+  fixture only - the bench's EA board has its quartz on PA0/PA1, and no
   letter routes there.
 - **10-bit addressing.** The client's match logic recognizes the first
   byte when SADDR[7:3] is 0b11110 and the second byte is software's job
@@ -1085,9 +1078,9 @@ implement):
 - **The general call as a host verb.** `start()` refuses address 0x00
   with every reserved address ([../design/i2c-bus.md](../design/i2c-bus.md));
   a broadcast is a feature of its own, born with its first user.
-- **Multi-host as a policy.** The engine reports `i2c_arb_lost`, but
-  nothing above the engine decides what to do with it: a retry policy, a
-  back-off, a bus AO that knows it shares the wire. `i2c_arb_lost`
+- **Multi-host as a policy.** The host reports `i2c_arb_lost`, but
+  nothing above the host decides what to do with it: a retry policy, a
+  back-off, an arbiter that knows it shares the wire. `i2c_arb_lost`
   reaches the requester and stops there.
 - **A client-side AO.** The client task is a polled/ISR surface; the
   kernel-level usage type (an AO that owns an address and answers
@@ -1119,28 +1112,30 @@ implement):
 **Implemented but not bench-verified**:
 
 - letters `d` and `q`'s refusal of the reserved addresses on the AVR DA
-  and DB: run on the AVR64EA48 only, the DA and DB boards being off the
-  desk; a run of the two letters on each would close it;
+  and DB: run on the AVR64EA48 only, no DA or DB board being on the
+  bench; a run of the two letters on each would close it;
 
 - the client's general call (`general_call`, SADDR[0]): written, and
   taken on the wire no longer - every brio host refuses address 0x00,
-  this chip's own and the desk partner's; a controller that sends a
+  this chip's own and the bench partner's; a controller that sends a
   general call (this suite's injector pins, driven by hand, could) would
   measure it;
 
-- the engine's `i2c_arb_lost` on a lost arbitration (MSTATUS with
+- the host's `i2c_arb_lost` on a lost arbitration (MSTATUS with
   ARBLOST, the transaction not landing) with this chip as the DUT: the
-  ARBLOST itself is measured as the SAM C21's peer, the engine's report
+  ARBLOST itself is measured as the SAM C21's peer, the host's report
   of it is not - letter n's race needs a peer whose held START fires on
   an injected STOP, which the SAM C21's does not; a leg of n queuing
-  this host's START and the peer's behind one REAL STOP, as
+  this host's START and the peer's behind one real STOP, as
   `test_samc_i2c` o does from that side, would measure it;
-- the AVR DA/DB's client at SDASETUP eight: every DA/DB figure and
-  verdict on this page was taken with the client at four clocks (exact
-  there - the DB's dual loop at 24 MHz, 167 ns); the default's eight add
-  four clocks a byte where the client releases SCL, and the DB's letter
-  i and its two `test_avr_twi` images would measure the change - the DA
-  board on this desk has no pull-ups without the SAM C21's pair;
+- the host's cost on the AVR128DB48, and the AVR DA/DB's client at
+  SDASETUP eight: the AVR128DB48's cost table is an older image's ("The
+  host's cost, measured"), and every DA/DB figure and verdict on this page
+  was taken with the client at four clocks (exact there - the DB's dual
+  loop at 24 MHz, 167 ns); the default's eight add four clocks a byte
+  where the client releases SCL. `bench_avr` letter i and the two
+  `test_avr_twi` images on an AVR128DB48 would measure both - the bench's
+  DA board has no pull-ups without the SAM C21's pair;
 - the DA's swapped SDAHOLD codes (DS80000882C 2.14.2): `sda_hold` writes
   the swapped code on a DA and `sda_hold_code` reads it back; the AVR
   EA's letter v measures the codes on the wire (straight there), and the
@@ -1150,18 +1145,18 @@ implement):
   DB's is 5): VOL and tOF at FMPEN 0 and 1 against 1.5k to 5 V - PA3 is
   AIN23, so an ADC leg reading the held SCL would measure it; and Fm+ on
   the dual client's PC6/PC7 (the DB limits them to Sm/Fm, the EA's
-  chapter is silent) - the dual pair this desk wires is PC2/PC3;
+  chapter is silent) - the dual pair the bench wires is PC2/PC3;
 - the AVR EA's INPUTLVL thresholds: no TWI VIL/VIH row in 35.7 or
   DS80001048D; the DAC ramping the node would find them, which needs a
   wire from PD6 to the bus;
 - 1 MHz between 10 and 12 MHz of CLK_PER on the AVR EA: this board's
   clock ladder reaches 20 and 10 MHz (refused at 10 by the divider and the
   12 MHz floor alike), not the band between;
-- SMBus as an ELECTRICAL fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
+- SMBus as an electrical fact: CTRLA/DUALCTRL.INPUTLVL is exposed and
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN;
 - the timings of electricals 39.16 as numbers;
 - TWI1, and every route other than TWI0 DEFAULT/ALT1/ALT2, are compiled
   for all eight DA/DB packages and the three AVR EA ones and refused
   where they must be, but only TWI0's DEFAULT pair has carried traffic
-  on this desk.
+  on the bench.

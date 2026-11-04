@@ -48,7 +48,7 @@ Target-independent design, one page per decision:
 | [design/clock.md](design/clock.md) | The clock model: one rate truth, static and dynamic regimes, and how a rate change reaches every driver |
 | [design/serial.md](design/serial.md) | The serial stack: the UART driver below, line events and `print` above, and the run as the unit of a transport |
 | [design/spi-bus.md](design/spi-bus.md) | The shared SPI bus: the engine descriptor, arbitration between active objects, the rules for several devices on one bus |
-| [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus over the same arbiter: the engine descriptor and the status vocabulary |
+| [design/i2c-bus.md](design/i2c-bus.md) | The I2C bus over the same arbiter: the request descriptor and the status vocabulary |
 | [design/can.md](design/can.md) | The CAN vocabulary: the frame, the bit timing in human units, the error state, and why there is no bus active object |
 | [design/nv-heap.md](design/nv-heap.md) | NvHeap: blocks of flash allocated at run time that outlive the program, and how a power cut during a write is survived |
 | [design/nv-journal.md](design/nv-journal.md) | NvJournal: a handful of small values kept in flash on a part with no EEPROM, with a reserve a panic handler can still write |

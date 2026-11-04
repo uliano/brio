@@ -20,7 +20,7 @@
  *  two interrupt bodies (one per vector), and release().
  *
  *  the tasks - what an application names:
- *    I2cHost<n, route>    the transfer engine: one Request = one bus
+ *    I2cHost<n, route>    the host: one Request = one bus
  *                         tenure (write / read / write-then-read with a
  *                         repeated START / probe), the byte pump under
  *                         the host interrupt. Driven by util/i2c_bus.hpp
@@ -164,7 +164,7 @@
  *    and enforces it: speed_ok() says whether twi_baud_for() has a BAUD
  *    for the speed at the clock and timing in force, and since the
  *    fastest the divider goes is CLK_PER/10 a reachable speed meets the
- *    four-times condition; the host engine answers a request at an
+ *    four-times condition; the host answers a request at an
  *    unreachable speed i2c_rejected. The client keeps the condition as a
  *    readback (max_scl_hz(), can_follow()) and does not enforce it: a
  *    slower main clock is legal there, it only blinds those two
@@ -174,7 +174,7 @@
  *    (SDA PA0, SCL PA1, dual PC2/PC3). Its SCL is not 50/50: the low phase
  *    is BAUD + 6 in Sm (equation 3.2), and FMEN (Fm) or FMPEN (Fm+) move
  *    clocks from the high phase into it, the period equation 1's - the
- *    chapter's SCLDUTY measured, twi_low_ticks() its model, the engine
+ *    chapter's SCLDUTY measured, twi_low_ticks() its model, the host
  *    setting FMEN with the Fm speed as it sets FMPEN with Fm+: 400 kHz
  *    with the specification's edges charged is MBAUD 21 at 20 MHz with
  *    it, 364 kHz on the bench's bus, and would be 26 without, 308 kHz
@@ -451,7 +451,7 @@ constexpr bool twi_needs_fm_plus(I2cSpeed s) { return s == I2cSpeed::fast_plus_1
 /// The SCL low phase the host drives for this MBAUD at a speed, in
 /// CLK_PER: equation 29-4's BAUD + 5 on the AVR DA/DB, whatever the speed;
 /// on the AVR EA the duty its speed sets (device_tables.hpp's twi_ea_scl):
-/// BAUD + 6 in Sm, plus min(5, BAUD) in Fm (the engine sets FMEN with that
+/// BAUD + 6 in Sm, plus min(5, BAUD) in Fm (the host sets FMEN with that
 /// speed) and min(8, BAUD + 2) in Fm+ (FMPEN). What a pulse-width meter on
 /// the SCL pin reads is this less the bus's fall.
 constexpr uint16_t twi_low_ticks(uint8_t baud, I2cSpeed s = I2cSpeed::standard_100k) {
@@ -1190,7 +1190,7 @@ public:
     /// Can the divider make `s` at the peripheral clock last seen and
     /// the bus timing declared - a BAUD the register holds, with the
     /// period at or above the request (twi_baud_for)? A speed that is
-    /// not is refused by the host engine, never approximated: the
+    /// not is refused by the host, never approximated: the
     /// fastest the divider goes is CLK_PER/10, so reachability implies
     /// the chapter's CLK_PER >= 4 x f_SCL (twi_clock_ok), the condition
     /// the bus error detector (29.5.6) and the client Stop interrupt
@@ -1378,12 +1378,12 @@ private:
 /*
  * I2cHost<n, route>
  *
- * The transfer engine: the target-side half of the I2C stack, driven by
+ * The host: the target-side half of the I2C stack, driven by
  * util/i2c_bus.hpp (the BusMaster arbiter, which owns arbitration and
- * replies). This engine owns the wire: START/repeated START/STOP, the
+ * replies). This host owns the wire: START/repeated START/STOP, the
  * address phase, the ACK policy and the byte pump under the TWI host
  * interrupt (one interrupt per byte, the same honest price the SPI
- * engine pays).
+ * host pays).
  *
  * Transaction descriptor (Request) - one bus tenure, from START to STOP,
  * in the four shapes I2C devices actually use:
@@ -1406,7 +1406,7 @@ private:
  * (start() below). i2c_nack_addr is any
  * address nobody acknowledged - a write's, a read's, the repeated
  * START's - and i2c_nack_data a written byte refused. On any NACK the
- * engine still issues the STOP so the bus is released; on arbitration
+ * host still issues the STOP so the bus is released; on arbitration
  * lost the bus belongs to the other host and no STOP is sent; on bus
  * error the peripheral is forced back to the idle bus state.
  *
@@ -1608,7 +1608,7 @@ public:
     /// tenure that reads arms ACKACT = ACK here, once, and every byte but
     /// the last is then answered by the MDATA read alone.
     static bool start(const Request& r) {
-        // What the engine reads later, field by field (the reply capsule
+        // What the host reads later, field by field (the reply capsule
         // is the arbiter's): the address and the read phase for a
         // repeated START, the write's length for the NACK's verdict.
         addr_ = r.addr;
