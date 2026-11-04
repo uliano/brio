@@ -199,8 +199,9 @@ itself keeps the reset value, `low`, on the STM32G0 and the STM32F4.)
   between two frames; a paced output holds its last value a period.
   It underruns, or only slows. A receive that cannot overrun belongs
   here too, and for the same reason: an I2C host stretches the clock
-  while its data register is full, so a starved channel slows the bus
-  and loses nothing.
+  while its data register is full, so a starved channel slows the bus and never overruns. That does not cover the
+read's tail: a channel starved over the last bytes finds the wire already over,
+and the host's entry settles it (the STM32G0 and DesignWare I2C pages).
 - **A memory-to-memory copy arms at the lowest level.** No request
   paces it: it asks for the bus on every cycle of its block. A channel it
   outranks on a strictly ranked controller waits for about the whole
@@ -384,7 +385,8 @@ modes).
 | ch32v00x | `DmaPriority` (`ch32v00x/dma_engine.hpp`); receive very_high, transmit high, copy low (`ch32v00x/dma.hpp`) | as the STM32G0 |
 | ch32vx03 | `DmaPriority` (`ch32vx03/dma_engine.hpp`); receive and block source very_high, transmit and player high, copy low (`ch32vx03/dma.hpp`) | as the STM32G0; the converter's stream very_high, the DAC's high |
 | ch32x035 | `DmaPriority` (`ch32x035/dma_engine.hpp`); receive very_high, transmit high, copy low (`ch32x035/dma.hpp`) | as the STM32G0 |
-| rp2040 | HIGH_PRIORITY, one bit (`rp2040/dma.hpp`); receive HIGH, transmit and copy normal | the PL011's ring and the PL022 host's receive HIGH, their transmits normal, the DW_apb_i2c host's two normal (SCL held behind a starved channel either way); no level option on the UART |
+| rp2040 | HIGH_PRIORITY, one bit (`rp2040/dma.hpp`); receive HIGH, transmit and copy normal | the PL011's ring and the PL022 host's receive HIGH, their transmits normal, the DW_apb_i2c host's two normal (SCL held behind a starved channel either way,
+and the STOP's entry settling a receive channel still counting); no level option on the UART |
 | rp2350 | the RP2040's arrangement (`rp2350/dma.hpp`) | as the RP2040 |
 | pl011, pl022, dw_apb_i2c | the IP strata's engine parameters, each level named at the call as the family's one bit | as the RP2040; the PL022 host's receive binds once, `arm_rx_engine()` |
 | host | none: no DMA controller is simulated | |

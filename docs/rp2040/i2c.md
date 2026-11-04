@@ -310,44 +310,46 @@ core must do meanwhile.
 
 The table gives the core cycles each costs at 125 MHz: `bench_rp2040` letter i's
 `i2c.cost` lines, `start()` and the vectors together, each line the least of
-five, at 400 kHz, with a range where five runs of the letter differ because of
-the XIP cache, through which the core
-executes the flash. The rows "the host in SRAM" are
+five, at 400 kHz. The rows "the host in SRAM" are
 `bench_rp2040_ram`'s, whose host is `InRam` and whose vectors are placed
-([platform.md](platform.md), "A handler in SRAM"); the rows "from the flash"
-are `bench_rp2040`'s, the default image. At 100 kHz and 1 MHz the figures are
-the same, but for the `dma` row from the flash (below) and one run's 1430 for
-an `interrupt` read of 16 from the flash at 100 kHz. These lines run on the host
+([platform.md](platform.md), "A handler in SRAM"). The core executes the flash through
+the XIP cache, and its other rows depend on how the link lays the paths out, because the
+cache is two-way: the rows "as linked" are `bench_rp2040`'s default image, the range one run's three
+speeds; the rows "vector apart" are that image with the host's vector aligned to 4 KB, a
+one-off build that puts it in other sets than `start()`. At 100 kHz and 1 MHz the
+figures of the other rows are the same. These lines run on the host
 with engines bound, the table under "The host's cost" on the host with none, so
 that table's handler cycles (598 for a read of 16, here 642) are not a part of
 these figures.
 
 | read of | 1 | 2 | 3 | 8 | 9 | 16 | 64 | 255 |
 |---|---|---|---|---|---|---|---|---|
-| `interrupt`, the host in SRAM | 694 | 712 | 738 | 868 | 1110 | 1292 | 4256 | 16 062 |
-| `dma`, the host in SRAM | 725 | 729 | 1094 | 993 | 1001 | 1001 | 1198 | 1198 |
-| `interrupt`, from the flash | 663 to 848 | 681 | 707 | 837 | 1062 | 1244 | 4119 | 15 541 |
-| `dma`, from the flash | 699 | 703 | 1042 | 942 | 952 | 952 to 1138 | 1407 to 1500 | 1591 to 1683 |
+| `interrupt`, the host in SRAM | 706 | 724 | 750 | 880 | 1122 | 1304 | 4272 | 16 078 |
+| `dma`, the host in SRAM | 742 | 746 | 1111 | 1008 | 1018 | 1018 | 1218 | 1218 |
+| `interrupt`, from the flash, vector apart | 671 | 689 | 715 | 845 | 1071 | 1253 | 4136 | 15 606 |
+| `dma`, from the flash, vector apart | 718 | 722 | 1061 | 959 | 970 | 970 | 1149 | 1149 |
+| `interrupt`, from the flash, as linked | 1597 to 2063 | 1615 to 1898 | 2014 to 2111 | 1769 to 2051 | 2095 to 2741 | 2547 to 2735 | 5807 to 5899 | 17 090 to 17 278 |
+| `dma`, from the flash, as linked | 1742 to 1930 | 1653 to 1836 | 2177 to 2361 | 1981 to 2350 | 2087 to 2454 | 1988 to 2361 | 2723 to 2818 | 2357 to 2821 |
 
 F, b and E are [the design page's](../design/i2c-bus.md) ("Which to name, by the
 cycles"): the pump's fixed cost and its cost a byte, and the engines' fixed cost.
-From sixteen bytes up the pump costs F + b x n, F about 300 cycles and b about
+From sixteen bytes up the pump costs F + b x n, F about 320 cycles and b about
 60 a byte, in steps of eight (one entry for each half FIFO). The engines
 cost E, about 1000 cycles from SRAM for a read of nine to sixteen bytes and
-1198 from sixty-four (a third entry, the transmit DMA block's end finding no room
-for the STOP entry). Warm, the host in SRAM is not cheaper than the host in the
-flash on the pump or on `dma` up to sixteen bytes: it pays the call's veneer, and
+1218 from sixty-four (a third entry, the transmit DMA block's end finding no room
+for the STOP entry). Warm and with the vector apart, the host in SRAM is not cheaper than the
+host in the flash at any length: it pays the call's veneer, and
 the cache serves a warm path at the SRAM's
-pace. From sixty-four bytes `dma` reads 209 to 485 cycles less in SRAM, where the
-flash's figure spreads with the cache. What SRAM buys besides is the cold path, and no spread warm
+pace. As `bench_rp2040` links them, though, `start()`, the vector and the letter's other paths share
+sets of the cache, and a tenure reads 24 to 28 XIP misses where the aligned build reads none: about
+twice the cycles at every short length, for a layout no line of the driver chose.
+SRAM buys the cold path and independence from the link
 ([platform.md](platform.md), "A handler in SRAM").
 
 So `dma` costs the core fewer cycles from **nine bytes** with the host in SRAM
-(the pump's second entry). From the flash the same holds at 400 kHz and 1 MHz in
-five runs of five. At 100 kHz it holds from sixteen bytes in three runs and from
-sixty-four in two, E reading 1134 to 1414 there; the letter's XIP counts do not
-say why that speed differs. A read of one or two costs the same within forty cycles
-either way (the 848 above is one run of five, its other four 663). A read of
+and with the vector apart (the pump's second entry); as linked, from nine at 100 kHz and 400 kHz
+and from twelve at 1 MHz in the one run. A read of one or two costs the same within fifty cycles
+either way, as linked within 330. A read of
 three to eight costs the engines a second entry (the transmit DMA block's end), and
 at three and four `start()` itself reads 100 cycles more than at eight: a DMA block
 of one or two beats ends before `start()` returns, so the DMA line's entry falls
@@ -384,7 +386,7 @@ extern "C" void isr_i2c1() {
 
 The reference suite is `test_rp2040_i2c`, green on the WeAct board
 against the WeAct RP2350B's peer over the I2C wires between the two, on either
-of that chip's architectures: **73 verdicts** in its key `z`, the console key that
+of that chip's architectures: **81 verdicts** in its key `z`, the console key that
 runs its letters together. The same peripheral as the peer, the RP2040 the
 far end, is judged by `test_rp2350_i2c` ([../rp2350/i2c.md](../rp2350/i2c.md)), so every
 client finding below is measured from both sides. The cost figures are
@@ -586,6 +588,66 @@ named is `test_rp2040_i2c`'s.
   to clear the request with;
   nothing of the control reaches the wire. That is the DMA request a reset at `init()` withdraws
   ([dma.md](dma.md)).
+
+### The receive channel at the STOP (`test_rp2040_i2c` letters `u` and `s`)
+
+A `dma` read has no completion of its own: the receive engine reports errors alone, and
+STOP_DET ends the tenure. STOP_DET says the wire is over and not that the channel is, so the STOP's
+entry reads CTRL.BUSY, one load, and a channel still counting is stopped by the abort and what
+stands in the FIFO taken by hand ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "The receive
+channel at the STOP"). The same entry runs here. What differs is how far this chip's channel gets
+behind: this arbiter serves one normal channel a round (2.5.7), and no load left it more than a beat.
+
+**From the flash, no load reached it.** Letter `u` (reads of 1, 8, 16, 64 and 255 at each speed, thirty
+of each a run; byte copies at HIGH_PRIORITY and at normal in SRAM, an APB register read across the bridge
+at HIGH_PRIORITY, copies out of the uncached flash at both, and core 1 writing SRAM beside some): BUSY
+down at the vector's first load in all 81000 reads of 12 runs, every cell exact. A rate of zero is
+not a bound, and the next paragraph is why.
+
+**With the host and its vectors in SRAM, one did.** `test_rp2040_i2c_ram` puts them there, so a
+vector's way in does not wait on the flash a load is reading. The flash loads then find the channel a
+beat behind, at 400 kHz and 1 MHz, the SRAM loads never:
+
+| load, the host and its vectors in SRAM | late at 100 kHz | at 400 kHz | at 1 MHz | most beats owed |
+|---|---|---|---|---|
+| nothing else; every load in SRAM or across the bridge, of 1500 reads a cell | 0 | 0 | 0 | 0 |
+| one HIGH byte copy, uncached flash | 0 | 0 | 441 | 1 |
+| two HIGH byte copies, uncached flash | 0 | 0 | 1220 | 1 |
+| four HIGH byte copies, uncached flash | 0 | 617 | 1140 | 1 |
+| two normal byte copies, uncached flash | 0 | 0 | 817 | 1 |
+| four HIGH, uncached flash, core 1 in SRAM | 0 | 8 | 480 | 1 |
+
+4723 of 67500 reads over 10 runs, all exact, and never more than one beat against the
+sixteen the FIFO could hold. A control, a build whose entry reads no channel, one run: 351 of 6750 late at the
+vector's first load, every cell right at the thread's first load behind the reply and nothing
+moving. So no load showed a read wrong on this chip, a beat landing before the vector returns; a
+requester's own way back is later than that thread's poll.
+
+**The stage** (letter `s`, 12 runs). The same eight shapes, four tails and three speeds as
+[the RP2350's](../rp2350/i2c.md): the request taken down for the tail, the channel's EN taken down,
+EN let up behind the reply, a byte popped ahead of the host's body, each followed by a read of
+eight and a write of eight. The control: every read staged wrong under `i2c_ok`, 139 cells a row,
+every channel left running with its bytes in the FIFO and the read behind wrong, and with EN let up
+behind the reply every cell written after it. The entry: every byte at its place in the vector, the channel stopped,
+FIFO empty, the requests behind whole, and the byte nobody has `i2c_dma_fault`. So on this chip the late path
+is proved past one beat by the stage alone. BUSY polled down and TRANS_COUNT polled to zero ("updating automatically each time a
+write transfer completes", 2.5.7's register list), then the cell: stale in none of 400 rows
+each. A channel paused over a read of four banks one request by its debug register, which stands behind
+`IC_DMA_CR` going down, and one or two beats run when EN comes up (2.5.3.2), and `IC_DATA_CMD` read over a stopped channel with the
+request up or down, 200 rows of each, moved nothing at the next block's start.
+
+A read of seventeen at 100 kHz fills the FIFO at its block's end, and TX_EMPTY then brings the entry with
+the STOP. On the RP2350 a `start()` overtaken by that end loses the arm under its own write of the mask, so
+the host looks at it behind that write ([../rp2350/i2c.md](../rp2350/i2c.md)). This chip did not reach
+that order in the control even staged, TX_CMD_BLOCK holding the first entry and the XIP cache emptied over
+`start()`: 100 of 100 reads answered, the block's end inside `start()` but behind the write. The look runs
+here because the code is shared; the host suite is what shows it working here.
+
+**What it costs here.** One load of the channel's CTRL, a test and a branch at the STOP of every engined
+tenure, and one load and a test in `start()`: with the host in SRAM 17 cycles of a read's `dma` figure
+(742 for one byte, of which a control build without them reads 725; 1018 from nine to sixteen, against 1001)
+and 12 of `interrupt` on that same engined host (706, against 694). The table above holds them. The late path is out of line in the flash: it read at most
+10204 cycles between stamps in the vector over letter `s` from the flash image (82 us, the path cold in the XIP cache), its abort polling BUSY as E13 asks.
 
 ### The stack under the preemptive kernel (`test_rp2040_rubato_i2c`)
 

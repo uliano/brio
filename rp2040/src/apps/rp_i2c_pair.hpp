@@ -23,6 +23,11 @@
 //   xip_empty()                  every line of the XIP cache dropped (the
 //                                family's Xip verb): letter g's cold read
 //   partner_kind, partner_text   twi_link's kind byte of the peer, its name
+//   late_cycles()                clk_sys cycles, letters u and s's fine ruler
+//   late_line(on)                the link instance's interrupt line on or off,
+//                                in the family's interrupt controller
+//   late_flash(i)                16 KB of the flash through the XIP's uncached
+//                                alias, the i-th of four
 //
 // and binds its I2C vector to `pair_i2c_isr()` and isr_dma_0 to
 // `pair_dma_isr()`.
@@ -1858,6 +1863,1058 @@ void tm_client_edges() {
     bench.verdict("the command channel is back after the client's edges", command(Op::ping));
 }
 
+// =============================================================================
+// u, s - THE RECEIVE CHANNEL AT THE STOP
+// =============================================================================
+//
+// A read under `dma` has no completion of its own (the receive engine reports
+// errors alone): STOP_DET ends the tenure, and STOP_DET says the WIRE is over.
+// The channel may still have beats to move, up to the FIFO's sixteen, since SCL
+// holds only with the FIFO full. The chapter gives no bound on a channel's lag
+// (RP2040 2.5.7, RP2350 12.6.1: a round of HIGH channels, then one normal). So:
+//
+//   u  THE LOAD: reads of 1, 8, 16, 64 and 255 at the three speeds under each
+//      load below, a channel's state read in the vector's first loads; the
+//      bytes at the reply and a millisecond later, the next read behind them.
+//      How often a channel was late is the load's and is printed, not judged.
+//   s  THE STAGE: the entry made to find the channel counting, on every shape.
+//
+// RP2350 12.6.4.2 on the request: "each 1-clock pulse on the dreq signal
+// increments this counter ... The counter decrements when the transfer is issued
+// to the address FIFOs", so a pulse banked outlives IC_DMA_CR going down; and
+// "the user must not access a FIFO currently being serviced by the DMA", so the
+// core reads IC_DATA_CMD only behind a stopped channel. TRANS_COUNT updates "each
+// time a write transfer completes" (both chips' register lists), BUSY falls when
+// the last transfer of the sequence completes. Letter s's first rows measure both.
+//
+// The rulers: the suite's `late_cycles()`, clk_sys cycles. What the suite states
+// for these two letters: late_cycles(), late_line(on), the interrupt controller's
+// line of the link instance, and late_flash(i), a run of the flash through the
+// XIP's uncached alias.
+
+using LateRxChannel = DmaChannel<DmaRx::channel>;
+using LateTxChannel = DmaChannel<DmaTx::channel>;
+using LateCopyA = DmaCopyEngine<8>;
+using LateCopyB = DmaCopyEngine<9>;
+using LateCopyC = DmaCopyEngine<10>;
+using LateCopyD = DmaCopyEngine<11>;
+
+/// A block of the load: at most the 16 KB of the shape docs/rp2350/dma.md measures.
+constexpr uint32_t late_block_max = 16384u;
+alignas(4) uint8_t late_load_ram[4][2][late_block_max];
+alignas(4) uint32_t late_core1_ram[256];
+
+enum class LateSource : uint8_t { sram, bridge, flash };
+
+struct LateLoad {
+    const char* name;
+    uint8_t copies;
+    bool high;
+    LateSource source;
+    bool core1;
+    uint32_t block;
+};
+
+// A block out of the flash is 256 bytes: at 16 KB, a beat there being some 150 cycles,
+// the channel beside two HIGH copies waits 2.4 million cycles (16 ms) a turn and a read
+// of 255 outlasts any useful limit, which says nothing more about the entry.
+constexpr LateLoad late_loads[] = {
+    {"nothing else", 0, false, LateSource::sram, false, late_block_max},
+    {"one HIGH byte copy, SRAM", 1, true, LateSource::sram, false, late_block_max},
+    {"two HIGH byte copies, SRAM", 2, true, LateSource::sram, false, late_block_max},
+    {"two HIGH byte copies, SRAM, blocks of 1 KB", 2, true, LateSource::sram, false, 1024},
+    {"four HIGH byte copies, SRAM", 4, true, LateSource::sram, false, late_block_max},
+    {"two normal byte copies, SRAM", 2, false, LateSource::sram, false, late_block_max},
+    {"two HIGH, SRAM, core 1 in SRAM", 2, true, LateSource::sram, true, late_block_max},
+    {"two HIGH byte reads across the bridge", 2, true, LateSource::bridge, false, late_block_max},
+    {"four HIGH byte reads across the bridge", 4, true, LateSource::bridge, false, late_block_max},
+    {"four HIGH across the bridge, core 1 in SRAM", 4, true, LateSource::bridge, true, late_block_max},
+    {"one HIGH byte copy, uncached flash", 1, true, LateSource::flash, false, 256},
+    {"two HIGH byte copies, uncached flash", 2, true, LateSource::flash, false, 256},
+    {"four HIGH byte copies, uncached flash", 4, true, LateSource::flash, false, 256},
+    {"two normal byte copies, uncached flash", 2, false, LateSource::flash, false, 256},
+    {"four HIGH, uncached flash, core 1 in SRAM", 4, true, LateSource::flash, true, 256},
+};
+
+volatile uint8_t late_copies = 0;
+volatile LateSource late_source = LateSource::sram;
+volatile uint32_t late_block = late_block_max;
+volatile bool late_core1_keeps = false;
+volatile bool late_core1_live = false;
+volatile uint32_t late_core1_turns = 0;
+uint32_t late_load_blocks = 0;
+
+template <typename E>
+void late_keep(uint8_t i) {
+    if (E::busy()) {
+        return;
+    }
+    bool started = false;
+    switch (late_source) {
+        case LateSource::sram:
+            started = E::copy(late_load_ram[i][1], static_cast<const uint8_t*>(late_load_ram[i][0]), late_block);
+            break;
+        case LateSource::bridge:
+            // IC_COMP_VERSION, read-only, on the APB behind the same bridge as IC_DATA_CMD.
+            started = E::fill(late_load_ram[i][1],
+                              reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(&Raw::regs().IC_COMP_VERSION)),
+                              late_block);
+            break;
+        case LateSource::flash:
+            started = E::copy(late_load_ram[i][1], late_flash(i), late_block);
+            break;
+    }
+    late_load_blocks = late_load_blocks + (started ? 1u : 0u);
+}
+
+/// Every copy of the load that has run out, started again.
+void late_keep_all() {
+    const uint8_t n = late_copies;
+    if (n > 0u) { late_keep<LateCopyA>(0); }
+    if (n > 1u) { late_keep<LateCopyB>(1); }
+    if (n > 2u) { late_keep<LateCopyC>(2); }
+    if (n > 3u) { late_keep<LateCopyD>(3); }
+}
+
+/// The turn core 0's waits take, unless core 1 keeps the load.
+void late_load_turn() {
+    if (!late_core1_keeps) {
+        late_keep_all();
+    }
+}
+
+[[noreturn]] void late_core1_entry() {
+    late_core1_live = true;
+    for (;;) {
+        late_keep_all();
+        for (uint32_t i = 0; i < 256u; ++i) {
+            late_core1_ram[i] = late_core1_ram[(i + 128u) & 255u] + 1u;
+        }
+        late_core1_turns = late_core1_turns + 1u;
+    }
+}
+
+void late_load_on(const LateLoad& l) {
+    late_source = l.source;
+    late_block = l.block;
+    late_copies = l.copies;
+    late_load_blocks = 0;
+    if (l.copies > 0u) { LateCopyA::arm(DmaReport::errors, l.high); }
+    if (l.copies > 1u) { LateCopyB::arm(DmaReport::errors, l.high); }
+    if (l.copies > 2u) { LateCopyC::arm(DmaReport::errors, l.high); }
+    if (l.copies > 3u) { LateCopyD::arm(DmaReport::errors, l.high); }
+    late_core1_keeps = false;
+    if (l.core1) {
+        late_core1_live = false;
+        late_core1_turns = 0;
+        late_core1_keeps = Core1::launch(&late_core1_entry);
+    } else {
+        late_load_turn();
+    }
+}
+
+/// The load off and whether a copy met a bus error (the load would be no load).
+bool late_load_off() {
+    if (late_core1_keeps) {
+        (void)Core1::reset();
+        late_core1_keeps = false;
+    }
+    const uint32_t errors = LateCopyA::errors() | LateCopyB::errors() | LateCopyC::errors() | LateCopyD::errors();
+    late_copies = 0;
+    LateCopyA::stop();
+    LateCopyB::stop();
+    LateCopyC::stop();
+    LateCopyD::stop();
+    return errors == 0u;
+}
+
+// ---- the vector's first loads --------------------------------------------------------
+
+enum class LateStage : uint8_t {
+    none,
+    away,    ///< IC_DMA_CR down for the tail: no pulse, the bytes standing in the FIFO
+    paused,  ///< the channel's EN down for the tail: pulses banked, the channel never let go
+    behind,  ///< as paused, the thread letting EN up behind the reply
+    race,    ///< as paused, the vector letting EN up `burns` turns ahead of the host's body
+    steal,   ///< as away, the vector popping a byte: a byte nobody has
+};
+
+struct LateWatch {
+    volatile bool on = false;
+    volatile LateStage stage = LateStage::none;
+    volatile uint16_t burns = 0;
+    volatile bool stop = false;      ///< an entry with STOP_DET up was seen
+    volatile bool rx_busy = false;   ///< the receive channel's BUSY at that entry
+    volatile uint16_t rx_left = 0;   ///< its TRANS_COUNT there
+    volatile uint8_t level = 0;      ///< IC_RXFLR there
+    volatile bool tx_busy = false;   ///< the transmit channel's BUSY there
+    volatile uint8_t credits = 0;    ///< the receive channel's banked requests there
+    volatile uint32_t body_on_time = 0;   ///< the longest host body, the channel done
+    volatile uint32_t body_late = 0;      ///< ... the channel counting
+};
+LateWatch late_watch;
+volatile uint32_t late_burned = 0;
+
+/// `turns` of a loop the compiler keeps, whichever core runs it.
+[[gnu::always_inline]] inline void late_burn(uint32_t turns) {
+    for (uint32_t i = 0; i < turns; ++i) {
+        late_burned = late_burned + 1u;
+    }
+}
+
+/// Ahead of the host's body. The count and BUSY are the vector's first loads.
+[[gnu::always_inline]] inline void late_before() {
+    const bool rx_busy = LateRxChannel::busy();
+    const uint32_t rx_left = LateRxChannel::count();
+    const bool tx_busy = LateTxChannel::busy();
+    const uint8_t level = Raw::rx_count();
+    const uint8_t credits = static_cast<uint8_t>(LateRxChannel::debug_credits());
+    if ((Raw::raw_pending() & I2cInterrupt::stop_det) == 0u) {
+        return;
+    }
+    late_watch.credits = credits;
+    late_watch.stop = true;
+    late_watch.rx_busy = rx_busy;
+    late_watch.rx_left = static_cast<uint16_t>(rx_left);
+    late_watch.tx_busy = tx_busy;
+    late_watch.level = level;
+    if (late_watch.stage == LateStage::race) {
+        LateRxChannel::enable(true);
+        late_burn(late_watch.burns);
+    } else if (late_watch.stage == LateStage::steal && level != 0u) {
+        (void)Raw::pop();
+    }
+}
+
+// ---- one tenure under watch ----------------------------------------------------------
+
+struct LateRow {
+    uint32_t reads = 0;
+    uint32_t exact = 0;        ///< the status owed and every cell right at the reply, nothing moving after
+    uint32_t status_wrong = 0;
+    uint32_t unanswered = 0;
+    uint32_t late = 0;         ///< the channel BUSY at the STOP entry
+    uint32_t owed_max = 0;     ///< the most beats TRANS_COUNT owed there
+    uint32_t level_max = 0;    ///< the most entries IC_RXFLR held there
+    uint32_t credits_max = 0;  ///< the most requests the channel had banked there
+    uint32_t stale = 0;        ///< reads with a cell wrong at the reply
+    uint32_t stale_cells = 0;  ///< how many
+    uint32_t moved = 0;        ///< reads with a cell written after the reply
+    uint32_t running = 0;      ///< the channel still BUSY at the reply
+    uint32_t standing = 0;     ///< entries left in the FIFO at the reply
+    uint32_t tx_busy = 0;      ///< the transmit channel BUSY at the STOP entry
+    uint32_t next_wrong = 0;   ///< the read behind it not exact
+};
+
+void late_row_add(LateRow& all, const LateRow& r) {
+    all.reads += r.reads;
+    all.exact += r.exact;
+    all.status_wrong += r.status_wrong;
+    all.unanswered += r.unanswered;
+    all.late += r.late;
+    all.owed_max = r.owed_max > all.owed_max ? r.owed_max : all.owed_max;
+    all.level_max = r.level_max > all.level_max ? r.level_max : all.level_max;
+    all.credits_max = r.credits_max > all.credits_max ? r.credits_max : all.credits_max;
+    all.stale += r.stale;
+    all.stale_cells += r.stale_cells;
+    all.moved += r.moved;
+    all.running += r.running;
+    all.standing += r.standing;
+    all.tx_busy += r.tx_busy;
+    all.next_wrong += r.next_wrong;
+}
+
+uint8_t late_seed = 0;
+uint8_t late_rx_at = 0;   ///< the serve's read position, modulo the pattern's period
+uint8_t late_tx_at = 0;   ///< the serve's write position
+uint8_t late_cells[257];
+uint8_t late_held[257];
+
+uint8_t late_rx_value(uint32_t i) {
+    return twilink::pattern_value(twilink::pattern_counting, late_seed, static_cast<uint16_t>(late_rx_at + i));
+}
+
+/// What a row with no load allows over the wire, in place of a second.
+uint32_t late_limit_margin_us = 1'000'000u;
+/// Letter s's cold row: every line of the XIP cache dropped right ahead of start(), which
+/// runs with TX_CMD_BLOCK holding its entries in the FIFO, and how many of those tenures had
+/// a DMA line entry inside it.
+bool late_cold_start = false;
+uint32_t late_inside_start = 0;
+
+/// THE LIMIT, nine periods a byte twice over and a second: letter u's slowest measured
+/// channel beside four HIGH copies of the flash waits 2.1 ms a turn for a block of 256
+/// bytes (5.2 million cycles for 16 KB at 150 MHz, over 64), and a read of 255 at one beat
+/// a turn is 540 ms of holding SCL. Past this it is `no_answer`, never a verdict's margin.
+uint32_t late_limit_us(uint32_t bytes, I2cSpeed s) {
+    return 18'000'000u / i2c_speed_hz(s) * (bytes + 2u) + late_limit_margin_us;
+}
+
+/// start(), as the cold row wants it when it does.
+void late_start(const DmaHost::Request& r) {
+    if (late_cold_start) {
+        Raw::command_block(true);
+        xip_empty();
+    }
+    (void)DmaHost::start(r);
+    if (late_cold_start) {
+        late_inside_start += dma_entries != 0u ? 1u : 0u;
+        Raw::command_block(false);
+    }
+}
+
+/// One millisecond with the load kept: what a late channel has left to write lands.
+void late_after_reply() {
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < 1000u) {
+        late_load_turn();
+    }
+}
+
+/// One read under `dma`, staged or not, judged at the reply and a millisecond later.
+void late_read(uint8_t tx_len, uint8_t n, I2cSpeed s, LateStage stage, uint8_t tail, uint16_t burns, LateRow& row,
+               uint8_t want = i2c_ok, bool clean = true) {
+    // A stage's pause that reached a channel already done has left EN clear behind the
+    // engine's back; the engine's next start would not know.
+    if (!LateRxChannel::enabled()) {
+        DmaRx::stop();
+        DmaRx::arm(Raw::data_address(), Raw::dreq_rx, false, DmaReport::errors);
+    }
+    for (uint32_t i = 0; i < n + 1u; ++i) {
+        late_cells[i] = static_cast<uint8_t>(~late_rx_value(i));
+    }
+    for (uint32_t i = 0; i < tx_len; ++i) {
+        tx_buf[i] = twilink::pattern_value(twilink::pattern_counting, late_seed, static_cast<uint16_t>(late_tx_at + i));
+    }
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_cells));
+    r.rx_len = n;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    late_watch.stage = stage;
+    late_watch.burns = burns;
+    late_watch.stop = false;
+    late_watch.rx_busy = false;
+    late_watch.rx_left = 0;
+    late_watch.level = 0;
+    late_watch.tx_busy = false;
+    late_watch.credits = 0;
+    late_watch.on = true;
+    transfer_done = false;
+    isr_entries = 0;
+    dma_entries = 0;
+    const uint32_t limit = late_limit_us(static_cast<uint32_t>(tx_len) + n, s);
+    const uint32_t t0 = us_now();
+    late_start(r);
+    if (stage != LateStage::none) {
+        // The tail begins at this count. The transmit block's end lets the request up
+        // again (dma_isr()), so a read that has one waits for it first.
+        const uint32_t room = n < tail ? n : tail;
+        while (((n > 2u && DmaTx::busy()) || LateRxChannel::count() > room) && !transfer_done &&
+               us_now() - t0 < limit) {
+            late_load_turn();
+        }
+        if (stage == LateStage::away || stage == LateStage::steal) {
+            Raw::dma_requests(false, false);
+        } else {
+            LateRxChannel::enable(false);
+        }
+    }
+    while (!transfer_done && us_now() - t0 < limit) {
+        late_load_turn();
+    }
+    // THE REPLY: the first loads the requester could make.
+    const bool answered = transfer_done;
+    const bool running = LateRxChannel::busy();
+    const uint8_t level = Raw::rx_count();
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; i < n + 1u; ++i) {
+        late_held[i] = late_cells[i];
+        const uint8_t owed = i < n ? late_rx_value(i) : static_cast<uint8_t>(~late_rx_value(i));
+        wrong += late_held[i] != owed ? 1u : 0u;
+    }
+    late_watch.on = false;
+    if (stage == LateStage::behind) {
+        LateRxChannel::enable(true);
+    }
+    late_after_reply();
+    bool moved = false;
+    for (uint32_t i = 0; i < n + 1u; ++i) {
+        moved = moved || late_cells[i] != late_held[i];
+    }
+    if (!answered) {
+        (void)DmaHost::recover();
+    }
+    const uint8_t status = answered ? transfer_status : no_answer;
+    // A stolen byte is owed its status; a stage that came too late stole nothing.
+    const uint8_t owed_status = stage == LateStage::steal && !late_watch.rx_busy ? uint8_t{i2c_ok} : want;
+    row.reads += 1u;
+    row.unanswered += answered ? 0u : 1u;
+    row.status_wrong += status != owed_status ? 1u : 0u;
+    row.late += late_watch.rx_busy ? 1u : 0u;
+    row.owed_max = late_watch.rx_left > row.owed_max ? late_watch.rx_left : row.owed_max;
+    row.level_max = late_watch.level > row.level_max ? late_watch.level : row.level_max;
+    row.credits_max = late_watch.credits > row.credits_max ? late_watch.credits : row.credits_max;
+    row.tx_busy += late_watch.tx_busy ? 1u : 0u;
+    row.stale += wrong != 0u ? 1u : 0u;
+    row.stale_cells += wrong;
+    row.moved += moved ? 1u : 0u;
+    row.running += running ? 1u : 0u;
+    row.standing += level;
+    const bool nothing_after = !moved && !running && level == 0u;
+    row.exact += answered && status == owed_status && nothing_after && (wrong == 0u || owed_status != i2c_ok) ? 1u : 0u;
+    late_rx_at = static_cast<uint8_t>(late_rx_at + n);
+    late_tx_at = static_cast<uint8_t>(late_tx_at + tx_len);
+    late_watch.stage = LateStage::none;
+    // WHAT A WRONG TENURE LEFT is carried into the next read only where the caller
+    // judges that (`clean` false); otherwise the FIFO is given a disable, which flushes
+    // it (RP2040 4.3.10.3, RP2350 12.2.10.3), so that one wrong read counts once.
+    if (clean && (running || level != 0u || Raw::rx_count() != 0u)) {
+        (void)Raw::disable();
+        Raw::enable();
+    }
+}
+
+/// A write under `dma`, its bytes the pattern at the serve's position: the transmit
+/// channel's BUSY at the STOP entry is what is judged here, the bytes by the partner.
+void late_write(uint8_t n, I2cSpeed s, LateRow& row) {
+    for (uint32_t i = 0; i < n; ++i) {
+        tx_buf[i] = twilink::pattern_value(twilink::pattern_counting, late_seed, static_cast<uint16_t>(late_tx_at + i));
+    }
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = n;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    late_watch.stage = LateStage::none;
+    late_watch.stop = false;
+    late_watch.tx_busy = false;
+    late_watch.on = true;
+    transfer_done = false;
+    dma_entries = 0;
+    const uint32_t limit = late_limit_us(n, s);
+    const uint32_t t0 = us_now();
+    late_start(r);
+    while (!transfer_done && us_now() - t0 < limit) {
+        late_load_turn();
+    }
+    const bool answered = transfer_done;
+    late_watch.on = false;
+    if (!answered) {
+        (void)DmaHost::recover();
+    }
+    row.reads += 1u;
+    row.unanswered += answered ? 0u : 1u;
+    row.status_wrong += answered && transfer_status == i2c_ok ? 0u : 1u;
+    row.tx_busy += late_watch.tx_busy ? 1u : 0u;
+    late_tx_at = static_cast<uint8_t>(late_tx_at + n);
+}
+
+// ---- how near, polled ----------------------------------------------------------------
+
+struct LagRow {
+    uint32_t rows = 0;
+    uint32_t lag_max = 0;      ///< the channel's BUSY down, cycles from the request let up
+    uint32_t window_min = 0xFFFF'FFFFu;   ///< STOP_DET, cycles from there
+    int32_t margin_min = 0x7FFF'FFFF;
+    uint32_t late = 0;         ///< STOP_DET first
+    uint32_t turn_max = 0;
+    uint32_t wrong = 0;
+    uint32_t stale = 0;        ///< BUSY down and the next load not the byte
+};
+
+/// A read of one with the vector's line off and the request held down until the byte
+/// stands in the FIFO, then let up: a masked poll dates BUSY's fall and STOP_DET in one
+/// tenure. A turn is three loads, the poll's resolution, printed.
+void late_lag_row(I2cSpeed s, LagRow& row) {
+    late_cells[0] = static_cast<uint8_t>(~late_rx_value(0));
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_cells));
+    r.rx_len = 1;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    const uint32_t limit = late_limit_us(1, s);
+    late_line(false);
+    transfer_done = false;
+    (void)DmaHost::start(r);
+    Raw::dma_requests(false, false);
+    const uint32_t t_wait = us_now();
+    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
+        late_load_turn();
+    }
+    uint32_t zero_at = 0;
+    uint32_t stop_at = 0;
+    uint32_t turn = 0;
+    bool zero = false;
+    bool stopped = false;
+    uint8_t first = 0;
+    {
+        InterruptGuard guard;
+        late_load_turn();
+        const uint32_t t0 = late_cycles();
+        Raw::dma_requests(false, true);
+        uint32_t last = t0;
+        for (uint32_t turns = 4000u; turns != 0u && !(zero && stopped); --turns) {
+            const bool busy = LateRxChannel::busy();
+            if (!zero && !busy) {
+                first = *static_cast<volatile uint8_t*>(late_cells);
+            }
+            const uint32_t raw = Raw::raw_pending();
+            const uint32_t now = late_cycles();
+            turn = now - last > turn ? now - last : turn;
+            last = now;
+            if (!zero && !busy) {
+                zero = true;
+                zero_at = now - t0;
+            }
+            if (!stopped && (raw & I2cInterrupt::stop_det) != 0u) {
+                stopped = true;
+                stop_at = now - t0;
+            }
+        }
+    }
+    late_line(true);
+    const uint32_t t1 = us_now();
+    while (!transfer_done && us_now() - t1 < limit) {
+        late_load_turn();
+    }
+    if (!transfer_done) {
+        (void)DmaHost::recover();
+    }
+    row.wrong += transfer_done && transfer_status == i2c_ok && late_cells[0] == late_rx_value(0) ? 0u : 1u;
+    late_rx_at = static_cast<uint8_t>(late_rx_at + 1u);
+    if (!stopped) {
+        return;
+    }
+    row.rows += 1u;
+    row.turn_max = turn > row.turn_max ? turn : row.turn_max;
+    row.window_min = stop_at < row.window_min ? stop_at : row.window_min;
+    if (zero) {
+        const uint8_t owed = static_cast<uint8_t>(late_seed + late_rx_at - 1u);
+        row.stale += first != owed ? 1u : 0u;
+        row.lag_max = zero_at > row.lag_max ? zero_at : row.lag_max;
+        const int32_t m = static_cast<int32_t>(stop_at) - static_cast<int32_t>(zero_at);
+        row.margin_min = m < row.margin_min ? m : row.margin_min;
+    }
+    row.late += !zero || zero_at > stop_at ? 1u : 0u;
+}
+
+// ---- the serve around a row ----------------------------------------------------------
+
+bool late_begin(uint16_t bytes, uint8_t seed, twilink::Params& a, uint32_t& s0) {
+    if (!need_peer()) {
+        return false;
+    }
+    a = serve_params(30'000, seed);
+    a.count = bytes;   // the serve ends at the STOP of the tenure that reaches it
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve command", false);
+        return false;
+    }
+    s0 = us_now();
+    owner = Owner::none;
+    Host::release();
+    (void)DmaHost::init(clock);
+    late_rx_at = 0;
+    late_tx_at = 0;
+    late_seed = seed;
+    owner = Owner::dma_host;
+    return true;
+}
+
+/// The host given back and the partner's tally. Its counted serve ended at the last STOP;
+/// a tally short of the count leaves it serving, and then its deadline is waited out.
+bool late_end(const twilink::Params& a, uint32_t s0, twilink::Report& r) {
+    owner = Owner::none;
+    DmaHost::release();
+    host_ready();
+    settle_ms(120);
+    if (peer_report(r)) {
+        return true;
+    }
+    outlast(a, s0);
+    return peer_report(r);
+}
+
+// ---- u ------------------------------------------------------------------------------
+
+constexpr uint8_t late_lengths[5] = {1, 8, 16, 64, 255};
+constexpr uint8_t late_write_lengths[2] = {8, 64};
+constexpr uint16_t late_reps = 30;
+constexpr uint16_t late_lag_reps = 20;
+
+struct LateCensus {
+    uint32_t reads = 0;
+    uint32_t exact = 0;
+    uint32_t late = 0;
+    uint32_t owed_max = 0;
+    uint32_t wrong_tally = 0;
+    uint32_t tx_busy = 0;
+    uint32_t load_faults = 0;
+};
+
+void late_census_row(const LateLoad& l, I2cSpeed s, LateCensus& all) {
+    uint16_t bytes = late_lag_reps;
+    for (const uint8_t n : late_lengths) {
+        bytes = static_cast<uint16_t>(bytes + late_reps * n);
+    }
+    uint16_t written = 0;
+    for (const uint8_t n : late_write_lengths) {
+        written = static_cast<uint16_t>(written + late_reps * n);
+    }
+    twilink::Params a{};
+    uint32_t s0 = 0;
+    if (!late_begin(static_cast<uint16_t>(bytes + written), static_cast<uint8_t>(0x30u + all.reads), a, s0)) {
+        all.wrong_tally += 1u;
+        return;
+    }
+    late_load_on(l);
+    LateRow by[5] = {};
+    LateRow writes{};
+    LagRow lag{};
+    late_watch.body_on_time = 0;
+    late_watch.body_late = 0;
+    for (uint16_t pass = 0; pass < late_reps; ++pass) {
+        for (uint8_t i = 0; i < 5u; ++i) {
+            late_read(0, late_lengths[i], s, LateStage::none, 0, 0, by[i]);
+        }
+        for (const uint8_t n : late_write_lengths) {
+            late_write(n, s, writes);
+        }
+    }
+    for (uint16_t i = 0; i < late_lag_reps; ++i) {
+        late_lag_row(s, lag);
+    }
+    const uint32_t blocks = late_load_blocks;
+    const uint32_t core1_turns = late_core1_turns;
+    const bool load_clean = late_load_off();
+    all.load_faults += load_clean ? 0u : 1u;
+    twilink::Report r{};
+    const bool rep = late_end(a, s0, r);
+    LateRow sum{};
+    for (const LateRow& b : by) {
+        late_row_add(sum, b);
+    }
+    const bool tally = rep && r.aux1 == static_cast<uint8_t>(bytes) && r.aux0 == static_cast<uint8_t>(written) &&
+                       r.sstatus == 0u;
+    print(serial, "    ", i2c_speed_hz(s) / 1000u, " kHz: late at the entry, reads of 1, 8, 16, 64, 255, ", late_reps, " each: ",
+          by[0].late, ", ", by[1].late, ", ", by[2].late, ", ", by[3].late, ", ", by[4].late, "; beats owed at most ", sum.owed_max,
+          ", FIFO at most ", sum.level_max, crlf);
+    print(serial, "      exact ", sum.exact, " of ", sum.reads, "; at the reply wrong ", sum.stale, " (", sum.stale_cells, " cells), running ",
+          sum.running, ", FIFO ", sum.standing, "; moved after it ", sum.moved, "; unanswered ", sum.unanswered, "; status wrong ",
+          sum.status_wrong, crlf);
+    print(serial, "      writes ", writes.reads, " status wrong ", writes.status_wrong, ", transmit channel busy at a STOP entry ",
+          sum.tx_busy + writes.tx_busy, "; partner's tally ", tally ? "exact" : "OFF", " (", r.aux1, "/", static_cast<uint8_t>(bytes),
+          ", ", r.aux0, "/", static_cast<uint8_t>(written), ", ", r.sstatus, " off); copies' blocks ", blocks, ", core 1 turns ", core1_turns,
+          crlf);
+    print(serial, "      polled, ", lag.rows, " tenures: BUSY down at most ", lag.lag_max, " cycles from the request, STOP_DET at least ",
+          lag.window_min, ", the least margin ", lag.margin_min, ", STOP_DET first in ", lag.late, ", the poll's turn at most ",
+          lag.turn_max, ", a stale cell ", lag.stale, ", wrong ", lag.wrong, "; the host's body at most ", late_watch.body_on_time,
+          " on time, ", late_watch.body_late, " late", crlf);
+    all.reads += sum.reads;
+    all.exact += sum.exact;
+    all.late += sum.late;
+    all.owed_max = sum.owed_max > all.owed_max ? sum.owed_max : all.owed_max;
+    all.wrong_tally += tally ? 0u : 1u;
+    all.tx_busy += sum.tx_busy + writes.tx_busy;
+}
+
+void tu_late_load() {
+    LateCensus all{};
+    for (const LateLoad& l : late_loads) {
+        print(serial, "  ", l.name, crlf);
+        for (const I2cSpeed s : {I2cSpeed::standard_100k, I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m}) {
+            late_census_row(l, s, all);
+        }
+    }
+    print(serial, "  in all ", all.reads, " reads, exact ", all.exact, ", late at the entry ", all.late, ", beats owed at most ",
+          all.owed_max, ", the partner's tally off in ", all.wrong_tally, " rows, a transmit channel busy at a STOP ", all.tx_busy,
+          ", a copy's bus error in ", all.load_faults, " rows", crlf);
+    // No bound to derive: each read is judged cell by cell. How often a channel was late
+    // is the load's and is printed, not judged: a rate of zero says nothing of the next load.
+    bench.verdict("EVERY READ EXACT UNDER EVERY LOAD, late or not: every cell at the reply, none written after it, nothing "
+                  "standing in the FIFO, the channel stopped",
+                  all.reads != 0u && all.exact == all.reads && all.load_faults == 0u);
+    bench.verdict("... the partner's tally agrees on every row", all.wrong_tally == 0u);
+    bench.verdict("THE TRANSMIT SIDE: no transmit channel is busy at a tenure's STOP (the last entry is the pump's, behind the "
+                  "block's end)", all.tx_busy == 0u);
+}
+
+// ---- s ------------------------------------------------------------------------------
+
+/// A channel polled to its end, the next load the cell: what says a beat is in memory.
+struct SaysRow {
+    uint32_t rows = 0;
+    uint32_t stale = 0;
+    uint32_t turns_max = 0;
+};
+
+/// `count`: TRANS_COUNT at zero, else BUSY down. A read of one, as in late_lag_row().
+void late_says_row(bool count, I2cSpeed s, SaysRow& row) {
+    late_cells[0] = static_cast<uint8_t>(~late_rx_value(0));
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_cells));
+    r.rx_len = 1;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    const uint32_t limit = late_limit_us(1, s);
+    late_line(false);
+    transfer_done = false;
+    (void)DmaHost::start(r);
+    Raw::dma_requests(false, false);
+    const uint32_t t_wait = us_now();
+    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
+    }
+    uint8_t first = 0;
+    uint32_t turns = 0;
+    {
+        InterruptGuard guard;
+        late_load_turn();
+        Raw::dma_requests(false, true);
+        if (count) {
+            while (LateRxChannel::count() != 0u && turns < 20'000u) {
+                ++turns;
+            }
+        } else {
+            while (LateRxChannel::busy() && turns < 20'000u) {
+                ++turns;
+            }
+        }
+        first = *static_cast<volatile uint8_t*>(late_cells);
+    }
+    late_line(true);
+    const uint32_t t1 = us_now();
+    while (!transfer_done && us_now() - t1 < limit) {
+    }
+    if (!transfer_done) {
+        (void)DmaHost::recover();
+    }
+    row.rows += 1u;
+    row.stale += first != late_rx_value(0) ? 1u : 0u;
+    row.turns_max = turns > row.turns_max ? turns : row.turns_max;
+    late_rx_at = static_cast<uint8_t>(late_rx_at + 1u);
+}
+
+/// A byte standing in the FIFO over a stopped channel, then the data register read in
+/// one of two orders: with IC_DMA_CR's request up, or taken down first. What is judged
+/// is the next block's start with nothing on the wire: a beat there is a request a stop
+/// left behind. A tenure of one, the vector's line off until the read is done.
+void late_stray_row(bool request_up, I2cSpeed s, uint32_t& stood, uint32_t& strays, uint32_t& credits, uint32_t& next_wrong) {
+    late_cells[0] = 0;
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_cells));
+    r.rx_len = 1;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    const uint32_t limit = late_limit_us(1, s);
+    late_line(false);
+    transfer_done = false;
+    (void)DmaHost::start(r);
+    Raw::dma_requests(false, false);
+    const uint32_t t_wait = us_now();
+    while (Raw::rx_count() == 0u && us_now() - t_wait < limit) {
+    }
+    uint8_t read = 0;
+    uint32_t banked = 0;
+    {
+        InterruptGuard guard;
+        DmaRx::stop();
+        DmaRx::arm(Raw::data_address(), Raw::dreq_rx, false, DmaReport::errors);
+        if (request_up) {
+            Raw::dma_requests(false, true);
+            late_burn(20);
+            banked = LateRxChannel::debug_credits();
+            read = Raw::pop();
+            Raw::dma_requests(false, false);
+        } else {
+            read = Raw::pop();
+        }
+    }
+    stood += read == late_rx_value(0) ? 1u : 0u;
+    credits = banked > credits ? banked : credits;
+    late_line(true);
+    const uint32_t t1 = us_now();
+    while (!transfer_done && us_now() - t1 < limit) {
+    }
+    if (!transfer_done) {
+        (void)DmaHost::recover();
+    }
+    late_rx_at = static_cast<uint8_t>(late_rx_at + 1u);
+    // The next block's start, then the request up over an empty FIFO, as launch_dma() has it.
+    static uint8_t scratch[2];
+    (void)DmaRx::start(scratch, 2u);
+    late_burn(100);
+    const bool moved_down = LateRxChannel::count() != 2u;
+    Raw::dma_requests(false, true);
+    late_burn(100);
+    const bool moved_up = LateRxChannel::count() != 2u;
+    Raw::dma_requests(false, false);
+    DmaRx::stop();
+    DmaRx::arm(Raw::data_address(), Raw::dreq_rx, false, DmaReport::errors);
+    strays += moved_down || moved_up ? 1u : 0u;
+    // And a whole read behind it.
+    LateRow behind{};
+    late_read(0, 8, s, LateStage::none, 0, 0, behind);
+    next_wrong += behind.exact == 1u ? 0u : 1u;
+}
+
+/// DO BANKED REQUESTS OUTLIVE IC_DMA_CR? A read of four with the channel paused from its
+/// start and the vector's line off: the bytes stand and the requests bank; at STOP_DET the
+/// count of them, the request down, the count again, then EN up with the request down: what
+/// moves then moved on credit alone, and it leaves the FIFO by the same reads. Then the
+/// host's body takes what stands.
+void late_credits_row(I2cSpeed s, uint32_t& before, uint32_t& after, uint32_t& moved, uint32_t& exact) {
+    for (uint32_t i = 0; i < 5u; ++i) {
+        late_cells[i] = static_cast<uint8_t>(~late_rx_value(i));
+    }
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_cells));
+    r.rx_len = 4;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    const uint32_t limit = late_limit_us(4, s);
+    late_line(false);
+    transfer_done = false;
+    const uint32_t t0 = us_now();
+    (void)DmaHost::start(r);
+    LateRxChannel::enable(false);
+    while ((Raw::raw_pending() & I2cInterrupt::stop_det) == 0u && us_now() - t0 < limit) {
+    }
+    uint32_t banked = 0;
+    uint32_t left = 0;
+    uint32_t remaining = 0;
+    {
+        InterruptGuard guard;
+        banked = LateRxChannel::debug_credits();
+        Raw::dma_requests(false, false);
+        late_burn(20);
+        left = LateRxChannel::debug_credits();
+        LateRxChannel::enable(true);
+        late_burn(100);
+        remaining = LateRxChannel::count();
+    }
+    before = banked > before ? banked : before;
+    after = left > after ? left : after;
+    moved = 4u - remaining > moved ? 4u - remaining : moved;
+    late_line(true);
+    const uint32_t t1 = us_now();
+    while (!transfer_done && us_now() - t1 < limit) {
+    }
+    if (!transfer_done) {
+        (void)DmaHost::recover();
+    }
+    bool whole = transfer_done && transfer_status == i2c_ok;
+    for (uint32_t i = 0; i < 4u; ++i) {
+        whole = whole && late_cells[i] == late_rx_value(i);
+    }
+    exact += whole ? 1u : 0u;
+    late_rx_at = static_cast<uint8_t>(late_rx_at + 4u);
+    if (Raw::rx_count() != 0u) {
+        (void)Raw::disable();
+        Raw::enable();
+    }
+}
+
+/// The shapes a stage runs: reads, a write-then-read.
+struct LateShape {
+    uint8_t tx_len;
+    uint8_t rx_len;
+};
+constexpr LateShape late_shapes[] = {{0, 1}, {0, 2}, {0, 3}, {0, 8}, {0, 16}, {0, 17}, {0, 64}, {1, 8}};
+constexpr uint8_t late_tails[] = {1, 2, 8, 16};
+
+/// Every shape under every tail, each with a read of eight and a write of eight behind it.
+void late_stage_row(LateStage stage, I2cSpeed s, uint16_t burns, uint8_t want, LateRow& row) {
+    for (const uint8_t tail : late_tails) {
+        for (const LateShape& shape : late_shapes) {
+            late_read(shape.tx_len, shape.rx_len, s, stage, tail, burns, row, want, false);
+            LateRow behind{};
+            late_read(0, 8, s, LateStage::none, 0, 0, behind);
+            row.next_wrong += behind.exact == 1u ? 0u : 1u;
+            LateRow writes{};
+            late_write(8, s, writes);
+            row.next_wrong += writes.status_wrong;
+        }
+    }
+}
+
+uint16_t late_stage_bytes() {
+    uint16_t bytes = 0;
+    for (const LateShape& shape : late_shapes) {
+        bytes = static_cast<uint16_t>(bytes + shape.tx_len + shape.rx_len + 8u + 8u);
+    }
+    return static_cast<uint16_t>(bytes * sizeof late_tails);
+}
+
+void late_row_print(const char* name, const LateRow& r) {
+    print(serial, "    ", name, ": ", r.reads, " reads: exact ", r.exact, ", status wrong ", r.status_wrong, ", unanswered ", r.unanswered,
+          "; the entry found the channel counting in ", r.late, ", at most ", r.owed_max, " beats, FIFO ", r.level_max, "; at the reply ",
+          r.stale, " wrong (", r.stale_cells, " cells), running ", r.running, ", FIFO ", r.standing, "; moved after it ", r.moved,
+          "; banked requests at the entry at most ", r.credits_max, "; the requests behind them wrong ", r.next_wrong, crlf);
+}
+
+void ts_late_stage() {
+    const I2cSpeed speeds[3] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m};
+    twilink::Params a{};
+    uint32_t s0 = 0;
+    twilink::Report r{};
+
+    // ---- what says the last beat is in memory ----
+    constexpr LateLoad copy_load{"", 2, true, LateSource::sram, false, late_block_max};
+    if (!late_begin(800, 0x41, a, s0)) {
+        return;
+    }
+    SaysRow says_busy{};
+    SaysRow says_count{};
+    for (uint16_t i = 0; i < 200u; ++i) {
+        late_says_row(false, I2cSpeed::fast_400k, says_busy);
+        late_says_row(true, I2cSpeed::fast_400k, says_count);
+    }
+    late_load_on(copy_load);
+    for (uint16_t i = 0; i < 200u; ++i) {
+        late_says_row(false, I2cSpeed::fast_400k, says_busy);
+        late_says_row(true, I2cSpeed::fast_400k, says_count);
+    }
+    (void)late_load_off();
+    bool rep = late_end(a, s0, r);
+    print(serial, "  a channel polled to its end, the next load the cell, ", says_busy.rows, " rows of each, half of them under two HIGH copies: "
+          "BUSY down stale ", says_busy.stale, " (at most ", says_busy.turns_max, " loads), TRANS_COUNT at zero stale ", says_count.stale,
+          " (at most ", says_count.turns_max, " loads); the partner's tally ", rep ? "read" : "LOST", crlf);
+    // No bound to derive: both registers' text, each row judged at its end.
+    bench.verdict("BUSY DOWN AND TRANS_COUNT AT ZERO EACH SAY THE LAST BEAT IS IN MEMORY: the next load reads the byte",
+                  says_busy.rows == 400u && says_busy.stale == 0u && says_count.rows == 400u && says_count.stale == 0u);
+
+    // ---- a request left over a stopped channel ----
+    if (!late_begin(static_cast<uint16_t>(400u * (1u + 8u)), 0x52, a, s0)) {
+        return;
+    }
+    uint32_t stood_up = 0;
+    uint32_t stray_up = 0;
+    uint32_t credit_up = 0;
+    uint32_t next_up = 0;
+    uint32_t stood_down = 0;
+    uint32_t stray_down = 0;
+    uint32_t credit_down = 0;
+    uint32_t next_down = 0;
+    for (uint16_t i = 0; i < 200u; ++i) {
+        late_stray_row(true, I2cSpeed::fast_400k, stood_up, stray_up, credit_up, next_up);
+        late_stray_row(false, I2cSpeed::fast_400k, stood_down, stray_down, credit_down, next_down);
+    }
+    rep = late_end(a, s0, r);
+    print(serial, "  IC_DATA_CMD read over a stopped channel, 200 rows of each: the request UP, the byte read in ", stood_up, ", credits banked at most ",
+          credit_up, ", a beat at the next block's start ", stray_up, ", the read behind wrong ", next_up, "; the request DOWN, the byte in ",
+          stood_down, ", a beat ", stray_down, ", the read behind wrong ", next_down, "; the partner's tally ", rep ? "read" : "LOST", crlf);
+    // No bound to derive: 200 rows a run, each stray judged at zero. A beat there is the
+    // stale credit begin() clears; the count not moving says the clear did its work.
+    bench.verdict("NO STRAY BEAT: a data register read over a stopped channel, the request up or down, leaves the next block's "
+                  "start where it was, and the read behind it exact",
+                  stray_up == 0u && stray_down == 0u && next_up == 0u && next_down == 0u && stood_up == 200u && stood_down == 200u);
+
+    // ---- banked requests against IC_DMA_CR ----
+    if (!late_begin(static_cast<uint16_t>(100u * 4u), 0x71, a, s0)) {
+        return;
+    }
+    uint32_t banked = 0;
+    uint32_t banked_after = 0;
+    uint32_t banked_moved = 0;
+    uint32_t banked_exact = 0;
+    for (uint16_t i = 0; i < 100u; ++i) {
+        late_credits_row(I2cSpeed::fast_400k, banked, banked_after, banked_moved, banked_exact);
+    }
+    rep = late_end(a, s0, r);
+    print(serial, "  a channel paused over a read of four: requests banked at STOP_DET at most ", banked, ", behind IC_DMA_CR going down at most ",
+          banked_after, ", beats behind EN up with the request down at most ", banked_moved, " of 4; the read exact in ", banked_exact,
+          " of 100; the partner's tally ", rep ? "read" : "LOST", crlf);
+    // No bound to derive: the counts are the chapter's question and are printed. The verdict
+    // is the host's order over them: every read exact in the vector whichever beats ran.
+    bench.verdict("A BANKED REQUEST SPENT OR NOT, THE ENTRY TAKES WHAT STANDS: every read of four exact", banked_exact == 100u);
+
+    // ---- a transmit block's end inside start() ----
+    // Seventeen is the length whose block (fifteen beats and the first entry) fills the FIFO,
+    // and 100 kHz the speed that leaves the first entry in it longest: dma_isr() then arms
+    // TX_EMPTY for the last entry. Unstaged, a warm start() stores its mask first; on one run
+    // of fifteen a read of 17 stalled there. The stage makes the order certain: TX_CMD_BLOCK
+    // keeps the first entry in the FIFO (set with the host idle, as its register asks) and the
+    // cache emptied ahead of start() stretches it past the block's end. The limit's margin is
+    // 20 ms, the wire's 3.8 ms being in the rest, since nothing here holds SCL but the defect
+    // itself; 100 rows of each, a read and a write. On the RP2040 a write of 17 stays on the
+    // pump and a read's block ends behind the mask's store even so; the RAM image's start()
+    // fetches nothing. So the arm's look is what this row judges on the RP2350's flash image.
+    late_limit_margin_us = 20'000u;
+    late_cold_start = true;
+    late_inside_start = 0;
+    if (!late_begin(static_cast<uint16_t>(200u * 17u), 0x7C, a, s0)) {
+        return;
+    }
+    LateRow cold_reads{};
+    LateRow cold_writes{};
+    for (uint16_t i = 0; i < 100u; ++i) {
+        late_read(0, 17, I2cSpeed::standard_100k, LateStage::none, 0, 0, cold_reads);
+        late_write(17, I2cSpeed::standard_100k, cold_writes);
+    }
+    late_cold_start = false;
+    late_limit_margin_us = 1'000'000u;
+    rep = late_end(a, s0, r);
+    print(serial, "  reads and writes of 17 at 100 kHz, TX_CMD_BLOCK and the XIP cache emptied over start(), 100 of each: a DMA line entry inside start() in ",
+          late_inside_start, " of 200; reads exact ", cold_reads.exact, ", unanswered ", cold_reads.unanswered, "; writes unanswered ",
+          cold_writes.unanswered, "; the partner's tally ", rep ? "read" : "LOST", ", ", r.sstatus, " off the pattern", crlf);
+    // No bound to derive: a tenure answered or not, over the limit's arithmetic above.
+    bench.verdict("A TRANSMIT BLOCK ENDING INSIDE start(): its arm for the last entry stands, every tenure answered",
+                  cold_reads.unanswered == 0u && cold_writes.unanswered == 0u && cold_reads.exact == 100u && rep);
+
+    // ---- the stages ----
+    struct StageRow {
+        const char* name;
+        LateStage stage;
+        uint16_t burns;
+        uint8_t want;
+    };
+    const StageRow stages[] = {
+        {"the request taken away for the tail", LateStage::away, 0, i2c_ok},
+        {"the channel paused for the tail", LateStage::paused, 0, i2c_ok},
+        {"the channel let go behind the reply", LateStage::behind, 0, i2c_ok},
+        {"the channel let go in the entry, at once", LateStage::race, 0, i2c_ok},
+        {"... 4 turns ahead of the body", LateStage::race, 4, i2c_ok},
+        {"... 16 turns", LateStage::race, 16, i2c_ok},
+        {"a byte nobody has", LateStage::steal, 0, i2c_dma_fault},
+    };
+    bool whole = true;
+    for (const StageRow& st : stages) {
+        print(serial, "  ", st.name, crlf);
+        for (const I2cSpeed s : speeds) {
+            if (!late_begin(late_stage_bytes(), 0x63, a, s0)) {
+                return;
+            }
+            LateRow row{};
+            late_watch.body_on_time = 0;
+            late_watch.body_late = 0;
+            late_stage_row(st.stage, s, st.burns, st.want, row);
+            rep = late_end(a, s0, r);
+            late_row_print(i2c_speed_hz(s) == 100'000u ? "100 kHz" : i2c_speed_hz(s) == 400'000u ? "400 kHz" : "1 MHz", row);
+            print(serial, "      the host's body at most ", late_watch.body_on_time, " cycles on time, ", late_watch.body_late,
+                  " late; the partner's tally: ", rep ? "read" : "LOST", ", served ", r.aux1, ", received ", r.aux0, ", ", r.sstatus,
+                  " off the pattern", crlf);
+            // 32 = 4 tails x 8 shapes. The stage's own miss is no failure, its read judged the
+            // same, and the one shape it can miss on is the read of one, a tenure of 18 us at
+            // 1 MHz against the thread's way out of a start() cold in the XIP cache: 4 rows of
+            // the 32. Beyond those the stage has missed its point, except a race's, whose beats
+            // may be done by the vector's first load.
+            const bool stage_hit = st.stage == LateStage::race || row.late >= 28u;
+            whole = whole && row.reads == 32u && row.exact == 32u && row.next_wrong == 0u && stage_hit && rep && r.sstatus == 0u;
+        }
+    }
+    bench.verdict("EVERY STAGE: every byte at its place in the vector or the status that says otherwise, the channel stopped, "
+                  "nothing moving after the reply, nothing left in the FIFO, the requests behind whole", whole);
+}
+
 // ---- the vector bodies ---------------------------------------------------------------
 
 [[gnu::always_inline]] inline void pair_i2c_isr() {
@@ -1872,12 +2929,28 @@ void tm_client_edges() {
                 }
             }
             break;
-        case Owner::dma_host:
-            if (DmaHost::isr()) {
+        case Owner::dma_host: {
+            const bool watched = late_watch.on;
+            uint32_t t0 = 0;
+            if (watched) {
+                late_before();
+                t0 = late_cycles();
+            }
+            const bool ended = DmaHost::isr();
+            if (watched && late_watch.stop) {
+                const uint32_t took = late_cycles() - t0;
+                if (late_watch.rx_busy) {
+                    late_watch.body_late = took > late_watch.body_late ? took : late_watch.body_late;
+                } else {
+                    late_watch.body_on_time = took > late_watch.body_on_time ? took : late_watch.body_on_time;
+                }
+            }
+            if (ended) {
                 transfer_status = DmaHost::status();
                 transfer_done = true;
             }
             break;
+        }
         case Owner::client: client_serve(Client::service()); break;
         default:
             Raw::interrupts_only(0);

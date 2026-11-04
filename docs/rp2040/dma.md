@@ -282,8 +282,9 @@ family has a forced instance or an unavoidable group.
   a span or a pointer and a count; `complete()` (the beats the block
   carried), `busy()` (claimed or running), `in_flight()`,
   `progress()`. Receive: `start(run)`, `start_discard(cell, n)`,
-  `idle()`, `take()` (beats arrived since the last take, from
-  TRANS_COUNT), `full`, `capacity`, `taken`. Both: `service()` (this
+  `idle()`, `take()` (beats arrived since the last take, from TRANS_COUNT), `full`,
+`capacity`, `taken`, `settle(run)` (a run ended now, by E13's abort: the beats in
+memory, from WRITE_ADDR on an incrementing run). Both: `service()` (this
   channel's status on its line, cleared and handed back as
   `flag_complete` / `flag_error`; no half event on this controller),
   `abandon()`, `faults()`, `stop()`. A receive engine clears the

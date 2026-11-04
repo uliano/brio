@@ -199,6 +199,7 @@
 #include <stdint.h>
 
 #include <atomic>
+#include <optional>
 #include <span>
 
 #include "rp2350/device.hpp"
@@ -1367,6 +1368,28 @@ public:
     }
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
+
+    /// The run in progress ended now, however far it got, for a transport whose
+    /// peripheral has said the data is over: the abort with E5's preparation and its
+    /// poll of ABORT (at most 100 000, Dma::abort(); 12.6.8.3: the transfers in flight
+    /// "cannot be revoked", and BUSY stays up until they land), the channel bound again and
+    /// its request credits left for the next start to clear. The beats in memory at `run`,
+    /// where the run started: WRITE_ADDR's own count, since CHAN_ABORT "clears the transfer
+    /// counter" and that counter falls only as a write completes. A run thrown away
+    /// (start_discard(): `run` null, the address fixed) answers 0. Empty when BUSY did not
+    /// fall. From main or from a handler; it masks nothing.
+    template <typename T>
+    [[gnu::noinline, gnu::cold]] static std::optional<uint32_t> settle(const T* run) {
+        const bool settled = Channel::abort();
+        const uint32_t next = Channel::write_addr();
+        capacity_ = 0;
+        taken_ = 0;
+        bind();
+        if (!settled) {
+            return std::nullopt;
+        }
+        return run != nullptr ? (next - dma_address(run)) / sizeof(T) : 0u;
+    }
 
     static void stop() {
         Binding::release();

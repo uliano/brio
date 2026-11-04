@@ -76,6 +76,7 @@
 
 #pragma once
 
+#include <optional>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -525,6 +526,14 @@ struct SimDwApbI2cEngine {
     static inline bool fixed = false;       ///< the last block poured one cell
     static inline bool discarded = false;   ///< the last block was thrown away
     static inline bool running = false;
+    /// A run still counting at the STOP: what idle() answers until settle(), which
+    /// answers `late_landed`, or nothing with `late_stuck` (a channel that would not stop).
+    static inline bool late = false;
+    static inline uint32_t late_landed = 0;
+    static inline bool late_stuck = false;
+    static inline uint32_t settled = 0;
+    /// Run inside a block's start, as a DMA line's entry can (a test's stage).
+    static inline void (*on_begin)() = nullptr;
 
     static uint8_t service() {
         const uint8_t f = next_flags;
@@ -565,6 +574,17 @@ struct SimDwApbI2cEngine {
         return length;
     }
     static bool busy() { return running; }
+    static bool idle() { return !late; }
+    static std::optional<uint32_t> settle(const uint8_t* run) {
+        (void)run;
+        settled = settled + 1u;
+        late = false;
+        running = false;
+        if (late_stuck) {
+            return std::nullopt;
+        }
+        return late_landed;
+    }
     static bool abandon() {
         running = false;
         faults = faults + 1u;
@@ -574,6 +594,11 @@ struct SimDwApbI2cEngine {
 
     static void reset() {
         next_flags = 0;
+        late = false;
+        late_landed = 0;
+        late_stuck = false;
+        settled = 0;
+        on_begin = nullptr;
         armed = 0;
         errors_only = false;
         high = false;
@@ -598,6 +623,9 @@ private:
         length = len;
         running = true;
         blocks = blocks + 1u;
+        if (on_begin != nullptr) {
+            on_begin();
+        }
         return true;
     }
 };

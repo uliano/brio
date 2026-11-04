@@ -988,9 +988,12 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  * start(), nothing on the wire. On a host with engines a wrong choice costs
  * core cycles, never correctness; the family's document gives the length
  * from which `dma` costs the core less at each speed. The receive engine is armed to
- * report a bus error alone (the family's Report::errors): its block ends
- * with the last byte, before that byte's NACK and the STOP, and the
- * tenure ends on the STOP like every other - two interrupts an engined
+ * report a bus error alone (the family's Report::errors), and the tenure
+ * ends on the STOP like every other. The STOP entry reads whether the
+ * channel has finished, one load; a channel still counting is stopped there
+ * and what it had not moved taken from the FIFO, so the requester has every
+ * byte or i2c_dma_fault and nothing moves after the reply
+ * (settle_late_read()). Two interrupts an engined
  * read of three bytes or more, the transmit block's end and the STOP; one
  * or two host entries (the STOP, and TX_EMPTY when the commands did not
  * fit) for a shorter one; a write on the transmit engine the same two,
@@ -1265,6 +1268,19 @@ private:
             tx_armed_ = true;
         }
         S::interrupts_only(mask);
+        // THE DMA LINE CAN RUN INSIDE THE FILL. A transmit block short enough to end before
+        // the store above (a read or a write of seventeen is fifteen beats) finds the FIFO
+        // full if the peripheral has not taken the first entry yet, the first thing at 100 kHz,
+        // and dma_isr() arms TX_EMPTY for the last entry; the store then takes that back and
+        // nothing ever writes the entry that carries the STOP, the peripheral holding SCL
+        // until the bus timeout. So the arm is looked at after the store: dma_isr() cannot
+        // lose it from then on, its own set being one atomic write. Seen and staged on the
+        // RP2350 (test_rp2350_i2c's letter s), TX_CMD_BLOCK holding the first entry.
+        if constexpr (has_engines) {
+            if ((mask & I2cInterrupt::tx_empty) == 0u && tx_armed_) {
+                S::interrupts(I2cInterrupt::tx_empty, true);
+            }
+        }
         return false;
     }
 
@@ -1302,9 +1318,10 @@ private:
                 // reach here: the last entry's when the transmit engine
                 // poured the middle block, every command's after the
                 // first when it did not (a read of one or two bytes). The
-                // receive engine reports errors alone (armed quiet): its run ends
-                // with the last byte, a bit and a STOP before STOP_DET, so
-                // the STOP is the tenure's end here too.
+                // receive engine reports errors alone (armed quiet), so the STOP
+                // is the tenure's end here too. STOP_DET says the WIRE is over,
+                // and the channel may be up to the FIFO's depth behind it: the
+                // entry asks the channel (settle_late_read()).
                 if ((up & I2cInterrupt::tx_empty) != 0u) {
                     // THE MASK BEFORE THE PUSH. TX_EMPTY is a level the FIFO holds: an entry pushed
                     // into an empty FIFO takes it down, and the block, waiting with SCL held, takes
@@ -1330,8 +1347,16 @@ private:
                         S::dma_requests(false, false);
                         dma_active_ = false;
                         poured_ = false;
-                        received_ = read_len();
-                        return finish(i2c_ok);
+                        // One load: CTRL.BUSY falls when the last transfer of the
+                        // sequence completes, its write in memory. A pure write has
+                        // no run on this channel and reads idle. A beat that lands
+                        // after the request went down reads as counting, and the
+                        // cold path takes it as it stands.
+                        if (RxEngine::idle()) {
+                            received_ = read_len();
+                            return finish(i2c_ok);
+                        }
+                        return finish(settle_late_read());
                     }
                 }
                 return false;
@@ -1712,6 +1737,42 @@ private:
         }
     }
 
+    /// THE RECEIVE CHANNEL STILL COUNTING AT ITS TENURE'S STOP. SCL holds only with
+    /// the receive FIFO full, so the wire can finish with the channel up to the FIFO's
+    /// depth behind it, which a load of DMA channels above it can make it (the family's
+    /// page has the rates); the requester is about to own the buffer. So nothing may
+    /// move after this returns, and the bytes still in the FIFO go by hand. The requests
+    /// are already down. A pulse banked before that still spends itself on a read
+    /// ("the counter decrements when the transfer is issued", RP2350 12.6.4.2, RP2040
+    /// 2.5.3.2), so the channel is stopped by the family's own abort before the core
+    /// touches the FIFO ("the user must not access a FIFO currently being serviced by
+    /// the DMA", the same sections). Bytes that landed plus the FIFO's level must be the
+    /// whole read; a byte nobody has is i2c_dma_fault, never i2c_ok, and that status
+    /// costs the next tenure the disable that flushes what may stand. No wait here but
+    /// the abort's own, bounded inside the engine. A read whose run is thrown away
+    /// (a null buffer) keeps no count and owes no byte. Out of line and cold: the
+    /// on-time path carries a load and a branch, a late one the listing's figures on the
+    /// family's page.
+    [[gnu::noinline, gnu::cold]] static uint8_t settle_late_read() {
+        if constexpr (has_engines) {
+            const uint8_t* const run = req_.rx.get();
+            const std::optional<uint32_t> landed = RxEngine::settle(run);
+            if (!landed) {
+                addressed_ = false;
+                return i2c_dma_fault;
+            }
+            received_ = static_cast<uint8_t>(*landed);
+            take();
+            if (run == nullptr || received_ >= read_len()) {
+                return i2c_ok;
+            }
+            addressed_ = false;
+            return i2c_dma_fault;
+        } else {
+            return i2c_ok;
+        }
+    }
+
     /// The read half onto the engines, with its first entry in the FIFO.
     /// True when the transmit engine took the middle block (dma_isr()
     /// writes the last entry), false when the pump writes the commands
@@ -1773,11 +1834,15 @@ private:
     /// The transmit engine reports its blocks (the STOP entry waits on
     /// one); the receive engine reports a bus error alone - the STOP
     /// ends its tenure. BOTH AT THE FAMILY'S NORMAL LEVEL, the rule's for
+    /// ends its tenure. BOTH AT THE FAMILY'S NORMAL LEVEL, the rule's for
     /// a peripheral that waits (docs/design/dma.md): a starved command
     /// channel leaves the transmit FIFO empty and the block holds SCL, and
     /// a starved receive channel leaves the receive FIFO full and the
     /// block holds SCL again (RX_FIFO_FULL_HLD_CTRL, I2cConfig's default,
-    /// pinned at the end of this file) - the bus slows, nothing is lost.
+    /// pinned at the end of this file) - the bus slows and the FIFO never
+    /// overruns. The tail is the STOP's: a channel starved there finds the
+    /// wire over with bytes still standing, and the entry settles them
+    /// (settle_late_read()).
     static void arm_engines() {
         if constexpr (has_engines) {
             TxEngine::arm(S::command_address(), S::dreq_tx, false);

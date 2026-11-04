@@ -59,6 +59,12 @@
 //   l  THE ROLES INVERT: this board's client written to and read from by
 //      the peer's host, and a general call commanded of that host refused
 //      there, nothing reaching this client
+//   u  A READ'S CHANNEL BEHIND THE STOP, under load: reads of 1 to 255 at the three
+//      speeds under HIGH_PRIORITY byte copies in SRAM, across the bridge and out of
+//      the uncached flash, core 1 too; the channel's state in the vector's first
+//      loads, every cell at the reply and a millisecond later, the lag polled
+//   s  THE SAME STAGED: the entry made to find the channel counting, a byte nobody
+//      has, and a request left over a stopped channel
 //   x  (outside z) the hand-made window traced: what the block reports of
 //      a START and a STOP it did not make, and a tenure written inside it
 //
@@ -79,6 +85,7 @@
 #include "rp2040/dma.hpp"
 #include "rp2040/flash.hpp"
 #include "rp2040/i2c.hpp"
+#include "rp2040/multicore.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
 #include "rp2040/platform.hpp"
@@ -120,13 +127,35 @@ constexpr I2cPins link_pins{.scl = 3, .sda = 2};
 using Host = I2cHost<1, link_pins>;
 using DmaTx = DmaTxEngine<4, uint16_t>;
 using DmaRx = DmaRxEngine<5>;
-using DmaHost = I2cHost<1, link_pins, DmaTx, DmaRx>;
+// The suite's RAM image (test_rp2040_i2c_ram.cpp) places the engined host and the two vectors in
+// SRAM, the one way a vector comes before a copy of the flash lets it: letter u's question.
+#if defined(I2C_SUITE_IN_RAM)
+using DmaHot = InRam;
+#define I2C_SUITE_VECTOR [[gnu::section(".fast_text"), gnu::flatten]]
+#else
+using DmaHot = InFlash;
+#define I2C_SUITE_VECTOR
+#endif
+using DmaHost = I2cHost<1, link_pins, DmaTx, DmaRx, DmaHot>;
 using Client = I2cClient<1, link_pins>;
 using Raw = DwApbI2c<1>;
 using SdaPin = Pin<2>;
 using SclPin = Pin<3>;
 constexpr uint8_t partner_kind = twilink::peer_rp2350;
 constexpr const char* partner_text = "the WeAct RP2350B";
+
+/// Letters u and s: clk_sys cycles, SysTick's position composed with the tick count.
+uint32_t late_cycles() { return Ticker::cycles(); }
+void late_line(bool on) {
+    if (on) {
+        Nvic::enable(Raw::irq());
+    } else {
+        Nvic::disable(Raw::irq());
+    }
+}
+const uint8_t* late_flash(uint8_t i) {
+    return reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(xip_nocache_noalloc_base + 0x8000u * i));
+}
 
 // THE TWO-BOARD LETTERS, over the names above.
 #include "rp_i2c_pair.hpp"
@@ -228,8 +257,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
-extern "C" void isr_i2c1() { pair_i2c_isr(); }
-extern "C" void isr_dma_0() { pair_dma_isr(); }
+extern "C" I2C_SUITE_VECTOR void isr_i2c1() { pair_i2c_isr(); }
+extern "C" I2C_SUITE_VECTOR void isr_dma_0() { pair_dma_isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -252,6 +281,8 @@ int main() {
     bench.letter('k', "arbitration on the wire", tk_arbitration);
     bench.letter('l', "the roles invert: this board as the peer's client", tl_roles);
     bench.letter('m', "the client's edges: the overrun, the disable inside a tenure", tm_client_edges);
+    bench.letter('u', "a read's channel behind the STOP, under load", tu_late_load);
+    bench.letter('s', "a read's channel behind the STOP, staged", ts_late_stage);
     bench.letter('x', "the hand-made window, traced (outside z)", tx_window, false);
 
     if (serial_ok) {

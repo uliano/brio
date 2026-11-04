@@ -109,7 +109,9 @@ value `bus_engine_status + 4`, when a DMA channel reports a transfer
 error in the middle of a tenure or, on the CH32V00x, the CH32X035 and the
 CH32V203/V303, when BTF finds the transmit channel's count standing, or, on the STM32G0,
 when the STOPF entry finds the receive channel's count standing over a byte
-nobody has. The host then ends the tenure and
+nobody has, or, on the DesignWare peripheral, when the STOP's entry finds the
+receive channel still counting and what it moved with what stands in the FIFO
+short of the read. The host then ends the tenure and
 releases the bus (a STOP, or on the DesignWare peripheral an abort, which
 sends one). `util/i2c_bus.hpp` does not declare it: each stratum whose
 host has engine parameters defines it, with the same value, and the STM32F4's
@@ -739,8 +741,10 @@ The write half stays on the pump, a byte beat landing in the command register
 replicated across the word, its copy in bit 8 a read command (RP2040 2.1.4).
 The pump reads at half the FIFO and refills at half: a read of eight bytes or
 less and a write of sixteen or less take one interrupt, and a longer one one per
-eight. A tenure that completes ends on its
-own STOP_DET and a failure on TX_ABRT. The disable / IC_TAR / enable cycle is
+eight. A tenure that completes ends on its own STOP_DET and a failure on TX_ABRT, and a
+read's STOP entry reads the receive channel's BUSY, stopping a channel still
+counting and taking what stands in the FIFO by hand ([the DesignWare I2C
+page](../dw_apb_i2c/README.md)). The disable / IC_TAR / enable cycle is
 skipped while the address and the speed stand and the last tenure ended on
 its STOP, which takes the peripheral's bus-timed disable (the whole cycle 1.4
 to 1.6 us at 400 kHz, 7.6 to 12 at 100) out of the dispatch. `unstick()`

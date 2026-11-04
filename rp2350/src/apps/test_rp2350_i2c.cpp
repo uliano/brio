@@ -86,6 +86,12 @@
 //      direction
 //   v  a bus error on the channel, a run that leaves the map; the control, the
 //      next write from RAM
+//   u  A READ'S CHANNEL BEHIND THE STOP, under load: reads of 1 to 255 at the three
+//      speeds under HIGH_PRIORITY byte copies in SRAM, across the bridge and out of
+//      the uncached flash, core 1 too; the channel's state in the vector's first
+//      loads, every cell at the reply and a millisecond later, the lag polled
+//   s  THE SAME STAGED: the entry made to find the channel counting, a byte nobody
+//      has, and a request left over a stopped channel
 //   x  (outside z) the hand-made window traced: what the block reports of
 //      a START and a STOP it did not make, and a tenure written inside it
 //
@@ -147,7 +153,16 @@ constexpr I2cPins link_pins{.scl = 37, .sda = 36};
 using Host = I2cHost<0, link_pins>;
 using DmaTx = DmaTxEngine<4, uint16_t>;
 using DmaRx = DmaRxEngine<5>;
-using DmaHost = I2cHost<0, link_pins, DmaTx, DmaRx>;
+// The suite's RAM image (test_rp2350_i2c_ram.cpp) places the engined host and the two vectors in
+// SRAM, the one way a vector comes before a copy of the flash lets it: letter u's question.
+#if defined(I2C_SUITE_IN_RAM)
+using DmaHot = InRam;
+#define I2C_SUITE_VECTOR [[gnu::section(".fast_text"), gnu::flatten]]
+#else
+using DmaHot = InFlash;
+#define I2C_SUITE_VECTOR
+#endif
+using DmaHost = I2cHost<0, link_pins, DmaTx, DmaRx, DmaHot>;
 using Client = I2cClient<0, link_pins>;
 using Raw = DwApbI2c<0>;
 using SdaPin = Pin<36>;
@@ -158,6 +173,18 @@ constexpr const char* partner_text = "the WeAct RP2040";
 uint32_t us_now() { return Ruler::now_low(); }
 /// Every line of the XIP cache dropped: letter g's cold read.
 void xip_empty() { Xip::invalidate_all(); }
+/// Letters u and s: clk_sys cycles on the second system timer (main() sets its source).
+uint32_t late_cycles() { return Timer<1>::now_low(); }
+void late_line(bool on) {
+    if (on) {
+        Irq::enable(Raw::irq());
+    } else {
+        Irq::disable(Raw::irq());
+    }
+}
+const uint8_t* late_flash(uint8_t i) {
+    return reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(xip_nocache_base + 0x8000u * i));
+}
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
 // THE TWO-BOARD LETTERS, over the names above.
@@ -680,12 +707,14 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
-extern "C" void isr_i2c0() { pair_i2c_isr(); }
-extern "C" void isr_dma_0() { pair_dma_isr(); }
+extern "C" I2C_SUITE_VECTOR void isr_i2c0() { pair_i2c_isr(); }
+extern "C" I2C_SUITE_VECTOR void isr_dma_0() { pair_dma_isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool timer_ok = brio::Timer<0>::init(clock);
+    (void)brio::Timer<1>::init(clock);
+    brio::Timer<1>::source(brio::TimerSource::sysclk);   // letters u and s's fine ruler
     // The unstick's half-bits are paced by the platform timer
     // (rp2350/delay.hpp), which the Hazard3 half's ticker starts and the
     // Cortex-M33 half's does not. Starting it here is idempotent and
@@ -717,6 +746,8 @@ int main() {
     bench.letter('n', "a pure write on the channel: a NACK in mid-write", guarded<bench, clock, tn_write_nack>);
     bench.letter('o', "a pure write on the channel: a lost arbitration", guarded<bench, clock, to_write_arbitration>);
     bench.letter('v', "a pure write on the channel: a bus error", guarded<bench, clock, tv_write_fault>);
+    bench.letter('u', "a read's channel behind the STOP, under load", guarded<bench, clock, tu_late_load>);
+    bench.letter('s', "a read's channel behind the STOP, staged", guarded<bench, clock, ts_late_stage>);
     bench.letter('x', "the hand-made window, traced (outside z)", guarded<bench, clock, tx_window>, false);
 
     if (serial_ok) {

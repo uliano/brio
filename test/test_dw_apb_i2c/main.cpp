@@ -488,6 +488,114 @@ TEST_CASE("recover puts the engine back where a start is legal; release puts it 
     CHECK_FALSE(Block::released());
 }
 
+TEST_CASE("a transmit block that ends inside start() keeps the arm its end made for the last entry") {
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+
+    uint8_t in[17]{};
+    Streamed::Request r{};
+    r.addr = 0x48;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 17;
+    r.engine = I2cEngine::dma;
+    // The block's end on the DMA line, with the FIFO full, in the middle of the fill.
+    TxEngine::on_begin = [] {
+        peer_regs().IC_TXFLR = 16;
+        TxEngine::next_flags = TxEngine::flag_complete;
+        (void)Streamed::dma_isr();
+    };
+    REQUIRE_FALSE(Streamed::start(r));
+    TxEngine::on_begin = nullptr;
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) != 0u);
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::stop_det) != 0u);
+
+    // TX_EMPTY brings the last entry.
+    peer_regs().IC_TXFLR = 0;
+    peer_regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Streamed::isr());
+    CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::tx_empty) == 0u);
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Streamed::isr());
+    Streamed::release();
+}
+
+TEST_CASE("a receive channel still counting at the STOP: settled, the FIFO taken by hand, or a status") {
+    // The channel's own states and the bytes are the bench's to judge
+    // (test_rp2350_i2c, test_rp2040_i2c letters u and s); here the engine's two
+    // answers stage them, and what is judged is what the entry does with them.
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock));
+
+    uint8_t in[8]{};
+    const auto late_read = [&in] {
+        Streamed::Request r{};
+        r.addr = 0x48;
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+        r.rx_len = 8;
+        r.engine = I2cEngine::dma;
+        REQUIRE_FALSE(Streamed::start(r));
+        TxEngine::next_flags = TxEngine::flag_complete;
+        CHECK_FALSE(Streamed::dma_isr());
+    };
+    const auto stop = [] {
+        peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+        return Streamed::isr();
+    };
+
+    // On time: the one load says idle, nothing is settled, and the FIFO is not read.
+    late_read();
+    peer_regs().IC_RXFLR = 3;
+    CHECK(stop());
+    CHECK(Streamed::status() == i2c_ok);
+    CHECK(RxEngine::settled == 0u);
+    CHECK(peer_regs().IC_RXFLR == 3u);
+    peer_regs().IC_RXFLR = 0;
+
+    // Late, five landed and three standing: the requests down, the channel settled,
+    // i2c_ok; the block's next tenure needs no disable, its FIFOs are empty.
+    late_read();
+    peer_regs().IC_DATA_CMD = 0xA5u;
+    peer_regs().IC_RXFLR = 3;
+    RxEngine::late = true;
+    RxEngine::late_landed = 5;
+    CHECK(stop());
+    CHECK(Streamed::status() == i2c_ok);
+    CHECK(RxEngine::settled == 1u);
+    CHECK(peer_regs().IC_DMA_CR == 0u);
+    CHECK(Streamed::idle());
+    CHECK(in[5] == 0xA5u);
+    CHECK(in[6] == 0xA5u);
+    CHECK(in[7] == 0xA5u);
+    CHECK(in[4] == 0u);
+
+    // Late and a byte short: i2c_dma_fault, never i2c_ok.
+    late_read();
+    peer_regs().IC_RXFLR = 2;
+    RxEngine::late = true;
+    RxEngine::late_landed = 5;
+    CHECK(stop());
+    CHECK(Streamed::status() == i2c_dma_fault);
+    CHECK(RxEngine::settled == 2u);
+
+    // A channel that would not stop says so too.
+    late_read();
+    peer_regs().IC_RXFLR = 0;
+    RxEngine::late = true;
+    RxEngine::late_stuck = true;
+    CHECK(stop());
+    CHECK(Streamed::status() == i2c_dma_fault);
+    RxEngine::late_stuck = false;
+
+    Streamed::release();
+}
+
 TEST_CASE("under dma the engines take the middle of a read phase, the pump its two ends") {
     fresh();
     TxEngine::reset();
@@ -523,7 +631,7 @@ TEST_CASE("under dma the engines take the middle of a read phase, the pump its t
     CHECK(RxEngine::errors_only);
     CHECK_FALSE(TxEngine::errors_only);
     // Both at the normal level (docs/design/dma.md): the block holds SCL
-    // behind a starved channel in either direction, nothing is lost.
+    // behind a starved channel in either direction, and the FIFO never overruns.
     CHECK_FALSE(RxEngine::high);
     CHECK_FALSE(TxEngine::high);
     CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));

@@ -277,8 +277,9 @@ choice in it answers an item of the controller's own offer:
   SPI host's receive engines arm HIGH, which is what keeps their rings,
   and an engine armed by hand beside two HIGH channels that must not
   lose takes HIGH too; the I2C host arms its receive engine at normal on
-  purpose, because a starved channel there leaves the receive FIFO full,
-  the block holds SCL, and the bus slows with nothing lost.
+  purpose, because a starved channel there leaves the receive FIFO full and the block holds
+SCL, and the STOP's entry settles what a channel starved over the tail still owes
+([i2c.md](i2c.md)).
 
 **The run-time `claim()`.** A transport may start blocks on its transmit engine from
 two contexts - its thread and its completion on the line - and "is this channel free
@@ -433,8 +434,9 @@ family has a forced instance or an unavoidable group.
   the run-time test-and-set: `claim()`, `unclaim()`, `launch` / `launch_fixed`;
   `service()` (this channel's status on its line, cleared and handed back
   as `flag_complete` / `flag_error`; no half event on this controller),
-  `complete()`, `busy()` / `idle()`, `take()` (beats, from TRANS_COUNT,
-  with the mode masked off), `full`, `capacity`, `abandon()`,
+  `complete()`, `busy()` / `idle()`, `take()` (beats, from TRANS_COUNT, with the
+mode masked off), `full`, `capacity`, `settle(run)` (a run ended now, by the abort:
+the beats in memory, from WRITE_ADDR), `abandon()`,
   `faults()`, `stop()`, and `Report` - `DmaReport` by a name a template
   reaches through the engine type. A receive engine clears the channel's
   request credits before every run.
@@ -765,7 +767,10 @@ Implemented but not bench-verified, each with what would measure it:
   served in full beside three HIGH ones. What differs in letter p is the
   ring's source, a peripheral read across the APB bridge, and byte beats
   in the copies; the same count with the paced channel reading an APB
-  register beside byte copies would split the two.
+  register beside byte copies would split the two. `test_rp2350_i2c` letter u
+adds a figure: an I2C receive channel at normal, reading across the same bridge,
+waits about a block of the copies, 50 000 cycles beside two HIGH byte copies of
+16 KB and 2500 beside blocks of 1 KB, and not at all beside one.
 - An engine on line 1 served by core 1, and the two spare lines used as
   the convention above allows: the multicore chapter, with a transport
   on the second core - the routing is the same verb.
