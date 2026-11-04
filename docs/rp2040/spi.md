@@ -615,8 +615,8 @@ InRam, against 814 and 827 warm**; the 41 are the caller's (the ruler's reads, t
   with the host in the flash; the tenth read 1379 with two misses. The
   engined block cold (letter d after letter c, 16 frames at 31.25 MHz,
   warm 1416) splits the same way: 28436 to 28712 cycles from the flash, 17904 with
-the host InRam, 17116 with the vectors placed, 10640 with both - the host's code some 14700 of the difference, the vectors' some
-  10800, the caller's the rest. THE SRAM IT COSTS under InRam: `start()`
+the host InRam, 17116 with the vectors placed, 10640 with both - the host's code some 10500 of the difference, the vectors' some
+  11300, the caller's the rest. THE SRAM IT COSTS under InRam: `start()`
   824 bytes without engines and 1572 with them, the engines' launch folded
   in, the DMA line's body 684. Every call across the boundary goes through
   a veneer (a push, a literal load, a move into ip, a pop, a `bx`): the
