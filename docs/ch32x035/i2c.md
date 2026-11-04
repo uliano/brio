@@ -104,14 +104,14 @@ What decides correctness even there:
   tenure's STOP, then a bound of 100 us for BUSY, both timed on the STK (the
   core's system counter, RM 7.5.5, which the ticker runs). Each ends a few
   microseconds past its name, later if a handler holds the core; before the ticker
-  runs each is a count of polls, 30 ms and 612 us ("The two bounds of `start()`",
+  runs each is a count of polls, 30 ms and 1 ms ("The two bounds of `start()`",
   below). And on the pump (the event vector moving a request's data) a read of
   three bytes or more waits inside the event vector for its last byte, a bound of
   100 000 polls no correct program spends, then reports `i2c_ok` whatever DATAR
   holds ("Not covered yet").
-- No brio program has a bus with a second controller. On one, `start()`'s reset can
-  land in that controller's tenure and end it in a bus error ("A request into another
-  controller's tenure", below).
+- No brio program has a bus with a second controller. On one, a request into that
+  controller's tenure under a clock of 50 or 20 kHz mostly waits for the per-bus timeout
+  ("A request into another controller's tenure", below).
 
 ## Documents of record
 
@@ -229,7 +229,7 @@ data half is the written or the read part of a tenure:
 | START cleared by the user code, a requested start withdrawn (15.9.1) | declined | behind a refused last byte the controller generates the repeated START all the same and the withdrawal races it (lost on the CH32V006 and the CH32V203); the refusal is closed from the Sr's SB with a void write (the address with the write bit and STOP behind it) instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.9.1) | yes | the chapter's procedures by count |
 | DMAEN with LAST (15.9.2), channels 6 and 7 (figure 9-1) | yes, when the request names `I2cEngine::dma` | every data half at any length (below the table) |
-| SWRST (15.9.1) | yes | `recover()`, and `start()` for a BUSY standing over an idle wire, the chapter's own case, on one read of both lines that also passes in a live tenure ("A request into another controller's tenure") |
+| SWRST (15.9.1) | yes | `recover()`, and `start()` for a BUSY standing over an idle wire, the chapter's own case and its condition, "the pins of the I2C bus are released and the bus is idle": BUSY up through the whole of `bus_free_us` and no read finding a line low ("A request into another controller's tenure") |
 | PEC (15.8), 10-bit addresses as a host (15.3), ENARP | declined | no Request shape asks for them ("Not covered yet") |
 | the USB pads' pull modes (8.3.2.4) | declined | they do not act under the alternate function (measured) |
 
@@ -279,12 +279,12 @@ write-then-read's repeated START.
   with no engines bound (`has_dma` false). An address-phase entry of the event
   vector that finds ADD10, SB or BTF where it waits for ADDR ends the tenure
   `i2c_bus_error` instead of re-entering for ever. `start()` waits, bounded,
-  for the last tenure's STOP to leave CTLR1 (5 ms; a clock held past it parks
-  the tenure, no START and no vector, until the per-bus timeout answers) and
-  for BUSY (100 us), then - BUSY still up and one read finding both lines high -
-  takes SWRST and counts it (`unwedges()`). With no per-bus timeout nothing answers
-  a parked tenure, nor a START held under a foreign tenure (read from the code: no
-  letter here stages either without one).
+  for the last tenure's STOP to leave CTLR1 (5 ms; a clock held past it is answered
+  there, `start()` true with `i2c_timeout` in `status()`, nothing written, with or
+  without a per-bus timeout) and for BUSY (100 us), then - BUSY up for all of it and no
+  read finding a line low - takes SWRST and counts it (`unwedges()`). With no per-bus
+  timeout nothing answers a START held under a foreign tenure (read from the code: no
+  letter here stages it without one).
 
   `unstick()` clocks a stuck client free by hand - a line pulled low as a
   push-pull output over a clear bit and released as a floating input, never
@@ -478,8 +478,9 @@ tenure): `z` is 59 and 61 verdicts, green.
 - **A BUSY left standing over an idle wire** (letter u): a START made by
   hand, SDA let go while SCL was held low, then SCL - no STOP condition
   ever on the wire - left BUSY up with both lines high; `start()`'s
-  100 us wait ran out, `unwedge_busy()` took SWRST (`unwedges()` one
-  more) and the tenure behind it completed `i2c_ok`, BUSY down after. A
+  100 us wait ran out with no read finding a line low, it took SWRST
+  (`unwedges()` one more) and the tenure behind it completed `i2c_ok` at 100
+  and at 400 kHz, BUSY down after. A
   STOP made with the peripheral's gate closed leaves nothing: BUSY read 0 at
   the reopening - the flag follows the wire. No hand on the wire, the case is a
   client holding the clock past the per-bus timeout (`recover()`'s SWRST under the
@@ -558,7 +559,7 @@ target, each measured from the far end:
 
 ### The two bounds of `start()` against their names (`test_x035_i2c` letter t)
 
-Fifteen runs, all green. The time is the ticker's cycle count around the call, 20.8
+Eighteen runs, all green. The time is the ticker's cycle count around the call, 20.8
 ns a count, a read of it some 60 cycles inside each figure, so a figure reads high by
 that and never low. Each verdict takes the name as its floor and, as its ceiling, the
 name plus the free bus's own figure, one poll, a tick's entry and the ruler. A floor on
@@ -567,10 +568,10 @@ from being short is the sum read below.
 
 | wait | named | measured at 48 MHz | how it was staged |
 |---|---|---|---|
-| free bus | 0 | 336 to 344 cycles, 7 us | nothing standing: the two first looks |
-| `bus_free_us` | 100 us | 5272 to 5316 cycles, 110 or 111 us | SCL held low from this board's pad |
-| `bus_free_us` with the reset | 100 us | 5476 to 5532 cycles, 114 or 115 us | BUSY over an idle wire |
-| `stop_drain_us` | 5 ms | 240 332 to 240 384 cycles, 5007 or 5008 us | a client holding SCL 45 ms behind a write of two, both speeds; parked, no START, no vector entered |
+| free bus | 0 | 304 to 320 cycles, 7 us | nothing standing: the two first looks |
+| `bus_free_us` | 100 us | 5276 to 5344 cycles, 109 to 111 us | SCL held low from this board's pad |
+| `bus_free_us` with the reset | 100 us | 5468 to 5544 cycles, 113 to 115 us | BUSY over an idle wire |
+| `stop_drain_us` | 5 ms | 240 332 to 240 392 cycles, 5007 or 5008 us | a client holding SCL 45 ms behind a write of two, both speeds; `start()` true with `i2c_timeout`, no START, no vector entered |
 
 The wait reads what the STK's low half moved (RM 7.5.5), each poll adding the
 difference with one period folded in where the counter restarts from zero, so a bound
@@ -582,47 +583,84 @@ counter read and no call; the poll is out of line and cold.
 **Before the ticker runs** nothing moves the counter, so the wait also spends a
 budget, the time asked at eight cycles a poll, which a running counter always beats.
 With STE cleared by hand, timed on TIM2 at 1 us a count: `bus_free_us` ends after its
-600 polls in 612 or 613 us and `stop_drain_us` after 30 000 polls in 30.0 ms, a poll
+600 polls in 962 or 963 us with SCL low and 1016 or 1017 us over an idle wire, a poll 76 or 77 and 81 cycles, and `stop_drain_us` after 30 000 polls in 30.0 ms, a poll
 48 cycles. A program that calls `start()` before `Ticker::init()` has bounds that long.
 
 **Why 5 ms and 100 us.** `stop_drain_us` holds the dispatch of every active object
 under the arbiter's kernel and is there for a client digesting a write: 5 ms is a
 fifth of SMBus's 25 ms clock-low limit and stands under a 20 ms per-bus timeout with
 room for the tenure behind it. `bus_free_us` is there for this host's own STOP, a bit
-at 100 kHz.
+at 100 kHz, and is the watch's window (below): twice SMBus's 50 us ceiling on a clock's
+high phase, so any such clock shows a low line inside it.
+
+### The answer to a STOP held past its bound (`test_x035_i2c` letter t)
+
+A client that stretches after a write's last acknowledge holds the host's STOP in
+CTLR1, and a request behind it finds that STOP standing. When `stop_drain_us` runs out
+`start()` answers that request itself: true, `i2c_timeout` in `status()`, CTLR1
+untouched, no vector. The arbiter replies and takes its next request, and no
+`recover()` runs under the hold, so the STOP stays requested and goes out when the
+client lets go. Nothing of the request reached the wire, so it can be posted again.
+
+| | post to reply | the next request, the hold over |
+|---|---|---|
+| a 20 ms per-bus timeout, the client holding 15 ms, 100 and 400 kHz | 5043 or 5044 us | on the wire, 171 or 172 us from its post at 100 kHz, 92 to 99 at 400 |
+| no per-bus timeout, the client holding 45 ms, 100 and 400 kHz | 5043 to 5045 us | the same |
+
+Eighteen runs, 12 rounds a run, all sound: CTLR1's STOP up, START down and BUSY up at the
+reply, no reset, no vector, and behind the hold STOP and BUSY down with nothing done.
+The ceiling beside the letter is `stop_drain_us`, what `start()` costs around the wait,
+a poll, a tick's entry, the ruler and the kernel's own turn, read in the same round as
+the post-to-reply of a request refused with nothing on the wire (41 to 43 us).
+
+What a program sees of it: a client that stretches past 5 ms after a write loses the
+request behind it to `i2c_timeout` however long the per-bus timeout is, and that
+request's 5 ms are the dispatch's. A requester that posts again at once meets the same
+bound until the client lets go, each try 5 ms of every object's time. Requests waiting
+behind the tenure when its reply comes are each answered in that one dispatch, 5 ms
+apiece: two behind a 15 ms hold, every reply in 25.4 ms, and a queue of four holds
+the kernel 20 ms. A program with such a client spaces its requests by the client's
+own time.
 
 ### A request into another controller's tenure (`test_x035_i2c` letter w)
 
-`start()` reads both lines once when its wait for BUSY runs out, and takes SWRST if
-both are high. In a tenure another controller is clocking both lines stand high in
-SCL's high phase on a 1. Letter w stages it: this board's probe of nobody at 100 kHz
-posted into a tenure of the peer's controller longer than the bound, the moment swept
-by 7 us, 64 rounds a kind, eighteen runs. At 100 and 400 kHz the peer writes 24 bytes of
+`start()` takes SWRST only when BUSY stood for the whole of `bus_free_us` and no read
+in that time found a line low: 15.9.1's "Make sure the pins of the I2C bus are released
+and the bus is idle before the reset". One read would not do: both lines stand high in
+SCL's high phase on a 1 (the last column below). The assumption this rests on: **a
+foreign controller's clock whose high phase is longer than the bound, a clock under
+5 kHz, is taken for an idle wire.** SMBus's ceiling on that phase is 50 us.
+
+A poll of the watch is 76 to 81 cycles, 1.7 us at 48 MHz, read on a timer with the STK stopped: some 60 reads
+in the bound. A low phase shorter than that can fall between two of them, and a low
+phase is what the watch looks for. At 100 kHz the low phase is 5 us, at 400 kHz in DUTY 2
+1.67 us, 80 cycles, about one poll, 40 of them in the bound; a poll is not a multiple of
+that clock's period, so successive reads do not stay in its high phase. A tick's entry,
+220 cycles, can hide two low phases at 400 kHz. A clock past 400 kHz is not staged ("Not
+covered yet").
+
+Letter w stages it: this board's probe of nobody at 100 kHz posted into a tenure of the
+peer's controller longer than the bound, the moment swept by 7 us, 64 rounds a kind, eighteen runs. At 100 and 400 kHz the peer writes 24 bytes of
 0x55 that this board's own client half acknowledges from the event vector, there being
 no third chip on the wire. Host and client share CTLR1's ACK bit, and `start()`'s store
 clears it for the address phase, so the client half refuses the next byte and the peer's tenure ends on the byte behind the request either way. At
 20 kHz it probes an address nobody answers, nine clocks of 50 us, this peripheral a
-bystander. The bound ran out in every round.
+bystander. The bound ran out in every round, and **no reset was taken**.
 
 | the peer's tenure | requests | resets taken | both lines high by arithmetic and read | this request | the peer's tenure |
 |---|---|---|---|---|---|
-| 24 bytes at 100 kHz | 1152 | 169, 14.7 % | half of the bit x 4 of 9 bits, 22 %; the thread's reads 14.4 % | `i2c_nack_addr` in every round | `i2c_nack_data` in every round |
-| 24 bytes at 400 kHz | 1152 | 53, 4.6 % | a third of the bit x 4 of 9 bits, 15 %; the thread reads too seldom here to say | `i2c_nack_addr` in 1148, `i2c_bus_error` in 4, those 4 with no reset | `i2c_nack_data` in 1148, `i2c_bus_error` in 4, the same |
-| probe at 20 kHz | 1152 | 180, 15.6 % | half of the bit x 4 of 9 bits, 22 %; the thread's reads 26.6 % | with no reset: unanswered in 10 ms in 883 of 972, `i2c_nack_addr` in 89. With a reset: `i2c_nack_addr` in 78 of 180, unanswered in 102 | with no reset: `i2c_nack_addr` in 972. With a reset: `i2c_nack_addr` in 108, **`i2c_bus_error` in 72** |
+| 24 bytes at 100 kHz | 1152 | 0 | half of the bit x 4 of 9 bits, 22 %; the thread's reads 16.2 % | `i2c_nack_addr` in 1151, `i2c_bus_error` in 1 | `i2c_nack_data` in 1151, `i2c_bus_error` in 1 |
+| 24 bytes at 400 kHz | 1152 | 0 | a third of the bit x 4 of 9 bits, 15 %; the thread reads too seldom here to say | `i2c_nack_addr` in 1147, `i2c_bus_error` in 5 | `i2c_nack_data` in 1147, `i2c_bus_error` in 5 |
+| probe at 20 kHz | 1152 | 0 | half of the bit x 4 of 9 bits, 22 %; the thread's reads 24.7 % | unanswered in 10 ms in 1049, `i2c_nack_addr` in 103 | `i2c_nack_addr` in 1152 |
 
-So the reset is reached in a live tenure, and these counts are a sweep's, not a rate:
-32 fixed moments run twice, at 20 kHz exactly 10 resets of 64 in every run, and the 400
-kHz row a third of its arithmetic. At 20 kHz, the only rate where the peer's tenure can
-tell, this peripheral a bystander, four resets in ten ended that tenure in a bus error
-by the far controller's report; the letter does not read the wire, so that a START
-reached it is the reading, not a measurement. The rows at 100 and 400 kHz cannot show
-that: the acknowledge is this peripheral's, so a reset's own NACK is what the far end
-sees.
+At 20 kHz, the only rate where the peer's tenure can tell, this peripheral a bystander,
+that tenure is not ended in `i2c_bus_error`, which the letter judges. The rows at 100
+and 400 kHz cannot show that: the acknowledge is this peripheral's.
 
 **A START stored into a tenure mostly stays standing under a clock of 50 or 20 kHz.**
 Raw, the vectors dark, the store swept inside the peer's probe of nobody with this
 peripheral a bystander at 100 kHz, 1152 stores at each rate: at 100 kHz SB rose in all
-of them; at 50 kHz in 91 and at 20 kHz in 246. In the others BUSY stood over both lines
+of them; at 50 kHz in 95 and at 20 kHz in 226. In the others BUSY stood over both lines
 high with no SB at the end of the 3 ms the letter watches, the probe, 180 or 450 us
 long, over by then. Through `start()` the unanswered rounds above read START in CTLR1
 as well, and what answers such a request is the per-bus timeout. Why the rate decides
@@ -645,23 +683,23 @@ the same vector:
 
 | tenure | the pump from the flash: rest, entries, cycles an entry | from SRAM: rest, cycles an entry | the engines: rest, entries + DMA |
 |---|---|---|---|
-| write 1 | 1348, 3, 225 | 1037 or 1054, 145 or 146 | 1272 to 1284, 3 + 1 |
-| write 2 | 1334, 3, 238 | - | 1258 to 1282, 3 + 1 |
-| write 16 | 1330, 17, 211 | 1041 or 1045, 136 | 1270 to 1298, 3 + 1 |
-| write 255 | 1332, 256, 201 | 1051, 132 | 1260 to 1288, 3 + 1 |
-| read 1 | 1372 or 1376, 3, 242 | 1078 to 1158, 152 | 1352, 2 + 1 |
-| read 2 | 1426 or 1434, 3, 251 or 254 | 1116 to 1140, 155 | 1358 or 1374, 2 + 1 |
-| read 16 | 1790 or 1798, 17, 244 or 245 | 1336 to 1384, 148 | 1318 or 1342, 2 + 1 |
-| read 255 | 1760 or 1772, 256, 233 | - | 1292 or 1308, 2 + 1 |
-| register read 1 + 1 | 2128 or 2140, 5, 242 or 243 | - | 2020 or 2040, 5 + 2 |
-| register read 1 + 4 | 2518 or 2534, 7, 262 or 263 | 1880 to 1920, 156 | 2022 or 2026, 5 + 2 |
-| probe | 1054 or 1070, 2, 205 or 207 | 862, 137 | - |
+| write 1 | 1308, 3, 227 or 229 | 1073 to 1093, 148 or 150 | 1280 to 1288, 3 + 1 |
+| write 2 | 1310 or 1318, 3, 241 | - | 1242 or 1258, 3 + 1 |
+| write 16 | 1298 to 1318, 17, 211 or 214 | 1046 or 1048, 136 | 1270 to 1282, 3 + 1 |
+| write 255 | 1320 or 1336, 256, 201 | 1029 or 1031, 132 | 1260 to 1276, 3 + 1 |
+| read 1 | 1368 or 1388, 3, 246 | 1054 to 1158, 149 or 151 | 1360 or 1372, 2 + 1 |
+| read 2 | 1418 to 1430, 3, 257 | 1088 to 1186, 155 | 1342 or 1346, 2 + 1 |
+| read 16 | 1758 to 1766, 17, 243 or 244 | 1268 to 1339, 147 or 148 | 1294 or 1302, 2 + 1 |
+| read 255 | 1756 to 1812, 256, 233 | - | 1276 to 1288, 2 + 1 |
+| register read 1 + 1 | 2144, 5, 248 | - | 2004 to 2012, 5 + 2 |
+| register read 1 + 4 | 2518 to 2526, 7, 261 | 1881 to 1954, 157 or 158 | 2022 or 2034, 5 + 2 |
+| probe | 1038 or 1042, 2, 205 | 860, 138 | - |
 
 Each figure is the range over three runs of the letter.
 
-- **`start()` is 316 to 336 cycles** on the ticker's ruler for every
+- **`start()` is 296 to 312 cycles** on the ticker's ruler for every
   shape on the pump and the engines, the bounded waits' first looks
-  included; the engined read of one byte is 400 in letter `x`,
+  included; the engined read of one byte is 372 to 380 and the pumped read of 255 is 360 or 364 in letter `x`,
   without a reason the letter prints.
 - **The pump's entry is 201 cycles a byte from the flash between the stamps**
   over the 255-byte write, 271 with its trip, of a 1098-cycle byte at 400 kHz:
@@ -669,15 +707,15 @@ Each figure is the range over three runs of the letter.
   base address, and a byte's path runs from the flash behind two wait states
   at 48 MHz, this core's fetch (the DMA controller's own 6 cycles an item from
   SRAM against 11.6 from the flash, [dma.md](dma.md)). The longest entry over
-  every shape is 325 cycles, the suite's stamps and its switch among
+  every shape is 321 cycles, the suite's stamps and its switch among
   the hosts included, and the family's longest handler with every driver in
   the flash ([platform.md](platform.md) places it among the handlers); main
   context waits that long, as it does for any polled loop.
 - **The pump in SRAM, two ways, and only if the program wants the core**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
   for a plain host, flattened, a leaf): 132 cycles an entry over
-  the 255-byte write and 148 over the 16-byte read, the longest
-  187, behind the suite's vector in the flash. A program that places the vector
+  the 255-byte write and 147 or 148 over the 16-byte read, the longest
+  189, behind the suite's vector in the flash. A program that places the vector
   (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
   the default host's inline body with it, one attribute where the program
   binds the vector, with no call between the two memories; `InRam` is for
@@ -686,9 +724,9 @@ Each figure is the range over three runs of the letter.
   move, since SCL stretches behind a late entry and the rate is the bus's:
   the placement buys core time, not the wire.
 - **The engines** carry a 255-byte write in three event entries and a
-  read in two, each with one DMA interrupt (its body 151 to 183 cycles
+  read in two, each with one DMA interrupt (its body 151 to 191 cycles
   between the stamps), the write at 1004 to 1012 thousandths of its wire, the
-  core in the event vector 571 or 583 cycles of some 282 350. The
+  core in the event vector 579 or 583 cycles of some 282 350. The
   write's DMA entry, its DMA block's completion, is the price of carrying a
   write half before a read: the completion hands the half back to the
   event vector, which ends a plain write at BTF and requests a
@@ -710,16 +748,16 @@ Each figure is the range over three runs of the letter.
 The host chooses nothing: the program names the mechanism of each request.
 On a host with engines bound, either name delivers the same bytes, and the
 choice costs time or energy. At 400 kHz, read directly, the engines cost the
-core fewer cycles for a read from two bytes, a read of one being some 15 cycles in
-the pump's favour, and for a write from 3 bytes (the letter has no write of three:
-write 2's 1241 and the pump's 271 cycles a byte give some 1512 against 1322 to
-1350); under that, name the interrupt. **For a write-then-read, the shortest
-register read stays cheaper under `interrupt`:** `dma` pays for two DMA blocks, so 1 + 1 is 1883 or 1887 cycles on
-the pump against 2157 or 2173. The register read at the top of this page, 1 +
-2, has no row of its own: the slope between 1 + 1 and 1 + 4, 254 cycles a byte, puts
-it at some 2140, under what the engines cost, and on this series `dma` costs the
+core fewer cycles for a read from two bytes, a read of one being level (1249 against
+1247 to 1255), and for a write from 3 bytes (the letter has no write of three:
+write 2's 1229 and the pump's 271 cycles a byte give some 1500 against 1302 to
+1318); under that, name the interrupt. **For a write-then-read, the shortest
+register read stays cheaper under `interrupt`:** `dma` pays for two DMA blocks, so 1 + 1 is 1887 or 1891 cycles on
+the pump against 2137 to 2153. The register read at the top of this page, 1 +
+2, has no row of its own: the slope between 1 + 1 and 1 + 4, 244 cycles a byte, puts
+it at some 2133, about what the engines cost, and on this series `dma` costs the
 sleep (below), so name the interrupt there too. The same slope puts 1 + 3 at some
-2390 against the engines' 2165, and from 1 + 4 (2645 or 2653 against 2165) the rows
+2377 against the engines' 2137 to 2153, and from 1 + 4 (2621 against 2137 or 2153) the rows
 say it: from there name `dma`, if the core has other work to run. At 100 kHz the
 letter gives the estimate only.
 
@@ -734,8 +772,8 @@ does not grow with the length; `N`, the smallest length with E <= F + N x b:
 
 | at | write: b, F, E | N | read: b, F, E | N |
 |---|---|---|---|---|
-| 400 kHz | 271, 767, 1338 to 1350 | 3 ((1350 - 767) / 271 = 2.2) | 302 or 303, 819 to 847, 1267 or 1271 | 2 ((1271 - 819) / 303 = 1.5) |
-| 100 kHz | 270, 795 to 819, 1350 or 1354 | 2 or 3, by the run ((1354 - 795) / 270 = 2.1) | 302, 839, 1203 to 1211 | 2 ((1211 - 839) / 302 = 1.2) |
+| 400 kHz | 270 or 271, 743 to 811, 1314 or 1318 | 2 or 3, by the run ((1318 - 743) / 271 = 2.1) | 303, 783 to 791, 1247 to 1255 | 2 ((1255 - 783) / 303 = 1.6) |
+| 100 kHz | 270 or 271, 755 to 771, 1354 | 3 ((1354 - 755) / 271 = 2.2) | 302 or 303, 783 to 815, 1179 | 2 ((1179 - 783) / 303 = 1.3) |
 
 The estimate counts a byte the same at every length, and a write's first
 two bytes cost the pump less: the entry that clears ADDR loads both, so a
@@ -744,13 +782,13 @@ second byte costs it no entry. So the short lengths are read directly, at
 
 | tenure | pump | engines |
 |---|---|---|
-| write 1 | 1213 | 1338 to 1350 |
-| write 2 | 1241 | 1322 to 1334 |
-| write 16 | 5103 | 1350 |
-| read 1 | 1253 | 1267 or 1271 |
-| read 2 | 1281 or 1289 | 1243 or 1259 |
-| register read 1 + 1 | 1883 or 1887 | 2157 or 2173 |
-| register read 1 + 4 | 2645 or 2653 | 2165 |
+| write 1 | 1193 | 1314 or 1318 |
+| write 2 | 1229 | 1306 or 1310 |
+| write 16 | 5079 or 5131 | 1302 |
+| read 1 | 1249 | 1247 to 1255 |
+| read 2 | 1281 | 1219 |
+| register read 1 + 1 | 1887 or 1891 | 2137 to 2153 |
+| register read 1 + 4 | 2621 | 2137 or 2153 |
 
 Against the wire: the pump spends 271 cycles of a 1098-cycle byte at 400
 kHz (a quarter of the core) and 270 of a byte of at least 4320 cycles at
@@ -796,15 +834,15 @@ describes them).
 STOP and for BUSY, then stores START last: a dispatch above the arbiter
 that lands in it delays the START, a gap between tenures, and every byte
 decision after it is the vectors'. Letter `x` counts it on 400 writes of
-16 bytes on the engines: `start()` takes 392 or 393 cycles with TIM2 silent
-in the default image and 395 or 396 in the twin, `start()` in the flash in both.
+16 bytes on the engines: `start()` takes 307 to 309 cycles with TIM2 silent
+in the default image and 303 or 304 in the twin, `start()` in the flash in both.
 That figure includes the suite's own code in front of the host's `start()`,
-23 instructions from the flash that copy the Request and set its `engine`:
-the 64 to 68 cycles over the host's own 328 for the same write in
-`test_x035_i2c` ("The host's cost" above).
-Under 97 us x 3000 the interrupt landed inside it 125 to 145 times in 400 in
-each of eleven runs of the default image, and 214 to 254 in each of eleven of the
-twin, against the 33 or 34 that ticks independent of the tenures would give. That
+23 instructions from the flash that copy the Request and set its `engine`, and it
+is taken on this suite's own ruler, which the letter does not compare with
+`test_x035_i2c`'s ("The host's cost" above).
+Under 97 us x 3000 the interrupt landed inside it 149 to 159 times in 400 in
+each of eleven runs of the default image, and 225 to 262 in each of eleven of the
+twin, against the 26 that ticks independent of the tenures would give. That
 excess is not explained: the letter counts the landings and does not time
 their phase. MSL stood at such a landing rarely, a preemption after the START
 store that outlasted the START's way onto the wire, the tenure then the
@@ -812,8 +850,8 @@ vector's from its first bit:
 
 | image | eleven runs of `x` | three runs of `z` |
 |---|---|---|
-| default | none in four runs, 1 to 3 in the others | one each in two of the runs |
-| twin | none in one run, 1 to 11 in the others | none |
+| default | none | none |
+| twin | none | one in one of the runs |
 
 **Every shape under `interrupt` and under `dma`, under every pressure as in
 the control.** Letter `o`, at 400 kHz against one serve counted to its last
@@ -825,15 +863,15 @@ handed back by channel 6's completion for the repeated START), writes of
 and 32 (channel 6, its completion, then BTF) - every one `i2c_ok`, every
 read byte-exact, the peer's count, sum and address matches exact. A
 shape's post-to-reply under pressure is the control's plus at most one
-dispatch and the path behind it: the 32-byte write 809 to 811 us silent
-and at most 960 under pressure with the scheduler path in SRAM, 821 to 824 and
-at most 1156 with it in the flash; the probe 75 and at most 290, 87 or 88
-and at most 482. Letter `p`: a read of 16, a 1+4 and a write of 16
+dispatch and the path behind it: the 32-byte write 807 or 808 us silent
+and at most 886 under pressure with the scheduler path in SRAM, 823 and
+at most 1160 with it in the flash; the probe 73 or 74 and at most 213, 86
+and at most 480. Letter `p`: a read of 16, a 1+4 and a write of 16
 byte-exact at 100 and 400 kHz (the write of 16 in 1596 to 1598 and 442 or 443 us
 silent with the scheduler path in SRAM, 1611 to 1613 and 456 to 458 with it in the
 flash, against the wire's 1530 and 382), and the peer's commanded stretch of 1000 us a byte
-priced from below - a read of 8 in 9267 to 9601 us against its nine holds, a
-write of 8 in 7566 to 8125 us against its
+priced from below - a read of 8 in 9266 to 9601 us against its nine holds, a
+write of 8 in 7562 to 8134 us against its
 seven (the peer one byte late: the hold before each byte it takes
 overlaps the next byte's shifting in, and the write's last two fall after
 its tenure), under the 20 ms timeout.
@@ -862,24 +900,24 @@ writes of two bytes (the interrupt); Pressure's eight probes in a pressure
 pass - every reply `i2c_ok`, to its own requester, in its order (slot k
 complete and k + 1 untouched at reply k), nothing rejected, the timeout
 never firing, the peer's count, sum and address matches exact; the
-letter in 7.02 to 14.37 ms with the scheduler path in SRAM and 7.51 to
-26.29 with it in the flash.
+letter in 6.97 to 14.26 ms with the scheduler path in SRAM and 7.51 to
+25.51 with it in the flash.
 
 **The held wire: `i2c_arb_lost` at the speed in force and at another.**
 Letter `h` (the peer holds SDA for 60 ms, the tenure into it, and in a
 pressure pass Pressure's flood of probes, paced as below): at the speed
-in force the held tenure answered `i2c_arb_lost` in 172 to 350 us from
-its `start()` (173 to 367 with the scheduler path in the flash), its
+in force the held tenure answered `i2c_arb_lost` in 167 to 328 us from
+its `start()` (167 to 363 with the scheduler path in the flash), its
 START out into the held line and its address's first one bit read back
-low - in 16 passes of 21 with the scheduler path in SRAM and 18 of 21
+low - in 17 passes of 21 with the scheduler path in SRAM and 18 of 21
 with it in the flash, over three runs of each image. Of that time 100 us
 is `start()`'s wait for BUSY; the letter does not break down the rest.
 Where a flood probe met the hold first and its recovery (SWRST, after which
 the peripheral's START stays pending) came before the held tenure's START, the
-held tenure answered `i2c_timeout`, 19.6 to 20.5 ms from its `start()` and
-up to 21.3 ms from its post (the other 5 and 3 passes). Met at 400 kHz
+held tenure answered `i2c_timeout`, 19.6 to 20.6 ms from its `start()` and
+up to 21.4 ms from its post (the other 4 and 3 passes). Met at 400 kHz
 after commands at 100 - the timing written again before the START, a PE
-cycle - it is `i2c_arb_lost` too (160 to 246 us): unlike SWRST, a PE cycle
+cycle - it is `i2c_arb_lost` too (159 to 245 us): unlike SWRST, a PE cycle
 does not make this peripheral forget the line it saw taken.
 
 Up to three of Pressure's requests a pass arrived in the arbiter's
@@ -896,27 +934,27 @@ common case while the line is held - leave nothing.
 The suite's letter `u`, run by name, floods unpaced, a probe at every tick for
 2000 ticks, the pressure's vector then stopping the timer. In ten runs of each
 image past the arbiter's pending four the arbiter's event queue (the kernel's
-queue of the active object, not the pending four) dropped 636 to 647 posts with
-the scheduler path in SRAM and 1587 to 1605 in the flash, with no reply; 1354 to
-1365 of the 2000 probes were answered, 397 to 415 in the flash, each once
-(`i2c_rejected` but for four or five `i2c_ok` after the release and one or two
+queue of the active object, not the pending four) dropped 634 to 645 posts with
+the scheduler path in SRAM and 1578 to 1587 in the flash, with no reply; 1356 to
+1367 of the 2000 probes were answered, 415 to 424 in the flash, each once
+(`i2c_rejected` but for four `i2c_ok` after the release and one
 that met the hold, `i2c_arb_lost` or `i2c_timeout`), and the next tenure was
 `i2c_ok` and the arbiter idle once the flood was over. The held tenure, whose
 timeout is a time event the overload starves, was answered `i2c_timeout` some 193 ms
 from its `start()` in every run with the scheduler path in SRAM. With it in the
-flash it was answered `i2c_rejected` in four runs and in the other six not at all,
+flash it was answered `i2c_rejected` in three runs and in the other seven not at all,
 its post among those dropped: a load this core cannot serve, which a program sizes
 away by keeping at most ten requests outstanding (util/bus_master.hpp). The
-preemptive kernel's stack stayed within its bound through it: a high-water of 1320
-to 1480 bytes with the scheduler path in SRAM and 1304 to 1336 in the flash, against the 2144 the
+preemptive kernel's stack stayed within its bound through it: a high-water of 1288
+to 1400 bytes with the scheduler path in SRAM and 1288 to 1320 in the flash, against the 2144 the
 letter derives from the kernel's count of runs - at most five for the pack's
 five objects - and the release listing's frames ([platform.md](platform.md)).
 
 The shared letter `h` therefore posts a probe at a tick only when the Console
 has turned since the last (the first probe of a hold excepted): at 97 us x 3000
-that is 305 to 310 probes in the pass's 1113 to 1118 ticks with the scheduler path in
-SRAM and 151 or 152 in 1141 to 1153 in the flash. The arbiter's queue never
-overflows, the held tenure is answered in its place, and at least 14152 bytes of
+that is 307 to 309 probes in the pass's 1117 or 1118 ticks with the scheduler path in
+SRAM and 164 in 1141 to 1161 in the flash. The arbiter's queue never
+overflows, the held tenure is answered in its place, and at least 14136 bytes of
 the 20 KB of stack stay untouched by the kernel's ledger in every pass of every
 letter (three runs of `z` on each image, the default's figure the lower).
 
@@ -955,12 +993,6 @@ Driver gaps, each with its reason:
 - The collision case (twi_link's `coll`, two clients on one address with
   a third party reading): an instance is a host or a client, and this
   part's suite has one other board on its bus.
-- A watch of the lines behind `start()`'s reset, in place of its one read: it would
-  keep the reset out of a live tenure ("A request into another controller's tenure")
-  and is the CH32V00x host's. Not taken: no brio program has a bus with two controllers.
-- An answer for a tenure parked with no per-bus timeout: `start()` writes nothing and
-  nothing answers it. The answer a bound would give is the arbiter's own, and a
-  program that may meet a client stretching past 5 ms keeps the timeout.
 - Fast mode Plus: 15.1 names two speeds and the datasheet gives the I2C
   no timing table; the host has no third speed.
 - **This chip as the bus's target, served from an active object, under
@@ -991,9 +1023,14 @@ Implemented but not bench-verified, each with what would measure it:
 - **The USB_IOEN refusal**: nothing in the stratum sets the bit; the USB
   controller's driver, when it is born, is what would set it and see
   `init()` refuse.
-- **What a START or a reset into a live tenure puts on the wire.** Letter w reads the
+- **What a START into a live tenure puts on the wire.** Letter w reads the
   flags and the far controller's report; the edges want a logic analyser on the two
   lines.
+- **A foreign clock whose high phase is longer than `bus_free_us`**: taken for an idle
+  wire by the page's stated assumption. The peer's divider tops out at 85 us of high
+  phase, so no suite makes one; a controller under 5 kHz would measure it. A clock past
+  this peripheral's own 400 kHz, whose low phases reads can fall between, is unmeasured
+  too.
 - **This peripheral at 400 kHz under a foreign clock.** Letter w's request and its raw
   row run at 100 kHz; a letter sweeping the rates would measure it.
 - **The last byte of a read when the wait for its RxNE runs out.** On the

@@ -206,7 +206,9 @@ inline constexpr uint8_t bus_rejected = 1;      ///< pending FIFO was full
 inline constexpr uint8_t bus_engine_status = 2; ///< first engine-defined code
 /// The transfer never answered inside the arbiter's timeout_ticks: the
 /// engine was recover()ed and this reply stands in for the completion
-/// that never came. Top of the range, deliberately: engine vocabularies
+/// that never came. An engine may also report it from a synchronous start(),
+/// for a request it never put on the wire; the arbiter then replies and
+/// recovers nothing. Top of the range, deliberately: engine vocabularies
 /// grow up from bus_engine_status (i2c_bus.hpp holds four already) and
 /// must never collide with an arbiter code.
 inline constexpr uint8_t bus_timeout = 255;

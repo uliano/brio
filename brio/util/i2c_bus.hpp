@@ -52,7 +52,9 @@ inline constexpr uint8_t i2c_arb_lost = bus_engine_status + 2;   ///< lost to an
 inline constexpr uint8_t i2c_bus_error = bus_engine_status + 3;  ///< any other fault that ends the tenure (the bus error above)
 /// The tenure never answered inside the arbiter's per-bus timeout: the
 /// host was recover()ed, and the wire is now the application's to
-/// judge (unstick(), re-probe: the recovery ladder). The arbiter's code,
+/// judge (unstick(), re-probe: the recovery ladder). On a host whose start()
+/// has a bound on the last STOP, also that bound running out, with nothing of
+/// the request on the wire and no recover(). Otherwise the arbiter's code,
 /// not the host's: no silicon time-out staged here sees a held SDA, and of
 /// those staged only the SAM C21's, armed, bound a client's hold of SCL (the
 /// measurements are in docs/design/i2c-bus.md, "The per-bus timeout").

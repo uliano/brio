@@ -310,7 +310,7 @@ changed in that alone), a write of 16 bytes took 17 to 19 interrupt
 entries instead of three and a write of 254 took 255 to 257 (the tick's
 entries taken out) - an entry for very nearly every byte, each about 150
 cycles with the meter's stamps, so that the 254-byte write at 400 kHz
-kept the core busy 96701 cycles against 4020 with MB disarmed. The block's end (TCMPL, in the
+kept the core busy 96701 cycles against about 4000 with MB disarmed. The block's end (TCMPL, in the
 DMAC's vector) re-arms MB, and the MB after byte n - LEN not yet reached,
 the clock held - is where the host sends its STOP or its repeated START.
 Three interrupts a write: the address's MB, the block's TCMPL, the last
@@ -543,26 +543,26 @@ board's 20 MHz quartz); the SCL period is
 the register pair's on this node (481, 121 and 49 cycles at 100 kHz,
 400 kHz and Fm+, 166 ns rise); `wire` is the tenure's SCL rising edges
 times that period. THE PEER IS A POLLED CLIENT and stretches every byte
-by its own turnaround - about 300 cycles a frame at 400 kHz, which a
-255-byte read reads almost alone (x 1.26) - so the host's own share is
+by its own turnaround - about 280 cycles a frame on a read at 400 kHz,
+which a 255-byte read reads almost alone (x 1.26) - so the host's own share is
 the difference between the columns, and its CPU is `busy` and `isr`.
-Best of 8, CLK_CPU cycles; `plain` is the engine with the thread
+Best of 8, three runs (a range is the runs' lowest to highest), CLK_CPU cycles; `plain` is the engine with the thread
 spinning on the completion edge and no stamp in the vector, `metered`
 the same engine with the thread idling masked between the vector's
 edges and every entry stamped (56 cycles an entry inside `isr`). The
 meter counts SysTick's entries too: `irq` and `isr` hold one tick a
-millisecond of wall, 44 cycles each in this image:
+millisecond of wall, 40 cycles each in this image:
 
 | tenure | wire | plain | metered: wall (irq, isr, busy) |
 |---|---|---|---|
-| 1-byte write, 400 kHz | 2299 | 3253 | 3656 (2, 568, 1473) |
-| 1 + 1 register read, 400 kHz | 4598 | 6010 | 6589 (3, 948, 2075) |
-| 16-byte write, 400 kHz | 18634 | 24610 | 27087 (18, 3672, 8129) |
-| 16-byte read, 400 kHz | 18634 | 23476 | 26047 (17, 3072, 7242) |
-| 255-byte read, 400 kHz | 278905 | 350852 (x 1.26) | 388758 (263, 45205, 103572) |
-| 255-byte write, 400 kHz | 278905 | 363356 (x 1.30) | 401685 (264, 52736, 111531) |
-| 255-byte read, 100 kHz | 1108705 | 1141071 (x 1.03) | 1169076 (280, 45953, 108273) |
-| 255-byte read, Fm+ | 112945 | 194523 (x 1.72) | 232605 (260, 45065, 102291) |
+| 1-byte write, 400 kHz | 2299 | 3325 to 3334 | 3650 to 3696 (2, 572, 1479) |
+| 1 + 1 register read, 400 kHz | 4598 | 6064 to 6069 | 6520 to 6564 (3, 873, 2002) |
+| 16-byte write, 400 kHz | 18634 | 24522 to 24576 | 27098 to 27194 (17 to 18, 3632 to 3672, 7869 to 7992) |
+| 16-byte read, 400 kHz | 18634 | 23382 to 23459 | 26018 to 26029 (16 to 17, 2951 to 2991, 6994 to 7034) |
+| 255-byte read, 400 kHz | 278905 | 350561 to 350871 (x 1.26) | 388607 to 388731 (263 to 264, 45096 to 45136, 103307 to 103589) |
+| 255-byte write, 400 kHz | 278905 | 363134 to 363164 (x 1.30) | 401748 to 401818 (264 to 265, 52708 to 52748, 111035 to 111258) |
+| 255-byte read, 100 kHz | 1108705 | 1141138 to 1142332 (x 1.03) | 1168519 to 1168767 (279, 45736, 107342 to 107614) |
+| 255-byte read, Fm+ | 112945 | 194231 to 194395 (x 1.72) | 232521 to 232640 (260, 44976 to 45005, 102106 to 102415) |
 
 What the rows say:
 
@@ -581,21 +581,20 @@ What the rows say:
   of this letter whose code lies at other addresses, and its written
   byte measured 188, 193 and 205 cycles an entry, its read byte 157, 170
   and 176 (counted as above) - the two wait states behind the NVMCTRL cache (the
-  file header of `bench_samc`). The figures on this page are an older image's; `bench_samc` letter i on this
-  board would restate them.
-- IN SRAM (`bench_samc_ram`, the vector in `.fast_text`): the pump's
-  entry costs 127 cycles for a written byte and 112 for a read one,
+  file header of `bench_samc`).
+- IN SRAM (`bench_samc_ram`, the vector in `.fast_text`, three runs): the pump's
+  entry costs 128 cycles for a written byte and 113 for a read one,
   counted as above (the stamps 38 cycles there and a tick 28, letter r
   of the same image), against 205 and 176 from the flash behind two wait
-  states; 89 and 74 without the stamps, against 149 and 120. The
+  states; 90 and 75 without the stamps, against 149 and 120. The
   written byte's SYSOP wait stays a call, through a veneer back into
   the flash, and so does `settle()`, the first and the last entry of a
   tenure; the host takes no placement. At Fm+ the polled peer's
   turnaround, not the host, paces a long tenure (x 1.72 above). The
   same image's engined write ("Which engine", below, counted the same
-  way) costs 1006 cycles - `start()` 273, the three entries 733 - against
-  the pump's 471 and 88 for each byte added, so the crossing there is
-  seven bytes;
+  way) costs 995 cycles - `start()` 275, the three entries 720 - against
+  the pump's 470 and 89 for each byte added, so the crossing there is
+  six bytes;
   but the image runs the engined host's SERCOM body from the flash,
   called out of line (the next section), so two of those three entries
   are the flash's and the figure is not an SRAM program's.
@@ -615,28 +614,28 @@ beside it, the second body measured 26 cycles more on every pumped byte,
 one image against another; the cost section's last points say how far
 an image's layout alone moves a figure). Letter r's instrument costs are
 taken out: 56 cycles of stamps an entry inside `isr`, one ruler read
-(65) inside `start()`, and the ticks as above. The figures are the same
+(63) inside `start()`, and the ticks as above. The figures are the same
 at 100 kHz, 400 kHz and 1 MHz, to the cycle:
 
 | write of n bytes | `start()` | vector bodies (entries) | core cycles |
 |---|---|---|---|
-| `interrupt`, n = 1 | 199 | 456 (2) | 655 |
+| `interrupt`, n = 1 | 201 | 460 (2) | 661 |
 | `interrupt`, each byte more | - | 148 (1) | + 148 |
-| `dma`, n = 1 .. 254 | 271 | 789 (3: two SERCOM, one DMAC) | 1060 |
+| `dma`, n = 1 .. 254 | 275 | 782 (3: two SERCOM, one DMAC) | 1057 |
 | `dma`, n = 255 | as `interrupt` | as `interrupt` | the pump's |
 
-So E, the engine's cost to the core of a write, is 1060 cycles whatever
-its length; F, the pump's beyond its bytes, is 655 - 148 = 507; and b,
+So E, the engine's cost to the core of a write, is 1057 cycles whatever
+its length; F, the pump's beyond its bytes, is 661 - 148 = 513; and b,
 the pump's cost of a byte, is 148. The engine costs the core fewer cycles
 from the smallest n where E <= F + n x b ([the I2C bus design
-page](../design/i2c-bus.md)): 1060 <= 507 + 4 x 148 = 1099, so **from
-four bytes**, by 39 cycles there and by 148 more a byte after; at three
-bytes the pump is 109 cycles cheaper. The crossing was four in another
+page](../design/i2c-bus.md)): 1057 <= 513 + 4 x 148 = 1105, so **from
+four bytes**, by 48 cycles there and by 148 more a byte after; at three
+bytes the pump is 100 cycles cheaper. The crossing was four in another
 image of this letter too, its code at other addresses (E 1034 against F
 511 and b 136). A Request's read half has no such choice (it always runs on the
 pump), so a write-then-read pays the difference on its write half:
-a register read of one written byte and one read costs 1412 cycles with
-`dma`, 979 with `interrupt` - 433 more: the write half's 405, and 28 on
+a register read of one written byte and one read costs 1406 cycles with
+`dma`, 906 with `interrupt` - 500 more: the write half's 396, and 104 on
 the read half, whose entry on the engined host passes through that
 host's body, called out of line in this letter (measured, not itemized
 further). The
@@ -658,9 +657,9 @@ engine's, over 255 bytes:
 
 | SCL | `interrupt`, 255 bytes: wall plain / metered (wire) | `dma`, 254 bytes: wall plain / metered (wire) | the pump's hold a byte, plain / metered |
 |---|---|---|---|
-| 100 kHz | 1151908 / 1182205 (1108705) | 1110678 / 1110970 (1104376) | 145 / 262 cycles |
-| 400 kHz | 363356 / 401685 (278905) | 323312 / 323781 (277816) | 153 / 301 cycles |
-| 1 MHz | 206365 / 246002 (112945) | 167692 / 167976 (112504) | 150 / 304 cycles |
+| 100 kHz | 1152108 to 1152760 / 1181790 to 1181948 (1108705) | 1110862 to 1113634 / 1111120 to 1114163 (1104376) | 136 to 145 / 248 to 261 cycles |
+| 400 kHz | 363134 to 363164 / 401748 to 401818 (278905) | 323205 to 323347 / 323500 to 323631 (277816) | 152 / 302 to 303 cycles |
+| 1 MHz | 206069 to 206183 / 245397 to 245825 (112945) | 167427 to 167467 / 167755 to 167852 (112504) | 150 / 303 to 304 cycles |
 
 What stays above the wire on the engine is the polled peer's own stretch
 (the cost section above), the same in both runs. At 1 MHz the pump turns

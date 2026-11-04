@@ -43,7 +43,7 @@
 //   event vector off between tenures, the error vector on. start() runs in
 //   the arbiter's dispatch and WAITS there, bounded, on the STK's counter:
 //   for the last STOP to leave CTLR1 (5 ms) and for BUSY (100 us, then
-//   unwedge_busy(), SWRST where BUSY stands over an idle wire, counted by
+//   wait_bus_free(), SWRST where BUSY stands over an idle wire, counted by
 //   unwedges()) - and its last act is the CTLR1 store that sets START. So a
 //   preemption inside start() spends a wait it lands in (the counter runs
 //   through it, and a last look at the bit follows the bound, so a wait held

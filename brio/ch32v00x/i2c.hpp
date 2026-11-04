@@ -70,8 +70,8 @@
  * requesters (the active objects that post them) one at a time in arrival order, calls the host's start() for each and
  * replies to the sender with the outcome; `BusPassThrough` is its failure
  * policy (no retry) and the last argument its per-bus timeout, the one
- * answer to a client (a device on the wire) that holds the clock, which must
- * sit above the longest tenure the program asks for: 20 ms fits some 200 bytes
+ * answer to a client (a device on the wire) that holds the clock through a
+ * tenure, which must sit above the longest tenure the program asks for: 20 ms fits some 200 bytes
  * at 100 kHz, and the longest request, a write-then-read of 255 + 255 bytes, is
  * 46 ms of wire there. `Sensor` is the program's active object that
  * sent this request.
@@ -603,8 +603,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * `speed` names a row of the timing table init() solves for the bus
  * clock; a speed the clock cannot produce, and an address outside
  * 0x08..0x77 (util/i2c_bus.hpp), are answered i2c_rejected inside
- * start(), no byte moved - the one synchronous completion of an I2C
- * engine, and the arbiter replies with status() for it.
+ * start(), no byte moved, and a STOP still standing at the end of
+ * stop_drain_us is answered i2c_timeout there: the two synchronous
+ * completions of this engine, and the arbiter replies with status() for
+ * each.
  *
  * The engine slots: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
  * neither, and dma_isr() bound to both channels' vectors. Under
@@ -779,17 +781,17 @@ public:
     /// dispatch; a program never does). The Request's fields are copied
     /// and its buffers stay lent until the tenure's TransferDone. False
     /// whenever the wire moves: the tenure completes on the event
-    /// vector and a TransferDone{status()} follows. True only for the
-    /// one refusal that moves nothing - a speed the clock cannot
-    /// produce, an address outside 0x08..0x77 (i2c_address_in_range), or
-    /// `I2cEngine::dma` on a host with no engines bound, answered
-    /// i2c_rejected through status() - the I2cHost contract
-    /// (docs/design/i2c-bus.md). It waits, bounded: up to
-    /// stop_drain_us for the last STOP to leave CTLR1 - past that the
-    /// tenure parks, false with no START and no vector, for the per-bus
-    /// timeout to answer, and with no such timeout nothing answers it -
-    /// then up to bus_free_us for BUSY, resetting a BUSY that stood over
-    /// an idle wire for all of it (wait_bus_free()). It masks nothing.
+    /// vector and a TransferDone{status()} follows. True when it answers
+    /// the request itself, nothing of it on the wire, through status(): a
+    /// speed the clock cannot produce, an address outside 0x08..0x77
+    /// (i2c_address_in_range), or `I2cEngine::dma` on a host with no engines
+    /// bound, i2c_rejected; the last tenure's STOP still standing after
+    /// stop_drain_us, i2c_timeout - the I2cHost contract
+    /// (docs/design/i2c-bus.md). It waits, bounded: up to stop_drain_us for
+    /// that STOP, which stays requested and goes out when the client lets go,
+    /// no recover() under the hold; then up to bus_free_us for BUSY, resetting
+    /// a BUSY that stood over an idle wire for all of it (wait_bus_free()). It
+    /// masks nothing.
     static bool start(const Request& r) {
         // What the tenure's entries read, and nothing else of the Request:
         // the reply and the speed are the arbiter's and start()'s.
@@ -817,10 +819,13 @@ public:
         // request otherwise, the F1 lineage's rule - so it is waited for
         // before anything writes CTLR1, a speed change's PE cycle
         // included, bounded in time (stop_drain_us). A clock held past
-        // the bound is a wedge: the tenure parks - no START and no vector
-        // - for the per-bus timeout to answer.
+        // the bound answers this request here, with nothing written: the
+        // arbiter is free for the next one, with or without a per-bus timeout,
+        // and the STOP goes out when the client lets go.
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
-            return false;
+            status_ = i2c_timeout;
+            phase_ = Phase::idle;
+            return true;
         }
         // BUSY clears a moment after our STOP is seen. On a bus still busy
         // the wait is out of line, and the START goes in behind it whatever

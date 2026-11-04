@@ -94,9 +94,9 @@
  * (stop_drain_us, 5 ms) and then for BUSY to clear (bus_free_us,
  * 100 us), both timed on the STK at the rate the clock type claims -
  * with the counter stopped each is a count of polls.
- * When the first runs out start() writes nothing and returns false: the
- * tenure parks, no START and no event vector, and the arbiter's per-bus
- * timeout is what answers it. When the second runs out unwedge_busy()
+ * When the first runs out start() writes nothing, answers the request
+ * i2c_timeout and returns true: no START, no event vector, and the arbiter
+ * free for the next request. When the second runs out wait_bus_free()
  * resets a BUSY left standing over an idle wire and the START is set
  * either way. isr(), error_isr() and dma_isr() are the vectors' bodies:
  * the program's handlers call them and nothing else does; each runs to
@@ -287,11 +287,12 @@
  * seeing its own STOP leaves BUSY standing over an idle wire. That is
  * 19.12.1's own case for SWRST ("when no stop condition is detected on
  * the bus but the busy bit is 1"), a hand staging makes it (measured),
- * and `start()` answers it: when the bounded wait runs out and one read
- * finds both lines high the chapter's reset is taken and the whole
- * configuration written again. That read also passes in a tenure another
- * controller is clocking, at the fraction of its bits both lines stand
- * high (measured, docs/ch32vx03/i2c.md).
+ * and `start()` answers it: when BUSY has stood for the whole of
+ * bus_free_us and no read in that time found either line low
+ * (wait_bus_free()), the chapter's reset is taken and the whole
+ * configuration written again, so a bus another controller is clocking does
+ * not pass; a foreign clock whose high phase is longer than the bound is
+ * taken for an idle wire (docs/ch32vx03/i2c.md).
  *
  * The pads are a column (afio.hpp, table 10-34). I2C1 has two: the
  * default PB6/PB7 and code 1's PB8/PB9. I2C2 has no remap field - one
@@ -872,9 +873,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * `speed` names a row of the timing table init() solves for the bus
  * clock; a speed the clock cannot produce, and an address outside
  * 0x08..0x77 (util/i2c_bus.hpp), and `I2cEngine::dma` on a host with no
- * engines bound, are answered i2c_rejected inside start(), no byte moved
- * - the one synchronous completion of an I2C engine, and the arbiter
- * replies with status() for it.
+ * engines bound, are answered i2c_rejected inside start(), no byte moved,
+ * and a STOP still standing at the end of stop_drain_us i2c_timeout there:
+ * the two synchronous completions of this engine, and the arbiter replies
+ * with status() for each.
  *
  * THE ENGINE SLOTS: the instance's own two channels, both or neither, and
  * dma_isr() bound to both channels' vectors. Under `I2cEngine::interrupt`
@@ -1075,11 +1077,12 @@ public:
 
     /// Begin a tenure (I2cBus calls it from main context). False
     /// whenever the wire moves: the tenure completes on the event vector
-    /// and a TransferDone{status()} follows. True only for the one
-    /// refusal that moves nothing - a speed the clock cannot produce, an
-    /// address outside 0x08..0x77 (i2c_address_in_range), or
-    /// `I2cEngine::dma` on a host with no engines bound, answered
-    /// i2c_rejected through status() - the I2cHost contract
+    /// and a TransferDone{status()} follows. True when it answers the
+    /// request itself, nothing of it on the wire, through status(): a speed
+    /// the clock cannot produce, an address outside 0x08..0x77
+    /// (i2c_address_in_range), or `I2cEngine::dma` on a host with no engines
+    /// bound, i2c_rejected; the last tenure's STOP still standing after
+    /// stop_drain_us, i2c_timeout - the I2cHost contract
     /// (docs/design/i2c-bus.md). The arbiter's verb, from its dispatch in
     /// main context; it waits there, bounded, for the last STOP to leave
     /// CTLR1 and for BUSY, and the comments below say what each bound
@@ -1116,11 +1119,15 @@ public:
         // half's), so this block cannot queue the START behind it: it is
         // waited for here, before anything writes CTLR1, a speed change's
         // PE cycle included, BOUNDED IN TIME (stop_drain_us). A clock held
-        // past the bound is a wedge: the tenure PARKS - no START and no
-        // vector - for the per-bus timeout to answer. What the wait costs a
-        // tenure started at once is docs/ch32vx03/i2c.md's figure.
+        // past the bound answers this request here, with nothing written:
+        // the arbiter is free for the next one, with or without a per-bus
+        // timeout, and the STOP, still requested, goes out when the client
+        // lets go. What the wait costs a tenure started at once is
+        // docs/ch32vx03/i2c.md's figure.
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
-            return false;
+            t_.status = i2c_timeout;
+            t_.phase = Phase::idle;
+            return true;
         }
         // STAR1 is read before STAR2 and the CTLR1 store below: a STOPF or
         // an ADDR the client half raised while the event vector was off
@@ -1133,8 +1140,8 @@ public:
         // a stuck target holds answers - so the wait is not an error, and
         // what follows it is.
         (void)S::status1();
-        if (!wait_for_us([] { return !S::busy(); }, bus_free_us)) {
-            (void)unwedge_busy();
+        if (S::busy()) {
+            wait_bus_free();
         }
         apply(r.speed);
         // The event vector on, the buffer vector and the DMA requests off:
@@ -1146,40 +1153,9 @@ public:
         return false;
     }
 
-    /**
-     * 19.12.1'S OWN CASE, AND THE ONE VERB THAT ANSWERS IT: SWRST "can
-     * reset the I2C module when no stop condition is detected on the bus
-     * but the busy bit is 1". That state is real on this silicon - a hand
-     * staging leaves the wire idle, both lines high, and BUSY standing
-     * (docs/ch32vx03/i2c.md) - and a START issued into it is held by the
-     * hardware for ever, because the hardware is waiting for a bus that is
-     * already free.
-     *
-     * So: when the bounded wait for BUSY runs out and one read finds both
-     * lines high, the chapter's reset is taken. That read also passes in a
-     * tenure another controller is clocking, at the fraction of its bits
-     * both lines stand high (measured, docs/ch32vx03/i2c.md, "A request into
-     * another controller's tenure"). True when the machine was reset.
-     */
-    static bool unwedge_busy() {
-        if (!S::busy() || !SclPin::read() || !SdaPin::read()) {
-            return false;
-        }
-        S::software_reset();
-        // SWRST TAKES CTLR2 WITH IT, the two interrupt enables included:
-        // the whole configuration is written again (start() raises the
-        // event vector after this).
-        S::timing(table_[static_cast<uint8_t>(applied_)]);
-        S::enable();
-        S::ack(false);
-        S::control2(t_.freq, idle_enables);
-        ++unwedged_;
-        return true;
-    }
-
-    /// How many times the bit above has been reset out of the way - a
-    /// count, not a promise, and what a suite prints to say the case is
-    /// real on this silicon.
+    /// How many times start() has reset a BUSY standing over an idle wire
+    /// (wait_bus_free()) - a count, not a promise, and what a suite prints to
+    /// say the case is real on this silicon.
     static uint16_t unwedges() { return unwedged_; }
 
     /// The engine's completion status, for the TransferDone payload.
@@ -1918,10 +1894,11 @@ private:
     /// kernel dispatch's time, which is why it is bounded at all.
     static constexpr uint16_t stop_drain_us = 5'000;
 
-    /// How long start() then waits for BUSY to clear: our STOP seen by
-    /// the bus takes a moment, a bit at 100 kHz, another controller's traffic
-    /// takes longer. A hundred microseconds is twice SMBus's 50 us ceiling on
-    /// a clock's high phase.
+    /// How long start() then waits for BUSY to clear, and watches the lines
+    /// while it does: our STOP seen by the bus takes a moment, a bit at
+    /// 100 kHz, another controller's traffic takes longer. A hundred
+    /// microseconds is twice SMBus's 50 us ceiling on a clock's high phase, so
+    /// a clock within that ceiling shows a low line inside the bound.
     static constexpr uint16_t bus_free_us = 100;
 
     /// The least a poll of wait_for_us() can take: its loop is more than
@@ -1967,6 +1944,47 @@ private:
             last = now;
         }
         return pred();
+    }
+
+    /**
+     * BUSY found up at start(): the wait for it, with both lines watched
+     * through the whole bound, and 19.12.1's own case at its end. SWRST "can
+     * reset the I2C module when no stop condition is detected on the bus but
+     * the busy bit is 1", and the same row asks first: "Before reset, make sure
+     * that the pins of the I2C bus are released and the bus is idle". That
+     * state is real on this silicon - a hand staging leaves both lines high and
+     * BUSY standing (docs/ch32vx03/i2c.md) - and a START issued into it is held
+     * by the hardware for ever. One read cannot tell it from a tenure another
+     * controller is clocking: both lines read high there too, in SCL's high
+     * phase on a 1. So the reset is taken only when BUSY stood for the whole of
+     * bus_free_us and no read in that time found either line low. A low phase
+     * shorter than a poll can fall between two reads; the bound spans many polls
+     * and a tenure many low phases (docs/ch32vx03/i2c.md measures the poll and
+     * what it can miss). SWRST TAKES CTLR2 WITH IT, the two interrupt enables
+     * included: the whole configuration is written again (start() raises the
+     * event vector after this). Cold, and it writes nothing unless it resets.
+     */
+    [[gnu::noinline, gnu::cold]] static void wait_bus_free() {
+        bool line_low = false;
+        const bool freed = poll_for_us(
+            [&line_low] {
+                if (!S::busy()) {
+                    return true;
+                }
+                if (!SclPin::read() || !SdaPin::read()) {
+                    line_low = true;
+                }
+                return false;
+            },
+            bus_free_us);
+        if (!freed && !line_low) {
+            S::software_reset();
+            S::timing(table_[static_cast<uint8_t>(applied_)]);
+            S::enable();
+            S::ack(false);
+            S::control2(t_.freq, idle_enables);
+            ++unwedged_;
+        }
     }
 
     /// Poll `pred` at most 100 000 times - a bound in polls, not in time;

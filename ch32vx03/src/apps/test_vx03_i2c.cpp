@@ -136,10 +136,12 @@
 // and by name only, not in z, against the peer:
 //   t  THE TWO BOUNDS OF start() AGAINST THEIR NAMES: bus_free_us with SCL held
 //      and over an idle wire, stop_drain_us run out by a client holding the
-//      clock, both speeds; and both with the STK stopped, a count of polls
+//      clock, both speeds, start() answering i2c_timeout, raw and through the
+//      arbiter with a per-bus timeout and with none, the next request on the wire
+//      behind it; and both bounds with the STK stopped, a count of polls
 //   w  A REQUEST INTO A TENURE ANOTHER CONTROLLER IS CLOCKING: the peer's long
-//      write, the post's moment swept, both speeds, the resets start() takes on
-//      its one read of both lines counted, what each side was answered
+//      write, the post's moment swept, both speeds: no reset taken, and at 20 kHz
+//      the other controller's tenure not ended in i2c_bus_error
 //   r  THE LATE REPEATED START: a write of one to four bytes and a
 //      one-byte read with the repeated START requested AFTER BTF, the
 //      order the engine does not use, driven through the resource by
@@ -254,6 +256,8 @@ constexpr uint8_t trail_len = 8;
 volatile bool host_done = false;
 volatile bool dma_host_live = false;
 volatile bool bus_ao_live = false;
+/// The arbiter with no per-bus timeout, letter t's, owns the host's completions.
+volatile bool bus_ao_untimed = false;
 volatile bool client_live = false;
 volatile uint32_t host_isr_entries = 0;
 volatile uint32_t error_isr_entries = 0;
@@ -1805,6 +1809,8 @@ namespace kl {
 
 constexpr uint32_t bus_timeout_ticks = ticks_from_ms<P>(20);
 using I2cArb = I2cBus<Host, P, 4, BusPassThrough, bus_timeout_ticks>;
+/// The arbiter with no per-bus timeout, `timeout_ticks` 0: letter t's alone.
+using I2cArbUntimed = I2cBus<Host, P, 4>;
 
 uint8_t out_a[4];
 uint8_t out_b[4];
@@ -1846,7 +1852,8 @@ public:
     }
 };
 
-using BusKernel = Tenuto<P, Probe, I2cArb>;
+using BusKernel = std::conditional_t<selection_carries(test_letters, 't'), Tenuto<P, Probe, I2cArb, I2cArbUntimed>,
+                                     Tenuto<P, Probe, I2cArb>>;
 
 void pump() {
     TimeEvents<P>::process();
@@ -3565,8 +3572,8 @@ void banner() {
 constexpr uint32_t bound_per_us = SysClock::hz / 1'000'000u;
 constexpr uint32_t bus_free_named = 100;
 constexpr uint32_t stop_drain_named = 5'000;
-/// The longest poll, in cycles: 26 measured with SCL low (the stopped row's figure), the other path's branches on top; from the listing, 16 instructions and two peripheral loads on the bus.
-constexpr uint32_t poll_max = 40;
+/// The longest poll, in cycles: the watch's over an idle wire, 40 measured on the CH32V203C8T6 and 36 on the CH32V303VCT6 (the stopped row's figures), and room for the layout's moves.
+constexpr uint32_t poll_max = 48;
 constexpr uint32_t tick_entry = 200;
 constexpr uint32_t ruler = 60;
 /// With the STK stopped: the budget is the bound over 8 cycles a poll.
@@ -3581,12 +3588,15 @@ Host::Request nobody_probe() {
     return r;
 }
 
+/// What the last start_cycles() returned: true when start() answered the request itself.
+bool start_answered = false;
+
 uint32_t start_cycles(const Host::Request& r) {
     host_done = false;
     host_isr_entries = 0;
     console_drain();
     const uint32_t c0 = Ticker::cycles();
-    (void)Host::start(r);
+    start_answered = Host::start(r);
     return Ticker::cycles() - c0;
 }
 
@@ -3606,6 +3616,161 @@ bool stand_stop(I2cSpeed speed) {
     }
     host_ready();
     return host_tenure(twilink::dut_addr, tx_buf, 2, nullptr, 0, speed) == i2c_ok && H::stopping();
+}
+
+/// A probe of the peer's command channel: an address phase and nothing else, the
+/// peer's serve keeping its client elsewhere until its deadline.
+Host::Request command_probe(I2cSpeed speed) {
+    Host::Request r = kl::request(twilink::command_addr, kl::out_a);
+    r.tx_len = 0;
+    r.speed = speed;
+    return r;
+}
+
+/// One request through an arbiter: its one reply and the time to it, post to reply.
+struct ArbAnswer {
+    uint8_t replies;
+    uint8_t status;
+    uint32_t us;
+};
+/// THE KERNEL'S TURN around a request on the wire: the post waits for the dispatch and
+/// the reply for the probe's turn, under 2 ms between them on a loop with nothing else
+/// to do (the first reply's figure is printed).
+constexpr uint32_t standing_arb_us = 2'000;
+
+ArbAnswer ask_arbiter(const Host::Request& r) {
+    kl::Probe::clear_tally();
+    const uint32_t c0 = Ticker::cycles();
+    post<kl::I2cArb>(r);
+    kl::pump_until(1, 100);
+    const uint32_t us = (Ticker::cycles() - c0) / bound_per_us;
+    return {kl::Probe::n, kl::Probe::replies[0], us};
+}
+
+ArbAnswer ask_untimed(const Host::Request& r, uint32_t ms) {
+    kl::Probe::clear_tally();
+    const uint32_t c0 = Ticker::cycles();
+    post<kl::I2cArbUntimed>(r);
+    kl::pump_until(1, ms);
+    const uint32_t us = (Ticker::cycles() - c0) / bound_per_us;
+    return {kl::Probe::n, kl::Probe::replies[0], us};
+}
+
+/// A request through whichever arbiter the round names.
+ArbAnswer ask_of(bool timed, const Host::Request& r, uint32_t ms) {
+    return timed ? ask_arbiter(r) : ask_untimed(r, ms);
+}
+
+/// THE RUN-OUT THROUGH THE ARBITER, one row: a write of two the client holds, its
+/// reply taken, and a request posted right behind it, under that hold's second half
+/// with the host's STOP standing. It is answered by start() itself: i2c_timeout, one
+/// reply, CTLR1's STOP still up and no START, BUSY up, no reset and no vector. The
+/// hold over, the STOP is out and BUSY down with nothing done, and the next request
+/// is on the wire. Under the 20 ms per-bus timeout the client holds 15 ms, or the
+/// write itself would meet the timeout; with none it holds 45.
+///
+/// THE BOUND, post to reply: stop_drain_us, then `over` (what start() costs around
+/// the wait, a poll, a tick's entry, the ruler), then the kernel's turn, which is
+/// read here on a request refused with nothing on the wire: the same post, dispatch
+/// and reply with no wait in them. One microsecond for the truncation of each.
+bool run_out_row(I2cSpeed speed, bool timed, uint32_t over) {
+    const uint16_t hold_us = timed ? 15'000 : 45'000;
+    constexpr uint8_t stands = 3;
+    uint32_t lo = 0xFFFFFFFFu;
+    uint32_t hi = 0;
+    uint32_t turn_hi = 0;
+    uint32_t next_hi = 0;
+    uint8_t clean = 0;
+    for (uint8_t k = 0; k < stands; ++k) {
+        host_ready();
+        settle_ms(5);
+        twilink::Params held{};
+        held.count = 16;
+        held.ms = 200;
+        held.addr = twilink::dut_addr;
+        held.hold_us = hold_us;
+        const bool accepted = peer_act(Op::serve, held);
+        kl::BusKernel::init_all();
+        bus_ao_live = true;
+        bus_ao_untimed = !timed;
+        Host::Request refused = command_probe(speed);
+        refused.addr = 0x00;
+        const ArbAnswer turn = ask_of(timed, refused, 10);
+        Host::Request w = kl::request(twilink::dut_addr, kl::out_a);
+        w.tx_len = 2;
+        w.speed = speed;
+        const ArbAnswer through = ask_of(timed, w, 150);
+        const bool stood = H::stopping();
+        const uint16_t resets0 = Host::unwedges();
+        host_isr_entries = 0;
+        console_drain();
+        const ArbAnswer a = ask_of(timed, command_probe(speed), 30);
+        const uint16_t c1 = H::regs().CTLR1;
+        const bool untouched = (c1 & i2c_stop) != 0u && (c1 & i2c_start) == 0u && H::busy() && host_isr_entries == 0u;
+        kl::drain(hold_us / 1000u + 2u);
+        const bool freed = !H::stopping() && !H::busy();
+        const ArbAnswer next = ask_of(timed, command_probe(speed), 30);
+        kl::drain(2);
+        bus_ao_untimed = false;
+        bus_ao_live = false;
+        const uint32_t ceiling = stop_drain_named + over / bound_per_us + 1u + turn.us + 1u;
+        lo = a.us < lo ? a.us : lo;
+        hi = a.us > hi ? a.us : hi;
+        turn_hi = turn.us > turn_hi ? turn.us : turn_hi;
+        next_hi = next.us > next_hi ? next.us : next_hi;
+        if (accepted && turn.replies == 1u && turn.status == i2c_rejected && through.replies == 1u && through.status == i2c_ok &&
+            stood && a.replies == 1u && a.status == i2c_timeout && a.us >= stop_drain_named && a.us <= ceiling && untouched &&
+            freed && next.replies == 1u && (next.status == i2c_ok || next.status == i2c_nack_addr) && next.us < standing_arb_us &&
+            Host::unwedges() == resets0) {
+            ++clean;
+        }
+        host_ready();
+        settle_ms(220);
+    }
+    print(serial, "  a run-out through the arbiter, ", timed ? "a 20 ms timeout" : "no timeout", ", ", i2c_speed_hz(speed) / 1000u,
+          " kHz: i2c_timeout in ", lo, " to ", hi, " us, the kernel's turn ", turn_hi, " us, the next on the wire in ", next_hi,
+          " us at most, sound ", clean, " of ", stands, crlf);
+    return clean == stands;
+}
+
+/// Requests waiting behind the tenure when its reply comes: each spends the bound in
+/// one dispatch of the arbiter (begin_waiting()), and each is answered. A write of two
+/// under a 15 ms hold and two probes queued behind it: 15 ms, then 5 and 5. The bound
+/// is run_out_row()'s twice over and the write's, printed with what it took.
+bool run_out_queue(uint32_t over) {
+    constexpr uint32_t hold_us = 15'000;
+    host_ready();
+    settle_ms(5);
+    twilink::Params held{};
+    held.count = 16;
+    held.ms = 200;
+    held.addr = twilink::dut_addr;
+    held.hold_us = hold_us;
+    const bool accepted = peer_act(Op::serve, held);
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    Host::Request w = kl::request(twilink::dut_addr, kl::out_a);
+    w.tx_len = 2;
+    w.speed = link_speed;
+    kl::Probe::clear_tally();
+    const uint32_t c0 = Ticker::cycles();
+    post<kl::I2cArb>(w);
+    post<kl::I2cArb>(command_probe(link_speed));
+    post<kl::I2cArb>(command_probe(link_speed));
+    kl::pump_until(3, 60);
+    const uint32_t us = (Ticker::cycles() - c0) / bound_per_us;
+    const uint8_t n = kl::Probe::n;
+    kl::drain(hold_us / 1000u + 2u);
+    const bool freed = !H::stopping() && !H::busy();
+    bus_ao_live = false;
+    print(serial, "  two requests waiting behind a 15 ms hold: replies ", n, ", status ", kl::Probe::replies[0], " ",
+          kl::Probe::replies[1], " ", kl::Probe::replies[2], ", all in ", us, " us", crlf);
+    const bool ok = accepted && n == 3u && kl::Probe::replies[0] == i2c_ok && kl::Probe::replies[1] == i2c_timeout &&
+                    kl::Probe::replies[2] == i2c_timeout && us >= hold_us + 2u * stop_drain_named &&
+                    us <= hold_us + 360u + 2u * (stop_drain_named + over / bound_per_us + 1u) + standing_arb_us && freed;
+    host_ready();
+    settle_ms(220);
+    return ok;
 }
 
 /// A BUSY left standing by hand: a START, SDA let go under a low SCL, SCL let go.
@@ -3685,29 +3850,60 @@ void tt_bounds() {
     bench.verdict("over an idle wire the same 100 us, the reset's stores on top, one reset counted each time",
                   stand_lo >= bus_free_named * bound_per_us &&
                       stand_hi <= bus_free_named * bound_per_us + over + reset_cycles && stand_kept);
+    // ---- and the request goes out behind that reset, at both speeds ----
+    bool out_behind = true;
+    for (const I2cSpeed speed : {link_speed, I2cSpeed::fast_400k}) {
+        for (uint8_t k = 0; k < tries; ++k) {
+            const bool staged = stand_busy();
+            const uint16_t resets0 = Host::unwedges();
+            const uint8_t st = host_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, speed);
+            const bool one_reset = Host::unwedges() == resets0 + 1u;
+            settle_ms(2);
+            out_behind = out_behind && staged && st == i2c_ok && one_reset && !H::busy();
+        }
+    }
+    host_ready();
+    bench.verdict("OVER A REAL BUSY the request goes out, at both speeds: one reset counted, the probe of the peer i2c_ok, BUSY "
+                  "down behind it",
+                  out_behind);
     // ---- stop_drain_us, run out by a client holding the clock ----
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
         uint32_t lo = 0xFFFFFFFFu;
         uint32_t hi = 0;
-        bool parked = true;
+        bool answered = true;
         constexpr uint8_t stands = 3;
         for (uint8_t k = 0; k < stands; ++k) {
-            parked = parked && stand_stop(speed);
+            answered = answered && stand_stop(speed);
             const uint32_t c = start_cycles(nobody_probe());
             lo = c < lo ? c : lo;
             hi = c > hi ? c : hi;
             const uint16_t c1 = H::regs().CTLR1;
-            parked = parked && (c1 & i2c_stop) != 0u && (c1 & i2c_start) == 0u && host_isr_entries == 0u;
+            answered = answered && start_answered && Host::status() == i2c_timeout && (c1 & i2c_stop) != 0u &&
+                       (c1 & i2c_start) == 0u && host_isr_entries == 0u;
             settle_ms(60);   // the hold over, the STOP out
             (void)Host::recover();
             settle_ms(200);  // the peer's deadline
         }
         print(serial, "  stop_drain_us ", stop_drain_named, ", a client holding the clock at ", i2c_speed_hz(speed) / 1000u,
-              " kHz: start() ", lo, " to ", hi, " cycles, ", hi / bound_per_us, " us at most, parked ", parked ? "yes" : "NO", crlf);
-        bench.verdict("stop_drain_us means what it says: a client holding the clock runs it out at its 5 ms, the tenure parked: "
-                      "no START, no vector",
-                      parked && lo >= stop_drain_named * bound_per_us && hi <= stop_drain_named * bound_per_us + over);
+              " kHz: start() ", lo, " to ", hi, " cycles, ", hi / bound_per_us, " us at most, answered ", answered ? "yes" : "NO", crlf);
+        bench.verdict("stop_drain_us means what it says: a client holding the clock runs it out at its 5 ms, and start() "
+                      "answers: true, i2c_timeout, no START, no vector",
+                      answered && lo >= stop_drain_named * bound_per_us && hi <= stop_drain_named * bound_per_us + over);
     }
+    // ---- the same through the arbiter: what a requester gets ----
+    bool timed_sound = true;
+    bool untimed_sound = true;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        timed_sound = run_out_row(speed, true, over) && timed_sound;
+        untimed_sound = run_out_row(speed, false, over) && untimed_sound;
+    }
+    bench.verdict("A RUN-OUT WITH A PER-BUS TIMEOUT is answered i2c_timeout at about 5 ms, by start(), under the hold: no "
+                  "reset, no recover(), and the next request is on the wire behind it",
+                  timed_sound);
+    bench.verdict("A RUN-OUT WITH NO PER-BUS TIMEOUT is answered the same, and the next request is on the wire behind it",
+                  untimed_sound);
+    bench.verdict("two requests waiting behind the hold are each answered i2c_timeout, one bound each",
+                  run_out_queue(over));
     // ---- both with the STK stopped: the poll budget, on TIM3 at 1 us a count ----
     using Ruler = Tim<3>;
     Ruler::init();
@@ -3731,6 +3927,10 @@ void tt_bounds() {
     SclPin::function(PinDrive::open_drain);
     (void)delay_us(clock, 20);
     (void)Host::recover();
+    const bool wire_idle = stand_busy();
+    const uint32_t watch_budget_us = stopped_us();
+    settle_ms(1);
+    (void)Host::recover();
     const bool stood = stand_stop(link_speed);
     const uint32_t drain_budget_us = stopped_us();
     settle_ms(60);
@@ -3740,11 +3940,14 @@ void tt_bounds() {
     const uint32_t free_polls = budget_of(bus_free_named);
     const uint32_t drain_polls = budget_of(stop_drain_named);
     print(serial, "  the STK stopped: bus_free_us ends after ", free_polls, " polls in ", free_budget_us, " us, ",
-          free_budget_us * bound_per_us / free_polls, " cycles a poll; stop_drain_us after ", drain_polls, " polls in ",
-          drain_budget_us, " us, ", drain_budget_us * bound_per_us / drain_polls, " cycles a poll", crlf);
+          free_budget_us * bound_per_us / free_polls, " cycles a poll with SCL low, ", watch_budget_us, " us and ",
+          watch_budget_us * bound_per_us / free_polls, " over an idle wire (BUSY up ", wire_idle ? 1 : 0,
+          ", the reset inside); stop_drain_us after ", drain_polls, " polls in ", drain_budget_us, " us, ",
+          drain_budget_us * bound_per_us / drain_polls, " cycles a poll", crlf);
     bench.verdict("with the STK stopped each wait still ends, on its count of polls: never under the time named, never "
                   "over the budget at the longest poll",
-                  stood && free_budget_us >= bus_free_named && free_budget_us <= free_polls * poll_max / bound_per_us + 1u &&
+                  stood && wire_idle && free_budget_us >= bus_free_named && free_budget_us <= free_polls * poll_max / bound_per_us + 1u &&
+                      watch_budget_us >= bus_free_named && watch_budget_us <= free_polls * poll_max / bound_per_us + 1u &&
                       drain_budget_us >= stop_drain_named && drain_budget_us <= drain_polls * poll_max / bound_per_us + 1u);
     host_ready();
     bench.verdict("and the command channel is back", command(Op::ping));
@@ -3754,9 +3957,12 @@ void tt_bounds() {
 // w - a request into a tenure another controller is clocking
 // ===========================================================================
 //
-// start() waits bus_free_us for BUSY and then, BUSY still up, reads both lines
-// once: both high, it takes SWRST (unwedge_busy()). On a tenure another controller
-// is clocking both lines read high in SCL's high phase on a 1. The letter stages
+// start() waits bus_free_us for BUSY with both lines watched, and takes SWRST only
+// when BUSY stood for all of it and no read found a line low (wait_bus_free()). One
+// read could not tell: on a tenure another controller is clocking both lines read
+// high in SCL's high phase on a 1, which the fraction below prints. The verdict is a
+// count of zero, and what makes it mean something is that the bound ran out in every
+// round, judged too; what a poll can miss is the page's arithmetic. The letter stages
 // that two ways, this board's request a probe of nobody posted into a tenure of
 // the peer's controller, the moment swept by 7 us behind the STOP that opens its
 // START:
@@ -3970,6 +4176,9 @@ void tw_live_tenure() {
     print(serial, "  at 20 kHz, 30 to 247 us behind", crlf);
     live_raw_row(Foreign::probe_20k, 30, 7);
     bool answered = true;
+    bool ran_out = true;
+    bool no_reset = true;
+    bool bystander_clean = true;
     for (const Foreign kind : {Foreign::bytes_100k, Foreign::bytes_400k, Foreign::probe_20k}) {
         LiveTally t;
         constexpr uint8_t rounds = 64;
@@ -3993,11 +4202,20 @@ void tw_live_tenure() {
         print_row("    the peer's tenure, a reset", t.peer[1]);
         print(serial, crlf);
         answered = answered && t.rounds == rounds;
+        ran_out = ran_out && t.ran_out == t.rounds;
+        no_reset = no_reset && t.resets == 0u;
+        if (kind == Foreign::probe_20k) {
+            bystander_clean = t.peer[0][4] == 0u && t.peer[1][4] == 0u;
+        }
     }
     host_ready();
     bench.verdict("every round accounted for: answered on the wire or unanswered, recover() freeing the block, the peer "
-                  "reporting (a measurement: the rates above are the letter's subject)",
+                  "reporting",
                   answered);
+    bench.verdict("the request ran its whole bound into the tenure, in every round of the three kinds", ran_out);
+    bench.verdict("INTO A LIVE TENURE NO RESET IS TAKEN: the watch found a line low, in every round of the three kinds", no_reset);
+    bench.verdict("and at 20 kHz, this block a bystander, the other controller's tenure is not ended in i2c_bus_error",
+                  bystander_clean);
     bench.verdict("and the command channel is back", command(Op::ping));
 }
 
@@ -4005,6 +4223,17 @@ void tw_live_tenure() {
 
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
+
+/// The completion to the arbiter that owns the host (letter t has two).
+[[gnu::always_inline]] inline void post_done() {
+    if constexpr (brio::selection_carries(brio::test_letters, 't')) {
+        if (bus_ao_untimed) {
+            brio::post<kl::I2cArbUntimed>(brio::TransferDone{Host::status()});
+            return;
+        }
+    }
+    brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
+}
 
 BRIO_CH32_VECTOR(i2c1_ev_handler) {
     if (live_client) {
@@ -4042,7 +4271,7 @@ BRIO_CH32_VECTOR(i2c1_ev_handler) {
     // One body for the arbiter's tenures and the letters' own.
     if (Host::isr()) {
         if (bus_ao_live) {
-            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
+            post_done();
         } else {
             host_done = true;
         }
@@ -4063,7 +4292,7 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
     // One body for the arbiter's tenures and the letters' own.
     if (Host::error_isr()) {
         if (bus_ao_live) {
-            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
+            post_done();
         } else {
             host_done = true;
         }

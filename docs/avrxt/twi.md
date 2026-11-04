@@ -522,34 +522,37 @@ repeated START, one for the STOP - times the SCL period measured on PA3
 command, a period before the STOP's edge. Plain bindings (no stamps), the
 thread spinning on the edge, best of 8, in CLK_PER cycles.
 
-**On the AVR64EA48 at 20 MHz** (rev B1, `bench_avr` letter i on an older image; the letter on this board would
-restate it). The SCL period measured on PA3: 201, 55 and
+**On the AVR64EA48 at 20 MHz** (rev B1, `bench_avr` letter i, three runs: a
+range is the runs' lowest to highest). The SCL period measured on PA3: 201, 55 and
 21 cycles at 100 kHz, 400 kHz and Fm+ (99.5 kHz, 363.6 kHz with FMEN,
 952.4 kHz - MBAUD 94, 21 and 4, the register's floor 198, 52 and 18
 plus the bus's rise):
 
 | tenure | wire | measured | x |
 |---|---|---|---|
-| 1-byte write, 100 kHz | 3819 | 4260 | 1.12 |
-| 255-byte write, 100 kHz | 463305 | 480481 | 1.04 |
-| 255-byte read, Smart, 100 kHz | 463305 | 482229 | 1.04 |
+| 1-byte write, 100 kHz | 3819 | 4251 to 4260 | 1.11 to 1.12 |
+| 255-byte write, 100 kHz | 463305 | 480110 to 480755 | 1.04 |
+| 255-byte read, Smart, 100 kHz | 463305 | 482244 to 482458 | 1.04 |
 | 1 + 1 register read, 100 kHz | 7638 | 8602 | 1.13 |
-| 1-byte write, 400 kHz | 1045 | 1457 | 1.39 |
-| 255-byte write, 400 kHz | 126775 | 153685 | 1.21 |
-| 255-byte read, Smart, 400 kHz | 126775 | 155655 | 1.23 |
-| 1 + 1 register read, 400 kHz | 2090 | 2766 | 1.32 |
-| 1-byte write, Fm+ | 399 | 814 | 2.04 |
-| 255-byte write, Fm+ | 48405 | 77370 | 1.60 |
-| 255-byte read, Smart, Fm+ | 48405 | 83040 | 1.72 |
-| 1 + 1 register read, Fm+ | 798 | 1507 | 1.89 |
+| 1-byte write, 400 kHz | 1045 | 1448 to 1484 | 1.39 to 1.42 |
+| 255-byte write, 400 kHz | 126775 | 153595 to 153928 | 1.21 |
+| 255-byte read, Smart, 400 kHz | 126775 | 155390 to 155673 | 1.23 |
+| 1 + 1 register read, 400 kHz | 2090 | 2766 to 2784 | 1.32 to 1.33 |
+| 1-byte write, Fm+ | 399 | 814 to 823 | 2.04 to 2.06 |
+| 255-byte write, Fm+ | 48405 | 77127 to 77352 | 1.59 to 1.60 |
+| 255-byte read, Smart, Fm+ | 48405 | 82990 to 83044 | 1.71 to 1.72 |
+| 1 + 1 register read, Fm+ | 798 | 1498 to 1507 | 1.88 to 1.89 |
 
 A long write is wire-bound at 100 kHz, and the two handlers on one core
 cost a fifth at 400 kHz and three fifths at Fm+: a 255-byte write carries
-26910 cycles above the wire at 400 kHz and 28965 at Fm+. The client runs
+26820 to 27153 cycles above the wire at 400 kHz and 28722 to 28947 at Fm+,
+105 to 113 a frame. This image's listing holds about that: 50 cycles from the
+host's flag to its MDATA store and 54 from the client's to its SDATA read, the
+bench's vector dispatch and the client's entry counter among them. The client runs
 SDASETUP at eight clocks, the driver's default (Bench findings, "The
 client's data setup"), which a long read pays on each byte whose clock the
-client releases; across ten runs of `bench_avr` letter i each 255-byte row
-spreads by 0.2 per cent at most.
+client releases; across the three runs each 255-byte row spreads by 0.3 per
+cent at most.
 
 **The handler, in the release listing** (`bench_avr` for the AVR128DB48, on
 the code as it stands): a written byte's path from the flag to the MDATA

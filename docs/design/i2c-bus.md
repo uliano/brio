@@ -274,8 +274,10 @@ with no byte moved; a tenure is never run at a rate nobody asked for and
 never approximated in silence. And where `start()` can find the
 peripheral out of its control, `i2c_bus_error` the same way: a system
 operation that never settled on the SAM C21, a peripheral that would not
-disable on the two DesignWare families, and a START still standing on the
-STM32G0, which only a program's own use of the resource can leave. The
+disable on the two DesignWare families, and a START still standing on the STM32G0, which only a program's own use of the
+resource can leave. On the hosts of the F1 lineage a client holding the last
+tenure's STOP past `stop_drain_us` is answered the same way, `i2c_timeout` with
+nothing written. The
 arbiter replies with `status()` on every synchronous
 return (`util/bus_master.hpp`'s contract), so the requester sees these
 in the same `I2cDone` as any outcome of the wire; the arbiter's retry hook
@@ -640,10 +642,10 @@ These four share an event machine and its consequences:
   a START behind a STOP and nothing in its chapters signals the STOP's
   leaving, so `start()` waits for it: about one bit period when a tenure
   is started at the last one's completion, bounded at 5 ms, and then for
-  BUSY to clear, bounded at 100 us (`bus_free_us`). A clock held
-  past the first parks the tenure, no START and no vector, for the per-bus
-  timeout to answer; each WCH host's paragraph below has what it does about a
-  BUSY left standing after the second.
+  BUSY to clear, bounded at 100 us (`bus_free_us`). A clock held past the first is answered there: `start()` returns true with
+`i2c_timeout` in `status()`, no START and no vector, no `recover()` under the hold,
+and the arbiter goes on to its next request. Each WCH host's paragraph below has
+what it does about a BUSY left standing after the second.
 - The event line is raised by `start()` and dropped at the completion, so
   the BTF a STOP leaves standing does not re-enter the vector.
 - A write-then-read requests its repeated START on the TxE of the last
@@ -722,11 +724,9 @@ STOP leaves.
 `duty` and the wire's rise time at init. The bus clock is refused outside
 19.12.2's 4..60 MHz window, narrower than the stratum's own PB1 ceiling. The
 engine slots are fixed to the instance's own channels (I2C1 on DMA1's 6 and
-7, I2C2 on its 4 and 5). After the wait for the STOP, a BUSY standing with one read finding both lines
-high takes 19.12.1's SWRST, counted (`unwedges()`); that read also passes in
-another controller's tenure, and the reset then falls inside it, on a bus no brio
-program shares with a second controller ([the CH32V203/CH32V303 I2C
-page](../ch32vx03/i2c.md)). `busy()` is
+7, I2C2 on its 4 and 5). After the wait for the STOP, a BUSY that stood through the whole of `bus_free_us`
+with no read finding a line low takes 19.12.1's SWRST, counted (`unwedges()`)
+([the CH32V203/CH32V303 I2C page](../ch32vx03/i2c.md)). `busy()` is
 for a sleep site. On the pump the first two data bytes load in the ADDR
 entry. The client half takes `I2cClientOptions` (a polled client with its
 three enables down) and has `flush()`, the PE cycle for a byte the
@@ -739,10 +739,9 @@ it holds its timing. Six columns, the part's first off the debug port
 the default, the debug port's refused while the probe owns it and the USB
 pads while USB_IOEN does. The engine slots are fixed to DMA channels 6 and 7
 (ORs shared with USART2). On the pump the first two bytes load in the ADDR
-entry. After the wait for the STOP, a BUSY standing with one read finding both lines
-high takes 15.9.1's SWRST, counted (`unwedges()`); that read also passes in
-another controller's tenure, and the reset then falls inside it, on a bus no brio
-program shares with a second controller ([the CH32X035 I2C page](../ch32x035/i2c.md)). `unstick()` drives a line low push-pull and
+entry. After the wait for the STOP, a BUSY that stood through the whole of `bus_free_us`
+with no read finding a line low takes 15.9.1's SWRST, counted (`unwedges()`)
+([the CH32X035 I2C page](../ch32x035/i2c.md)). `unstick()` drives a line low push-pull and
 releases it as an input, this series having no open-drain GPIO. The client is
 polled (`I2cClientOptions`) or on its vectors, with `flush()`. `Placement`,
 the last template argument (`util/placement.hpp`), can put the hot path in
