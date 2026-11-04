@@ -4,9 +4,10 @@
  * The Fast-mode Plus I2C of the STM32F4 (RM0390 ch. 23) as a bus for a
  * program: a second and entirely different I2C block some parts of this
  * family (the F410, F412, F413/F423 and F446) carry beside the three of
- * stm32f4/i2c.hpp, the one to choose for a 1 MHz bus or for a rate that
- * survives a change of the core's clock (it has a kernel clock of its
- * own). It comes in the two layers every brio bus driver has
+ * stm32f4/i2c.hpp, the one to choose for a 1 MHz bus or for a rate held
+ * through a change of the core's clock (its kernel clock can be the HSI,
+ * which holds its rate and refuses 1 MHz; the default, its APB clock, moves
+ * with the core and needs rebase()). It comes in the two layers every brio bus driver has
  * (docs/design/i2c-bus.md):
  *
  *   FmpI2c<n>                  the resource: the register block, its APB1
@@ -154,7 +155,7 @@
  *    - fmpi2c_transmit_stall_risk() - for what is not this host: a target's
  *    first byte and a program's own stream on the resource's verbs.
  *  - 2.12.4, last-received byte loss in reload mode: with RELOAD set and
- *    NBYTES > 1 a receiver can lose the last byte. The host engine never
+ *    NBYTES > 1 a receiver can lose the last byte. The host never
  *    sets RELOAD - a Request's spans are eight-bit lengths, so one tenure
  *    is at most 255 bytes and NBYTES alone carries it - and the resource's
  *    reload() verb carries the caution.
@@ -163,7 +164,7 @@
  *    so the host cannot reach it; the resource publishes the state
  *    (ten_bit_nack_stuck()) and the escape is 23.4.6's PE cycle, which is
  *    cycle().
- * The remaining five are the application's and live in
+ * The remaining four are the application's and live in
  * docs/stm32f4/fmpi2c.md.
  *
  * The one verb that disables is 23.4.6's procedure. Clearing PE releases
@@ -1905,7 +1906,7 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * And this host never answers i2c_bus_error, which is the erratum's doing.
  * ES0298 2.12.3: in controller mode a BERR can be raised spuriously and "any
  * such transfer continues normally"; the workaround is to clear it and go on.
- * So this engine clears BERR, counts it (spurious_bus_errors()) and does not
+ * So this host clears BERR, counts it (spurious_bus_errors()) and does not
  * let it decide anything. A tenure that never answers is the ARBITER's to
  * time out (i2c_timeout), and recover() is what it calls.
  *
@@ -1936,11 +1937,11 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * proves the stream's run: NBYTES counted every byte it stored. For a read it
  * proves nothing about the stream, whose two AHB accesses come after RXNE and
  * may wait for the arbiter (9.3.5): SxCR.EN is what says the block's last byte
- * is in memory ("the transfer completion is dependent on the remaining data in
- * FIFO" in peripheral-to-memory mode, 9.3.14), so the STOPF entry reads it
- * before the reply. A stream still running is stopped there, which lets a byte
- * it had taken reach memory (9.3.13), and a byte it had not taken still stands
- * in RXDR and the vector stores it (streams_back()).
+ * is in memory (a transfer is the load, the store and the count, 9.3.3, and EN
+ * falls at the count's zero, 9.3.14), so the STOPF entry reads it before the
+ * reply. A stream still running is stopped there, EN falling only when the
+ * transfer it is on is finished (9.3.15, 9.3.18 step 1), and a byte it never
+ * took still stands in RXDR and the vector stores it (streams_back()).
  *
  * THE DMA CONTROLLER IS THE APP'S: Dma<1>::init() before any engined
  * init(). The engines arm STREAMS of a controller somebody else owns.
@@ -2064,8 +2065,8 @@ public:
      * speed_ok() tells, and a Request naming it is answered i2c_rejected
      * rather than run at a rate nobody asked for.
      *
-     * Returns false when not even standard_100k is reachable, or when the
-     * boot configuration is refused.
+     * Returns false when not even standard_100k is reachable, or when cfg
+     * names a kernel clock outside the three or a digital filter past 15.
      */
     template <typename Clock>
     static bool init(Clock clock, const FmpI2cHostConfig& cfg = {}) {
@@ -2138,9 +2139,9 @@ public:
         const bool was_enabled = S::enabled();
         // The APB1 rate DERIVED from the new SYSCLK (`apb_hz_at`): the
         // fan-out runs before the RCC moves, and its divider is the rate
-        // being left - read back, a switch from 180 to 48 MHz solved
-        // TIMINGR for 12 MHz where 24 ran (the bus 1.8 times the rate
-        // asked, measured).
+        // being left: read back, a switch from 180 to 48 MHz would solve
+        // TIMINGR for 12 MHz where 24 runs (docs/stm32f4/fmpi2c.md has the
+        // rate measured with that line taken out).
         rebase_rates(apb_hz_at(hz, false), hz);
         if (was_enabled && valid_[static_cast<uint8_t>(applied_)]) {
             const FmpI2cSpeed keep = applied_;
@@ -2173,7 +2174,7 @@ public:
     static void fast_plus_drive(bool on) { S::fast_plus_drive(on, on); }
     static bool fast_plus_drive() { return S::fast_plus_scl() && S::fast_plus_sda(); }
 
-    /// The engine is between tenures. BusMaster serializes, so this is a
+    /// The host is between tenures. BusMaster serializes, so this is a
     /// convenience for suites, not a lock.
     static bool idle() { return phase_ == Phase::idle; }
     /// How many times ES0298 2.12.3's spurious BERR has been swept since
@@ -2263,7 +2264,7 @@ public:
         return false;
     }
 
-    /// The engine's completion status, read by the app glue for the
+    /// The host's completion status, read by the app glue for the
     /// TransferDone payload.
     static uint8_t status() { return status_; }
 
@@ -2489,7 +2490,7 @@ public:
     }
 
     /**
-     * Put the ENGINE back where start() is legal - the verb a timed I2cBus
+     * Put the HOST back where start() is legal - the verb a timed I2cBus
      * calls on a tenure that never answered (util/bus_master.hpp).
      *
      * It is 23.4.6's PE cycle and nothing more, because 23.4.6 is exactly
@@ -2730,17 +2731,18 @@ private:
     /// it. On a whole tenure SxNDTR is zero: EN came down with it (9.3.14) and
     /// the next block's start finds the stream as it wants it.
     ///
-    /// THE RECEIVE STREAM'S PROOF is one read of SxCR. EN low says the block is
-    /// finished with its last byte in memory (9.3.14), which is the common case
-    /// and needs nothing more. EN high, the stream is late or was never asked: an
-    /// address not acknowledged, or the last byte's request still waiting for the
-    /// arbiter (9.3.5) when the STOP went out. Clearing EN lets a byte it has
-    /// taken reach memory (9.3.13, and stop() waits for EN to read low, at most
-    /// one beat under the arbiter), and one it has not taken still stands in RXDR
-    /// with RXNE up, where stopped() stores it at pos_ as the vector's own. SxCR
-    /// is not read in the cycles after an EN store (the wedge, docs/stm32f4/dma.md):
-    /// nine SCL periods of address stand between that store and any end of
-    /// tenure.
+    /// THE RECEIVE STREAM'S TEST is one read of SxCR. EN low says the block is
+    /// finished with its last byte in memory (9.3.3's order, 9.3.14's end), which
+    /// is the common case and needs nothing more. EN high, the stream is late or
+    /// was never asked: an address not acknowledged, or the last byte's request
+    /// still waiting for the arbiter (9.3.5) when the STOP went out. A clear of EN
+    /// over a request that stands finishes that beat before EN falls (9.3.15,
+    /// 9.3.18 step 1, and stop() waits for it), so at EN low the byte is in memory
+    /// or it stands in RXDR with RXNE up, where stopped() stores it at pos_ as the
+    /// vector's own. No load tried has made a stream late here; letter r stages the
+    /// standing request (docs/stm32f4/fmpi2c.md). SxCR is not read in the cycles
+    /// after an EN store (the wedge, docs/stm32f4/dma.md): the shortest end of a
+    /// tenure measured is a lost arbitration some 25 us after start().
     static void streams_back() {
         if constexpr (has_engines) {
             if (tx_dma_) {

@@ -670,7 +670,9 @@ STOPF, and that entry reads NACKF. It is the address's when TXE is clear and
 nothing refilled TXDR, which the pump's position or the transmit stream's count
 tells, read with the stream stopped. A read's last byte is taken at STOPF; on a
 stream that entry reads SxCR.EN first, stops a stream still running and stores
-what it had not taken. A tenure's interrupt and DMA enables go in one CR1 store
+what it had not taken. The stop finishes the beat the stream is on (RM0390 9.3.15),
+measured on a staged standing request; no load tried has made a stream late by
+itself. A tenure's interrupt and DMA enables go in one CR1 store
 each way (`enables()`), ERRIE alone at rest. A controller's BERR is counted and
 never acted on. The engine slots sit on the mapping's single cell per direction,
 armed for their errors alone, `dma` carrying both phases, a half with no buffer

@@ -516,7 +516,7 @@ figure per entry with the meter's stamps inside it:
 | USART transmit engine's completion, 5.625 Mbaud (the tick's entries mixed in alike) | 123 | 216 | 145 | 146 | 364 |
 | the console's interrupt, a print of 4096 bytes (the tick's entries mixed in alike) | 61 | 88 | 67 | 101 | 312 |
 | I2C1 event pump, a byte written / read | 103 / 122 | - | 91 / 118 | - | 2104 the suite's vector |
-| FMPI2C1 event pump, a byte written / read | 136 / 151 | - | 164 / 166 | - | 1060 the suite's vector |
+| FMPI2C1 event pump, a byte written / read | 106 / 113 | - | 106 / 108 | - | 992 the suite's vector |
 
 The accelerator hides the five wait states: a warm handler runs from
 the flash faster than from SRAM, the USART's per-byte transmit a quarter
@@ -527,8 +527,8 @@ peripheral data access the handler makes, data first (DDI 0439B
 2.2.1), where code in the flash comes over ICode beside them. The
 exceptions are small and mixed with losses on the same paths - the
 transmit-only loop at 45 MHz 9392 -> 8472 (the wire 8192) against the
-receive loop 19110 -> 21764, I2C1's byte 103 -> 91 against FMPI2C1's
-136 -> 164 - and the flash loops themselves move with layout (the
+receive loop 19110 -> 21764, I2C1's byte 103 -> 91 beside FMPI2C1's
+106 -> 106 written and 113 -> 108 read - and the flash loops themselves move with layout (the
 receive loop is FASTER with the accelerator off, 17714). A body behind
 a flash vector pays the call besides: SRAM lies out of a BL's 16 MB
 reach, so GNU ld puts an 8-byte stub in the path, `ldr.w pc, [pc]` and

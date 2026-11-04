@@ -12,9 +12,10 @@
 // THE BUS IS THE BENCH'S SELF-LINK, AND MOSTLY NOBODY ANSWERS ON IT. The
 // block exists on one board of this stratum's (the FMPI2C is the F410's,
 // F412's, F413/F423's and F446's), and the bench wires its two pads to the
-// same chip's I2C1. Every letter but m keeps I2C1 silent, so the suite
-// measures WHAT A BUS WITH NOBODY ANSWERING SHOWS, which is more than it
-// sounds; letter m makes I2C1 a target and moves bytes:
+// same chip's I2C1. Letters a to l but f keep I2C1 silent, so they measure
+// WHAT A BUS WITH NOBODY ANSWERING SHOWS, which is more than it sounds;
+// letter f runs I2C1 as a second host, and letters m, q and r make it a target
+// and move bytes:
 //
 //   FMPI2C1   SCL PC6, SDA PC7 (AF4), the port's pull-ups asked for as
 //             well; the bench's 2.2 kOhm resistors on each line hold the
@@ -76,7 +77,9 @@
 //      STOPF), and a read half's address refused after the repeated START
 //   r  THE RECEIVE STREAM AT THE STOPF ENTRY on the self-link: its request
 //      taken away, DMA1 under a higher-priority stream, the memory under four
-//      copies; the last byte judged in the vector, before any reply
+//      copies; the last byte judged in the vector, before any reply; a stop swept
+//      against a standing request, on the silicon and on the host's own path, the
+//      next tenure judged after it
 //
 // and against the desk partner's `twi_peer` (the second set, `t`):
 //   n  Fast-mode Plus acknowledged, a held SDA and a held clock, the rebase
@@ -89,7 +92,8 @@
 //      engines and both speeds and in and out of the band, the partner's tally
 //      judging each, the next request whole
 //   s  letter r's two loads at Fast-mode Plus, the narrowest window between the
-//      last byte and the STOP, reads against the partner's pattern
+//      last byte and the STOP, reads against the partner's pattern, and the host's
+//      stop over a standing request
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -196,8 +200,21 @@ struct StopWatch {
     volatile uint32_t rxne_up = 0;   ///< and of those, the last byte still in RXDR
     const volatile uint8_t* cell = nullptr;   ///< the Request's last byte
     volatile uint8_t seen = 0;       ///< what it held when the body said the tenure was over
+    volatile int16_t raise_turns = -1;   ///< >= 0: a stream's request let up at STOPF, that many
+                                         ///< turns of burn() ahead of the body's stop
+    volatile bool raise_tx = false;      ///< the transmit stream's, not the receive stream's
 };
 StopWatch stop_watch;
+
+/// `turns` of a three-instruction loop out of the flash (NOP, SUBS, a taken BNE: 4 to
+/// 6 core cycles, ARM DDI 0439B 3.3.1), no data access: what sweeps one store against
+/// another. Letter r prints where a sweep landed, so nothing rests on the figure.
+[[gnu::always_inline]] inline void burn(uint32_t turns) {
+    while (turns != 0u) {
+        __NOP();
+        --turns;
+    }
+}
 
 /// What the EVENT vector saw, in order, for the tenure being watched: the
 /// ISR's own reading of ISR before the engine touches it. Four entries is
@@ -2254,10 +2271,10 @@ constexpr uint8_t trial_value(uint16_t k, uint8_t i) {
 
 /// THE BOUND ON ONE TENURE, in ticks of 1 ms. On the wire: nine clocks for the
 /// address and for each byte, at the speed's period - a rate that letter f
-/// measures within 6 per cent of the speed at 100 kHz and 400 kHz on this
+/// measures within 7 per cent of the speed at 100 kHz and 400 kHz on this
 /// kernel clock - plus the START and the STOP, under a period each. The
 /// partner's polled target adds what the preemptive suite measures, at most
-/// 66 us of a 382 us write of sixteen bytes, 17 per cent. Twice the wire holds
+/// 67 us of a 382 us write of sixteen bytes, 18 per cent. Twice the wire holds
 /// all of that, and 3 ticks cover the tick's own reading on either side and a
 /// tenure far shorter than a tick.
 uint32_t trial_limit_ms(uint8_t len, FmpI2cSpeed s) {
@@ -3249,12 +3266,13 @@ void tq_entries() {
 // =============================================================================
 //
 // With no completion entry STOPF is the tenure's one edge, and STOPF says the
-// wire is over, not the stream: RXNE rose about a period and a half earlier at the
-// bus's rate, and the stream has its peripheral port's arbitration and its memory
-// port's still to go (RM0390 9.3.5). Three stages make it late. Taking the request
-// away decides it: the stream is never asked. A very_high stream on the same
-// controller outranks it on the peripheral port. Four copies on DMA2 share the
-// memory with its memory port through the bus matrix.
+// wire is over, not the stream: RXNE rose more than a period and a half earlier at
+// the bus's rate (the lag rows print the window), and the stream has its peripheral
+// port's arbitration and its memory port's still to go (RM0390 9.3.5). Three stages
+// load it. Taking the request away decides the lateness: the stream is never asked.
+// A very_high stream on the same controller outranks it on the peripheral port. Four
+// copies on DMA2 share the memory with its memory port through the bus matrix. Only
+// the first of the three has made a stream late at a STOPF entry.
 //
 // The verdict is the byte in memory at the moment the host's body says the tenure
 // is over, read in the vector, ahead of anything a reply could read. How often the
@@ -3340,6 +3358,7 @@ struct ProofRow {
     uint32_t in_memory = 0;  ///< the last byte right in the vector, every byte right after
     uint32_t en_up = 0;      ///< the stream still running at STOPF
     uint32_t rxne_up = 0;    ///< and never asked: the byte still in RXDR
+    uint32_t taken = 0;      ///< the stream's count at zero after the body: it had the last byte
     uint32_t slow = 0;       ///< no completion inside the first bound: a starved stream's stretch
     uint32_t lost = 0;       ///< no completion at all
 };
@@ -3355,7 +3374,7 @@ void proof_print(const char* name, const ProofRow& r) {
 /// never asked. The bytes want `value(i)`.
 template <typename Value, typename Spin>
 void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value value, Spin spin,
-                ProofRow& row) {
+                ProofRow& row, int16_t raise_turns = -1) {
     static uint8_t in[255];
     for (uint16_t i = 0; i < n; ++i) {
         in[i] = static_cast<uint8_t>(~value(i));
@@ -3368,6 +3387,7 @@ void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value v
     r.engine = I2cEngine::dma;
     stop_watch.cell = &in[n - 1u];
     stop_watch.seen = static_cast<uint8_t>(~value(n - 1u));
+    stop_watch.raise_turns = raise_turns;
     stop_watch.on = true;
     const uint32_t en0 = stop_watch.en_up;
     const uint32_t rx0 = stop_watch.rxne_up;
@@ -3387,6 +3407,7 @@ void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value v
         slow = slow || Ticker::ticks() - t0 >= bound;
     }
     stop_watch.on = false;
+    row.taken = row.taken + (xfer_done && RxEngine::remaining() == 0u ? 1u : 0u);
     bool exact = xfer_done && DmaHost::status() == i2c_ok && stop_watch.seen == value(n - 1u);
     for (uint16_t i = 0; i < n && exact; ++i) {
         exact = in[i] == value(i);
@@ -3405,8 +3426,9 @@ void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value v
 /// THE LAG AND THE WINDOW, in core cycles, polled. The vector's line is off and
 /// the receive request held down until RXNE rises, then let up: the time to EN low
 /// is the stream's own, from its request to its last byte in memory, and the time
-/// to STOPF the bus's. A turn of the poll is two register loads, 20 to 30 cycles,
-/// which is the figures' resolution; a row a tick's entry landed in is not kept.
+/// to STOPF the bus's. A turn of the poll, three register loads (SxCR, ISR, SysTick's
+/// VAL), is the figures' resolution, and no line times it; a row a tick's entry landed
+/// in is not kept.
 struct LagRow {
     uint32_t runs = 0;
     uint32_t lag_max = 0;
@@ -3473,6 +3495,145 @@ void lag_print(const char* name, const LagRow& r) {
           "longest ", r.lag_max, " core cycles, the shortest window to STOPF ", r.window_min,
           ", wrong ", r.wrong, crlf);
 }
+
+
+/// THE STOP THAT MEETS THE BEAT, on the silicon alone. The vector's line is off and
+/// the request held down until RXNE stands. Then the request is let up and SxCR.EN
+/// cleared `turns` of burn() later, each one store of a word read beforehand, so the
+/// clear lands before the stream sees the request or inside its load, its store to
+/// memory and its count. The first loads after EN reads low are the memory cell, the
+/// stream's flags, the count and ISR, in that order: what a reader that trusted EN
+/// would see. A stop over a request is 9.3.15's "ongoing transfer is completed
+/// first ... EN bit is now 0"; `en_turns` says how long EN took to fall.
+struct BeatRow {
+    uint32_t rows = 0;
+    uint32_t untaken = 0;    ///< RXNE up with EN low: the clear came before the request
+    uint32_t taken = 0;      ///< RXNE down
+    uint32_t stale = 0;      ///< taken, the cell not yet right when EN read low
+    uint32_t count_up = 0;   ///< taken, the count not yet at zero when EN read low
+    uint32_t tc_down = 0;    ///< TCIF not yet up when EN read low
+    uint32_t en_turns = 0;   ///< the most reads of SxCR that found EN still up
+    uint32_t wrong = 0;      ///< the host's answer, its vector back on, not the byte
+};
+
+template <typename Value, typename Spin>
+void beat_stop(uint8_t addr, FmpI2cSpeed speed, uint32_t turns, Value value, Spin spin, BeatRow& row) {
+    using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+    static uint8_t in;
+    volatile uint8_t& cell = in;
+    const uint8_t want = value(0);
+    cell = static_cast<uint8_t>(~want);
+    DmaHost::Request r{};
+    r.addr = addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(&in));
+    r.rx_len = 1;
+    r.speed = speed;
+    r.engine = I2cEngine::dma;
+    xfer_done = false;
+    Nvic::disable(S::event_irq);
+    (void)DmaHost::start(r);
+    S::dma_receive(false);
+    const uint32_t limit = trial_limit_ms(1, speed);
+    (void)wait_until([&spin] {
+        spin();
+        return (S::flags() & FmpI2cFlag::rxne) != 0u;
+    }, limit);
+    uint8_t first = 0;
+    uint32_t dma_flags = 0;
+    uint16_t count = 0;
+    uint32_t isr = 0;
+    uint32_t en_reads = 0;
+    {
+        InterruptGuard guard;
+        spin();
+        const uint32_t request = S::regs().CR1 | FMPI2C_CR1_RXDMAEN;
+        const uint32_t cleared = RxRegs::regs().CR & ~DMA_SxCR_EN;
+        S::regs().CR1 = request;
+        burn(turns);
+        RxRegs::regs().CR = cleared;
+        while (RxRegs::enabled() && en_reads < 200'000u) {
+            ++en_reads;
+        }
+        first = cell;
+        dma_flags = RxRegs::flags();
+        count = RxRegs::count();
+        isr = S::flags();
+        S::dma_receive(false);   // ahead of the host's read of RXDR: stray_row()
+    }
+    const bool taken = (isr & FmpI2cFlag::rxne) == 0u;
+    row.rows = row.rows + 1u;
+    row.taken = row.taken + (taken ? 1u : 0u);
+    row.untaken = row.untaken + (taken ? 0u : 1u);
+    row.stale = row.stale + (taken && first != want ? 1u : 0u);
+    row.count_up = row.count_up + (taken && count != 0u ? 1u : 0u);
+    row.tc_down = row.tc_down + ((dma_flags & DmaFlag::complete) == 0u ? 1u : 0u);
+    row.en_turns = en_reads > row.en_turns ? en_reads : row.en_turns;
+    Nvic::enable(S::event_irq);
+    (void)wait_until([] { return xfer_done; }, limit);
+    if (!xfer_done || cell != want) {
+        row.wrong = row.wrong + 1u;
+    }
+}
+
+template <typename Value, typename Spin>
+void beat_sweep(const char* name, uint8_t addr, FmpI2cSpeed speed, Value value, Spin spin,
+                BeatRow& row) {
+    for (uint32_t turns = 0; turns < 48u; ++turns) {
+        for (uint8_t k = 0; k < 20u; ++k) {
+            beat_stop(addr, speed, turns, value, spin, row);
+        }
+    }
+    print(serial, "  the clear swept against the request, ", name, ": ", row.rows, " stops, the byte "
+          "taken in ", row.taken, ", left in RXDR in ", row.untaken, ", EN up at most ", row.en_turns,
+          " reads; at the first load after EN low the cell stale in ", row.stale, ", the count up in ",
+          row.count_up, ", TCIF down in ", row.tc_down, "; the host's answer wrong ", row.wrong, crlf);
+}
+
+/// A STRAY BEAT: the clear before the request (one store after the other, no turn
+/// between) leaves the byte in RXDR, and the request that follows is not forgotten
+/// if RXDR is then read with the DMA enable up. The next block's start takes a beat
+/// with nothing there, its count one down, RXDMAEN clear and no byte coming. With the
+/// enable taken down ahead of that read, nothing moves. `enable_first`: that order.
+/// True when the byte was left and the next block's count moved.
+bool stray_row(bool enable_first, bool& left) {
+    using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+    static uint8_t in;
+    static uint8_t scratch[2];
+    DmaHost::Request r{};
+    r.addr = self_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(&in));
+    r.rx_len = 1;
+    r.speed = FmpI2cSpeed::fast_400k;
+    r.engine = I2cEngine::dma;
+    xfer_done = false;
+    Nvic::disable(S::event_irq);
+    (void)DmaHost::start(r);
+    S::dma_receive(false);
+    const uint32_t limit = trial_limit_ms(1, r.speed);
+    (void)wait_until([] { return (S::flags() & FmpI2cFlag::rxne) != 0u; }, limit);
+    {
+        InterruptGuard guard;
+        const uint32_t request = S::regs().CR1 | FMPI2C_CR1_RXDMAEN;
+        const uint32_t cleared = RxRegs::regs().CR & ~DMA_SxCR_EN;
+        S::regs().CR1 = request;
+        RxRegs::regs().CR = cleared;
+        for (uint32_t i = 200'000u; i != 0u && RxRegs::enabled(); --i) {   // abort()'s bound
+        }
+        left = (S::flags() & FmpI2cFlag::rxne) != 0u;
+        if (enable_first) {
+            S::dma_receive(false);
+        }
+    }
+    Nvic::enable(S::event_irq);
+    (void)wait_until([] { return xfer_done; }, limit);
+    RxEngine::stop();
+    (void)RxEngine::start(std::span<uint8_t>(scratch, 2u));
+    burn(100);
+    const bool moved = RxRegs::count() != 2u;
+    RxEngine::stop();
+    return moved;
+}
+
 
 void tr_stream_proof() {
     if (!far_ready()) {
@@ -3568,6 +3729,122 @@ void tr_stream_proof() {
     bench.verdict("the lag rows' reads are exact",
                   lag_copies.wrong == 0u && lag_quiet.wrong == 0u && lag_above.wrong == 0u);
 
+
+    // ---- the clear against the request ----
+    BeatRow beat_quiet{};
+    beat_sweep("nothing else", self_addr, v, far, idle, beat_quiet);
+    BeatRow beat_over{};
+    load_on(1);
+    beat_sweep("a very_high stream, a beat every 2 of TIM2's clock", self_addr, v, far, idle, beat_over);
+    load_off();
+    copies_on();
+    BeatRow beat_copies{};
+    beat_sweep("four copies", self_addr, v, far, copies_turn, beat_copies);
+    copies_off();
+    // No bound to derive: 48 turns x 20 stops a load, each stop judged at zero. A stale
+    // cell, a count up or TCIF down at EN low would contradict the page outright, and
+    // `taken` not zero says the sweep reached the request at all.
+    auto beat_right = [](const BeatRow& b) {
+        return b.taken != 0u && b.stale == 0u && b.count_up == 0u && b.tc_down == 0u && b.wrong == 0u;
+    };
+    bench.verdict("A STOP OVER A STANDING REQUEST finishes its beat first: at the first load after EN "
+                  "reads low the byte is in memory, the count down and TCIF up, under each load",
+                  beat_right(beat_quiet) && beat_right(beat_over) && beat_right(beat_copies));
+
+    uint8_t stray_left = 0;
+    uint8_t strays = 0;
+    uint8_t clean_left = 0;
+    uint8_t clean_strays = 0;
+    for (uint8_t k = 0; k < 100u; ++k) {
+        bool left = false;
+        const bool moved = stray_row(false, left);
+        stray_left = static_cast<uint8_t>(stray_left + (left ? 1u : 0u));
+        strays = static_cast<uint8_t>(strays + (left && moved ? 1u : 0u));
+        const bool moved_clean = stray_row(true, left);
+        clean_left = static_cast<uint8_t>(clean_left + (left ? 1u : 0u));
+        clean_strays = static_cast<uint8_t>(clean_strays + (moved_clean ? 1u : 0u));
+    }
+    print(serial, "  the clear ahead of the request: RXDR read with the enable up, the byte left in ",
+          stray_left, " of 100, a stray beat at the next start in ", strays,
+          "; the enable down first, left in ", clean_left, ", a stray in ", clean_strays, crlf);
+    // 100 rows a run, a stray judged at zero under the order the suite's stage relies on;
+    // the other order's count is printed: the silicon's, not the host's.
+    bench.verdict("... a clear ahead of the request, the DMA enable down before RXDR is read: no "
+                  "stray beat at the next start",
+                  clean_strays == 0u);
+
+    // ---- the host's own stop over a standing request, and the next tenure ----
+    ProofRow late{};
+    ProofRow next{};
+    load_on(1);
+    for (int16_t turns = 0; turns < 8; ++turns) {
+        for (uint8_t pass = 0; pass < 20u; ++pass) {
+            for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
+                proof_read(self_addr, n, v, true, far, idle, late, turns);
+                proof_read(self_addr, 8, v, false, far, idle, next);
+            }
+        }
+    }
+    load_off();
+    proof_print("the request let up in the STOPF entry, a very_high stream", late);
+    print(serial, "    the stream had the byte in ", late.taken, ", the host in ",
+          late.tenures - late.taken, crlf);
+    proof_print("... each followed by a read of eight", next);
+    // 480 = 8 turns x 20 passes x 3 lengths. A standing request is what the stage makes,
+    // so en_up is every row. The wait is trial_limit_ms() per read, its arithmetic above.
+    bench.verdict("THE HOST STOPS A STREAM OVER A STANDING REQUEST: every read exact in the vector, "
+                  "and the next read whole",
+                  late.tenures == 480u && late.en_up == 480u && late.in_memory == 480u &&
+                      next.in_memory == next.tenures && next.lost == 0u);
+
+    static const uint8_t refused_out[4] = {0x21, 0x32, 0x43, 0x54};
+    static const uint8_t next_out[8] = {0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
+    uint32_t refused = 0;
+    uint32_t nacked = 0;
+    uint32_t next_whole = 0;
+    load_on(1);
+    for (int16_t turns = 0; turns < 8; ++turns) {
+        for (uint8_t pass = 0; pass < 20u; ++pass) {
+            DmaHost::Request r{};
+            r.addr = self_addr;
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(refused_out));
+            r.tx_len = 4;
+            r.speed = v;
+            r.engine = I2cEngine::dma;
+            Far::refuse_at = 1;
+            stop_watch.raise_tx = true;
+            stop_watch.raise_turns = turns;
+            stop_watch.cell = &refused_out[0];
+            stop_watch.on = true;
+            xfer_done = false;
+            (void)DmaHost::start(r);
+            S::dma_transmit(false);
+            (void)wait_until([] { return xfer_done; }, trial_limit_ms(4, v));
+            stop_watch.on = false;
+            stop_watch.raise_tx = false;
+            stop_watch.raise_turns = -1;
+            refused = refused + 1u;
+            nacked = nacked + (xfer_done && DmaHost::status() == i2c_nack_data ? 1u : 0u);
+            Far::refuse_at = 0;
+            ClassicTarget::acknowledge(true);
+            Far::took = 0;
+            bool same = tenure<DmaHost>(self_addr, next_out, 8, nullptr, 0, v, I2cEngine::dma) == i2c_ok &&
+                        Far::took == 8u;
+            for (uint8_t i = 0; i < 8u && same; ++i) {
+                same = Far::sink[i] == next_out[i];
+            }
+            next_whole = next_whole + (same ? 1u : 0u);
+        }
+    }
+    load_off();
+    print(serial, "  a first byte refused, the transmit request let up in the STOPF entry, a very_high "
+          "stream: ", refused, " writes, ", nacked, " i2c_nack_data, the next write of eight whole in ",
+          next_whole, crlf);
+    // 160 = 8 turns x 20 passes.
+    bench.verdict("... and over a transmit stream's: the first byte's i2c_nack_data, the next write "
+                  "whole",
+                  refused == 160u && nacked == 160u && next_whole == 160u);
+
     dma_host_live = false;
     DmaHost::release();
     far_down();
@@ -3590,7 +3867,10 @@ void ts_stream_proof_fm() {
     constexpr uint8_t seed = 0x40;
     /// One batch: the partner told to serve, the engined host at Fm+, `reads` of
     /// each length, the wait turning `spin`, the partner's tally read back.
-    auto batch = [&](auto spin, ProofRow& row, uint16_t reads, LagRow* lag = nullptr) {
+    /// `standing`: the request taken away for the last byte and let up in the STOPF
+    /// entry, so the host's stop meets a standing request.
+    auto batch = [&](auto spin, ProofRow& row, uint16_t reads, LagRow* lag = nullptr,
+                     bool standing = false) {
         twilink::Params a{};
         a.ms = static_cast<uint16_t>(reads * 3u * 4u + 50u);
         a.addr = twilink::dut_addr;
@@ -3608,12 +3888,12 @@ void ts_stream_proof_fm() {
         for (uint16_t k = 0; k < reads && up; ++k) {
             for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
                 const uint16_t from = at;
-                proof_read(twilink::dut_addr, n, v, false,
+                proof_read(twilink::dut_addr, n, v, standing,
                            [from](uint16_t i) {
                                return twilink::pattern_value(twilink::pattern_counting, seed,
                                                              static_cast<uint16_t>(from + i));
                            },
-                           spin, row);
+                           spin, row, standing ? static_cast<int16_t>(k % 8u) : int16_t{-1});
                 at = static_cast<uint16_t>(at + n);
             }
             if (lag != nullptr) {
@@ -3656,6 +3936,19 @@ void ts_stream_proof_fm() {
     lag_print("Fm+, the very_high stream", lag_above);
     bench.verdict("... under a very_high stream on the same controller, the same",
                   a_ok && above.in_memory == above.tenures && above.lost == 0u && lag_above.wrong == 0u);
+
+    ProofRow standing{};
+    load_on(1);
+    const bool s_ok = batch([] {}, standing, 100, nullptr, true);
+    load_off();
+    proof_print("Fm+, the request let up in the STOPF entry, a very_high stream", standing);
+    print(serial, "    the stream had the byte in ", standing.taken, ", the host in ",
+          standing.tenures - standing.taken, crlf);
+    // 300 = 100 passes x 3 lengths; the partner's tally judges the sequence.
+    bench.verdict("... the host's stop over a standing request: every read exact in the vector, the "
+                  "partner's tally the host's",
+                  s_ok && standing.tenures == 300u && standing.en_up == 300u &&
+                      standing.in_memory == 300u && standing.lost == 0u);
 
     copies_on();
     ProofRow copies{};
@@ -3722,6 +4015,14 @@ extern "C" void FMPI2C1_EV_IRQHandler() {
                     if ((f & brio::FmpI2cFlag::rxne) != 0u) {
                         stop_watch.rxne_up = stop_watch.rxne_up + 1u;
                     }
+                }
+                if (stop_watch.raise_turns >= 0) {
+                    if (stop_watch.raise_tx) {
+                        brio::FmpI2c<1>::dma_transmit(true);
+                    } else {
+                        brio::FmpI2c<1>::dma_receive(true);
+                    }
+                    burn(static_cast<uint32_t>(stop_watch.raise_turns));
                 }
             }
         }

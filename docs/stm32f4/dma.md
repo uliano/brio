@@ -763,7 +763,8 @@ clock is still off - the stream takes the stray item from the frozen
 request line, as the CH32V203's channel does - but clearing the DMA
 enable withdraws it, as on the STM32G0. A transport's `release()` closes
 the gate over whatever request bit stands, which is C: the `Uart`'s stands
-always, and the I2C and FMPI2C hosts' only after an abandoned tenure. The SPI
+always, and the classic I2C host's only after an abandoned tenure; the FMPI2C host
+takes both down at every tenure's end. The SPI
 host raises and drops its bits around each block, so one released idle has
 none set. The DAC's `release()` clears its channels, which by its own erratum
 does not withdraw a pending request ("DMA request not automatically cleared by
@@ -776,6 +777,18 @@ line of its own: it is every converter's and the common block's (RM0090
 6.3.9), so its `init()` clears CR2 and CR1 with the clock on instead, the
 same as B, and its `release()` clears CR2 with the clock on before the
 gate - F. QUADSPI has no verb that sets its DMAEN.
+
+**A clear ahead of a request can leave a stray beat for the next block.** When EN's
+clear reaches a stream just before the request it serves rises, the stream stops with
+the peripheral's data still unread. If that register is then read by the core with the
+peripheral's DMA enable still up, the next block's start takes a beat by itself, with
+the enable clear and no data there: its count one down, 1500 of 1500 on the receive
+request of FMPI2C1 (`test_stm32f4_fmpi2c` letter `r`, DMA1 stream 2 on the
+STM32F446RE). With the enable taken down ahead of that read, 0 of 1500. The manual does
+not describe it. The window is the clear landing within a few core cycles of the
+request's rise; a request already standing is served
+before EN falls ([fmpi2c.md](fmpi2c.md)). What other transports stopping a live
+peripheral's stream meet here is not measured.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
