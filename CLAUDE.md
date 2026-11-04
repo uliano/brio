@@ -237,7 +237,10 @@ caught it. The antidote to both, in practice:
   cycles per byte or frame, interrupts per byte, cycles masked - counted
   in the release disassembly, measured by a suite letter and stated in
   the document beside the wire's or the bus's figure, a rate far from
-  that figure explained or listed as a gap; (8) THE WRITING judged by
+  that figure explained or listed as a gap; (7b) UNDER CONTENTION, for a driver with DMA: a suite
+  letter runs it under the chip's worst public DMA load and judges its bytes,
+  its interrupts and its answer, ten to twenty runs (drivers not yet touched
+  since this rule are owed it, listed in private/TODO.md); (8) THE WRITING judged by
   someone who did not write it: a cold reader (an agent given the pages
   alone) answers what the thing is, how it is used, where the trap is
   and what it could not establish, and a fact check reads every claim
