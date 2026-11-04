@@ -90,7 +90,9 @@ interrupt goes into the crt's default spin and the program stops there
 (no timeout can answer from inside a spinning handler). `reg` and `value` must
 stay untouched and in scope from the post to the `I2cDone`; nothing
 checks it. An `i2c_timeout` hands them back too: `recover()` stops the channels
-before the arbiter answers, so nothing still writes them. The request is posted from an active object's handler, which
+before the arbiter answers, so nothing still writes them, short of an abort whose poll
+runs out ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "The receive channel at the
+STOP"). The request is posted from an active object's handler, which
 is what the reply is sent back to. `init()` hands both pads over itself,
 the isolation latch dropped and the pull-up 12.2.1.3 asks for on, but
 the pulling is the board's ("What the silicon does" below). And a
@@ -349,7 +351,8 @@ read of three bytes or more - and, with no read half, a write of three
 bytes or more on the transmit engine. Every other write half stays on the
 interrupt and the request completes. On a host
 with no engines bound, `dma` is answered `i2c_rejected`. On a host with engines
-a wrong choice costs core cycles or a sleep (below), never correctness.
+a wrong choice costs core cycles or a sleep (below), and correctness only if a
+DMA load outlasts the arbiter's per-bus timeout.
 
 The core cycles each costs at 150 MHz, Cortex-M33 / Hazard3, are `bench_rp2350`
 letter i's `i2c.cost` lines: `start()` and the vectors together, on the host with
@@ -398,13 +401,13 @@ return fall inside `start()`'s span (inferred from those lengths, not counted ap
 a read of three and four shows the same, 64 or 65 / 100 or 103).
 
 What the channel buys past the break-even is the core free on a long write. A write
-of 255 at 400 kHz, from the same image, keeps the core busy 16 693 / 7328 cycles on the
-interrupt and 2119 / 891 on the channel, 31 entries against 3, its longest
+of 255 at 400 kHz, from the same image, keeps the core busy 16 693 to 16 841 / 7370 cycles on the
+interrupt and 1971 to 2119 / 891 on the channel, 31 entries against 3, its longest
 host entry 105 / 77 cycles, at the same wall time (x 1.00). Busy is every cycle the
 core is not idle ([../design/benchmark.md](../design/benchmark.md)): beyond the
 handlers' 5878 / 5463 cycles and `start()`, some 340 / 50 cycles an entry
 remain, which no letter splits (`bench_rp2350` letter r's `window` line reads one
-idle turn at 150 / 42 cycles).
+idle turn at 144 to 149 / 38 to 42 cycles, its handler taken out).
 
 Under either value the core waits in its sleep instruction between entries, and the
 chip's SLEEP state asks in addition that the DMA have no outstanding transfer on any
@@ -529,22 +532,23 @@ with no suite named is `test_rp2350_i2c`'s.
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 7757 / 7764 (x 1.05) | 1 | 96 / 70 | 680 / 371 | 405 / 412 |
-  | write of 255 | 874 145 to 874 149 / 874 154 to 874 157 (x 1.00) | 31 | 6178 / 5196 | 17 358 to 17 506 / 7038 to 7122 | 404 to 406 / 411 to 414 |
-  | read of 16 | 59 028 or 59 029 / 59 030 to 59 032 (x 1.00) | 2 | 375 / 328 | 1358 to 1506 / 776 to 818 | 511 or 512 / 513 to 515 |
-  | read of 255 | 874 233 to 874 247 / 874 243 to 874 248 (x 1.00) | 32 | 9109 / 8573 | 23 470 / 10 501 to 10 543 | 494 to 503 / 497 to 506 |
-  | register read, 1 + 1 | 15 158 to 15 160 / 15 162 or 15 163 (x 1.03) | 1 | 133 / 102 | 650 to 798 / 401 | 453 to 455 / 457 or 458 |
-  | read of 255 on the engines | 874 163 to 874 170 / 874 171 to 874 185 (x 1.00) | 3 | 333 / 266 | 2242 to 2351 / 923 to 965 | 424 to 426 / 430 to 441 |
+  | write of 1 | 7757 / 7762 to 7764 (x 1.05) | 1 | 97 / 71 | 681 / 326 to 368 | 405 / 411 or 412 |
+  | write of 255 | 874 142 to 874 147 / 874 034 to 874 101 (x 1.00) | 31 | 5939 / 5197 | 16 784 to 16 997 / 7104 to 7123 | 404 to 406 / 410 to 412 |
+  | read of 16 | 59 017 to 59 019 / 59 016 to 59 027 (x 1.00) | 2 | 355 / 329 | 1316 to 1464 / 774 to 816 | 500 to 502 / 507 to 514 |
+  | read of 255 | 874 223 to 874 234 / 874 111 to 874 187 (x 1.00) | 32 | 8760 / 8574 | 22 740 / 10 499 to 10 541 | 486 to 495 / 485 to 504 |
+  | register read, 1 + 1 | 15 155 to 15 157 / 15 158 to 15 160 (x 1.03) | 1 | 131 / 103 | 645 / 395 | 450 to 452 / 455 or 456 |
+  | read of 255 on the engines | 874 159 to 874 171 / 874 054 to 874 127 (x 1.00) | 3 | 333 / 271 | 2245 / 977 to 1086 | 422 to 432 / 429 to 439 |
 
   A read of half a FIFO or less, and a write of a FIFO or less, is one interrupt,
   its STOP; a long read is one every eight bytes. Busy can hold one idle turn more
   than the tenure's own, a tick's wake: the core's way through the idle loop and
-  back, 150 / 42 cycles by `bench_rp2350` letter r's `window` line, its handler taken out.
-  The write of 1's 680 / 371 holds one, in the run with the shortest wall of the five, and
-  it reads 532 / 329 at 1 MHz without. The same step of 148 / 42 cycles, the
+  back, 144 to 149 / 38 to 42 cycles by `bench_rp2350` letter r's `window` line, its handler taken out.
+  The write of 1's 681 and the top of its 326 to 368 hold one, and
+  it reads 533 / 326 at 1 MHz without. The same step of 148 / 42 cycles, the
   handler's unmoved, comes and goes at other lengths.
 
-  The long tenures' walls agree within some fifteen cycles over these five runs.
+  The long tenures' walls agree within some fifteen cycles over these five runs on the
+  Cortex-M33 and some 150 on Hazard3.
   Other sessions' 255-byte tenures have read up to some 700 cycles shorter, three
   tenths of a cycle a period, reads against writes as well, so a long read's fixed
   cost is known less well than the table's range says (254 to 506 across sessions).
@@ -555,28 +559,27 @@ with no suite named is `test_rp2350_i2c`'s.
   The address and the speed stay in the
   peripheral between tenures, so a one-byte write's fixed cost is the same at
   400 kHz and 1 MHz (405 on the Cortex-M33, 411 or 412 on Hazard3). At
-  100 kHz it reads 571 on the Cortex-M33 and 410 to 575 on Hazard3, and the
+  100 kHz it reads 412 to 571 on the Cortex-M33 and 578 or 579 on Hazard3, and the
   excess is not split. The disable, IC_TAR and enable that a new address still
-  pays costs 1563 to 1653 / 1671 to 1836 cycles more at 100 kHz, 226 /
-  238 or 239 at 400 kHz and 91 / 103 to 105 at 1 MHz - the disable
+  pays costs 1652 to 1812 / 1675 to 1678 cycles more at 100 kHz, 225 or 226 /
+  239 to 242 at 400 kHz and 90 or 91 / 105 to 108 at 1 MHz - the disable
   waits on the peripheral's own shutdown, which follows the bus timing. The
-  longest host entry is 301 / 288 cycles, a 255-byte read's. With the
+  longest host entry is 290 / 288 cycles, a 255-byte read's. With the
   vector in the flash too (`bench_rp2350`, the default image) the
-  one-byte write's fixed cost reads 403 / 411 and its
-  handler 96 / 70, a 255-byte write 31 interrupts on both architectures at
-  400 kHz. **Warm, the vector's placement moves nothing in this image**: the
-  one-STOP handler reads the same 96 / 70 cycles from the flash and from SRAM.
+  one-byte write's fixed cost reads 400 / 410 or 411 and its
+  handler 95 / 71, a 255-byte write 31 interrupts on both architectures at
+  400 kHz. **Warm, the vector's placement moves two cycles at most in this image**: the
+  one-STOP handler reads 95 / 71 from the flash and 97 / 71 from SRAM.
   The letter counts no miss of the XIP cache, through which the core executes the
-  flash, over the Cortex-M33's tenure and one miss over Hazard3's, in
-  both images; which line, it does not say. That is this
+  flash, over that tenure on either architecture, in
+  both images. That is this
   layout's: a warm figure from the flash holds whatever set conflicts the
   image's code makes ([platform.md](platform.md), "A handler in SRAM"). Cold, it
-  matters on both: the same handler after every line of the XIP cache is
-  invalidated reads 2880 / 1649 cycles from the flash and 96 / 70 placed.
+  matters on both.
   Where it runs is the program's: the vector it binds, and `I2cHost`'s placement
   tag for `start()` and the bodies. The one-byte write's longest entry, warm then
-  cold, reads 96 then 2880 on the Cortex-M33 and 70 then 1649 on Hazard3 with both in the
-  flash, and 119 both times and 80 both times with both placed. `bench_rp2350` runs the handler from
+  cold (every line of the XIP cache invalidated), reads 95 then 3048 on the Cortex-M33 and 71 then 1631 on Hazard3 with both in the
+  flash, and 119 both times and 79 both times with both placed. `bench_rp2350` runs the handler from
   the flash, `bench_rp2350_ram` from SRAM.
 - **The vendor's tenure on the same wire:** the pico-sdk 2.3.1's polled
   `i2c_write_blocking` / `i2c_read_blocking` (its `i2c.c` compiled from
@@ -588,23 +591,23 @@ with no suite named is `test_rp2350_i2c`'s.
   SCL period measures the same (378.9 cycles at 400 kHz on both). At
   400 kHz, fixed cost, the SDK against the default image (the table's
   V image in brackets), Cortex-M33 / Hazard3: a one-byte write 362 / 354
-  against 403 / 411 (405 / 412), a 255-byte write 366 / 357 against
-  403 / 411 or 412, a 16-byte read 767 / 853 against 505 to 508 / 513 or 514, a
-  255-byte read 13 675 / 15 203 (x 1.02) against 493 to 499 / 501 to 506
-  (x 1.00), a register read of 1 + 1 -16 / -45 against 451 or 452 / 456; an
-  address not acknowledged 348 / 317 against 563 / 592. The one-byte write's gap over the
+  against 400 / 410 or 411 (405 / 411 or 412), a 255-byte write 366 / 357 against
+  399 to 401 / 410 to 414, a 16-byte read 767 / 853 against 494 to 496 / 510 to 513, a
+  255-byte read 13 675 / 15 203 (x 1.02) against 483 to 491 / 454 to 500
+  (x 1.00), a register read of 1 + 1 -16 / -45 against 447 or 448 / 454 or 455; an
+  address not acknowledged 348 / 317 against 559 / 591 or 592. The one-byte write's gap over the
   SDK's fixed cost is within a fifth, the size the project calls a finding, from either
-  image (11 and 12 % on the Cortex-M33, 16 % on Hazard3); it is
+  image (10 and 12 % on the Cortex-M33, 16 % on Hazard3); it is
   what the SDK does not do - no interrupt, no wake from the idle loop. For it
   the SDK holds the core the whole wire, busy 7714 / 7706 cycles against
-  677 / 329 from the default image (529 on the Cortex-M33 at 1 MHz, the step above not
+  673 / 326 to 368 from the default image (525 on the Cortex-M33 at 1 MHz, the step above not
   in it). Its fixed cost for a register read of 1 + 1 is
   below zero because `i2c_read_blocking` returns at the last byte,
   before the NACK and the STOP are on the wire; its long read keeps one
   read command in flight, waiting for each byte before the next command,
   where the pump pours them by the FIFO.
-- **The engines** (letter g, every request naming the mechanism, ten runs of z
-  on each architecture, the same counts in each):
+- **The engines** (letter g, every request naming the mechanism, fifteen runs on
+  each architecture, three of them in `z`, the same counts in each):
   the shortest reads under `dma`, one byte and two, on the receive
   engine, its run the length and every byte of it moved, the transmit
   engine never started, one host entry and no DMA line entry; a write of
@@ -656,7 +659,7 @@ with no suite named is `test_rp2350_i2c`'s.
   receive run points into a hole in the map (0x40100000) is a bus error
   on the receive channel; `dma_isr()` aborts the tenure and answers
   `i2c_dma_fault` with no host interrupt, the peer having served 3 bytes by
-  the abort in twenty-five runs on each architecture, and the next engined
+  the abort in those fifteen runs on each architecture, and the next engined
   read is clean.
 - **A released DMA request, the same owner again** (letter r, ten runs of four rounds on each architecture,
   the second chip serving): the host released the worst way, both DMA enables of IC_DMA_CR
@@ -669,13 +672,13 @@ with no suite named is `test_rp2350_i2c`'s.
   to clear the request with; nothing of the control reaches the wire. That is the DMA request a
   reset at `init()` withdraws ([dma.md](dma.md)).
 - **The engines' first read is the XIP cache's fill.** A 64-byte engined
-  read at 400 kHz takes 1484 to 1486 us (393 or 394 kHz) with two host
-  interrupts. Letter g's first takes 1529 to 1541 / 1527 to 1532 us
+  read at 400 kHz takes 1488 to 1492 / 1485 to 1487 us (392 or 393 kHz) with two host
+  interrupts. Letter g's first takes 1539 to 1545 / 1532 to 1535 us
   (Cortex-M33 / Hazard3) inside the key `z`, whose other letters run
-  before it, and 1493 to 1548 / 1510 to 1532 with the letter run alone.
+  before it, and 1503 to 1528 / 1516 to 1531 with the letter run alone.
   The same read with every line of the cache invalidated first,
-  printed third, takes 1535 to 1542 / 1522 to 1525. Two host interrupts in
-  every case, over ten runs of `z` and fifteen of the letter on each
+  printed third, takes 1538 / 1525 to 1535. Two host interrupts in
+  every case, over three runs of `z` and twelve of the letter on each
   architecture; the RP2040's reading in a larger size ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter
   judges the second.
 
@@ -688,12 +691,12 @@ entry does about that is the IP stratum's
 ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "The receive channel at the STOP"): one load
 of CTRL.BUSY, and a channel still counting stopped by the abort, what stands in the FIFO taken by
 hand. This section is what the channel does here. **Late** below is BUSY up at the vector's
-first load. The host's channel arms at normal; HIGH is a copy armed
-`DmaCopyEngine::arm(report, true)`, a public verb.
+first load. The host's channel arms at normal. A copy is a `DmaCopyEngine`'s block of bytes, started
+again as it runs out; HIGH is one armed `DmaCopyEngine::arm(report, true)`, a public verb.
 
 **A load makes a channel late by itself.** Letter `u`: reads of 1, 8, 16, 64 and 255 at each
-speed, thirty of each a run, beside copies started again as they run out, and between them
-writes of 8 and 64 under `dma`. Late reads of 1800 in a cell, over 12 runs,
+speed, thirty of each a run, beside copies, and between them
+writes of 8 and 64 under `dma`. Late reads of 1800 in a table cell, over 12 runs,
 Cortex-M33 / Hazard3; byte beats, blocks of 16 KB unless the row says otherwise.
 
 | load | late at 100 kHz | at 400 kHz | at 1 MHz | most beats owed |
@@ -710,80 +713,95 @@ Cortex-M33 / Hazard3; byte beats, blocks of 16 KB unless the row says otherwise.
 | four HIGH, the same | 1792 / 1797 | 1799 / 1780 | 1708 / 1780 | 16 / 16 |
 | four HIGH, the same, core 1 writing SRAM | 1760 / 1800 | 1800 / 1788 | 1800 / 1800 | 16 / 16 |
 
-Late were 50941 of 81000 / 50842 of 81000 reads, and every one of them was exact at the reply, every cell, with
+Late were 50941 of 81000 / 50842 of 81000 reads, and every one of them was exact at the reply, every byte, with
 nothing written after it (a millisecond later, the load still running), nothing standing in the FIFO
 and the channel stopped; the partner's tally agrees on every row. One HIGH copy, or two normal ones,
-never made a channel late. A wait of this size is not the round 12.6.10 describes, and
-[dma.md](dma.md) has why that is still open: a normal channel beside two or more HIGH byte
+never made a channel late. A wait of this size is not the round 12.6.10 describes, and why is still
+open ([dma.md](dma.md), letter p): a normal channel beside two or more HIGH byte
 copies waits about as long as a block of them takes.
 
-**How near, polled.** The vector's line off, a read of one with the request held down until
-the byte stands in the FIFO and then let up, a masked poll of BUSY and STOP_DET, twenty tenures a
+**How far behind, polled.** The channel's last beat can land more than a millisecond after the STOP. The
+vector's line off, a read of one with the DMA request held down until
+the byte stands in the FIFO and then let up, a masked poll of BUSY, twenty tenures a
 row. A turn of the poll is three register loads, at most 783 / 609 cycles, and 4255 / 3550 with a load
-reading the flash the core fetches from; every figure is good to that.
+reading the flash the core fetches from; every figure is good to that. The wire behind the let-up is short, a
+bit and a STOP (STOP_DET's least across these rows, 41 to 1519 cycles by the speed), so the larger figures are the
+channel's wait behind the wire:
 
-| load, on 150 MHz, Cortex-M33 / Hazard3 | BUSY down, at most, cycles from the let-up | STOP_DET, at least, at 100 kHz, 400 kHz, 1 MHz |
-|---|---|---|
-| nothing else | 689 / 508 | 1337 / 1382, 331 / 378, 44 / 126 |
-| two HIGH, SRAM, blocks of 1 KB | 2462 / 2634 | 1200 / 1453, 324 / 260, 41 / 127 |
-| two HIGH, SRAM, blocks of 16 KB | 50580 / 50533 | 1312 / 1447, 321 / 346, 41 / 127 |
-| four HIGH, SRAM | 99712 / 95303 | 1276 / 1437, 265 / 259, 41 / 83 |
-| four HIGH across the bridge | 203548 / 160649 | 1267 / 718, 328 / 334, 100 / 94 |
-| two normal, the flash, blocks of 256 bytes | 4967 / 3875 | 640 / 799, 640 / 547, 640 / 107 |
-| four HIGH, the flash, the same | 73239 / 71003 | 716 / 877, 716 / 1033, 716 / 955 |
+| load, on 150 MHz, Cortex-M33 / Hazard3 | BUSY down, at most, cycles from the let-up |
+|---|---|
+| nothing else | 689 / 508 |
+| two HIGH, SRAM, blocks of 1 KB | 2462 / 2634 |
+| two HIGH, SRAM, blocks of 16 KB | 50580 / 50533 |
+| four HIGH, SRAM | 99712 / 95303 |
+| four HIGH across the bridge | 203548 / 160649 |
+| two normal, the flash, blocks of 256 bytes | 4967 / 3875 |
+| four HIGH, the flash, the same | 73239 / 71003 |
 
 Blocks of 1 KB beside blocks of 16 KB are the wait following the block. With 16 KB read out of the
 uncached flash, a beat there some 150 cycles, two HIGH copies took BUSY's fall to 2.4 million
 cycles (16 ms) and four to 5.2 million (35 ms) in one run, and a read of 255 did not finish in
 200 ms, the FIFO full and SCL held. The letter's own flash blocks are 256 bytes, to keep its rows
-short. A program under such a load gets a slow bus: every byte, or `i2c_timeout` from the arbiter's
-per-bus timeout if the load outlasts it.
+short. A program under such a load gets a slow bus: every byte, or, by the code, `i2c_timeout` from the
+arbiter's per-bus timeout if the load outlasts it (not run: "Not covered yet").
 
 **The control, a build whose entry answers `i2c_ok` with no read of the channel.** One run of letter
 `u` over the same rows: 4011 of 6750 reads wrong under `i2c_ok` on the Cortex-M33 and 3862 on Hazard3,
-2909 and 2610 with a cell written after the reply, 4184 and 4003 with the channel still running at
-the reply, up to sixteen cells stale. None on a load the table has at zero.
+at least 2909 and 2610 with a byte written after the reply (the watch is a millisecond, and BUSY's fall can
+come later), 4184 and 4003 with the channel still running at the reply, up to sixteen bytes stale. None on a
+load the table has at zero.
 
 **The stage** (letter `s`, 12 runs on each half). Eight shapes (reads of 1, 2, 3, 8, 16, 17 and 64, a
 write-then-read of 1 + 8) under four tails (the last 1, 2, 8 or 16 beats), at the three speeds, each
-followed by a read of eight and a write of eight. The tail is staged five ways: the request taken
+followed by a read of eight and a write of eight. The tail is staged five ways: the DMA request taken
 down, the channel's EN taken down, EN let up behind the reply, EN let up in the vector 0, 4 or 16
 turns ahead of the host's body so that the beats land across it, and a byte popped ahead of the body.
 
 | stage, 32 reads a speed | the control, one run, whose entry reads no channel | the entry |
 |---|---|---|
-| the request down for the tail | every read wrong under `i2c_ok`, 139 cells at each speed, every channel left running, the FIFO not empty; the read behind wrong, every one | every byte in its place, the channel stopped, FIFO empty, the requests behind whole |
+| the request down for the tail | every read wrong under `i2c_ok`, 139 bytes at each speed, every channel left running, the FIFO not empty; the read behind wrong, every one | every byte in its place, the channel stopped, FIFO empty, the requests behind whole |
 | EN down for the tail | the same | the same |
 | EN let up behind the reply | every read wrong at the reply and written after it; the read behind wrong in 21 of 32 | the same, and nothing moves |
-| EN let up 0 or 4 turns ahead of the body | 3 of 32 wrong on the Cortex-M33, up to 5 on Hazard3 | the same |
+| EN let up 0 turns ahead of the body | 3 of 32 wrong on the Cortex-M33, 4 to 10 on Hazard3 over three control builds, a race | the same |
+| EN let up 4 turns ahead | 3 of 32 wrong on the Cortex-M33, 1 to 3 on Hazard3 | the same |
+| EN let up 16 turns ahead | none wrong | the same |
 | a byte popped ahead of the body | `i2c_ok` with the byte missing, every read; the read behind wrong in 21 of 32 | `i2c_dma_fault`, the channel stopped, the requests behind whole |
 
-BUSY polled down, then the cell: stale in none of 400 rows, half under two HIGH copies, and the same
+BUSY polled down, then the buffer's last byte: stale in none of 400 trials, half under two HIGH copies, and the same
 for TRANS_COUNT polled to zero ("updating automatically each time a write transfer completes",
-12.6.10). A channel paused over a read of four banks one request, it stands behind `IC_DMA_CR`
+12.6.10). A channel paused over a read of four shows one banked request (one it has not yet issued) in its
+debug counter behind `IC_DMA_CR`
 going down, and with EN let up a beat runs on it: the counter "decrements when the transfer is issued"
-(12.6.4.2), which is why the entry stops the channel before touching the FIFO. That is the stray beat's
-answer too: `IC_DATA_CMD` read over a stopped channel with the request up, or down, 200 rows of each,
-and the next block's start moved nothing and the read behind was exact.
+(12.6.4.2), which is why the entry stops the channel before touching the FIFO. Nor does such a beat, a stray beat,
+reach the next tenure: `IC_DATA_CMD` read over a stopped channel with the request up, or down, 200 trials of each,
+and the next DMA block's start moved nothing and the read behind was exact.
 
-**Reads and writes of seventeen at 100 kHz** fill the FIFO at their block's end, and the entry with
+**Reads and writes of seventeen at 100 kHz** fill the FIFO at their DMA block's end, and the entry with
 the STOP then waits for TX_EMPTY. That end can overtake `start()`, whose write of the mask would then
 take back the arm the DMA line just made, and nothing would write the entry; the host looks at the
 arm behind that write ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md), "The DMA requests"). Without the
-look a read of 17 stalled once, unstaged, over fifteen runs of letter `s` on Hazard3 (`i2c_timeout` under the
-arbiter). Staged, TX_CMD_BLOCK holding the first entry and the XIP cache emptied over `start()`: the
+look one read stood unanswered, unstaged, in one of fifteen runs of letter `s` on Hazard3, in a row with reads of 17 at
+100 kHz among them (its length is not in the log, and letter `s` calls the host with no arbiter). Staged,
+TX_CMD_BLOCK holding the first entry and the XIP cache emptied over `start()`: the
 control left 200 of 200 tenures unanswered on both halves, and with the look none.
 
 **What it costs.** In the release listing the entry adds one load of the channel's CTRL, a test and a
 branch to every engined tenure's STOP, and `start()` on an engined host one load and a test of the
 TX_EMPTY mirror. The tables above hold both. Letter i's read of one on `dma`, against a control build
 without them: 384 cycles against 373 on the Cortex-M33, `start()` 279 against 271 and the vector 105
-against 102; 357 against 349 on Hazard3. The late path, out of line in the flash, read at most 4927 cycles on
-the Cortex-M33 and 4913 on Hazard3 between stamps in the vector over letter `s`, the abort's
-poll and the XIP's misses in it. It waits for nothing else.
+against 102; 357 against 349 on Hazard3.
+
+The late path is out of line in the flash. **Its short figures come from the stage**, no load running: at most
+4927 cycles on the Cortex-M33 and 4913 on Hazard3 between stamps in the vector over letter `s`, the abort's
+poll and the XIP's misses in it. Under letter `u`'s loads the same stamp reads more, Cortex-M33 / Hazard3:
+at most 3794 / 4918 cycles beside loads in SRAM or across the bridge, and 36 683 / 39 440 (245 / 263 us) beside
+copies out of the uncached flash, 32 168 / 36 573 with the host in SRAM, the late path still in the flash. Those are
+the most seen in 12 and 3 runs, no bound. What is not established: how much of it is the abort's poll
+and how much the path's fetches beside the load, and what it reaches beside the longer flash blocks the letter
+does not run. No other interrupt nests over that vector meanwhile.
 
 A write takes the same two loads. The transmit channel's BUSY at the STOP entry reads down in every row
-of letter `u`, reads and writes alike: the last entry is the pump's, written behind the block's end.
+of letter `u`, reads and writes alike: the last entry is the pump's, written behind the DMA block's end.
 
 The same body on the RAM image (`test_rp2350_i2c_ram`, the engined host and the two vectors in
 SRAM, the late path called out to the flash): letters `u` and `s` the same on both halves, 3 runs.
@@ -912,6 +930,11 @@ Implemented but not bench-verified, each with what would measure it:
 
 - What a `dma` tenure costs the chip's SLEEP state: a meter on the rail, the same
   tenure under either value, would measure it.
+- A DMA load outlasting the arbiter's per-bus timeout: by the code `recover()` stops the channels and the
+  requester hears `i2c_timeout` (and `recover()` ignores an abort whose poll runs out); letter `u` calls
+  the host bare. Letter `u`'s longest load under the arbiter would measure it.
+- The late path beside the flash blocks of 16 KB, whose wait reaches 35 ms: letter `u`'s stamp under that
+  load would measure it.
 - The client's general call (`ack_general_call`): no brio host sends a
   general call, the partner's included, so no suite reaches this
   peripheral's GEN_CALL handling ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)

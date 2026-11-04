@@ -454,7 +454,9 @@ release contract, docs/design/dma.md) - and `claim_smba_pad` hands over the aler
 program in SMBus mode wants. Both engines arm at DMA priority `high`: the host
 does not overrun - a byte its streams have not moved leaves TxE or RxNE
 up and BTF rises, "stretching SCL low" until DR is served (RM0090
-27.3.3) - so a starved stream slows the bus and loses nothing.
+27.3.3), so a late stream slows the bus and loses nothing. A read of one has no next
+byte to hold: its wire ends by itself and the answer follows when the stream is served,
+and the arbiter's timeout answers for one never served ("A read under `dma` ends on its stream" below).
 `I2cClient::release` gates the peripheral the same way, its `init` starting from
 the reset.
 
@@ -780,11 +782,11 @@ the last fifty times that; past it the letter answers as an arbiter's timeout wo
 `recover()`, and the next read is whole. The event vector took two entries a read, SB
 and ADDR, at every load, with BTF up at none of them, so a late stream raises no level on it.
 
-**A load past what the bus takes is the case that decides** (letter `r`, by name only, fifteen
-runs). Three streams every 5, 2249 beats in 100 us: the stream is not served at all while the load
-stands. A read of one's wire ended with the byte in DR, 1500 of 1500. Nothing answered ahead of the
+**A load past what the bus takes is the case that decides** (letter `r`, run by its own key and not
+under `z`, fifteen runs). Three streams every 5, asking 5400 beats in 100 us against the bus's 2250: the
+stream is not served at all while the load stands. A read of one's wire ended with the byte in DR, 1500 of 1500. Nothing answered ahead of the
 stream, 0 of 1500, and when the load came off the read and the read of eight behind it were exact,
-1500 of 1500 each. Three every 12 and the copies, 2249 beats: 664 of the 664 reads of one that answered
+1500 of 1500 each. Three every 12 and the copies, 2247 to 2251 beats: 664 of the 664 reads of one that answered
 had the wire over first, 83 of 2040 reads gave no answer inside the bound, and every other one was exact. What
 such a load can do to the core is in [dma.md](dma.md)'s "Not covered yet".
 
@@ -1076,8 +1078,8 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
 reset through the panel's shared line PH7. `z` holds 64 verdicts here. 63 have
 run on this board, and letter `c`'s refusal of the reserved addresses on the
-Nucleo-F446RE alone ("Not covered yet"); one letter more, by name only, wants a
-finger.
+Nucleo-F446RE alone ("Not covered yet"); one letter more, run by its own key and not
+under `z`, wants a finger.
 
 - **The scan finds one address of 112, 0x38**, and the device says
   what it is in its own registers: FOCALTECH_ID (0xA8) reads 0x11 - the

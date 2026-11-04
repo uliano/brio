@@ -2326,7 +2326,9 @@ void tj_two_hosts() {
                       (lr.flags & (twilink::report_arblost | twilink::report_buserr)) == 0u);
 
     // Through the ENGINE, its start() thirty microseconds into the same
-    // tenure: the bounded BUSY wait (the document) meets the peer's STOP.
+    // tenure: the bounded BUSY wait (the document) meets the peer's STOP. The
+    // verdict below ("never a stall") is of this 100 kHz tenure: under a slower
+    // clock the request mostly stalls, the 20 kHz row of 2b.
     link_ready();
     if (!peer_act(Op::arb, host_action(nobody_addr, 0, 0, 600))) {
         bench.verdict("the peer accepted the host command into nobody", false);
@@ -3903,6 +3905,9 @@ void tt_bounds() {
                       stand_hi <= bus_free_us_named * bound_per_us + over + reset_cycles && stand_kept);
     // ---- stop_drain_us, run out by a client holding the clock ----
     constexpr uint32_t stop_drain_named = 5'000;
+    // Each floor in this letter is the name on a figure that holds start()'s own
+    // cycles and the ruler, so it would pass a wait that much short; poll_for_us()'s
+    // sum is what keeps the wait itself from ending early.
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
         uint32_t lo = 0xFFFFFFFFu;
         uint32_t hi = 0;

@@ -2477,7 +2477,7 @@ void tt_bounds() {
 //    40 to 257 us behind. What the peer's tenure ends with is then the reset's doing.
 // Counted: the resets taken, what the peer's tenure ended with and what this request
 // was answered, the tables apart by whether the round took a reset. Beside it, the
-// fraction a reset would land in by chance: the thread reading both lines through
+// fraction of a tenure both lines stand high: the thread reading both lines through
 // one whole tenure of the same bits, no request posted.
 
 struct LiveTally {

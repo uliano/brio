@@ -116,7 +116,8 @@
  *    the routes - the datasheet's own workaround, as one verb;
  *  - progress is TRANS_COUNT, erratum E12: READ_ADDR and WRITE_ADDR read
  *    wrong while a non-incrementing or wrapping sequence is in progress,
- *    so no verb here derives progress from an address;
+ *    so no verb here derives a running sequence's progress from an address
+ *    (settle() reads WRITE_ADDR with the channel aborted and nothing in flight);
  *  - a bus error halts the channel, marks CTRL (AHB_ERROR with READ_ERROR
  *    or WRITE_ERROR, cleared by writing one) and raises the channel's
  *    interrupt: an engine's service() hands back the error flag beside
@@ -456,7 +457,7 @@ public:
     /**
      * End the sequence early, erratum E13's way: the routes to both lines
      * lifted, CHAN_ABORT written, BUSY awaited (bounded, at most 100 000
-     * polls - the transfers in flight land in a few cycles), the completion
+     * polls - 2.5.5.3: "generally ... only a few cycles"), the completion
      * the landing may have raised cleared raw and on both lines, the routes
      * restored. False when BUSY never fell.
      *
@@ -620,11 +621,10 @@ struct DmaSniffer {
 // The level is the peripheral's (docs/design/dma.md), and this controller
 // has one bit of it, CTRL.HIGH_PRIORITY (2.5.7): "in each scheduling
 // round, all high priority channels are considered first, and then only a
-// single low priority channel". A normal channel therefore waits one round
-// of the high ones at most and is never starved outright, so here the
-// level decides no correctness and no transport offers it as an option
-// (docs/rp2040/dma.md measures a receive ring at normal beside two
-// HIGH_PRIORITY copies). The defaults are the rule's all the same, one bit
+// single low priority channel". No load measured here made the level decide
+// correctness, and no transport offers it as an option (docs/rp2040/dma.md
+// measures a receive ring at normal beside two HIGH_PRIORITY copies, and what
+// that text bounds is not established). The defaults are the rule's all the same, one bit
 // wide: a receive engine arms HIGH, its peripheral being the one that
 // overruns when starved; a transmit engine and the copy engine normal; and
 // a transport names its engines' levels at the call.
@@ -930,7 +930,8 @@ private:
 /**
  * A receive engine: one caller-owned run filled from one peripheral
  * register, and asked how much has arrived - from TRANS_COUNT, one
- * read, nothing suspended (erratum E12: never from WRITE_ADDR). The
+ * read, nothing suspended (erratum E12: a running channel's progress never
+ * from WRITE_ADDR; settle() reads it behind the abort). The
  * count is in the elements of the run started, whatever its beat.
  */
 template <uint8_t ch, typename Elem = uint8_t, uint8_t line = 0>

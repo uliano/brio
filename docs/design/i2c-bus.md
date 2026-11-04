@@ -105,18 +105,29 @@ adds the four an I2C host can observe, declared in
 | `i2c_bus_error` | the tenure is over on any other fault: a protocol violation, on a host that acts on one ("What a host does on the wire"), or, from `start()`, a peripheral out of its control ("The transaction descriptor") |
 
 A host with DMA engines adds a fifth, its own: `i2c_dma_fault`, the
-value `bus_engine_status + 4`, when a DMA channel reports a transfer
-error in the middle of a tenure or, on the CH32V00x, the CH32X035 and the
-CH32V203/V303, when BTF finds the transmit channel's count standing, or, on the STM32G0,
-when the STOPF entry finds the receive channel's count standing over a byte
-nobody has, or, on the DesignWare peripheral, when the STOP's entry finds the
-receive channel still counting and what it moved with what stands in the FIFO
-short of the read. The host then ends the tenure and
-releases the bus (a STOP, or on the DesignWare peripheral an abort, which
-sends one). `util/i2c_bus.hpp` does not declare it: each stratum whose
+value `bus_engine_status + 4`. Every such host answers it when a DMA channel
+reports a transfer error in the middle of a tenure, and three kinds of host when
+a channel's end disagrees with the wire:
+
+- on the CH32V00x, the CH32X035 and the CH32V203/V303, when BTF finds the
+  transmit channel's count standing;
+- on the STM32G0, when the STOPF entry finds the receive channel's count
+  standing over a byte nobody has;
+- on the DesignWare peripheral, when the STOP's entry finds the receive channel
+  still counting and what it moved with what stands in the FIFO short of the
+  read, or its abort's poll running out.
+
+The STM32F4's FMPI2C1 answers it for a transfer error alone: a byte in neither
+memory nor RXDR stays `i2c_ok` there, which only a program's own read of RXDR
+inside a tenure reaches.
+
+After a transfer error or at BTF the wire is still held, so the host ends the
+tenure and releases the bus (a STOP, or on the DesignWare peripheral an abort,
+which sends one). At STOPF or STOP_DET the wire is already over, and it issues
+neither. `util/i2c_bus.hpp` does not declare the status: each stratum whose
 host has engine parameters defines it, with the same value, and the STM32F4's
-second design names it `fmpi2c_dma_fault` (`stm32f4/fmpi2c.hpp`). The
-AVR's host, which has no DMA, never produces it. A requester that
+second design names it `fmpi2c_dma_fault` (`stm32f4/fmpi2c.hpp`), for the transfer
+error alone. The AVR's host, which has no DMA, never produces it. A requester that
 compares against it names its family's constant; a portable one treats
 any code it does not know as a failure.
 
@@ -253,8 +264,8 @@ is the complete script of one bus tenure" holds word for word. The
 probe is what a scanner sends and, unlike the SPI zero-length request,
 it does touch the wire (its address phase is the transaction), so
 `start()` is asynchronous on I2C whenever the wire moves: such a request
-ends in a `TransferDone` from the host's vector, unless the wire wedges,
-which is the per-bus timeout's case below. What completes inside
+ends in a `TransferDone` from the host's vector, unless the wire wedges or
+a DMA load holds it, which is the per-bus timeout's case below. What completes inside
 `start()` is what never reached the wire. The refusals: a request naming
 a speed the clock in force cannot produce (`speed_ok(speed)` says so),
 an address outside the range above, or `dma` with no engines bound is
@@ -309,11 +320,14 @@ below. The host could count only its own core cycles; the program knows
 what else must run, and whether the core should sleep during the tenure.
 A wrong choice costs core cycles, a sleep, or wire time when a pump
 stretches the clock (below).
-The one case where it costs correctness is a buffer no DMA master
+Two cases cost more than that. A buffer no DMA master
 reaches: under `dma`, a half in the core-coupled memory of an STM32F4 part
 that has one should end in `i2c_dma_fault` where `interrupt` would succeed
 ([the STM32F4 DMA page](../stm32f4/dma.md); read from that page's
-measured transfer error, not staged on I2C).
+measured transfer error, not staged on I2C). And a DMA load that starves the
+channel for longer than the per-bus timeout: the read holds SCL and that timeout
+answers ([the FMPI2C page](../stm32f4/fmpi2c.md), [the RP2350 I2C
+page](../rp2350/i2c.md)), where `interrupt` does not wait on the load.
 
 **A half the engines cannot carry completes on the interrupt**, under
 `dma` too, and is not refused. Here I2C parts from SPI, whose host refuses
@@ -453,7 +467,8 @@ request that names it does not compile
 ## The per-bus timeout
 
 A client holding a line low for ever (SDA, or the clock in the middle
-of a byte) leaves a tenure in flight: the kernel keeps running, since
+of a byte) leaves a tenure in flight, and so does a DMA load that keeps a
+read's channel from the peripheral while it holds SCL: the kernel keeps running, since
 nothing waits, but the arbiter keeps waiting and later requests pile up
 until the arbiter rejects them. The requesters hear those rejections, and
 nothing recovers the bus. The silicon does not close this. Of the
@@ -604,9 +619,9 @@ write half's first byte goes into TXDR before the START under `interrupt` and
 under `dma`, a write of one starting no channel: that is ES0418 2.11.6's first
 workaround on the STM32G071, so the host takes one path inside that erratum's
 band of clock ratios and outside it. A read's last byte is taken at STOPF; on a channel that entry reads the count
-first, stops a channel still counting, requests first, and stores what it had
-not taken at `rx_len - remaining`. Channels above it make one late by themselves
-(the [STM32G0 page](../stm32g0/i2c.md)). A NACK is named at STOPF with no NACKIE
+first; with the count standing it takes the channel's DMA request down, stores what
+the channel had not taken at `rx_len - remaining` and stops it. DMA channels of a
+higher priority make one late by themselves (the [STM32G0 page](../stm32g0/i2c.md)). A NACK is named at STOPF with no NACKIE
 armed; it is the address's when TXE is
 clear and nothing refilled TXDR, which the pump's position or the transmit
 channel's count tells. A tenure's interrupt and DMA
@@ -624,9 +639,11 @@ These four share an event machine and its consequences:
 - **`start()` spends dispatch time on the bus.** This lineage cannot queue
   a START behind a STOP and nothing in its chapters signals the STOP's
   leaving, so `start()` waits for it: about one bit period when a tenure
-  is started at the last one's completion, bounded at 5 ms. A clock held
-  past that parks the tenure, no START and no vector, for the per-bus
-  timeout to answer.
+  is started at the last one's completion, bounded at 5 ms, and then for
+  BUSY to clear, bounded at 100 us (`bus_free_us`). A clock held
+  past the first parks the tenure, no START and no vector, for the per-bus
+  timeout to answer; each WCH host's paragraph below has what it does about a
+  BUSY left standing after the second.
 - The event line is raised by `start()` and dropped at the completion, so
   the BTF a STOP leaves standing does not re-enter the vector.
 - A write-then-read requests its repeated START on the TxE of the last
@@ -707,7 +724,8 @@ STOP leaves.
 engine slots are fixed to the instance's own channels (I2C1 on DMA1's 6 and
 7, I2C2 on its 4 and 5). After the wait for the STOP, a BUSY standing with one read finding both lines
 high takes 19.12.1's SWRST, counted (`unwedges()`); that read also passes in
-another controller's tenure ([the CH32V203/CH32V303 I2C
+another controller's tenure, and the reset then falls inside it, on a bus no brio
+program shares with a second controller ([the CH32V203/CH32V303 I2C
 page](../ch32vx03/i2c.md)). `busy()` is
 for a sleep site. On the pump the first two data bytes load in the ADDR
 entry. The client half takes `I2cClientOptions` (a polled client with its
@@ -723,7 +741,8 @@ pads while USB_IOEN does. The engine slots are fixed to DMA channels 6 and 7
 (ORs shared with USART2). On the pump the first two bytes load in the ADDR
 entry. After the wait for the STOP, a BUSY standing with one read finding both lines
 high takes 15.9.1's SWRST, counted (`unwedges()`); that read also passes in
-another controller's tenure ([the CH32X035 I2C page](../ch32x035/i2c.md)). `unstick()` drives a line low push-pull and
+another controller's tenure, and the reset then falls inside it, on a bus no brio
+program shares with a second controller ([the CH32X035 I2C page](../ch32x035/i2c.md)). `unstick()` drives a line low push-pull and
 releases it as an input, this series having no open-drain GPIO. The client is
 polled (`I2cClientOptions`) or on its vectors, with `flush()`. `Placement`,
 the last template argument (`util/placement.hpp`), can put the hot path in
@@ -744,7 +763,8 @@ less and a write of sixteen or less take one interrupt, and a longer one one per
 eight. A tenure that completes ends on its own STOP_DET and a failure on TX_ABRT, and a
 read's STOP entry reads the receive channel's BUSY, stopping a channel still
 counting and taking what stands in the FIFO by hand ([the DesignWare I2C
-page](../dw_apb_i2c/README.md)). The disable / IC_TAR / enable cycle is
+page](../dw_apb_i2c/README.md)), so nothing writes the buffer after the reply short of
+an abort whose poll runs out. The disable / IC_TAR / enable cycle is
 skipped while the address and the speed stand and the last tenure ended on
 its STOP, which takes the peripheral's bus-timed disable (the whole cycle 1.4
 to 1.6 us at 400 kHz, 7.6 to 12 at 100) out of the dispatch. `unstick()`

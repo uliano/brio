@@ -1871,7 +1871,7 @@ void tm_client_edges() {
 // errors alone): STOP_DET ends the tenure, and STOP_DET says the WIRE is over.
 // The channel may still have beats to move, up to the FIFO's sixteen, since SCL
 // holds only with the FIFO full. The chapter gives no bound on a channel's lag
-// (RP2040 2.5.7, RP2350 12.6.1: a round of HIGH channels, then one normal). So:
+// (RP2040 2.5.7, RP2350 12.6.10: a round of HIGH channels, then one normal). So:
 //
 //   u  THE LOAD: reads of 1, 8, 16, 64 and 255 at the three speeds under each
 //      load below, a channel's state read in the vector's first loads; the
@@ -2143,9 +2143,10 @@ bool late_cold_start = false;
 uint32_t late_inside_start = 0;
 
 /// THE LIMIT, nine periods a byte twice over and a second: letter u's slowest measured
-/// channel beside four HIGH copies of the flash waits 2.1 ms a turn for a block of 256
-/// bytes (5.2 million cycles for 16 KB at 150 MHz, over 64), and a read of 255 at one beat
-/// a turn is 540 ms of holding SCL. Past this it is `no_answer`, never a verdict's margin.
+/// channel beside four HIGH copies of the flash waits 0.54 ms a turn for a block of 256
+/// bytes (5.2 million cycles for 16 KB at 150 MHz, over 64; 73 239 cycles measured at
+/// that block), and a read of 255 at one beat a turn is 138 ms of holding SCL. Past this it
+/// is `no_answer`, never a verdict's margin.
 uint32_t late_limit_us(uint32_t bytes, I2cSpeed s) {
     return 18'000'000u / i2c_speed_hz(s) * (bytes + 2u) + late_limit_margin_us;
 }
@@ -2840,11 +2841,12 @@ void ts_late_stage() {
     // ---- a transmit block's end inside start() ----
     // Seventeen is the length whose block (fifteen beats and the first entry) fills the FIFO,
     // and 100 kHz the speed that leaves the first entry in it longest: dma_isr() then arms
-    // TX_EMPTY for the last entry. Unstaged, a warm start() stores its mask first; on one run
-    // of fifteen a read of 17 stalled there. The stage makes the order certain: TX_CMD_BLOCK
+    // TX_EMPTY for the last entry. Unstaged, a warm start() stores its mask first; in one run
+    // of fifteen one read stood unanswered in a row with reads of 17 (the log gives no length).
+    // The stage makes the order certain: TX_CMD_BLOCK
     // keeps the first entry in the FIFO (set with the host idle, as its register asks) and the
     // cache emptied ahead of start() stretches it past the block's end. The limit's margin is
-    // 20 ms, the wire's 3.8 ms being in the rest, since nothing here holds SCL but the defect
+    // 20 ms over a rest of 3.42 ms (the wire 1.64 ms), since nothing here holds SCL but the defect
     // itself; 100 rows of each, a read and a write. On the RP2040 a write of 17 stays on the
     // pump and a read's block ends behind the mask's store even so; the RAM image's start()
     // fetches nothing. So the arm's look is what this row judges on the RP2350's flash image.
@@ -2903,10 +2905,10 @@ void ts_late_stage() {
                   " late; the partner's tally: ", rep ? "read" : "LOST", ", served ", r.aux1, ", received ", r.aux0, ", ", r.sstatus,
                   " off the pattern", crlf);
             // 32 = 4 tails x 8 shapes. The stage's own miss is no failure, its read judged the
-            // same, and the one shape it can miss on is the read of one, a tenure of 18 us at
+            // same, and the one shape it can miss on is the read of one, a tenure of 19 us at
             // 1 MHz against the thread's way out of a start() cold in the XIP cache: 4 rows of
-            // the 32. Beyond those the stage has missed its point, except a race's, whose beats
-            // may be done by the vector's first load.
+            // the 32. Beyond those the stage has missed its point. A race's rows are not held to
+            // that: late_before() reads BUSY ahead of its let-up, and they log 31 or 32.
             const bool stage_hit = st.stage == LateStage::race || row.late >= 28u;
             whole = whole && row.reads == 32u && row.exact == 32u && row.next_wrong == 0u && stage_hit && rep && r.sstatus == 0u;
         }

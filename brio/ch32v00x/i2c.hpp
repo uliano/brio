@@ -97,10 +97,10 @@
  * arbiter, with no tenure in flight.
  *
  * The machine this chapter prescribes is a set of software sequences,
- * each stretching SCL low until it completes (15.3's notes): EV5 (SB
- * up: read STAR1, write the address), EV6 (ADDR up: read STAR1 then
- * STAR2), EV8 (TxE: write DATAR), EV8_2 (TxE and BTF: the last byte is
- * out, STOP or repeated START), EV7 (RxNE: read DATAR) - and a
+ * each stretching SCL low until it completes (15.3's notes): EVT5 (SB
+ * up: read STAR1, write the address), EVT6 (ADDR up: read STAR1 then
+ * STAR2), EVT8 (TxE: write DATAR), EVT8_2 (TxE and BTF: the last byte is
+ * out, STOP or repeated START), EVT7 (RxNE: read DATAR) - and a
  * receive procedure that depends on the count: one byte wants ACK
  * cleared before ADDR is cleared and STOP set right after; two bytes
  * want POS set with ACK, ACK cleared after ADDR, and the pair read
@@ -119,12 +119,12 @@
  * (begin_receive()).
  *
  * The entry that clears ADDR loads a write's first two bytes (first_bytes()).
- * TxE stands at ADDR and after its clear, EV8_1: the first store goes
+ * TxE stands at ADDR and after its clear, EVT8_1: the first store goes
  * through the data register into the empty shifter, TxE is up again on the
- * next read of STAR1, EV8, and the data register takes the second (measured,
- * docs/ch32v00x/i2c.md). So a write of one or two bytes never raises the
- * buffer line: three entries, SB, ADDR and BTF, with the STOP at BTF, once
- * the last byte's acknowledge is known. A NACK of the first byte leaves the
+ * next read of STAR1, EVT8, and the data register takes the second (measured,
+ * docs/ch32v00x/i2c.md). So a write of one or two bytes, that read finding TxE
+ * up, never raises the buffer line: three entries, SB, ADDR and BTF, with the
+ * STOP at BTF, once the last byte's acknowledge is known. A NACK of the first byte leaves the
  * second in the data register, which never reaches the wire: the STOP goes
  * out and the next tenure's address replaces it at SB (measured).
  *
@@ -135,7 +135,7 @@
  * repeat the start condition, and requested while a byte shifts it goes
  * out as that byte ends (measured: every written byte taken, and no BTF
  * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
- * EV8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
+ * EVT8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
  * acknowledge - and it is the order WCH's interrupt example uses, with no
  * BTF entry of its own. No delivery on this part depends on
  * it (docs/ch32v00x/i2c.md). The price is in the error path: the START
@@ -148,7 +148,7 @@
  * races that generation - won at 100 kHz, lost at 400 kHz, where it left
  * STOP standing over a master holding the bus and the next tenure stalled
  * (measured, docs/ch32v00x/i2c.md). So the refusal lets the Sr go out and
- * closes the tenure from its SB with the one sequence EV5 allows: the
+ * closes the tenure from its SB with the one sequence EVT5 allows: the
  * address with the write bit and STOP requested behind it - a void write,
  * Sr A P on the wire - its ADDR cleared or its own NACK taken before the
  * tenure reports i2c_nack_data. Nothing else of the controller is touched,
@@ -209,7 +209,7 @@
  *
  * Not covered yet: 10-bit addressing on the host side (the resource
  * has the mode and the client matches such an address; the host's
- * header-byte sequence, EV9, has no user); PEC (the resource has the
+ * header-byte sequence, EVT9, has no user); PEC (the resource has the
  * enable, no tenure shape asks for it); the general call as a host
  * verb; a wake from Standby on an address match, which this family's
  * PWR chapter does not offer.
@@ -532,14 +532,14 @@ struct I2c {
     static bool second_address_matched() { return (regs().STAR2 & i2c_dualf) != 0u; }
     static bool general_call_matched() { return (regs().STAR2 & i2c_gencall) != 0u; }
 
-    /// EV6/EV1: ADDR is cleared by reading STAR1 then STAR2, in that
+    /// EVT6/EVT1: ADDR is cleared by reading STAR1 then STAR2, in that
     /// order. Returns STAR2, which tells the direction (TRA) and which
     /// address matched.
     static uint16_t clear_addr() {
         (void)regs().STAR1;
         return regs().STAR2;
     }
-    /// EV4: STOPF is cleared by reading STAR1 then writing CTLR1.
+    /// EVT4: STOPF is cleared by reading STAR1 then writing CTLR1.
     static void clear_stopf() {
         (void)regs().STAR1;
         regs().CTLR1 = regs().CTLR1;
@@ -826,8 +826,9 @@ public:
         // the wait is out of line, and the START goes in behind it whatever
         // it found. Measured: into a line a peer holds low it is answered
         // ARLO, and i2c_arb_lost is the reply, inside any per-bus timeout;
-        // into a tenure another controller is clocking it is held until the
-        // STOP (docs/ch32v00x/i2c.md).
+        // into a tenure another controller is clocking at 100 kHz it is held
+        // until the STOP; at 50 or 20 kHz it mostly stays held past it, for the
+        // per-bus timeout to answer (docs/ch32v00x/i2c.md).
         if (S::busy()) {
             wait_bus_free();
         }
@@ -893,7 +894,7 @@ public:
                 if (phase_ == Phase::refused || (phase_ == Phase::restart && (s1 & i2c_af) != 0u)) {
                     return close_refused();
                 }
-                // EV5: the address, with the direction bit.
+                // EVT5: the address, with the direction bit.
                 if (phase_ != Phase::start_tx) {
                     prime_receive();
                     S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
@@ -959,7 +960,7 @@ public:
                         request_restart();
                         return false;
                     }
-                    S::stop();   // EV8_2: a plain write's end
+                    S::stop();   // EVT8_2: a plain write's end
                     return finish(i2c_ok);
                 }
                 return false;
@@ -1273,7 +1274,7 @@ private:
         return finish(i2c_bus_error);
     }
 
-    /// EV8_1 and EV8 in the entry that cleared ADDR (the file header). The
+    /// EVT8_1 and EVT8 in the entry that cleared ADDR (the file header). The
     /// first byte goes straight through the data register into the empty
     /// shifter, and one read of STAR1, not a loop, asks whether TxE is up
     /// again: then the data register takes the second byte, or a one-byte
@@ -1304,7 +1305,7 @@ private:
         return false;
     }
 
-    /// EV8 on the buffer vector, and EV8_2 on the event vector. A plain
+    /// EVT8 on the buffer vector, and EVT8_2 on the event vector. A plain
     /// write drops the buffer vector with its last byte and ends on BTF; a
     /// read half to follow keeps it, and the TxE that says the last byte
     /// went into the shifter - or one served later, with BTF up - requests
@@ -1326,7 +1327,7 @@ private:
             return false;
         }
         if ((s1 & i2c_btf) != 0u) {
-            S::stop();   // EV8_2
+            S::stop();   // EVT8_2
             return finish(i2c_ok);
         }
         return false;
@@ -1342,7 +1343,7 @@ private:
         S::start();
     }
 
-    /// EV5 of the Sr behind a refused last byte: the address with the
+    /// EVT5 of the Sr behind a refused last byte: the address with the
     /// WRITE bit, which clears SB, and STOP requested behind it - "after the
     /// current byte transfer" (15.10.1) - so the wire carries a void write
     /// and the controller is left as a plain write leaves it. AF is cleared
@@ -1366,7 +1367,7 @@ private:
         }
     }
 
-    /// EV6 on a read: the procedure by count.
+    /// EVT6 on a read: the procedure by count.
     static bool begin_receive() {
         if constexpr (has_dma) {
             if (dma_serves_rx()) {
@@ -1759,7 +1760,7 @@ public:
     /// An address match is pending (SCL held meanwhile, unless
     /// NOSTRETCH).
     static bool addressed() { return S::flag(i2c_addr); }
-    /// Answer the match and release the clock: EV1's STAR1-then-STAR2
+    /// Answer the match and release the clock: EVT1's STAR1-then-STAR2
     /// read. Returns true when the host reads (this side transmits).
     static bool answer_address() { return (S::clear_addr() & i2c_tra) != 0u; }
     /// Valid after answer_address(): which own address matched.

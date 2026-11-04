@@ -1140,7 +1140,7 @@ others to the cycle):
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
 | I2C one-byte write at 400 kHz, `start()` | 182 / 4550 | 189 / 537 | 185 / 4291 | 188 / 536 |
 | ... its longest handler entry | 96 / 2880 | 123 / 1094 | 96 / 96 | 119 / 119 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58938 / 67742 | 58963 / 61466 | 58941 / 63544 | 58966 / 59580 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58937 to 58941 / 67612 to 67615 | 58963 / 61466 (an older image) | 58941 / 63544 (an older image) | 58964 to 58968 / 59582 to 59584 |
 
 | Hazard3 | F | R | V | B |
 |---|---|---|---|---|
@@ -1151,7 +1151,7 @@ others to the cycle):
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
 | I2C one-byte write at 400 kHz, `start()` | 188 / 4138 | 188 / 1845 | 188 / 4153 | 192 / 1782 |
 | ... its longest handler entry | 70 / 1649 | 79 / 545 | 70 / 70 | 80 / 80 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 58951 / 64980 | 58972 / 61940 to 62222 | 58955 / 62552 | 58971 / 60723 to 60989 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58942 to 58952 / 64976 to 64979 | 58972 / 61940 to 62222 (an older image) | 58955 / 62552 (an older image) | 58972 to 58975 / 60720 to 60723 |
 
 What the rows say - the RP2040's reading on both halves:
 

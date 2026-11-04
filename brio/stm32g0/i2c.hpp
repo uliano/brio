@@ -2019,9 +2019,11 @@ public:
     /// engines may static_assert it instead.
     static constexpr bool has_dma = TxEngine::present;
     /// How many loads of the receive channel's count the STOPF entry gives a beat
-    /// already under way (settle_late_read()). A granted beat is one read and one write
-    /// (10.4.3) and no other channel comes between them (10.4.4); 5 cycles a word
-    /// measured (docs/stm32g0/dma.md), at most three times that behind the bus matrix's
+    /// already under way (settle_late_read()). Arithmetic: no suite row has caught such a
+    /// beat (docs/stm32g0/i2c.md). A granted beat is one read and one write (10.4.3) and no
+    /// other channel comes between them (10.4.4). At RXNE down the read is done and the
+    /// store is left, under the 5 cycles of a whole memory-to-memory word
+    /// (docs/stm32g0/dma.md), at most three times that behind the bus matrix's
     /// round robin (10.4.1) against the core and the second controller. A turn is at
     /// least 5 cycles, a load and a branch at zero wait states, so 16 turns are 80 cycles
     /// against 15.

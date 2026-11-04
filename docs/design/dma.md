@@ -200,8 +200,8 @@ itself keeps the reset value, `low`, on the STM32G0 and the STM32F4.)
   It underruns, or only slows. A receive that cannot overrun belongs
   here too, and for the same reason: an I2C host stretches the clock
   while its data register is full, so a starved channel slows the bus and never overruns. That does not cover the
-read's tail: a channel starved over the last bytes finds the wire already over,
-and the host's entry settles it (the STM32G0 and DesignWare I2C pages).
+  read's tail: a channel starved over the last bytes finds the wire already over,
+  and the host's entry settles it (the STM32G0, FMPI2C and DesignWare I2C pages).
 - **A memory-to-memory copy arms at the lowest level.** No request
   paces it: it asks for the bus on every cycle of its block. A channel it
   outranks on a strictly ranked controller waits for about the whole
@@ -241,7 +241,7 @@ it so that a ring a program ranks low loses nothing within the FIFO's
 nine characters and counts every gap past them
 ([the STM32G0 USART page](../stm32g0/usart.md)). The RP2040's arbiter
 serves one normal channel every scheduling round after the high ones
-(2.5.7), and no arrangement of copies starved a receive ring at
+(2.5.7), and no arrangement of copies measured starved a receive ring at
 normal: two HIGH_PRIORITY copies of 16 KB back to back at 3 Mbaud,
 one, or two normal ones ([the RP2040 DMA page](../rp2040/dma.md)). The
 RP2350 states the same round (12.6.10) and has removed the idle cycle

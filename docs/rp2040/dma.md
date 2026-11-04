@@ -150,8 +150,8 @@ single low priority channel, before returning to the high priority
 channels". The engines take docs/design/dma.md's rule in that one bit: a
 receive engine arms HIGH by default (its peripheral overruns when the
 channel is starved), a transmit engine and the copy engine normal, and a
-transport names its engines' levels at the call. On this chip the bit
-decides no correctness: nothing starved a receive ring at normal (letter
+transport names its engines' levels at the call. No load measured on this
+chip made the bit decide correctness: nothing starved a receive ring at normal (letter
 p, below), and the Uart takes no level option.
 
 ## One owner a channel
@@ -479,10 +479,11 @@ travelled by DMA):
   it, a 1.5 s window a leg at 115200, 1 Mbaud and 3 Mbaud): every byte
   in order and no overrun with the ring at HIGH beside two normal copies
   and beside two HIGH_PRIORITY ones - AND with the ring at normal beside
-  two HIGH_PRIORITY copies, one, or two normal ones. The arbiter serves
-  one normal channel every round, and the bit decides no correctness on
-  this chip - where the RP2350's arbiter, the same text over a different
-  round, does ([../rp2350/dma.md](../rp2350/dma.md)).
+  two HIGH_PRIORITY copies, one, or two normal ones. In this measurement the bit
+  decides no correctness on this chip; on the RP2350, whose chapter has the same text on
+  the round, it does ([../rp2350/dma.md](../rp2350/dma.md)), and why they differ is
+  not established. An I2C channel at normal beside the same copies can still run a
+  beat behind its peripheral ([i2c.md](i2c.md)).
 - A RELEASED REQUESTER, THE SAME OWNER AGAIN, letter r (no wire), the release
   contract on UART1, whose channels 2 and 3 are its own for the whole image. The
   block is released the worst way: both DMA enables set, the channels stopped, four

@@ -286,11 +286,12 @@
  * (docs/ch32vx03/i2c.md). And a tenure that ends without the peripheral
  * seeing its own STOP leaves BUSY standing over an idle wire. That is
  * 19.12.1's own case for SWRST ("when no stop condition is detected on
- * the bus but the busy bit is 1"), it is real here after a DMA-served
- * read (measured), and `start()` answers it: when the bounded wait runs
- * out and both lines read high the chapter's reset is taken and the whole
- * configuration written again, the wire being the guard that keeps
- * another master's busy bus out of it.
+ * the bus but the busy bit is 1"), a hand staging makes it (measured),
+ * and `start()` answers it: when the bounded wait runs out and one read
+ * finds both lines high the chapter's reset is taken and the whole
+ * configuration written again. That read also passes in a tenure another
+ * controller is clocking, at the fraction of its bits both lines stand
+ * high (measured, docs/ch32vx03/i2c.md).
  *
  * The pads are a column (afio.hpp, table 10-34). I2C1 has two: the
  * default PB6/PB7 and code 1's PB8/PB9. I2C2 has no remap field - one
@@ -1148,11 +1149,11 @@ public:
     /**
      * 19.12.1'S OWN CASE, AND THE ONE VERB THAT ANSWERS IT: SWRST "can
      * reset the I2C module when no stop condition is detected on the bus
-     * but the busy bit is 1". That state is real on this silicon - a
-     * DMA-served read has been seen to end with the wire idle, both lines
-     * high, and BUSY standing (docs/ch32vx03/i2c.md) - and a START issued
-     * into it is held by the hardware for ever, because the hardware is
-     * waiting for a bus that is already free.
+     * but the busy bit is 1". That state is real on this silicon - a hand
+     * staging leaves the wire idle, both lines high, and BUSY standing
+     * (docs/ch32vx03/i2c.md) - and a START issued into it is held by the
+     * hardware for ever, because the hardware is waiting for a bus that is
+     * already free.
      *
      * So: when the bounded wait for BUSY runs out and one read finds both
      * lines high, the chapter's reset is taken. That read also passes in a

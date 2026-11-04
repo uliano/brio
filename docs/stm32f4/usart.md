@@ -634,11 +634,11 @@ read once more, and a run one short, the last byte of the burst left standing in
 after. Unread, the same frame is a real byte the next block takes, and nothing is wrong
 but the program's expectation. With DMAR down ahead of the read, nothing moves, every stop.
 
-**The transport does not reach it.** Read to its end in `usart.hpp`, the stream stops in three places:
-`release()`, which gates the block with DR unread, `init()` then starting from the reset; a
+**The transport does not reach it.** Read to its end in `usart.hpp`, the stream stops in two places:
+`release()`, which gates the block with DR unread, `init()` then starting from the reset; and a
 transfer error, which stops it in hardware (`dma_isr()`, `abandon()`, then the consumer's look
-through `arm_rx()`), with DR unread again, so the ring takes what stands as a real byte; and
-nothing else, since `rebase()` and `set_baud()` write BRR under a running stream. The vector's
+through `arm_rx()`), with DR unread again, so the ring takes what stands as a real byte.
+`rebase()` and `set_baud()` stop nothing: they write BRR under a running stream. The vector's
 one read of DR under the engine, the overrun with nothing to take (`rx_vector()`), is on a stream
 that has not stopped: a transfer error there is the one way to reach it, and the frame then stands with
 RXNE up, which that branch does not take. A transfer error needs a ring no DMA master can reach, which

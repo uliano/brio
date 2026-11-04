@@ -84,7 +84,7 @@ facts no header carries keyed on the device-select define). Bench suite:
 `test_stm32f4_dma`, and `test_stm32f4_serial` letter g for a receive
 ring against copies on its own controller (a letter is one command key
 of the suite's console and the group of verdicts it runs, `z` the key
-that runs them all). Family fixture
+that runs them all, unless a letter is said to run by name, its own key alone). Family fixture
 `test/family_stm32f4/dma.cpp` plus nine negatives under `brio check
 stm32f4`, three of them the ownership check's.
 
@@ -298,8 +298,8 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
   `UartOptions::rx_priority` (`very_high` by default) and its transmit at
   `high` ([usart.md](usart.md)), the SPI host's receive `very_high` and
   transmit `high` ([spi.md](spi.md)), the I2C and FMPI2C hosts' two at
-  `high` - their bus stretches SCL rather than overrun ([i2c.md](i2c.md),
-  [fmpi2c.md](fmpi2c.md)). A DAC stream is the exception a program ranks
+  `high` - their bus stretches SCL rather than overrun, a read's last byte
+  apart, which stretches nothing ([i2c.md](i2c.md), [fmpi2c.md](fmpi2c.md)). A DAC stream is the exception a program ranks
   itself: a DMA underrun "disables" the DAC's transfers until both ends
   are re-initialized (RM0090 14.3.7), so it does not only slow
   ([dac.md](dac.md)).
@@ -778,35 +778,41 @@ line of its own: it is every converter's and the common block's (RM0090
 same as B, and its `release()` clears CR2 with the clock on before the
 gate - F. QUADSPI has no verb that sets its DMAEN.
 
-**A clear ahead of a beat can leave a stray beat for the next block.** When EN's
+**A clear ahead of a beat can leave a stray beat for the next DMA block.** When EN's
 clear reaches a stream with no transfer under way, the stream stops with the peripheral's
 data unread or still to come. If that register is then read by the core with the
-peripheral's DMA enable still up, the next block's start takes a beat by itself: its count
-one down with nothing sent. The manual does not describe it, and the blocks differ. All on the
-STM32F446RE:
+peripheral's DMA enable still up, the next DMA block's start takes a beat by itself, the stray
+beat: its count one down with nothing sent. The manual does not describe it, and the peripherals
+differ. All on the STM32F446RE, each row a count of stops of the kind the second column names:
 
-| the requester | the clear | DR read with the enable up, a stray in | the enable down first |
+| the requester | the clear | DR read with the enable up: stops that left a stray beat | the enable down first |
 |---|---|---|---|
-| FMPI2C1's receive, DMA1 stream 2 (`test_stm32f4_fmpi2c` letter `r`, its enable let up and EN cleared in the next store) | ahead of the request | 1500 of 1500 | 0 of 1500 |
-| the same, under a load past what APB1 takes (letter `v`, by itself) | over a request the arbiter has not granted | the next read wrong, 300 of 300 under `i2c_ok`, the host's order changed for a control | 0 of 1500 |
-| USART6's receive, DMA2 stream 1 (`test_stm32f4_serial` letter `i`) | any time before the frame's end | 98839 of 98839 frames left | 0 of 98559 |
-| I2C1's receive, DMA1 stream 0 (`test_stm32f4_i2c` letter `p`) | ahead of the request | 0 of 1500 | 0 of 1500 |
+| FMPI2C1's receive, DMA1 stream 2 (`test_stm32f4_fmpi2c` letter `r`, its enable let up and EN cleared in the next store) | ahead of the DMA request | 1500 of 1500 | 0 of 1500 |
+| the same, under a load past what APB1 takes (letter `v`, which `z` does not run) | over a DMA request not yet granted | 300 of 300, seen as the next read wrong under `i2c_ok`, the host's order changed for a control | 0 of 1500 |
+| USART6's receive, DMA2 stream 1 (`test_stm32f4_serial` letter `i`) | any time before the frame's end | 98839 of 98839, a frame left in DR each | 0 of 98559 |
+| I2C1's receive, DMA1 stream 0 (`test_stm32f4_i2c` letter `p`) | ahead of the DMA request | 0 of 1500 | 0 of 1500 |
 
-A transfer under way does finish before EN falls, and a request the arbiter is serving comes
-to that ([fmpi2c.md](fmpi2c.md)). The FMPI2C host takes its enable down at EN low; neither the
-USART's transport nor the classic I2C host reads a data register over a stream it stopped
-([usart.md](usart.md), [i2c.md](i2c.md)).
+A transfer under way does finish before EN falls, and a DMA request being served is one
+([fmpi2c.md](fmpi2c.md)). A program that stops a stream by hand and then reads the peripheral's
+data register takes the peripheral's DMA enable down first; that is the order every zero above
+ran. The FMPI2C host takes its enable down at EN low; neither the USART's transport nor the classic
+I2C host reads a data register over a stream it stopped ([usart.md](usart.md), [i2c.md](i2c.md)).
+The SPI host takes both its enables down ahead of any stream's stop, on every end of a request
+([spi.md](spi.md)), and no letter stages the stray beat on it (the second list below).
 
 **DMA1 can take all of APB1, and what stands below it then is not served.** A stream of DMA1 pointed
 at a timer's counter on APB1, a word to one cell of SRAM, moves at most 1502 beats in 100 us at
-180 MHz by itself, one every 12 core cycles however fast it is paced. Three or more together reach
-2250, 45 MHz at two clocks an access, and no pacing went past it (`test_stm32f4_fmpi2c` letter `v`).
-Paced past that figure, three streams every 5, a stream at `high` under them at `very_high` is not served at all while
-they stand. Below it, four copies on DMA2 with three paced streams have held a stream at `high` past the
-milliseconds ([i2c.md](i2c.md) has the rows), and made one late against a wire that does not wait for
-it ([fmpi2c.md](fmpi2c.md)). A timer's gate closed over its raised request, with a stream at
-`very_high` left on that cell, measured once, does the same with one stream, and
-EN's clear on a stream below it then ran out `abort()`'s whole bound, 1.6 million cycles at 180 MHz: the
+180 MHz by itself, one every 12 core cycles however fast it is paced, and two together move no more.
+Three or more together reach 2250, 45 MHz at two clocks an access, and no pacing went past it (a sweep
+of `test_stm32f4_fmpi2c` letter `u`'s load in a scratch build; the suite's own rows print the rate
+of the pacing each one runs). Paced past that figure, three
+streams every 5, asking 5400 beats in 100 us, a stream at `high` under them at `very_high` is not
+served at all while they stand (letter `v`). Below it, four copies on DMA2 with three paced streams
+have held a stream at `high` past twice the wire and three ticks of the tenure ([i2c.md](i2c.md)
+has the rows), and made one late against a wire that does not wait for it
+([fmpi2c.md](fmpi2c.md)). A timer's gate closed over its raised request, with a stream at
+`very_high` left on that cell, seen once with no log kept, does the same with one stream, and
+EN's clear on a stream below it ran out `abort()`'s whole bound, 200000 reads of SxCR: the
 release contract above is what keeps a correct program out of that.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
@@ -961,11 +967,16 @@ Implemented but not bench-verified, each with what would measure it:
   and a host's `init()` under it), the core stood in Thread mode with SysTick and USART2 pending until a
   reset. The probe's halt timed out, the probe read the private peripheral bus and the flash and not
   SRAM or the peripherals, and the program counter, sampled through DWT_PCSR, stood on a load from
-  the RCC. That reads as the core's System-bus access waiting behind a store to APB1, which nothing
-  here establishes. Fifteen runs each of `test_stm32f4_fmpi2c` letter `v` and `test_stm32f4_i2c`
-  letter `r`, some 3000 starts of such a load, did not repeat it, so those two letters run by name
-  only. That load repeated under the independent watchdog, with the probe reading what stands at its
-  reset, would measure it.
+  the RCC. These are observations with no log kept. They read as the core's System-bus access
+  waiting behind a store to APB1, which nothing here establishes. Fifteen runs each of
+  `test_stm32f4_fmpi2c` letter `v` and `test_stm32f4_i2c` letter `r`, some 3000 starts of such a load,
+  did not repeat it, so those two letters run by their own keys and not under `z`. What load a program
+  may keep under is not established beyond this: these two stands were at or near 2250 beats, and
+  every row a suite runs under `z` stops at 2120. That load repeated under the independent watchdog,
+  with the probe reading what stands at its reset, would measure it.
+- The stray beat on the SPI hosts: the order above is read from the code. The orders of
+  `test_stm32f4_serial` letter `i` on an SPI's receive stream would measure whether that peripheral
+  remembers a DMA request as FMPI2C1 does.
 
 - **FEIF and DMEIF.** Both are implemented (the flag, the enable, the ISR
   body, the accounting), and neither can be raised through this driver:

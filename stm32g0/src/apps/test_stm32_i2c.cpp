@@ -5118,8 +5118,11 @@ void late_load_off() {
 /// arithmetic there, plus what a load adds. A byte the channel has not taken stretches
 /// SCL (32.4.7) until the channel gets a turn, at worst the three channels' blocks of
 /// 1000 beats at the 5 cycles a beat a load's own beat takes (docs/stm32g0/dma.md) -
-/// 15000 cycles, 234 us at 64 MHz, 1 ms to be a wedge and not a slow row, at every byte
-/// and the address.
+/// 15000 cycles, 234 us at 64 MHz and 938 us at 16 MHz, 1 ms to be a wedge and not a slow
+/// row, at every byte and the address. At 2 MHz, where the letter also runs, they are 7.5 ms
+/// against 6 ms on a read of one, so the derivation stops at 16 MHz: that row's copies
+/// alternate with lower channels (10.4.4) and do not reach this worst, and a late one would
+/// be a false red, never a false green.
 uint32_t late_limit_ms(uint16_t bytes, I2cSpeed s) {
     return refused_limit_ms(bytes, s) + bytes + 2u;
 }
@@ -5560,7 +5563,7 @@ void late_stray_clear_first(uint16_t k, I2cSpeed s, bool enable_first, uint32_t&
 }
 
 /// A channel starved under a request, the shape of the entry on a load that outranks
-/// the channel. The load holds the arbiter (a block longer than the row) and the request
+/// the channel. The load holds the DMA controller's arbitration (a block longer than the row) and the request
 /// goes up under it. Then, by `order`, the steps of a stop, and only then the load off:
 /// `after` is the count behind the load, the next block's start is judged as above.
 enum class LateOrder : uint8_t {
@@ -5765,9 +5768,10 @@ void tC_late_stage() {
           " loads, never in ", down.in_flight_stuck, "; a stale cell ", down.stale, crlf);
     // 480 = 24 turns x 20 rows. Zero judged on the stuck and the stale: a beat under
     // way that never ended, or ended with the wrong byte, contradicts the entry's wait.
-    bench.verdict("A BEAT THAT OUTLIVES THE REQUEST FINISHES: every count under way falls and the cell "
+    // Both pass with no beat caught, which is the printed count's to say.
+    bench.verdict("ANY BEAT THAT OUTLIVES THE REQUEST FINISHES, IF ONE IS CAUGHT: its count falls and the cell "
                   "is the byte", down.rows == 480u && down.in_flight_stuck == 0u && down.stale == 0u);
-    bench.verdict("... inside the entry's wait", down.in_flight_turns < DmaHost::late_beat_turns);
+    bench.verdict("... inside the entry's wait, if any", down.in_flight_turns < DmaHost::late_beat_turns);
 
     // ---- the enable cleared against the beat ----
     ClearRow clear{};

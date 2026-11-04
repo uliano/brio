@@ -522,8 +522,8 @@ repeated START, one for the STOP - times the SCL period measured on PA3
 command, a period before the STOP's edge. Plain bindings (no stamps), the
 thread spinning on the edge, best of 8, in CLK_PER cycles.
 
-**On the AVR64EA48 at 20 MHz** (rev B1, `bench_avr` letter i on the code
-as it stands). The SCL period measured on PA3: 201, 55 and
+**On the AVR64EA48 at 20 MHz** (rev B1, `bench_avr` letter i on an older image; the letter on this board would
+restate it). The SCL period measured on PA3: 201, 55 and
 21 cycles at 100 kHz, 400 kHz and Fm+ (99.5 kHz, 363.6 kHz with FMEN,
 952.4 kHz - MBAUD 94, 21 and 4, the register's floor 198, 52 and 18
 plus the bus's rise):

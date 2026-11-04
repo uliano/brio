@@ -972,8 +972,9 @@ struct DmaMpu {
 // as an option. The UART's and the SPI host's receive engines arm HIGH
 // (brio/pl011/uart.hpp, brio/pl022/spi.hpp); the I2C host arms its
 // receive engine at normal on purpose (brio/dw_apb_i2c/i2c.hpp): a
-// starved channel leaves the receive FIFO full, the block holds SCL, and
-// the bus slows with nothing lost.
+// starved channel leaves the receive FIFO full, the peripheral holds SCL, and
+// the bus slows with nothing lost; over a read's tail, which the STOP ends, the
+// host's entry settles the channel instead.
 //
 // The same surface as the RP2040's engines (brio/rp2040/dma.hpp) -
 // DmaReport, the binding, the claim, the typed runs - because the IP

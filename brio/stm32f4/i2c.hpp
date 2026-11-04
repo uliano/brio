@@ -921,8 +921,10 @@ public:
             // A byte its transmit stream has not written leaves TxE up and
             // BTF rises, "stretching SCL low" until DR is written; a byte
             // its receive stream has not taken does the same until DR is
-            // read (RM0090 27.3.3) - a starved stream slows the bus and
-            // loses nothing.
+            // read (RM0090 27.3.3), so a late stream slows the bus and
+            // loses nothing. A read of one has no next byte to hold: its wire ends
+            // by itself and the answer follows when the stream is served, or the
+            // arbiter's timeout answers for one never served (docs/stm32f4/i2c.md).
             TxEngine::arm(S::data_address(), DmaPriority::high);
             RxEngine::arm(S::data_address(), DmaPriority::high);
         }

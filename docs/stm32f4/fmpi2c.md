@@ -89,7 +89,8 @@ What decides correctness even there:
   without it `FmpI2c<n>` does not compile, and `n` must be 1, the one instance
   there is.
 - **The timeout.** The timeout given to the arbiter is what ends a tenure a
-  wedged device holds. With no change of speed since the last tenure, a data
+  wedged device holds, or a read of two or more on a stream other DMA traffic has
+  starved outright ("Bench findings"). With no change of speed since the last tenure, a data
   line held low parks the START with no error, and nothing in the host answers
   it. After a change of speed, whose TIMINGR write takes a PE cycle (PE is CR1's
   enable; below), the same hold is answered `i2c_arb_lost` instead ("Bench
@@ -129,6 +130,12 @@ What decides correctness even there:
   `i2c_dma_fault` ([../design/i2c-bus.md](../design/i2c-bus.md)): the buffer is at
   an address a DMA master does not reach. The F446 has no core-coupled memory, so
   an ordinary buffer in its SRAM or a written half in its flash does not meet it.
+  After it the cells the stream reached hold their bytes and the rest what they
+  held, `I2cDone` does not say where that line falls, and the requester posts again.
+- **A read under `dma` needs nothing of the program for a late stream.** The reply
+  comes with every byte in the buffer: the STOPF entry settles a stream other DMA
+  traffic has made late, up to 13 us in the vector ("The receive stream at STOPF"
+  below).
 - **After a failure.** Every failed tenure leaves the host idle, and the arbiter
   starts the next queued request in the same dispatch; a retry is the requester's,
   by posting again. `i2c_timeout` says no completion came inside the arbiter's
@@ -150,7 +157,8 @@ RM0390 Rev 6 ch. 23 (the F446's manual; the F410,
 F412 and F413/F423 carry the same peripheral and their manuals have not been
 read), DS10693 Rev 11 table 11 for the pads and its I2C
 characteristics for the bus edges, RM0390 table 28 for the DMA request
-mapping, and ES0298 Rev 8's FMPI2C items 2.12.1 to 2.12.10, each treated under
+mapping and ch. 9 for the DMA controller (the sections 9.3.x cited here), and ES0298
+Rev 8's FMPI2C items 2.12.1 to 2.12.10, each treated under
 "What the silicon does". Driver: `stm32f4/fmpi2c.hpp`, over the reserve's presence,
 SMBus and request-mapping facts (`stm32f4/device_tables.hpp`, the reserve: the
 table of what each part has, read off the device header), under the arbiter
@@ -165,12 +173,12 @@ an engine on a part class whose manual was not read, one engine of two,
 and an engine whose element is not a byte. Bench: `test_stm32f4_fmpi2c`
 on the Nucleo-F446RE, the one board of this stratum whose part carries
 the peripheral, its PC6 and PC7 wired to the same chip's I2C1 on PB8 and PB9
-with a 2.2 kOhm pull-up on each line. Letters `m`, `q`, `r` and `u` make I2C1 a target,
+with a 2.2 kOhm pull-up on each line. Letters `m`, `q`, `r`, `u` and `v` make I2C1 a target,
 letter `f` runs it as a second host, and it stays silent in the others. The same wires carry the classic I2C's own
 suite ([i2c.md](i2c.md)) and `bench_stm32f4`'s letter `i`. A letter of a suite
 is one command key of the suite's console and the group of verdicts it runs;
-`z` is the key that runs them all, and `t` a second set, run against a partner
-board (below).
+`z` is the key that runs them all but `v`, which runs by its own key, and `t` a
+second set, run against a partner board (below).
 
 ## What the silicon does
 
@@ -440,7 +448,9 @@ host's alone ([../design/dma.md](../design/dma.md), the ownership rule), so
 `start()` does not test whether a stream's start took. Both engines arm at DMA
 priority `high`: a byte RXDR still holds keeps SCL "stretched low until
 FMPI2C_RXDR is read", and an empty TXDR stretches it after the ninth pulse (RM0390
-23.4.7) - a starved stream slows the bus and loses nothing.
+23.4.7), so a late stream slows the bus and loses nothing. A read's last byte has no
+next one to hold: the STOP goes out whatever the stream has done, and the STOPF entry
+settles it ("The receive stream at STOPF" below).
 
 `FmpI2cHostConfig`, what `init()` takes besides the clock:
 
@@ -622,10 +632,11 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l but `f` see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - letter `f` runs I2C1 as a
-second host beside it, and letters m, q, r and u make I2C1 the target. `test_stm32f4_fmpi2c` is 124 verdicts over sixteen
-letters in `z`, green in three runs of three on the image these figures are of,
-letters `m` and `f` in ten of ten more, `q`, `r` and `u` in fifteen of fifteen, and
-letter `v`, by name only, in fifteen of fifteen.
+second host beside it, and letters m, q, r, u and v make I2C1 the target. `test_stm32f4_fmpi2c` is 124 verdicts over sixteen
+letters in `z`, green in three runs of three, letters `m` and `f` in ten of ten more, `q`,
+`r` and `u` in twelve of twelve more, and letter `v`, which `z` does not run, in fifteen of
+fifteen. The figures of every section below that names a suite are of one image of it, and of
+one image of `bench_stm32f4` and of `test_stm32f4_rubato_fmpi2c`, unless the sentence says otherwise.
 
 **The register file at reset is the chapter's**, and the one non-zero
 value is ISR = 0x0001: TXE stands out of reset, so a transmitter that
@@ -685,13 +696,13 @@ the pad:
 
 | kernel | speed | stated (the ceiling) | measured | tSYNC measured |
 |--------|-------|----------------------|----------|----------------|
-| APB1 45 MHz | Sm | 99557 Hz | 97613 or 97666 Hz | 283 or 289 ns |
+| APB1 45 MHz | Sm | 99557 Hz | 97613 Hz | 289 ns |
 | APB1 45 MHz | Fm | 394736 Hz | 368098 Hz | 272 ns |
 | APB1 45 MHz | Fm+ | 1000000 Hz | 845070 or 849056 Hz | 267 or 273 ns |
 | SYSCLK 180 MHz | Sm | 98955 Hz | 97402 or 97455 Hz | 178 or 183 ns |
 | SYSCLK 180 MHz | Fm | 396475 Hz | 375000 Hz | 167 ns |
 | SYSCLK 180 MHz | Fm+ | 1000000 Hz | 865384 Hz | 178 ns |
-| HSI 16 MHz | Sm | 98765 Hz | 98360 or 98576 Hz | 269 or 291 ns |
+| HSI 16 MHz | Sm | 98765 Hz | 98576 Hz | 269 ns |
 | HSI 16 MHz | Fm | 400000 Hz | 378151 Hz | 394 ns |
 
 Not one row runs above the speed asked. The letter reads the period on the
@@ -729,7 +740,7 @@ asked inside a band of plus or minus 20 per cent - so it lands on either
 side of the rate on its own model, and above it on a wire with faster
 edges than it assumes. At 45 MHz it answers 0x30A03234, 0x00F02136 and
 0x00400A12: on the fastest wire 107.1 kHz, 483.9 kHz and 1.32 MHz, and on
-this one (its low and high parts plus the measured delays) 105.1 kHz, 444 kHz and
+this one (its low and high parts plus the measured delays) 105.0 kHz, 444 kHz and
 1.07 MHz - all three above the rate asked, the Fm one past the mode's
 ceiling. The two methods share every inequality (the setup and hold
 bounds, 23.4.3's conditions) and differ in that one charge;
@@ -737,8 +748,8 @@ bounds, 23.4.3's conditions) and differ in that one charge;
 
 **The other I2C of this family keeps its stated rate.** The classic I2C1
 (CCR, RM0390 27.6.8), run as a host through the same probe on the same
-wire and counted on PB8: 100000 Hz against the 100000 its CCR states and
-392156 Hz against 394736, under four core cycles of 456 at 180 MHz,
+wire and counted on PB8: 100166 Hz, once in thirteen runs 100000, against the 100000 its CCR
+states, and 395604 Hz, once 392156, against 394736, within four core cycles of 456 at 180 MHz,
 inside a turn of the poll. Its arithmetic is [i2c.md](i2c.md)'s; what the
 comparison shows is that its period does not grow by a detection delay
 the way this peripheral's does, and that with CCR rounded up its stated rate is
@@ -753,8 +764,8 @@ it BUSY is clear and both lines read high: the STOP landed on the wire.
 
 **The idle time-out needs no peer.** TIMEOUTA with TIDLE set watches both
 lines standing high, which is what an empty bus does: armed at 50 us it
-raised TIMEOUT after **51.1 us**. It is a level and not an event -
-cleared on a bus that is still idle it came back in another 8985 core
+raised TIMEOUT after **51.1 or 51.2 us**. It is a level and not an event -
+cleared on a bus that is still idle it came back in another 8984 or 8990 core
 cycles, 50 us again. The same code with TIDLE clear - the SCL-low watcher
 - stayed quiet over the same wait, which is the two modes measured apart.
 
@@ -890,46 +901,46 @@ at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
 same wires, I2C1 the target served on the same core, its entries counted
 apart). The SCL period measured on the pad is 488 core cycles at the 400 kHz row:
 368.9 kHz, under the ceiling as above, which carries 41.0 KB/s at nine periods a
-byte. At 400 kHz a one-byte write costs 1044 to 1048 cycles beyond the wire, in one
-interrupt, and a register read 1+1 costs 1608, in two. A 255-byte write and read take
+byte. At 400 kHz a one-byte write costs 1052 to 1056 cycles beyond the wire, in one
+interrupt, and a register read 1+1 costs 1615, in two. A 255-byte write and read take
 1.00 times the wire's time on the pump (255 interrupts, 106 cycles of handler a byte
-written and 113 read) and on the engines (one interrupt): a write at 40770 and 40759
+written and 113 read) and on the engines (one interrupt): a write at 40769 and 40759
 B/s against 40805, the rate the letter computes for that tenure with its address,
-START and STOP. `start()` is 336 to 344 cycles for a write on the pump, 316 for a
-read, 315 or 319 for a probe and 303 for an address not acknowledged, and the longest
-entry is 333 cycles of the event vector. The fixed cost includes the target's, because
+START and STOP. `start()` is 340 to 345 cycles for a write on the pump, 317 for a
+read, 312 for a probe and 304 for an address not acknowledged, and the longest
+entry is 335 cycles of the event vector. The fixed cost includes the target's, because
 the classic I2C stretches SCL from its address match until its vector has run, on the
 same core: in the same image I2C1 as the host against this peripheral as the target
-pays 233 for the same write ([i2c.md](i2c.md)).
+pays 210 for the same write ([i2c.md](i2c.md)).
 
 **Which mechanism, by the cycles** (the same letter, every row of one image, three
-runs that differ by at most four cycles a row). `irq` is how many entries the two I2C
+runs that differ by at most two cycles a row). `irq` is how many entries the two I2C
 vectors and the two streams took, and `isr` the cycles inside them between the
 meter's stamps, the bench's two timer reads around each entry. `start` is `start()`'s
 cycles, counted because on this peripheral the engines are started there. The last
 column is start + isr under `dma` less the same under `interrupt`, the entries apart.
-At 400 kHz; at 100 kHz every row is within four cycles of these:
+At 400 kHz; at 100 kHz every row is within two cycles of these:
 
 | half | `interrupt`: start, irq, isr | `dma`: start, irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 336, 1, 240 | 400, 1, 298 | +122 |
-| write 2 | 341, 2, 362 | 456, 1, 350 | +103 |
-| write 3 | 341, 3, 468 | 456, 1, 350 | -3 |
-| write 16 | 341, 16, 1846 | 456, 1, 350 | -1381 |
-| read 1 | 316, 1, 259 | 440, 1, 305 | +170 |
-| read 2 | 316, 2, 391 | 448, 1, 305 | +46 |
-| read 16 | 316, 16, 1975 | 448, 1, 305 | -1538 |
-| register read 1+1 | 341, 2, 449 | 450, 2, 503 | +163 |
-| register read 1+2 | 341, 3, 588 | 460, 2, 503 | +34 |
-| register read 1+16 | 341, 17, 2169 | 460, 2, 503 | -1547 |
+| write 1 | 340, 1, 236 | 399, 1, 293 | +116 |
+| write 2 | 344, 2, 358 | 457, 1, 346 | +101 |
+| write 3 | 344, 3, 464 | 457, 1, 346 | -5 |
+| write 16 | 345, 16, 1842 | 457, 1, 346 | -1384 |
+| read 1 | 317, 1, 255 | 439, 1, 309 | +176 |
+| read 2 | 317, 2, 387 | 443, 1, 309 | +48 |
+| read 16 | 317, 16, 1971 | 443, 1, 309 | -1536 |
+| register read 1+1 | 344, 2, 445 | 451, 2, 507 | +169 |
+| register read 1+2 | 344, 3, 584 | 453, 2, 507 | +32 |
+| register read 1+16 | 344, 17, 2165 | 453, 2, 507 | -1549 |
 
 The first byte's place shows in both columns: a write's `start()` pays the TXDR
-flush and the store, 341 cycles against the read's 316 on the vector (336 for a write
+flush and the store, 344 cycles against the read's 317 on the vector (340 for a write
 of one, which arms no TXIE), and under
-`dma` a write of two or more 456, which programs a stream too, against 400 for a
+`dma` a write of two or more 457, which programs a stream too, against 399 for a
 write of one, which does not. An address nobody answers takes one interrupt, 263
-cycles of handler under `interrupt` and 333 under `dma`, against an answered
-probe's 240 and 298.
+cycles of handler under `interrupt` and 324 under `dma`, against an answered
+probe's 236 and 293.
 
 The pump's figure a byte past the first is the slope, 106 cycles written
 and 113 read, one entry each, and an entry's own exception entry and
@@ -937,19 +948,19 @@ return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
 every interrupt counted. In core cycles, then:
 - **a write half costs the core fewer cycles on the engines from three bytes**:
-  -3 on the stamps at three, with two interrupts fewer. At two, +103 on the stamps
-  less one entry is still 79 over;
-- **a read half from three**: +46 on the stamps at two, less one entry, is still 22
-  over. At three the slope makes the stamps -67, before the two entries saved;
-- **a register read with a one-byte index from a read of three**: +34 on the stamps at
-  1+2, less one entry, is 10 over. At 1+3 the slope makes the stamps -79, before the
+  -5 on the stamps at three, with two interrupts fewer. At two, +101 on the stamps
+  less one entry is still 77 over;
+- **a read half from three**: +48 on the stamps at two, less one entry, is still 24
+  over. At three the slope makes the stamps -65, before the two entries saved;
+- **a register read with a one-byte index from a read of three**: +32 on the stamps at
+  1+2, less one entry, is 8 over. At 1+3 the slope makes the stamps -81, before the
   two entries saved.
 
 The table has no rows for a read of three or a 1+3, which are the slope, nor for a
 two-byte index, which nothing measures here.
 The engines' fixed cost to the core, their program in `start()` and their share of
-the entry, is about 225 cycles for a write half of two or more (456 + 350 less
-341 + 240) and 178 for a read half (448 + 305 less 316 + 259), against a byte's 110
+the entry, is about 223 cycles for a write half of two or more (457 + 346 less
+344 + 236) and 180 for a read half (443 + 309 less 317 + 255), against a byte's 110
 or so on the pump. The speed moves none of these lengths: the same rows at 100 kHz
 say so. The letter has no row at 1 MHz, because its target is the classic I2C1, which
 stops at 400 kHz; at 1 MHz a byte is some 1620 core cycles of wire against the pump's
@@ -985,75 +996,50 @@ this family `dma` costs no sleep, only its fixed cycles.
 **The receive stream at STOPF.** With no completion entry STOPF is a `dma` read's
 one edge, and it says the wire is over: RXNE rose more than a period and a half
 earlier, and the stream still had its peripheral port's arbitration and its memory
-port's to win (9.3.5). So the entry reads SxCR before it answers, one load, and finds
-one of three things:
+port's to win (9.3.5). So the entry reads SxCR once before it answers:
 
-- **EN low.** The DMA block is finished with its last byte in memory: a transfer is
+- **EN low: on time.** The DMA block is finished with its last byte in memory: a transfer is
   the load, the store and the count, in that order (9.3.3), and EN falls when the
-  count reaches zero (9.3.14).
-- **EN high, a beat under way.** The entry clears EN and waits for it to read low.
-  "The stream may take time to be disabled (ongoing transfer is completed first)", and
-  then EN "is now 0 to confirm the stream interruption" (9.3.15); the bit "is actually
-  written to 0 once all the current transfers are finished" (9.3.18 step 1). So the
-  beat ends first, and at EN low the byte is in memory.
-- **EN high, no beat under way.** An address not acknowledged has no byte to move. A
-  request the arbiter has not granted is not a transfer under way: EN falls with the
-  byte in RXDR and RXNE up, as it does for a byte the stream was never asked for. The
-  entry takes RXDMAEN down, then stores that byte itself at the place the stream's
-  count gives.
+  count reaches zero (9.3.14). Nothing more is done.
+- **EN high.** The stream is late, or an address not acknowledged left it nothing to move. One
+  read of EN cannot say which, so the entry clears EN and waits for it to read low, and what
+  stands then says what happened:
+  - **A beat was under way.** "The stream may take time to be disabled (ongoing transfer is
+    completed first)", and then EN "is now 0 to confirm the stream interruption" (9.3.15); the bit
+    "is actually written to 0 once all the current transfers are finished" (9.3.18 step 1). So the
+    beat ends first, and at EN low the byte is in memory.
+  - **No beat was under way.** A DMA request the DMA controller's arbitration has not granted is
+    not a transfer under way: EN falls with the byte in RXDR and RXNE up, as it does for a byte the
+    stream was never asked for. The entry takes RXDMAEN down, then stores that byte itself at the
+    place the stream's count gives. An address not acknowledged has no byte at all.
 
-The cost is that load on every read on a stream, and a stop with a read-modify-write
-of CR1 only on a late stream or an address not acknowledged. One passage reads the other way for data in a FIFO: 9.3.13's
-flush "continues transferring the remaining data ... (even though stream is effectively
-disabled)" and ends with TCIF. This stream is in direct mode, where a byte passes
-through the FIFO and is "immediately drained" (9.3.7), and the manual does not say
-which of the two covers that byte, so the letter asks the silicon.
+The cost is that one register read on every read on a stream, and a stop with a read-modify-write
+of CR1 only on a late stream or an address not acknowledged.
 
-**A stop over a standing request, on the silicon.** Letter `r`, the vector's line off,
-lets the request up once RXNE stands and clears EN 0 to 47 turns of a delay loop later
-(4 to 6 core cycles a turn), 20 stops a turn, with nothing else moving, under a
-`very_high` stream on the same controller and under the four copies below. The first
-load after EN reads low is the memory cell, then the stream's flags and its count. Over
-fifteen runs, 14400 stops a load: in 14100 the stream had the byte, and in every one of
-them, at that first load, the byte was in memory, the count at zero and TCIF up, with EN
-read high at most once. In the other 300 of each load, one stop in 48, the clear came
-ahead of the request and the byte stayed in RXDR. That is what these stops landed
-on, at those steps and loads; no stop was timed against the stream's two accesses.
+Two ends of this path no correct program reaches, and what the code does there:
 
-**The same stop on the host's own path.** A request held down to the STOPF entry and let
-up there, 0 to 7 turns ahead of the host's body, makes the entry stop a running stream
-over a standing request. On 7200 reads of one, two and eight at 400 kHz (letter `r`,
-fifteen runs) and 4500 at 1 MHz (letter `s`, fifteen runs), every one was
-exact in the vector, ahead of anything a reply could read, the stream having the byte
-every time. Each 400 kHz read is followed by a read of eight, 7200 whole of 7200, and at
-1 MHz the partner's count judges the sequence. Over the transmit stream, a first byte of
-four refused with the same stage, 2400 writes: `i2c_nack_data`, the next write of eight
-whole on I2C1.
-
-**The byte the stream is never asked for.** Taking the request away for the whole last
-byte, on 2250 reads of one, two and eight over fifteen runs, the stream was running with
-the byte in RXDR at every STOPF entry, and every one came out exact. That stage is the
-letter's control: with the entry changed to stop the stream and sweep RXNE, it reads 0
-exact of 150.
-
-**A clear ahead of the request leaves a stray beat, in one order.** When the clear lands
-first, one stop in 48 above, the request that follows is not forgotten if RXDR is
-then read with RXDMAEN up: the next DMA block's start takes a beat with RXDMAEN clear and
-nothing on the wire, its count one down, 1500 of 1500. With RXDMAEN taken down ahead of
-that read, 0 of 1500. The manual does not describe this ([dma.md](dma.md) has it). A
-stream a load starves lands there on every late read of one (below), so the entry takes
-RXDMAEN down at EN low, ahead of that read.
+- **EN does not fall.** The wait is bounded, 200000 reads of SxCR, and the entry does not read its
+  answer: it goes on, the status stays `i2c_ok`, the reply goes out and a beat can follow it. It has
+  taken a timer's gate closed over a raised DMA request with a stream at `very_high` left on the cell
+  ([dma.md](dma.md)), which the release contract excludes.
+- **The byte in neither place.** EN low, the count not at zero, RXNE down: nothing is stored, and
+  the status stays `i2c_ok` with that cell as it was. This host has no `i2c_dma_fault` for it, where
+  [the STM32G0's](../stm32g0/i2c.md) has. It takes a program's own read of RXDR through the resource
+  inside a tenure.
 
 **A load makes a stream late by itself** (`test_stm32f4_fmpi2c` letter `u` on the self-link,
-letter `s` against the partner at 1 MHz, letter `v` for the last row). DMA1 has no
-memory-to-memory (9.3.7), so what loads this stream's controller is peripheral-paced
-streams: a timer's request at `very_high`, above the host's `high`, a word from the timer's
-counter on APB1 to one word of SRAM, on the streams of DMA1 the host does not hold (0, 1, 3,
-4, 6 and 7, RM0390 table 28), each every so many counts of the timers' 90 MHz. The copies are
-the four above, started again by the core between its looks at the reply. Late is EN up at the
-vector's first load. The figures are over fifteen runs on 180 MHz with 45 MHz on APB1, and
-"beats" is what the paced streams moved in 100 us with the copies idle, the bus's own figure
-being 2250 (45 MHz, two clocks an access):
+letter `s` against the partner at 1 MHz, letter `v` for the last row). A load, on this page, is other
+DMA traffic. DMA1 has no memory-to-memory (9.3.7), so what loads this stream's controller is
+peripheral-paced streams: a timer's DMA request at `very_high`, above the host's `high`, a word from
+the timer's counter on APB1 to one word of SRAM, on the streams of DMA1 the host does not hold (0, 1,
+3, 4, 6 and 7, RM0390 table 28), each every so many counts of the timers' 90 MHz. The copies, on this
+page, are four memory-to-memory blocks on DMA2's streams 0, 4, 5 and 7 at `very_high`, 256 words of
+SRAM each, started again by the core while it waits for the reply; they meet the stream at the memory,
+through the bus matrix. The host's `high` is fixed by the host; the level of a program's own streams and
+copies is the program's, and no row here runs this load at a lower one. Late is EN up at the vector's
+read of SxCR. The figures are over fifteen runs on 180 MHz with 45 MHz on APB1, and "beats" is what the
+paced streams moved in 100 us with the copies idle, the bus's own figure being 2250 (45 MHz, two clocks
+an access):
 
 | load | beats | late at 400 kHz, reads of 1, 2, 8 (2250 each) | late at 100 kHz (750 each) | late at 1 MHz (1500 each) |
 |---|---|---|---|---|
@@ -1064,59 +1050,96 @@ being 2250 (45 MHz, two clocks an access):
 | four copies | 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
 | two every 16, and the copies | 1127 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
 | six every 48, and the copies | 1127 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
-| two every 8, and the copies | 1501 | 0, 0, 122 | 0, 0, 63 | 640, 1043, 1205 |
-| three every 16, and the copies | 1689 | 12, 341, 1957 | 1, 289, 613 | 1500, 1489, 1496 |
-| three every 12, and the copies | 2000 | 1896, 1496, 2190 | 273, 655, 731 | not run |
+| two every 8, and the copies | 1501 | 0, 0, 133 | 0, 0, 58 | 620, 1049, 1205 |
+| three every 16, and the copies | 1689 | 11, 364, 1973 | 2, 278, 613 | 1499, 1477, 1495 |
+| three every 12, and the copies | 1999 | 1922, 1481, 2176 | 304, 643, 733 | not run |
 
-No load of paced streams alone made one late, and neither did the copies alone: it takes
-both, the copies in the memory and the paced streams above the host's on the controller.
-Every one of the 130500 reads was exact in the vector, ahead of anything a reply could read,
-`i2c_ok`, with no byte left in RXDR and the stream still once the reply stood. **So the late path is
-reached by itself, 87 reads of eight in a hundred at 400 kHz under letter `u`'s heaviest row and all
-but 15 of its 4500 reads at 1 MHz, and the entry holds.**
+Two streams every 8 ask 2250 beats and move 1501, fewer than three every 8: in a sweep outside the suite
+one stream and two both stopped at 1502 however fast they were paced ([dma.md](dma.md)), and why is not
+established. In this table's rows no load of paced streams alone made one late and neither did the
+copies alone, and the rows that did have both; the load in the next paragraph needs no copies. Every one
+of the table's 130500 reads was exact in the vector, ahead of anything
+a reply could read, `i2c_ok`, with no byte left in RXDR and the stream still once the reply stood. **So the
+late path is reached by itself, 88 reads of eight in a hundred at 400 kHz under letter `u`'s heaviest row
+and all but 29 of its 4500 reads at 1 MHz, and the entry holds.** Under three streams every 16 and the
+copies, a first byte refused on a write of four: `i2c_nack_data`, and the next write of eight whole,
+1500 of 1500 (letter `u`).
 The entry's body, between two reads of the cycle counter, is at most 257 cycles on an unloaded
-read and 2350 on a late one, the stop's wait for its beat: 13 us in the vector. The last row is by
-name only and has no 1 MHz column, for what such a load can do to the core: at 1 MHz it stood the
-core still once ([dma.md](dma.md), "Not covered yet").
+read and 2354 on a late one, the stop's wait for its beat: 13 us in the vector. Letter `v`, run by its own
+key and not under `z`, carries the last row and has no 1 MHz column, for what such a load can do to the
+core: at 1 MHz one stood the core still once, and no bound on such a load is established
+([dma.md](dma.md), "Not covered yet").
 
 **A load past what the bus takes starves the stream outright** (letter `v`, fifteen runs). Three
-streams every 5, 2249 beats in 100 us: the stream is not served at all while the load stands. A
-read of one finds its byte in RXDR with EN up, 1500 of 1500. EN then falls with no beat, and the
-entry's own read puts the byte in memory, exact, and the read of eight started behind it, with
-the load off, is exact, 1500 of 1500. **The control, in a separate image with RXDMAEN left up
-over that read of RXDR: the read of one exact, and the read of eight behind it wrong 300 of
-300 over three runs, every one `i2c_ok`, its count at zero and its first cell not a byte on the
-wire.** The cost of the order is a read-modify-write of CR1 on the late path alone: in the release
-listing an on-time read takes the branch on EN low before it. A read of two or more
-under this load does not end while it stands: its first byte is not taken, so SCL stays low (23.4.7),
-and only the requester's timeout answers; after `recover()` the next read is whole, 45 of 45.
+streams every 5, asking 5400 beats in 100 us against the bus's 2250: the stream is not served at all
+while the load stands. A read of one finds its byte in RXDR with EN up, 1500 of 1500. EN then falls with
+no beat, and the entry's own read puts the byte in memory, exact, and the read of eight started behind
+it, with the load off, is exact, 1500 of 1500. **With the entry changed to leave RXDMAEN up over that
+read of RXDR: the read of one exact, and the read of eight behind it wrong 300 of 300 over three runs,
+every one `i2c_ok`, its count at zero and its first cell not a byte on the wire.** The cost of the order is a
+read-modify-write of CR1 on the late path alone: in the release listing an on-time read takes the branch
+on EN low before it. A read of two or more under this load does not end while it stands: its first byte
+is not taken, so SCL stays low (23.4.7), and only the arbiter's per-bus timeout answers it; after
+`recover()` the next read is whole, 45 of 45.
 
-Under three streams every 16 and the copies, a first byte refused on a write of four: `i2c_nack_data`,
-and the next write of eight whole, 1500 of 1500 (letter `u`).
+**The stop on the silicon.** Letter `r` stages what the entry's second bullet relies on. The vector's line
+off, it holds RXDMAEN down, lets the DMA request up once RXNE stands and clears EN 0 to 47 turns of a delay loop later (4 to 6
+core cycles a turn), 20 stops a turn, with nothing else moving, under a `very_high` stream on the same
+controller and under the copies. The first read after EN reads low is the memory cell, then the stream's
+flags and its count. Over fifteen runs, 14400 stops under each: in 14100 the stream had the byte, and in
+every one of them, at that first read, the byte was in memory, the count at zero and TCIF up, with EN read
+high at most once. In the other 300 of each, one stop in 48, the clear came ahead of the DMA request and
+the byte stayed in RXDR. That is what these stops landed on, at those steps and loads; no stop was timed
+against the stream's two accesses (the second list below). 9.3.13 reads the other way for data in a FIFO:
+its flush "continues transferring the remaining data ... (even though stream is effectively disabled)"
+and ends with TCIF. This stream is in direct mode, where a byte passes through the FIFO and is
+"immediately drained" (9.3.7), and the manual does not say which of the two covers that byte, which is
+why the letter asks the silicon.
 
-How near an unloaded stream is to that, polled with the vector's line off and the request let up as RXNE rises:
-the time to EN low is the stream's lag, and the time to STOPF the window it has. Longest
-lag and shortest window over eighteen runs at each speed, in core cycles:
+**The same stop on the host's own path.** A DMA request held down to the STOPF entry and let
+up there, 0 to 7 turns ahead of the host's body, makes the entry stop a running stream
+over a standing request. On 7200 reads of one, two and eight at 400 kHz (letter `r`,
+fifteen runs) and 4500 at 1 MHz (letter `s`, fifteen runs), every one was
+exact in the vector, ahead of anything a reply could read, the stream having the byte
+every time. Each 400 kHz read is followed by a read of eight, 7200 whole of 7200, and at
+1 MHz the partner's count judges the sequence. Over the transmit stream, a first byte of
+four refused with the same stage, 2400 writes: `i2c_nack_data`, the next write of eight
+whole on I2C1.
+
+**The byte the stream is never asked for.** Taking the DMA request away for the whole last
+byte, on 2250 reads of one, two and eight over fifteen runs, the stream was running with
+the byte in RXDR at every STOPF entry, and every one came out exact. With the entry changed to stop the
+stream and sweep RXNE, it reads 0 exact of 150.
+
+**A clear ahead of the DMA request leaves a stray beat, in one order.** A stray beat is one the next DMA
+block's start takes with RXDMAEN clear and nothing on the wire, its count one down. When the clear lands
+first, one stop in 48 above, and RXDR is then read with RXDMAEN up, that beat comes 1500 of 1500. With
+RXDMAEN taken down ahead of that read, 0 of 1500. The manual does not describe this ([dma.md](dma.md) has
+it). A stream a load starves lands there on every late read of one (above), so the entry takes RXDMAEN
+down at EN low, ahead of that read.
+
+**How near a stream comes to the wire's end.** Polled with the vector's line off and the DMA request let up
+as RXNE rises: the time to EN low is the stream's lag, and the time to STOPF the window it has. Longest
+lag and shortest window over fifteen runs at each speed, in core cycles:
 
 | load | 400 kHz: lag, window | 1 MHz: lag, window |
 |---|---|---|
-| nothing else | 260, 844 | 270, 407 |
-| the stream, a beat every 10 | 244, 844 | 287, 267 |
-| the four copies | 486, 338 | 294, 150 |
+| nothing else | 256, 804 | 267, 407 |
+| a `very_high` stream, a beat every 10 | 104, 921 | 267, 274 |
+| the copies | 315, 411 | 289, 165 |
 
 These are not a margin. The two figures of a cell come from different tenures. The cell
-at 1 MHz with nothing else reads 111 and 443 over the fifteen runs of the letter alone,
-and 270 and 407 inside set `t`, and nothing here says what lengthened it. Under the
-copies the wait for RXNE also starts copies between its reads, so by the code it can date
-RXNE late and shorten that window. Every poll is good to a turn of three register loads,
-which no line times. The chapter states no bound on a stream's lag, and the table above
-has tenures that had a running stream at STOPF, so the entry's read of SxCR is what a read
-on a stream rests on.
+at 1 MHz with nothing else reads 99 and 407 over the twelve runs of the letter alone,
+and 267 and 423 inside set `t`, and nothing here says what lengthened it (the second list
+below). Under the copies the wait for RXNE also starts copies between its reads, so by the code it can
+date RXNE late and shorten that window. Every poll is good to a turn of three register reads, itself not
+timed. The chapter states no bound on a stream's lag, and the load table above has tenures that had a
+running stream at STOPF, so the entry's read of SxCR is what a read on a stream rests on.
 
 **Against a partner board** (set `t`, letters `n`, `o`, `p` and `s`, 39 verdicts,
-green in three runs of three, letter `s` in fifteen of fifteen). The bullets just below are letter `n`'s 12 verdicts;
-letters `o` and `p` have their own paragraphs after them, and `s` is in "The receive
-stream at STOPF" above. The
+green in three runs of three, letters `o`, `p` and `s` in twelve of twelve more). The bullets just below are letter `n`'s 12 verdicts;
+letters `o` and `p` have their own paragraphs after them, and `s` is in "A load makes a
+stream late by itself" and "The same stop on the host's own path" above. The
 partner is an STM32G0 on the same two nodes, running `twi_peer`, the suites'
 scriptable target, commanded in band over the bus under test by frames of a
 protocol every family shares (twi_link). For `z` it runs its dark console, a
@@ -1125,8 +1148,8 @@ partner's command address would answer one of them.
 
 - **Fast-mode Plus with every byte acknowledged**: a write and a read of
   eight bytes at the 1 MHz row, byte-exact, the partner's target - solved
-  for Fm+ - accounting 8 taken and 8 served; the write, on the pump, averages **769 to
-  775 kHz** of SCL (81 periods in a stopwatch that holds the request's cost
+  for Fm+ - accounting 8 taken and 8 served; the write, on the pump, averages **768 to
+  782 kHz** of SCL (81 periods in a stopwatch that holds the request's cost
   and the partner's polled target stretching each byte), never above
   the rate.
 - **`unstick()` against a client that really holds SDA**: held by the
@@ -1143,7 +1166,7 @@ partner's command address would answer one of them.
   hold, every run - and the tenure goes on: this host sweeps the flag
   (no tenure here arms a time-out of its own), the silicon sends nothing
   of its own on it. This tenure is driven by hand, with no arbiter and no timeout over
-  it, so when the holds are over the write completes `i2c_ok`, in 146 or 147 ms for two
+  it, so when the holds are over the write completes `i2c_ok`, in 147 ms for two
   bytes: the three holds, at the address and on each byte, are 120 ms of that, and the
   rest is not broken down.
 - **`rebase()` derives the APB1 rate** from
@@ -1173,14 +1196,14 @@ letter:
 | HSI, ratio 2.81 | `interrupt` | 6600 | 0 |
 | HSI, ratio 2.81 | `dma` | 6600 | 0 |
 | HSI, ratio 2.81 | `dma`, writes of one | 1500 | 0 |
-| HSI, ratio 2.81 | the control, TXDR left empty | 6600 | 951, 14.4 per cent |
+| HSI, ratio 2.81 | the control, TXDR left empty | 6600 | 1091, 16.5 per cent |
 | APB1, ratio 1.0 | `interrupt`, writes of 16 | 1500 | 0 |
 | APB1, ratio 1.0 | `dma`, writes of 1, 2, 16 and 255 | 4800 | 0 |
 | SYSCLK, ratio 0.25 | `dma`, writes of 2, 16 and 255 | 3300 | 0 |
 
 Every byte of every host row is on the partner, its count, sum and address
 matches exact. The control's rate does not follow the length or the speed:
-13.0 to 15.7 per cent at every length and speed, a two-byte write as often as a 255-byte
+15.0 to 17.4 per cent at every length and speed, a two-byte write as often as a 255-byte
 one, which is the erratum's own account of a fault at the first two bytes.
 Every stall leaves the partner holding exactly the first byte of that write,
 its count and sum exact across the batch, and each batch's first stall, the one
@@ -1270,7 +1293,7 @@ kernel clock, a ratio of 1.0 outside ES0298 2.12.8's band, the Fm+ pad drive on)
 while TIM2 posts to the highest of the suite's active objects (together, the
 pack) every 97, 193 or 389 us and that object's dispatch spins 300 or 3000
 cycles. Every letter runs once with TIM2 silent and six times under it; **209
-verdicts, green in three runs of `z`, and letters `x` in three more and `q` in ten**.
+verdicts, green in three runs of `z`, and letters `x` in three more and `q` in ten more**.
 The pack and the letters are the I2C suites' shared body
 (`avrxt/src/apps/rubato_i2c.hpp`), and [platform.md](platform.md) places the
 suite among the preemptive kernel's.
@@ -1280,11 +1303,11 @@ suite among the preemptive kernel's.
   `apply()`'s PE cycle); it arms the engines and then writes CR2
   with START last, so a dispatch above the arbiter landing in it delays
   the START. Letter `x`, 400 writes of 16 bytes: `start()` takes 435 or 436
-  cycles with TIM2 silent (the longest 592 to 594), in this image and in a loop of
-  400 (the bench's 456 above is another image, and placement and the flash
+  cycles with TIM2 silent (the longest 591 to 594), in this image and in a loop of
+  400 (the bench's 457 above is another image, and placement and the flash
   accelerator move this figure, so the two are not compared). Under 97 us x 3000
-  the interrupt landed inside it 13 to 23 times in three runs, against the 10
-  that independent ticks would give (400 x 436 / 17460), 3 or 4 of them with
+  the interrupt landed inside it 16, 16 and 20 times in three runs, against the 10
+  that independent ticks would give (400 x 436 / 17460), 0 to 4 of them with
   ISR.BUSY set, which only the instructions after the START store could see. That
   is up to about twice the independent figure; the letter times no phase, so why is
   not established.
@@ -1296,17 +1319,17 @@ suite among the preemptive kernel's.
   a write of one is its store in TXDR alone and a longer write has its stream
   carry the rest. The probe, the reads, the write-then-reads and the
   writes are every one `i2c_ok`, every read byte-exact, the partner's
-  count, sum and address matches exact. The 32-byte write 819 or 820 us
-  silent and at most 838 under TIM2 (the classic I2C's 761: this peripheral's
+  count, sum and address matches exact. The 32-byte write 819 to 821 us
+  silent and at most 825 under TIM2 (the classic I2C's 761: this peripheral's
   400 kHz row is a ceiling, its SCL slower, as above), the probe 40
-  and at most 45.
+  and at most 46.
 - **Three speeds and the commanded stretch** (letter `p`): a read of 16, a
   1+4 and a write of 16 byte-exact at 100, 400 and 1000 kHz, the write of
-  16 in 1589 to 1610, 429 to 449 and 193 to 202 us against the wire's
+  16 in 1589 to 1610, 429 and 193 to 202 us against the wire's
   1530, 382 and 153 - at Fm+ the partner's polled target stretching each
   byte, as above. The partner's stretch of 1000 us a byte at 100 kHz: a
-  read of 8 in 9210 to 9219 us against its nine holds, a write of 8 in
-  9002 to 9013 against its eight (the write follows the read at once and
+  read of 8 in 9211 to 9228 us against its nine holds, a write of 8 in
+  8991 to 9013 against its eight (the write follows the read at once and
   meets most of one hold more, [i2c.md](i2c.md) has the arithmetic).
 - **A NACKed data byte is told from an address not acknowledged, under the
   engines** (letter `q`): a probe and a write to an address nothing acknowledges, the partner
@@ -1331,13 +1354,16 @@ suite among the preemptive kernel's.
   PE cycle** - the STM32G0's two signatures, this peripheral being its register
   file ([../stm32g0/i2c.md](../stm32g0/i2c.md)). With the partner holding
   SDA low 60 ms, the tenure posted at the speed in force parks behind
-  BUSY and is answered `i2c_timeout` by the arbiter, in 19986 to
-  20018 us from its `start()`, 21 passes of 21. In this passage the flood is the suite's
+  BUSY and is answered `i2c_timeout` by the arbiter, in 19982 to
+  20010 us from its `start()`, 20 passes of 21. In the other a probe the suite's highest
+  object had posted first parked and timed out, the arbiter's `recover()` cleared BUSY, and the held
+  tenure's START lost its address at once: `i2c_arb_lost`, 46 us from its `start()` and
+  20047 from its post. In this passage the flood is the suite's
   highest object posting probes to the arbiter at each of TIM2's interrupts, paced by
   the turns of the suite's console object. The same tenure at 400 kHz after
   commands at 100 kHz pays the PE cycle of a change of speed before its START and is
   answered `i2c_arb_lost` in 25 us, every run. Under the flood (180
-  to 722 probes a pass, 721 or 722 of 920 to 942 ticks at 97 us) every
+  to 722 probes a pass, 721 or 722 of 920 to 931 ticks at 97 us) every
   request was answered exactly once. While SDA is held they answer `i2c_rejected`; a
   probe that reaches the wire after a `recover()` nearly always answers `i2c_arb_lost`;
   after the release they answer `i2c_ok` or `i2c_nack_addr`, the next tenure is
@@ -1408,6 +1434,10 @@ Implemented, not bench-verified (each with what would measure it):
   its START by software at a delay swept across this one's. The status's
   own path is measured: a START into a data line the partner holds low
   loses its address and is answered `i2c_arb_lost` (Bench findings).
+- What lengthens a stream's lag. No stop in letter `r` was timed against the stream's two accesses,
+  and the polled lag at 1 MHz reads 99 cycles over the letter alone and 267 inside set `t` with nothing
+  said of why. A stop dated on the stream's peripheral read and memory store, with a bus trace or a
+  counter on the bus matrix, would measure them.
 - ES0298 2.12.3's spurious BERR told apart from a real one: the count
   moved under the preemptive kernel's suite, once a pass at a write that
   ends the partner's counted serve at 100 kHz (Bench findings), which the

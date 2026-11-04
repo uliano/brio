@@ -1936,7 +1936,7 @@ inline constexpr uint8_t fmpi2c_dma_fault = bus_engine_status + 4;
  * so a `dma` tenure takes no entry per stream: STOPF ends it. For a write that
  * proves the stream's run: NBYTES counted every byte it stored. For a read it
  * proves nothing about the stream, whose two AHB accesses come after RXNE and
- * may wait for the arbiter (9.3.5): SxCR.EN is what says the block's last byte
+ * may wait for the DMA controller's arbitration (9.3.5): SxCR.EN is what says the block's last byte
  * is in memory (a transfer is the load, the store and the count, 9.3.3, and EN
  * falls at the count's zero, 9.3.14), so the STOPF entry reads it before the
  * reply. A stream still running is stopped there, EN falling only when the
@@ -2713,7 +2713,10 @@ private:
     /// its receive stream has not taken leaves RXNE up and "the SCL line is
     /// stretched low until FMPI2C_RXDR is read"; a byte its transmit stream
     /// has not written stretches SCL after the ninth pulse until TXDR is
-    /// (RM0390 23.4.7) - a starved stream slows the bus and loses nothing.
+    /// (RM0390 23.4.7), so a late stream slows the bus and loses nothing. A read's last
+    /// byte has no next one to hold: the STOP goes out whatever the stream has done, and
+    /// the STOPF entry settles it (streams_back()). A stream never served leaves a read
+    /// of two or more to the arbiter's timeout (docs/stm32f4/fmpi2c.md).
     static void arm_engines() {
         if constexpr (has_engines) {
             TxEngine::arm(S::tx_address(), DmaPriority::high, DmaInterrupts::errors_only);
@@ -2735,7 +2738,7 @@ private:
     /// finished with its last byte in memory (9.3.3's order, 9.3.14's end), which
     /// is the common case and needs nothing more. EN high, the stream is late or
     /// was never asked: an address not acknowledged, or the last byte's request
-    /// still waiting for the arbiter (9.3.5) when the STOP went out, which a load
+    /// still waiting for the DMA controller's arbitration (9.3.5) when the STOP went out, which a load
     /// above the stream reaches by itself (docs/stm32f4/fmpi2c.md has the rates). A
     /// clear of EN finishes a beat under way before EN falls (9.3.15, 9.3.18 step 1,
     /// and stop() waits for it), so at EN low the byte is in memory or it stands in
@@ -2746,6 +2749,10 @@ private:
     /// cell wrong and its count one down under i2c_ok (docs/stm32f4/dma.md, "A clear
     /// ahead of a beat"), and under a stream starved by a load every late read of
     /// one is that case. It is a read-modify-write of CR1 on the late path alone.
+    ///
+    /// No status marks the two ends no correct program reaches: EN still up when stop()'s
+    /// bound runs out, its answer unread, and a byte neither in memory nor in RXDR both
+    /// leave i2c_ok (docs/stm32f4/fmpi2c.md, "The receive stream at STOPF").
     ///
     /// SxCR is not read in the cycles after an EN store (the wedge,
     /// docs/stm32f4/dma.md): the shortest end of a tenure measured is a lost

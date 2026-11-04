@@ -2749,7 +2749,7 @@ void tq_bounds() {
               "; the 100 us bus wait ", busy_row.wall_min / cycles_per_us, " to ",
               busy_row.wall_max / cycles_per_us, " us, reached ", busy_row.staged, " of ", busy_row.rows,
               crlf);
-        // Above the time asked: start()'s own 229 cycles at most on a quiet bus, a poll's turn
+        // Above the time asked: start()'s own 181 cycles at most on a quiet bus, a poll's turn
         // of 30, a tick's handler of about 100, six at most in 5 ms: under 1000 cycles. The
         // console has drained (Serial::tx_idle() below), so no other vector lands.
         constexpr uint32_t over = 1000u;

@@ -277,9 +277,9 @@ choice in it answers an item of the controller's own offer:
   SPI host's receive engines arm HIGH, which is what keeps their rings,
   and an engine armed by hand beside two HIGH channels that must not
   lose takes HIGH too; the I2C host arms its receive engine at normal on
-  purpose, because a starved channel there leaves the receive FIFO full and the block holds
-SCL, and the STOP's entry settles what a channel starved over the tail still owes
-([i2c.md](i2c.md)).
+  purpose, because a starved channel there leaves the receive FIFO full and the peripheral
+  holds SCL, and the STOP's entry settles what a channel starved over the tail still owes
+  ([i2c.md](i2c.md)).
 
 **The run-time `claim()`.** A transport may start blocks on its transmit engine from
 two contexts - its thread and its completion on the line - and "is this channel free

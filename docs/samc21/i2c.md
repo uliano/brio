@@ -581,8 +581,8 @@ What the rows say:
   of this letter whose code lies at other addresses, and its written
   byte measured 188, 193 and 205 cycles an entry, its read byte 157, 170
   and 176 (counted as above) - the two wait states behind the NVMCTRL cache (the
-  file header of `bench_samc`). The figures on this page are the last
-  image's.
+  file header of `bench_samc`). The figures on this page are an older image's; `bench_samc` letter i on this
+  board would restate them.
 - IN SRAM (`bench_samc_ram`, the vector in `.fast_text`): the pump's
   entry costs 127 cycles for a written byte and 112 for a read one,
   counted as above (the stamps 38 cycles there and a tick 28, letter r

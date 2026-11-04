@@ -1666,9 +1666,9 @@ void tg_dma() {
           " read2=", r2, " read1=", r1, " (", r1_ch7, " receive completion); the peer received ",
           received, " bytes and served ", served, " (20 and 23 on the wire), faults tx=",
           DmaTxEngine<1, 6>::faults(), " rx=", DmaRxEngine<1, 7>::faults(), crlf);
-    // 19.12.1's own case, counted: a DMA-served read can end with the
-    // wire idle and BUSY standing, and the engine takes the chapter's
-    // SWRST out of it before the next START.
+    // 19.12.1's own case, counted: a read that ended with the wire idle
+    // and BUSY standing would have the engine take the chapter's SWRST
+    // before the next START. This letter's reads read 0 here.
     print(serial, "  the stuck-BUSY remedy fired ", DmaHost::unwedges(), " time(s) on the "
                   "engined host and ", Host::unwedges(), " on the plain one", crlf);
     bench.verdict("a 16-byte write and a 16-byte read through the engines on channels 6 and "
@@ -3772,7 +3772,7 @@ void tt_bounds() {
 //    40 to 257 us behind. What the peer's tenure ends with is then the reset's doing.
 // Counted: the resets taken, what the peer's tenure ended with and what this request
 // was answered, the tables apart by whether the round took a reset. Beside it, the
-// fraction a reset would land in by chance: the thread reading both lines through
+// fraction of a tenure both lines stand high: the thread reading both lines through
 // one whole tenure of the same bits, no request posted.
 
 struct LiveTally {

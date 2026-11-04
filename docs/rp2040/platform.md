@@ -748,7 +748,7 @@ warm and five cold runs on each image.
 | UART transmit engine, 256 bytes at 1 Mbaud, completions | 4513 to 6091 / 8682 to 9798 | 1778 to 3173 / 6239 to 7077 | 390 to 425 / 2090 to 2930 | 645 to 1446 / 2218 to 2774 |
 | I2C one-byte write at 400 kHz, `start()` | 362 / 12640 | 379 / 5129 to 5504 | 362 / 12640 to 16076 | 379 / 5504 |
 | ... its longest handler entry | 169 / 6382 | 201 / 3174 | 169 / 169 | 192 / 192 |
-| I2C 16-byte read on the engines at 400 kHz, wall | 49553 to 49644 / 71946 to 73838 | 49602 / 61326 to 61422 | 49553 to 49738 / 61750 to 64166 | 49593 / 54810 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 51137 to 51788 / 72418 to 72970 | 49602 (an older image) / 61334 | 49553 to 49738 (an older image) / 61758 | 49602 / 54754 to 54822 |
 
 What the rows say:
 

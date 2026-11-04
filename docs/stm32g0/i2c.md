@@ -77,6 +77,20 @@ What decides correctness even there:
   It must sit above the longest legal tenure: the 20 ms here fits requests of some
   200 bytes at 100 kHz, nine periods a byte, and a longer one or a device that
   stretches wants more ([design/i2c-bus.md](../design/i2c-bus.md)).
+- **After a failure.** Every failed tenure leaves the host idle, and the arbiter starts
+  the next queued request; a retry is the requester's, by posting again. `i2c_timeout`
+  says no completion came inside the timeout: the arbiter has already called `recover()`,
+  a PE cycle that releases both lines and keeps the configuration. That does not free a device
+  holding the wire: if the next request fails the same way, `unstick()` (nine clock pulses
+  and a STOP by hand) is the program's step, from main context and with no tenure in
+  flight, which is the program's to know, no verb saying whether the arbiter's queue is
+  empty. `i2c_dma_fault`, under `dma` alone, says a channel reported a transfer error or a
+  read's byte is missing: the channel is stopped ahead of the reply, the cells it reached
+  hold their bytes and the rest what they held before the request, and `I2cDone` does not
+  say where that line falls, so the buffer is void and the requester posts again. A correct
+  program is not expected to see it: a transfer error wants a buffer no DMA master reaches,
+  and a missing byte a program's own read of RXDR inside a tenure ("The receive channel at
+  STOPF" below says what was not staged).
 
 The chapter is built whole and measured on the STM32G0B1RE: on the Nucleo's own
 self-link and, on the same bus, against a partner board, an STM32F446RE, the host
@@ -174,7 +188,7 @@ takes** - the inventory every cost below is read against:
 | NACKIE (table 181) | declined | a STOP follows every NACK by itself (32.4.9), so the STOPF entry reads NACKF from the status register and one entry serves a refused tenure |
 | the six enables at their flags' bit positions (table 181, 32.9.7) | yes | the pending mask is CR1 masked and shifted, no test per enable |
 | TXDMAEN and RXDMAEN (32.7) | yes, two engine parameters | the program names the mechanism per request (`Request::engine`, below): under `dma` a read half with a buffer rides a channel at any length, a write half past its preloaded first byte, and neither takes a data interrupt; a half with no buffer stays on the pump |
-| the receive channel's count at STOPF (RM0444 10.6.4) | yes, one load at the STOPF entry of a read on a channel | STOPF says the wire is over and not that the channel is ("The receive channel at STOPF" below) |
+| the receive channel's count at STOPF (RM0444 10.6.4) | yes, one register read at the STOPF entry of a read on a channel | STOPF says the wire is over and not that the channel is ("The receive channel at STOPF" below) |
 | the independent kernel clock, the Fm+ drive, the wake, SMBus, the PEC, both filters | yes, measured (below) | none of them bears on a transfer's cost but the filters' share of the SCL period |
 
 ## Types and verbs
@@ -386,10 +400,10 @@ Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 249 verdicts
 in two sets, `z` green in three runs, `w` in three, letters `c`, `u`, `v`
 and `B` in ten each and `C` and `D` in fifteen each
 (the letters named below are the suite's console keys, each the group of
-verdicts it runs). The findings down to
-"ES0548 2.10.2 did not fire once" are the self-link's (I2C1 host
+verdicts it runs). The findings ahead of "The peer bus" are the self-link's (I2C1 host
 PB8/PB9, I2C2 client PA11/PA12, both AF6, 2.2 kOhm pull-ups): `z`,
-letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **214 verdicts**. The ones under "The peer bus" are a
+letters `a`..`m`, `u`, `v`, `B`, `C` and `D`, **214 verdicts**, the cost sections
+`bench_stm32`'s on the same link. The ones under "The peer bus" are a
 second chip's, the STM32F446RE running `twi_peer` on the same two nodes:
 the second all-key `w`, letters `n`..`t`, **35 verdicts**.
 
@@ -629,9 +643,9 @@ set: the START stands through the write, where the same sequence on the
 STM32F446RE's FMPI2C takes it at once ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)).
 So the CR2 store at the end of `start()` can refuse (32.9.2 forbids moving CR2 while
 START stands), and the host answers `i2c_bus_error` with nothing on the wire and CR2
-unmoved; the first byte stays in TXDR, and under `dma` the channels stay started. No
-request through the arbiter meets this: a parked tenure is timed out, and
-`recover()`'s PE cycle, which the letter also judges, takes the START.
+unmoved; the first byte stays in TXDR, and under `dma` the channels stay started until
+`recover()` stops them. No request through the arbiter meets this: a parked tenure is
+timed out, and `recover()`'s PE cycle, which the letter also judges, takes the START.
 
 ### The host's cost (bench_stm32 letter i)
 
@@ -837,9 +851,9 @@ at reset and written by no verb here). A Stop stops the DMA (table 27), and
   builds whose I2C vector is the same instruction for instruction, 20
   bytes apart in the flash, ran this letter's pump about 10 cycles an
   entry apart (the two wait states' prefetch, by inference: not
-  isolated). Adding `settle_late_read()` ahead of the vector moved it 436 bytes and
-  changed no instruction of the engineless host's body, whose STOPF entry then read 231
-  against 242 and written byte 165 against 169. The engined host's pump and the
+  isolated). With `settle_late_read()`'s 436 bytes taken out from ahead of the vector, no
+  instruction of the engineless host's body changing, its STOPF entry reads 242 where it
+  reads 231 and its written byte 169 where it reads 165. The engined host's pump and the
   engineless one's, the same byte branches in two bodies at two addresses, differ by
   5 cycles a written byte and -2 a read one; whether the placement or the code
   around the branches accounts for it is not isolated. The rows above are one
@@ -850,14 +864,15 @@ at reset and written by no verb here). A Stop stops the DMA (table 27), and
 
 With no completion entry STOPF is a `dma` read's one edge, and it says the wire is over.
 The last byte stretches nothing: RXNE rises and the controller NACKs and stops under
-AUTOEND whether or not RXDR was read, while the channel still has the arbiter
-(10.4.4) and the bus matrix's round robin (10.4.1) to win. RM0444 gives no bound on a
-channel's lag. So the STOPF entry reads the receive channel's count, one load:
+AUTOEND whether or not RXDR was read, while the channel still has the DMA controller's
+arbitration (10.4.4) and the bus matrix's round robin (10.4.1) to win. RM0444 gives no bound
+on a channel's lag. So the STOPF entry reads the receive channel's count, one register read:
 
 - **Zero, the on-time path.** A beat is a read, a write and then the count (10.4.3); the
   count "is decremented after each single DMA 'read followed by write' transfer"
-  (10.6.4). Letter `C` polls it to zero with the next load the memory cell: 6000 rows
-  over fifteen runs, half of them under a copy at `very_high`, no stale cell.
+  (10.6.4). Letter `C` polls the count until it reads zero and reads the memory cell in the
+  next instruction: 6000 rows over fifteen runs, half of them under a copy at `very_high`, no
+  stale cell.
 - **Not zero, NACKF up.** The address was refused, there is no byte, and `finish()` stops
   the channel behind the enables.
 - **Not zero, NACKF clear: the channel is late.** `settle_late_read()` runs, cold and out
@@ -865,22 +880,26 @@ channel's lag. So the STOPF entry reads the receive channel's count, one load:
   disable the peripheral in DMA mode"). The count is read ahead of any stop, since 10.4.5
   says a stopped channel's count "may not correctly reflect the remaining data transfers".
   With RXNE up the byte goes at `rx_len - remaining`; with RXNE down a beat is under way and
-  the entry gives the count `late_beat_turns`, 16 loads, to fall. Then CCR.EN goes down. A
-  byte still missing after that is `i2c_dma_fault`, never `i2c_ok`.
+  the entry gives the count `late_beat_turns`, 16 reads of it, to fall. Then CCR.EN goes
+  down, a store with no read-back, ahead of the reply. A byte still missing after that is
+  `i2c_dma_fault`, never `i2c_ok`, and the opening's "After a failure" says what the buffer
+  holds then.
 
-**The cost on the on-time path is one register load and no wait.** In the release
-listing a read on a channel adds the flag `rx_dma_` loaded, NACKF tested, CNDTR loaded
-and compared, against the test of RXNE it no longer makes: the entry reads 300 cycles
-between the stamps against 298 before, and a write's, which loads the flag and no count, 298 and 325
-against 297 and 324. A pump's last byte on the engined host pays the flag's test too. The
-late path is 401 cycles between two reads of SysTick around the body, and 663 when
-the 16 loads run out and the status says so (letter `C`, the same in fifteen runs).
+**The cost on the on-time path is one register read and no wait.** In the release
+listing a read on a channel loads the host's flag for it, tests NACKF, loads CNDTR and compares,
+and does not test RXNE: the entry reads 300 cycles between the meter's stamps, 2 more than the
+same entry with RXNE's test in those places, and a write's, which loads the flag and no count,
+pays 1. A pump's last byte on the engined host pays the flag's test too. The late path, on
+another ruler (two reads of SysTick around the body, not comparable with the stamps), is 401
+cycles, and 663 when the 16 reads run out and the status says so (letter `C`, the same in
+fifteen runs).
 
-**A load makes a channel late by itself.** Letter `D`: the host's channel at `high`, the
-load's channels at `very_high` above it on the same controller, each block a thousand beats,
-a word from one cell into another, the blocks started again once all of them have run out. The
-figures are over fifteen runs, reads of 1, 2 and 8, 750 each, on a 64 MHz core. Late is the count
-not at zero at the vector's first load.
+**A load makes a channel late by itself.** A load, here, is other DMA traffic. Letter `D`: the
+host's channel at `high`, a level no program names (`arm_engines()` fixes it), the load's channels
+at `very_high` above it on the same controller, each block a thousand beats, a word from one cell
+into another, the blocks started again once all of them have run out. The figures are over fifteen
+runs, reads of 1, 2 and 8, 750 each, on a 64 MHz core. Late is the count not at zero at the vector's
+first read of it.
 
 | load | late at 400 kHz, reads of 1, 2, 8 | late at 1 MHz |
 |---|---|---|
@@ -897,70 +916,80 @@ not at zero at the vector's first load.
 | three copies at `low`, `DmaCopyEngine`'s default | 0, 0, 0 | 0, 0, 0 |
 | a paced channel every 8 and two copies | 750, 0, 0 | 750, 0, 133 |
 
-Starting the three timers 1 to 3 turns of a delay loop apart takes the 750 as low as 700 and
-the reads of two as high as 335. No single channel of either shape made one late, the copy
-being 10.4.4's, re-arbitrated between single transfers. On a core at 16 MHz and at 2 MHz, 400 kHz
-on HSI16: 0 of 2250 reads with nothing else, and under three copies 15 of 2250 each, all reads of
-one. Every one of the 99000 reads was exact, in the vector, with nothing moving after it.
+The levels of a program's own channels are its to choose, and the row at `low` is what leaving the
+copies at their default buys. Starting the three timers 1 to 3 turns of a delay loop apart takes
+the 750 as low as 700 and the reads of two as high as 335, so a zero in a loaded row is what that
+phase gave; why reads of one are late where reads of two are not is not established. No single
+channel of either kind made one late: a copy is re-arbitrated between single transfers
+(10.4.4). On a core at 16 MHz and at 2 MHz, 400 kHz on HSI16: 0 of 2250 reads with nothing else, and
+under three copies 15 of 2250 each, all reads of one. Every one of the 99000 reads was exact, in
+the vector, its channel stopped and no cell moved across 40 turns of a delay loop behind the
+completion. No load here starves the channel outright, as the FMPI2C's does (the second list below).
 
-**The control, the entry storing at `pos_` and stopping nothing.** Staged, the request taken
-away for the last byte, 20 of the 30 reads at each speed had the last byte over the first and
-the last cell stale, every one `i2c_ok`, and all 30 left the channel running. Under letter
-`D`'s loads, one run: 1013 reads of 6600 wrong under `i2c_ok`, none on a load the table
-has at zero and none on the slower rungs, most of them reads of two and eight with the count at zero at
-the vector, behind a read of one that was right. By the stage below that is the stray beat
-carrying from one tenure to the next, with RXDR read at each entry with RXDMAEN up; it was not
-isolated row by row.
+**The control: the entry changed to store at the pump's position and stop nothing.** With the DMA
+request taken away for the last byte (RXDMAEN held down), 20 of the 30 reads at each speed had the
+last byte over the first and the last cell stale, every one `i2c_ok`, and all 30 left the channel
+running. Under letter `D`'s loads, one run: 1013 reads of 6600 wrong under `i2c_ok`, none on a load
+the table has at zero and none with the core at 16 or 2 MHz, most of them reads of two and eight with
+the count at zero at the vector, behind a read of one that was right. That reads as a stray beat (a
+beat the next DMA block's start takes with nothing on the wire, "A request a stopped channel never
+served" below) carried from one tenure to the next; it was not isolated row by row.
 
-**How near, polled.** The vector's line off, the request held down until RXNE rises and
-then let up, a masked poll dates the count's zero and STOPF in one tenure, 600 tenures a
-row. A turn of the poll is three register loads and the arithmetic, at most 102 cycles,
-and every figure is good to that.
-
-| load, on 64 MHz | 400 kHz: count at zero, STOPF | 1 MHz: count at zero, STOPF |
-|---|---|---|
-| nothing else, one channel or one copy | by 36, from 373 | by 36, from 205 |
-| two paced, or three paced every 16 | by 116, from 371 | by 115, from 202 |
-| three paced every 8, the timers' starts apart or not | by 7151, from 357 | by 6677, from 194 |
-| two copies | by 3563, from 357 | by 5117, from 194 |
-| a paced channel every 8 and two copies | by 6155, from 357 | by 7898, from 194 |
-
-On 16 MHz with nothing else, by 33 and from 111. On 2 MHz the poll's first turn found both, 31
-cycles after the let-up, which says nothing of their order; there the reads above are the
-evidence. RM0444 states no such bound, so these are what was seen and not a margin.
+**How near, polled.** The vector's line off, the DMA request held down until RXNE rises and
+then let up, a masked poll dates the count's zero and STOPF in one tenure, 600 tenures a row, good
+to a turn of the poll, at most 102 cycles. On 64 MHz STOPF came no sooner than 357 cycles after the
+let-up at 400 kHz and 194 at 1 MHz. The count's zero came within 36 cycles with nothing else, one
+channel or one copy, within 116 under two paced channels or three every 16, and as late as 7151 under
+three every 8, 5117 under two copies and 7898 under a paced channel every 8 and two copies. RM0444
+states no such bound, so these are what was seen and not a margin.
 
 **What the silicon does with a stop**, letter `C`'s sweeps, fifteen runs:
 
-- **The request taken down against a request rising.** RXDMAEN up, then down 0 to 23 turns
-  of a delay loop later, 7200 rows: the count at zero at the first load and the cell right, every
+- **The DMA request taken down just after it rises.** RXDMAEN up, then down 0 to 23 turns
+  of a delay loop later, 7200 rows: the count at zero at the first read and the cell right, every
   one. No row caught a beat under way, so `late_beat_turns` rests on the arithmetic in its
-  comment and not on a beat seen.
-- **EN cleared against a beat, the request up.** 7200 rows: the clear first with the byte still
+  comment in `brio/stm32g0/i2c.hpp` and not on a beat seen (the second list below).
+- **EN cleared against a beat, the DMA request up.** 7200 rows: the clear first with the byte still
   in RXDR 150, the byte in memory and the count at zero 6900, the byte in memory and the count
   still up 150, the byte lost none. The 150 with the count up are 10.4.5's warning, on the silicon.
-- **A beat landing inside the entry.** The request let up in the entry under 1 to 48 beats of
+- **A beat landing inside the entry.** The DMA request let up in the entry under 1 to 48 beats of
   three channels above it, so that the beat lands across the body, 192 reads a run at each of
   400 kHz and 1 MHz: all exact, none left running, a read of eight, a write of eight and a refused
   write whole behind them. Another 96 reads a run let up 0 to 23 turns ahead of the body read the same.
-- **The request taken away for the last byte.** Reads and write-then-reads of 1, 2 and 8 at
+- **The DMA request taken away for the last byte.** Reads and write-then-reads of 1, 2 and 8 at
   100 kHz, 400 kHz and 1 MHz, 30 at each speed a run: every entry found the channel running and
   RXNE up, every byte was at its place, the requests behind them whole.
 - **A byte nobody has.** RXDR read away in the vector ahead of the body, 20 reads a run:
   `i2c_dma_fault` every time, the channel stopped, the requests behind them whole. No correct
-  program gets there; the stage is what runs that branch.
+  program reads RXDR inside a tenure; the stage is what runs that branch.
 
-**A request a stopped channel never served is remembered, in one order.** The question
-[the STM32F4's page](../stm32f4/fmpi2c.md) raises for a stream, answered here from this chip. EN
-down, then RXDMAEN up over a byte in RXDR, then RXDR read with RXDMAEN still up: the next
-block's start takes a beat with RXDMAEN clear and nothing on the wire, its count one down, 1500
-of 1500. With RXDMAEN taken down ahead of that read, 0 of 1500. On a channel a load is holding,
-RXDMAEN down does not take the request back: after the core has read RXDR the channel still
-moves a beat once the load lets it, 1500 of 1500, whether the enable was up or down at the
-read. With EN cleared too there is no beat at the next block's start in any order tried, 0 of
-1500 each, nor after `recover()` over a standing request, 0 of 1500, and at most 18 rows of each
-1500 caught a beat that had landed before the clear. So the entry takes RXDMAEN down first
-and EN last, and `recover()` stays as it is. The manual describes neither. What other
-transports stopping a live peripheral's channel meet here is not measured.
+**A DMA request a stopped channel never served is remembered, in one order: the stray beat.** A
+stray beat is one the next DMA block's start takes with RXDMAEN clear and nothing on the wire, its
+count one down. Letter `C`, over a byte in RXDR, 1500 rows of each order; the manual describes
+neither case:
+
+| the channel stopped first, then RXDMAEN up, then | a stray beat at the next block's start |
+|---|---|
+| RXDR read with RXDMAEN still up | 1500 |
+| RXDMAEN down, then RXDR read | 0 |
+
+A channel a load is holding is the other case: RXDMAEN down does not take its DMA request back.
+
+| the channel held by a load, the core's order | moved a beat behind the load | a stray beat |
+|---|---|---|
+| RXDR read, RXDMAEN up, EN up | 1499 of the 1499 the load held | 0 |
+| RXDMAEN down, RXDR read, EN up | 1500 | 0 |
+| RXDMAEN down, RXDR read, EN down | 18 | 0 |
+| EN down, RXDMAEN down, RXDR read | 11 | 0 |
+| RXDMAEN down, EN down, RXDR read | 4 | 0 |
+| `recover()` over the standing request | 9 | 0 |
+
+The count is read before the order and again behind the load, so a row in the last four says the
+count moved across a window with the clear inside it and not on which side of the store the beat
+landed. So the entry takes RXDMAEN down first and EN last, and a beat let through in between reads
+the same RXDR into the same cell.
+
+### Refused writes, ES0418's band and the mechanism named (letters v, B and u)
 
 **A refused write, position by position** (`test_stm32_i2c`'s letter `v`, on the self-link,
 11 verdicts, ten runs of ten). I2C2 NACKs through its target byte control the
@@ -1007,8 +1036,7 @@ NBYTES count drops that write's last: the letter's own control, a write of two b
 the resource's verbs after a NACKed first byte, puts the channel's byte at the
 client ahead of its own, and a scratch build with the flush left out fails the
 next-request verdicts under both mechanisms. TXIS is not a second trap here, though
-a NACK can leave it standing with no store to clear it (32.9.7, and the starved
-refusal can leave it standing with no store to clear it (32.9.7, and the starved
+a refusal can leave it standing with no store to clear it (32.9.7, and the starved
 rows leave it eight times of eight): `start()` stores the first byte before it arms
 TXIE or TXDMAEN in one store, so a standing TXIS is gone before either can see it.
 
@@ -1384,7 +1412,7 @@ so this board asks the wire at boot like any other (`self-link probe:
 SCL 0 SDA 0` with the peer link fitted) and its self-link letters
 skip on that answer, claiming nothing. The suite builds as three group images on this
 part (its groups line: the self-link's letters, the peer's, and `v`, `B`, `C` and `D`,
-54.5, 27.6 and 37.6 KB of the part's 64).
+55.0, 28.1 and 38.1 KiB of the part's 64 in the flash).
 
 **Table 165's column again, one part further down.** This part's I2C2
 has no `RCC_CCIPR_I2C2SEL`, so - as on the G071 - it has no independent
@@ -1463,12 +1491,23 @@ Implemented but not bench-verified:
   are measured on the STM32G0B1RE only; those letters on a self-link on those two
   boards, and `bench_stm32`'s letter `i` there, would measure them. The STOPF entry is the
   one host's on all three, and its late path has run on neither smaller part: their DMA1 is
-  the same design with fewer channels (RM0444 10.3.1), and nothing but that says it behaves alike.
-- **A load on the second DMA controller.** The STM32G0B1RE's DMA2 shares the bus matrix with
-  DMA1 and no arbiter, and letter `D` loads DMA1 alone. Copies on DMA2 in letter `D` would
-  measure it. The suite's
+  the same design (RM0444 10.3.1), seven channels on the STM32G071 as here and five on the
+  STM32G031 (table 49), and nothing but that says it behaves alike. The suite's
   key `w` against a peer on each board, on the STM32G031K8 through its group
   images, would measure the rest.
+- **A load on the second DMA controller.** The STM32G0B1RE's DMA2 shares the bus matrix with
+  DMA1 and no arbitration, and letter `D` loads DMA1 alone. Copies on DMA2 in letter `D` would
+  measure it.
+- **A beat under way at the STOPF entry, and a load that starves the channel outright.** No row of
+  letters `C` or `D` caught RXNE down with the count standing, so `late_beat_turns` is arithmetic,
+  and a beat granted ahead of EN's clear and held past the reply is not excluded by a read-back
+  here, the worst it can write on `i2c_ok` being the byte already there. By 32.4.7 a read of two or
+  more under a load that never serves the channel stays stretched until the arbiter's timeout. A
+  master holding the bus matrix across a beat, or letter `D` with a load past what the bus takes,
+  would measure them; DMA2 above is the nearest candidate.
+- **The stray beat on the other transports here.** Letter `C` asks it of I2C's receive alone. A
+  stage of the same orders on a USART's and an SPI's receive channel would say whether those
+  peripherals remember a DMA request as this one does.
 - **ES0418 2.11.6 on the part whose sheet lists it.** Whether the STM32G071RB
   stalls on TXDR left empty, and whether the host's path is clean there: letter `B`
   on a self-link on that board prints the first rate and judges the second. On the

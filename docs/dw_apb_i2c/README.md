@@ -89,7 +89,8 @@ What decides correctness even there:
 
 - **The buffers a request lends stay untouched by the requester until its
   `I2cDone` arrives.** An `i2c_timeout` is such a reply: `recover()` stops the
-  channels before the arbiter answers, so nothing still writes a lent buffer.
+  channels before the arbiter answers, so nothing still writes a lent buffer, short
+  of an abort whose poll runs out ("The receive channel at the STOP").
 - **The vector is bound and posts `TransferDone`.** Left unbound, the line's first
   interrupt parks the core in the crt's default spin, where no timeout can answer.
   Bound but not posting, the arbiter never learns that a tenure ended, and its
@@ -465,7 +466,8 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   `r.engine = brio::I2cEngine::dma;`, on a host whose two engine parameters
   are filled (each family's "How to use it" has the host type and the
   vector). On a host with engines a wrong choice costs core cycles or a
-  sleep (each family's page, on the SLEEP state), never correctness. Each family's document gives the measured cost of both,
+  sleep (each family's page, on the SLEEP state), and correctness only if a DMA load
+  outlasts the arbiter's per-bus timeout ([../design/i2c-bus.md](../design/i2c-bus.md)). Each family's document gives the measured cost of both,
   and the length from which `dma` costs the core less:
 
   - a read on the RP2040: nine bytes with the host in SRAM, and from the
@@ -548,50 +550,62 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **The receive channel at the STOP** - STOP_DET says the wire is over and not that
   the channel is. SCL holds only with the receive FIFO full, so a read's last sixteen
   bytes can stand in the FIFO as the STOP goes out, and neither chip's chapter bounds
-  how long a channel waits behind others. A load a correct program may run makes it
-  wait far longer than a bit and a STOP; each family's page has what that load is and
-  how often ([../rp2350/i2c.md](../rp2350/i2c.md),
-  [../rp2040/i2c.md](../rp2040/i2c.md)). So the STOP's entry takes the requests down
-  and reads the receive channel's CTRL.BUSY through the engine's `idle()`, one load:
+  how long a channel waits behind others. On the RP2350 a load a correct program may
+  run leaves the channel far behind that STOP ([../rp2350/i2c.md](../rp2350/i2c.md));
+  on the RP2040 the most measured is one beat, and only with the host in SRAM under
+  flash loads ([../rp2040/i2c.md](../rp2040/i2c.md)). So the STOP's entry takes the DMA
+  requests down and reads the receive channel's CTRL.BUSY through the engine's
+  `idle()`, one load:
 
-  - **Down, the on-time path.** BUSY falls "when the last transfer of that sequence
-    completes" (RP2040 and RP2350's register lists), which both suites confirm: BUSY
-    polled down, then the cell, stale in no row. A pure write has no run on the channel
-    and reads down too.
-  - **Up: `settle_late_read()`**, cold and out of line. The requests are already down,
-    but a request the channel has banked outlives `IC_DMA_CR`: the counter "decrements
-    when the transfer is issued" (RP2040 2.5.3.2, RP2350 12.6.4.2), and a channel paused
-    over a read banks one by its debug register, and runs a beat or two behind the enable
-    going down. Those
-    sections also say "the user must not access a FIFO which is currently being serviced
-    by the DMA". So the channel is stopped first, by the engine's `settle()`: the
-    chip's abort, polled to its end. Only after that does the host read `IC_RXFLR` and
-    take what stands, by hand, at the place the channel reached. That place is the
-    channel's WRITE_ADDR read after the abort, since CHAN_ABORT "clears the transfer
-    counter", which itself falls only as a write completes; nothing is in flight by
-    then, so the address is exact (RP2040-E12 concerns the non-incrementing kinds). A
-    read whose bytes are thrown away (a null `rx`) keeps no such count and owes none.
+  - **Down, the on-time path.** BUSY goes low "when the last transfer of that sequence
+    completes" (RP2040 2.5.7's register list; RP2350 12.6.10's). Each suite polled it
+    down and read the buffer's last byte next: stale in none of 400 trials on either
+    chip. A pure write has no run on the channel and reads down too.
+  - **Up: `settle_late_read()`**, cold and out of line. The DMA requests are already
+    down, but the channel counts the requests it has not yet issued (a banked request),
+    and that count outlives `IC_DMA_CR`: it falls "when the transfer is issued" (RP2040
+    2.5.3.2, RP2350 12.6.4.2). A channel paused over a read of four shows at most one
+    in its debug counter behind the enable going down, and runs a beat when let up (two
+    on the RP2040, the second unaccounted for). Those sections also say the user "must
+    not access a FIFO" that is "currently being serviced by the DMA". So the host
+    stops the channel first, by the engine's `settle()`: the chip's abort, polled to
+    its end. Only then does it read `IC_RXFLR` and take what stands, by hand, at the
+    place the channel reached. It finds that place in the channel's WRITE_ADDR after
+    the abort. The count cannot tell it, since CHAN_ABORT "clears the transfer counter".
+    The address is exact with nothing in flight
+    ([RP2040-E12](../rp2040/dma.md) concerns the non-incrementing kinds). A read with
+    no buffer, which the `Request` does not offer
+    ([../design/i2c-bus.md](../design/i2c-bus.md)), owes no byte.
   - **A byte nobody has** - the channel's bytes and the FIFO's level together short of
-    the read, or an abort that did not finish - is `i2c_dma_fault`, never `i2c_ok`. It
+    the read, or an abort whose poll ran out - is `i2c_dma_fault`, never `i2c_ok`. It
     also makes the next `start()` run the disable, which flushes what may stand. No
-    correct program gets there: the status is the guard, and a suite letter stages it.
+    correct program gets there: the status is the guard, and a suite letter stages the
+    short count.
 
-  So the requester has every byte, or a status that says otherwise, and nothing writes
-  the buffer after the reply. The on-time path pays that one load and a branch. No wait
-  is added to the vector beyond the abort's own, bounded inside the engine at 100 000
-  polls; each family's page has what the late path costs.
+  So the requester has every byte or a status that says otherwise, and nothing writes
+  the buffer after the reply, with one exception: an abort whose poll runs out (100 000
+  reads of BUSY) leaves a beat possibly in flight, and that beat can land after the
+  `i2c_dma_fault`. The stops on the failure paths, `recover()`'s among them, ignore the
+  same result. No measured case comes near it: the longest whole host body under any
+  load is 39 440 cycles, on the RP2350. The on-time path pays that one load and a branch. The
+  late path waits only inside the abort, for at most 100 000 polls, and for as many again if
+  that poll runs out, the channel's rebind aborting it a second time. Each family's
+  page has what the late path measured, on the stage and under its loads; those are
+  the most seen, not a bound.
 
-  **The stray beat**: the data register read with the request up over a stopped
-  channel, or with the request down, leaves the next block's start where it was and the
-  read behind it exact (200 rows of each on either chip): a block's start clears the
-  channel's banked requests and the trigger drops them. The host never makes the first of
-  those reads anyway.
+  **A stray beat**, one a banked request spends after the host has finished with the
+  channel, does not reach the next tenure. The data register read with the DMA request
+  up over a stopped channel, or with the request down, leaves the next DMA block's
+  start where it was and the read behind it exact (200 trials of each on either chip):
+  a block's start clears the channel's banked requests. The host never makes the first
+  of those reads anyway.
 
-  **The transmit side** does not share the assumption. A STOP comes only from the entry
-  that carries it, and that entry is the pump's, written behind the transmit block's
-  end on the DMA line; so no transmit channel is running at the tenure's own STOP, by
-  construction and in every row of the families' load letters. A foreign node's STOP in
-  mid-block is `own_stop()`'s to refuse, as above.
+  **The transmit channel** is not behind the wire at a tenure's own STOP. A STOP comes
+  only from the entry that carries it, and that entry is the pump's, written behind the
+  transmit DMA block's end on the DMA line, so that channel has finished by
+  construction; both families' load letters read its BUSY down at every such STOP. A
+  foreign node's STOP in mid-block fails the transmit FIFO's test in "STOP_DET as every
+  tenure's end" and ends nothing.
 - **`IC_ENABLE.ABORT`** - used where an engine fails; a NACK or a lost
   arbitration is the peripheral's own abort, read off `IC_TX_ABRT_SOURCE` once.
 - **`IC_ENABLE.TX_CMD_BLOCK`** - declined for tenures: entries written
@@ -684,3 +698,8 @@ family's own document.
   stratum, and a 10-bit device is the first user.
 - The client on the DMA engines: the requests exist; a streaming client
   is born with a program that needs one.
+
+Implemented but not bench-verified, each with what would measure it:
+
+- An abort whose poll runs out (`i2c_dma_fault`, the next `start()`'s disable): no load or stage reaches it,
+  letter `s` staging the short count alone; a channel held past the 100 000 polls would measure it.

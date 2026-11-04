@@ -986,14 +986,15 @@ constexpr bool dw_apb_i2c_engine_claimed() {
  *
  * `dma` on a host with no engines bound is answered i2c_rejected inside
  * start(), nothing on the wire. On a host with engines a wrong choice costs
- * core cycles, never correctness; the family's document gives the length
+ * core cycles, and correctness only if a DMA load outlasts the arbiter's
+ * timeout (docs/design/i2c-bus.md); the family's document gives the length
  * from which `dma` costs the core less at each speed. The receive engine is armed to
  * report a bus error alone (the family's Report::errors), and the tenure
  * ends on the STOP like every other. The STOP entry reads whether the
  * channel has finished, one load; a channel still counting is stopped there
  * and what it had not moved taken from the FIFO, so the requester has every
- * byte or i2c_dma_fault and nothing moves after the reply
- * (settle_late_read()). Two interrupts an engined
+ * byte or i2c_dma_fault, and nothing moves after the reply unless the abort's
+ * poll ran out (settle_late_read()). Two interrupts an engined
  * read of three bytes or more, the transmit block's end and the STOP; one
  * or two host entries (the STOP, and TX_EMPTY when the commands did not
  * fit) for a shorter one; a write on the transmit engine the same two,
@@ -1347,11 +1348,13 @@ private:
                         S::dma_requests(false, false);
                         dma_active_ = false;
                         poured_ = false;
-                        // One load: CTRL.BUSY falls when the last transfer of the
-                        // sequence completes, its write in memory. A pure write has
-                        // no run on this channel and reads idle. A beat that lands
-                        // after the request went down reads as counting, and the
-                        // cold path takes it as it stands.
+                        // One load: CTRL.BUSY goes low "when the last transfer of that
+                        // sequence completes" (RP2040 2.5.7, RP2350 12.6.10); RP2350
+                        // 12.6.1 has the RP2040's end at the first cycle of the last
+                        // write's data phase, earlier at a write stall, which no suite
+                        // stages. A pure write has no run on this channel and reads idle.
+                        // A beat that lands after the request went down reads as counting,
+                        // and the cold path takes it as it stands.
                         if (RxEngine::idle()) {
                             received_ = read_len();
                             return finish(i2c_ok);
@@ -1496,7 +1499,8 @@ public:
     /// Put the host back where start() is legal - the verb a timed
     /// I2cBus calls on a tenure that never answered: the engines put
     /// away first, so nothing still writes a lent buffer when the arbiter
-    /// answers, the peripheral reset (a command under way with no STOP holds
+    /// answers, short of an abort whose poll runs out (settle_late_read() says
+    /// what that leaves; here its result is not read), the peripheral reset (a command under way with no STOP holds
     /// it enabled forever), the configuration and the timing rewritten.
     /// The wire stays the application's (unstick()).
     static bool recover() {
@@ -1742,17 +1746,20 @@ private:
     /// depth behind it, which a load of DMA channels above it can make it (the family's
     /// page has the rates); the requester is about to own the buffer. So nothing may
     /// move after this returns, and the bytes still in the FIFO go by hand. The requests
-    /// are already down. A pulse banked before that still spends itself on a read
-    /// ("the counter decrements when the transfer is issued", RP2350 12.6.4.2, RP2040
-    /// 2.5.3.2), so the channel is stopped by the family's own abort before the core
-    /// touches the FIFO ("the user must not access a FIFO currently being serviced by
-    /// the DMA", the same sections). Bytes that landed plus the FIFO's level must be the
-    /// whole read; a byte nobody has is i2c_dma_fault, never i2c_ok, and that status
-    /// costs the next tenure the disable that flushes what may stand. No wait here but
-    /// the abort's own, bounded inside the engine. A read whose run is thrown away
-    /// (a null buffer) keeps no count and owes no byte. Out of line and cold: the
-    /// on-time path carries a load and a branch, a late one the listing's figures on the
-    /// family's page.
+    /// are already down. A pulse banked before that still spends itself on a read (the
+    /// counter falls "when the transfer is issued", RP2350 12.6.4.2, RP2040 2.5.3.2), so
+    /// the channel is stopped by the family's own abort before the core touches the FIFO
+    /// (the user "must not access a FIFO" that is "currently being serviced by the DMA",
+    /// the same sections). Bytes that landed plus the FIFO's level must be the whole read;
+    /// a byte nobody has is i2c_dma_fault, never i2c_ok, and that status costs the next
+    /// tenure the disable that flushes what may stand. The one thing that can still move
+    /// after this returns is a beat in flight when the abort's poll ran out, the empty
+    /// answer below, i2c_dma_fault again; no measured case comes near it. No wait here
+    /// but the abort's own, at most 100 000 polls, and as many again if that poll runs
+    /// out, the channel's rebind aborting it a second time. A read whose run is thrown
+    /// away (a null buffer) keeps no count and owes no byte. Out of line and cold: the
+    /// on-time path carries a load and a branch; what a late one measured, on the stage
+    /// and under a load, is on the family's page.
     [[gnu::noinline, gnu::cold]] static uint8_t settle_late_read() {
         if constexpr (has_engines) {
             const uint8_t* const run = req_.rx.get();
@@ -1833,7 +1840,6 @@ private:
 
     /// The transmit engine reports its blocks (the STOP entry waits on
     /// one); the receive engine reports a bus error alone - the STOP
-    /// ends its tenure. BOTH AT THE FAMILY'S NORMAL LEVEL, the rule's for
     /// ends its tenure. BOTH AT THE FAMILY'S NORMAL LEVEL, the rule's for
     /// a peripheral that waits (docs/design/dma.md): a starved command
     /// channel leaves the transmit FIFO empty and the block holds SCL, and
