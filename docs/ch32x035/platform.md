@@ -1453,9 +1453,9 @@ driver can: its private paths (the SPI host's polled loops) and the
 bodies it calls out of the vector, with the vector left in the flash. A
 program that places the vector moves everything inline in it - every
 `InFlash` body it binds - with no call at all. On a path whose body is
-inline in the vector whole (a USART's per-byte transport, the table's row;
-the I2C event pump has the same shape, no suite placing its vector), placing
-the vector is the faster of the two, and placing both spends the bytes
+inline in the vector whole (a USART's per-byte transport, the table's row,
+where placing the vector measures the faster of the two; the I2C event pump has
+the same shape, and no suite places its vector), placing both spends the bytes
 twice. On a path the driver
 calls out of line or keeps private, `InRam` is the only way.
 

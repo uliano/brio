@@ -54,8 +54,8 @@
 //   register write, and MSL rises only at SB, some tens of microseconds on.
 //   THE HELD WIRE: a START into an SDA the peer holds, from a block that saw
 //   the line taken, goes out and its address loses at its first one bit -
-//   i2c_arb_lost at once (docs/ch32x035/i2c.md, "A START into a held SDA is
-//   not refused"); from a block brought up over the held line (SWRST:
+//   i2c_arb_lost at once (docs/ch32x035/i2c.md, "A START into a held SDA goes
+//   out, and the address loses"); from a block brought up over the held line (SWRST:
 //   recover(); a PE cycle) the START stays pending and only the arbiter's
 //   20 ms answers (i2c_timeout). Letter h meets the hold at the speed in
 //   force (the first signature predicted) and once at another, whose

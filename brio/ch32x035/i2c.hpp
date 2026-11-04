@@ -22,11 +22,11 @@
  *  - `I2c<n>` is the resource: the register block, its gate and reset,
  *    the column, the clock arithmetic, the flags and the sequences that
  *    clear them, the control bits as verbs. It decides nothing.
- *  - `I2cHost<n, pins, TxEngine, RxEngine, Placement>` is the engine util/
- *    i2c_bus.hpp's I2cBus drives: the Request has the same fields on every
- *    stratum - addr, tx and tx_len, rx and rx_len, reply, speed, engine - one
- *    bus tenure that is a write, a read, a write-then-read with a repeated START, or
- *    the empty probe - and the outcome vocabulary is i2c_bus.hpp's.
+ *  - `I2cHost<n, pins, TxEngine, RxEngine, Placement>` is the host util/
+ *    i2c_bus.hpp's I2cBus drives: the Request holds addr, tx and tx_len, rx
+ *    and rx_len, reply, speed and engine, one bus tenure that is a write, a
+ *    read, a write-then-read with a repeated START, or the empty probe. The
+ *    outcome vocabulary is i2c_bus.hpp's.
  *  - `I2cClient<n, pins>` is the target side: a polled surface and two
  *    interrupt bodies, deliberately thin, because a client is a protocol
  *    and which protocol is the application's.
@@ -104,8 +104,9 @@
  * generation", and set while a byte shifts it goes out as that byte ends.
  * It is not the chapter's own end of a write - figure 15-3 ends one at
  * EVT8_2, with SCL held low past the last acknowledge. No delivery on this
- * part depends on the order: the one loss measured under the BTF order
- * needs one core serving both ends (docs/ch32vx03/i2c.md), and the
+ * part depends on the order: the BTF order's one loss was measured with a
+ * target polled by the core that also serves the host, a target on its own
+ * vector or on another board keeping the byte (docs/ch32vx03/i2c.md), and the
  * CH32V006's polled twi_peer took every written byte in this order, one to
  * four before a read, at both speeds, pump and engines (measured,
  * docs/ch32x035/i2c.md). It saves the BTF entry. The price is in the
@@ -174,8 +175,8 @@
  * another master's busy bus out of it, and counts it (`unwedges()`).
  *
  * A START into a held line is not refused by this die (measured,
- * docs/ch32x035/i2c.md): set by a block that saw another device take SDA,
- * it raises SB some 20 us later with the line still held, and the address
+ * docs/ch32x035/i2c.md): set by a peripheral that saw another device take
+ * SDA, it raises SB some 40 us later at 100 kHz with the line still held, and the address
  * written behind it loses arbitration at its first one bit - so a tenure
  * into a stuck target comes back i2c_arb_lost within a byte, through
  * error_isr(); set by a block brought up over a line already held, it
@@ -722,7 +723,7 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
 /**
  * I2cHost<n, pins, TxEngine, RxEngine, Placement>
  *
- * The engine I2cBus (util/i2c_bus.hpp = BusMaster) drives. One Request
+ * The host I2cBus (util/i2c_bus.hpp = BusMaster) drives. One Request
  * is one bus tenure: START, the address, tx_len bytes written, then - if
  * rx_len is not zero - a repeated START, the address again with the read
  * bit and rx_len bytes taken with the last one NACKed, then STOP. Both
@@ -733,7 +734,7 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *   using Bus = brio::I2cHost<1>;   // the part's first column
  *   using I2c = brio::I2cBus<Bus, P, 4, brio::BusPassThrough, brio::ticks_from_ms<P>(20)>;
  *   if (!Bus::init(clock)) {        // after the clock task
- *       // an HCLK under 4 MHz, a column the probe or USB owns, no block: no bus
+ *       // an HCLK under 4 MHz, a column the probe or USB owns, no I2C: no bus
  *   }
  *
  * I2cBus's arguments: the engine, the platform, how many requests may
@@ -741,16 +742,27 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * policy, and the per-bus timeout in kernel ticks - the one that answers
  * a parked tenure with i2c_timeout (util/bus_master.hpp), which must sit
  * above the longest tenure the program asks for (20 ms fits some 200 bytes
- * at 100 kHz, and 255 bytes there is 23 ms of wire). `clock` is the
+ * at 100 kHz, and the longest request, a write-then-read of 255 + 255 bytes,
+ * is 46 ms of wire there). `clock` is the
  * clock task's tag object (ch32x035/clock.hpp). With the engines named,
  * dma1_channel6_handler and dma1_channel7_handler call dma_isr() too.
  *
+ *   // In a handler of Sensor. The two buffers are static: they are lent until I2cDone.
+ *   static uint8_t reg = 0x00;
+ *   static uint8_t value[2];
  *   Bus::Request r{};
  *   r.addr = 0x48;
- *   r.tx = brio::lend<brio::Lease::reply>(reg); r.tx_len = 1;
+ *   r.tx = brio::lend<brio::Lease::reply>(&reg); r.tx_len = 1;
  *   r.rx = brio::lend<brio::Lease::reply>(value); r.rx_len = 2;   // write-then-read
  *   r.reply = brio::reply_to<Sensor, brio::I2cDone>();
  *   brio::post<I2c>(r);
+ *
+ *   // In Sensor's dispatch, the reply: value holds the two bytes only on i2c_ok.
+ *   brio::match(e, [](const brio::I2cDone& done) {
+ *       if (done.status != brio::i2c_ok) {
+ *           // a code of util/i2c_bus.hpp: what the wire did instead
+ *       }
+ *   });
  *
  *   BRIO_CH32_VECTOR(i2c1_ev_handler) {
  *       if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
@@ -1441,18 +1453,17 @@ private:
      * sent" (15.9.1), and the header's transfer is over. ADD10 is cleared
      * by a STAR1 read followed by a DATAR write (15.9.6) - this entry's
      * first access, and a store made AFTER the STOP request, never
-     * before it. Measured on the CH32X035F8U6, the CH32V006's client
-     * acknowledging 0x7A (docs/ch32x035/i2c.md): with the STOP alone ADD10
-     * stood on and the next tenure's START never came out (STAR2 0), its
-     * vector re-entering on ADD10 until the per-bus timeout; with the
-     * store behind the STOP the flag read 0, the peer took no byte and the
-     * next tenures were sound - as on the CH32V303 and the STM32F446. The
-     * stored byte stays in DATAR, and the next tenure's address replaces
-     * it at SB.
+     * before it. On the CH32V303 and the STM32F446 the STOP alone left ADD10
+     * standing and the next tenure's START never came out, and the store
+     * behind the STOP cleared the flag with no byte on the wire (measured,
+     * docs/ch32vx03/i2c.md). Not measured on this part: no suite reaches
+     * this branch (docs/ch32x035/i2c.md lists it as not bench-verified). The
+     * stored byte stays in DATAR, and the next tenure's address replaces it
+     * at SB.
      *
      * Out of line and cold, it costs a tenure's path nothing: the call is
      * made only from an address-phase entry that found no ADDR, below the
-     * switch (docs/ch32x035/i2c.md, the cost).
+     * switch.
      */
     [[gnu::noinline, gnu::cold]] static bool unserved(uint16_t s1) {
         if ((s1 & address_strays) == 0u) {

@@ -1221,7 +1221,7 @@ they differ each is named.
 counter the ruler, every number in HCLK cycles and the instrument's own
 cost included as the line carries it (a stopwatch is 28 cycles, a stamp
 pair in a vector 79 - the app's letter r). The SPI rows carry the
-transaction's copy of the 48-byte `Request` into the host, which is the bus
+transaction's copy of the 40-byte `Request` into the host, which is the bus
 contract's and not the engines', and which the letter does not print apart.
 Three runs of the letter printed the same figures.
 

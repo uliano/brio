@@ -572,8 +572,8 @@ whole, a long or looping one repays them. So the driver places what
 repays it - the polled loops, a call a phase, and the transmit engine's
 block restart - and leaves inline in the vector what does not: the
 USART's `isr()` and the I2C's event pump, which a program
-moves by placing the vector, the fastest of the three ways (no call at
-all). Measured on the CH32V006K8U6 at 48 MHz, a handler's body between
+moves by placing the vector with no call at all (the fastest of the three
+ways on the USART's measured row; no suite places the I2C's). Measured on the CH32V006K8U6 at 48 MHz, a handler's body between
 the meter's stamps (about 46 cycles of them inside) and the hardware
 prologue's entry and exit outside:
 

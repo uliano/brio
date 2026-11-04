@@ -24,12 +24,11 @@
  *  - `I2c<n>` is the resource: the register block, its gate and reset,
  *    the clock arithmetic, the flags and the sequences that clear them,
  *    the control bits as verbs. It decides nothing.
- *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the engine util/
- *    i2c_bus.hpp's I2cBus drives: the Request is the same struct on
- *    every stratum, verbatim - {addr, tx span, rx span, reply, speed},
- *    one bus tenure that is a write, a read, a write-then-read with a
- *    repeated START, or the empty probe - and the outcome vocabulary is
- *    i2c_bus.hpp's (a NACK on the address, a NACK on a byte, arbitration
+ *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the host util/
+ *    i2c_bus.hpp's I2cBus drives: the Request holds addr, tx and tx_len, rx
+ *    and rx_len, reply, speed and engine, one bus tenure that is a write, a
+ *    read, a write-then-read with a repeated START, or the empty probe. The
+ *    outcome vocabulary is i2c_bus.hpp's (a NACK on the address, a NACK on a byte, arbitration
  *    lost, a bus error), with one code of the engine's own beside it,
  *    i2c_dma_fault.
  *  - `I2cClient<n, pins>` is the target side: a polled surface and two
@@ -37,32 +36,50 @@
  *    which protocol is the application's.
  *
  * The smallest use, a register write-then-read through the arbiter
- * (docs/ch32vx03/i2c.md, "How to use it"):
+ * (docs/ch32vx03/i2c.md, its opening):
  *
- *     using Bus = brio::I2cHost<1>;                       // PB6/PB7, no engines
+ *     using Bus = brio::I2cHost<1>;                       // PB6 SCL, PB7 SDA, no engines
  *     using Arb = brio::I2cBus<Bus, P, 4, brio::BusPassThrough,
  *                              brio::ticks_from_ms<P>(20)>;
  *
- *     Bus::init(clock);                                   // PB1 must be 4..60 MHz
- *     post<Arb>(Bus::Request{.addr = 0x2C,
- *                            .tx = lend<Lease::reply>(out), .tx_len = 4,
- *                            .rx = lend<Lease::reply>(in),  .rx_len = 2,
- *                            .reply = reply_to<Probe, brio::I2cDone>(),
- *                            .speed = brio::I2cSpeed::fast_400k});
+ *     BRIO_CH32_VECTOR(i2c1_ev_handler) {
+ *         if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *     BRIO_CH32_VECTOR(i2c1_er_handler) {
+ *         if (Bus::error_isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
+ *     }
+ *
+ *     // In main(), after the clock task's init() and before the kernel runs:
+ *     if (!Bus::init(clock)) {                            // PB1 must be 4..60 MHz
+ *         // no timing at this PB1, or a column the part refuses: no bus
+ *     }
+ *
+ *     // In a handler of Probe. out and in are lent until I2cDone.
+ *     brio::post<Arb>(Bus::Request{.addr = 0x2C,
+ *                                  .tx = brio::lend<brio::Lease::reply>(out), .tx_len = 4,
+ *                                  .rx = brio::lend<brio::Lease::reply>(in),  .rx_len = 2,
+ *                                  .reply = brio::reply_to<Probe, brio::I2cDone>(),
+ *                                  .speed = brio::I2cSpeed::fast_400k});
+ *
+ *     // In Probe's dispatch, the reply: in holds the two bytes only on i2c_ok.
+ *     brio::match(e, [](const brio::I2cDone& done) {
+ *         if (done.status != brio::i2c_ok) {
+ *             // a code of util/i2c_bus.hpp: what the wire did instead
+ *         }
+ *     });
+ *
  * where `P` is the platform, `clock` the clock task's tag, `out` and `in`
- * the caller's byte arrays and `Probe` the active object the I2cDone
+ * the caller's static byte arrays and `Probe` the active object the I2cDone
  * goes to; `4` is the arbiter's pending_depth (how many requests wait
  * behind the one on the wire), `BusPassThrough` its policy and the last
  * argument its per-bus timeout in ticks (util/i2c_bus.hpp and
- * util/bus_master.hpp define all three); PB1 is the peripheral bus
- * whose clock, PCLK1, the block counts. `Arb` is listed in the
- * program's Tenuto (the kernel's scheduler, kernel/tenuto.hpp), and the instance's
- * two vectors (i2c1_ev_handler and i2c1_er_handler, the names the
- * startup code ch32vx03/src/glue/startup_ch32vx03.S gives them) bound by
- * the program with BRIO_CH32_VECTOR (pfic.hpp), each body calling isr() or
- * error_isr() and, when it answers true, posting
- * TransferDone{Bus::status()} to the arbiter - test_vx03_i2c's handlers
- * do so.
+ * util/bus_master.hpp define all three), which must sit above the longest
+ * request the program posts: a write-then-read of 255 + 255 bytes is 46 ms of
+ * wire at 100 kHz. PB1 is the peripheral bus whose clock, PCLK1, the
+ * peripheral counts. `Arb` is listed in the program's Tenuto (the kernel's
+ * scheduler, kernel/tenuto.hpp), and the bindings use the startup code's names
+ * for the instance's two vectors (ch32vx03/src/glue/startup_ch32vx03.S) with
+ * BRIO_CH32_VECTOR (pfic.hpp).
  *
  * Who calls what, and from where. init(), release(), unstick() and
  * recover() are setup and recovery verbs, main context: init() once in

@@ -14,12 +14,11 @@
  *  - `I2c<n>` is the resource: the register block, its gate and reset,
  *    the clock arithmetic, the flags and the sequences that clear them,
  *    the control bits as verbs. It decides nothing.
- *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the engine util/
- *    i2c_bus.hpp's I2cBus drives. Its Request has the same fields on every
- *    stratum - addr, tx and tx_len, rx and rx_len, reply, speed, engine -
- *    one bus tenure (one
- *    transaction from its START to its STOP) that is a write, a read, a
- *    write-then-read with a repeated START, or the empty probe - and the
+ *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the host util/
+ *    i2c_bus.hpp's I2cBus drives. Its Request holds addr, tx and tx_len, rx
+ *    and rx_len, reply, speed and engine: one bus tenure (one START to its
+ *    STOP, the bus held for one request) that is a write, a read, a
+ *    write-then-read with a repeated START, or the empty probe. The
  *    outcome vocabulary is i2c_bus.hpp's (a NACK, the receiver's refusal
  *    of a byte, on the address or on a byte; arbitration lost; a bus
  *    error).
@@ -58,15 +57,23 @@
  *     r.reply = brio::reply_to<Sensor, brio::I2cDone>();
  *     brio::post<I2c>(r);
  *
+ *     // In Sensor's dispatch, the reply: value holds the two bytes only on i2c_ok.
+ *     brio::match(e, [](const brio::I2cDone& done) {
+ *         if (done.status != brio::i2c_ok) {
+ *             // a code of util/i2c_bus.hpp: what the wire did instead
+ *         }
+ *     });
+ *
  * `I2c` is the arbiter (util/bus_master.hpp's BusMaster): an active
  * object of the program - a component with its own event queue, served
- * one event at a time by the kernel - that takes the clients' requests
- * one at a time in arrival order, calls the host's start() for each and
+ * one event at a time by the kernel - that takes the requests of the
+ * requesters (the active objects that post them) one at a time in arrival order, calls the host's start() for each and
  * replies to the sender with the outcome; `BusPassThrough` is its failure
  * policy (no retry) and the last argument its per-bus timeout, the one
- * answer to a client that holds the clock, which must sit above the longest
- * tenure the program asks for: 20 ms fits some 200 bytes at 100 kHz, and 255
- * bytes there is 23 ms of wire. `Sensor` is the program's active object that
+ * answer to a client (a device on the wire) that holds the clock, which must
+ * sit above the longest tenure the program asks for: 20 ms fits some 200 bytes
+ * at 100 kHz, and the longest request, a write-then-read of 255 + 255 bytes, is
+ * 46 ms of wire there. `Sensor` is the program's active object that
  * sent this request.
  *
  * Who calls what. init() runs in main, after the clock task (the timing
@@ -117,14 +124,14 @@
  * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
  * EV8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
  * acknowledge - and it is the order WCH's interrupt example uses, with no
- * stretch and no BTF entry of its own. No delivery on this part depends on
+ * BTF entry of its own. No delivery on this part depends on
  * it (docs/ch32v00x/i2c.md). The price is in the error path: the START
  * is requested before the last byte's acknowledge is known, so the phase
  * between the request and SB is its own (`restart`), and a NACK in it is
  * the byte's - i2c_nack_data. The repeated START is not withdrawn: the
- * controller generates it after the refused byte all the same (measured:
- * left alone, START clears and SB rises a few tens of cycles after the
- * error vector sees AF), and a CTLR1 store that clears START and sets STOP
+ * controller generates it after the refused byte all the same (measured
+ * raw: SB rises 834 cycles after AF at 100 kHz and 414 at 400 kHz), and a
+ * CTLR1 store that clears START and sets STOP
  * races that generation - won at 100 kHz, lost at 400 kHz, where it left
  * STOP standing over a master holding the bus and the next tenure stalled
  * (measured, docs/ch32v00x/i2c.md). So the refusal lets the Sr go out and
@@ -791,11 +798,10 @@ public:
             return false;
         }
         // BUSY clears a moment after our STOP is seen; a bus still busy
-        // after bus_free_us is someone else's. On this silicon a START
-        // into a busy bus does not wait for it to free: measured with a
-        // peer holding SDA low, the START is answered ARLO, and
-        // i2c_arb_lost is the reply - the wire's own answer, in its place,
-        // inside any per-bus timeout.
+        // after bus_free_us is someone else's. The START goes in anyway.
+        // Measured: into a line a peer holds low it is answered ARLO, and
+        // i2c_arb_lost is the reply, inside any per-bus timeout; into a
+        // tenure another controller is clocking it is held until the STOP.
         (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
         // One CTLR1 store: START, with POS and ACK down for the address
@@ -1207,10 +1213,11 @@ private:
      * where a 7-bit address raises ADDR, the controller waiting for the
      * second address byte (15.3) - which is a 7-bit address of 0x78 to
      * 0x7B: CTLR1 and OADDR1 carry no controller addressing mode, so the
-     * header can only be told by its pattern, as on the STM32F1's block
-     * the chapter follows - and measured so on the CH32V006, whose event
-     * vector without this branch re-entered on ADD10 until its guard cut
-     * the line (docs/ch32v00x/i2c.md). start() refuses those addresses
+     * header can only be told by its pattern, as on the STM32F1's peripheral
+     * the chapter follows. On this part no suite reaches this branch
+     * (docs/ch32v00x/i2c.md lists it as not bench-verified, and
+     * docs/ch32vx03/i2c.md has the measurement on the CH32V303's same
+     * machine). start() refuses those addresses
      * before the wire (i2c_address_in_range), so this branch is the
      * engine's own guarantee and not the contract: whatever stands in the
      * address phase, the vector ends the tenure instead of spinning on it.
@@ -1223,15 +1230,13 @@ private:
      * chapter says the same, and there the STOP alone - a STAR1 read and a
      * CTLR1 write - left ADD10 standing and the next tenure's START never
      * came out, while the store behind the STOP cleared it with no byte on
-     * the wire (measured, docs/ch32vx03/i2c.md). On the CH32V006 the STOP
-     * alone left ADD10 standing too, and the next tenure took four entries
-     * of the vector where one serves it; with the store, STAR1 read 0 and
-     * the peer took no byte (docs/ch32v00x/i2c.md). The stored byte stays
-     * in DATAR, and the next tenure's address replaces it at SB.
+     * the wire (measured, docs/ch32vx03/i2c.md). Not measured on this part.
+     * The stored byte stays in DATAR, and the next tenure's address replaces
+     * it at SB.
      *
      * Out of line and cold, it costs a tenure's path nothing: the call is
      * made only from an address-phase entry that found no ADDR, below the
-     * switch (docs/ch32v00x/i2c.md, the cost).
+     * switch.
      */
     [[gnu::noinline, gnu::cold]] static bool unserved(uint16_t s1) {
         if ((s1 & address_strays) == 0u) {
@@ -1399,8 +1404,9 @@ private:
         S::stop();
         out[pos_] = S::data();
         ++pos_;
-        // N arrives a byte time after N-1's read: waited for here, inside
-        // the vector, up to wait_until()'s 100 000 polls. The answer is
+        // N's RxNE follows N-1's read, N being in the shifter already, so a
+        // client holding SCL cannot hold it back. It is waited for here,
+        // inside the vector, up to wait_until()'s 100 000 polls. The answer is
         // discarded - if the bound runs out, DATAR is read regardless and
         // the tenure reports i2c_ok with whatever it held.
         (void)wait_until([] { return S::flag(i2c_rxne); });
