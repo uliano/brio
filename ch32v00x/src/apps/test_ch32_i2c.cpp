@@ -95,8 +95,8 @@
 //      clocks until it lets go, and the STOPF its hand-made STOP leaves
 //      cleared with no entry of the event vector
 //   p  THE DEAD CHANNEL, staged by a timer's compare request held on DMA
-//      channel 6 or 7 with no wire: a write over it ending i2c_dma_fault, a
-//      read over it never completing with its event vector unstormed, each
+//      channel 6 or 7 with no wire: a write and a read over it never
+//      completing with the event vector unstormed, each
 //      landing whole once the timer is reset; and the block's own request
 //      left by a stalled read, let go four ways - release(), its gate
 //      closed with no reset, leaving the next owner of channel 7 nothing
@@ -133,8 +133,9 @@
 //      polls timed on a timer; and a raw START into a tenure at 100, 50 and 20
 //      kHz, this block a bystander
 //   y  THE ENGINES' CHANNELS STARVED: a memory-to-memory block at very_high above
-//      them, up before the START and caught at the third byte, writes and reads:
-//      the status, the far end's count, the event vector's entries
+//      them, up before the START, caught at the third byte and on a read's second-
+//      last byte, writes and reads: the status, the far end's count, the next read's
+//      bytes, the event vector's entries
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
@@ -1213,7 +1214,7 @@ void tg_dma() {
     bench.verdict("a 16-byte write and a 16-byte read through the DMA engines complete i2c_ok, "
                   "byte-exact",
                   ws == i2c_ok && rs == i2c_ok && mism == 0u);
-    bench.verdict("the combined tenure, the two-byte read (LAST's NACK) and the one-byte read "
+    bench.verdict("the combined tenure, the two-byte read (POS's NACK) and the one-byte read "
                   "(its NACK and STOP from the ADDR entry) all complete on the engines",
                   cs == i2c_ok && r2 == i2c_ok && r1 == i2c_ok);
     bench.verdict("a 16-byte read at 400 kHz on the engines completes i2c_ok, the serve's next "
@@ -2769,24 +2770,40 @@ void tv_client_vectors() {
 // y - the engines' channels starved
 // ===========================================================================
 //
-// A write on the engines keeps the event vector up, and BTF is its level: a transmit
-// channel a load holds still lets the byte in the shifter end with DATAR empty, BTF up and
-// the count standing. The load is the worst this DMA offers: channel 1 at very_high,
-// above the engines' `high`, memory to memory, load_beats words from a cell to a cell. A
-// memory-to-memory channel has no request to wait for and gives the arbiter no gap
-// (RM 9.2.1), so the channels below it move nothing until its block is over. It ends by
-// itself, so even a vector re-entering for its whole length gives the suite back.
+// The event line is down for a DMA block in either direction, so a channel a load holds
+// still is seen by nobody: SCL stands at BTF until the channel moves the next byte, and the
+// tenure answers behind the load with every byte. The load is the worst this DMA offers:
+// channel 1 at very_high, above the engines' `high`, memory to memory, load_beats words from
+// a cell to a cell. A memory-to-memory channel has no request to wait for and gives the
+// arbiter no gap (RM 9.2.1), so the channels below it move nothing until its block is over.
+// It ends by itself, so even a vector re-entering for its whole length gives the suite back.
 //
-// A row is one tenure at link_speed, the load up before the START or, `late`, 300 us into
-// it: the address and two bytes, 27 clocks at 100 kHz. What it counts: the answer's
-// status, whether it came with the load up, the event vector's entries, the far end's
-// count or the bytes read compared. THE ENTRIES' BOUND: SB and ADDR, then the BTF that
-// ends the tenure on a fault or the plain end's after the load, four with one re-entry of
-// a line still high (the same bound letter p holds a dead channel to); a level re-entering
-// without end would take host_isr_budget, which the vector counts and stops.
+// A row is one tenure at link_speed, the load up before the START or, `late_us` non-zero,
+// that long into it, then a read of next_n on the same host, no reset between: what the far
+// end gave past the tenure's bytes shows there, and in its count. THE COUNT'S BOUND is exact:
+// the target counts a byte as it loads it and stops at the host's NACK, so a tenure of tx_n +
+// rx_n bytes and the next read count tx_n + rx_n + next_n, an integer with no instrument
+// between (a row with no load is its control). THE ENTRIES' BOUND: SB, ADDR and a write's
+// BTF, three; a write-then-read's address phases and the TxE that requests its repeated START
+// five; a read's opening two; one more for a re-entry of a line still high. A level
+// re-entering without end would take host_isr_budget, which the vector counts and stops.
+// THE WINDOW: LAST's NACK follows the channel, so a read of three or more is exposed while
+// its second-last byte is on the wire. From the START's request a read's byte k has arrived
+// at (k + 1) x 90 us, nine clocks a byte at 100 kHz, the address the first: byte 6 of 8 at
+// 630 us, byte 7 at 720; window_us lands in the middle, a request's few cycles early or late
+// against a window 90 us wide. What a load there does is printed and its reply judged.
+// THE LATE VECTOR: no load, the interrupts masked across a write of 8's end. Its block
+// completes as byte 7 goes into the shifter, some (1 + 6) x 90 = 630 us in, and its last
+// byte ends at (1 + 8) x 90 = 810 us: masked from 500 us for 500 us, the completion is
+// served behind the last byte, BTF up and true.
 namespace ly {
 using Load = DmaChannel<1>;
 constexpr uint16_t load_beats = 30000;
+constexpr uint8_t next_n = 4;
+constexpr uint16_t third_byte_us = 300;   // the address and two bytes, 27 clocks at 100 kHz
+constexpr uint16_t window_us = 675;
+constexpr uint16_t masked_from_us = 500;
+constexpr uint16_t masked_us = 500;
 alignas(4) volatile uint32_t load_cell[2];
 
 void load_start() {
@@ -2804,17 +2821,20 @@ struct Row {
     uint16_t ok = 0;         ///< i2c_ok with every byte
     uint16_t short_ok = 0;   ///< i2c_ok without them: the defect
     uint16_t fault = 0;      ///< i2c_dma_fault
+    uint16_t nack = 0;       ///< i2c_nack_data
     uint16_t other = 0;      ///< any other answer, or none
     uint16_t early = 0;      ///< answered with the load up
-    uint32_t entries = 0;    ///< the most event entries a row took
+    uint16_t more = 0;       ///< the far end gave more than the tenure asked
+    uint16_t next_bad = 0;   ///< the read behind it not i2c_ok, or its bytes not consecutive
+    uint32_t entries = 0;    ///< the most event entries a tenure took
     uint16_t stormed = 0;
     uint16_t took_min = 0xFFFFu;
     uint16_t took_max = 0;
 };
 
-/// One tenure of `n`, a write or a read, under the load (or none). The peer serves a
-/// short window; the plain host reads its report afterwards.
-void row(uint8_t n, bool write, bool late, bool load, Row& out) {
+/// One tenure of tx_n written and rx_n read under the load (or none), then the read behind
+/// it. The peer serves a short window; the plain host reads its report afterwards.
+void row(uint8_t tx_n, uint8_t rx_n, uint16_t late_us, bool load, Row& out, uint8_t nack_at = 0, bool mask = false) {
     const uint8_t seed = 0x40;
     twilink::Params a{};
     a.count = 0;
@@ -2822,31 +2842,39 @@ void row(uint8_t n, bool write, bool late, bool load, Row& out) {
     a.addr = twilink::dut_addr;
     a.seed = seed;
     a.pattern = twilink::pattern_counting;
+    a.nack_at = nack_at;
     (void)peer_act(Op::serve, a);
     dma_host_live = true;
     (void)DmaHost::init(clock);
-    for (uint8_t i = 0; i < n; ++i) {
+    for (uint8_t i = 0; i < tx_n; ++i) {
         tx_buf[i] = static_cast<uint8_t>(0x20u + i);
+    }
+    for (uint8_t i = 0; i < rx_n; ++i) {
         rx_buf[i] = 0xEE;
     }
     DmaHost::Request r{};
     r.addr = twilink::dut_addr;
-    r.tx = lend<Lease::reply>(write ? static_cast<const uint8_t*>(tx_buf) : static_cast<const uint8_t*>(nullptr));
-    r.tx_len = write ? n : uint8_t{0};
-    r.rx = lend<Lease::reply>(write ? static_cast<uint8_t*>(nullptr) : static_cast<uint8_t*>(rx_buf));
-    r.rx_len = write ? uint8_t{0} : n;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = tx_n;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.rx_len = rx_n;
     r.speed = link_speed;
     r.engine = I2cEngine::dma;
     host_done = false;
     host_isr_entries = 0;
     host_stormed = false;
-    if (load && !late) {
+    if (load && late_us == 0u) {
         load_start();
     }
     const bool at_once = DmaHost::start(r);
-    if (load && late) {
-        (void)delay_us(clock, 300);
+    if (load && late_us != 0u) {
+        (void)delay_us(clock, late_us);
         load_start();
+    }
+    if (mask) {
+        (void)delay_us(clock, masked_from_us);
+        InterruptGuard guard;
+        (void)delay_us(clock, masked_us);
     }
     while (load && Load::count() != 0u && !host_done) {
     }
@@ -2865,16 +2893,21 @@ void row(uint8_t n, bool write, bool late, bool load, Row& out) {
     if (!answered) {
         (void)DmaHost::recover();
     }
+    uint8_t next[next_n] = {};
+    const uint8_t next_st = dma_tenure(twilink::dut_addr, nullptr, 0, next, next_n, link_speed);
     DmaHost::release();
     host_ready();
     settle_ms(60);
     twilink::Report rep{};
     const uint16_t took = peer_report(rep) ? rep.count : uint16_t{0xFFFF};
-    bool whole = write ? took == n : true;
-    if (!write) {
-        for (uint8_t i = 0; i < n; ++i) {
-            whole = whole && rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, seed, i);
-        }
+    const uint16_t asked = static_cast<uint16_t>(tx_n + rx_n + next_n);
+    bool whole = took >= asked;
+    for (uint8_t i = 0; i < rx_n; ++i) {
+        whole = whole && rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, seed, i);
+    }
+    bool next_good = next_st == i2c_ok;
+    for (uint8_t i = 1; i < next_n; ++i) {
+        next_good = next_good && next[i] == static_cast<uint8_t>(next[i - 1u] + 1u);
     }
     out.rows = static_cast<uint16_t>(out.rows + 1u);
     if (st == i2c_ok) {
@@ -2885,20 +2918,32 @@ void row(uint8_t n, bool write, bool late, bool load, Row& out) {
         }
     } else if (st == i2c_dma_fault) {
         out.fault = static_cast<uint16_t>(out.fault + 1u);
+    } else if (st == i2c_nack_data) {
+        out.nack = static_cast<uint16_t>(out.nack + 1u);
     } else {
         out.other = static_cast<uint16_t>(out.other + 1u);
     }
     out.early = static_cast<uint16_t>(out.early + (early ? 1u : 0u));
+    out.more = static_cast<uint16_t>(out.more + (took != 0xFFFFu && took > asked ? 1u : 0u));
+    out.next_bad = static_cast<uint16_t>(out.next_bad + (next_good ? 0u : 1u));
     out.stormed = static_cast<uint16_t>(out.stormed + (stormed ? 1u : 0u));
     out.entries = entries > out.entries ? entries : out.entries;
     out.took_min = took < out.took_min ? took : out.took_min;
     out.took_max = took > out.took_max ? took : out.took_max;
 }
 
-void print_row(const char* what, uint8_t n, const Row& r) {
-    print(serial, "  ", what, " of ", n, ", ", r.rows, " rows: i2c_ok whole ", r.ok, ", i2c_ok short ", r.short_ok,
-          ", i2c_dma_fault ", r.fault, ", else ", r.other, "; with the load up ", r.early, "; event entries at most ",
-          r.entries, r.stormed != 0u ? ", STORMED" : "", "; the far end counted ", r.took_min, " to ", r.took_max, crlf);
+void print_row(const char* what, const Row& r) {
+    print(serial, "  ", what, ", ", r.rows, " rows: i2c_ok whole ", r.ok, ", i2c_ok short ", r.short_ok,
+          ", i2c_dma_fault ", r.fault, ", i2c_nack_data ", r.nack, ", else ", r.other, "; with the load up ", r.early,
+          "; event entries at most ", r.entries, r.stormed != 0u ? ", STORMED" : "", "; the far end counted ", r.took_min, " to ", r.took_max,
+          ", more than asked in ", r.more, ", the next read off in ", r.next_bad, crlf);
+}
+
+/// Every byte, answered i2c_ok behind the load, nothing more off the far end than asked, the
+/// read behind it clean, the event vector within `entries`.
+bool exact(const Row& r, uint16_t asked, uint32_t entries) {
+    return r.rows != 0u && r.ok == r.rows && r.early == 0u && r.stormed == 0u && r.next_bad == 0u &&
+           r.entries <= entries && r.took_min == asked && r.took_max == asked;
 }
 }  // namespace ly
 
@@ -2906,40 +2951,68 @@ void ty_starved() {
     if (!need_peer()) {
         return;
     }
-    ly::Row plain_w{}, plain_r{}, wr2{}, wr8{}, late_w{}, rd1{}, rd2{}, rd8{}, late_r{};
+    using ly::next_n;
+    using ly::third_byte_us;
+    ly::Row plain_w{}, plain_r{}, plain_r2{}, wr2{}, wr8{}, late_w{}, late_wn{}, late_wr{}, held_w{}, held_wn{}, rd1{}, rd2{}, rd8{}, late_r{},
+        window{};
     for (uint8_t k = 0; k < 8u; ++k) {
-        ly::row(8, true, false, false, plain_w);
-        ly::row(8, false, false, false, plain_r);
-        ly::row(2, true, false, true, wr2);
-        ly::row(8, true, false, true, wr8);
-        ly::row(8, true, true, true, late_w);
-        ly::row(1, false, false, true, rd1);
-        ly::row(2, false, false, true, rd2);
-        ly::row(8, false, false, true, rd8);
-        ly::row(8, false, true, true, late_r);
+        ly::row(8, 0, 0, false, plain_w);
+        ly::row(0, 8, 0, false, plain_r);
+        ly::row(0, 2, 0, false, plain_r2);
+        ly::row(2, 0, 0, true, wr2);
+        ly::row(8, 0, 0, true, wr8);
+        ly::row(8, 0, third_byte_us, true, late_w);
+        ly::row(8, 0, third_byte_us, true, late_wn, 8);
+        ly::row(8, 2, third_byte_us, true, late_wr);
+        ly::row(8, 0, 0, false, held_w, 0, true);
+        ly::row(8, 0, 0, false, held_wn, 8, true);
+        ly::row(0, 1, 0, true, rd1);
+        ly::row(0, 2, 0, true, rd2);
+        ly::row(0, 8, 0, true, rd8);
+        ly::row(0, 8, third_byte_us, true, late_r);
+        ly::row(0, 8, ly::window_us, true, window);
     }
-    ly::print_row("no load, a write", 8, plain_w);
-    ly::print_row("no load, a read", 8, plain_r);
-    ly::print_row("the load from the start, a write", 2, wr2);
-    ly::print_row("the load from the start, a write", 8, wr8);
-    ly::print_row("the load from the third byte, a write", 8, late_w);
-    ly::print_row("the load from the start, a read", 1, rd1);
-    ly::print_row("the load from the start, a read", 2, rd2);
-    ly::print_row("the load from the start, a read", 8, rd8);
-    ly::print_row("the load from the third byte, a read", 8, late_r);
-    const auto never_short = [](const ly::Row& r) {
-        return r.rows != 0u && r.short_ok == 0u && r.other == 0u && r.stormed == 0u && r.entries <= 4u;
-    };
-    bench.verdict("with no load every tenure is whole", plain_w.ok == plain_w.rows && plain_r.ok == plain_r.rows);
-    bench.verdict("A WRITE STARVED FROM ITS THIRD BYTE ends i2c_dma_fault with the load up, in every row, the far end "
-                  "short of the eight, the event vector at most 4 entries: the status says what the wire did",
-                  never_short(late_w) && late_w.fault == late_w.rows && late_w.early == late_w.rows &&
-                      late_w.took_max < 8u);
-    bench.verdict("A WRITE STARVED FROM ITS START: every byte, or a status that says otherwise, at most 4 entries",
-                  never_short(wr2) && never_short(wr8));
-    bench.verdict("A READ STARVED, from its start or its third byte: every byte, or a status that says otherwise, "
-                  "at most 4 entries",
-                  never_short(rd1) && never_short(rd2) && never_short(rd8) && never_short(late_r));
+    ly::print_row("no load, a write of 8", plain_w);
+    ly::print_row("no load, a read of 8", plain_r);
+    ly::print_row("no load, a read of 2", plain_r2);
+    ly::print_row("the load from the start, a write of 2", wr2);
+    ly::print_row("the load from the start, a write of 8", wr8);
+    ly::print_row("the load from the third byte, a write of 8", late_w);
+    ly::print_row("the same, its last byte refused", late_wn);
+    ly::print_row("the load from the third byte, a write of 8 then a read of 2", late_wr);
+    ly::print_row("no load, the interrupts masked across a write of 8's end", held_w);
+    ly::print_row("the same, its last byte refused", held_wn);
+    ly::print_row("the load from the start, a read of 1", rd1);
+    ly::print_row("the load from the start, a read of 2", rd2);
+    ly::print_row("the load from the start, a read of 8", rd8);
+    ly::print_row("the load from the third byte, a read of 8", late_r);
+    ly::print_row("the load from the seventh byte, a read of 8", window);
+    bench.verdict("with no load every tenure is whole, the far end counting what was asked",
+                  ly::exact(plain_w, 8u + next_n, 3u) && ly::exact(plain_r, 8u + next_n, 2u) &&
+                      ly::exact(plain_r2, 2u + next_n, 2u));
+    bench.verdict("A WRITE STARVED FROM ITS THIRD BYTE answers i2c_ok behind the load, every byte at the far end, no "
+                  "fault, the event vector at most 4 entries",
+                  ly::exact(late_w, 8u + next_n, 4u) && late_w.fault == 0u);
+    bench.verdict("THE SAME WRITE WITH ITS LAST BYTE REFUSED answers i2c_nack_data in every row, never i2c_ok",
+                  late_wn.rows != 0u && late_wn.ok == 0u && late_wn.short_ok == 0u && late_wn.nack == late_wn.rows);
+    bench.verdict("A WRITE STARVED FROM ITS START: the same", ly::exact(wr2, 2u + next_n, 4u) &&
+                                                                  ly::exact(wr8, 8u + next_n, 4u));
+    bench.verdict("A WRITE THEN A READ OF TWO, starved from the third byte: every byte both ways, at most 6 entries",
+                  ly::exact(late_wr, 8u + 2u + next_n, 6u));
+    bench.verdict("A WRITE'S COMPLETION SERVED BEHIND ITS LAST BYTE: every byte, i2c_ok; the last byte refused, "
+                  "i2c_nack_data in every row",
+                  ly::exact(held_w, 8u + next_n, 3u) && held_wn.rows != 0u && held_wn.nack == held_wn.rows);
+    bench.verdict("A READ OF TWO STARVED FROM ITS START: the reply exact and THE FAR END GIVES TWO, the next read "
+                  "taking the next byte",
+                  ly::exact(rd2, 2u + next_n, 3u));
+    bench.verdict("A READ OF ONE OR EIGHT STARVED, from its start or its third byte: exact, the far end giving what "
+                  "was asked",
+                  ly::exact(rd1, 1u + next_n, 3u) && ly::exact(rd8, 8u + next_n, 3u) &&
+                      ly::exact(late_r, 8u + next_n, 3u));
+    print(serial, "  a load starting on the second-last byte of a read of 8: one more byte off the far end in ",
+          window.more, " of ", window.rows, " rows", crlf);
+    bench.verdict("A READ OF EIGHT CAUGHT ON ITS SEVENTH BYTE: the reply exact, the far end at most one byte over",
+                  window.rows != 0u && window.ok == window.rows && window.took_max <= 8u + next_n + 2u);
     bench.verdict("and the command channel is back", command(Op::ping));
 }
 
@@ -4415,13 +4488,15 @@ void tp_dead_channel() {
     // 1. THE DEAD TRANSMIT CHANNEL. The hold proved first by a next owner
     // (which takes the one stray item and leaves the channel dead), then a
     // write of 32 over it: the channel moves the first byte at its enable
-    // and nothing more, BTF comes with the count standing, and the engine
-    // must answer i2c_dma_fault - never i2c_ok over a short write.
+    // and nothing more, BTF stands with the event line down, and nothing
+    // answers but a bound outside the host (here dma_tenure's spin, then
+    // recover()) - never i2c_ok over a short write.
     held::hold_compare_request<DeadTx>(dead_tx_ch, clock);
     const uint16_t held6 = held::next_owner_moves<6, I2cTxOwner>(clock);
     held::free_compare_request<DeadTx>();
     const uint8_t dws = dead_write();
     const uint32_t dw_entries = host_isr_entries;
+    const bool dw_storm = host_stormed;
     DmaHost::release();
     host_ready();
     const uint16_t dead_took = peer_took();
@@ -4435,17 +4510,17 @@ void tp_dead_channel() {
     const uint16_t live_took = peer_took();
     print(serial, "  next owner, nothing raised: ch6 ", control6, " ch7 ", control7, "; after TIM1's held request: ",
           held6, " (of 4)", crlf);
-    print(serial, "  the write of 32 over the dead channel 6: status ", dws, " (i2c_dma_fault ", i2c_dma_fault,
-          "), the peer took ", dead_took, ", event entries ", dw_entries, "; with the channel live: status ", lws,
-          ", the peer took ", live_took, crlf);
+    print(serial, "  the write of 32 over the dead channel 6: status ", dws, " (no answer ", no_answer,
+          "), the peer took ", dead_took, ", event entries ", dw_entries, dw_storm ? ", STORMED" : "",
+          "; with the channel live: status ", lws, ", the peer took ", live_took, crlf);
     bench.verdict("with nothing raised, the next owner of channel 6 or 7 moves nothing", control6 == 0u &&
                                                                                         control7 == 0u);
     bench.verdict("TIM1's compare request, raised and its gate closed with no reset, is HELD: the next owner "
                   "of channel 6 takes one stray item",
                   held6 == 1u);
-    bench.verdict("A WRITE OVER THE DEAD CHANNEL ends i2c_dma_fault (BTF with the transmit count standing), "
-                  "never i2c_ok over a short write - and the far end took fewer than the 32",
-                  dws == i2c_dma_fault && dead_took < 32u);
+    bench.verdict("A WRITE OVER THE DEAD CHANNEL never completes - no status claimed, never i2c_ok over a short "
+                  "write - its event vector not stormed (at most 4 entries), the far end short of the 32",
+                  dws == no_answer && dw_entries <= 4u && !dw_storm && dead_took < 32u);
     bench.verdict("with TIM1 reset the same write lands whole, i2c_ok", lws == i2c_ok && live_took == 32u);
 
     // 2. THE DEAD RECEIVE CHANNEL: TIM2's request held on channel 7 under

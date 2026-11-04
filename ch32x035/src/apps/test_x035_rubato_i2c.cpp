@@ -37,7 +37,7 @@
 //   I2cEngine::dma every half on the engines (a write's block completing on
 //   channel 6 and handing the half back to the event vector, which ends it
 //   at BTF or requests the repeated START on the last byte's TxE; a read on
-//   channel 7's completion, under LAST from two bytes), under
+//   channel 7's completion, under POS at two bytes and LAST from three), under
 //   I2cEngine::interrupt every byte on the event vector. Which a request
 //   names is this suite's choice by its shape (Host, below). start() waits,
 //   bounded, for the last STOP to leave CTLR1 (stop_drain_us 5 ms) and for
@@ -326,7 +326,7 @@ struct I2cTraits {
     static constexpr Shape shapes[] = {
         {0, 0, "interrupt, the probe: SB, ADDR, the STOP in the ADDR entry"},
         {0, 1, "interrupt: EVT6_1, the STOP at ADDR, the byte at RxNE"},
-        {0, 2, "dma: channel 7 under LAST, its completion the end"},
+        {0, 2, "dma: channel 7 under POS, its completion the end"},
         {0, 3, "dma"},
         {0, 8, "dma"},
         {0, 32, "dma"},
@@ -335,7 +335,7 @@ struct I2cTraits {
         {2, 8, "dma both halves"},
         {1, 0, "interrupt: the byte in the ADDR entry, BTF the end"},
         {2, 0, "interrupt: both bytes in the ADDR entry, BTF the end"},
-        {3, 0, "dma: channel 6, its completion, then BTF with its count at zero"},
+        {3, 0, "dma: channel 6, its completion, then BTF"},
         {8, 0, "dma"},
         {32, 0, "dma"},
     };

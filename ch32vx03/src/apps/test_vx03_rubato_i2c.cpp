@@ -35,9 +35,9 @@
 //   table, I2cTraits): under `interrupt` the first two written bytes taken
 //   in the entry that clears ADDR (EVT8_1: the data register and the
 //   shifter, TxE polled sixteen STAR1 reads), then one entry a byte; under
-//   `dma` a write half on the transmit engine, its end BTF with the
-//   channel's count at zero, and a read half on the receive engine, under
-//   CTLR2.LAST from two bytes, its NACK and STOP the event vector's at one;
+//   `dma` a write half on the transmit engine, its end BTF behind the
+//   block's completion, and a read half on the receive engine, under
+//   CTLR2.LAST from three bytes and POS at two, its NACK and STOP the event vector's at one;
 //   the repeated START requested on the last
 //   written byte's TxE; a refused last byte closed with a void write; the
 //   event vector off between tenures, the error vector on. start() runs in
@@ -290,8 +290,8 @@ struct I2cTraits {
     /// the data register and the shifter), then one entry a byte, the
     /// receive procedures by count; under `dma` every half on its engine at
     /// any length - a read of one with its NACK and STOP the event
-    /// vector's, a read of two or more under LAST, a write half's end BTF
-    /// with the channel's count at zero, or, a read half behind it, the TxE
+    /// vector's, a read of two under POS, of three or more under LAST, a write
+    /// half's end BTF behind the block's completion, or, a read half behind it, the TxE
     /// the transmit block's completion arms for the repeated START. Each
     /// engine takes the shortest halves and a long one. Ends on a plain
     /// write (the shared body's counted serve).
@@ -299,7 +299,7 @@ struct I2cTraits {
         {0, 0, "the probe: SB and ADDR, two event entries", I2cEngine::interrupt},
         {0, 1, "engines: ACK down before the address, STOP after ADDR's clear, the byte the channel's",
          I2cEngine::dma},
-        {0, 2, "engines: the receive channel under LAST", I2cEngine::dma},
+        {0, 2, "engines: the receive channel under POS", I2cEngine::dma},
         {0, 3, "pump: RxNE, then BTF twice", I2cEngine::interrupt},
         {0, 8, "engines", I2cEngine::dma},
         {0, 32, "pump", I2cEngine::interrupt},
@@ -308,7 +308,7 @@ struct I2cTraits {
          I2cEngine::interrupt},
         {2, 8, "engines both halves", I2cEngine::dma},
         {3, 2, "pump both halves", I2cEngine::interrupt},
-        {1, 0, "engines: the transmit channel, BTF with its count at zero", I2cEngine::dma},
+        {1, 0, "engines: the transmit channel's completion, then BTF", I2cEngine::dma},
         {2, 0, "pump: both bytes in the ADDR entry, BTF the end", I2cEngine::interrupt},
         {3, 0, "engines", I2cEngine::dma},
         {8, 0, "pump", I2cEngine::interrupt},

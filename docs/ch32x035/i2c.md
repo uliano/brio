@@ -109,6 +109,16 @@ What decides correctness even there:
   three bytes or more waits inside the event vector for its last byte, a bound of
   100 000 polls no correct program spends, then reports `i2c_ok` whatever DATAR
   holds ("Not covered yet").
+- Under `dma` a read of three bytes or more takes one byte more off the
+  target, the reply exact and `i2c_ok`, when a DMA block that outranks the
+  receive channel starts while the read's second-last byte is on the wire and
+  lasts past the last byte's acknowledge: a memory copy ranked above `high`
+  (staged, "A block above the host's channels", below), or at `high` on a
+  lower-numbered channel (the controller's rule, not staged). A read of one or
+  two bytes never does, and a write loses nothing. On a device whose reads
+  have an effect, a FIFO or a register cleared by reading, name `interrupt`
+  for that read or leave memory copies at their default `low`, below the
+  channels.
 - No brio program has a bus with a second controller. On one, a request into that
   controller's tenure under a clock of 50 or 20 kHz mostly waits for the per-bus timeout
   ("A request into another controller's tenure", below).
@@ -184,6 +194,17 @@ all) against a CH32V006K8U6 running its `twi_peer`.
   CTLR2.LAST makes the controller NACK the last byte a receive DMA block
   takes (15.9.2). The chapter has no DMA section: CTLR2's DMAEN and LAST
   are all it says, with no length named.
+- **LAST's NACK follows the channel, and a channel's store does not clear
+  BTF** (measured, letter y). The NACK lands on the byte after the one the
+  channel moved next to last, so a channel held off through the last byte's
+  acknowledge leaves that byte acknowledged, and the target clocks one more
+  out when the channel comes back. POS with ACK cleared behind ADDR's clear
+  (15.9.1's note on POS) sets a read of two's NACK before any byte moves, so a
+  read of two under DMAEN runs on them; a read of three or more has no such
+  bit. 15.3 clears BTF by a read of STAR1 followed by a store into DATAR: a
+  channel's store lets SCL go with no read before it, and once the channel has
+  fallen behind a byte's end BTF stays up across the block's remaining bytes,
+  until a START or a STOP.
 - **A START into a held SDA goes out, and the address loses.** With the peer
   holding SDA low, a START set by a peripheral that saw the line taken raised
   SB 40 us later at 100 kHz, MSL and BUSY up, and the address written then
@@ -228,18 +249,19 @@ data half is the written or the read part of a tenure:
 | START set while the last written byte shifts (15.9.1) | yes, for a write-then-read | it goes out as the byte ends, with no BTF entry of its own. No delivery here depends on it: the BTF order's one loss was measured with a target polled by the core that also serves the host (a target on its own vector or on another board kept the byte, [../ch32vx03/i2c.md](../ch32vx03/i2c.md)), which this part's one I2C cannot be, and the CH32V006's polled target took every byte in this order (measured) |
 | START cleared by the user code, a requested start withdrawn (15.9.1) | declined | behind a refused last byte the controller generates the repeated START all the same and the withdrawal races it (lost on the CH32V006 and the CH32V203); the refusal is closed from the Sr's SB with a void write (the address with the write bit and STOP behind it) instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.9.1) | yes | the chapter's procedures by count |
-| DMAEN with LAST (15.9.2), channels 6 and 7 (figure 9-1) | yes, when the request names `I2cEngine::dma` | every data half at any length (below the table) |
+| DMAEN, with LAST from three bytes and POS at two (15.9.1, 15.9.2), channels 6 and 7 (figure 9-1) | yes, when the request names `I2cEngine::dma` | every data half at any length (below the table) |
 | SWRST (15.9.1) | yes | `recover()`, and `start()` for a BUSY standing over an idle wire, the chapter's own case and its condition, "the pins of the I2C bus are released and the bus is idle": BUSY up through the whole of `bus_free_us` and no read finding a line low ("A request into another controller's tenure") |
 | PEC (15.8), 10-bit addresses as a host (15.3), ENARP | declined | no Request shape asks for them ("Not covered yet") |
 | the USB pads' pull modes (8.3.2.4) | declined | they do not act under the alternate function (measured) |
 
-Under DMAEN a read of two or more runs under LAST, and a read of one has
+Under DMAEN a read of three or more runs under LAST, a read of two under POS
+with ACK cleared behind ADDR's clear, and a read of one has
 its NACK set in the SB entry, before the address, and its STOP in the ADDR
 entry (EVT6_1, the channel moving the byte). Each DMA block's completion
-interrupt is taken. The transmit DMA block's hands its half back to the event
-vector with DMAEN down - never with ITBUFEN, since both answer the same TxE
+interrupt is taken, the event line being down for the block. The transmit DMA block's hands its half back to the event
+vector with DMAEN down and the event line up - never ITBUFEN with DMAEN, since both answer the same TxE
 - so BTF ends a plain write and the TxE of the last byte requests a
-write-then-read's repeated START.
+write-then-read's repeated START; with BTF already up the completion's entry takes that end itself.
 
 ## Types and verbs
 
@@ -296,8 +318,8 @@ write-then-read's repeated START.
 
   The engine parameters (engines: the DMA channels bound to the host) are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the host
-  stretches SCL behind a starved receive channel and loses nothing, 15.6; a
-  transmit channel starved past a byte's end ends the tenure). The program
+  stretches SCL behind a starved channel and loses nothing of the request,
+  15.6). The program
   calls no init of the DMA controller: the host's `init()` arms both engines,
   and arming opens the controller's gate. Which mechanism moves a request's
   data is the request's `engine` field (util/i2c_bus.hpp's `I2cEngine`):
@@ -308,9 +330,16 @@ write-then-read's repeated START.
   run time: the compiler refuses a second owner of a channel (in the verb that
   arms it, [../design/dma.md](../design/dma.md), "The check"), and the host runs
   one tenure at a time. An error puts away only the DMA block the tenure has in
-  flight. A channel's transfer error, or a transmit count standing at BTF, ends
-  the tenure `i2c_dma_fault`, this host's own status beyond the wire codes of
-  util/i2c_bus.hpp.
+  flight. A channel's transfer error ends the tenure `i2c_dma_fault`, this
+  host's own status beyond the wire codes of util/i2c_bus.hpp. The event line is
+  down through a DMA block in either direction. A write's completion that finds
+  BTF already up, the channel having fallen behind or this vector being late,
+  takes the end in its own entry, waiting with no other interrupt for about two
+  bytes at most (180 us at 100 kHz, 45 at 400; a client holding SCL through it,
+  the bound of `wait_until()`), `i2c_dma_fault` if that bound runs out. A channel
+  that never serves is answered by the per-bus timeout and its `recover()` alone,
+  in both directions; with `timeout_ticks` 0 nothing answers it: the reply never
+  comes, the arbiter takes no other request and the host holds SCL low.
 - `I2cClient<1, pins>`: `init(clock, addresses, I2cClientOptions)` - a
   polled client with `.interrupts = false` -, the polled surface
   (`addressed()`, `answer_address()` returning the direction,
@@ -375,7 +404,7 @@ PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
 channel, the stuck BUSY, the vectors' client, the cost, the bounds, the live
-tenure): `z` is 64 and 61 verdicts, green.
+tenure): `z` is 69 and 67 verdicts, green.
 
 - **The lot probe** answered present: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -399,7 +428,7 @@ tenure): `z` is 64 and 61 verdicts, green.
   asked) carried an 8-byte write and read byte-exact at about 690 kHz -
   measured, and no speed of the host's: 15.1 names two.
 - **The engines** (letter g, every request naming `I2cEngine::dma`): a
-  16-byte write and read, a write-then-read, a two-byte read under LAST,
+  16-byte write and read, a write-then-read, a two-byte read under POS,
   a one-byte read and a 16-byte read at 400 kHz byte-exact, the peer
   accounting all 59 bytes, no transfer fault; one completion interrupt a
   DMA block, the write's handing its half back to the event vector; a write
@@ -494,28 +523,31 @@ tenure): `z` is 64 and 61 verdicts, green.
   7 (figure 9-1) - is held: the channel takes one stray item at its next
   enable and serves nothing after it. (The software compare event, SWEVGR's
   CCxG, left it nothing: the match is the request.) A write
-  of 32 on the engines over the dead channel 6 ends `i2c_dma_fault` - BTF
-  with the transmit count standing, the far end holding one byte - where
-  a host trusting BTF alone would report `i2c_ok`; a read of 16 over
-  the dead channel 7 never completes, its event vector entered twice (SB,
-  ADDR) and never stormed - the event line is down for the DMA block - so
-  only a bound outside the host answers it: under the arbiter the per-bus
+  of 32 on the engines over the dead channel 6 and a read of 16 over
+  the dead channel 7 never complete, the far end holding one byte of the write, the event vector entered twice (SB,
+  ADDR) and never stormed - the event line is down for the DMA block - and no `i2c_ok` claimed, so
+  only a bound outside the host answers them: under the arbiter the per-bus
   timeout and its `recover()` (the letter's own wait stands in for it), and with
   no per-bus timeout nothing. Each completes intact once the timer is reset.
-- **A block above the host's channels** (letter y, twelve runs of eight rows a shape):
-  a memory-to-memory block of 30000 words on channel 1 at very_high, which leaves the
-  channels below it nothing until it ends, at 100 kHz. Caught at its third byte, a
-  write of eight ends `i2c_dma_fault` in every row with the block still running, the
-  far end holding four, the event vector entered three times (SB, ADDR, the BTF that
-  ends it): BTF with the count standing is answered once and does not re-enter, and
-  the vector cannot tell this channel from a dead one. Up before the START the block
-  costs a write nothing, no byte having gone to raise BTF: SCL stands and a write of
-  two or eight lands whole when it ends. Reads of one, two and eight under it, and a
-  read of eight caught at its third byte, are exact in every row with the event
-  vector at two entries, the answer behind the block. A read of two starved from its
-  start draws more off the target, which counted four, the reply exact. So a block
-  above `high` that can outlast a byte (90 us at 100 kHz, 22.5 at 400) can end a write;
-  a copy at its default `low` lies below it.
+- **A block above the host's channels** (letter y, image `-1`, fifteen runs of
+  eight rows a shape): a memory-to-memory block of 30000 words on channel 1 at
+  very_high, which leaves the channels below it nothing until it ends, at 100
+  kHz, a read of four on the same host behind each tenure. A write of two or
+  eight under it, and a write of eight caught at its third byte or followed by
+  a read of two, land whole behind the block, `i2c_ok` in every row, the far
+  end counting exactly what was asked: SCL stands at BTF with the event line
+  down. Caught at its third byte, or with the interrupts masked across its
+  end, a write's completion finds BTF up and takes the end in its own entry,
+  the event vector at two entries (SB, ADDR); its last byte refused is
+  `i2c_nack_data` in every row, never `i2c_ok`. Reads of one, two and eight
+  under it, and a read of eight caught at its third byte, are exact with the
+  event vector at two entries, the far end giving what was asked: a read of
+  two gave two, the next read starting on the third byte. A read of eight with
+  the block starting on its seventh byte is exact and takes one byte more off
+  the far end, 8 of 8 rows in every run, the next read starting
+  a byte on. So a block that outranks the channels costs a write or a read
+  only time, but for that window; a copy at its default `low` lies below them
+  (the controller's rule, not staged at `low`).
 - **The peripheral's own request does not outlive its gate** (letter p): a
   read stalled under DMAEN, RxNE and BTF standing, gave channel 7's next
   enable four items while the peripheral stayed live, and none once its
@@ -698,39 +730,38 @@ the same vector:
 
 | tenure | the pump from the flash: rest, entries, cycles an entry | from SRAM: rest, cycles an entry | the engines: rest, entries + DMA |
 |---|---|---|---|
-| write 1 | 1308, 3, 227 or 229 | 1073 to 1093, 148 or 150 | 1280 to 1288, 3 + 1 |
-| write 2 | 1310 or 1318, 3, 241 | - | 1242 or 1258, 3 + 1 |
-| write 16 | 1298 to 1318, 17, 211 or 214 | 1046 or 1048, 136 | 1270 to 1282, 3 + 1 |
-| write 255 | 1320 or 1336, 256, 201 | 1029 or 1031, 132 | 1260 to 1276, 3 + 1 |
-| read 1 | 1368 or 1388, 3, 246 | 1054 to 1158, 149 or 151 | 1360 or 1372, 2 + 1 |
-| read 2 | 1418 to 1430, 3, 257 | 1088 to 1186, 155 | 1342 or 1346, 2 + 1 |
-| read 16 | 1758 to 1766, 17, 243 or 244 | 1268 to 1339, 147 or 148 | 1294 or 1302, 2 + 1 |
-| read 255 | 1756 to 1812, 256, 233 | - | 1276 to 1288, 2 + 1 |
-| register read 1 + 1 | 2144, 5, 248 | - | 2004 to 2012, 5 + 2 |
-| register read 1 + 4 | 2518 to 2526, 7, 261 | 1881 to 1954, 157 or 158 | 2022 or 2034, 5 + 2 |
-| probe | 1038 or 1042, 2, 205 | 860, 138 | - |
+| write 1 | 1332, 3, 223 | 1053 to 1075, 148 to 154 | 1240 or 1244, 3 + 1 |
+| write 2 | 1314 or 1326, 3, 234 | - | 1234, 3 + 1 |
+| write 16 | 1310 or 1318, 17, 210 | 1045 to 1049, 140 to 142 | 1230 to 1238, 3 + 1 |
+| write 255 | 1324 or 1332, 256, 201 | 1041 or 1042, 132 or 133 | 1244 to 1268, 3 + 1 |
+| read 1 | 1380 or 1396, 3, 241 | 1086 to 1154, 153 or 155 | 1292 to 1352, 2 + 1 |
+| read 2 | 1434, 3, 249 | 1129 to 1139, 154 to 158 | 1310 to 1334, 2 + 1 |
+| read 16 | 1758, 17, 242 | 1297 to 1338, 148 | 1362 to 1398, 2 + 1 |
+| read 255 | 1760, 256, 233 | - | 1316 or 1336, 2 + 1 |
+| register read 1 + 1 | 2160 to 2172, 5, 247 | - | 1984 to 1996, 5 + 2 |
+| register read 1 + 4 | 2518 or 2522, 7, 259 or 260 | 1883 to 1935, 158 or 159 | 2018 to 2042, 5 + 2 |
+| probe | 1062, 2, 205 | 868 or 876, 138 or 140 | - |
 
 Each figure is the range over three runs of the letter.
 
-- **`start()` is 296 to 312 cycles** on the ticker's ruler for every
+- **`start()` is 300 to 316 cycles** on the ticker's ruler for every
   shape on the pump and the engines, the bounded waits' first looks
-  included; the engined read of one byte is 372 to 380 and the pumped read of 255 is 360 or 364 in letter `x`,
-  without a reason the letter prints.
+  included.
 - **The pump's entry is 201 cycles a byte from the flash between the stamps**
   over the 255-byte write, 271 with its trip, of a 1098-cycle byte at 400 kHz:
   a quarter of the core. The event body is a leaf, the tenure's fields one
   base address, and a byte's path runs from the flash behind two wait states
   at 48 MHz, this core's fetch (the DMA controller's own 6 cycles an item from
   SRAM against 11.6 from the flash, [dma.md](dma.md)). The longest entry over
-  every shape is 321 cycles, the suite's stamps and its switch among
+  every shape is 313 or 317 cycles, the suite's stamps and its switch among
   the hosts included, and the family's longest handler with every driver in
   the flash ([platform.md](platform.md) places it among the handlers); main
   context waits that long, as it does for any polled loop.
 - **The pump in SRAM, two ways, and only if the program wants the core**:
   the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
-  for a plain host, flattened, a leaf): 132 cycles an entry over
-  the 255-byte write and 147 or 148 over the 16-byte read, the longest
-  189, behind the suite's vector in the flash. A program that places the vector
+  for a plain host, flattened, a leaf): 132 or 133 cycles an entry over
+  the 255-byte write and 148 over the 16-byte read, the longest
+  187 or 189, behind the suite's vector in the flash. A program that places the vector
   (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
   the default host's inline body with it, one attribute where the program
   binds the vector, with no call between the two memories; `InRam` is for
@@ -739,9 +770,9 @@ Each figure is the range over three runs of the letter.
   move, since SCL stretches behind a late entry and the rate is the bus's:
   the placement buys core time, not the wire.
 - **The engines** carry a 255-byte write in three event entries and a
-  read in two, each with one DMA interrupt (its body 151 to 191 cycles
-  between the stamps), the write at 1004 to 1012 thousandths of its wire, the
-  core in the event vector 579 or 583 cycles of some 282 350. The
+  read in two, each with one DMA interrupt (its body 163 to 204 cycles
+  between the stamps), the write at 1004 thousandths of its wire, the
+  core in the event vector 583 to 591 cycles of some 282 350. The
   write's DMA entry, its DMA block's completion, is the price of carrying a
   write half before a read: the completion hands the half back to the
   event vector, which ends a plain write at BTF and requests a
@@ -752,7 +783,7 @@ Each figure is the range over three runs of the letter.
   series has been made): WCH's examples are polled - `I2C_CheckEvent` loops of two
   status loads and a compare around every step, the CPU the bus's for the
   whole tenure (282 000 cycles for a 255-byte write at 400 kHz, where this
-  pump spends some 52 000 of them in its vector and the engines some 730),
+  pump spends some 52 000 of them in its vector and the engines some 770),
   CCR
   rounded down, and the DMA example's channel 6 at VeryHigh and
   re-initialised whole - DMA_DeInit and DMA_Init - for every DMA block, where
@@ -763,16 +794,16 @@ Each figure is the range over three runs of the letter.
 The host chooses nothing: the program names the mechanism of each request.
 On a host with engines bound, either name delivers the same bytes, and the
 choice costs time or energy. At 400 kHz, read directly, the engines cost the
-core fewer cycles for a read from two bytes, a read of one being level (1249 against
-1247 to 1255), and for a write from 3 bytes (the letter has no write of three:
-write 2's 1229 and the pump's 271 cycles a byte give some 1500 against 1302 to
-1318); under that, name the interrupt. **For a write-then-read, the shortest
-register read stays cheaper under `interrupt`:** `dma` pays for two DMA blocks, so 1 + 1 is 1887 or 1891 cycles on
-the pump against 2137 to 2153. The register read at the top of this page, 1 +
-2, has no row of its own: the slope between 1 + 1 and 1 + 4, 244 cycles a byte, puts
-it at some 2133, about what the engines cost, and on this series `dma` costs the
+core fewer cycles for a read at every length, a read of two being level (1265 against
+1256 or 1264), and for a write from 3 bytes (the letter has no write of three:
+write 2's 1221 and the pump's 271 cycles a byte give some 1490 against 1322 to
+1342); under that, name the interrupt. **For a write-then-read, the shortest
+register read stays cheaper under `interrupt`:** `dma` pays for two DMA blocks, so 1 + 1 is 1895 cycles on
+the pump against 2178 or 2186. The register read at the top of this page, 1 +
+2, has no row of its own: the slope between 1 + 1 and 1 + 4, 241 cycles a byte, puts
+it at some 2136, under what the engines cost, and on this series `dma` costs the
 sleep (below), so name the interrupt there too. The same slope puts 1 + 3 at some
-2377 against the engines' 2137 to 2153, and from 1 + 4 (2621 against 2137 or 2153) the rows
+2377 against the engines' 2206 to 2222, and from 1 + 4 (2617 or 2621 against 2206 to 2222) the rows
 say it: from there name `dma`, if the core has other work to run. At 100 kHz the
 letter gives the estimate only.
 
@@ -787,8 +818,8 @@ does not grow with the length; `N`, the smallest length with E <= F + N x b:
 
 | at | write: b, F, E | N | read: b, F, E | N |
 |---|---|---|---|---|
-| 400 kHz | 270 or 271, 743 to 811, 1314 or 1318 | 2 or 3, by the run ((1318 - 743) / 271 = 2.1) | 303, 783 to 791, 1247 to 1255 | 2 ((1255 - 783) / 303 = 1.6) |
-| 100 kHz | 270 or 271, 755 to 771, 1354 | 3 ((1354 - 755) / 271 = 2.2) | 302 or 303, 783 to 815, 1179 | 2 ((1179 - 783) / 303 = 1.3) |
+| 400 kHz | 270 or 271, 743 or 755, 1330 or 1334 | 3 ((1334 - 743) / 271 = 2.2) | 303, 779, 1208 to 1216 | 2 ((1216 - 779) / 303 = 1.4) |
+| 100 kHz | 270, 771, 1334 to 1350 | 3 ((1350 - 771) / 270 = 2.1) | 303, 779, 1200 or 1204 | 2 ((1204 - 779) / 303 = 1.4) |
 
 The estimate counts a byte the same at every length, and a write's first
 two bytes cost the pump less: the entry that clears ADDR loads both, so a
@@ -797,13 +828,13 @@ second byte costs it no entry. So the short lengths are read directly, at
 
 | tenure | pump | engines |
 |---|---|---|
-| write 1 | 1193 | 1314 or 1318 |
-| write 2 | 1229 | 1306 or 1310 |
-| write 16 | 5079 or 5131 | 1302 |
-| read 1 | 1249 | 1247 to 1255 |
-| read 2 | 1281 | 1219 |
-| register read 1 + 1 | 1887 or 1891 | 2137 to 2153 |
-| register read 1 + 4 | 2621 | 2137 or 2153 |
+| write 1 | 1189 | 1330 or 1334 |
+| write 2 | 1221 | 1322 |
+| write 16 | 5075 or 5079 | 1338 or 1342 |
+| read 1 | 1241 | 1208 or 1216 |
+| read 2 | 1265 | 1256 or 1264 |
+| register read 1 + 1 | 1895 | 2178 or 2186 |
+| register read 1 + 4 | 2617 or 2621 | 2206 to 2222 |
 
 Against the wire: the pump spends 271 cycles of a 1098-cycle byte at 400
 kHz (a quarter of the core) and 270 of a byte of at least 4320 cycles at
@@ -849,14 +880,14 @@ describes them).
 STOP and for BUSY, then stores START last: a dispatch above the arbiter
 that lands in it delays the START, a gap between tenures, and every byte
 decision after it is the vectors'. Letter `x` counts it on 400 writes of
-16 bytes on the engines: `start()` takes 307 to 309 cycles with TIM2 silent
-in the default image and 303 or 304 in the twin, `start()` in the flash in both.
+16 bytes on the engines: `start()` takes 301 or 302 cycles with TIM2 silent
+in the default image and 300 or 301 in the twin, `start()` in the flash in both.
 That figure includes the suite's own code in front of the host's `start()`,
 23 instructions from the flash that copy the Request and set its `engine`, and it
 is taken on this suite's own ruler, which the letter does not compare with
 `test_x035_i2c`'s ("The host's cost" above).
-Under 97 us x 3000 the interrupt landed inside it 149 to 159 times in 400 in
-each of eleven runs of the default image, and 225 to 262 in each of eleven of the
+Under 97 us x 3000 the interrupt landed inside it 151 to 160 times in 400 in
+each of three runs of the default image, and 210 to 215 in each of three of the
 twin, against the 26 that ticks independent of the tenures would give. That
 excess is not explained: the letter counts the landings and does not time
 their phase. MSL stood at such a landing rarely, a preemption after the START
@@ -871,7 +902,7 @@ vector's from its first bit:
 **Every shape under `interrupt` and under `dma`, under every pressure as in
 the control.** Letter `o`, at 400 kHz against one serve counted to its last
 byte: the probe, reads of 1 (the interrupt) and of 2, 3, 8 and 32
-(channel 7 under LAST), write-then-reads of 1+1 (both halves the
+(channel 7 under POS at two, LAST above), write-then-reads of 1+1 (both halves the
 interrupt), 1+2 and 2+8 (both halves on the engines, the write half
 handed back by channel 6's completion for the repeated START), writes of
 1 and 2 (the interrupt, both bytes loaded in the ADDR entry) and of 3, 8
@@ -995,6 +1026,9 @@ handler pointer, in the flash in both images, and so is `start()`.
 
 Driver gaps, each with its reason:
 
+- The byte more a read of three bytes or more can take under `dma` (the top of this page): POS has no
+  equal past two bytes, and holding a read's tail to the event vector, the chapter's BTF
+  procedure, costs every such read two event entries; not chosen.
 - 10-bit addressing on the host side: the resource has the mode and the
   client matches such an address; the host's header-byte sequence (EVT9)
   has no user.
@@ -1020,6 +1054,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- A write's completion that finds BTF up with a client holding SCL past the bound of
+  `wait_until()` (`i2c_dma_fault`), and with its write-then-read's last written byte refused (the
+  repeated START's path from SB, as on time): letter y stages neither, a row with the
+  peer stretching or refusing that byte would measure them.
 - **The target's general call** (ENGC, GENCALL): armed and read back. No
   brio host sends a general call, so nothing here has exercised it on the
   wire; a controller that sends one would measure it.

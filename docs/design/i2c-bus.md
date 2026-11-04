@@ -109,8 +109,8 @@ value `bus_engine_status + 4`. Every such host answers it when a DMA channel
 reports a transfer error in the middle of a tenure, and three kinds of host when
 a channel's end disagrees with the wire:
 
-- on the CH32V00x, the CH32X035 and the CH32V203/V303, when BTF finds the
-  transmit channel's count standing;
+- on the CH32V00x, the CH32X035 and the CH32V203/V303, when a write's completion
+  finds BTF up and a client holds SCL past the bound on its last byte's end;
 - on the STM32G0, when the STOPF entry finds the receive channel's count
   standing over a byte nobody has;
 - on the DesignWare peripheral, when the STOP's entry finds the receive channel
@@ -121,7 +121,7 @@ The STM32F4's FMPI2C1 answers it for a transfer error alone: a byte in neither
 memory nor RXDR stays `i2c_ok` there, which only a program's own read of RXDR
 inside a tenure reaches.
 
-After a transfer error or at BTF the wire is still held, so the host ends the
+After a transfer error or that bound the wire is still held, so the host ends the
 tenure and releases the bus (a STOP, or on the DesignWare peripheral an abort,
 which sends one). At STOPF or STOP_DET the wire is already over, and it issues
 neither. `util/i2c_bus.hpp` does not declare the status: each stratum whose
@@ -326,10 +326,13 @@ Two cases cost more than that. A buffer no DMA master
 reaches: under `dma`, a half in the core-coupled memory of an STM32F4 part
 that has one should end in `i2c_dma_fault` where `interrupt` would succeed
 ([the STM32F4 DMA page](../stm32f4/dma.md); read from that page's
-measured transfer error, not staged on I2C). And a DMA load that starves the
-channel for longer than the per-bus timeout: the read holds SCL and that timeout
-answers ([the FMPI2C page](../stm32f4/fmpi2c.md), [the RP2350 I2C
-page](../rp2350/i2c.md)), where `interrupt` does not wait on the load.
+measured transfer error, not staged on I2C). And a DMA load that starves the channel for longer than the per-bus timeout: the
+tenure holds SCL and that timeout answers ([the FMPI2C page](../stm32f4/fmpi2c.md),
+[the RP2350 I2C page](../rp2350/i2c.md), in either direction on the CH32V00x, the
+CH32X035 and the CH32V203/V303), where `interrupt` does not wait on the load; with no
+per-bus timeout nothing answers. On those three a read of three bytes or more can
+also take one byte more off the target, its reply exact, when a block above its
+channel starts on the second-last byte ([the CH32V00x I2C page](../ch32v00x/i2c.md)).
 
 **A half the engines cannot carry completes on the interrupt**, under
 `dma` too, and is not refused. Here I2C parts from SPI, whose host refuses

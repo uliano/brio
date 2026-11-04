@@ -1158,8 +1158,8 @@ they differ each is named.
   register, the channel given to no one else - meets each transport
   without a storm. TIM3's channel 1 compare with CC1DE, matched once and
   its gate closed without a reset, moved one item of an I2C1 write on
-  channel 6 and stalled it (count 31 of 32, the target holding one byte),
-  the write answered `i2c_dma_fault`; a read over channel 7 held by
+  channel 6 and stalled it (count 31 of 32, the target holding one byte), the tenure answered by the caller's
+bound and `recover()`; a read over channel 7 held by
   USART2's transmit request entered the event vector for the START and
   the address alone, the tenure answered by the caller's bound and
   `recover()`; USART2's receive ring over channel 6 held by TIM3 gave the
