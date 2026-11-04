@@ -165,7 +165,7 @@ an engine on a part class whose manual was not read, one engine of two,
 and an engine whose element is not a byte. Bench: `test_stm32f4_fmpi2c`
 on the Nucleo-F446RE, the one board of this stratum whose part carries
 the peripheral, its PC6 and PC7 wired to the same chip's I2C1 on PB8 and PB9
-with a 2.2 kOhm pull-up on each line. Letters `m`, `q` and `r` make I2C1 a target,
+with a 2.2 kOhm pull-up on each line. Letters `m`, `q`, `r` and `u` make I2C1 a target,
 letter `f` runs it as a second host, and it stays silent in the others. The same wires carry the classic I2C's own
 suite ([i2c.md](i2c.md)) and `bench_stm32f4`'s letter `i`. A letter of a suite
 is one command key of the suite's console and the group of verdicts it runs;
@@ -622,9 +622,10 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l but `f` see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - letter `f` runs I2C1 as a
-second host beside it, and letters m, q and r make I2C1 the target. `test_stm32f4_fmpi2c` is 121 verdicts over fifteen
+second host beside it, and letters m, q, r and u make I2C1 the target. `test_stm32f4_fmpi2c` is 124 verdicts over sixteen
 letters in `z`, green in three runs of three on the image these figures are of,
-letters `m` and `f` in ten of ten more and `q` and `r` in fifteen of fifteen.
+letters `m` and `f` in ten of ten more, `q`, `r` and `u` in fifteen of fifteen, and
+letter `v`, by name only, in fifteen of fifteen.
 
 **The register file at reset is the chapter's**, and the one non-zero
 value is ISR = 0x0001: TXE stands out of reset, so a transmitter that
@@ -990,17 +991,19 @@ one of three things:
 - **EN low.** The DMA block is finished with its last byte in memory: a transfer is
   the load, the store and the count, in that order (9.3.3), and EN falls when the
   count reaches zero (9.3.14).
-- **EN high, a request standing.** The entry clears EN and waits for it to read low.
+- **EN high, a beat under way.** The entry clears EN and waits for it to read low.
   "The stream may take time to be disabled (ongoing transfer is completed first)", and
   then EN "is now 0 to confirm the stream interruption" (9.3.15); the bit "is actually
   written to 0 once all the current transfers are finished" (9.3.18 step 1). So the
   beat ends first, and at EN low the byte is in memory.
-- **EN high, no request.** An address not acknowledged has no byte to move. A byte the
-  stream was never asked for stands in RXDR with RXNE up, and the entry stores it
-  itself, at the place the stream's count gives.
+- **EN high, no beat under way.** An address not acknowledged has no byte to move. A
+  request the arbiter has not granted is not a transfer under way: EN falls with the
+  byte in RXDR and RXNE up, as it does for a byte the stream was never asked for. The
+  entry takes RXDMAEN down, then stores that byte itself at the place the stream's
+  count gives.
 
-The cost is that load on every read on a stream, and a stop only on a late stream or
-an address not acknowledged. One passage reads the other way for data in a FIFO: 9.3.13's
+The cost is that load on every read on a stream, and a stop with a read-modify-write
+of CR1 only on a late stream or an address not acknowledged. One passage reads the other way for data in a FIFO: 9.3.13's
 flush "continues transferring the remaining data ... (even though stream is effectively
 disabled)" and ends with TCIF. This stream is in direct mode, where a byte passes
 through the FIFO and is "immediately drained" (9.3.7), and the manual does not say
@@ -1037,23 +1040,61 @@ exact of 150.
 first, one stop in 48 above, the request that follows is not forgotten if RXDR is
 then read with RXDMAEN up: the next DMA block's start takes a beat with RXDMAEN clear and
 nothing on the wire, its count one down, 1500 of 1500. With RXDMAEN taken down ahead of
-that read, 0 of 1500. The manual does not describe this ([dma.md](dma.md) has it). This
-host's stop does not land there: only a clear within about a turn of the request's rise
-comes first, and at a STOPF entry the request rose with RXNE, more than a period and a
-half earlier, or is not up at all. The stage above, a few dozen cycles ahead of the stop,
-never reached it.
+that read, 0 of 1500. The manual does not describe this ([dma.md](dma.md) has it). A
+stream a load starves lands there on every late read of one (below), so the entry takes
+RXDMAEN down at EN low, ahead of that read.
 
-**No load tried has made a stream late by itself:**
+**A load makes a stream late by itself** (`test_stm32f4_fmpi2c` letter `u` on the self-link,
+letter `s` against the partner at 1 MHz, letter `v` for the last row). DMA1 has no
+memory-to-memory (9.3.7), so what loads this stream's controller is peripheral-paced
+streams: a timer's request at `very_high`, above the host's `high`, a word from the timer's
+counter on APB1 to one word of SRAM, on the streams of DMA1 the host does not hold (0, 1, 3,
+4, 6 and 7, RM0390 table 28), each every so many counts of the timers' 90 MHz. The copies are
+the four above, started again by the core between its looks at the reply. Late is EN up at the
+vector's first load. The figures are over fifteen runs on 180 MHz with 45 MHz on APB1, and
+"beats" is what the paced streams moved in 100 us with the copies idle, the bus's own figure
+being 2250 (45 MHz, two clocks an access):
 
-| load, on 180 MHz | reads, every one exact | stream running at STOPF |
-|---|---|---|
-| 400 kHz, TIM2_UP on DMA1 stream 1 at `very_high`, a beat every 5 to 80 of TIM2's 90 MHz clock | 9000 | 0 |
-| 400 kHz, four memory-to-memory copies at `very_high` on DMA2 | 4500 | 0 |
-| 1 MHz, nothing else | 4500 | 0 |
-| 1 MHz, the same stream, a beat every 10 | 4500 | 0 |
-| 1 MHz, the four copies | 4500 | 0 |
+| load | beats | late at 400 kHz, reads of 1, 2, 8 (2250 each) | late at 100 kHz (750 each) | late at 1 MHz (1500 each) |
+|---|---|---|---|---|
+| nothing else | 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| six streams every 32 | 1690 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| four every 17 | 2118 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| three every 8 | 2111 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| four copies | 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| two every 16, and the copies | 1127 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| six every 48, and the copies | 1127 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| two every 8, and the copies | 1501 | 0, 0, 122 | 0, 0, 63 | 640, 1043, 1205 |
+| three every 16, and the copies | 1689 | 12, 341, 1957 | 1, 289, 613 | 1500, 1489, 1496 |
+| three every 12, and the copies | 2000 | 1896, 1496, 2190 | 273, 655, 731 | not run |
 
-How near that is, polled with the vector's line off and the request let up as RXNE rises:
+No load of paced streams alone made one late, and neither did the copies alone: it takes
+both, the copies in the memory and the paced streams above the host's on the controller.
+Every one of the 130500 reads was exact in the vector, ahead of anything a reply could read,
+`i2c_ok`, with no byte left in RXDR and the stream still once the reply stood. **So the late path is
+reached by itself, 87 reads of eight in a hundred at 400 kHz under letter `u`'s heaviest row and all
+but 15 of its 4500 reads at 1 MHz, and the entry holds.**
+The entry's body, between two reads of the cycle counter, is at most 257 cycles on an unloaded
+read and 2350 on a late one, the stop's wait for its beat: 13 us in the vector. The last row is by
+name only and has no 1 MHz column, for what such a load can do to the core: at 1 MHz it stood the
+core still once ([dma.md](dma.md), "Not covered yet").
+
+**A load past what the bus takes starves the stream outright** (letter `v`, fifteen runs). Three
+streams every 5, 2249 beats in 100 us: the stream is not served at all while the load stands. A
+read of one finds its byte in RXDR with EN up, 1500 of 1500. EN then falls with no beat, and the
+entry's own read puts the byte in memory, exact, and the read of eight started behind it, with
+the load off, is exact, 1500 of 1500. **The control, in a separate image with RXDMAEN left up
+over that read of RXDR: the read of one exact, and the read of eight behind it wrong 300 of
+300 over three runs, every one `i2c_ok`, its count at zero and its first cell not a byte on the
+wire.** The cost of the order is a read-modify-write of CR1 on the late path alone: in the release
+listing an on-time read takes the branch on EN low before it. A read of two or more
+under this load does not end while it stands: its first byte is not taken, so SCL stays low (23.4.7),
+and only the requester's timeout answers; after `recover()` the next read is whole, 45 of 45.
+
+Under three streams every 16 and the copies, a first byte refused on a write of four: `i2c_nack_data`,
+and the next write of eight whole, 1500 of 1500 (letter `u`).
+
+How near an unloaded stream is to that, polled with the vector's line off and the request let up as RXNE rises:
 the time to EN low is the stream's lag, and the time to STOPF the window it has. Longest
 lag and shortest window over eighteen runs at each speed, in core cycles:
 
@@ -1068,11 +1109,12 @@ at 1 MHz with nothing else reads 111 and 443 over the fifteen runs of the letter
 and 270 and 407 inside set `t`, and nothing here says what lengthened it. Under the
 copies the wait for RXNE also starts copies between its reads, so by the code it can date
 RXNE late and shorten that window. Every poll is good to a turn of three register loads,
-which no line times. The chapter states no bound on a stream's lag, and no tenure above
-had a running stream at STOPF, so the entry keeps its read of SxCR.
+which no line times. The chapter states no bound on a stream's lag, and the table above
+has tenures that had a running stream at STOPF, so the entry's read of SxCR is what a read
+on a stream rests on.
 
-**Against a partner board** (set `t`, letters `n`, `o`, `p` and `s`, 38 verdicts,
-green in three runs of three). The bullets just below are letter `n`'s 12 verdicts;
+**Against a partner board** (set `t`, letters `n`, `o`, `p` and `s`, 39 verdicts,
+green in three runs of three, letter `s` in fifteen of fifteen). The bullets just below are letter `n`'s 12 verdicts;
 letters `o` and `p` have their own paragraphs after them, and `s` is in "The receive
 stream at STOPF" above. The
 partner is an STM32G0 on the same two nodes, running `twi_peer`, the suites'
@@ -1354,10 +1396,6 @@ Implemented, not bench-verified (each with what would measure it):
 - ST's HAL on this peripheral beside this host: read, not run (the inventory); a
   scratch program on the HAL alone with the same crt, clock and target would take its
   column, as [i2c.md](i2c.md) has for the classic I2C.
-- The receive stream late by itself at a STOPF entry: letters `r` and `s` reach that
-  path only by a stage, the request held down and let up in the entry or taken away
-  for the whole byte, no load tried having made a stream late ("The receive stream at STOPF").
-  More DMA1 streams at `very_high` or a burst on the same memory port would measure it.
 - `fmpi2c_dma_fault`: no letter stages a transfer error on this host. A buffer at a
   reserved address under `dma` would; the path is read from the code and from
   [dma.md](dma.md)'s measured transfer error.

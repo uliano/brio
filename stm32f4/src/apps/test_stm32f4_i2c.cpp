@@ -100,6 +100,17 @@
 //      (a DynamicClock over the three): the status, the controller 2 ms
 //      on (START, STOP, MSL), the next tenure on the same host; each count
 //      also acknowledged whole, the control
+//   o  (the Nucleo-F446RE) THE RECEIVE STREAM UNDER A REAL LOAD: paced streams at
+//      very_high on DMA1, four copies on DMA2 and the core, reads of 1, 2 and 8 at 100
+//      and 400 kHz, the event vector's entries and the wire against the completion
+//   p  (the Nucleo-F446RE) THE STREAM'S COMPLETION HELD OFF: SCL counted behind the last
+//      byte while the vector waits, what stands then, the next read; the stray beat's
+//      stage on this block
+//   q  (the Nucleo-F446RE) start()'S TWO BOUNDS against the wall: the STOP's drain and
+//      the wait for BUSY, staged with the far pads, with the ticker, without it and
+//      with the DWT's counter stopped
+//   r  (the Nucleo-F446RE, by name only) A LOAD THAT TAKES ALL OF APB1: nothing answering
+//      ahead of a starved stream, the read and the next one exact when the load comes off
 //
 // build: boards = f429zi,f469ni,f446re
 // build: monitor_speed = 115200
@@ -110,6 +121,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/exti.hpp"
 #if defined(STM32F446xx)
 #include "stm32f4/fmpi2c.hpp"
@@ -117,6 +129,7 @@
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/post.hpp"
@@ -417,7 +430,7 @@ bool is_peer_id(const uint8_t* bytes) { return peer_known && same(bytes, peer.id
 struct Regs {
     static constexpr uint8_t size = 64;
     static inline uint8_t file[size];
-    static inline uint8_t ptr = 0;
+    static inline volatile uint8_t ptr = 0;
     static inline bool indexed = false;   ///< the next written byte is the index
     static inline volatile uint8_t took = 0;
     static inline volatile uint8_t refuse_at = 0;
@@ -2047,6 +2060,719 @@ void tn_partner() {
 }
 #endif
 
+#if defined(STM32F446xx)
+// =============================================================================
+// o - THE RECEIVE STREAM UNDER A REAL LOAD (the Nucleo-F446RE's self-link)
+// =============================================================================
+//
+// What ends a read under dma on this host is the stream's own completion: the event
+// vector does nothing in that phase, and for a run of two or more the STOP is requested
+// in the completion's entry (RM0390 24.3.8). So the load asks a question other than the
+// FMPI2C's: not whether the host answers ahead of its stream, which it cannot, but what
+// a late stream does to the wire and to the time of the answer. DMA1 has no
+// memory-to-memory (RM0390 9.3.6): its load is peripheral-paced streams at very_high,
+// above the host's `high`, a word from a timer's counter on APB1 to one word of SRAM, the
+// count circular over 65535 beats so SxNDTR says how many moved. Four copies on DMA2 add
+// the memory's other master and the core's turns of keep_busy() a third.
+
+alignas(4) uint32_t paced_cell[6];
+
+/// One stream, on its timer's update (`cc` 0) or compare `cc`, every `period` of the
+/// timer's 90 MHz clock, two core cycles a count.
+template <uint8_t stream, uint8_t channel, uint8_t tim, uint8_t slot, uint8_t cc>
+struct Paced {
+    using T = Tim<tim>;
+    using St = DmaStream<1, stream>;
+    static void on(uint32_t period) {
+        if (!T::bus_clock()) {
+            T::init();
+        }
+        (void)T::configure(TimConfig{.prescaler = 0, .period = period - 1u});
+        DmaTransfer t{};
+        t.peripheral = &T::regs().CNT;
+        t.memory = &paced_cell[slot];
+        t.count = 65535;
+        t.config.channel = channel;
+        t.config.direction = DmaDirection::peripheral_to_memory;
+        t.config.circular = true;
+        t.config.memory_increment = false;
+        t.config.peripheral_width = DmaWidth::word;
+        t.config.memory_width = DmaWidth::word;
+        t.config.priority = DmaPriority::very_high;
+        (void)St::load(t);
+        if constexpr (cc == 0u) {
+            T::interrupts(T::update_dma, true);
+        } else {
+            (&T::regs().CCR1)[cc - 1u] = period / 2u;
+            T::regs().DIER = T::regs().DIER | (TIM_DIER_CC1DE << (cc - 1u));
+        }
+        T::enable(true);
+    }
+    static void stop() { St::stop(); }
+    /// After every stream on this timer has stopped: a gate closed over a raised request
+    /// holds it (docs/stm32f4/dma.md, "A released requester"), and a stream at very_high
+    /// left on that cell takes every arbitration there is.
+    static void gate() {
+        if (T::bus_clock()) {
+            T::release();
+        }
+    }
+    static uint16_t count() { return St::count(); }
+};
+
+// RM0390 table 28: every stream of DMA1 but this host's 6 and 0.
+using Paced1 = Paced<1, 3, 2, 0, 0>;   // TIM2_UP
+using Paced2 = Paced<2, 5, 3, 1, 0>;   // TIM3_UP
+using Paced3 = Paced<3, 2, 4, 2, 2>;   // TIM4_CH2
+using Paced4 = Paced<4, 1, 7, 3, 0>;   // TIM7_UP
+using Paced5 = Paced<5, 3, 2, 4, 1>;   // TIM2_CH1, the second stream on TIM2
+using Paced6 = Paced<7, 2, 4, 5, 3>;   // TIM4_CH3, the second stream on TIM4
+
+void paced_on(uint8_t streams, uint32_t period) {
+    if (streams > 0u) { Paced1::on(period); }
+    if (streams > 1u) { Paced2::on(period); }
+    if (streams > 2u) { Paced3::on(period); }
+    if (streams > 3u) { Paced4::on(period); }
+    if (streams > 4u) { Paced5::on(period); }
+    if (streams > 5u) { Paced6::on(period); }
+}
+
+void paced_off(uint8_t streams) {
+    if (streams > 5u) { Paced6::stop(); }
+    if (streams > 4u) { Paced5::stop(); }
+    if (streams > 3u) { Paced4::stop(); }
+    if (streams > 2u) { Paced3::stop(); }
+    if (streams > 1u) { Paced2::stop(); }
+    if (streams > 0u) { Paced1::stop(); }
+    Paced1::gate();
+    Paced2::gate();
+    Paced3::gate();
+    Paced4::gate();
+    Paced5::gate();
+    Paced6::gate();
+}
+
+/// The beats the load moved in 18000 core cycles, 100 us at 180 MHz, all its streams
+/// together. APB1 at 45 MHz takes an access in two of its clocks, 2250 in that span.
+uint32_t paced_beats(uint8_t streams) {
+    uint16_t a[6] = {Paced1::count(), Paced2::count(), Paced3::count(),
+                     Paced4::count(), Paced5::count(), Paced6::count()};
+    const uint32_t t0 = CycleCounter::now();
+    while (CycleCounter::now() - t0 < 18'000u) {
+    }
+    const uint16_t b[6] = {Paced1::count(), Paced2::count(), Paced3::count(),
+                           Paced4::count(), Paced5::count(), Paced6::count()};
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < streams; ++i) {
+        sum += static_cast<uint16_t>(a[i] - b[i]);
+    }
+    return sum;
+}
+
+alignas(16) uint32_t copy_src[4][256];
+alignas(16) uint32_t copy_dst[4][256];
+using CopyA = DmaCopyEngine<2, 0>;
+using CopyB = DmaCopyEngine<2, 4>;
+using CopyC = DmaCopyEngine<2, 5>;
+using CopyD = DmaCopyEngine<2, 7>;
+
+template <typename E>
+void keep_busy(uint8_t i) {
+    if (!E::busy()) {
+        (void)E::copy(copy_dst[i], copy_src[i], 256u);
+    }
+}
+
+void copies_on() {
+    Dma<2>::init();
+    CopyA::arm(DmaPriority::very_high);
+    CopyB::arm(DmaPriority::very_high);
+    CopyC::arm(DmaPriority::very_high);
+    CopyD::arm(DmaPriority::very_high);
+}
+
+void copies_turn() {
+    keep_busy<CopyA>(0);
+    keep_busy<CopyB>(1);
+    keep_busy<CopyC>(2);
+    keep_busy<CopyD>(3);
+}
+
+void copies_off() {
+    (void)CopyA::abandon();
+    (void)CopyB::abandon();
+    (void)CopyC::abandon();
+    (void)CopyD::abandon();
+}
+
+/// Letter o: the entries of the event vector and when the stream's completion found
+/// the wire, read by the suite's own vectors around the host's bodies.
+struct ReadWatch {
+    volatile bool on = false;
+    volatile uint32_t ev_entries = 0;     ///< the event vector, whatever it found
+    volatile uint32_t btf_entries = 0;    ///< BTF standing under the read's stream
+    volatile uint32_t tc_after_wire = 0;  ///< a read of one's wire already over at the completion
+    volatile uint32_t ev_cycles = 0;
+};
+ReadWatch read_watch;
+
+struct ReadRow {
+    uint32_t reads = 0;
+    uint32_t exact = 0;
+    uint32_t late = 0;      ///< BTF up at an entry under the stream: a byte waited for it
+    uint32_t after = 0;     ///< the wire over ahead of the completion: a read of one's
+    uint32_t entries = 0;   ///< the event vector's entries, all told
+    uint32_t cycles = 0;    ///< and their cycles
+    uint32_t slow = 0;
+    uint32_t lost = 0;
+    uint32_t moved = 0;
+};
+
+void read_row_print(const char* name, const ReadRow* by) {
+    print(serial, "    ", name, " reads of 1, 2, 8: ", by[0].reads, " each; exact ", by[0].exact, ", ",
+          by[1].exact, ", ", by[2].exact, "; BTF under the stream ", by[0].late, ", ", by[1].late, ", ",
+          by[2].late, "; wire over at the completion ", by[0].after, ", ", by[1].after, ", ", by[2].after,
+          "; event entries ", by[0].entries, ", ", by[1].entries, ", ", by[2].entries, " (",
+          by[2].cycles, " cycles at 8); stretched ", by[0].slow + by[1].slow + by[2].slow,
+          "; unanswered ", by[0].lost + by[1].lost + by[2].lost, "; moved after ",
+          by[0].moved + by[1].moved + by[2].moved, crlf);
+}
+
+/// One read under `dma`, the target's pointer set from here (the target is this chip's).
+/// The wait's first bound is twice the wire and three ticks, its last fifty times that: a
+/// stream starved past it is answered here as an arbiter's timeout would be, recover().
+template <typename Spin>
+void watched_read(uint8_t n, I2cSpeed speed, Spin spin, ReadRow& row) {
+    static uint8_t in[32];
+    const uint8_t from = 0x10;
+    Regs::ptr = from;
+    for (uint8_t i = 0; i < n; ++i) {
+        in[i] = static_cast<uint8_t>(~Regs::file[from + i]);
+    }
+    DmaHost::Request r{};
+    r.addr = peer.addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = n;
+    r.speed = speed;
+    r.engine = I2cEngine::dma;
+    read_watch.ev_entries = 0;
+    read_watch.btf_entries = 0;
+    read_watch.tc_after_wire = 0;
+    read_watch.ev_cycles = 0;
+    read_watch.on = true;
+    xfer_done = false;
+    (void)DmaHost::start(r);
+    const uint32_t bound = 2u * 9u * (n + 2u) * 1000u / i2c_speed_hz(speed) + 3u;
+    const uint32_t t0 = Ticker::ticks();
+    bool slow = false;
+    while (!xfer_done && Ticker::ticks() - t0 < 50u * bound) {
+        spin();
+        slow = slow || Ticker::ticks() - t0 >= bound;
+    }
+    read_watch.on = false;
+    bool exact = xfer_done && DmaHost::status() == i2c_ok;
+    for (uint8_t i = 0; i < n && exact; ++i) {
+        exact = in[i] == Regs::file[from + i];
+    }
+    if (!xfer_done) {
+        (void)DmaHost::recover();
+        row.lost = row.lost + 1u;
+    }
+    row.reads = row.reads + 1u;
+    row.exact = row.exact + (exact ? 1u : 0u);
+    row.late = row.late + (read_watch.btf_entries != 0u ? 1u : 0u);
+    row.after = row.after + read_watch.tc_after_wire;
+    row.entries = row.entries + read_watch.ev_entries;
+    row.cycles = row.cycles + read_watch.ev_cycles;
+    row.slow = row.slow + (slow ? 1u : 0u);
+    const uint16_t c0 = RxStreamRegs::count();
+    for (uint32_t i = 100u; i != 0u; --i) {
+        __NOP();
+    }
+    row.moved = row.moved + ((RxStreamRegs::enabled() || RxStreamRegs::count() != c0) ? 1u : 0u);
+}
+
+template <typename Spin>
+void read_row(const char* name, I2cSpeed speed, uint16_t reads, Spin spin, ReadRow& total) {
+    ReadRow by[3] = {};
+    const uint8_t lengths[3] = {1, 2, 8};
+    for (uint16_t k = 0; k < reads; ++k) {
+        for (uint8_t i = 0; i < 3u; ++i) {
+            watched_read(lengths[i], speed, spin, by[i]);
+        }
+        if (by[0].lost + by[1].lost + by[2].lost >= 3u) {
+            break;
+        }
+    }
+    read_row_print(name, by);
+    for (uint8_t i = 0; i < 3u; ++i) {
+        total.reads += by[i].reads;
+        total.exact += by[i].exact;
+        total.late += by[i].late;
+        total.after += by[i].after;
+        total.entries += by[i].entries;
+        total.slow += by[i].slow;
+        total.lost += by[i].lost;
+        total.moved += by[i].moved;
+    }
+}
+
+struct LoadCell {
+    uint8_t streams;
+    uint32_t period;
+    bool copies;
+};
+
+void to_load() {
+    (void)CycleCounter::init();
+    Dma<1>::init();
+    bus_ao_live = false;
+    const bool up = DmaHost::init(clock);
+    dma_host_live = true;
+    auto idle = [] {};
+    ReadRow total{};
+    for (const LoadCell& c : {LoadCell{0, 16, false}, LoadCell{6, 32, false}, LoadCell{4, 17, false},
+                              LoadCell{3, 8, false}, LoadCell{0, 16, true}, LoadCell{2, 16, true},
+                              LoadCell{2, 8, true}, LoadCell{6, 48, true}, LoadCell{3, 16, true}}) {
+        if (c.copies) {
+            copies_on();
+        }
+        paced_on(c.streams, c.period);
+        print(serial, "  ", c.streams, " stream(s) at very_high every ", c.period, " of 90 MHz",
+              c.copies ? " and four copies" : "", ": ", paced_beats(c.streams), " beats in 100 us", crlf);
+        if (c.copies) {
+            read_row("400 kHz", I2cSpeed::fast_400k, 150, copies_turn, total);
+            read_row("100 kHz", I2cSpeed::standard_100k, 50, copies_turn, total);
+        } else {
+            read_row("400 kHz", I2cSpeed::fast_400k, 150, idle, total);
+            read_row("100 kHz", I2cSpeed::standard_100k, 50, idle, total);
+        }
+        paced_off(c.streams);
+        if (c.copies) {
+            copies_off();
+        }
+    }
+    print(serial, "  below all of APB1: ", total.reads, " reads, ", total.exact, " exact, the wire over "
+          "ahead of a read of one's completion ", total.after, ", BTF up at an event entry ", total.late,
+          ", stretched past the bound ", total.slow, ", unanswered ", total.lost, ", moved after the reply ",
+          total.moved, crlf);
+    bench.verdict("UNDER EVERY LOAD BELOW ALL OF APB1: every read that was answered is exact and i2c_ok, "
+                  "the stream still after the reply",
+                  up && total.reads != 0u && total.exact + total.lost == total.reads && total.moved == 0u);
+    bench.verdict("... and a load makes a read of one's stream finish behind its wire", total.after != 0u);
+
+    dma_host_live = false;
+    DmaHost::release();
+    (void)host_ready();
+}
+
+// =============================================================================
+// r - A LOAD THAT TAKES ALL OF APB1 (by name only)
+// =============================================================================
+//
+// 2250 beats in 100 us, the bus's own figure. Not in `z`: such a load can leave the core's
+// own access to the bus waiting until a reset, and a suite that stands still judges
+// nothing after it. A run that never reaches its verdicts is that, and is counted.
+
+void tr_all_of_apb1() {
+    (void)CycleCounter::init();
+    Dma<1>::init();
+    bus_ao_live = false;
+    const bool up = DmaHost::init(clock);
+    dma_host_live = true;
+    ReadRow total{};
+    copies_on();
+    paced_on(3, 12);
+    print(serial, "  3 stream(s) at very_high every 12 of 90 MHz and four copies: ", paced_beats(3),
+          " beats in 100 us", crlf);
+    read_row("400 kHz", I2cSpeed::fast_400k, 150, copies_turn, total);
+    read_row("100 kHz", I2cSpeed::standard_100k, 50, copies_turn, total);
+    paced_off(3);
+    copies_off();
+    bench.verdict("THREE STREAMS AND THE COPIES AT THE BUS'S FIGURE: every read answered exact and "
+                  "i2c_ok, the stream still after the reply",
+                  up && total.reads != 0u && total.exact + total.lost == total.reads && total.moved == 0u);
+
+    // A read of one has its STOP programmed at ADDR's clear, so the wire ends with the
+    // byte in DR and the stream not served; the answer waits for the load to come off.
+    uint16_t rows = 0;
+    uint16_t wire_first = 0;
+    uint16_t answered_early = 0;
+    uint16_t right = 0;
+    uint16_t next_right = 0;
+    for (uint16_t k = 0; k < 100u; ++k) {
+        static uint8_t one;
+        static uint8_t next[8];
+        Regs::ptr = 0x10;
+        one = static_cast<uint8_t>(~Regs::file[0x10]);
+        paced_on(3, 5);
+        DmaHost::Request r{};
+        r.addr = peer.addr;
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(&one));
+        r.rx_len = 1;
+        r.speed = I2cSpeed::fast_400k;
+        r.engine = I2cEngine::dma;
+        xfer_done = false;
+        (void)DmaHost::start(r);
+        const uint32_t t0 = Ticker::ticks();
+        // The tenure's nineteen clocks, 48 us at 400 kHz: the wire's end is two ticks away.
+        while (Ticker::ticks() - t0 < 2u) {
+        }
+        wire_first = static_cast<uint16_t>(wire_first + (!S::host() && S::flag(I2cFlag::rx_not_empty) ? 1u : 0u));
+        answered_early = static_cast<uint16_t>(answered_early + (xfer_done ? 1u : 0u));
+        paced_off(3);
+        while (!xfer_done && Ticker::ticks() - t0 < 10u) {
+        }
+        rows = static_cast<uint16_t>(rows + 1u);
+        right = static_cast<uint16_t>(right + (xfer_done && DmaHost::status() == i2c_ok &&
+                                                       one == Regs::file[0x10] ? 1u : 0u));
+        Regs::ptr = 0x20;
+        bool same_next = tenure<DmaHost>(peer.addr, nullptr, 0, next, 8, I2cSpeed::fast_400k, I2cEngine::dma) == i2c_ok;
+        for (uint8_t i = 0; i < 8u && same_next; ++i) {
+            same_next = next[i] == Regs::file[0x20 + i];
+        }
+        next_right = static_cast<uint16_t>(next_right + (same_next ? 1u : 0u));
+    }
+    print(serial, "  all of APB1, a read of one, ", rows, " rows: the wire over with the byte in DR in ",
+          wire_first, ", an answer ahead of the stream in ", answered_early, "; exact once the load came off ",
+          right, ", the read of eight behind it ", next_right, crlf);
+    // 100 rows a run. wire_first says the load reached the case.
+    bench.verdict("A STREAM STARVED BY ALL OF APB1: the wire ends, nothing answers ahead of the stream, the "
+                  "read and the next one exact when the load comes off",
+                  rows == 100u && wire_first == 100u && answered_early == 0u && right == 100u &&
+                      next_right == 100u);
+    dma_host_live = false;
+    DmaHost::release();
+    (void)host_ready();
+}
+
+// =============================================================================
+// p - THE STREAM'S COMPLETION HELD OFF
+// =============================================================================
+//
+// A read of two or more under dma: the STOP is requested in the stream's completion
+// entry (RM0390 24.3.8), and the chapter does not say what the wire does between the
+// last byte in memory and that entry. The stage: the stream's vector line off, a poll
+// that dates the count's zero, a hold of `hold` core cycles counting SCL's rising edges,
+// the line back on, and the wire followed for forty bits at 100 kHz. Then what stands
+// in the peripheral, and the next read. No clock of a further byte is nine rising
+// edges; the one allowed is the STOP's own.
+
+struct HoldRow {
+    uint32_t rows = 0;
+    uint32_t exact = 0;
+    uint32_t extra_edges = 0;   ///< rising edges of SCL after the stream's last byte, most
+    uint32_t rxne = 0;          ///< RxNE up once the wire is over
+    uint32_t next_exact = 0;    ///< the read of eight behind it
+};
+
+void held_read(uint8_t n, I2cSpeed speed, uint32_t hold, HoldRow& row) {
+    static uint8_t in[32];
+    Regs::ptr = 0x10;
+    for (uint8_t i = 0; i < n; ++i) {
+        in[i] = static_cast<uint8_t>(~Regs::file[0x10 + i]);
+    }
+    DmaHost::Request r{};
+    r.addr = peer.addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = n;
+    r.speed = speed;
+    r.engine = I2cEngine::dma;
+    xfer_done = false;
+    NVIC_DisableIRQ(RxStreamRegs::irq());
+    (void)DmaHost::start(r);
+    const uint32_t t0 = Ticker::ticks();
+    while (RxStreamRegs::count() == 0u && Ticker::ticks() - t0 < 50u) {
+    }
+    while (RxStreamRegs::count() != 0u && Ticker::ticks() - t0 < 50u) {
+    }
+    uint32_t edges = 0;
+    bool last = SclPad::read();
+    const uint32_t c0 = CycleCounter::now();
+    while (CycleCounter::now() - c0 < hold) {
+        const bool now = SclPad::read();
+        edges += (now && !last) ? 1u : 0u;
+        last = now;
+    }
+    NVIC_EnableIRQ(RxStreamRegs::irq());
+    const uint32_t c1 = CycleCounter::now();
+    while (CycleCounter::now() - c1 < 40u * 1800u) {   // forty bits at 100 kHz, to the wire's end
+        const bool now = SclPad::read();
+        edges += (now && !last) ? 1u : 0u;
+        last = now;
+    }
+    bool exact = xfer_done && DmaHost::status() == i2c_ok;
+    for (uint8_t i = 0; i < n && exact; ++i) {
+        exact = in[i] == Regs::file[0x10 + i];
+    }
+    const bool rxne = S::flag(I2cFlag::rx_not_empty);
+    row.rows = row.rows + 1u;
+    row.exact = row.exact + (exact ? 1u : 0u);
+    row.extra_edges = edges > row.extra_edges ? edges : row.extra_edges;
+    row.rxne = row.rxne + (rxne ? 1u : 0u);
+    static uint8_t next[8];
+    Regs::ptr = 0x20;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        next[i] = static_cast<uint8_t>(~Regs::file[0x20 + i]);
+    }
+    bool same_next = tenure<DmaHost>(peer.addr, nullptr, 0, next, 8, speed, I2cEngine::dma) == i2c_ok;
+    for (uint8_t i = 0; i < 8u && same_next; ++i) {
+        same_next = next[i] == Regs::file[0x20 + i];
+    }
+    row.next_exact = row.next_exact + (same_next ? 1u : 0u);
+}
+
+/// THE STRAY BEAT'S STAGE ON THIS BLOCK, by hand: a read of one, DMAEN taken down behind
+/// the ADDR entry so RxNE stands with no request, then DMAEN up and EN's clear in the next
+/// store, so the clear lands ahead of the stream's beat. DR is then read with DMAEN up
+/// (`enable_first` false) or down. True when the next block's count moved by itself.
+bool stray_row(bool enable_first, bool& left) {
+    static uint8_t in;
+    static uint8_t scratch[2];
+    DmaHost::Request r{};
+    r.addr = peer.addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(&in));
+    r.rx_len = 1;
+    r.speed = I2cSpeed::fast_400k;
+    r.engine = I2cEngine::dma;
+    xfer_done = false;
+    Nvic::disable(RxStreamRegs::irq());
+    (void)DmaHost::start(r);
+    const uint32_t t0 = Ticker::ticks();
+    while ((S::regs().CR2 & I2C_CR2_DMAEN) == 0u && Ticker::ticks() - t0 < 5u) {
+    }
+    S::dma(false, false);
+    while (!S::flag(I2cFlag::rx_not_empty) && Ticker::ticks() - t0 < 5u) {
+    }
+    {
+        InterruptGuard guard;
+        const uint32_t request = S::regs().CR2 | I2C_CR2_DMAEN;
+        const uint32_t cleared = RxStreamRegs::regs().CR & ~DMA_SxCR_EN;
+        S::regs().CR2 = request;
+        RxStreamRegs::regs().CR = cleared;
+        for (uint32_t i = 200'000u; i != 0u && RxStreamRegs::enabled(); --i) {   // abort()'s bound
+        }
+        left = S::flag(I2cFlag::rx_not_empty);
+        if (enable_first) {
+            S::dma(false, false);
+        }
+        (void)S::data();
+    }
+    S::dma(false, false);
+    RxEngine::stop();
+    (void)RxEngine::start(std::span<uint8_t>(scratch, 2u));
+    for (uint32_t i = 100u; i != 0u; --i) {
+        __NOP();
+    }
+    const bool moved = RxStreamRegs::count() != 2u;
+    RxEngine::stop();
+    RxEngine::service();
+    Nvic::enable(RxStreamRegs::irq());
+    spin_ms(1);
+    (void)DmaHost::recover();
+    return moved;
+}
+
+void tp_held() {
+    (void)CycleCounter::init();
+    Dma<1>::init();
+    bus_ao_live = false;
+    const bool up = DmaHost::init(clock);
+    dma_host_live = true;
+    HoldRow all{};
+    for (const I2cSpeed v : {I2cSpeed::fast_400k, I2cSpeed::standard_100k}) {
+        const uint32_t bit = v == I2cSpeed::fast_400k ? 456u : 1800u;
+        for (const uint8_t n : {uint8_t{2}, uint8_t{8}}) {
+            // In quarters of a bit, up to forty bits: past the next byte's nine clocks
+            // and past a STOP's bit, so any byte the peripheral would clock is seen.
+            for (const uint32_t quarters : {uint32_t{0}, uint32_t{2}, uint32_t{4}, uint32_t{8},
+                                            uint32_t{36}, uint32_t{160}}) {
+                HoldRow row{};
+                for (uint8_t k = 0; k < 10u; ++k) {
+                    held_read(n, v, quarters * bit / 4u, row);
+                }
+                print(serial, "  ", v == I2cSpeed::fast_400k ? "400" : "100", " kHz, read of ", n,
+                      ", held ", quarters, "/4 of a bit: ", row.exact, " of ", row.rows,
+                      " exact, SCL's rising edges behind the last byte at most ", row.extra_edges,
+                      ", RxNE up ", row.rxne, ", the next read of 8 exact ", row.next_exact, crlf);
+                all.rows += row.rows;
+                all.exact += row.exact;
+                all.rxne += row.rxne;
+                all.next_exact += row.next_exact;
+                all.extra_edges = row.extra_edges > all.extra_edges ? row.extra_edges : all.extra_edges;
+            }
+        }
+    }
+    bench.verdict("A COMPLETION HELD OFF stretches the wire and clocks no byte: the one rising edge "
+                  "behind the last byte is the STOP's, RxNE down at the end, the read and the next "
+                  "one exact",
+                  up && all.rows == 240u && all.exact == all.rows && all.extra_edges <= 1u &&
+                      all.rxne == 0u && all.next_exact == all.rows);
+
+    // ---- the silicon's stray beat, and that no path of the host's reads DR over a stream ----
+    uint16_t left_up = 0;
+    uint16_t strays_up = 0;
+    uint16_t left_down = 0;
+    uint16_t strays_down = 0;
+    for (uint8_t k = 0; k < 100u; ++k) {
+        bool left = false;
+        const bool moved = stray_row(false, left);
+        left_up = static_cast<uint16_t>(left_up + (left ? 1u : 0u));
+        strays_up = static_cast<uint16_t>(strays_up + (left && moved ? 1u : 0u));
+        const bool moved_down = stray_row(true, left);
+        left_down = static_cast<uint16_t>(left_down + (left ? 1u : 0u));
+        strays_down = static_cast<uint16_t>(strays_down + (left && moved_down ? 1u : 0u));
+    }
+    print(serial, "  a clear ahead of the request, staged by hand: DR read with DMAEN up, the byte left in ",
+          left_up, " of 100, a stray beat at the next start in ", strays_up,
+          "; DMAEN down first, left in ", left_down, ", a stray in ", strays_down, crlf);
+    bench.verdict("the stray beat's stage: DMAEN down ahead of DR's read, none at the next start",
+                  strays_down == 0u);
+    const uint8_t after = tenure<DmaHost>(peer.addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k,
+                                          I2cEngine::dma);
+    bench.verdict("... and the host carries the next tenure", after == i2c_ok);
+    dma_host_live = false;
+    DmaHost::release();
+    (void)host_ready();
+}
+
+// =============================================================================
+// q - start()'s TWO BOUNDS, in microseconds
+// =============================================================================
+//
+// start() waits for the last tenure's STOP to leave the wire and then for BUSY. Each
+// wait is staged with the far pads of the self-link, PC6 and PC7, driven low from here.
+// The wall of start() is read on the counter the case leaves running.
+
+using FarScl = Pin<'C', 6>;
+using FarSda = Pin<'C', 7>;
+
+enum class BoundCase : uint8_t { ticker, no_ticker, no_counter };
+
+constexpr const char* bound_name(BoundCase c) {
+    return c == BoundCase::ticker      ? "the ticker running"
+           : c == BoundCase::no_ticker ? "SysTick stopped"
+                                       : "the DWT's counter stopped";
+}
+
+/// One start(): the case's counter stopped around it, its wall in core cycles.
+uint32_t timed_start(BoundCase c, const Host::Request& r, bool& answer) {
+    if (c == BoundCase::no_ticker) {
+        SysTick->CTRL = SysTick->CTRL & ~SysTick_CTRL_ENABLE_Msk;
+    }
+    if (c == BoundCase::no_counter) {
+        DWT->CTRL = DWT->CTRL & ~DWT_CTRL_CYCCNTENA_Msk;
+        const uint32_t t0 = Ticker::cycles();
+        answer = Host::start(r);
+        const uint32_t wall = Ticker::cycles() - t0;
+        DWT->CTRL = DWT->CTRL | DWT_CTRL_CYCCNTENA_Msk;
+        return wall;
+    }
+    const uint32_t t0 = CycleCounter::now();
+    answer = Host::start(r);
+    const uint32_t wall = CycleCounter::now() - t0;
+    if (c == BoundCase::no_ticker) {
+        SysTick->CTRL = SysTick->CTRL | SysTick_CTRL_ENABLE_Msk;
+    }
+    return wall;
+}
+
+/// The far pads back to the target, and the bus as a letter expects it.
+void far_pads_back() {
+    (void)Regs::up(clock);
+    (void)host_ready();
+}
+
+struct BoundRow {
+    uint32_t wall_min = 0xFFFF'FFFFu;
+    uint32_t wall_max = 0;
+    uint8_t staged = 0;   ///< the row reached the wait it is about
+    uint8_t rows = 0;
+};
+
+void bound_note(BoundRow& row, uint32_t wall, bool staged) {
+    row.rows = static_cast<uint8_t>(row.rows + 1u);
+    row.staged = static_cast<uint8_t>(row.staged + (staged ? 1u : 0u));
+    row.wall_min = wall < row.wall_min ? wall : row.wall_min;
+    row.wall_max = wall > row.wall_max ? wall : row.wall_max;
+}
+
+/// THE STOP'S DRAIN: a probe's STOP is requested at its completion, SCL is pulled low
+/// from the far pad behind it, so STOP stands; start() waits and parks.
+void stop_bound(BoundCase c, BoundRow& row) {
+    (void)host_ready();
+    const uint8_t st = tenure<Host>(peer.addr, nullptr, 0, nullptr, 0);
+    FarScl::output(false, {.open_drain = true, .speed = PinSpeed::very_high});
+    const bool standing = st == i2c_ok && S::stopping();
+    Host::Request r{};
+    r.addr = peer.addr;
+    bool answer = true;
+    const uint32_t wall = timed_start(c, r, answer);
+    const bool parked_here = !answer && !S::starting();
+    FarScl::release();
+    far_pads_back();
+    bound_note(row, wall, standing && parked_here);
+}
+
+/// THE BUS'S: SDA pulled low from the far pad with nothing standing in CR1, BUSY up;
+/// start() waits, then sets START, which waits behind BUSY until the far pad lets go.
+void busy_bound(BoundCase c, BoundRow& row) {
+    (void)host_ready();
+    FarSda::output(false, {.open_drain = true, .speed = PinSpeed::very_high});
+    (void)delay_us(clock, 20);
+    const bool busy = S::busy() && !S::stopping();
+    Host::Request r{};
+    r.addr = peer.addr;
+    xfer_done = false;
+    bool answer = true;
+    const uint32_t wall = timed_start(c, r, answer);
+    const bool behind = !answer && S::starting();
+    FarSda::release();
+    far_pads_back();
+    bound_note(row, wall, busy && behind);
+}
+
+void tq_bounds() {
+    (void)CycleCounter::init();
+    const uint32_t cycles_per_us = clock_hz(clock) / 1'000'000u;
+    while (!Serial::tx_idle()) {
+    }
+    for (const BoundCase c : {BoundCase::ticker, BoundCase::no_ticker, BoundCase::no_counter}) {
+        BoundRow stop_row{};
+        BoundRow busy_row{};
+        for (uint8_t k = 0; k < 10u; ++k) {
+            stop_bound(c, stop_row);
+            busy_bound(c, busy_row);
+        }
+        print(serial, "  ", bound_name(c), ": the 5000 us drain ", stop_row.wall_min / cycles_per_us, " to ",
+              stop_row.wall_max / cycles_per_us, " us, reached ", stop_row.staged, " of ", stop_row.rows,
+              "; the 100 us bus wait ", busy_row.wall_min / cycles_per_us, " to ",
+              busy_row.wall_max / cycles_per_us, " us, reached ", busy_row.staged, " of ", busy_row.rows,
+              crlf);
+        // Above the time asked: start()'s own 229 cycles at most on a quiet bus, a poll's turn
+        // of 30, a tick's handler of about 100, six at most in 5 ms: under 1000 cycles. The
+        // console has drained (Serial::tx_idle() below), so no other vector lands.
+        constexpr uint32_t over = 1000u;
+        const bool timed = c != BoundCase::no_counter;
+        const uint32_t drain_low = 5000u * cycles_per_us;
+        const uint32_t busy_low = 100u * cycles_per_us;
+        // The counter stopped, the budget alone: the time asked over poll_min_cycles (8) in
+        // polls, each at most 40 cycles (six instructions, a load across the APB1 bridge):
+        // five times the time asked, the bound on how long a stopped counter stretches it.
+        const uint32_t drain_high = timed ? drain_low + over : 5u * drain_low;
+        const uint32_t busy_high = timed ? busy_low + over : 5u * busy_low;
+        bench.verdict("each bound served at least, and within the figures its comment derives",
+                      stop_row.staged == 10u && busy_row.staged == 10u && stop_row.wall_min >= drain_low &&
+                          stop_row.wall_max <= drain_high && busy_row.wall_min >= busy_low &&
+                          busy_row.wall_max <= busy_high);
+        while (!Serial::tx_idle()) {
+        }
+    }
+    const uint8_t after = tenure<Host>(peer.addr, nullptr, 0, nullptr, 0);
+    bench.verdict("the host carries the next tenure", after == i2c_ok);
+}
+#endif
+
 void banner() {
     print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance, " with ", peer.name, crlf);
     bench.menu();
@@ -2119,6 +2845,18 @@ extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 
 extern "C" void BRIO_I2C_EV_HANDLER() {
     if (dma_host_live) {
+#if defined(STM32F446xx)
+        if (read_watch.on) {
+            const uint32_t c0 = brio::CycleCounter::now();
+            const bool btf = S::flag(brio::I2cFlag::byte_finished);
+            const bool done = DmaHost::isr();
+            xfer_done = xfer_done || done;
+            read_watch.ev_entries = read_watch.ev_entries + 1u;
+            read_watch.btf_entries = read_watch.btf_entries + (btf ? 1u : 0u);
+            read_watch.ev_cycles = read_watch.ev_cycles + (brio::CycleCounter::now() - c0);
+            return;
+        }
+#endif
         if (DmaHost::isr()) {
             xfer_done = true;
         }
@@ -2155,6 +2893,11 @@ extern "C" void BRIO_I2C_TX_DMA_HANDLER() {
 }
 extern "C" void BRIO_I2C_RX_DMA_HANDLER() {
     rx_dma_entries = rx_dma_entries + 1u;
+#if defined(STM32F446xx)
+    if (read_watch.on && !S::host()) {
+        read_watch.tc_after_wire = read_watch.tc_after_wire + 1u;
+    }
+#endif
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }
@@ -2210,6 +2953,10 @@ int main() {
 #endif
 #if defined(STM32F446xx)
     bench.letter('m', "THE REFUSED LAST BYTE, the core at 180, 48 and 16 MHz", tm_refusal);
+    bench.letter('o', "THE RECEIVE STREAM UNDER A REAL LOAD", to_load);
+    bench.letter('p', "THE STREAM'S COMPLETION HELD OFF", tp_held);
+    bench.letter('q', "start()'s TWO BOUNDS, in microseconds", tq_bounds);
+    bench.letter('r', "A LOAD THAT TAKES ALL OF APB1, by name only", tr_all_of_apb1, false);
     bench.second_letter('n', "THE DESK PARTNER: stretching, a held SDA, the per-bus timeout",
                         tn_partner);
 #endif

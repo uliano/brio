@@ -778,17 +778,36 @@ line of its own: it is every converter's and the common block's (RM0090
 same as B, and its `release()` clears CR2 with the clock on before the
 gate - F. QUADSPI has no verb that sets its DMAEN.
 
-**A clear ahead of a request can leave a stray beat for the next block.** When EN's
-clear reaches a stream just before the request it serves rises, the stream stops with
-the peripheral's data still unread. If that register is then read by the core with the
-peripheral's DMA enable still up, the next block's start takes a beat by itself, with
-the enable clear and no data there: its count one down, 1500 of 1500 on the receive
-request of FMPI2C1 (`test_stm32f4_fmpi2c` letter `r`, DMA1 stream 2 on the
-STM32F446RE). With the enable taken down ahead of that read, 0 of 1500. The manual does
-not describe it. The window is the clear landing within a few core cycles of the
-request's rise; a request already standing is served
-before EN falls ([fmpi2c.md](fmpi2c.md)). What other transports stopping a live
-peripheral's stream meet here is not measured.
+**A clear ahead of a beat can leave a stray beat for the next block.** When EN's
+clear reaches a stream with no transfer under way, the stream stops with the peripheral's
+data unread or still to come. If that register is then read by the core with the
+peripheral's DMA enable still up, the next block's start takes a beat by itself: its count
+one down with nothing sent. The manual does not describe it, and the blocks differ. All on the
+STM32F446RE:
+
+| the requester | the clear | DR read with the enable up, a stray in | the enable down first |
+|---|---|---|---|
+| FMPI2C1's receive, DMA1 stream 2 (`test_stm32f4_fmpi2c` letter `r`, its enable let up and EN cleared in the next store) | ahead of the request | 1500 of 1500 | 0 of 1500 |
+| the same, under a load past what APB1 takes (letter `v`, by itself) | over a request the arbiter has not granted | the next read wrong, 300 of 300 under `i2c_ok`, the host's order changed for a control | 0 of 1500 |
+| USART6's receive, DMA2 stream 1 (`test_stm32f4_serial` letter `i`) | any time before the frame's end | 98839 of 98839 frames left | 0 of 98559 |
+| I2C1's receive, DMA1 stream 0 (`test_stm32f4_i2c` letter `p`) | ahead of the request | 0 of 1500 | 0 of 1500 |
+
+A transfer under way does finish before EN falls, and a request the arbiter is serving comes
+to that ([fmpi2c.md](fmpi2c.md)). The FMPI2C host takes its enable down at EN low; neither the
+USART's transport nor the classic I2C host reads a data register over a stream it stopped
+([usart.md](usart.md), [i2c.md](i2c.md)).
+
+**DMA1 can take all of APB1, and what stands below it then is not served.** A stream of DMA1 pointed
+at a timer's counter on APB1, a word to one cell of SRAM, moves at most 1502 beats in 100 us at
+180 MHz by itself, one every 12 core cycles however fast it is paced. Three or more together reach
+2250, 45 MHz at two clocks an access, and no pacing went past it (`test_stm32f4_fmpi2c` letter `v`).
+Paced past that figure, three streams every 5, a stream at `high` under them at `very_high` is not served at all while
+they stand. Below it, four copies on DMA2 with three paced streams have held a stream at `high` past the
+milliseconds ([i2c.md](i2c.md) has the rows), and made one late against a wire that does not wait for
+it ([fmpi2c.md](fmpi2c.md)). A timer's gate closed over its raised request, with a stream at
+`very_high` left on that cell, measured once, does the same with one stream, and
+EN's clear on a stream below it then ran out `abort()`'s whole bound, 1.6 million cycles at 180 MHz: the
+release contract above is what keeps a correct program out of that.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
@@ -937,6 +956,16 @@ Driver gaps, each with its reason:
   suite measures the legal write instead.
 
 Implemented but not bench-verified, each with what would measure it:
+- What stands a core still under a load near all of APB1. Twice, each on a load of 2250 beats in 100 us or
+  near it (four streams every 8 at 2251 in a sweep; three every 12 and the copies with a 1 MHz partner
+  and a host's `init()` under it), the core stood in Thread mode with SysTick and USART2 pending until a
+  reset. The probe's halt timed out, the probe read the private peripheral bus and the flash and not
+  SRAM or the peripherals, and the program counter, sampled through DWT_PCSR, stood on a load from
+  the RCC. That reads as the core's System-bus access waiting behind a store to APB1, which nothing
+  here establishes. Fifteen runs each of `test_stm32f4_fmpi2c` letter `v` and `test_stm32f4_i2c`
+  letter `r`, some 3000 starts of such a load, did not repeat it, so those two letters run by name
+  only. That load repeated under the independent watchdog, with the probe reading what stands at its
+  reset, would measure it.
 
 - **FEIF and DMEIF.** Both are implemented (the flag, the enable, the ISR
   body, the accounting), and neither can be raised through this driver:
@@ -959,10 +988,10 @@ Implemented but not bench-verified, each with what would measure it:
   the reset at `init()`. On the F429 and the F411 letter p is the stronger
   measurement: their console is USART1, its ring DMA2's stream 2, and the
   four copies share its arbiter.
-- **The arbiter on DMA1.** Every copy runs on DMA2 (DMA1 cannot copy), so
-  what a busy stream ranked above a ring does on DMA1 is unmeasured; a
-  timer's update request at a rate the controller cannot keep up with is
-  the load that would measure it.
+- **A ring on DMA1 under paced streams.** Every ring measured here is on DMA2. The load
+  of paced streams above is measured against the I2C hosts' streams, not against a USART's
+  ring on DMA1, whose receive stream would overrun where a host's stretches the bus; USART2
+  or USART3 on a stream of DMA1 under letter `u`'s load would measure it.
 - **The held request of the I2C and FMPI2C blocks** is not staged: a
   standing request wants a tenure past its address phase. Both start their
   `init()` from the reset, applied by reading from the four requesters

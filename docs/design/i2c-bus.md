@@ -673,11 +673,12 @@ SYSCLK or the HSI. Two vectors, with a NACK on the event one (it is not an error
 peripheral) and NACKIE left down: every NACK ends in the STOP that raises
 STOPF, and that entry reads NACKF. It is the address's when TXE is clear and
 nothing refilled TXDR, which the pump's position or the transmit stream's count
-tells, read with the stream stopped. A read's last byte is taken at STOPF; on a
-stream that entry reads SxCR.EN first, stops a stream still running and stores
-what it had not taken. The stop finishes the beat the stream is on (RM0390 9.3.15),
-measured on a staged standing request; no load tried has made a stream late by
-itself. A tenure's interrupt and DMA enables go in one CR1 store
+tells, read with the stream stopped. A read's last byte is taken at STOPF; on a stream that entry reads SxCR.EN
+first, stops a stream still running, takes RXDMAEN down and stores what it had
+not taken. The stop finishes a beat under way (RM0390 9.3.15). Paced streams
+above it with copies through the memory make a stream late by themselves, and a
+load past what APB1 takes leaves the byte in RXDR (the [FMPI2C
+page](../stm32f4/fmpi2c.md)). A tenure's interrupt and DMA enables go in one CR1 store
 each way (`enables()`), ERRIE alone at rest. A controller's BERR is counted and
 never acted on. The engine slots sit on the mapping's single cell per direction,
 armed for their errors alone, `dma` carrying both phases, a half with no buffer

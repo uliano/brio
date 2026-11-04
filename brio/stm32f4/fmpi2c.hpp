@@ -2735,14 +2735,21 @@ private:
     /// finished with its last byte in memory (9.3.3's order, 9.3.14's end), which
     /// is the common case and needs nothing more. EN high, the stream is late or
     /// was never asked: an address not acknowledged, or the last byte's request
-    /// still waiting for the arbiter (9.3.5) when the STOP went out. A clear of EN
-    /// over a request that stands finishes that beat before EN falls (9.3.15,
-    /// 9.3.18 step 1, and stop() waits for it), so at EN low the byte is in memory
-    /// or it stands in RXDR with RXNE up, where stopped() stores it at pos_ as the
-    /// vector's own. No load tried has made a stream late here; letter r stages the
-    /// standing request (docs/stm32f4/fmpi2c.md). SxCR is not read in the cycles
-    /// after an EN store (the wedge, docs/stm32f4/dma.md): the shortest end of a
-    /// tenure measured is a lost arbitration some 25 us after start().
+    /// still waiting for the arbiter (9.3.5) when the STOP went out, which a load
+    /// above the stream reaches by itself (docs/stm32f4/fmpi2c.md has the rates). A
+    /// clear of EN finishes a beat under way before EN falls (9.3.15, 9.3.18 step 1,
+    /// and stop() waits for it), so at EN low the byte is in memory or it stands in
+    /// RXDR with RXNE up, where stopped() stores it at pos_ as the vector's own.
+    ///
+    /// RXDMAEN GOES DOWN AT EN LOW, AHEAD OF THAT READ. RXDR read with the enable up
+    /// over the stopped stream leaves the next block's start a stray beat, its first
+    /// cell wrong and its count one down under i2c_ok (docs/stm32f4/dma.md, "A clear
+    /// ahead of a beat"), and under a stream starved by a load every late read of
+    /// one is that case. It is a read-modify-write of CR1 on the late path alone.
+    ///
+    /// SxCR is not read in the cycles after an EN store (the wedge,
+    /// docs/stm32f4/dma.md): the shortest end of a tenure measured is a lost
+    /// arbitration some 25 us after start().
     static void streams_back() {
         if constexpr (has_engines) {
             if (tx_dma_) {
@@ -2754,6 +2761,7 @@ private:
             }
             if (rx_dma_ && !RxEngine::idle()) {
                 RxEngine::stop();
+                S::dma_receive(false);
                 if (phase_ == Phase::reading) {
                     pos_ = static_cast<uint8_t>(req_.rx_len - RxEngine::remaining());
                 }

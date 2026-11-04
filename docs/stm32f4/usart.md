@@ -615,6 +615,37 @@ by the CPU and lost to the stream without a flag; the HAL also treats any
 receive error under DMA as fatal and aborts the reception. A gap above a
 fifth, named: the price of never reading DR.
 
+**A frame over a stopped stream, DR then read with DMAR up: a stray beat, which the transport
+never reaches** ([dma.md](dma.md), "A clear ahead of a beat"; `test_stm32f4_serial` letter `i`,
+fifteen runs, USART6's loop at 5.625 and 1 Mbaud, DMA2 stream 1). In a masked section a byte goes
+into DR, EN's clear lands 0 to two frames later a few core cycles at a step, and the frame is let
+end. Then the next block starts on the same stream, DMAR up, and a burst of eight is sent into it:
+
+| after the stop | stops | the frame left in DR | the next block's count moved by itself | its first cell the left frame's, the burst one cell on |
+|---|---|---|---|---|
+| DR read with DMAR up | 254400 | 98839 | 98839 | 98839 |
+| DMAR down, DR read, DMAR up | 254400 | 98559 | 0 | 0 |
+| DR not read | 254400 | 98835 | 98835 | 98835 |
+
+**Every clear ahead of the frame's end leaves it**, at both rates, not a clear in some narrow
+window: the frame simply arrives over a stopped stream. With the read under DMAR the next block's
+count falls with nothing sent, and a program sees one wrong leading byte, the frame it already
+read once more, and a run one short, the last byte of the burst left standing in DR for the run
+after. Unread, the same frame is a real byte the next block takes, and nothing is wrong
+but the program's expectation. With DMAR down ahead of the read, nothing moves, every stop.
+
+**The transport does not reach it.** Read to its end in `usart.hpp`, the stream stops in three places:
+`release()`, which gates the block with DR unread, `init()` then starting from the reset; a
+transfer error, which stops it in hardware (`dma_isr()`, `abandon()`, then the consumer's look
+through `arm_rx()`), with DR unread again, so the ring takes what stands as a real byte; and
+nothing else, since `rebase()` and `set_baud()` write BRR under a running stream. The vector's
+one read of DR under the engine, the overrun with nothing to take (`rx_vector()`), is on a stream
+that has not stopped: a transfer error there is the one way to reach it, and the frame then stands with
+RXNE up, which that branch does not take. A transfer error needs a ring no DMA master can reach, which
+is not a correct program. What can reach it is a program of its own on the resource, stopping an
+engine and calling `clear_by_read()` or `read_data()` with DMAR standing: that is what
+`clear_by_read()`'s own comment forbids, and DMAR down first is the order.
+
 ### Against a far board: the STM32G0B1RE's `usart_peer` (the second all-key `t`)
 
 The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,

@@ -58,11 +58,13 @@
  * standard mode can be solved for that rate. start() is the arbiter's,
  * from its dispatch (main context), one tenure at a time - it does not
  * check that the previous tenure has completed, I2cBus is what
- * serializes. It waits in its caller, bounded: about stop_drain_us
- * (5 ms) for the last tenure's STOP to leave the wire and about
- * bus_free_us (100 us) for BUSY to fall; a STOP still standing past the
- * first bound parks the tenure, no START and no vector, for the per-bus
- * timeout to answer. isr(), error_isr() and dma_isr() are the bodies the
+ * serializes. It waits in its caller, bounded and timed on the DWT's
+ * cycle counter, which init() turns on: stop_drain_us (5 ms) for the last
+ * tenure's STOP to leave the wire and bus_free_us (100 us) for BUSY to
+ * fall; a STOP still standing past the first bound parks the tenure, no
+ * START and no vector, for the per-bus timeout to answer. A probe that
+ * stopped the counter makes each wait some two and a half times as long
+ * (poll_for_us()). isr(), error_isr() and dma_isr() are the bodies the
  * program's handlers for the event vector, the error vector and the two
  * DMA streams call, and nothing else calls them; each runs to completion
  * like every interrupt handler in brio. The one wait inside them: on the
@@ -197,6 +199,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/device_tables.hpp"
 #include "stm32f4/dma_engine.hpp"
 #include "stm32f4/nvic.hpp"
@@ -885,6 +888,7 @@ public:
         Nvic::disable(S::event_irq);
         Nvic::disable(S::error_irq);
         cfg_ = cfg;
+        (void)CycleCounter::init();   // start()'s two bounds (wait_for_us())
         S::bus_clock(true);
         S::reset();
         rebase_pclk(apb_hz(clock, S::on_apb2), clock_hz(clock));
@@ -1242,7 +1246,13 @@ public:
 
     /// The DMA streams' interrupt body - call from BOTH streams' vectors
     /// (one vector per stream on this family, shared with nothing). The
-    /// receive block completing ends a read phase (the STOP after it). The
+    /// receive block completing ends a read phase (the STOP after it), and
+    /// nothing else answers one short of an error: every byte is in memory
+    /// when this says so (a transfer's store comes before its count, RM0390
+    /// 9.3.3, and the count's zero raises the flag), a late stream stretches
+    /// the bus or, on a read of one, finishes behind the wire, and a late
+    /// entry here holds the bus with no further byte clocked
+    /// (docs/stm32f4/i2c.md, "A read under `dma` ends on its stream"). The
     /// transmit block completing is 27.3.8's EOT: the DMA requests go off
     /// and the event vector waits for BTF (a plain write's end) or, with a
     /// read half to follow, the buffer vector for the TxE that says the
@@ -1849,17 +1859,38 @@ private:
     /// bus takes a moment, another controller's traffic takes longer.
     static constexpr uint16_t bus_free_us = 100;
 
-    /// Poll `pred` for at least `us` microseconds, timed on SysTick
-    /// (stm32f4/delay.hpp); true as soon as it holds. delay_us() refuses
-    /// when SysTick is not running, and the bound is then a count of polls
-    /// - a bound still.
+    /// The least a poll of poll_for_us() can take, read in its release listing: more
+    /// than eight instructions, two loads among them, on a core that retires one a
+    /// cycle at most. The poll budget rests on it.
+    static constexpr uint32_t poll_min_cycles = 8;
+
+    /// Poll `pred` for at least `us` microseconds; true as soon as it holds. The first
+    /// look is here, in line, on no counter: a bus already free costs that one read.
     template <typename Pred>
-    static bool wait_for_us(Pred pred, uint16_t us) {
-        for (uint16_t t = 0; t < us; ++t) {
+    [[gnu::always_inline]] static bool wait_for_us(Pred pred, uint16_t us) {
+        return pred() || poll_for_us(pred, us);
+    }
+
+    /// The time on the DWT's cycle counter (cortexm/dwt.hpp), which init() turned on:
+    /// one load, a difference exact over this span, running with no ticker, in a handler
+    /// and under a mask, and counting whatever lands inside the wait. THE BUDGET is what
+    /// ends it where a probe stopped that counter: it allows the time asked at
+    /// poll_min_cycles a poll, so it cannot run out first while the counter runs, and a
+    /// stopped counter makes the wait longer than asked, by the poll's real length over
+    /// poll_min_cycles (docs/stm32f4/i2c.md has it measured). Out of line and cold, reached
+    /// only on a bus not free, with the poll inlined.
+    template <typename Pred>
+    [[gnu::noinline, gnu::cold, gnu::flatten]] static bool poll_for_us(Pred pred, uint16_t us) {
+        const uint32_t cycles = us * delay_rate_.cycles_per_us;
+        const bool timed = CycleCounter::running();
+        const uint32_t from = CycleCounter::now();
+        for (uint32_t polls = cycles / poll_min_cycles; polls != 0u; --polls) {
             if (pred()) {
                 return true;
             }
-            (void)delay_us(delay_rate_, 1);
+            if (timed && CycleCounter::now() - from >= cycles) {
+                break;
+            }
         }
         return pred();
     }

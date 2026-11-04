@@ -111,8 +111,9 @@ What decides correctness even there:
   without engines), with `status()` already `i2c_rejected` and no interrupt to
   follow, so a loop that waited for `done` after a true would wait for ever - the
   excerpt waits only after a false.
-- **`start()` waits in its caller, bounded.** About 5 ms for the previous tenure's
-  STOP to leave the wire, then about 100 us for BUSY to fall. A STOP still standing
+- **`start()` waits in its caller, bounded.** 5 ms for the previous tenure's
+  STOP to leave the wire, then 100 us for BUSY to fall, both on the DWT's cycle counter,
+  which `init()` turns on, so no ticker is needed. A STOP still standing
   after 5 ms parks the tenure - no START, no vector, and still a false - and a bus
   still busy after 100 us sets the START anyway, which waits behind BUSY (27.3.3),
   parked until the line is let go. Only an arbiter's per-bus timeout answers
@@ -345,7 +346,7 @@ drain on the Nucleo-F446RE:
   controller's own STOP, and CR1 untouchable while STOP stands (27.6.1),
   start() waits for it, in the caller (the arbiter's dispatch). The bound is
   5 ms; a tenure started at once behind a completion pays about a bit period:
-  1829 to 1877 cycles at 100 kHz and 304 to 368 at 400 (`bench_stm32f4` letter
+  1817 to 1874 cycles at 100 kHz and 313 to 362 at 400 (`bench_stm32f4` letter
   `i`). The alternatives were weighed and
   declined: a deferred START needs an event the chapter has not got, and
   a timer of the bus's own would cost a timer and an interrupt a tenure
@@ -356,7 +357,8 @@ drain on the Nucleo-F446RE:
   before the last byte's acknowledge, a deadline no handler of a program
   guarantees, and 27.3.3 gives the BTF procedures for exactly that case.
 - *The DMA requests and LAST.* Used for every phase of a Request that
-  names `dma`, one byte included. The transmit stream is started in the
+  names `dma`, one byte included, and the read's end is the stream's ("A read
+  under `dma` ends on its stream", in the bench findings). The transmit stream is started in the
   ADDR entry, before ADDR's clear, with DMAEN raised behind it;
   the receive stream at the read's SB, before the address goes out, so
   the entry that arranges ACK and POS for the read knows which procedure
@@ -669,8 +671,8 @@ same letter shows the mechanism each Request names on the streams
 chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
 line - served from its own vectors as a register file (an identity at
 0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
-first written byte sets), at 0x2C. `z` is 73 verdicts: every letter of
-the DISC1's runs against it, and one more - with a partner board, an
+first written byte sets), at 0x2C. `z` is 82 verdicts: every letter of
+the DISC1's runs against it, and four more - with a partner board, an
 STM32G0 on the same two nodes, on its dark console (a program that stays off
 the bus), since letter d's
 scan would otherwise meet the partner's command address. A second set,
@@ -725,6 +727,84 @@ in band over the bus under test: letter `n`, 13 verdicts, green in every run of
   `I2cBus` at its 20 ms limit (20 ms on the tick), and the
   same host carries the command channel again after `recover()`.
 
+- **`start()`'s two bounds are what they say** (letter `q`, ten stages a case, fifteen
+  runs). The far pads of the self-link, driven low from here, hold a STOP standing and
+  hold BUSY up, and the wall of `start()` is read on the counter the case leaves running:
+
+  | case | the 5000 us drain | the 100 us bus wait |
+  |---|---|---|
+  | the ticker running | 5001 us | 101 us |
+  | SysTick stopped | 5001 us | 101 us |
+  | the DWT's counter stopped, by a probe or a program | 12504 us | 251 to 252 us |
+
+  The counter is one load and a difference exact over this span, it runs with no ticker,
+  under a mask and in a handler, and whatever lands inside the wait counts. A stopped
+  counter leaves the budget: the time asked at 8 cycles a poll, each poll taking some 20
+  here, so the wait ends about two and a half times late, and it always ends. A bus already
+  free takes the first look alone, in line in `start()`: one load, a shift and a branch per
+  wait, in the release listing, and `poll_for_us()` is out of line and cold.
+
+**A read under `dma` ends on its stream** (`test_stm32f4_i2c` letters `o` and `p` on the
+self-link, fifteen runs each, 180 MHz with 45 MHz on APB1). In that phase the event vector
+does nothing, and `dma_isr()` ends the tenure when the receive stream's count reaches zero;
+a run of two or more has its STOP requested there (27.3.8), a run of one at ADDR's clear.
+Three other things can answer while the phase stands, and none says `i2c_ok`: a transfer error
+(`i2c_dma_fault`), lost arbitration (`i2c_arb_lost`) and the arbiter's timeout (`i2c_timeout`).
+A NACK cannot, this end sending the acknowledges. So the question the
+[FMPI2C](fmpi2c.md) settles at its STOPF entry does not arise here: a transfer is the load,
+the store and the count, in that order (RM0390 9.3.3), and the flag rises at the count's
+zero (9.3.14), so a reply never stands ahead of its last byte. What a late stream changes is
+the time of the answer.
+
+The load is [fmpi2c.md](fmpi2c.md)'s, "A load makes a stream late by itself", on the streams
+of DMA1 this host does not hold (1, 2, 3, 4, 5 and 7). Reads of one, two and eight, 2250 each
+at 400 kHz and 750 each at 100 kHz, a row stopped after three reads with no answer in a run:
+
+| load | beats in 100 us | wire over ahead of a read of one's completion, 400 kHz, 100 kHz | past the letter's first bound, reads of all lengths | no answer in fifty times that |
+|---|---|---|---|---|
+| nothing else | 0 | 0, 0 | 0 | 0 |
+| six streams every 32 | 1690 | 0, 0 | 0 | 0 |
+| four every 17 | 2118 | 0, 0 | 0 | 0 |
+| three every 8 | 2108 | 0, 0 | 0 | 0 |
+| four copies | 0 | 0, 0 | 0 | 0 |
+| two every 16, and the copies | 1127 | 0, 0 | 0 | 0 |
+| six every 48, and the copies | 1126 | 0, 0 | 0 | 0 |
+| two every 8, and the copies | 1500 | 0, 8 | 0 | 0 |
+| three every 16, and the copies | 1690 | 1853 of 1871, 700 of 706 | 4111 of 7731 | 44 |
+
+Every read answered was exact and `i2c_ok`, 79687 in all, with the stream still once the reply
+stood. A stream late on a run of two or more stretches SCL until it takes the byte ("stretching
+SCL low", 27.3.3); on a read of one the wire ends by itself and the answer follows when the
+stream is served, the "wire over" column. The first bound is twice the wire and three ticks and
+the last fifty times that; past it the letter answers as an arbiter's timeout would, with
+`recover()`, and the next read is whole. The event vector took two entries a read, SB
+and ADDR, at every load, with BTF up at none of them, so a late stream raises no level on it.
+
+**A load past what the bus takes is the case that decides** (letter `r`, by name only, fifteen
+runs). Three streams every 5, 2249 beats in 100 us: the stream is not served at all while the load
+stands. A read of one's wire ended with the byte in DR, 1500 of 1500. Nothing answered ahead of the
+stream, 0 of 1500, and when the load came off the read and the read of eight behind it were exact,
+1500 of 1500 each. Three every 12 and the copies, 2249 beats: 664 of the 664 reads of one that answered
+had the wire over first, 83 of 2040 reads gave no answer inside the bound, and every other one was exact. What
+such a load can do to the core is in [dma.md](dma.md)'s "Not covered yet".
+
+**A completion held off clocks no further byte.** The chapter asks for the STOP "in the DMA
+Transfer Complete interrupt routine" and does not say what the wire does until it comes. Letter
+`p`, the stream's vector line off, a poll dating the count's zero, then a hold of up to forty bit
+periods counting SCL's rising edges, the line back on, and the wire followed for forty bits at
+100 kHz: reads of two and eight at both speeds, 3600 over fifteen runs. At most one rising edge
+behind the last byte, the STOP's own; RxNE down at the end; each read and the read of eight behind
+it exact. So a handler that runs long, or a mask, holds the bus with no byte clocked past the
+NACK: the wire is stretched for that long, and the target sees nothing but the stretch.
+
+**The stray beat ([dma.md](dma.md)) has no path on this host.** No path reads DR with DMAEN
+up over a stopped stream: the pump's reads run with DMAEN down, raised only for a phase on the
+streams (`begin_receive()`), and `put_engines_away()` stops a stream and takes DMAEN down with no
+read of DR between them. Staged by hand on this block all the same, a read of one with DMAEN let
+up and EN's clear in the next store: the byte left in DR 1500 of 1500, and with DR then read
+with DMAEN up the next block's count moved 0 of 1500. The FMPI2C's request does remember it, 1500 of
+1500: the two blocks differ here, and the manuals say nothing of either.
+
 **The host above the wire on the Nucleo-F446RE: `bench_stm32f4`'s letter
 `i`** on the same self-link (benchmark.md's grammar; the letter's header
 says how the wire is counted: the SCL period measured on PB8 - 1800 core
@@ -739,14 +819,14 @@ the pump:
 
 | tenure | brio on the Nucleo-F446RE: irq, isr, fixed | ST's HAL on the STM32F429I-DISC1: irq, isr, fixed |
 |---|---|---|
-| write of 1 | 3, 419, 211 | 5, 758, 387 |
-| write of 2 | 3, 458, 210 | 6, 955, 426 |
-| write of 3 | 4, 600, 198 | - |
-| register read 1+1 | 5, 716, 596 | 9, 1996, 1171 |
-| register read 1+2 | 5, 758, 625 | 10, 1837, 816 |
-| register read 1+16 | 19, 2519, 673 | 23, 3843, 792 |
-| probe (ACK / NACK) | 2, 253 / 259 | polled, fixed 578 |
-| write of 255 on the engines | 4, 563, x 1.00 | 4, 807, x 1.00 |
+| write of 1 | 3, 453, 210 | 5, 758, 387 |
+| write of 2 | 3, 490, 209 | 6, 955, 426 |
+| write of 3 | 4, 641, 202 | - |
+| register read 1+1 | 5, 765, 596 | 9, 1996, 1171 |
+| register read 1+2 | 5, 801, 625 | 10, 1837, 816 |
+| register read 1+16 | 19, 2683, 676 | 23, 3843, 792 |
+| probe (ACK / NACK) | 2, 276 / 259 | polled, fixed 578 |
+| write of 255 on the engines | 4, 581, x 1.00 | 4, 807, x 1.00 |
 
 The HAL's column is ST's v1.8.5 (`HAL_I2C_Master_Transmit_IT`/`_DMA`,
 `HAL_I2C_Mem_Read_IT`/`_DMA`) in a scratch program with brio's crt, clock
@@ -757,24 +837,24 @@ behind a polled index, is not a row either (15648 core cycles busy). Its `fixed`
 that device's and is not set against brio's, whose target is served on the
 same core; the interrupts and the handler's cycles compare.
 
-- **The pump costs 98 cycles of handler a byte written and 118 a byte
-  read** (the slope between the 16- and the 255-byte rows; 101 and 125
+- **The pump costs 107 cycles of handler a byte written and 126 a byte
+  read** (the slope between the 16- and the 255-byte rows; 110 and 134
   between 2 and 16), against the HAL's 148 and 153. A 255-byte write and
   read are x 1.00 on the pump (256 interrupts) and on the engines (4 and
   3).
 - **The STOP's drain is the next tenure's**: `start()` called at a
-  completion waits for the STOP to leave the wire, 1829 to 1877 cycles at
-  100 kHz and 304 to 368 at 400 (the tenure before a write, a read or a
-  register read of two), over the 229 it reads on a quiet bus; the HAL's
+  completion waits for the STOP to leave the wire, 1817 to 1874 cycles at
+  100 kHz and 313 to 362 at 400 (the tenure before a write, a read or a
+  register read of two), over the 181 it reads on a quiet bus; the HAL's
   own call waits for BUSY the same way (1728 cycles at 100 kHz).
 - **The engines' fixed cost per tenure** is their start inside the
   vector - the transmit stream's in the ADDR entry, the receive stream's
   at the read's SB - and their completion entries: a write of 255 is 4
-  interrupts and 563 cycles of handler, a read of 255 is 3 and 498, and
+  interrupts and 581 cycles of handler, a read of 255 is 3 and 497, and
   a register read under `dma`, its index on the transmit stream too, 7
-  and 1012 at 1+16 (the "Which engine" table below).
-- **The longest single entry** of each vector over the letter: events 224
-  cycles, errors 197, the streams 120.
+  and 1030 at 1+16 (the "Which engine" table below).
+- **The longest single entry** of each vector over the letter: events 223
+  cycles, errors 190, the streams 127.
 - **The same code placed elsewhere costs differently**: the FMPI2C1
   host's rows, whose code was the same in two builds of this letter,
   moved by eight to ten cycles a byte between them - the image's layout
@@ -784,28 +864,28 @@ same core; the interrupts and the handler's cycles compare.
 I2C1 the host, every row of one image; `irq` and `isr` the I2C vectors'
 and the two streams', between the meter's stamps, the bench's two timer reads
 around each entry). The column leaves out `start()`, the streams here being started
-in the vectors: 188 to 233 cycles - on the pump the writes and
-register reads 210 to 213 and the reads 230 to 233, on the engines 188 and 206
-to 208 - so adding it takes about 22 to 25 cycles off every row's difference, and
-moves no length below (a read of two, +23 here, stays the tie).
+in the vectors: 161 to 190 cycles - on the pump the writes and
+register reads 161 and 162 and the reads 189 and 190, on the engines 165 to 168 and 184
+and 185 - so adding it puts about 4 cycles on a write's or a register read's difference and
+takes about 5 off a read's, and moves no length below (a read of two, -5 here, stays the tie).
 At 400 kHz, the 100 kHz rows within a few cycles of these:
 
 | phase | `interrupt`: irq, isr | `dma`: irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 3, 419 | 4, 562 | +143 |
-| write 2 | 3, 458 | 4, 563 | +105 |
-| write 3 | 4, 600 | 4, 563 | -37 |
-| write 16 | 17, 1874 | 4, 563 | -1311 |
-| read 1 | 3, 422 | 3, 500 | +78 |
-| read 2 | 3, 479 | 3, 502 | +23 |
-| read 16 | 17, 2233 | 3, 498 | -1735 |
-| register read 1+1 | 5, 716 | 7, 1008 | +292 |
-| register read 1+2 | 5, 758 | 7, 1020 | +262 |
-| register read 1+16 | 19, 2519 | 7, 1012 | -1507 |
+| write 1 | 3, 453 | 4, 580 | +127 |
+| write 2 | 3, 490 | 4, 581 | +91 |
+| write 3 | 4, 641 | 4, 581 | -60 |
+| write 16 | 17, 2033 | 4, 581 | -1452 |
+| read 1 | 3, 448 | 3, 496 | +48 |
+| read 2 | 3, 506 | 3, 501 | -5 |
+| read 16 | 17, 2382 | 3, 497 | -1885 |
+| register read 1+1 | 5, 765 | 7, 1027 | +262 |
+| register read 1+2 | 5, 801 | 7, 1050 | +249 |
+| register read 1+16 | 19, 2683 | 7, 1030 | -1653 |
 
 The pump's figure a byte past the second is the slope of the table's
-rows from 2 to 16 bytes, 101 cycles written and 125 read, one entry each
-(98 and 118 between 16 and 255 bytes, the letter's own per-byte line),
+rows from 2 to 16 bytes, 110 cycles written and 134 read, one entry each
+(107 and 126 between 16 and 255 bytes, the letter's own per-byte line),
 and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
@@ -813,24 +893,23 @@ every interrupt counted. So, in core cycles:
 - **a write costs the core fewer cycles on the engines from three
   bytes**: EV8_1 loads the first two in the entry that clears ADDR, so the
   pump takes no interrupt for a write of one or two and the engines add
-  their stream's start and its completion entry (+143 and +105, one
+  their stream's start and its completion entry (+127 and +91, one
   interrupt more);
 - **a read from three bytes, a read of two being a tie**: the engines'
   receive run under LAST ends in one completion entry, within a few cycles of
-  the pump's two-byte procedure (+23 here, the same three interrupts, and -7 in
+  the pump's two-byte procedure (-5 here, the same three interrupts, and +23 in
   another build of the same code, placement's reach). The pump's third byte
-  costs it 125 cycles and an entry;
-- **a register read with a one-byte index from five read bytes**. A Request has
+  costs it 134 cycles and an entry;
+- **a register read with a one-byte index from four read bytes**. A Request has
   one mechanism for both halves, so a short register read is cheaper on the pump:
   under `dma` the index rides the transmit stream too - its completion and the
   TxE behind it, where the repeated START is requested, are two
   interrupts the pump's ADDR entry does without - so the engines' register
-  read stays at about 1010 cycles and 7 interrupts whatever its length.
-  The pump's grows 42 cycles and no interrupt from 1+1 to 1+2 (716 to 758,
-  the two-byte procedure), then 125 cycles and one interrupt a byte: at
-  1+4 the two tie (758 + 2 x 125 = 1008 against about 1010, 7 interrupts
-  each), and from 1+5 the engines lead, by about 125 cycles and an entry
-  there and 125 and an entry more with every byte after.
+  read stays at about 1040 cycles and 7 interrupts whatever its length.
+  The pump's grows 36 cycles and no interrupt from 1+1 to 1+2 (765 to 801,
+  the two-byte procedure), then 134 cycles and one interrupt a byte: at
+  1+4 the engines lead by some thirty cycles, by the slopes (801 + 2 x 134 = 1069 against about 1040, 7
+  interrupts each), and from 1+5 by about 134 cycles and an entry more with every byte.
 The speed moves none of these lengths: the streams and the vectors
 cost within a few cycles of the same at both rows, and the wire's time between them is
 the core's to spend elsewhere. The core sleeps while a stream works: the
@@ -862,12 +941,12 @@ among the preemptive kernel's; its twin over the FMPI2C1 is
   vector and sets START last, so a dispatch above the arbiter landing in
   it lengthens the gap between tenures and moves nothing on the wire.
   Letter `x`, 400 writes of 16 bytes on the transmit engine: `start()`
-  takes 174 cycles with TIM2 silent (at most 287), the suite's naming
-  of the mechanism (below) included, in this image, in a loop of 400 (`bench`'s 188
-  to 233 are another image, and placement and the flash accelerator move this
+  takes 214 cycles with TIM2 silent (at most 330), the suite's naming
+  of the mechanism (below) included, in this image, in a loop of 400 (`bench`'s 161
+  to 190 are another image, and placement and the flash accelerator move this
   figure, so the two are not compared). Under 97 us x 3000 the interrupt landed
-  inside it 10, 4 and 5 times in three runs, and never with MSL set, against the
-  4.0 independent ticks would give (400 x 174 / 17460). The letter times no phase,
+  inside it 3, 2 and 4 times in three runs, and never with MSL set, against the
+  4 independent ticks would give (400 x 214 / 17460, the suite's own line). The letter times no phase,
   so this says only that the landings do not sit near zero as on the STM32G0's
   host ([../stm32g0/i2c.md](../stm32g0/i2c.md)); whether this tenure cycle locks
   to the tick is not established. In letter `h`, where the preempting object's
@@ -1056,6 +1135,11 @@ Driver gaps, each with its reason:
   target object.
 
 Implemented, not bench-verified (each with what would measure it):
+- `start()`'s budget at another core rate: measured at 180 MHz alone. The poll's length
+  in cycles moves with the APB1 ratio, the bound in time does not; letter `q` under
+  letter `m`'s DynamicClock would measure it.
+- The letters `o`, `p` and `q` on the STM32F429I-DISC1 and the 32F469IDISCOVERY: the self-link
+  they stage on is the Nucleo-F446RE's alone.
 - The engine a Request names, on the STM32F429I-DISC1 and the
   32F469IDISCOVERY: letter `j`'s traces (the one-byte phases on the
   streams, `interrupt` touching none, `dma` refused on the engineless

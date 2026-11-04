@@ -80,6 +80,11 @@
 //      copies; the last byte judged in the vector, before any reply; a stop swept
 //      against a standing request, on the silicon and on the host's own path, the
 //      next tenure judged after it
+//   u  THE RECEIVE STREAM UNDER A REAL LOAD on the self-link: paced streams at very_high
+//      on DMA1, four copies on DMA2 and the core, reads of 1, 2 and 8 at 100 and 400 kHz,
+//      the stream late by itself; a first byte refused under the heaviest of them
+//   v  (by name only) A LOAD THAT TAKES ALL OF APB1: the stream starved outright, the
+//      host's own read of RXDR, the next read judged
 //
 // and against the desk partner's `twi_peer` (the second set, `t`):
 //   n  Fast-mode Plus acknowledged, a held SDA and a held clock, the rebase
@@ -91,8 +96,8 @@
 //      second and a later data byte, a write of one and of two, under both
 //      engines and both speeds and in and out of the band, the partner's tally
 //      judging each, the next request whole
-//   s  letter r's two loads at Fast-mode Plus, the narrowest window between the
-//      last byte and the STOP, reads against the partner's pattern, and the host's
+//   s  letter r's two loads and letter u's at Fast-mode Plus, the narrowest window between
+//      the last byte and the STOP, reads against the partner's pattern, and the host's
 //      stop over a standing request
 //
 // build: boards = f446re
@@ -104,6 +109,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/fmpi2c.hpp"
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
@@ -203,6 +209,7 @@ struct StopWatch {
     volatile int16_t raise_turns = -1;   ///< >= 0: a stream's request let up at STOPF, that many
                                          ///< turns of burn() ahead of the body's stop
     volatile bool raise_tx = false;      ///< the transmit stream's, not the receive stream's
+    volatile uint32_t body_max = 0;      ///< the longest STOPF body, in core cycles
 };
 StopWatch stop_watch;
 
@@ -3271,8 +3278,8 @@ void tq_entries() {
 // port's arbitration and its memory port's still to go (RM0390 9.3.5). Three stages
 // load it. Taking the request away decides the lateness: the stream is never asked.
 // A very_high stream on the same controller outranks it on the peripheral port. Four
-// copies on DMA2 share the memory with its memory port through the bus matrix. Only
-// the first of the three has made a stream late at a STOPF entry.
+// copies on DMA2 share the memory with its memory port through the bus matrix. Letter
+// u is the load that makes a stream late by itself; of these three only the first does.
 //
 // The verdict is the byte in memory at the moment the host's body says the tenure
 // is over, read in the vector, ahead of anything a reply could read. How often the
@@ -3851,6 +3858,342 @@ void tr_stream_proof() {
 }
 
 // =============================================================================
+// u - THE RECEIVE STREAM UNDER A REAL LOAD (the self-link)
+// =============================================================================
+//
+// DMA1 has no memory-to-memory (RM0390 9.3.7), so what loads the controller this host's
+// stream is on is peripheral-paced streams: each below is a timer's request at very_high,
+// above the host's `high`, its beat a word from the timer's counter on APB1 to one word
+// of SRAM. Arbitration is by level and then stream number (9.3.5). The count is circular
+// over 65535 beats and the memory does not increment, so SxNDTR says how many moved, and
+// every row prints the beats of 100 us. Four copies on DMA2 add the memory's other master
+// and the core's turns of keep_busy() a third.
+//
+// What each row judges is what a reply could read: the last byte in the vector, every
+// byte after, the status, the stream still after the reply, and the next read, which is
+// the row's next line. How late the stream was is printed, since the load decides that.
+// A load that takes all of APB1 is letter v's, by name only: it starves the host's stream
+// outright, and it can stand the core still until a reset (docs/stm32f4/dma.md).
+
+alignas(4) uint32_t paced_cell[6];
+
+/// One stream, on its timer's update (`cc` 0) or compare `cc`, every `period` of the
+/// timer's 90 MHz clock, two core cycles a count.
+template <uint8_t stream, uint8_t channel, uint8_t tim, uint8_t slot, uint8_t cc>
+struct Paced {
+    using T = Tim<tim>;
+    using St = DmaStream<1, stream>;
+    static void on(uint32_t period) {
+        if (!T::bus_clock()) {
+            T::init();
+        }
+        (void)T::configure(TimConfig{.prescaler = 0, .period = period - 1u});
+        DmaTransfer t{};
+        t.peripheral = &T::regs().CNT;
+        t.memory = &paced_cell[slot];
+        t.count = 65535;
+        t.config.channel = channel;
+        t.config.direction = DmaDirection::peripheral_to_memory;
+        t.config.circular = true;
+        t.config.memory_increment = false;
+        t.config.peripheral_width = DmaWidth::word;
+        t.config.memory_width = DmaWidth::word;
+        t.config.priority = DmaPriority::very_high;
+        (void)St::load(t);
+        if constexpr (cc == 0u) {
+            T::interrupts(T::update_dma, true);
+        } else {
+            (&T::regs().CCR1)[cc - 1u] = period / 2u;
+            T::regs().DIER = T::regs().DIER | (TIM_DIER_CC1DE << (cc - 1u));
+        }
+        T::enable(true);
+    }
+    static void stop() { St::stop(); }
+    /// After every stream on this timer has stopped: a gate closed over a raised request
+    /// holds it (docs/stm32f4/dma.md, "A released requester"), and a stream at very_high
+    /// left on that cell takes every arbitration there is.
+    static void gate() {
+        if (T::bus_clock()) {
+            T::release();
+        }
+    }
+    static uint16_t count() { return St::count(); }
+};
+
+// RM0390 table 28: every stream of DMA1 but this host's 2 and 5.
+using Paced1 = Paced<1, 3, 2, 0, 0>;   // TIM2_UP
+using Paced2 = Paced<0, 6, 5, 1, 0>;   // TIM5_UP
+using Paced3 = Paced<6, 2, 4, 2, 0>;   // TIM4_UP
+using Paced4 = Paced<4, 1, 7, 3, 0>;   // TIM7_UP
+using Paced5 = Paced<7, 5, 3, 4, 3>;   // TIM3_CH3
+using Paced6 = Paced<3, 6, 5, 5, 4>;   // TIM5_CH4, the second stream on TIM5
+
+void paced_on(uint8_t streams, uint32_t period) {
+    if (streams > 0u) { Paced1::on(period); }
+    if (streams > 1u) { Paced2::on(period); }
+    if (streams > 2u) { Paced3::on(period); }
+    if (streams > 3u) { Paced4::on(period); }
+    if (streams > 4u) { Paced5::on(period); }
+    if (streams > 5u) { Paced6::on(period); }
+}
+
+void paced_off(uint8_t streams) {
+    if (streams > 5u) { Paced6::stop(); }
+    if (streams > 4u) { Paced5::stop(); }
+    if (streams > 3u) { Paced4::stop(); }
+    if (streams > 2u) { Paced3::stop(); }
+    if (streams > 1u) { Paced2::stop(); }
+    if (streams > 0u) { Paced1::stop(); }
+    Paced1::gate();
+    Paced2::gate();
+    Paced3::gate();
+    Paced4::gate();
+    Paced5::gate();
+    Paced6::gate();
+}
+
+/// The beats the load moved in 18000 core cycles, 100 us at 180 MHz, all its streams
+/// together. APB1 at 45 MHz takes an access in two of its clocks, 2250 in that span.
+uint32_t paced_beats(uint8_t streams) {
+    const uint16_t a[6] = {Paced1::count(), Paced2::count(), Paced3::count(),
+                           Paced4::count(), Paced5::count(), Paced6::count()};
+    const uint32_t t0 = CycleCounter::now();
+    while (CycleCounter::now() - t0 < 18'000u) {
+    }
+    const uint16_t b[6] = {Paced1::count(), Paced2::count(), Paced3::count(),
+                           Paced4::count(), Paced5::count(), Paced6::count()};
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < streams; ++i) {
+        sum += static_cast<uint16_t>(a[i] - b[i]);
+    }
+    return sum;
+}
+
+/// A load's row of reads: 1, 2 and 8 at one speed, the wait turning `spin`, the stream
+/// looked at after each reply and the longest body kept. `moved`: the stream running
+/// after a reply, or its count changing `burn(50)` later.
+struct LoadReads {
+    ProofRow by[3];
+    uint32_t moved = 0;
+    uint32_t body_max = 0;
+    bool whole() const {
+        uint32_t tenures = 0;
+        uint32_t right = 0;
+        for (const ProofRow& r : by) {
+            tenures += r.tenures;
+            right += r.in_memory;
+        }
+        return tenures != 0u && tenures == right && moved == 0u;
+    }
+};
+
+template <typename Value, typename Spin>
+void load_reads(uint8_t addr, FmpI2cSpeed v, uint16_t reads, Value value_from, Spin spin,
+                LoadReads& out) {
+    using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+    constexpr uint8_t lengths[3] = {1, 2, 8};
+    stop_watch.body_max = 0;
+    for (uint16_t k = 0; k < reads; ++k) {
+        for (uint8_t i = 0; i < 3u; ++i) {
+            proof_read(addr, lengths[i], v, false, value_from(lengths[i]), spin, out.by[i]);
+            const uint16_t c0 = RxRegs::count();
+            burn(50);
+            out.moved = out.moved + ((RxRegs::enabled() || RxRegs::count() != c0) ? 1u : 0u);
+        }
+    }
+    out.body_max = stop_watch.body_max;
+}
+
+void load_print(const char* name, const LoadReads& r) {
+    print(serial, "    ", name, ": late of reads of 1, 2, 8: ", r.by[0].en_up, ", ", r.by[1].en_up, ", ",
+          r.by[2].en_up, " of ", r.by[0].tenures, " each; exact ", r.by[0].in_memory + r.by[1].in_memory +
+          r.by[2].in_memory, " of ", r.by[0].tenures + r.by[1].tenures + r.by[2].tenures, "; byte in RXDR ",
+          r.by[0].rxne_up + r.by[1].rxne_up + r.by[2].rxne_up, "; stretched ",
+          r.by[0].slow + r.by[1].slow + r.by[2].slow, "; unanswered ",
+          r.by[0].lost + r.by[1].lost + r.by[2].lost, "; moved after the reply ", r.moved,
+          "; longest body ", r.body_max, crlf);
+}
+
+/// The loads below all of APB1: `copies`, the four on DMA2 and the core's turns.
+struct LoadCell {
+    uint8_t streams;
+    uint32_t period;
+    bool copies;
+};
+constexpr LoadCell load_cells_u[] = {
+    {0, 16, false}, {6, 32, false}, {4, 17, false}, {3, 8, false},
+    {0, 16, true},  {2, 16, true},  {2, 8, true},   {6, 48, true}, {3, 16, true},
+};
+
+void load_begin(const LoadCell& c) {
+    if (c.copies) {
+        copies_on();
+    }
+    paced_on(c.streams, c.period);
+    print(serial, "  ", c.streams, " stream(s) at very_high every ", c.period, " of 90 MHz",
+          c.copies ? " and four copies" : "", ": ", paced_beats(c.streams), " beats in 100 us", crlf);
+}
+
+void load_end(const LoadCell& c) {
+    paced_off(c.streams);
+    if (c.copies) {
+        copies_off();
+    }
+}
+
+void tu_load() {
+    if (!far_ready()) {
+        return;
+    }
+    (void)CycleCounter::init();
+    Dma<1>::init();
+    dma_host_live = true;
+    const bool up = DmaHost::init(clock, base_config);
+    auto far = [](uint8_t) { return [](uint16_t i) { return Far::value(static_cast<uint8_t>(i)); }; };
+    auto idle = [] {};
+    bool all_whole = up;
+    uint32_t late = 0;
+    uint32_t reads = 0;
+    uint32_t body_max = 0;
+    for (const LoadCell& c : load_cells_u) {
+        load_begin(c);
+        for (const FmpI2cSpeed v : {FmpI2cSpeed::fast_400k, FmpI2cSpeed::standard_100k}) {
+            LoadReads r{};
+            const uint16_t n = v == FmpI2cSpeed::fast_400k ? 150u : 50u;
+            if (c.copies) {
+                load_reads(self_addr, v, n, far, copies_turn, r);
+            } else {
+                load_reads(self_addr, v, n, far, idle, r);
+            }
+            load_print(v == FmpI2cSpeed::fast_400k ? "400 kHz" : "100 kHz", r);
+            all_whole = all_whole && r.whole();
+            for (const ProofRow& p : r.by) {
+                late += p.en_up;
+                reads += p.tenures;
+            }
+            body_max = r.body_max > body_max ? r.body_max : body_max;
+        }
+        load_end(c);
+    }
+    print(serial, "  below all of APB1: ", reads, " reads, the stream late at STOPF in ", late,
+          ", the longest body ", body_max, " core cycles", crlf);
+    bench.verdict("UNDER EVERY LOAD BELOW ALL OF APB1: every read of 1, 2 and 8 exact in the vector, "
+                  "i2c_ok, the stream still after the reply",
+                  all_whole);
+    // At least one row of this list makes a stream late by itself: the reason for it.
+    bench.verdict("... and the load makes a stream late at STOPF by itself", late != 0u);
+
+    // ---- the refused write under the load ----
+    static const uint8_t out[4] = {0x21, 0x32, 0x43, 0x54};
+    static const uint8_t next_out[8] = {0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
+    uint32_t refused = 0;
+    uint32_t nacked = 0;
+    uint32_t whole = 0;
+    const LoadCell worst{3, 16, true};
+    load_begin(worst);
+    for (uint16_t k = 0; k < 100u; ++k) {
+        Far::refuse_at = 1;
+        const uint8_t st = tenure<DmaHost>(self_addr, out, 4, nullptr, 0, FmpI2cSpeed::fast_400k,
+                                           I2cEngine::dma);
+        refused = refused + 1u;
+        nacked = nacked + (st == i2c_nack_data ? 1u : 0u);
+        Far::refuse_at = 0;
+        ClassicTarget::acknowledge(true);
+        Far::took = 0;
+        bool same = tenure<DmaHost>(self_addr, next_out, 8, nullptr, 0, FmpI2cSpeed::fast_400k,
+                                    I2cEngine::dma) == i2c_ok &&
+                    Far::took == 8u;
+        for (uint8_t i = 0; i < 8u && same; ++i) {
+            same = Far::sink[i] == next_out[i];
+        }
+        whole = whole + (same ? 1u : 0u);
+        copies_turn();
+    }
+    load_end(worst);
+    print(serial, "  a first byte refused under the heaviest of them: ", refused, " writes, ", nacked,
+          " i2c_nack_data, the next write of eight whole in ", whole, crlf);
+    bench.verdict("... a first byte refused under it: i2c_nack_data, the next write of eight whole",
+                  refused == 100u && nacked == 100u && whole == 100u);
+
+    dma_host_live = false;
+    DmaHost::release();
+    far_down();
+}
+
+// =============================================================================
+// v - A LOAD THAT TAKES ALL OF APB1 (by name only)
+// =============================================================================
+//
+// 2250 beats in 100 us, the bus's own figure. Not in `z`: such a load can leave the core's
+// own access to the bus waiting until a reset, and a suite that stands still judges
+// nothing after it. A run that never reaches its verdicts is that, and is counted.
+
+void tv_all_of_apb1() {
+    if (!far_ready()) {
+        return;
+    }
+    (void)CycleCounter::init();
+    Dma<1>::init();
+    dma_host_live = true;
+    const bool up = DmaHost::init(clock, base_config);
+    auto idle = [] {};
+    auto far = [](uint8_t) { return [](uint16_t i) { return Far::value(static_cast<uint8_t>(i)); }; };
+    auto f8 = [](uint16_t i) { return Far::value(static_cast<uint8_t>(i)); };
+
+    const LoadCell heavy{3, 12, true};
+    bool whole = up;
+    load_begin(heavy);
+    for (const FmpI2cSpeed v : {FmpI2cSpeed::fast_400k, FmpI2cSpeed::standard_100k}) {
+        LoadReads r{};
+        load_reads(self_addr, v, v == FmpI2cSpeed::fast_400k ? 150u : 50u, far, copies_turn, r);
+        load_print(v == FmpI2cSpeed::fast_400k ? "400 kHz" : "100 kHz", r);
+        whole = whole && r.whole();
+    }
+    load_end(heavy);
+    bench.verdict("THREE STREAMS AND THE COPIES AT THE BUS'S FIGURE: every read exact in the vector, "
+                  "i2c_ok, the stream still after the reply",
+                  whole);
+
+    // The stream is not served at all while the load stands, so a read of one finds its
+    // byte in RXDR under a stopped stream.
+    ProofRow starved{};
+    ProofRow behind{};
+    for (uint16_t k = 0; k < 100u; ++k) {
+        paced_on(3, 5);
+        proof_read(self_addr, 1, FmpI2cSpeed::fast_400k, false, f8, idle, starved);
+        paced_off(3);
+        proof_read(self_addr, 8, FmpI2cSpeed::fast_400k, false, f8, idle, behind);
+    }
+    proof_print("three every 5, a read of one, the load off behind it", starved);
+    proof_print("... the read of eight behind each", behind);
+    // 100 rows a run. The first verdict's en_up and rxne_up say the load reached the
+    // case; a stray beat would show on the second, its first cell and its count.
+    bench.verdict("A STREAM STARVED: the byte in RXDR, the host's own read puts it in memory, exact",
+                  starved.tenures == 100u && starved.en_up == 100u && starved.rxne_up == 100u &&
+                      starved.in_memory == 100u);
+    bench.verdict("... and the read of eight behind it exact, no stray beat at its start",
+                  behind.tenures == 100u && behind.in_memory == 100u);
+
+    // A read of two under that load parks behind the stream: its first byte is never
+    // taken. The wait is the arbiter's to end, here the letter's bound, then recover().
+    ProofRow parked_read{};
+    ProofRow after_parked{};
+    for (uint8_t k = 0; k < 3u; ++k) {
+        paced_on(3, 5);
+        proof_read(self_addr, 2, FmpI2cSpeed::fast_400k, false, f8, idle, parked_read);
+        paced_off(3);
+        proof_read(self_addr, 8, FmpI2cSpeed::fast_400k, false, f8, idle, after_parked);
+    }
+    proof_print("three every 5, a read of two", parked_read);
+    bench.verdict("... a read of two under it does not end while the load stands, and after recover() "
+                  "the next read is whole",
+                  parked_read.lost == 3u && after_parked.in_memory == 3u);
+    dma_host_live = false;
+    DmaHost::release();
+    far_down();
+}
+
+// =============================================================================
 // s - THE SAME AT FAST-MODE PLUS, against the partner (set `t`)
 // =============================================================================
 //
@@ -3870,7 +4213,7 @@ void ts_stream_proof_fm() {
     /// `standing`: the request taken away for the last byte and let up in the STOPF
     /// entry, so the host's stop meets a standing request.
     auto batch = [&](auto spin, ProofRow& row, uint16_t reads, LagRow* lag = nullptr,
-                     bool standing = false) {
+                     bool standing = false, ProofRow* by = nullptr) {
         twilink::Params a{};
         a.ms = static_cast<uint16_t>(reads * 3u * 4u + 50u);
         a.addr = twilink::dut_addr;
@@ -3886,8 +4229,10 @@ void ts_stream_proof_fm() {
         DmaHost::fast_plus_drive(true);
         uint16_t at = 0;
         for (uint16_t k = 0; k < reads && up; ++k) {
+            uint8_t index = 0;
             for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
                 const uint16_t from = at;
+                const uint32_t late0 = row.en_up;
                 proof_read(twilink::dut_addr, n, v, standing,
                            [from](uint16_t i) {
                                return twilink::pattern_value(twilink::pattern_counting, seed,
@@ -3895,6 +4240,11 @@ void ts_stream_proof_fm() {
                            },
                            spin, row, standing ? static_cast<int16_t>(k % 8u) : int16_t{-1});
                 at = static_cast<uint16_t>(at + n);
+                if (by != nullptr) {
+                    by[index].tenures += 1u;
+                    by[index].en_up += row.en_up - late0;
+                }
+                index = static_cast<uint8_t>(index + 1u);
             }
             if (lag != nullptr) {
                 const uint16_t from = at;
@@ -3959,6 +4309,26 @@ void ts_stream_proof_fm() {
     lag_print("Fm+, four copies", lag);
     bench.verdict("... under four copies through the memory, the same",
                   c_ok && copies.in_memory == copies.tenures && copies.lost == 0u && lag.wrong == 0u);
+
+    // The loads of letter u at Fm+, the partner's tally judging the sequence.
+    bool load_ok = true;
+    uint32_t late = 0;
+    for (const LoadCell& c : load_cells_u) {
+        load_begin(c);
+        ProofRow row{};
+        ProofRow by[3] = {};
+        const bool ok = c.copies ? batch(copies_turn, row, 100, nullptr, false, by)
+                                 : batch([] {}, row, 100, nullptr, false, by);
+        load_end(c);
+        proof_print("Fm+", row);
+        print(serial, "    late of reads of 1, 2, 8: ", by[0].en_up, ", ", by[1].en_up, ", ", by[2].en_up,
+              " of ", by[0].tenures, " each", crlf);
+        load_ok = load_ok && ok && row.in_memory == row.tenures && row.lost == 0u;
+        late += row.en_up;
+    }
+    print(serial, "  Fm+, the stream late at STOPF under letter u's loads: ", late, crlf);
+    bench.verdict("... UNDER LETTER U'S LOADS: every read exact, the partner's tally the host's",
+                  load_ok);
     (void)host_ready();
     bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
 }
@@ -4026,10 +4396,15 @@ extern "C" void FMPI2C1_EV_IRQHandler() {
                 }
             }
         }
+        const uint32_t body0 = brio::CycleCounter::now();
         if (DmaHost::isr()) {
             xfer_done = true;
             if (stop_watch.on) {
                 stop_watch.seen = *stop_watch.cell;
+                const uint32_t body = brio::CycleCounter::now() - body0;
+                if (body > stop_watch.body_max) {
+                    stop_watch.body_max = body;
+                }
             }
         }
         return;
@@ -4134,6 +4509,8 @@ int main() {
     bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
     bench.letter('q', "THE PUMP'S ENTRIES, and a late entry", tq_entries);
     bench.letter('r', "THE RECEIVE STREAM AT THE STOPF ENTRY", tr_stream_proof);
+    bench.letter('u', "THE RECEIVE STREAM UNDER A REAL LOAD", tu_load);
+    bench.letter('v', "A LOAD THAT TAKES ALL OF APB1, by name only", tv_all_of_apb1, false);
     bench.second_letter('n', "THE DESK PARTNER: Fm+ acknowledged, a held SDA, a held clock",
                         tn_partner);
     bench.second_letter('o', "ES0298 2.12.8: writes in and out of the clock-ratio band",

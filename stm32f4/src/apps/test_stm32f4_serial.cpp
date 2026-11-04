@@ -63,6 +63,9 @@
 //      the interrupt transmitter and the transmit engine, and read by the
 //      vector's glue, one edge a write; the platform's in_handler() true
 //      in the USART6 vector, false in the letter's body and under a mask
+//   i  A STREAM STOPPED WHILE BYTES ARRIVE: EN's clear swept across a frame, DR then read
+//      with DMAR up, read with DMAR down first, or not read; the next block's count
+//      and bytes judged, at 5.625 and 1 Mbaud
 //
 // THE TWO-BOARD SET, under the second all-key t (z never runs it): USART1
 // on PA9/PA10 (AF7) crossed to the desk's STM32G0B1RE running its
@@ -1053,6 +1056,164 @@ void th_room_edge() {
                   all_idle && glue_edges == writes && !body_edge);
     bench.verdict("in_handler() is IPSR's: true in the USART6 vector, false in the letter's body "
                   "and under a critical section", said == 2u && !body_says && !masked_says);
+}
+
+// =============================================================================
+// i - A STREAM STOPPED WHILE BYTES ARRIVE: THE STRAY BEAT'S QUESTION
+// =============================================================================
+//
+// docs/stm32f4/dma.md, "A clear ahead of a beat": on the FMPI2C, EN's clear landing
+// just ahead of the request, the data register then read with the peripheral's DMA
+// enable up, leaves the next block's start a beat with nothing there. This is the same
+// question to a USART on its loop, staged by hand since no verb of the transport reads
+// DR over a stream it stopped (the header's list, docs/stm32f4/usart.md). In a masked
+// section: one byte stored into DR, `turns` of burn(), EN's clear, the frame let end.
+// Then DR read with DMAR up, or DMAR down first and up again behind the read, or not
+// read. Then the next block: its count looked at before a byte is sent, a burst of
+// eight sent into it, its count and its bytes judged. DMAR stays up at that start,
+// as a ring's owner has it.
+
+[[gnu::always_inline]] inline void burn(uint32_t turns) {
+    while (turns != 0u) {
+        __NOP();
+        --turns;
+    }
+}
+
+enum class StopOrder : uint8_t { read_enable_up, read_enable_down, no_read };
+
+struct StopRow {
+    uint32_t rows = 0;
+    uint32_t taken = 0;       ///< the stream had the frame before EN fell
+    uint32_t left = 0;        ///< RXNE up with EN low and the count unmoved: the clear came first
+    uint32_t stray = 0;       ///< the next block's count moved with nothing sent
+    uint32_t short_run = 0;   ///< its count not zero after the burst of eight
+    uint32_t wrong = 0;       ///< or one of its eight bytes not the one sent
+    uint32_t first_again = 0;   ///< its first cell the frame the stop left: 0xA5, not 0x31
+    uint32_t then_shifted = 0;  ///< and its other seven the burst's first seven
+    uint32_t first_turn = 0xFFFF'FFFFu;   ///< the first turn of the sweep that left a frame
+    uint32_t last_turn = 0;
+};
+
+void stop_row(uint32_t turns, uint32_t frame_turns, StopOrder order, StopRow& row) {
+    using St = DmaStream<RxEngine::controller, RxEngine::stream>;
+    static uint8_t first[4];
+    static uint8_t next[8];
+    static const uint8_t burst[8] = {0x31, 0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xA8};
+    (void)RxEngine::start(std::span<uint8_t>(first, 4u));
+    burn(30);   // nothing reads SxCR in the cycles after the EN store (docs/stm32f4/dma.md)
+    bool left = false;
+    bool taken = false;
+    {
+        InterruptGuard guard;
+        const uint32_t cleared = St::regs().CR & ~DMA_SxCR_EN;
+        Res::write_data(0xA5);
+        burn(turns);
+        St::regs().CR = cleared;
+        for (uint32_t i = 200'000u; i != 0u && St::enabled(); --i) {   // abort()'s bound
+        }
+        burn(2u * frame_turns);
+        taken = St::count() != 4u;
+        left = !taken && Res::rx_ready();
+        if (order == StopOrder::read_enable_up) {
+            (void)Res::read_data();
+        } else if (order == StopOrder::read_enable_down) {
+            Res::dma_receive(false);
+            (void)Res::read_data();
+            Res::dma_receive(true);
+        }
+    }
+    (void)RxEngine::start(std::span<uint8_t>(next, 8u));
+    burn(100);
+    const bool stray = St::count() != 8u;
+    for (const uint8_t b : burst) {
+        while (!Res::tx_empty()) {
+        }
+        Res::write_data(b);
+    }
+    while (!Res::tx_complete()) {
+    }
+    burn(2u * frame_turns);
+    const uint16_t count = St::count();
+    bool same = true;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        same = same && next[i] == burst[i];
+    }
+    RxEngine::stop();
+    Res::dma_receive(false);
+    Res::clear_by_read();
+    Res::dma_receive(true);
+    row.rows = row.rows + 1u;
+    row.taken = row.taken + (taken ? 1u : 0u);
+    row.left = row.left + (left ? 1u : 0u);
+    row.stray = row.stray + (stray ? 1u : 0u);
+    row.short_run = row.short_run + (count != 0u ? 1u : 0u);
+    row.wrong = row.wrong + (same ? 0u : 1u);
+    row.first_again = row.first_again + (next[0] == 0xA5u ? 1u : 0u);
+    bool shifted = true;
+    for (uint8_t i = 1; i < 8u; ++i) {
+        shifted = shifted && next[i] == burst[i - 1u];
+    }
+    row.then_shifted = row.then_shifted + (shifted ? 1u : 0u);
+    if (left) {
+        row.first_turn = turns < row.first_turn ? turns : row.first_turn;
+        row.last_turn = turns > row.last_turn ? turns : row.last_turn;
+    }
+}
+
+void stop_sweep(const char* name, uint32_t frame_cycles, StopOrder order, StopRow& row) {
+    // A turn of burn() is 4 to 6 core cycles (ARM DDI 0439B 3.3.1); taken as 5, the sweep
+    // crosses two frames, one turn at a time, 20 stops a turn.
+    const uint32_t frame_turns = frame_cycles / 5u;
+    for (uint32_t turns = 0; turns < 2u * frame_turns; ++turns) {
+        for (uint8_t k = 0; k < 20u; ++k) {
+            stop_row(turns, frame_turns, order, row);
+        }
+    }
+    print(serial, "  ", name, ": ", row.rows, " stops, the frame taken in ", row.taken, ", left in DR in ",
+          row.left);
+    if (row.left != 0u) {
+        print(serial, " (turns ", row.first_turn, " to ", row.last_turn, " of ", 2u * frame_turns, ")");
+    }
+    print(serial, "; the next block's count moved by itself in ", row.stray, ", short after the burst in ",
+          row.short_run, ", a byte wrong in ", row.wrong, ", its first cell the left frame's in ",
+          row.first_again, ", the burst one cell on in ", row.then_shifted, crlf);
+}
+
+void ti_stray() {
+    (void)CycleCounter::init();
+    bool up_ok = up<LoopDma>(2, 5'625'000u);
+    // The vector stays out of the stage: it would read SR. The ring goes, the one-shot
+    // shape of the same engine comes, with no interrupt of its own.
+    Nvic::disable(Res::irq);
+    Res::regs().CR1 = Res::regs().CR1 & ~(USART_CR1_IDLEIE | USART_CR1_PEIE);
+    Res::error_interrupt(false);
+    RxEngine::stop();
+    RxEngine::arm(Res::data_address(), DmaPriority::very_high, DmaInterrupts::none);
+    Res::dma_receive(false);
+    Res::clear_by_read();
+    Res::dma_receive(true);
+    bool down_clean = true;
+    uint32_t left_total = 0;
+    for (const uint32_t baud : {uint32_t{5'625'000}, uint32_t{1'000'000}}) {
+        up_ok = up_ok && LoopDma::set_baud(clock_hz(clock), baud);
+        const uint32_t frame_cycles = 10u * (clock_hz(clock) / baud);
+        print(serial, "  at ", baud, " baud, a frame ", frame_cycles, " core cycles", crlf);
+        StopRow enable_up{};
+        stop_sweep("DR read with DMAR up", frame_cycles, StopOrder::read_enable_up, enable_up);
+        StopRow enable_down{};
+        stop_sweep("DMAR down first", frame_cycles, StopOrder::read_enable_down, enable_down);
+        StopRow no_read{};
+        stop_sweep("DR not read", frame_cycles, StopOrder::no_read, no_read);
+        down_clean = down_clean && enable_down.stray == 0u && enable_down.short_run == 0u &&
+                     enable_down.wrong == 0u;
+        left_total += enable_up.left + enable_down.left;
+    }
+    bench.verdict("the sweep reached the clear ahead of the frame", up_ok && left_total != 0u);
+    bench.verdict("... and with DMAR down ahead of DR's read the next block is whole, every stop",
+                  down_clean);
+    Nvic::enable(Res::irq);
+    down();
 }
 
 // ===========================================================================
@@ -3880,6 +4041,7 @@ int main() {
     bench.letter('f', "the burst edge from the vector, nothing polled", tf_edge);
     bench.letter('g', "the receive ring against copies on its own controller", tg_arbitration);
     bench.letter('h', "the transmit room and edge, and in_handler()", th_room_edge);
+    bench.letter('i', "a stream stopped while bytes arrive: the stray beat's question", ti_stray);
     bench.second_letter('1', "the rendezvous, and this crystal against the far chip's", t1_link);
     bench.second_letter('2', "the baud matrix across the wire, timed by the far chip", t2_rates);
     bench.second_letter('3', "the frame matrix across the wire", t3_frames);
