@@ -962,7 +962,9 @@ Driver gaps, each with its reason:
   suite measures the legal write instead.
 
 Implemented but not bench-verified, each with what would measure it:
-- What stands a core still under a load near all of APB1. Twice, each on a load of 2250 beats in 100 us or
+- What stands a core still under a load near all of APB1. One form is explained and closed: an
+  I2C host's event vector re-entering on BTF under a starved stream ([i2c.md](i2c.md)), which leaves the
+  core in Handler mode and answers a halt. The two recorded here did not, and stay open. Twice, each on a load of 2250 beats in 100 us or
   near it (four streams every 8 at 2251 in a sweep; three every 12 and the copies with a 1 MHz partner
   and a host's `init()` under it), the core stood in Thread mode with SysTick and USART2 pending until a
   reset. The probe's halt timed out, the probe read the private peripheral bus and the flash and not

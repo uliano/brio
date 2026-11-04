@@ -61,9 +61,9 @@
  * serializes. It waits in its caller, bounded and timed on the DWT's
  * cycle counter, which init() turns on: stop_drain_us (5 ms) for the last
  * tenure's STOP to leave the wire and bus_free_us (100 us) for BUSY to
- * fall; a STOP still standing past the first bound parks the tenure, no
- * START and no vector, for the per-bus timeout to answer. A probe that
- * stopped the counter makes each wait some two and a half times as long
+ * fall; a STOP still standing past the first bound is answered there,
+ * i2c_timeout with no START, whatever the arbiter's per-bus timeout. A probe
+ * that stopped the counter makes each wait some two and a half times as long
  * (poll_for_us()). isr(), error_isr() and dma_isr() are the bodies the
  * program's handlers for the event vector, the error vector and the two
  * DMA streams call, and nothing else calls them; each runs to completion
@@ -93,7 +93,9 @@
  * itself is on from start() to the completion and off between tenures,
  * because the flags that end a tenure are levels that outlive it - BTF
  * stands until the STOP requested on it is on the wire - and a vector left
- * on re-enters for all that time (isr() says what was measured).
+ * on re-enters for all that time (isr() says what was measured). A phase on
+ * the DMA streams keeps it down too, from ADDR's entry to the stream's
+ * completion: a late stream holds BTF up with nothing for the vector to do.
  *
  * What the engine takes from the chapter beyond the sequences, each
  * measured on the STM32F429I-DISC1 (docs/stm32f4/i2c.md has the
@@ -981,18 +983,18 @@ public:
 
     /// Begin a tenure (I2cBus calls it from main context). False whenever
     /// the wire moves: the tenure completes on the event vector and a
-    /// TransferDone{status()} follows. True only for the one refusal that
-    /// moves nothing - a speed the clock cannot produce, an address
-    /// outside 0x08..0x77 (i2c_address_in_range), or `engine =
-    /// I2cEngine::dma` on a host with no engines bound, answered
-    /// i2c_rejected through status() - the I2cHost contract
-    /// (docs/design/i2c-bus.md).
+    /// TransferDone{status()} follows. True when nothing of it moves, with
+    /// no vector to follow: i2c_rejected through status() for a speed the
+    /// clock cannot produce, an address outside 0x08..0x77
+    /// (i2c_address_in_range), or `engine = I2cEngine::dma` on a host with
+    /// no engines bound; i2c_timeout for a STOP still standing when the
+    /// drain below runs out. The I2cHost contract is
+    /// docs/design/i2c-bus.md.
     ///
     /// One tenure at a time: nothing here checks that the previous one has
     /// completed, the arbiter serializes. The Request's buffers stay lent
     /// until the completion. Waits in the caller, bounded (the STOP drain
-    /// and the BUSY wait below); a drain that runs out parks the tenure
-    /// with no START and no vector, and returns false.
+    /// and the BUSY wait below).
     static bool start(const Request& r) {
         // One compare refuses both an engine this host has not got (`dma`
         // with no engines bound) and a value outside the enumeration.
@@ -1026,11 +1028,14 @@ public:
         // this block cannot queue the START behind it: it is waited for
         // here, before anything writes CR1, a speed change's PE cycle
         // included, BOUNDED IN TIME (stop_drain_us). A clock held past the
-        // bound is a wedge: the tenure PARKS - no START and no vector - for
-        // the per-bus timeout to answer. What the wait costs a tenure
+        // bound ends the wait: the requester is answered here, i2c_timeout,
+        // CR1 untouched, so the STOP still goes out when the client lets go
+        // and the next request finds it gone. What the wait costs a tenure
         // started at once is docs/stm32f4/i2c.md's figure.
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
-            return false;
+            t_.status = i2c_timeout;
+            t_.phase = Phase::idle;
+            return true;
         }
         // SR1 is read before SR2 and the CR1 store below: a STOPF or an
         // ADDR the target half raised while the event vector was off
@@ -1068,6 +1073,16 @@ public:
      * the thread starved for a bit period. finish() takes ITEVTEN down
      * with the buffer vector and the DMA requests in one CR2 store, and
      * start() raises it.
+     *
+     * A PHASE ON THE STREAMS RUNS WITH IT DOWN, from the entry that clears
+     * ADDR to the stream's completion, which ends a read and raises it for
+     * a write's last BTF. A stream that falls a byte behind leaves BTF up
+     * until it is served, so with the vector on, a load that starved the
+     * stream re-entered this handler for as long as it stood: a read of two
+     * on the Nucleo-F446RE held the core here for good, the thread that
+     * could lift the load never running again, and a write of eight took
+     * BTF for its end and answered i2c_ok with four bytes on the wire
+     * (docs/stm32f4/i2c.md).
      *
      * An address phase that finds no ADDR leaves the switch for
      * unserved(), which ends the tenure when ADD10, SB or BTF stands there
@@ -1138,7 +1153,7 @@ public:
                         (void)TxEngine::start_claimed(
                             std::span<const uint8_t>(t_.tx, t_.tx_left));
                         t_.tx_dma = true;
-                        S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_DMAEN);
+                        S::control2(t_.freq, idle_enables | I2C_CR2_DMAEN);
                         (void)S::status2();
                         t_.phase = Phase::tx_dma;
                         return false;
@@ -1696,7 +1711,7 @@ private:
                 // (prime_receive()) and takes 24.3.8's own sequence: the
                 // STOP programmed after ADDR's clear.
                 const uint32_t last = t_.rx_len != 1u ? I2C_CR2_LAST : 0u;
-                S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_DMAEN | last);
+                S::control2(t_.freq, idle_enables | I2C_CR2_DMAEN | last);
                 (void)S::status2();
                 if (t_.rx_len == 1u) {
                     S::stop();

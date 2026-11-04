@@ -168,6 +168,8 @@
 //      called: every stall path and a bus error on either channel, directly
 //      and queued through SpiBus, the next polled and asynchronous windows
 //      exact at both ends; the clock gate closed, which no reset opens
+//   B  THE RECEIVE CHANNEL'S FIRST BLOCK BEHIND POLLED FRAMES against the peer: RXDMAEN up
+//      through the frames ahead of the channel's start, the count and the bytes judged
 //   t  (OUTSIDE z) THE CRCNEXT WINDOW: the store walked away from the
 //      last data store one loop turn at a time, one frame in flight -
 //      the instrument behind w's burst (spi.md)
@@ -180,7 +182,7 @@
 // plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghijklmnopqsK,rtuvwxySE
+// build: groups = abcdefghijklmnopqsK,rtuvwxySEB
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -319,7 +321,7 @@ Serial serial;
 // The table holds every letter registered in main(), 28 of them: a
 // letter past its capacity is refused (letter() returns false), and the
 // suite does not check the return, so it would be missing in silence.
-TestBench<Serial, 28> bench;
+TestBench<Serial, 29> bench;
 
 using CsPin = Pin<'A', 15>;          ///< the host's chip select, a GPIO
 using ClientNssPin = Pin<'B', 12>;   ///< the client's NSS - and letter e's witness
@@ -7006,6 +7008,319 @@ void tE_wire_ended() {
     (void)link_command_mode();
 }
 
+// =============================================================================
+// B - THE RECEIVE CHANNEL'S FIRST BLOCK BEHIND POLLED FRAMES
+// =============================================================================
+//
+// This host keeps RXDMAEN up from init() on, under every polled frame and the command
+// loop (boot_config()), so a frame coming back raises a DMA request that a channel not
+// serving does not take, and the core reads DR with that request up. Whether the DMA
+// remembers it and takes a beat at the channel's next start is what this letter asks.
+// RM0444 10.4.5 describes no such thing; docs/stm32g0/i2c.md has it measured on this
+// chip's I2C, in this order: the channel stopped, then the requests up, then the data
+// register read.
+//
+// One select window on the link, n frames both ways, commanded of the peer: the frames
+// ahead run polled, then the rest on the engines. What judges, every one an identity with
+// no tolerance: every cell read back against what the peer owes, the channel's count and the
+// block's first cell right behind start(), which leaves the receive channel's start
+// some tens of cycles behind and the block's first frame ends 256 cycles after its first
+// store at PCLK/32 and 2048 at PCLK/256, and the RXFIFO's level behind the completion. BSY at
+// the answer is printed: a completion a frame early is what a beat taken at start would
+// give, and the level is what judges it.
+
+namespace stray {
+
+constexpr uint16_t frames = 32;
+constexpr uint16_t ahead_frames = 8;
+alignas(2) uint8_t out[frames];
+uint8_t in[frames];
+
+enum class Ahead : uint8_t {
+    polled_read,     ///< the first request after init() is polled, read back
+    polled_write,    ///< ... polled, nothing read back
+    command,         ///< the first request names the engines, its command in the loop
+    fault,           ///< a transfer error on the receive channel, then a polled read
+    block,           ///< a block first, then a polled read: the channel filled, EN up
+};
+
+struct Row {
+    uint8_t passes = 0;
+    uint8_t exact = 0;        ///< every cell, at both ends, and the completion on a quiet block
+    uint8_t count_short = 0;  ///< the channel's count below the block's right after start()
+    uint8_t cell_moved = 0;   ///< the block's first cell written right after start()
+    uint8_t left = 0;         ///< a frame left in the RXFIFO behind the completion
+    uint8_t early = 0;        ///< BSY still up at the completion's answer
+    uint16_t host_mism = 0;
+    uint16_t peer_mism = 0;
+};
+
+/// One window: the frames ahead, then the block, then the two ends' reports.
+void one_pass(Ahead ahead, SpiClock rate, bool rxdmaen_down, uint8_t seed, Row& row) {
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = frames;
+    a.ms = 400;
+    a.seed_a = seed;
+    a.seed_b = static_cast<uint8_t>(seed ^ 0x6Cu);
+    a.pattern = spilink::pattern_prbs;
+    spilink::Stream gen(a.pattern, a.seed_a);
+    for (uint16_t i = 0; i < frames; ++i) {
+        out[i] = gen.next();
+        in[i] = 0xEE;
+    }
+    const bool accepted = peer_act(Op::exchange, a);
+    settle();
+    software_cs_pads();
+    Dma<1>::bus_clock(true);
+    dma_host_live = true;
+    (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
+    DmaHost::prime(SpiMode::mode0, rate);
+    settle_ms(1);
+    if (ahead == Ahead::fault) {
+        DmaHost::Request bad{};
+        bad.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+        bad.rx = lend<Lease::reply>(kl::way_bad_address());
+        bad.len = frames;
+        bad.clock = SpiClock::div32;
+        bad.engine = SpiEngine::dma;
+        host_done = false;
+        if (!DmaHost::start(bad)) {
+            (void)way::completed_within(false, 100u);
+        }
+        settle_ms(2);
+        DmaHost::prime(SpiMode::mode0, rate);
+    }
+    CsPin::clear();
+    link_hold();
+    uint16_t done = 0;
+    if (ahead == Ahead::block) {
+        // Eight frames on the engines ahead of the polled ones: the suite's own order.
+        DmaHost::Request first{};
+        first.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+        first.rx = lend<Lease::reply>(in);
+        first.len = ahead_frames;
+        first.clock = rate;
+        first.engine = SpiEngine::dma;
+        host_done = false;
+        if (!DmaHost::start(first)) {
+            (void)way::completed_within(false, 100u);
+        }
+        done = ahead_frames;
+    }
+    if (ahead != Ahead::command) {
+        if (rxdmaen_down) {
+            S1::regs().CR2 = S1::regs().CR2 & ~SPI_CR2_RXDMAEN;
+        }
+        DmaHost::Request polled{};
+        polled.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out + done));
+        if (ahead != Ahead::polled_write) {
+            polled.rx = lend<Lease::reply>(in + done);
+        }
+        polled.len = ahead_frames;
+        polled.clock = rate;
+        polled.engine = SpiEngine::polled;
+        (void)DmaHost::start(polled);
+        done = static_cast<uint16_t>(done + ahead_frames);
+        if (rxdmaen_down) {
+            S1::regs().CR2 = S1::regs().CR2 | SPI_CR2_RXDMAEN;
+        }
+    }
+    DmaHost::Request block{};
+    if (ahead == Ahead::command) {
+        block.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+        block.cmd_len = ahead_frames;
+        done = ahead_frames;
+    }
+    block.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out + done));
+    block.rx = lend<Lease::reply>(in + done);
+    block.len = static_cast<uint16_t>(frames - done);
+    block.clock = rate;
+    block.engine = SpiEngine::dma;
+    host_done = false;
+    dma_completions = 0;
+    const bool inside = DmaHost::start(block);
+    const uint32_t count_after = HostRx::remaining();
+    const uint8_t cell_after = in[done];
+    const bool completed = way::completed_within(inside, 400u);
+    const bool busy_at_end = S1::busy();
+    link_hold();
+    CsPin::set();
+    settle_ms(1);
+    const uint8_t left = static_cast<uint8_t>(S1::rx_level());
+    const uint8_t status = DmaHost::status();
+    DmaHost::release();
+    dma_host_live = false;
+    (void)link_command_mode();
+    spilink::Report r{};
+    const bool reported = peer_report(r);
+    spilink::Stream want(a.pattern, a.seed_b);
+    uint16_t mism = 0;
+    for (uint16_t i = 0; i < frames; ++i) {
+        const uint8_t w = want.next();
+        const bool read_back = (ahead == Ahead::polled_write || ahead == Ahead::command) ? i >= ahead_frames : true;
+        if (read_back && in[i] != w) {
+            ++mism;
+        }
+    }
+    const bool counted_short = !inside && count_after < block.len;
+    row.passes = static_cast<uint8_t>(row.passes + 1u);
+    row.count_short = static_cast<uint8_t>(row.count_short + (counted_short ? 1u : 0u));
+    row.cell_moved = static_cast<uint8_t>(row.cell_moved + ((!inside && cell_after != 0xEEu) ? 1u : 0u));
+    row.left = static_cast<uint8_t>(row.left + (left != 0u ? 1u : 0u));
+    row.early = static_cast<uint8_t>(row.early + (busy_at_end ? 1u : 0u));
+    row.host_mism = static_cast<uint16_t>(row.host_mism + mism);
+    row.peer_mism = static_cast<uint16_t>(row.peer_mism + r.mism);
+    const bool exact = accepted && reported && completed && !inside && status == spi_ok && r.count == frames && r.mism == 0u && mism == 0u &&
+                       dma_completions == 1u && left == 0u;
+    row.exact = static_cast<uint8_t>(row.exact + (exact ? 1u : 0u));
+}
+
+Row row_of(const char* what, Ahead ahead, SpiClock rate, bool rxdmaen_down, uint8_t passes) {
+    Row row{};
+    for (uint8_t k = 0; k < passes; ++k) {
+        one_pass(ahead, rate, rxdmaen_down, static_cast<uint8_t>(0x11u + k * 13u), row);
+    }
+    print(serial, "    ", what, " at PCLK/", spi_division(rate), rxdmaen_down ? ", RXDMAEN down around it" : "", ": exact ", row.exact, " of ",
+          row.passes, "; behind start() the count short ", row.count_short, ", the first cell written ", row.cell_moved,
+          "; a frame left ", row.left, ", BSY at the answer ", row.early, "; cells wrong here ", row.host_mism, ", at the peer ",
+          row.peer_mism, crlf);
+    return row;
+}
+
+/// RXDMAEN by hand: up all along, down around the frame and its read, raised on the
+/// standing frame and read behind it - the I2C page's own order - or up all along and the
+/// frame not read at all: a live request, the ruler's proof that a beat at start shows.
+enum class Hand : uint8_t { up, down, raised_on_it, not_read };
+
+/// The I2C page's order by hand, nothing on the wire but SCK and the select high so the peer
+/// hears nothing: `standing` frames clocked with the channel stopped, left in the RXFIFO
+/// `hold_us`, then read; then a block of eight at PCLK/256 with its count and first cell read
+/// behind start(), a frame being 2048 cycles.
+void by_hand(uint8_t standing, uint32_t hold_us, Hand hand, bool wide, Row& row) {
+    static uint16_t wide_in[8];
+    software_cs_pads();
+    Dma<1>::bus_clock(true);
+    dma_host_live = true;
+    (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
+    DmaHost::prime(SpiMode::mode0, SpiClock::div256, wide ? SpiDataSize::bits16 : SpiDataSize::bits8);
+    settle_ms(1);
+    if (hand == Hand::down || hand == Hand::raised_on_it) {
+        S1::regs().CR2 = S1::regs().CR2 & ~SPI_CR2_RXDMAEN;
+    }
+    for (uint8_t i = 0; i < standing; ++i) {
+        if (wide) {
+            S1::data_halfword(0xFFFFu);
+        } else {
+            S1::data_byte(0xFFu);
+        }
+    }
+    // delay_us() is capped below a tick: the hold in pieces it admits.
+    (void)delay_us(clock, 34u * (wide ? 2u : 1u) * standing);
+    for (uint32_t left_us = hold_us; left_us != 0u;) {
+        const uint32_t piece = left_us < 500u ? left_us : 500u;
+        (void)delay_us(clock, piece);
+        left_us -= piece;
+    }
+    if (hand == Hand::raised_on_it) {
+        S1::regs().CR2 = S1::regs().CR2 | SPI_CR2_RXDMAEN;
+    }
+    for (uint8_t i = 0; i < standing && hand != Hand::not_read; ++i) {
+        (void)(wide ? S1::data_halfword() : static_cast<uint16_t>(S1::data_byte()));
+    }
+    if (hand == Hand::down) {
+        S1::regs().CR2 = S1::regs().CR2 | SPI_CR2_RXDMAEN;
+    }
+    for (uint16_t i = 0; i < 8u; ++i) {
+        wide_in[i] = 0xEEEEu;
+    }
+    DmaHost::Request block{};
+    block.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    block.rx = lend<Lease::reply>(reinterpret_cast<uint8_t*>(wide_in));
+    block.len = 8;
+    block.clock = SpiClock::div256;
+    block.bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    block.engine = SpiEngine::dma;
+    host_done = false;
+    dma_completions = 0;
+    const bool inside = DmaHost::start(block);
+    const uint32_t count_after = HostRx::remaining();
+    const uint16_t cell_after = wide_in[0];
+    const bool completed = way::completed_within(inside, 100u);
+    const bool busy_at_end = S1::busy();
+    settle_ms(1);
+    const uint8_t left = static_cast<uint8_t>(S1::rx_level());
+    row.passes = static_cast<uint8_t>(row.passes + 1u);
+    row.count_short = static_cast<uint8_t>(row.count_short + ((!inside && count_after < 8u) ? 1u : 0u));
+    row.cell_moved = static_cast<uint8_t>(row.cell_moved + ((!inside && cell_after != 0xEEEEu) ? 1u : 0u));
+    row.left = static_cast<uint8_t>(row.left + (left != 0u ? 1u : 0u));
+    row.early = static_cast<uint8_t>(row.early + (busy_at_end ? 1u : 0u));
+    row.exact = static_cast<uint8_t>(row.exact + ((completed && !inside && DmaHost::status() == spi_ok && dma_completions == 1u && left == 0u &&
+                                                   count_after == 8u)
+                                                      ? 1u
+                                                      : 0u));
+    DmaHost::release();
+    dma_host_live = false;
+}
+
+Row hand_row(const char* what, uint8_t standing, uint32_t hold_us, Hand hand, bool wide, uint8_t passes) {
+    Row row{};
+    for (uint8_t k = 0; k < passes; ++k) {
+        by_hand(standing, hold_us, hand, wide, row);
+    }
+    print(serial, "    ", what, ", ", standing, " standing ", hold_us, " us",
+          hand == Hand::down           ? ", RXDMAEN down around it"
+          : hand == Hand::raised_on_it ? ", RXDMAEN raised on it"
+          : hand == Hand::not_read     ? ", not read: the ruler's proof"
+                                       : "",
+          ": whole ", row.exact, " of ",
+          row.passes, "; behind start() the count short ", row.count_short, ", the first cell written ", row.cell_moved,
+          "; a frame left ", row.left, ", BSY at the answer ", row.early, crlf);
+    return row;
+}
+
+}  // namespace stray
+
+void tB_stray() {
+    if (!need_peer()) {
+        return;
+    }
+    using stray::Ahead;
+    constexpr uint8_t passes = 20;
+    bool all = true;
+    for (const SpiClock rate : {SpiClock::div256, SpiClock::div32}) {
+        const auto note = [&all](const stray::Row& r) { all = all && r.exact == r.passes && r.count_short == 0u && r.cell_moved == 0u; };
+        note(stray::row_of("a polled read first", Ahead::polled_read, rate, false, passes));
+        note(stray::row_of("a polled write first", Ahead::polled_write, rate, false, passes));
+        note(stray::row_of("a command first, in the loop", Ahead::command, rate, false, passes));
+        note(stray::row_of("a transfer error, then a polled read", Ahead::fault, rate, false, passes));
+        note(stray::row_of("a block, then a polled read", Ahead::block, rate, false, passes));
+        note(stray::row_of("the control, a polled read first", Ahead::polled_read, rate, true, passes));
+        note(stray::row_of("the control, a polled write first", Ahead::polled_write, rate, true, passes));
+    }
+    print(serial, "  by hand", crlf);
+    using stray::Hand;
+    const auto whole = [&all](const stray::Row& r) { all = all && r.exact == r.passes && r.count_short == 0u && r.cell_moved == 0u; };
+    whole(stray::hand_row("byte frames", 1, 0, Hand::up, false, passes));
+    whole(stray::hand_row("byte frames", 1, 100, Hand::up, false, passes));
+    whole(stray::hand_row("byte frames", 2, 100, Hand::up, false, passes));
+    whole(stray::hand_row("byte frames", 1, 2000, Hand::up, false, passes));
+    whole(stray::hand_row("byte frames", 1, 100, Hand::down, false, passes));
+    whole(stray::hand_row("byte frames", 1, 100, Hand::raised_on_it, false, passes));
+    whole(stray::hand_row("half-word frames", 1, 100, Hand::up, true, passes));
+    whole(stray::hand_row("half-word frames", 1, 100, Hand::down, true, passes));
+    whole(stray::hand_row("half-word frames", 1, 100, Hand::raised_on_it, true, passes));
+    const stray::Row proof = stray::hand_row("byte frames", 1, 100, Hand::not_read, false, passes);
+    bench.verdict("THE RULER SEES A BEAT AT THE CHANNEL'S START: a frame left unread, RXDMAEN up, the count short and the first cell "
+                  "written behind start(), every pass",
+                  proof.count_short == proof.passes && proof.cell_moved == proof.passes);
+    bench.verdict("THE FIRST BLOCK BEHIND POLLED FRAMES, RXDMAEN UP THROUGHOUT: no stray beat - the count whole and the first cell "
+                  "unwritten behind start(), every cell exact at both ends",
+                  all);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the letter", command(Op::ping));
+}
+
 /// SPI1's line is letter m's alone: no host arms the block's interrupts,
 /// so the sleep letter's bare RXNE is the one thing that raises it, and
 /// the frame is read here and the wake recorded.
@@ -7170,6 +7485,7 @@ int main() {
     bench.letter('E', "WHEN A REQUEST ENDS THE WIRE HAS ENDED: the SCK pad, every mode and rate, "
                       "both engines",
                  tE_wire_ended);
+    bench.letter('B', "THE RECEIVE CHANNEL'S FIRST BLOCK BEHIND POLLED FRAMES against the peer", tB_stray);
     bench.letter('t', "THE CRCNEXT WINDOW against the peer: the walk, no verdict",
                  tt_crcnext_walk, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "

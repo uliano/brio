@@ -110,8 +110,8 @@ BOARD running `spi_peer`, commanded in band over
 `avrxt/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
 (16-bit frames, a client that only listens, both ends' CRC units), with
 `t` and `x` beside them outside `z`, `K` (12 verdicts) on the same link, the next
-request after a stall or a transfer error, and `S` (7) on the same link, the engine a
-request names. The peer may be any of the three ports of
+request after a stall or a transfer error, `S` (7) on the same link, the engine a
+request names, and `B` (3) on the same link, the first block behind polled frames. The peer may be any of the three ports of
 that app - the AVR's, the SAM C21's, this stratum's own, which answers
 on SPI1 AF0 at the same pin names this board hosts on, or the STM32F4's,
 on the F446's SPI2 - and the peer's `ident` names which one answered
@@ -1349,6 +1349,22 @@ everything; at medium every window is wrong in both widths, at low every
 bit. So the peer drives MISO at very-high in modes 0 and 3 and at medium
 in modes 1 and 2 (its header), and that suite's x is 0 of 40 and its
 back-to-back rung 0 of 30.
+
+**RXDMAEN stays up under polled frames, and the block behind them is whole** (letter `B`, twenty
+windows a row, fifteen runs and three of `z`). An engined host keeps the request's enable up from
+`init()` on (`boot_config()`), so a polled frame or a command's echo raises a DMA request the
+channel is not there to serve, and the core reads DR over it. This chip's I2C remembers such a
+request and takes a stray beat at the channel's next start ([i2c.md](i2c.md), "A DMA request a
+stopped channel never served is remembered"); this block's does not. On the link, eight frames
+ahead and the rest of 32 on the engines, in one select window at PCLK/256 and PCLK/32: a polled
+read first after `init()`, a polled write first, a command in the loop first, a transfer error
+and then a polled read, a block and then a polled read. Every row 300 windows of 300 exact at
+both ends, the channel's count whole and the block's first cell unwritten right behind `start()`,
+no frame left in the RXFIFO, and the same with RXDMAEN taken down by hand around the polled frames.
+By hand with nothing on the select: a frame left standing up to 2 ms, two frames, half-word frames,
+and the I2C page's own order - the frame standing, then RXDMAEN up, then DR read - all whole, 300 of
+300 a row. A frame left unread with RXDMAEN up does show, the count short and the first cell
+written 300 of 300: that is what a beat at the channel's start would look like here.
 
 **The next request after a stall or a transfer error** (letter `K`, twelve runs and three of `z`;
 `recover()` called only where named). The peer's window is commanded first, and the engined

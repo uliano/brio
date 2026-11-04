@@ -110,7 +110,12 @@
 //      the wait for BUSY, staged with the far pads, with the ticker, without it and
 //      with the DWT's counter stopped
 //   r  (the Nucleo-F446RE, by name only) A LOAD THAT TAKES ALL OF APB1: nothing answering
-//      ahead of a starved stream, the read and the next one exact when the load comes off
+//      ahead of a starved stream, the read and the next one exact when the load comes off;
+//      runs of two and eight starved from the start and from the third byte, the event
+//      vector's entries, the bytes at the target
+//   s  (the Nucleo-F446RE) A CLIENT HOLDS THE CLOCK PAST THE DRAIN: a request right behind a
+//      stretched acknowledge, through an arbiter with a per-bus timeout and one with none: the
+//      answer, its time, what it moved, and the next requests with no init() and no recover()
 //
 // build: boards = f429zi,f469ni,f446re
 // build: monitor_speed = 115200
@@ -327,6 +332,16 @@ uint8_t peer_sys_ctrl2_boot = 0;
 volatile bool bus_ao_live = false;
 volatile bool dma_host_live = false;
 volatile bool xfer_done = false;
+#if defined(STM32F446xx)
+// Letter s's glue: the arbiter with no timeout live, the far SCL pad pulled low from the
+// completion's entry, the completion's time, the tick at which a client's hold ends.
+volatile bool drain_plain_live = false;
+volatile bool drain_grab_scl = false;
+volatile uint32_t drain_done_at = 0;
+volatile uint32_t drain_let_go_tick = 0;
+enum class DrainLetGo : uint8_t { none, pad, target };
+volatile DrainLetGo drain_let_go = DrainLetGo::none;
+#endif
 /// Entries of the two DMA streams' vectors, counted whoever owns them.
 volatile uint32_t tx_dma_entries = 0;
 volatile uint32_t rx_dma_entries = 0;
@@ -2332,7 +2347,7 @@ void to_load() {
     auto idle = [] {};
     ReadRow total{};
     for (const LoadCell& c : {LoadCell{0, 16, false}, LoadCell{6, 32, false}, LoadCell{4, 17, false},
-                              LoadCell{3, 8, false}, LoadCell{0, 16, true}, LoadCell{2, 16, true},
+                              LoadCell{3, 13, false}, LoadCell{0, 16, true}, LoadCell{2, 16, true},
                               LoadCell{2, 8, true}, LoadCell{6, 48, true}, LoadCell{3, 16, true}}) {
         if (c.copies) {
             copies_on();
@@ -2373,6 +2388,98 @@ void to_load() {
 // 2250 beats in 100 us, the bus's own figure. Not in `z`: such a load can leave the core's
 // own access to the bus waiting until a reset, and a suite that stands still judges
 // nothing after it. A run that never reaches its verdicts is that, and is counted.
+
+/// A run of `n` on the engines under all of APB1, the stream not served from the start or,
+/// `late`, from the third byte on: what stands behind the wire's first bytes, what the
+/// event vector did, and the run when the load comes off. A write's bytes are counted at
+/// the target and a read's compared; the target comes up afresh for each, its pointer
+/// the witness of how many bytes the wire asked of it.
+struct StarvedRow {
+    uint16_t rows = 0;
+    uint16_t early = 0;      ///< answered with the load up
+    uint16_t stretched = 0;  ///< BTF standing and the host still the controller
+    uint32_t entries = 0;    ///< the event vector's, with the load up
+    uint16_t right = 0;      ///< answered i2c_ok, every byte, once the load came off
+    uint16_t given_max = 0;  ///< a read: the most bytes the target's pointer moved
+    uint16_t given_min = 0xFFFFu;
+};
+
+void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = true) {
+    static uint8_t cells[9];
+    const uint8_t from = 0x10;
+    (void)Regs::up(clock);
+    DmaHost::Request r{};
+    r.addr = peer.addr;
+    r.speed = late ? I2cSpeed::standard_100k : I2cSpeed::fast_400k;
+    r.engine = I2cEngine::dma;
+    if (write) {
+        for (uint8_t i = 0; i < n; ++i) {
+            cells[i] = from;   // the index, then bytes the read-only cells ignore
+        }
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(cells));
+        r.tx_len = n;
+    } else {
+        Regs::ptr = from;
+        for (uint8_t i = 0; i < n; ++i) {
+            cells[i] = static_cast<uint8_t>(~Regs::file[from + i]);
+        }
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(cells));
+        r.rx_len = n;
+    }
+    Regs::took = 0;
+    if (load && !late) {
+        paced_on(3, 5);
+    }
+    read_watch.ev_entries = 0;
+    read_watch.on = true;
+    xfer_done = false;
+    (void)DmaHost::start(r);
+    if (load && late) {
+        // The address and two bytes at 100 kHz, 270 us, and the load comes up.
+        (void)delay_us(clock, 300);
+        paced_on(3, 5);
+    }
+    const uint32_t t0 = Ticker::ticks();
+    // A run of eight's own clocks are 225 us at 400 kHz and 900 at 100 kHz.
+    while (Ticker::ticks() - t0 < 3u) {
+    }
+    row.entries = row.entries + read_watch.ev_entries;
+    row.early = static_cast<uint16_t>(row.early + ((load && xfer_done) ? 1u : 0u));
+    row.stretched = static_cast<uint16_t>(row.stretched + ((S::host() && S::flag(I2cFlag::byte_finished)) ? 1u : 0u));
+    if (load) {
+        paced_off(3);
+    }
+    while (!xfer_done && Ticker::ticks() - t0 < 20u) {
+    }
+    read_watch.on = false;
+    spin_ms(1);
+    bool right = xfer_done && DmaHost::status() == i2c_ok;
+    if (write) {
+        right = right && Regs::took == n;
+    } else {
+        for (uint8_t i = 0; i < n && right; ++i) {
+            right = cells[i] == Regs::file[from + i];
+        }
+        const uint16_t given = static_cast<uint16_t>(Regs::ptr - from);
+        row.given_max = given > row.given_max ? given : row.given_max;
+        row.given_min = given < row.given_min ? given : row.given_min;
+    }
+    if (!xfer_done) {
+        (void)DmaHost::recover();
+    }
+    row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.right = static_cast<uint16_t>(row.right + (right ? 1u : 0u));
+}
+
+void starved_print(const char* what, uint8_t n, const StarvedRow& row) {
+    print(serial, "  ", what, " of ", n, ", ", row.rows, " rows: answered with the load up ", row.early,
+          ", BTF standing ", row.stretched, ", event entries a row ", row.entries / (row.rows != 0u ? row.rows : 1u),
+          "; exact once the load came off ", row.right);
+    if (row.given_max != 0u) {
+        print(serial, "; the target's pointer moved ", row.given_min, " to ", row.given_max);
+    }
+    print(serial, crlf);
+}
 
 void tr_all_of_apb1() {
     (void)CycleCounter::init();
@@ -2441,6 +2548,30 @@ void tr_all_of_apb1() {
                   "read and the next one exact when the load comes off",
                   rows == 100u && wire_first == 100u && answered_early == 0u && right == 100u &&
                       next_right == 100u);
+    StarvedRow plain_rd2{}, plain_rd8{}, rd2{}, rd8{}, wr2{}, wr8{}, late_rd8{}, late_wr8{};
+    for (uint8_t k = 0; k < 50u; ++k) {
+        starved_run(2, false, false, plain_rd2, false);
+        starved_run(8, false, false, plain_rd8, false);
+        starved_run(2, false, false, rd2);
+        starved_run(8, false, false, rd8);
+        starved_run(2, true, false, wr2);
+        starved_run(8, true, false, wr8);
+        starved_run(8, false, true, late_rd8);
+        starved_run(8, true, true, late_wr8);
+    }
+    starved_print("no load, a read", 2, plain_rd2);
+    starved_print("no load, a read", 8, plain_rd8);
+    starved_print("all of APB1, a read", 2, rd2);
+    starved_print("all of APB1, a read", 8, rd8);
+    starved_print("all of APB1, a write", 2, wr2);
+    starved_print("all of APB1, a write", 8, wr8);
+    starved_print("all of APB1 from the third byte, a read", 8, late_rd8);
+    starved_print("all of APB1 from the third byte, a write", 8, late_wr8);
+    bench.verdict("A RUN OF TWO OR EIGHT STARVED: nothing answers ahead of the stream, the event vector takes SB's and ADDR's entries "
+                  "alone, and every byte is there when the load comes off",
+                  rd2.right == rd2.rows && rd8.right == rd8.rows && wr2.right == wr2.rows && wr8.right == wr8.rows &&
+                      late_rd8.right == late_rd8.rows && late_wr8.right == late_wr8.rows && rd2.early == 0u && rd8.early == 0u &&
+                      wr2.early == 0u && wr8.early == 0u && late_rd8.early == 0u && late_wr8.early == 0u);
     dma_host_live = false;
     DmaHost::release();
     (void)host_ready();
@@ -2647,6 +2778,16 @@ void tp_held() {
 using FarScl = Pin<'C', 6>;
 using FarSda = Pin<'C', 7>;
 
+/// Letter s's client lets go: the far pad back to the target, in the state Target::init()
+/// left it, or the target's event line unmasked. From the letter or from the tick's handler.
+void drain_client_lets_go() {
+    if (drain_let_go == DrainLetGo::pad) {
+        FarScl::function(target_pins.scl.function, {.open_drain = true, .speed = PinSpeed::very_high});
+    } else if (drain_let_go == DrainLetGo::target) {
+        Nvic::enable(Target::Resource::event_irq);
+    }
+}
+
 enum class BoundCase : uint8_t { ticker, no_ticker, no_counter };
 
 constexpr const char* bound_name(BoundCase c) {
@@ -2698,7 +2839,8 @@ void bound_note(BoundRow& row, uint32_t wall, bool staged) {
 }
 
 /// THE STOP'S DRAIN: a probe's STOP is requested at its completion, SCL is pulled low
-/// from the far pad behind it, so STOP stands; start() waits and parks.
+/// from the far pad behind it, so STOP stands; start() waits and answers i2c_timeout,
+/// with no START and the event vector still down.
 void stop_bound(BoundCase c, BoundRow& row) {
     (void)host_ready();
     const uint8_t st = tenure<Host>(peer.addr, nullptr, 0, nullptr, 0);
@@ -2708,10 +2850,11 @@ void stop_bound(BoundCase c, BoundRow& row) {
     r.addr = peer.addr;
     bool answer = true;
     const uint32_t wall = timed_start(c, r, answer);
-    const bool parked_here = !answer && !S::starting();
+    const bool answered_here = answer && Host::status() == i2c_timeout && !S::starting() && S::stopping() &&
+                               (S::regs().CR2 & I2C_CR2_ITEVTEN) == 0u;
     FarScl::release();
     far_pads_back();
-    bound_note(row, wall, standing && parked_here);
+    bound_note(row, wall, standing && answered_here);
 }
 
 /// THE BUS'S: SDA pulled low from the far pad with nothing standing in CR1, BUSY up;
@@ -2770,6 +2913,296 @@ void tq_bounds() {
     }
     const uint8_t after = tenure<Host>(peer.addr, nullptr, 0, nullptr, 0);
     bench.verdict("the host carries the next tenure", after == i2c_ok);
+}
+
+// =============================================================================
+// s - A CLIENT THAT HOLDS THE CLOCK PAST THE DRAIN, THROUGH THE ARBITER
+// =============================================================================
+//
+// A request right behind one whose acknowledge a client is stretching, on an arbiter
+// with a per-bus timeout and on one with timeout_ticks == 0. What holds SCL after a
+// written byte's acknowledge is the far SCL pad, pulled low from the completion's own
+// entry and given back to the target at the hold's end: this block's own client does
+// that (BTF stands with the shifter full, RM0390 24.3.2). FMPI2C1 at its address does
+// not: the row that masks its event line, ADDR holding SCL (23.4.8), shows the tenure's
+// own completion waiting for the hold, so no STOP stands and this path is not reached.
+// The scratch register is the witness of what a request answered i2c_timeout moved.
+
+namespace drain {
+
+/// A request's reply, with when it was dispatched.
+class Probe {
+public:
+    using Event = std::variant<I2cDone>;
+    static inline EventQueue<Event, 12, P> queue;
+    static inline uint8_t status[8];
+    static inline uint32_t at[8];
+    static inline uint8_t n = 0;
+
+    static void init() { clear(); }
+    static void clear() { n = 0; }
+    static void dispatch(const Event& e) {
+        brio::match(e, [](const I2cDone& d) {
+            if (n < 8u) {
+                status[n] = d.status;
+                at[n] = CycleCounter::now();
+            }
+            n = static_cast<uint8_t>(n + 1u);
+        });
+    }
+};
+
+using TimedArb = kl::I2cArb;
+using PlainArb = I2cBus<Host, P, 4>;
+
+uint8_t scratch_in[1];
+const uint8_t scratch_index[1] = {reg_sys_ctrl2};
+uint8_t first_out[2];
+uint8_t next_out[2];
+uint8_t behind_out[3][2];
+
+template <typename Arb>
+void arm_glue(bool on) {
+    if constexpr (std::is_same_v<Arb, TimedArb>) {
+        bus_ao_live = on;
+    } else {
+        drain_plain_live = on;
+    }
+}
+
+template <typename Kernel>
+void pump() {
+    TimeEvents<P>::process();
+    while (Kernel::step()) {
+        TimeEvents<P>::process();
+    }
+}
+
+/// Pump for `us`, or until `want` replies have come if it is not zero.
+template <typename Kernel>
+void pump_for(uint32_t us, uint8_t want = 0) {
+    const uint32_t t0 = CycleCounter::now();
+    const uint32_t span = us * (clock_hz(clock) / 1'000'000u);
+    while (CycleCounter::now() - t0 < span) {
+        pump<Kernel>();
+        if (want != 0u && Probe::n >= want) {
+            break;
+        }
+    }
+    pump<Kernel>();
+}
+
+Host::Request write_request(uint8_t* out, uint8_t value) {
+    out[0] = reg_sys_ctrl2;
+    out[1] = value;
+    Host::Request r{};
+    r.addr = peer.addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = 2;
+    r.reply = reply_to<Probe, I2cDone>();
+    return r;
+}
+
+Host::Request read_request() {
+    Host::Request r{};
+    r.addr = peer.addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(scratch_index));
+    r.tx_len = 1;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(scratch_in));
+    r.rx_len = 1;
+    r.reply = reply_to<Probe, I2cDone>();
+    return r;
+}
+
+struct Stage {
+    uint32_t hold_ms = 8;
+    uint8_t behind = 1;            ///< requests posted right behind the one that gets stretched
+    bool let_go_in_tick = false;   ///< the hold ends in SysTick's handler, inside the wait
+    bool target_hold = false;      ///< FMPI2C1's own hold at its address, the far pad untouched
+};
+
+/// One row's sums over its passes.
+struct Row {
+    uint8_t passes = 0;
+    uint8_t first_ok = 0;         ///< the stretched request answered i2c_ok
+    uint8_t behind_timeout = 0;   ///< every request behind it answered i2c_timeout
+    uint8_t behind_ok = 0;        ///< every request behind it answered i2c_ok
+    uint8_t unanswered = 0;       ///< a request was still owed its answer when the row gave up
+    uint8_t stood = 0;            ///< STOP stood at the hold's end
+    uint8_t witness_ok = 0;       ///< the scratch register read as it should
+    uint8_t next_ok = 0;          ///< a write and its read-back after the hold, exact
+    uint32_t answer_min = 0xFFFF'FFFFu;   ///< the last answer, behind the first's completion
+    uint32_t answer_max = 0;
+    uint32_t first_min = 0xFFFF'FFFFu;    ///< the first's completion, behind its post
+    uint32_t first_max = 0;
+};
+
+template <typename Arb, typename Kernel>
+void one_pass(const Stage& g, Row& row) {
+    while (!Serial::tx_idle()) {
+    }
+    (void)Regs::up(clock);
+    (void)host_ready();
+    const uint8_t seed_cmd[2] = {reg_sys_ctrl2, 0x5A};
+    const bool seeded = tenure<Host>(peer.addr, seed_cmd, 2, nullptr, 0) == i2c_ok;
+    spin_ms(1);
+
+    Kernel::init_all();
+    arm_glue<Arb>(true);
+    Probe::clear();
+    drain_done_at = 0;
+    Host::Request first{};
+    if (g.target_hold) {
+        // A probe, ADDR left standing at the target.
+        Nvic::disable(Target::Resource::event_irq);
+        first.addr = peer.addr;
+        first.reply = reply_to<Probe, I2cDone>();
+        drain_let_go = DrainLetGo::target;
+    } else {
+        drain_grab_scl = true;
+        first = write_request(first_out, 0x5A);
+        drain_let_go = DrainLetGo::pad;
+    }
+    const uint32_t t0 = CycleCounter::now();
+    if (g.let_go_in_tick) {
+        drain_let_go_tick = Ticker::ticks() + g.hold_ms + 1u;
+    }
+    post<Arb>(first);
+    for (uint8_t i = 0; i < g.behind; ++i) {
+        post<Arb>(write_request(behind_out[i], static_cast<uint8_t>(0xA0u + i)));
+    }
+    const uint8_t want = static_cast<uint8_t>(1u + g.behind);
+    // The hold's length, counted from the post: a two-byte write is 300 us of wire at
+    // 100 kHz. A dispatch that waits runs past it.
+    const uint32_t hold_cycles = g.hold_ms * (clock_hz(clock) / 1000u);
+    while (CycleCounter::now() - t0 < hold_cycles) {
+        pump<Kernel>();
+    }
+    const bool stood = S::stopping();
+    drain_grab_scl = false;
+    if (!g.let_go_in_tick) {
+        drain_client_lets_go();
+    }
+    // What the hold left: the STOP on its way, then anything still owed. 30 ms a request
+    // is past the 20 ms of the timed arbiter and the 5 ms start() spends ahead of arming it.
+    pump_for<Kernel>(30'000u * want, want);
+    const uint8_t answered = Probe::n;
+    bool all_timeout = answered == want;
+    bool all_ok = answered == want;
+    for (uint8_t i = 1; i < want && i < answered; ++i) {
+        all_timeout = all_timeout && Probe::status[i] == i2c_timeout;
+        all_ok = all_ok && Probe::status[i] == i2c_ok;
+    }
+    row.passes = static_cast<uint8_t>(row.passes + 1u);
+    row.first_ok = static_cast<uint8_t>(row.first_ok + ((answered != 0u && Probe::status[0] == i2c_ok) ? 1u : 0u));
+    row.behind_timeout = static_cast<uint8_t>(row.behind_timeout + (all_timeout ? 1u : 0u));
+    row.behind_ok = static_cast<uint8_t>(row.behind_ok + (all_ok ? 1u : 0u));
+    row.unanswered = static_cast<uint8_t>(row.unanswered + (answered < want ? 1u : 0u));
+    row.stood = static_cast<uint8_t>(row.stood + (stood ? 1u : 0u));
+    if (drain_done_at != 0u) {
+        const uint32_t first_took = drain_done_at - t0;
+        row.first_min = first_took < row.first_min ? first_took : row.first_min;
+        row.first_max = first_took > row.first_max ? first_took : row.first_max;
+        if (answered == want) {
+            const uint32_t took = Probe::at[want - 1u] - drain_done_at;
+            row.answer_min = took < row.answer_min ? took : row.answer_min;
+            row.answer_max = took > row.answer_max ? took : row.answer_max;
+        }
+    }
+
+    // The next requests, with no init() and no recover() from here: the witness read, a
+    // write and its read-back. A request answered i2c_timeout moved nothing; one answered
+    // i2c_ok left its byte.
+    Probe::clear();
+    scratch_in[0] = 0;
+    post<Arb>(read_request());
+    pump_for<Kernel>(30'000u, 1);
+    const uint8_t witness_want = (g.let_go_in_tick || g.target_hold) ? static_cast<uint8_t>(0xA0u + g.behind - 1u) : 0x5Au;
+    row.witness_ok = static_cast<uint8_t>(
+        row.witness_ok + ((seeded && Probe::n == 1u && Probe::status[0] == i2c_ok && scratch_in[0] == witness_want) ? 1u : 0u));
+    Probe::clear();
+    post<Arb>(write_request(next_out, 0x3C));
+    post<Arb>(read_request());
+    pump_for<Kernel>(30'000u, 2);
+    const bool next = Probe::n == 2u && Probe::status[0] == i2c_ok && Probe::status[1] == i2c_ok && scratch_in[0] == 0x3Cu;
+    row.next_ok = static_cast<uint8_t>(row.next_ok + (next ? 1u : 0u));
+    arm_glue<Arb>(false);
+    drain_grab_scl = false;
+    drain_let_go_tick = 0;
+    drain_let_go = DrainLetGo::none;
+    Nvic::enable(Target::Resource::event_irq);
+}
+
+template <typename Arb, typename Kernel>
+Row row_of(const char* arb, const char* what, const Stage& g) {
+    constexpr uint8_t passes = 10;
+    Row row{};
+    for (uint8_t k = 0; k < passes; ++k) {
+        one_pass<Arb, Kernel>(g, row);
+    }
+    const uint32_t cycles_per_us = clock_hz(clock) / 1'000'000u;
+    print(serial, "  ", arb, ", ", what, ", ", g.behind, " behind, ", g.hold_ms, " ms: STOP stood ", row.stood, "/", row.passes,
+          ", the first's completion ", row.first_max == 0u ? 0u : row.first_min / cycles_per_us, " to ", row.first_max / cycles_per_us,
+          " us, i2c_ok ", row.first_ok, "; behind it i2c_timeout ", row.behind_timeout, ", i2c_ok ", row.behind_ok, ", unanswered ",
+          row.unanswered, "; the last answer ", row.answer_max == 0u ? 0u : row.answer_min / cycles_per_us, " to ",
+          row.answer_max / cycles_per_us, " us behind that completion (", row.answer_max == 0u ? 0u : row.answer_min, " to ",
+          row.answer_max, " cycles); witness ", row.witness_ok, ", next ", row.next_ok, crlf);
+    return row;
+}
+
+/// The band of the last answer behind the completion it follows, `waits` waits of 5000 us.
+/// Below: start() serves the time asked at least (letter q). Above: letter q's 1000 cycles
+/// a wait (start() itself, a poll's turn, the ticks that land), then, once, the way from the
+/// completion's entry through a turn of the pump, the two dispatches of the arbiter and the
+/// replies': 1237 cycles over the time asked for one wait, 2039 for three, in the row's
+/// figures, which is under 400 cycles a wait and 1000 of way, and 3000 is three times that.
+constexpr bool answer_in_band(const Row& row, uint8_t waits, uint32_t cycles_per_us) {
+    const uint32_t low = waits * 5000u * cycles_per_us;
+    const uint32_t high = low + waits * 1000u + 3000u;
+    return row.answer_min >= low && row.answer_max <= high;
+}
+
+template <typename Arb, typename Kernel>
+void stages(const char* arb) {
+    const uint32_t cycles_per_us = clock_hz(clock) / 1'000'000u;
+    const Row held = row_of<Arb, Kernel>(arb, "SCL held behind a written byte's acknowledge", Stage{});
+    bench.verdict("A CLIENT HOLDING SCL PAST THE BOUND: the request behind it answered i2c_timeout by start() itself at the "
+                  "bound, every pass",
+                  held.first_ok == held.passes && held.behind_timeout == held.passes && held.stood == held.passes &&
+                      answer_in_band(held, 1, cycles_per_us));
+    bench.verdict("... and the host sound when the client lets go, no init() and no recover(): the witness untouched, a write "
+                  "and its read-back exact",
+                  held.witness_ok == held.passes && held.next_ok == held.passes);
+
+    const Row three = row_of<Arb, Kernel>(arb, "SCL held behind a written byte's acknowledge", Stage{.hold_ms = 30, .behind = 3});
+    bench.verdict("THREE REQUESTS BEHIND A LONGER HOLD: each answered i2c_timeout in its turn, in one dispatch of three bounds, "
+                  "and the host sound when the client lets go",
+                  three.first_ok == three.passes && three.behind_timeout == three.passes && three.stood == three.passes &&
+                      answer_in_band(three, 3, cycles_per_us) && three.witness_ok == three.passes && three.next_ok == three.passes);
+
+    const Row brief = row_of<Arb, Kernel>(arb, "SCL held and let go inside the bound", Stage{.hold_ms = 2, .let_go_in_tick = true});
+    bench.verdict("THE CONTROL, A HOLD THAT ENDS INSIDE THE BOUND: the request behind it runs, i2c_ok, its byte in the register",
+                  brief.first_ok == brief.passes && brief.behind_ok == brief.passes && brief.witness_ok == brief.passes &&
+                      brief.next_ok == brief.passes);
+
+    const Row own = row_of<Arb, Kernel>(arb, "FMPI2C1's own hold at its address", Stage{.target_hold = true});
+    // 8000 us is when the row lets go; a bit period for the acknowledge's clock, the target's
+    // vector and the host's: 7 us measured, 500 for a tick and a turn of the pump over that.
+    bench.verdict("A HOLD AHEAD OF THE ACKNOWLEDGE'S END IS NOT THIS PATH: the tenure's own completion waits for it (8 ms from "
+                  "the post, 8000 to 8500 us), no STOP stands, the request behind it runs",
+                  own.stood == 0u && own.first_ok == own.passes && own.behind_ok == own.passes && own.witness_ok == own.passes &&
+                      own.next_ok == own.passes && own.first_min >= 8000u * cycles_per_us && own.first_max <= 8500u * cycles_per_us);
+}
+
+}  // namespace drain
+
+void ts_drain() {
+    (void)CycleCounter::init();
+    drain::stages<drain::TimedArb, Tenuto<P, drain::Probe, drain::TimedArb>>("timed 20 ms");
+    drain::stages<drain::PlainArb, Tenuto<P, drain::Probe, drain::PlainArb>>("timeout_ticks 0");
+    (void)Regs::up(clock);
+    (void)host_ready();
+    bench.verdict("the host carries the next tenure", probe(peer.addr) == i2c_ok);
 }
 #endif
 
@@ -2863,6 +3296,18 @@ extern "C" void BRIO_I2C_EV_HANDLER() {
         return;
     }
     if (Host::isr()) {
+#if defined(STM32F446xx)
+        if (drain_grab_scl) {
+            FarScl::output(false, {.open_drain = true, .speed = brio::PinSpeed::very_high});
+            drain_grab_scl = false;
+        }
+        if (drain_done_at == 0u) {
+            drain_done_at = brio::CycleCounter::now();
+        }
+        if (drain_plain_live) {
+            brio::post<drain::PlainArb>(brio::TransferDone{Host::status()});
+        }
+#endif
         xfer_done = true;
         if (bus_ao_live) {
             brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
@@ -2878,6 +3323,11 @@ extern "C" void BRIO_I2C_ER_HANDLER() {
         return;
     }
     if (Host::error_isr()) {
+#if defined(STM32F446xx)
+        if (drain_plain_live) {
+            brio::post<drain::PlainArb>(brio::TransferDone{Host::status()});
+        }
+#endif
         xfer_done = true;
         if (bus_ao_live) {
             brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
@@ -2903,7 +3353,15 @@ extern "C" void BRIO_I2C_RX_DMA_HANDLER() {
     }
 }
 
-extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" void SysTick_Handler() {
+    brio::Ticker::tick();
+#if defined(STM32F446xx)
+    if (drain_let_go_tick != 0u && brio::Ticker::ticks() == drain_let_go_tick) {
+        drain_let_go_tick = 0;
+        drain_client_lets_go();
+    }
+#endif
+}
 
 int main() {
     // What the silicon held before a line of this program ran: the gate is
@@ -2957,6 +3415,7 @@ int main() {
     bench.letter('p', "THE STREAM'S COMPLETION HELD OFF", tp_held);
     bench.letter('q', "start()'s TWO BOUNDS, in microseconds", tq_bounds);
     bench.letter('r', "A LOAD THAT TAKES ALL OF APB1, by name only", tr_all_of_apb1, false);
+    bench.letter('s', "A CLIENT HOLDS THE CLOCK PAST THE DRAIN, a request behind it, both arbiters", ts_drain);
     bench.second_letter('n', "THE DESK PARTNER: stretching, a held SDA, the per-bus timeout",
                         tn_partner);
 #endif

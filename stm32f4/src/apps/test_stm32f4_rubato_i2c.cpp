@@ -38,8 +38,8 @@
 //   START requested on the last written byte's TxE behind a dummy store; a
 //   refused LAST written byte of a write-then-read closed by a void write
 //   from the Sr (24.6.1 forbids any CR1 access while START stands); the
-//   event vector on from start() to the completion, the error vector
-//   always; every BERR counted (spurious_bus_errors(): ES0298 2.11.1 says
+//   event vector on from start() to the completion but over a phase on the
+//   streams, the error vector always; every BERR counted (spurious_bus_errors(): ES0298 2.11.1 says
 //   a controller's can be spurious) and never a status. start()
 //   WAITS in the caller: for the last tenure's STOP to leave the wire (CR1
 //   STOP standing, at most 5 ms) and for BUSY (100 us), each a count of

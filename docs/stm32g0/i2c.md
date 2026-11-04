@@ -1505,9 +1505,9 @@ Implemented but not bench-verified:
   more under a load that never serves the channel stays stretched until the arbiter's timeout. A
   master holding the bus matrix across a beat, or letter `D` with a load past what the bus takes,
   would measure them; DMA2 above is the nearest candidate.
-- **The stray beat on the other transports here.** Letter `C` asks it of I2C's receive alone. A
-  stage of the same orders on a USART's and an SPI's receive channel would say whether those
-  peripherals remember a DMA request as this one does.
+- **The stray beat on the other transports here.** Letter `C` asks it of I2C's receive and `test_stm32_spi` letter `B` of the SPI's,
+which does not remember one ([spi.md](spi.md)). A stage of the same orders on a
+USART's receive channel would say whether that peripheral does.
 - **ES0418 2.11.6 on the part whose sheet lists it.** Whether the STM32G071RB
   stalls on TXDR left empty, and whether the host's path is clean there: letter `B`
   on a self-link on that board prints the first rate and judges the second. On the
