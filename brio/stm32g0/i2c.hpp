@@ -1885,7 +1885,8 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *                   already released the bus and switched to target
  *                   mode, so no STOP is ours to send
  *   i2c_bus_error   start()'s synchronous answer for a START still standing
- *   i2c_dma_fault   a DMA channel reported an error mid-tenure
+ *   i2c_dma_fault   a DMA channel reported an error mid-tenure, or the
+ *                   receive channel's count stood over a byte nobody has
  *
  * THE ENABLES ARE THE TENURE'S, IN ONE STORE EACH WAY. start() writes the
  * seven interrupt enables and the two DMA request enables the tenure's
@@ -1942,13 +1943,17 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * 5.4.18: DMA1SMEN and DMA2SMEN set at reset, written by no verb here).
  *
  * The completion edge is STOPF either way, and THAT IS WHY BOTH
- * ENGINES ARE ARMED FOR THEIR ERRORS ALONE (DmaIrq::error_only): a
- * tenure that ends on its STOP after NBYTES has had every byte written
- * to TXDR and read from RXDR, so a channel's own completion interrupt
- * would prove nothing STOPF does not, and a tenure costs the I2C's
- * interrupts and no DMA one. finish() completes the transmit engine on
- * that proof, or on a count run to zero, and abandons it - counted, an
- * untransmitted tail - otherwise.
+ * ENGINES ARE ARMED FOR THEIR ERRORS ALONE (DmaIrq::error_only): a tenure
+ * costs the I2C's interrupts and no DMA one. On a write half a channel's own
+ * completion would prove nothing the STOP after NBYTES does not: every byte
+ * was written to TXDR, and finish() completes the transmit engine on that
+ * proof, or on a count run to zero, and abandons it - counted, an
+ * untransmitted tail - otherwise. On a read half STOPF proves the wire and not
+ * the channel: RXNE rose ahead of it, the last byte stretches nothing, and
+ * channels above this one can hold it past the STOP. So the STOPF entry reads the
+ * receive channel's count, one load; zero says the byte is in memory (10.6.4), and
+ * anything else takes settle_late_read(), which leaves the bytes whole or the
+ * status i2c_dma_fault, the channel stopped either way.
  *
  * The DMA controller needs no init() of its own: an engine's arm()
  * opens the controller's clock (stm32g0/dma.hpp's bind()), so an
@@ -2013,6 +2018,14 @@ public:
     /// i2c_rejected by start(); a program that means to ask for the
     /// engines may static_assert it instead.
     static constexpr bool has_dma = TxEngine::present;
+    /// How many loads of the receive channel's count the STOPF entry gives a beat
+    /// already under way (settle_late_read()). A granted beat is one read and one write
+    /// (10.4.3) and no other channel comes between them (10.4.4); 5 cycles a word
+    /// measured (docs/stm32g0/dma.md), at most three times that behind the bus matrix's
+    /// round robin (10.4.1) against the core and the second controller. A turn is at
+    /// least 5 cycles, a load and a branch at zero wait states, so 16 turns are 80 cycles
+    /// against 15.
+    static constexpr uint32_t late_beat_turns = 16;
 
     /// One bus tenure, in the shape every target's I2cHost takes
     /// (docs/design/i2c-bus.md). The two buffers are loans
@@ -2597,11 +2610,36 @@ private:
         (void)delay_us(cs_rate_, 5);
     }
 
-    /// The STOPF entry: every shape's edge (the class comment). The last
-    /// byte of a pumped read is taken first, then the NACK the entry was
-    /// never raised for is read from the status register and named.
+    /// The STOPF entry: every shape's edge (the class comment). The last byte of a read
+    /// is settled first, and only then the NACK the entry was never raised for is read
+    /// from the status register and named. Under `dma` STOPF says the wire is over and not
+    /// that the channel is, so a read on a channel reads its count, one load: zero is the
+    /// on-time path, 10.6.4's count falling "after each single DMA 'read followed by
+    /// write' transfer", with nothing else to do. An address refused has no byte to wait
+    /// for, and finish() stops its channel.
     static bool stopped() {
         const uint32_t f = S::flags();
+        if constexpr (has_dma) {
+            if (rx_dma_) {
+                if ((f & I2C_ISR_NACKF) == 0u && RxEngine::remaining() != 0u &&
+                    !settle_late_read()) {
+                    status_ = i2c_dma_fault;
+                }
+            } else {
+                take_pumped_last(f);
+            }
+        } else {
+            take_pumped_last(f);
+        }
+        if ((f & I2C_ISR_NACKF) != 0u) {
+            status_ = nacked_address(f) ? i2c_nack_addr : i2c_nack_data;
+        }
+        return finish(status_);
+    }
+
+    /// A pumped read's last byte, waiting in RXDR for the STOPF entry, and a byte a
+    /// half with no buffer drains.
+    [[gnu::always_inline]] static void take_pumped_last(uint32_t f) {
         if ((f & I2C_ISR_RXNE) != 0u) {
             const uint8_t v = S::data();
             if (phase_ == Phase::reading && t_.rx.get() != nullptr && pos_ < t_.rx_len) {
@@ -2609,10 +2647,43 @@ private:
             }
             ++pos_;
         }
-        if ((f & I2C_ISR_NACKF) != 0u) {
-            status_ = nacked_address(f) ? i2c_nack_addr : i2c_nack_data;
+    }
+
+    /// A receive channel still counting at the STOPF entry: other channels outrank it
+    /// and the wire has not waited, since nothing stretches SCL for the last byte. True
+    /// when every byte reached the buffer, with the channel stopped either way.
+    ///
+    /// The order is the one 10.4.5 asks of an abort: the peripheral's requests first.
+    /// RXDR read with RXDMAEN up can leave the next block's start a beat with nothing
+    /// there (docs/stm32g0/i2c.md, "The receive channel at STOPF"). RXDMAEN alone does not
+    /// end it: a channel holding a request serves it when the load above it lets it,
+    /// so the channel is stopped too, and only that keeps a beat out of the buffer after
+    /// the reply. What 10.4.5 cannot promise is what its count says after the stop, so
+    /// the count is read before it.
+    ///
+    /// RXNE up: the byte stands, and it goes where the count says, the requester's
+    /// rx_len - remaining. A beat granted just ahead of the requests going down reads the
+    /// same RXDR into the same cell. RXNE down with the count standing: a beat is under
+    /// way, or the byte has gone somewhere this host did not send it. late_beat_turns
+    /// loads tell the two apart, and the second is answered i2c_dma_fault, never i2c_ok.
+    [[gnu::noinline, gnu::cold]] static bool settle_late_read() {
+        S::dma_receive(false);
+        const uint16_t left = static_cast<uint16_t>(RxEngine::remaining());
+        bool whole = false;
+        if ((S::flags() & I2C_ISR_RXNE) != 0u) {
+            const uint8_t v = S::data();
+            if (left != 0u) {
+                t_.rx.get()[t_.rx_len - left] = v;
+            }
+            whole = left <= 1u;
+        } else {
+            whole = left == 0u;
+            for (uint32_t turns = late_beat_turns; turns != 0u && !whole; --turns) {
+                whole = RxEngine::remaining() == 0u;
+            }
         }
-        return finish(status_);
+        RxEngine::stop();
+        return whole;
     }
 
     /// Was the NACK the address's? A read half's always: a controller
@@ -2686,7 +2757,9 @@ private:
     /// next one waits in the shift register with SCL stretched low until
     /// RXDR is read; a byte its transmit channel has not written stretches
     /// SCL after the ninth pulse until TXDR is (32.4.7) - a starved
-    /// channel slows the bus and loses nothing.
+    /// channel slows the bus and loses nothing. The last byte of a read
+    /// has no next one to hold: the STOP goes out whatever the channel has
+    /// done, and the STOPF entry settles it (settle_late_read()).
     static void arm_engines() {
         TxEngine::arm(S::tx_address(), S::dma_tx_request(), DmaPriority::high,
                       DmaIrq::error_only);

@@ -107,7 +107,9 @@ adds the four an I2C host can observe, declared in
 A host with DMA engines adds a fifth, its own: `i2c_dma_fault`, the
 value `bus_engine_status + 4`, when a DMA channel reports a transfer
 error in the middle of a tenure or, on the CH32V00x, the CH32X035 and the
-CH32V203/V303, when BTF finds the transmit channel's count standing. The host then ends the tenure and
+CH32V203/V303, when BTF finds the transmit channel's count standing, or, on the STM32G0,
+when the STOPF entry finds the receive channel's count standing over a byte
+nobody has. The host then ends the tenure and
 releases the bus (a STOP, or on the DesignWare peripheral an abort, which
 sends one). `util/i2c_bus.hpp` does not declare it: each stratum whose
 host has engine parameters defines it, with the same value, and the STM32F4's
@@ -599,8 +601,11 @@ multiplexer; two optional engine slots with `dma_isr()`; `fast_plus_drive()`
 write half's first byte goes into TXDR before the START under `interrupt` and
 under `dma`, a write of one starting no channel: that is ES0418 2.11.6's first
 workaround on the STM32G071, so the host takes one path inside that erratum's
-band of clock ratios and outside it. A read's last byte is taken at STOPF. A
-NACK is named at STOPF with no NACKIE armed; it is the address's when TXE is
+band of clock ratios and outside it. A read's last byte is taken at STOPF; on a channel that entry reads the count
+first, stops a channel still counting, requests first, and stores what it had
+not taken at `rx_len - remaining`. Channels above it make one late by themselves
+(the [STM32G0 page](../stm32g0/i2c.md)). A NACK is named at STOPF with no NACKIE
+armed; it is the address's when TXE is
 clear and nothing refilled TXDR, which the pump's position or the transmit
 channel's count tells. A tenure's interrupt and DMA
 enables go in one CR1 store each way (`enables()`), so an engined tenure

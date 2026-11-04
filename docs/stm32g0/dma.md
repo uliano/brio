@@ -246,9 +246,10 @@ The controller's offer, item by item:
 arms an engine for its errors alone (`DmaIrq::error_only`). The SPI host
 does it to its transmit engine - the receive block's completion is
 strictly after the transmit block's last beat, since every frame that
-came back was clocked out first - and the I2C host to both of its, the
-tenure's STOP after NBYTES proving both blocks; the driver completes the
-engine on that proof (`complete()`).
+came back was clocked out first - and the I2C host to both of its: the tenure's STOP after NBYTES proves the
+transmit block, and the driver completes the engine on that proof
+(`complete()`); of the receive block it proves only the wire, so the STOPF entry
+reads the channel's count ([i2c.md](i2c.md), "The receive channel at STOPF").
 
 **The mask covers one test-and-set.** A transport starts blocks from two
 contexts, its thread and its completion handler, so `DmaTxEngine` splits

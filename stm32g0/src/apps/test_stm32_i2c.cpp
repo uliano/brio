@@ -46,7 +46,7 @@
 // same two nodes, so a desk carries the self-link, the peer, or both.
 // main() PROBES the self-link before any letter runs - PB8 and PB9
 // driven both ways against the far pad's own internal pull - and
-// letters b..l, u, v, B, x and y skip themselves, printing the reason and
+// letters b..l, u, v, B, C, D, x and y skip themselves, printing the reason and
 // claiming no verdict, when the probe says no. THE PEER LETTERS ARE A
 // SECOND SET under their own all-key, `w`: `z` stays the single-board
 // set, runnable with the far board on its dark console, and `w` needs
@@ -132,6 +132,15 @@
 //      ratio of 2.75. The host's writes judged byte for byte, and a row with
 //      TXDR left empty by the resource's verbs, its rate printed: what says
 //      whether this silicon has the erratum
+//   C  THE RECEIVE CHANNEL AT THE STOPF ENTRY, staged: what says a beat is in
+//      memory, a request taken down and a channel stopped against a beat, the
+//      stray beat in each order; the last byte's request taken away and let up in
+//      the entry, under beats that end inside it: reads and write-then-reads of 1,
+//      2 and 8 at 100 kHz, 400 kHz and 1 MHz, a read, a write and a refused write
+//      whole behind them, and a byte nobody has answered i2c_dma_fault
+//   D  THE SAME UNDER LOAD: channels above the host's, paced and copies, at 400 kHz
+//      and 1 MHz and on the slower rungs: every read exact, how often the channel
+//      was running at the STOPF entry, and its lag against the bus's window
 //   n  THE PEER: the twi_link command channel to the peer board, its
 //      ident and ten command round trips
 //   o  the tenure shapes against the peer - write, read, write-then-read
@@ -157,7 +166,7 @@
 // of the I2C self-link plus the console's two.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghijklmuxy,nopqrst,vB
+// build: groups = abcdefghijklmuxy,nopqrst,vBCD
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -180,6 +189,7 @@
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/rtc.hpp"
 #include "stm32g0/sleep.hpp"
+#include "stm32g0/tim.hpp"
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/i2c_bus.hpp"
@@ -288,7 +298,7 @@ Serial serial;
 // TWO SETS: `z` the single-board letters, runnable with the far board on
 // its dark console; `w` the peer letters n..t, which need `twi_peer` on
 // the far board and FAIL without it.
-TwoKeyTestBench<Serial, 'w', 26> bench;
+TwoKeyTestBench<Serial, 'w', 28> bench;
 
 /// The client's own address, and one it must be deaf to.
 constexpr uint8_t peer_addr = 0x42;
@@ -4886,11 +4896,1271 @@ void tt_peer_wake() {
 // the banner
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// C, D - THE RECEIVE CHANNEL AT THE STOPF ENTRY
+// ===========================================================================
+//
+// Under `dma` a read's one edge is STOPF, and STOPF says the wire is over: RXNE rose
+// some nine tenths of a period before the NACK's ninth clock and more than a period
+// and a half before the STOP, and the receive channel still had the arbiter (10.4.4)
+// and the bus matrix's round robin (10.4.1) to win. Letter C stages a channel that has
+// not moved the last byte at that entry and judges what the host does with it; letter
+// D asks whether a load makes one late by itself, and how near.
+
+using LateChannel = DmaChannel<HostRx::controller, HostRx::channel>;
+
+/// A delay of no bus access but the fetch: about five cycles a turn from the flash.
+[[gnu::always_inline]] inline void late_burn(uint32_t turns) {
+    while (turns != 0u) {
+        __NOP();
+        --turns;
+    }
+}
+
+/// THE VECTOR'S WATCH, ahead of the host's body and behind it. Only a STOPF entry
+/// counts: on a write-then-read the TC entry comes first.
+struct LateWatch {
+    volatile bool on = false;
+    volatile int16_t raise_turns = -1;   ///< let the request up, this many burns ahead of the body
+    volatile bool steal = false;         ///< read RXDR ahead of the body: a byte nobody will have
+    volatile uint16_t race_words = 0;    ///< let the request up under a load block of this many beats
+    volatile uint32_t stops = 0;         ///< STOPF entries watched
+    volatile uint32_t running = 0;       ///< the channel enabled with a count left, at the first load
+    volatile uint32_t rxne = 0;          ///< RXNE up at that first load
+    const volatile uint8_t* cell = nullptr;
+    volatile uint8_t seen = 0;           ///< the cell at the first load behind the body
+    volatile uint32_t t0 = 0;            ///< SysTick's VAL just ahead of the body
+    volatile uint32_t body_on_time = 0;  ///< the longest body, the channel done at the first load
+    volatile uint32_t body_late = 0;     ///< the longest body, the channel running at it
+    volatile bool was_late = false;
+};
+LateWatch late_watch;
+
+template <uint8_t ch>
+void late_block_set(uint16_t words);
+
+[[gnu::always_inline]] inline void late_watch_before() {
+    const uint32_t f = H::flags();
+    if ((f & I2cFlag::stop) == 0u) {
+        return;
+    }
+    late_watch.stops = late_watch.stops + 1u;
+    late_watch.was_late = LateChannel::enabled() && LateChannel::count() != 0u;
+    if (late_watch.was_late) {
+        late_watch.running = late_watch.running + 1u;
+    }
+    if ((f & I2cFlag::rxne) != 0u) {
+        late_watch.rxne = late_watch.rxne + 1u;
+    }
+    if (late_watch.race_words != 0u) {
+        const uint16_t beats = late_watch.race_words;
+        late_block_set<3>(static_cast<uint16_t>((beats + 2u) / 3u));
+        late_block_set<4>(static_cast<uint16_t>((beats + 1u) / 3u));
+        late_block_set<5>(static_cast<uint16_t>(beats / 3u));
+        H::dma_receive(true);
+    }
+    if (late_watch.raise_turns >= 0) {
+        H::dma_receive(true);
+        late_burn(static_cast<uint32_t>(late_watch.raise_turns));
+    }
+    if (late_watch.steal) {
+        (void)H::data();
+    }
+    late_watch.t0 = SysTick->VAL;
+}
+
+[[gnu::always_inline]] inline void late_watch_after() {
+    const uint32_t now = SysTick->VAL;
+    const uint32_t t0 = late_watch.t0;
+    const uint32_t body = t0 >= now ? t0 - now : t0 + SysTick->LOAD + 1u - now;
+    if (late_watch.was_late) {
+        late_watch.body_late = body > late_watch.body_late ? body : late_watch.body_late;
+    } else {
+        late_watch.body_on_time = body > late_watch.body_on_time ? body : late_watch.body_on_time;
+    }
+    if (late_watch.cell != nullptr) {
+        late_watch.seen = *late_watch.cell;
+    }
+}
+
+/// The load's channels, DMA1's three the host leaves on every part: a word from one
+/// cell into another, at very_high, above the host's two at high. A paced channel
+/// rides a timer's update; a copy (MEM2MEM) runs flat out and 10.4.4 alternates it
+/// with whoever else is asking. A block is re-armed by the thread's turn when its
+/// count runs out, so a load has gaps a program's blocks would have too.
+constexpr uint16_t late_block_words = 1000;
+volatile uint32_t late_load_from = 0x5A5A5A5Au;
+volatile uint32_t late_load_to[3];
+
+struct LateLoad {
+    const char* name;
+    uint8_t paced;      ///< how many paced channels, from channel 3 up
+    uint16_t period;    ///< the timers' period, in TIMPCLK cycles
+    uint8_t copies;     ///< how many copies, on the channels above those
+    uint8_t skew = 0;   ///< burns between one timer's start and the next: their phase
+    DmaPriority copy_level = DmaPriority::very_high;
+};
+uint8_t late_load_paced = 0;
+uint8_t late_load_copies = 0;
+
+template <uint8_t ch>
+void late_load_program(uint8_t request, bool copy, DmaPriority copy_level = DmaPriority::very_high) {
+    (void)DmaMux::request(DmaChannel<1, ch>::mux_channel, request);
+    DmaTransfer t{};
+    t.peripheral = &late_load_from;
+    t.memory = &late_load_to[ch - 3u];
+    t.count = late_block_words;
+    t.config.memory_to_memory = copy;
+    t.config.memory_increment = false;
+    t.config.peripheral_width = DmaWidth::word;
+    t.config.memory_width = DmaWidth::word;
+    t.config.priority = copy ? copy_level : DmaPriority::very_high;
+    (void)DmaChannel<1, ch>::load(t);
+}
+
+template <typename T>
+void late_timer_on(uint16_t period) {
+    T::init();
+    (void)T::configure({.prescaler = 0, .period = static_cast<uint32_t>(period - 1u)});
+    T::interrupts(T::update_dma, true);
+    T::enable(true);
+}
+
+template <typename T>
+void late_timer_off() {
+    T::interrupts(T::update_dma, false);
+    T::enable(false);
+    T::release();
+}
+
+void late_load_on(const LateLoad& l) {
+    late_load_paced = l.paced;
+    late_load_copies = l.copies;
+    if (l.paced > 0u) {
+        late_load_program<3>(Tim<3>::dma_update_request(), false);
+        late_timer_on<Tim<3>>(l.period);
+    }
+    if (l.paced > 1u) {
+        late_load_program<4>(Tim<1>::dma_update_request(), false);
+        late_burn(l.skew);
+        late_timer_on<Tim<1>>(l.period);
+    }
+    if (l.paced > 2u) {
+        late_load_program<5>(Tim<2>::dma_update_request(), false);
+        late_burn(l.skew);
+        late_timer_on<Tim<2>>(l.period);
+    }
+    const uint8_t first = l.paced;
+    if (l.copies > 0u && first == 0u) {
+        late_load_program<3>(0, true, l.copy_level);
+    }
+    if ((l.copies > 0u && first == 1u) || (l.copies > 1u && first == 0u)) {
+        late_load_program<4>(0, true, l.copy_level);
+    }
+    if ((l.copies > 0u && first == 2u) || (l.copies > 1u && first == 1u) ||
+        (l.copies > 2u && first == 0u)) {
+        late_load_program<5>(0, true, l.copy_level);
+    }
+}
+
+template <uint8_t ch>
+[[gnu::always_inline]] inline bool late_block_out() {
+    return DmaChannel<1, ch>::count() == 0u;
+}
+
+template <uint8_t ch>
+void late_block_set(uint16_t words) {
+    (void)DmaChannel<1, ch>::enable(false);
+    DmaChannel<1, ch>::clear(DmaFlag::all);
+    (void)DmaChannel<1, ch>::set_count(words);
+    (void)DmaChannel<1, ch>::enable(true);
+}
+
+/// The thread's turn: once every block of the load has run out, all of them again. The
+/// gap that leaves is where a channel below them gets its turn, as under a program's
+/// blocks; with no gap a byte stretched behind them would wait for ever.
+void late_load_turn() {
+    const uint8_t used = static_cast<uint8_t>(late_load_paced + late_load_copies);
+    if (used == 0u || (used > 0u && !late_block_out<3>()) || (used > 1u && !late_block_out<4>()) ||
+        (used > 2u && !late_block_out<5>())) {
+        return;
+    }
+    late_block_set<3>(late_block_words);
+    if (used > 1u) {
+        late_block_set<4>(late_block_words);
+    }
+    if (used > 2u) {
+        late_block_set<5>(late_block_words);
+    }
+}
+
+void late_load_off() {
+    if (late_load_paced > 0u) {
+        late_timer_off<Tim<3>>();
+    }
+    if (late_load_paced > 1u) {
+        late_timer_off<Tim<1>>();
+    }
+    if (late_load_paced > 2u) {
+        late_timer_off<Tim<2>>();
+    }
+    DmaChannel<1, 3>::stop();
+    DmaChannel<1, 4>::stop();
+    DmaChannel<1, 5>::stop();
+    (void)DmaMux::request(DmaChannel<1, 3>::mux_channel, 0);
+    (void)DmaMux::request(DmaChannel<1, 4>::mux_channel, 0);
+    (void)DmaMux::request(DmaChannel<1, 5>::mux_channel, 0);
+    late_load_paced = 0;
+    late_load_copies = 0;
+}
+
+/// THE BOUND ON ONE TENURE of this letter, in ticks of 1 ms: letter v's, its
+/// arithmetic there, plus what a load adds. A byte the channel has not taken stretches
+/// SCL (32.4.7) until the channel gets a turn, at worst the three channels' blocks of
+/// 1000 beats at the 5 cycles a beat a load's own beat takes (docs/stm32g0/dma.md) -
+/// 15000 cycles, 234 us at 64 MHz, 1 ms to be a wedge and not a slow row, at every byte
+/// and the address.
+uint32_t late_limit_ms(uint16_t bytes, I2cSpeed s) {
+    return refused_limit_ms(bytes, s) + bytes + 2u;
+}
+
+/// A completion waited for, the load turning; false after recover().
+bool late_wait_done(uint32_t limit_ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (!host_done && Ticker::millis() - t0 < limit_ms) {
+        late_load_turn();
+    }
+    if (!host_done) {
+        (void)DmaHost::recover();
+        return false;
+    }
+    return true;
+}
+
+/// A byte of read `k`, each position different, so a stale or a moved byte shows.
+constexpr uint8_t late_value(uint16_t k, uint16_t i) {
+    return static_cast<uint8_t>(0x6Bu + 0x3Du * k + 0x1Bu * i);
+}
+
+constexpr uint8_t late_buf = 16;
+uint8_t late_in[late_buf + 1u];   // the last, a sentinel past every read here
+uint8_t late_out[8];
+uint16_t late_serial = 0;
+
+void late_serve(uint16_t k, uint8_t n) {
+    for (uint8_t i = 0; i < n; ++i) {
+        peer_answers[i] = late_value(k, i);
+    }
+}
+
+/// How the last byte's request is staged.
+enum class LateStage : uint8_t {
+    none,       ///< nothing touched: the channel as the load leaves it
+    starve,     ///< the request taken away for the last byte, up to the end
+    raise,      ///< the same, let up in the STOPF entry `turns` of burns ahead of the host
+    steal,      ///< the same, RXDR read in the entry ahead of the host: the byte is nobody's
+    race,       ///< the same, let up in the entry under a load block `turns` beats long
+};
+
+struct LateRow {
+    uint32_t reads = 0;
+    uint32_t exact = 0;      ///< i2c_ok, every cell its byte, the sentinel whole, in the vector
+    uint32_t first_wrong = 0;   ///< the first cell not its byte (the suspicion's mark)
+    uint32_t last_wrong = 0;    ///< the last cell not its byte
+    uint32_t status_wrong = 0;  ///< not the status the stage owes
+    uint32_t lost = 0;       ///< no completion within the bound
+    uint32_t running = 0;    ///< the channel enabled with a count left at the vector's first load
+    uint32_t rxne = 0;       ///< RXNE up at it
+    uint32_t left_on = 0;    ///< the channel still enabled with a count left after the completion
+    uint32_t stray = 0;      ///< a sentinel written, or a cell moved after the completion
+    uint32_t next_read = 0;     ///< the read of eight that follows, whole
+    uint32_t next_write = 0;    ///< the write of eight that follows, whole
+    uint32_t next_refused = 0;  ///< the refused write behind them: the status, then a write whole
+    uint32_t nexts = 0;
+};
+
+void late_row_print(const char* name, const LateRow& r) {
+    print(serial, "    ", name, ": ", r.reads, " reads, exact ", r.exact, ", first cell wrong ",
+          r.first_wrong, ", last wrong ", r.last_wrong, ", status wrong ", r.status_wrong,
+          ", unanswered ", r.lost, "; running at the entry ", r.running, ", RXNE up ", r.rxne,
+          "; left running ", r.left_on, ", moved after ", r.stray, crlf);
+    if (r.nexts != 0u) {
+        print(serial, "      behind them, of ", r.nexts, ": read of eight whole ", r.next_read,
+              ", write of eight whole ", r.next_write, ", refused write and the next whole ",
+              r.next_refused, crlf);
+    }
+}
+
+/// One request on the engined host, waited for: true when it answered.
+bool late_request(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, I2cSpeed s,
+                  uint8_t addr = peer_addr) {
+    DmaHost::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(tx);
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rx_len;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    host_done = false;
+    host_isr_entries = 0;
+    peer_isr_entries = 0;
+    (void)DmaHost::start(r);
+    return late_wait_done(late_limit_ms(static_cast<uint16_t>(tx_len + rx_len), s));
+}
+
+/// The requests behind a staged read: a read of eight, a write of eight, a write the
+/// client refuses at its second byte (in byte control for that write alone, letter v's
+/// verbs: a client in byte control gives nothing to a read) and a write of eight again -
+/// each on `dma`, no init() and no PE cycle of the host's between them.
+void late_nexts(I2cSpeed s, LateRow& row) {
+    row.nexts = row.nexts + 1u;
+    const uint16_t k = late_serial = static_cast<uint16_t>(late_serial + 1u);
+    late_serve(k, 8);
+    uint8_t in[8] = {};
+    bool same_in = late_request(nullptr, 0, in, 8, s) && DmaHost::status() == i2c_ok;
+    for (uint8_t i = 0; i < 8u && same_in; ++i) {
+        same_in = in[i] == late_value(k, i);
+    }
+    row.next_read = row.next_read + (same_in ? 1u : 0u);
+    for (uint8_t i = 0; i < 8u; ++i) {
+        late_out[i] = late_value(static_cast<uint16_t>(k + 1u), i);
+    }
+    peer_rx_n = 0;
+    bool whole = late_request(late_out, 8, nullptr, 0, s) && DmaHost::status() == i2c_ok &&
+                 peer_rx_n == 8u && same(peer_rx, late_out, 8);
+    row.next_write = row.next_write + (whole ? 1u : 0u);
+    (void)Peer::byte_control(true);
+    Peer::interrupt(I2cInterrupt::transfer_complete, true);
+    peer_nack_at = 2;
+    peer_rx_n = 0;
+    const bool refused = late_request(late_out, 8, nullptr, 0, s) &&
+                         DmaHost::status() == i2c_nack_data && peer_rx_n == 2u;
+    peer_nack_at = 0;
+    Peer::interrupt(I2cInterrupt::transfer_complete, false);
+    (void)Peer::byte_control(false);
+    peer_rx_n = 0;
+    whole = late_request(late_out, 8, nullptr, 0, s) && DmaHost::status() == i2c_ok &&
+            peer_rx_n == 8u && same(peer_rx, late_out, 8);
+    row.next_refused = row.next_refused + (refused && whole ? 1u : 0u);
+}
+
+/// One read on the channel, staged, judged in the vector and behind it.
+void late_read(uint8_t tx_len, uint8_t n, I2cSpeed s, LateStage stage, int16_t turns,
+               LateRow& row, uint8_t want = i2c_ok) {
+    const uint16_t k = late_serial = static_cast<uint16_t>(late_serial + 1u);
+    late_serve(k, n);
+    for (uint8_t i = 0; i < late_buf + 1u; ++i) {
+        late_in[i] = static_cast<uint8_t>(~late_value(k, i));
+    }
+    const uint8_t sentinel = late_in[n];
+    for (uint8_t i = 0; i < 8u; ++i) {
+        late_out[i] = static_cast<uint8_t>(0x11u + i);
+    }
+    DmaHost::Request r{};
+    r.addr = peer_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(late_out));
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_in));
+    r.rx_len = n;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    late_watch.cell = &late_in[n - 1u];
+    late_watch.seen = static_cast<uint8_t>(~late_value(k, static_cast<uint16_t>(n - 1u)));
+    late_watch.raise_turns = stage == LateStage::raise ? turns : int16_t{-1};
+    late_watch.steal = stage == LateStage::steal;
+    late_watch.race_words = stage == LateStage::race ? static_cast<uint16_t>(turns) : uint16_t{0};
+    late_watch.on = true;
+    const uint32_t running0 = late_watch.running;
+    const uint32_t rxne0 = late_watch.rxne;
+    const uint32_t limit = late_limit_ms(static_cast<uint16_t>(tx_len + n), s);
+    host_done = false;
+    host_isr_entries = 0;
+    peer_isr_entries = 0;
+    (void)DmaHost::start(r);
+    if (stage != LateStage::none) {
+        if (n > 1u) {
+            const uint32_t t0 = Ticker::millis();
+            while (LateChannel::count() > 1u && !host_done && Ticker::millis() - t0 < limit) {
+            }
+        }
+        H::dma_receive(false);
+    }
+    const bool answered = late_wait_done(limit);
+    late_watch.on = false;
+    late_watch.raise_turns = -1;
+    late_watch.steal = false;
+    late_watch.race_words = 0;
+    const uint8_t status = answered ? DmaHost::status() : no_answer;
+    row.reads = row.reads + 1u;
+    row.lost = row.lost + (answered ? 0u : 1u);
+    row.status_wrong = row.status_wrong + (status != want ? 1u : 0u);
+    row.running = row.running + (late_watch.running - running0);
+    row.rxne = row.rxne + (late_watch.rxne - rxne0);
+    // What the requester would read, the first load behind the body, then all of it.
+    const uint8_t last = late_watch.seen;
+    bool exact = answered && status == want && last == late_value(k, static_cast<uint16_t>(n - 1u));
+    for (uint8_t i = 0; i < n && exact; ++i) {
+        exact = late_in[i] == late_value(k, i);
+    }
+    exact = exact && late_in[n] == sentinel;
+    row.exact = row.exact + (exact ? 1u : 0u);
+    row.first_wrong = row.first_wrong + (late_in[0] != late_value(k, 0) ? 1u : 0u);
+    row.last_wrong = row.last_wrong +
+                     (late_in[n - 1u] != late_value(k, static_cast<uint16_t>(n - 1u)) ? 1u : 0u);
+    row.left_on = row.left_on + (LateChannel::enabled() && LateChannel::count() != 0u ? 1u : 0u);
+    uint8_t held[late_buf + 1u];
+    for (uint8_t i = 0; i < late_buf + 1u; ++i) {
+        held[i] = late_in[i];
+    }
+    late_burn(40);
+    bool moved = late_in[n] != sentinel;
+    for (uint8_t i = 0; i < late_buf + 1u; ++i) {
+        moved = moved || held[i] != late_in[i];
+    }
+    row.stray = row.stray + (moved ? 1u : 0u);
+}
+
+/// Every shape once, at one speed, under one stage.
+void late_shapes(I2cSpeed s, LateStage stage, int16_t turns, LateRow& row, bool nexts) {
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
+        late_read(0, n, s, stage, turns, row);
+        if (nexts) {
+            late_nexts(s, row);
+        }
+        late_read(1, n, s, stage, turns, row);
+        if (nexts) {
+            late_nexts(s, row);
+        }
+    }
+}
+
+/// A read of one with the vector's line off and the request held down until RXNE
+/// stands: the common ground of the polled stages. False if RXNE never rose.
+bool late_hold(uint16_t k, I2cSpeed s, uint32_t& limit) {
+    late_serve(k, 1);
+    late_in[0] = static_cast<uint8_t>(~late_value(k, 0));
+    DmaHost::Request r{};
+    r.addr = peer_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_in));
+    r.rx_len = 1;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    host_done = false;
+    host_isr_entries = 0;
+    peer_isr_entries = 0;
+    limit = late_limit_ms(1, s);
+    Nvic::disable(H::irq());
+    (void)DmaHost::start(r);
+    H::dma_receive(false);
+    const uint32_t t0 = Ticker::millis();
+    while ((H::flags() & I2cFlag::rxne) == 0u && Ticker::millis() - t0 < limit) {
+        late_load_turn();
+    }
+    return (H::flags() & I2cFlag::rxne) != 0u;
+}
+
+void late_release(uint32_t limit) {
+    Nvic::enable(H::irq());
+    (void)late_wait_done(limit);
+}
+
+// ---- what says the last beat is in memory ----
+
+struct CountRow {
+    uint32_t rows = 0;
+    uint32_t stale = 0;
+    uint32_t turns_max = 0;
+};
+
+/// The request let up, the count polled down to zero, and the very next load the
+/// memory cell: 10.6.4 decrements "after each single DMA 'read followed by write'
+/// transfer". A turn is one load of CNDTR and a branch.
+void late_count_row(uint16_t k, I2cSpeed s, uint32_t lead, CountRow& row) {
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_release(limit);
+        return;
+    }
+    const uint32_t request = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    uint8_t first = 0;
+    uint32_t turns = 0;
+    {
+        InterruptGuard guard;
+        late_burn(lead);
+        H::regs().CR1 = request;
+        while (LateChannel::count() != 0u && turns < 20'000u) {
+            ++turns;
+        }
+        first = *static_cast<volatile uint8_t*>(late_in);
+    }
+    row.rows = row.rows + 1u;
+    row.stale = row.stale + (first != late_value(k, 0) ? 1u : 0u);
+    row.turns_max = turns > row.turns_max ? turns : row.turns_max;
+    late_release(limit);
+}
+
+// ---- the request taken down against the request rising ----
+
+struct DownRow {
+    uint32_t rows = 0;
+    uint32_t taken = 0;      ///< count down at the first load
+    uint32_t in_flight = 0;  ///< RXNE down, count up: the beat under way
+    uint32_t left = 0;       ///< RXNE up, count up: no beat seen
+    uint32_t left_taken = 0; ///< ... and the count fell afterwards: a grant outlived the enable
+    uint32_t in_flight_turns = 0;   ///< the most loads the count took to fall
+    uint32_t in_flight_stuck = 0;   ///< the count never fell
+    uint32_t stale = 0;      ///< count down, the cell at the next load not the byte
+};
+
+/// RXDMAEN up, then down `turns` of burn() later, with interrupts masked: where the
+/// first loads find the beat. 10.4.3: the request is acknowledged at the grant, and the
+/// read and the write come after, so a grant can outlive the enable.
+void late_down_row(uint16_t k, I2cSpeed s, uint32_t turns, DownRow& row) {
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_release(limit);
+        return;
+    }
+    const uint32_t down = H::regs().CR1;
+    const uint32_t up = down | I2C_CR1_RXDMAEN;
+    uint32_t isr = 0;
+    uint16_t count = 0;
+    uint32_t wait = 0;
+    uint16_t later = 1;
+    uint8_t first = 0;
+    {
+        InterruptGuard guard;
+        H::regs().CR1 = up;
+        late_burn(turns);
+        H::regs().CR1 = down;
+        isr = H::flags();
+        count = LateChannel::count();
+        later = count;
+        while (later != 0u && wait < 256u) {
+            later = LateChannel::count();
+            ++wait;
+        }
+        first = *static_cast<volatile uint8_t*>(late_in);
+    }
+    row.rows = row.rows + 1u;
+    const bool rxne_up = (isr & I2cFlag::rxne) != 0u;
+    if (count == 0u) {
+        row.taken = row.taken + 1u;
+        row.stale = row.stale + (first != late_value(k, 0) ? 1u : 0u);
+    } else if (!rxne_up) {
+        row.in_flight = row.in_flight + 1u;
+        if (later != 0u) {
+            row.in_flight_stuck = row.in_flight_stuck + 1u;
+        } else {
+            row.in_flight_turns = wait > row.in_flight_turns ? wait : row.in_flight_turns;
+            row.stale = row.stale + (first != late_value(k, 0) ? 1u : 0u);
+        }
+    } else {
+        row.left = row.left + 1u;
+        if (later == 0u) {
+            row.left_taken = row.left_taken + 1u;
+            row.in_flight_turns = wait > row.in_flight_turns ? wait : row.in_flight_turns;
+        }
+    }
+    late_release(limit);
+}
+
+// ---- the enable cleared against the beat ----
+
+struct ClearRow {
+    uint32_t rows = 0;
+    uint32_t left = 0;       ///< RXNE up: the clear came first
+    uint32_t whole = 0;      ///< RXNE down, the cell the byte, the count down
+    uint32_t count_up = 0;   ///< RXNE down, the cell the byte, the count up
+    uint32_t aborted = 0;    ///< RXNE down and the cell never the byte: the beat cut between its accesses
+};
+
+/// EN cleared `turns` of burn() after the request is let up, the request still up:
+/// 10.4.5's "stopped and aborted", against a beat in progress. The first loads after
+/// the store are the cell, the count, ISR; the cell again after a pause.
+void late_clear_row(uint16_t k, I2cSpeed s, uint32_t turns, ClearRow& row) {
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_release(limit);
+        return;
+    }
+    const uint32_t up = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    const uint32_t cleared = LateChannel::regs().CCR & ~DMA_CCR_EN;
+    uint32_t isr = 0;
+    uint16_t count = 0;
+    uint8_t later = 0;
+    {
+        InterruptGuard guard;
+        H::regs().CR1 = up;
+        late_burn(turns);
+        LateChannel::regs().CCR = cleared;
+        count = LateChannel::count();
+        isr = H::flags();
+        H::dma_receive(false);
+        late_burn(40);
+        later = *static_cast<volatile uint8_t*>(late_in);
+    }
+    row.rows = row.rows + 1u;
+    if ((isr & I2cFlag::rxne) != 0u) {
+        row.left = row.left + 1u;
+    } else if (later != late_value(k, 0)) {
+        row.aborted = row.aborted + 1u;
+    } else if (count != 0u) {
+        row.count_up = row.count_up + 1u;
+    } else {
+        row.whole = row.whole + 1u;
+    }
+    late_release(limit);
+}
+
+constexpr LateLoad late_load_saturating{"three paced channels, every 8 cycles", 3, 8, 0};
+
+// ---- a stray beat ----
+
+/// The next block's count, a hundred burns after its start with nothing on the wire:
+/// a beat there is the request a stop left behind. The tenure before it is waited out
+/// first; the enable is down throughout.
+bool late_next_block_moved() {
+    static uint8_t scratch[2];
+    HostRx::stop();
+    (void)HostRx::start(std::span<uint8_t>(scratch, 2u));
+    late_burn(100);
+    const bool moved = LateChannel::count() != 2u;
+    HostRx::stop();
+    return moved;
+}
+
+/// A clear ahead of the request, as F4's page has it: EN down, the next store RXDMAEN
+/// up, then RXDR read, with the enable up or taken down ahead of the read.
+void late_stray_clear_first(uint16_t k, I2cSpeed s, bool enable_first, uint32_t& left,
+                            uint32_t& strays) {
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_release(limit);
+        return;
+    }
+    const uint32_t up = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    const uint32_t cleared = LateChannel::regs().CCR & ~DMA_CCR_EN;
+    bool stood = false;
+    {
+        InterruptGuard guard;
+        LateChannel::regs().CCR = cleared;
+        H::regs().CR1 = up;
+        stood = (H::flags() & I2cFlag::rxne) != 0u;
+        if (enable_first) {
+            H::dma_receive(false);
+        }
+        (void)H::data();
+    }
+    late_release(limit);
+    const bool moved = late_next_block_moved();
+    left = left + (stood ? 1u : 0u);
+    strays = strays + (stood && moved ? 1u : 0u);
+}
+
+/// A channel starved under a request, the shape of the entry on a load that outranks
+/// the channel. The load holds the arbiter (a block longer than the row) and the request
+/// goes up under it. Then, by `order`, the steps of a stop, and only then the load off:
+/// `after` is the count behind the load, the next block's start is judged as above.
+enum class LateOrder : uint8_t {
+    read_up,          ///< RXDR read with the enable up, the channel left running
+    down_read,        ///< the enable down, RXDR read, the channel left running
+    down_read_clear,  ///< the enable down, RXDR read, EN cleared
+    clear_down_read,  ///< EN cleared, the enable down, RXDR read
+    down_clear_read,  ///< the enable down, EN cleared, RXDR read
+};
+
+struct StarvedRow {
+    uint32_t rows = 0;
+    uint32_t served = 0;    ///< the count down ahead of the steps: the load let it through
+    uint32_t behind = 0;    ///< a beat behind the load
+    uint32_t stray = 0;     ///< a beat at the next block's start
+};
+
+void late_stray_starved(uint16_t k, I2cSpeed s, LateOrder order, StarvedRow& row) {
+    late_load_on(late_load_saturating);
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_load_off();
+        late_release(limit);
+        return;
+    }
+    const uint32_t up = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    uint16_t count = 0;
+    uint16_t after = 0;
+    {
+        InterruptGuard guard;
+        late_load_turn();
+        H::regs().CR1 = up;
+        late_burn(2);
+        count = LateChannel::count();
+        switch (order) {
+            case LateOrder::read_up:
+                (void)H::data();
+                break;
+            case LateOrder::down_read:
+                H::dma_receive(false);
+                (void)H::data();
+                break;
+            case LateOrder::down_read_clear:
+                H::dma_receive(false);
+                (void)H::data();
+                (void)LateChannel::enable(false);
+                break;
+            case LateOrder::clear_down_read:
+                (void)LateChannel::enable(false);
+                H::dma_receive(false);
+                (void)H::data();
+                break;
+            case LateOrder::down_clear_read:
+                H::dma_receive(false);
+                (void)LateChannel::enable(false);
+                (void)H::data();
+                break;
+        }
+        late_load_off();
+        late_burn(100);
+        after = LateChannel::count();
+    }
+    row.rows = row.rows + 1u;
+    row.served = row.served + (count == 0u ? 1u : 0u);
+    row.behind = row.behind + (count != 0u && after != count ? 1u : 0u);
+    late_release(limit);
+    row.stray = row.stray + (late_next_block_moved() ? 1u : 0u);
+}
+
+/// A tenure dropped by recover() over a starved channel, the request standing: the
+/// per-bus timeout's path behind a load. The next block's start is judged as above.
+void late_recover_row(uint16_t k, I2cSpeed s, StarvedRow& row) {
+    late_load_on(late_load_saturating);
+    uint32_t limit = 0;
+    if (!late_hold(k, s, limit)) {
+        late_load_off();
+        late_release(limit);
+        return;
+    }
+    const uint32_t up = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    uint16_t count = 0;
+    uint16_t after = 0;
+    {
+        InterruptGuard guard;
+        late_load_turn();
+        H::regs().CR1 = up;
+        late_burn(2);
+        count = LateChannel::count();
+        (void)DmaHost::recover();
+        late_load_off();
+        late_burn(100);
+        after = LateChannel::count();
+    }
+    Nvic::enable(H::irq());
+    row.rows = row.rows + 1u;
+    row.served = row.served + (count == 0u ? 1u : 0u);
+    row.behind = row.behind + (count != 0u && after != count ? 1u : 0u);
+    row.stray = row.stray + (late_next_block_moved() ? 1u : 0u);
+}
+
+// ---- the letters ----
+
+/// The client, its timing solved for Fm+ on PCLK where the rung asks
+/// for 1 MHz (ES0548 2.10.1's 20 MHz floor rules HSI16 out there), on HSI16 where the
+/// core is under that floor.
+void late_client(I2cClock kernel) {
+    uint8_t serve[8];
+    fill_pattern(serve, 8, 0x60);
+    const I2cSpeed solved = kernel == I2cClock::pclk ? I2cSpeed::fast_plus_1m : I2cSpeed::fast_400k;
+    (void)peer_arm(serve, 8, solved, false, peer_addr, I2cAddressMode::seven_bit, 0,
+                   I2cOa2Mask::none, false, false, I2cFilters{}, kernel);
+    peer_nack_at = 0;
+}
+
+/// The 20 mA drive on both ends for the 1 MHz rung, off for the others.
+void late_rung(I2cSpeed s) {
+    const bool plus = s == I2cSpeed::fast_plus_1m;
+    C::instance_fast_plus(plus);
+    DmaHost::fast_plus_drive(plus);
+}
+
+bool late_begin() {
+    if constexpr (!self_link_possible) {
+        (void)need_self_link();
+        return false;
+    }
+    if (!need_self_link()) {
+        return false;
+    }
+    uint8_t serve[8];
+    fill_pattern(serve, 8, 0x60);
+    (void)peer_arm(serve, 8);
+    host_ready();
+    if (!link_alive()) {
+        bench.verdict("the link is alive (declined: no answer from the client)", false);
+        peer_stop();
+        return false;
+    }
+    Host::release();
+    late_client(I2cClock::pclk);
+    dma_host_live = true;
+    return DmaHost::init(clock, I2cClock::pclk);
+}
+
+void late_end() {
+    late_watch = LateWatch{};
+    late_rung(I2cSpeed::fast_400k);
+    dma_host_live = false;
+    DmaHost::release();
+    SysClock::set_index(r_fast);
+    console_drain();
+    (void)Host::init(clock, I2cClock::pclk);
+    peer_stop();
+    calibrate_spin();
+}
+
+/// C - the staging. Rows of a run: `reads` of 12 for the shapes, three speeds.
+void tC_late_stage() {
+    if (!late_begin()) {
+        return;
+    }
+    const I2cSpeed speeds[3] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k,
+                                I2cSpeed::fast_plus_1m};
+    const char* const names[3] = {"100 kHz", "400 kHz", "1 MHz"};
+
+    // ---- what says the beat is in memory ----
+    CountRow count{};
+    for (uint32_t lead = 0; lead < 8u; ++lead) {
+        for (uint8_t i = 0; i < 25u; ++i) {
+            late_serial = static_cast<uint16_t>(late_serial + 1u);
+            late_count_row(late_serial, I2cSpeed::fast_400k, lead, count);
+        }
+    }
+    late_load_on({"", 0, 0, 1});
+    for (uint32_t lead = 0; lead < 8u; ++lead) {
+        for (uint8_t i = 0; i < 25u; ++i) {
+            late_serial = static_cast<uint16_t>(late_serial + 1u);
+            late_count_row(late_serial, I2cSpeed::fast_400k, lead, count);
+        }
+    }
+    late_load_off();
+    print(serial, "  the count polled to zero, the next load the cell: ", count.rows,
+          " rows (half under a copy at very_high), stale ", count.stale,
+          ", at most ", count.turns_max, " loads of the count", crlf);
+    // No bound to derive: 10.6.4's order, each row judged at zero. A stale cell would
+    // say the count falls ahead of the memory's write.
+    bench.verdict("THE COUNT AT ZERO SAYS THE LAST BEAT IS IN MEMORY: the first load after it reads "
+                  "the byte", count.rows == 400u && count.stale == 0u);
+
+    // ---- the request taken down against the request rising ----
+    DownRow down{};
+    for (uint32_t turns = 0; turns < 24u; ++turns) {
+        for (uint8_t i = 0; i < 20u; ++i) {
+            late_serial = static_cast<uint16_t>(late_serial + 1u);
+            late_down_row(late_serial, I2cSpeed::fast_400k, turns, down);
+        }
+    }
+    print(serial, "  RXDMAEN up, then down 0 to 23 burns later: ", down.rows, " rows; the count down "
+          "at the first load ", down.taken, ", the beat under way (RXNE down, count up) ",
+          down.in_flight, ", no beat (RXNE up) ", down.left, "; of those a beat came after all ",
+          down.left_taken, "; the count fell within ", down.in_flight_turns,
+          " loads, never in ", down.in_flight_stuck, "; a stale cell ", down.stale, crlf);
+    // 480 = 24 turns x 20 rows. Zero judged on the stuck and the stale: a beat under
+    // way that never ended, or ended with the wrong byte, contradicts the entry's wait.
+    bench.verdict("A BEAT THAT OUTLIVES THE REQUEST FINISHES: every count under way falls and the cell "
+                  "is the byte", down.rows == 480u && down.in_flight_stuck == 0u && down.stale == 0u);
+    bench.verdict("... inside the entry's wait", down.in_flight_turns < DmaHost::late_beat_turns);
+
+    // ---- the enable cleared against the beat ----
+    ClearRow clear{};
+    for (uint32_t turns = 0; turns < 24u; ++turns) {
+        for (uint8_t i = 0; i < 20u; ++i) {
+            late_serial = static_cast<uint16_t>(late_serial + 1u);
+            late_clear_row(late_serial, I2cSpeed::fast_400k, turns, clear);
+        }
+    }
+    print(serial, "  EN cleared 0 to 23 burns after RXDMAEN up, the request up: ", clear.rows,
+          " rows; RXNE up, the clear first ", clear.left, "; the byte in memory, count down ",
+          clear.whole, "; the byte in memory, count up ", clear.count_up,
+          "; RXNE down and the byte nowhere ", clear.aborted, crlf);
+
+    // ---- a stray beat ----
+    uint32_t left_up = 0;
+    uint32_t stray_up = 0;
+    uint32_t left_down = 0;
+    uint32_t stray_down = 0;
+    for (uint8_t i = 0; i < 100u; ++i) {
+        late_serial = static_cast<uint16_t>(late_serial + 1u);
+        late_stray_clear_first(late_serial, I2cSpeed::fast_400k, false, left_up, stray_up);
+        late_serial = static_cast<uint16_t>(late_serial + 1u);
+        late_stray_clear_first(late_serial, I2cSpeed::fast_400k, true, left_down, stray_down);
+    }
+    print(serial, "  EN down, then RXDMAEN up, then RXDR read: with the enable up, the byte stood in ",
+          left_up, " of 100, a beat at the next block's start in ", stray_up,
+          "; the enable down first, stood in ", left_down, ", a beat in ", stray_down, crlf);
+    StarvedRow host_order{};
+    const LateOrder orders[5] = {LateOrder::read_up, LateOrder::down_read, LateOrder::down_read_clear,
+                                 LateOrder::clear_down_read, LateOrder::down_clear_read};
+    const char* const order_names[5] = {"RXDR read, enable up", "enable down, read",
+                                        "enable down, read, EN clear", "EN clear, enable down, read",
+                                        "enable down, EN clear, read"};
+    for (uint8_t o = 0; o < 5u; ++o) {
+        StarvedRow starved{};
+        for (uint8_t i = 0; i < 100u; ++i) {
+            late_serial = static_cast<uint16_t>(late_serial + 1u);
+            late_stray_starved(late_serial, I2cSpeed::fast_400k, orders[o], starved);
+        }
+        print(serial, "  a starved channel, ", order_names[o], ": ", starved.rows, " rows, served ahead ",
+              starved.served, ", a beat behind the load ", starved.behind,
+              ", a beat at the next block's start ", starved.stray, crlf);
+        if (orders[o] == LateOrder::down_read_clear) {
+            host_order = starved;
+        }
+    }
+    StarvedRow recovered{};
+    for (uint8_t i = 0; i < 100u; ++i) {
+        late_serial = static_cast<uint16_t>(late_serial + 1u);
+        late_recover_row(late_serial, I2cSpeed::fast_400k, recovered);
+    }
+    print(serial, "  a starved channel, recover() over the standing request: ", recovered.rows,
+          " rows, served ahead ", recovered.served, ", a beat behind the load ", recovered.behind,
+          ", a beat at the next block's start ", recovered.stray, crlf);
+    // No bound to derive: 100 rows a run, each stray judged at zero under the two orders the
+    // host keeps. The other orders' counts are printed: the silicon's, not the host's.
+    bench.verdict("THE HOST'S ORDER LEAVES NOTHING: the enable down ahead of the read, a beat at the "
+                  "next block's start in no row, the channel starved or not",
+                  stray_down == 0u && host_order.rows == 100u && host_order.stray == 0u);
+    bench.verdict("... and neither does recover() over a standing request",
+                  recovered.rows == 100u && recovered.stray == 0u);
+
+    // ---- the request taken away for the last byte ----
+    bool all_exact = true;
+    bool all_next = true;
+    for (uint8_t v = 0; v < 3u; ++v) {
+        late_rung(speeds[v]);
+        LateRow stage{};
+        for (uint8_t pass = 0; pass < 5u; ++pass) {
+            late_shapes(speeds[v], LateStage::starve, -1, stage, true);
+        }
+        print(serial, "  the request taken away for the last byte, ", names[v], crlf);
+        late_row_print("reads of 1, 2, 8 and write-then-reads 1+1, 1+2, 1+8", stage);
+        // 30 = 5 passes x 6 shapes. The stage holds the byte back, so every entry
+        // finds the channel running and RXNE up: anything else says the stage missed.
+        all_exact = all_exact && stage.reads == 30u && stage.exact == 30u && stage.running == 30u &&
+                    stage.rxne == 30u && stage.left_on == 0u && stage.stray == 0u;
+        all_next = all_next && stage.next_read == 30u && stage.next_write == 30u &&
+                   stage.next_refused == 30u;
+    }
+    bench.verdict("THE LAST BYTE THE CHANNEL WAS NEVER ASKED FOR: every byte at its place in the vector, "
+                  "the channel stopped, nothing moving afterwards, at the three speeds", all_exact);
+    bench.verdict("... and behind it a read of eight, a write of eight and a refused write whole",
+                  all_next);
+
+    // ---- the same, the request let up at the entry ----
+    bool raised_exact = true;
+    bool raised_next = true;
+    for (uint8_t v = 1; v < 3u; ++v) {
+        late_rung(speeds[v]);
+        LateRow raised{};
+        for (int16_t turns = 0; turns < 24; ++turns) {
+            late_read(0, 1, speeds[v], LateStage::raise, turns, raised);
+            late_read(0, 2, speeds[v], LateStage::raise, turns, raised);
+            late_read(0, 8, speeds[v], LateStage::raise, turns, raised);
+            late_read(1, 8, speeds[v], LateStage::raise, turns, raised);
+            late_nexts(speeds[v], raised);
+        }
+        print(serial, "  the request let up in the STOPF entry 0 to 23 burns ahead of the body, ",
+              names[v], crlf);
+        late_row_print("reads of 1, 2, 8, a write-then-read 1+8", raised);
+        // 96 = 24 turns x 4 shapes, every entry staged as above; a beat may win by
+        // the host's first load, so `running` is printed and not judged here.
+        raised_exact = raised_exact && raised.reads == 96u && raised.exact == 96u &&
+                       raised.left_on == 0u && raised.stray == 0u;
+        raised_next = raised_next && raised.next_read == 24u && raised.next_write == 24u &&
+                      raised.next_refused == 24u;
+    }
+    bench.verdict("THE HOST STOPS A CHANNEL OVER A STANDING REQUEST: every byte in the vector, swept "
+                  "across the entry, at 400 kHz and 1 MHz", raised_exact);
+    bench.verdict("... and behind it a read of eight, a write of eight and a refused write whole",
+                  raised_next);
+
+    // ---- the request under a load that ends inside the entry ----
+    bool raced_exact = true;
+    bool raced_next = true;
+    for (uint8_t v = 1; v < 3u; ++v) {
+        late_rung(speeds[v]);
+        late_load_on(late_load_saturating);
+        (void)DmaChannel<1, 3>::enable(false);
+        (void)DmaChannel<1, 4>::enable(false);
+        (void)DmaChannel<1, 5>::enable(false);
+        late_load_paced = 0;   // the entry's to start, the thread's turn out of it
+        LateRow raced{};
+        for (int16_t words = 1; words <= 48; ++words) {
+            late_read(0, 1, speeds[v], LateStage::race, words, raced);
+            late_read(0, 2, speeds[v], LateStage::race, words, raced);
+            late_read(0, 8, speeds[v], LateStage::race, words, raced);
+            late_read(1, 8, speeds[v], LateStage::race, words, raced);
+            late_nexts(speeds[v], raced);
+        }
+        late_load_paced = 3;
+        late_load_off();
+        print(serial, "  the request up in the entry under 1 to 48 beats of three channels above it, ",
+              names[v], crlf);
+        late_row_print("reads of 1, 2, 8, a write-then-read 1+8", raced);
+        // 192 = 48 beats x 4 shapes; `running` is every row's by the stage's making, and the
+        // beat may land on either side of the body's load, so nothing else is judged of it.
+        raced_exact = raced_exact && raced.reads == 192u && raced.exact == 192u &&
+                      raced.left_on == 0u && raced.stray == 0u;
+        raced_next = raced_next && raced.next_read == 48u && raced.next_write == 48u &&
+                     raced.next_refused == 48u;
+    }
+    print(serial, "  the host's body so far, between SysTick reads: at most ", late_watch.body_on_time,
+          " cycles with the channel done at the first load, ", late_watch.body_late,
+          " with it running", crlf);
+    bench.verdict("A BEAT LANDING ANYWHERE IN THE ENTRY: every byte in the vector, nothing moving after",
+                  raced_exact);
+    bench.verdict("... and behind it a read of eight, a write of eight and a refused write whole",
+                  raced_next);
+
+    // ---- a byte nobody has ----
+    late_rung(I2cSpeed::fast_400k);
+    late_watch.body_late = 0;
+    LateRow stolen{};
+    for (uint8_t pass = 0; pass < 10u; ++pass) {
+        late_read(0, 1, I2cSpeed::fast_400k, LateStage::steal, -1, stolen, i2c_dma_fault);
+        late_read(0, 8, I2cSpeed::fast_400k, LateStage::steal, -1, stolen, i2c_dma_fault);
+        late_nexts(I2cSpeed::fast_400k, stolen);
+    }
+    print(serial, "  the last byte read away ahead of the host's body: ", stolen.reads,
+          " reads, the body at most ", late_watch.body_late, " cycles, the status owed wrong in ",
+          stolen.status_wrong, ", left running ", stolen.left_on,
+          "; behind them read whole ", stolen.next_read, ", write whole ", stolen.next_write,
+          ", refused whole ", stolen.next_refused, crlf);
+    // 20 = 10 passes x 2 lengths, 10 of the requests behind them.
+    bench.verdict("A BYTE NOBODY HAS IS A STATUS, NEVER i2c_ok: i2c_dma_fault, and the channel stopped",
+                  stolen.reads == 20u && stolen.status_wrong == 0u && stolen.left_on == 0u &&
+                      stolen.lost == 0u);
+    bench.verdict("... and the requests behind it whole",
+                  stolen.next_read == 10u && stolen.next_write == 10u && stolen.next_refused == 10u);
+
+    late_end();
+}
+
+// ---- D: the load, the lag, the window ----
+
+struct LagRow {
+    uint32_t rows = 0;
+    uint32_t lag_max = 0;
+    uint32_t window_min = 0xFFFF'FFFFu;
+    int32_t margin_min = 0x7FFF'FFFF;
+    uint32_t late = 0;     ///< STOPF up with the count not yet at zero
+    uint32_t turn_max = 0;
+    uint32_t wrong = 0;
+};
+
+/// The request held down until RXNE rises, then let up: a masked poll dates the count's
+/// zero (the channel's lag, from the request) and STOPF (the window it has), one tenure.
+/// The client has given its byte before the mask comes down. A turn of the wait for RXNE
+/// is one load and a branch, a turn of the poll three loads (CNDTR, ISR, SysTick's VAL):
+/// the figures' resolution, the poll's printed. Each row is good to that turn, and the
+/// let-up itself costs a store and a load on the far side of RXNE.
+void late_lag_row(uint16_t k, I2cSpeed s, LagRow& row) {
+    late_serve(k, 1);
+    late_in[0] = static_cast<uint8_t>(~late_value(k, 0));
+    DmaHost::Request r{};
+    r.addr = peer_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(late_in));
+    r.rx_len = 1;
+    r.speed = s;
+    r.engine = I2cEngine::dma;
+    host_done = false;
+    host_isr_entries = 0;
+    peer_isr_entries = 0;
+    peer_tx_n = 0;
+    const uint32_t limit = late_limit_ms(1, s);
+    Nvic::disable(H::irq());
+    (void)DmaHost::start(r);
+    H::dma_receive(false);
+    const uint32_t up = H::regs().CR1 | I2C_CR1_RXDMAEN;
+    const uint32_t t_wait = Ticker::millis();
+    while (peer_tx_n == 0u && Ticker::millis() - t_wait < limit) {
+        late_load_turn();
+    }
+    const uint32_t period = SysTick->LOAD + 1u;
+    uint32_t zero_at = 0;
+    uint32_t stop_at = 0;
+    uint32_t turn = 0;
+    bool zero = false;
+    bool stopped = false;
+    {
+        InterruptGuard guard;
+        late_load_turn();
+        for (uint32_t turns = 200'000u; turns != 0u && (H::flags() & I2cFlag::rxne) == 0u; --turns) {
+        }
+        const uint32_t t0 = SysTick->VAL;
+        H::regs().CR1 = up;
+        uint32_t last = t0;
+        bool first = true;
+        for (uint32_t turns = 4000u; turns != 0u && !(zero && stopped); --turns) {
+            const uint16_t c = LateChannel::count();
+            const uint32_t f = H::flags();
+            const uint32_t now = SysTick->VAL;
+            // SysTick counts down and wraps at most once in a row (no division: a
+            // modulo on this core would be most of the turn).
+            const uint32_t step = last >= now ? last - now : last + period - now;
+            turn = !first && step > turn ? step : turn;
+            first = false;
+            last = now;
+            const uint32_t at = t0 >= now ? t0 - now : t0 + period - now;
+            if (!zero && c == 0u) {
+                zero = true;
+                zero_at = at;
+            }
+            if (!stopped && (f & I2cFlag::stop) != 0u) {
+                stopped = true;
+                stop_at = at;
+            }
+        }
+    }
+    late_release(limit);
+    row.wrong = row.wrong + (host_done && DmaHost::status() == i2c_ok && late_in[0] == late_value(k, 0)
+                                 ? 0u
+                                 : 1u);
+    if (!stopped) {
+        return;
+    }
+    row.rows = row.rows + 1u;
+    row.turn_max = turn > row.turn_max ? turn : row.turn_max;
+    row.window_min = stop_at < row.window_min ? stop_at : row.window_min;
+    if (zero) {
+        row.lag_max = zero_at > row.lag_max ? zero_at : row.lag_max;
+        const int32_t m = static_cast<int32_t>(stop_at) - static_cast<int32_t>(zero_at);
+        row.margin_min = m < row.margin_min ? m : row.margin_min;
+    }
+    if (!zero || zero_at > stop_at) {
+        row.late = row.late + 1u;
+    }
+}
+
+void late_lag_print(const LagRow& r) {
+    print(serial, "      polled, ", r.rows, " tenures: the count's zero at most ", r.lag_max,
+          " core cycles from the request, STOPF at least ", r.window_min, ", the least margin ",
+          r.margin_min, ", STOPF first in ", r.late, ", a poll's turn at most ", r.turn_max,
+          ", wrong ", r.wrong, crlf);
+}
+
+constexpr LateLoad late_loads[] = {
+    {"nothing else", 0, 0, 0},
+    {"a paced channel, every 64 cycles", 1, 64, 0},
+    {"a paced channel, every 16 cycles", 1, 16, 0},
+    {"a paced channel, every 4 cycles", 1, 4, 0},
+    {"two paced channels, every 16 cycles", 2, 16, 0},
+    {"two paced channels, every 4 cycles", 2, 4, 0},
+    {"three paced channels, every 16 cycles", 3, 16, 0},
+    {"three paced channels, every 8 cycles", 3, 8, 0},
+    {"... their timers 1 burn apart", 3, 8, 0, 1},
+    {"... 2 burns apart", 3, 8, 0, 2},
+    {"... 3 burns apart", 3, 8, 0, 3},
+    {"three paced channels, every 6 cycles", 3, 6, 0},
+    {"... 1 burn apart", 3, 6, 0, 1},
+    {"three paced channels, every 4 cycles", 3, 4, 0},
+    {"... 1 burn apart", 3, 4, 0, 1},
+    {"a copy", 0, 0, 1},
+    {"two copies", 0, 0, 2},
+    {"three copies", 0, 0, 3},
+    {"three copies at low, the default", 0, 0, 3, 0, DmaPriority::low},
+    {"a paced channel every 8 cycles and two copies", 1, 8, 2},
+};
+
+constexpr LateLoad late_loads_copies{"three copies", 0, 0, 3};
+
+struct LateCensus {
+    uint32_t reads = 0;
+    uint32_t exact = 0;
+    uint32_t lost = 0;
+};
+
+/// One row: reads of 1, 2 and 8 on nothing but the load, each length's count of a
+/// channel still running at the vector's first load, then the poll's margin on reads
+/// of one.
+void late_census_row(const char* name, I2cSpeed s, LateCensus& all) {
+    LateRow by[3] = {};
+    const uint8_t lengths[3] = {1, 2, 8};
+    for (uint8_t pass = 0; pass < 50u; ++pass) {
+        for (uint8_t i = 0; i < 3u; ++i) {
+            late_read(0, lengths[i], s, LateStage::none, -1, by[i]);
+        }
+    }
+    LagRow lag{};
+    for (uint8_t i = 0; i < 40u; ++i) {
+        late_serial = static_cast<uint16_t>(late_serial + 1u);
+        late_lag_row(late_serial, s, lag);
+    }
+    print(serial, "    ", name, ": reads of 1, 2, 8, 50 each: exact ", by[0].exact, ", ", by[1].exact, ", ",
+          by[2].exact, "; running at the entry ", by[0].running, ", ", by[1].running, ", ",
+          by[2].running, "; unanswered ", by[0].lost + by[1].lost + by[2].lost, "; left running ",
+          by[0].left_on + by[1].left_on + by[2].left_on, crlf);
+    late_lag_print(lag);
+    console_drain();
+    for (const LateRow& r : by) {
+        all.reads = all.reads + r.reads;
+        all.exact = all.exact + r.exact;
+        all.lost = all.lost + r.lost;
+    }
+}
+
+/// D - the census: every load at 400 kHz and 1 MHz, then the slower rungs.
+void tD_late_load() {
+    if (!late_begin()) {
+        return;
+    }
+    const I2cSpeed speeds[2] = {I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m};
+    const char* const names[2] = {"400 kHz", "1 MHz"};
+    LateCensus all{};
+    for (const LateLoad& l : late_loads) {
+        print(serial, "  ", l.name, crlf);
+        for (uint8_t v = 0; v < 2u; ++v) {
+            late_rung(speeds[v]);
+            late_load_on(l);
+            late_census_row(names[v], speeds[v], all);
+            late_load_off();
+        }
+    }
+    // The slower rungs, the kernel on HSI16: the bus's window shrinks in core cycles
+    // and the channel's own does not. Bare, and under the load the rows above name.
+    late_rung(I2cSpeed::fast_400k);
+    late_client(I2cClock::hsi16);
+    const uint8_t rungs[2] = {r_mid, r_slow};
+    const char* const rung_names[2] = {"core 16 MHz, kernel HSI16", "core 2 MHz, kernel HSI16"};
+    for (uint8_t i = 0; i < 2u; ++i) {
+        SysClock::set_index(rungs[i]);
+        console_drain();
+        if (!DmaHost::init(clock, I2cClock::hsi16)) {
+            all.reads = all.reads + 1u;   // no verdict can pass over a refused rung
+        }
+        print(serial, "  ", rung_names[i], crlf);
+        late_census_row("400 kHz, nothing else", speeds[0], all);
+        late_load_on(late_loads_copies);
+        late_census_row("400 kHz, three copies", speeds[0], all);
+        late_load_off();
+        SysClock::set_index(r_fast);
+        console_drain();
+    }
+    const uint32_t all_reads = all.reads;
+    const uint32_t all_exact = all.exact;
+    const uint32_t all_lost = all.lost;
+    print(serial, "  in all ", all_reads, " reads, exact ", all_exact, ", unanswered ", all_lost, crlf);
+    // No bound to derive: each read is judged byte for byte, and unanswered is
+    // late_limit_ms(), its arithmetic above. How often a channel was late is the load's
+    // and is printed, not judged: a rate of zero would say nothing of the next load.
+    bench.verdict("EVERY READ EXACT UNDER EVERY LOAD, late or not, its last byte in memory in the vector",
+                  all_reads != 0u && all_exact == all_reads && all_lost == 0u);
+    late_end();
+}
+
 void banner() {
     print(serial, crlf, "test_stm32_i2c - STM32G0 I2C (RM0444 ch. 32)", crlf);
     if (self_link) {
         print(serial, "  the SELF-LINK is on the desk: I2C1 host PB8/PB9 AF6  <->  "
-                      "I2C2 client PA11/PA12 AF6; letters b..m, u, v and B are live, client "
+                      "I2C2 client PA11/PA12 AF6; letters b..m, u, v, B, C and D are live, client "
                       "address ",
               hex(peer_addr), ", client kernel HSI16", crlf);
     } else {
@@ -4943,7 +6213,13 @@ extern "C" void I2C1_IRQHandler() {
         return;
     }
     if (dma_host_live) {
+        if (late_watch.on) {
+            late_watch_before();
+        }
         if (DmaHost::isr()) {
+            if (late_watch.on) {
+                late_watch_after();
+            }
             host_done = true;
             host_completions = static_cast<uint16_t>(host_completions + 1u);
         }
@@ -5016,6 +6292,10 @@ int main() {
                       "byte for byte", tv_refusals);
     bench.letter('B', "ES0418 2.11.6's band by name: the host's writes, and TXDR left empty, its "
                       "rate printed", tB_band);
+    bench.letter('C', "THE RECEIVE CHANNEL AT THE STOPF ENTRY, staged: the last byte's request taken "
+                      "away, and let up in the entry", tC_late_stage);
+    bench.letter('D', "... and under load: every read, the channel's lag against the bus's window",
+                 tD_late_load);
     bench.second_letter('n', "THE PEER: the twi_link command channel to the peer board",
                  tn_peer_link);
     bench.second_letter('o', "the tenure shapes against the peer, the repeated START "
