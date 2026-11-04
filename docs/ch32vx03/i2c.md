@@ -466,9 +466,9 @@ receive to 7, I2C2's to 4 and 5. On this family the channel is the
 request, so an engine slot naming any other channel is refused at
 compile time. Both engines arm at high priority, the transmit level of
 [../design/dma.md](../design/dma.md)'s rule and not a receive's: the
-host does not overrun - a byte a starved channel has not moved leaves
-BTF up and SCL held low until it is (19.3's notes), the bus slower and
-nothing lost.
+host does not overrun - a byte a starved receive channel has not moved
+leaves BTF up and SCL held low until it is (19.3's notes), the bus slower
+and nothing lost.
 
 The program names the mechanism of every request: `I2cEngine::interrupt`,
 the default, runs every data byte on the event vector and touches no
@@ -512,7 +512,8 @@ bus master ([dma.md](dma.md)). The transmit channel's completion still
 raises its interrupt here, unlike the SPI host's: on this bus nothing
 comes back to prove it, and it is the edge the host acts on. The event vector
 ends a write on BTF only behind it. A BTF with the transmit channel's count not
-at zero is a stalled channel and not a written DMA block, and ends the tenure
+at zero is a channel that has not served a TxE for a byte's time, starved by a
+block above it or dead, and not a written DMA block, and ends the tenure
 `i2c_dma_fault` with its STOP requested, as does a channel's transfer error:
 this host's own status, declared in its header beyond the four wire codes of
 util/i2c_bus.hpp (measured: with a request another peripheral left held on
@@ -691,9 +692,9 @@ against the other running `twi_peer` (the peer's PLL on its 8 MHz crystal): I2C1
 to I2C1 on PB6/PB7, a 2.2 kOhm pull-up on each line to the CH32V203C8T6 board's
 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
-letter both ways, three runs of `z` in each direction with no failure (103
-verdicts on the CH32V303VCT6's one image, 57 and 45 in the CH32V203C8T6's
-two, the one more being letter `g`'s write across 64 KB, a rule only the
+letter both ways, three runs of `z` in each direction with no failure (115
+verdicts on the CH32V303VCT6's one image, 57, 52 and 5 in the CH32V203C8T6's
+three, the one more being letter `g`'s write across 64 KB, a rule only the
 CH32V303 has). TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad
 that carries it, with no scope and no wire. The figures below are the
@@ -932,6 +933,20 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
   arbiter the per-bus timeout and its `recover()`, here the letter's own 50 ms wait,
   with no per-bus timeout nothing; the thread runs throughout, and each holder's reset line
   lets its request go and the same tenure runs whole.
+- **A block above the host's channels** (letter y, the CH32V203C8T6's image `-3`, both parts, twelve runs of eight rows a shape):
+  a memory-to-memory block of 30000 words on channel 1 at very_high, which leaves the
+  channels below it nothing until it ends, at 100 kHz. Caught at its third byte, a
+  write of eight ends `i2c_dma_fault` in every row with the block still running, the
+  far end holding four, the event vector entered three times (SB, ADDR, the BTF that
+  ends it): BTF with the count standing is answered once and does not re-enter, and
+  the vector cannot tell this channel from a dead one. Up before the START the block
+  costs a write nothing, no byte having gone to raise BTF: SCL stands and a write of
+  two or eight lands whole when it ends. Reads of one, two and eight under it, and a
+  read of eight caught at its third byte, are exact in every row with the event
+  vector at two entries, the answer behind the block. A read of two starved from its
+  start draws more off the target, which counted four, the reply exact. So a block
+  above `high` that can outlast a byte (90 us at 100 kHz, 22.5 at 400) can end a write;
+  a copy at its default `low` lies below it.
 - **Ten seconds of back-to-back tenures at fast mode**: 25346 tenures
   (25354 on the CH32V303VCT6), 405 thousand bytes moved, not one failure
   at either end and no byte mismatch.

@@ -4628,6 +4628,7 @@ struct Outcome {
     uint16_t idx = 0xFFFF;
     uint8_t got = 0, exp = 0;
     uint32_t cycles = 0;      ///< start() to completion, core cycles
+    bool ticked = false;      ///< a tick landed between those two readings
 };
 
 /// Whether the peer served the extended exchange and heard every frame.
@@ -4686,12 +4687,13 @@ Outcome run(const Ext& e) {
         r.mode = SpiMode::mode0;
         r.bits = bits;
         r.engine = SpiEngine::dma;
+        const uint32_t m0 = Ticker::millis();
         const uint32_t t0 = cycles_now();
         bool done = DmaHost::start(r);
-        const uint32_t m0 = Ticker::millis();
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
         o.cycles = cycles_now() - t0;
+        o.ticked = Ticker::millis() != m0;
         o.clocked = done || host_done;
         link_hold();
         CsPin::set();
@@ -4710,12 +4712,13 @@ Outcome run(const Ext& e) {
         r.mode = SpiMode::mode0;
         r.bits = bits;
         r.engine = SpiEngine::polled;
+        const uint32_t m0 = Ticker::millis();
         const uint32_t t0 = cycles_now();
         bool done = Host::start(r);
-        const uint32_t m0 = Ticker::millis();
         while (!done && !host_done && Ticker::millis() - m0 < 200u) {
         }
         o.cycles = cycles_now() - t0;
+        o.ticked = Ticker::millis() != m0;
         o.clocked = done || host_done;
         link_hold();
         CsPin::set();
@@ -4800,21 +4803,62 @@ bool climb(Ext e, uint8_t& judged) {
 /// THE WIRE'S TIME, from the difference of two windows of 16 and 48
 /// frames at the same rung - the transaction's fixed cost cancels - in
 /// permille of the frame's SCK periods (PCLK = HCLK here, so a bit is
-/// `division` core cycles). Zero when either window was not exact.
+/// `division` core cycles). Zero when either window was not exact. The
+/// console is drained first, and a window a tick landed in is taken again
+/// (at most six times each): the tick's handler and a transmit interrupt
+/// lengthen a window (window_ok() judges the unlengthened ones).
 uint32_t frame_permille(Ext e) {
     Ext shorter = e;
     shorter.count = 16;
     Ext longer = e;
     longer.count = 48;
     longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
-    const Outcome a = run(shorter);
-    const Outcome b = run(longer);
-    if (!exact(shorter, a) || !exact(longer, b) || b.cycles <= a.cycles) {
+    console_drain();
+    Outcome a{};
+    Outcome b{};
+    uint8_t turns = 6;
+    do {
+        a = run(shorter);
+    } while (a.ticked && --turns != 0u);
+    turns = 6;
+    do {
+        b = run(longer);
+    } while (b.ticked && --turns != 0u);
+    if (a.ticked || b.ticked || !exact(shorter, a) || !exact(longer, b) || b.cycles <= a.cycles) {
         return 0u;
     }
     const uint32_t per_frame_x1000 = (b.cycles - a.cycles) * 1000u / 32u;
     const uint32_t wire = (e.wide ? 16u : 8u) * spi_division(e.rate);
     return per_frame_x1000 / wire;
+}
+
+/// frame_permille()'s difference, read against the wire. THE BOUND, DERIVED:
+///
+///   the wire: 32 frames x 16 bits x `division` core cycles, W = 2048 at PCLK/4
+///   and 8192 at PCLK/16. PCLK is HCLK and the ruler counts HCLK, so the clocks add
+///   no error and no wander, whatever the crystal does.
+///
+///   the ruler: the same call at each end of a window, one cycle of resolution, its
+///   own time cancelling.
+///
+///   the fixed cost: cancels, but each window ends at the first poll to find the
+///   flag, so a window reads up to one empty turn of its wait late: at most `turn`
+///   cycles either way in the difference. An empty turn of the polled loop's RXNE wait
+///   is 24 to 34 cycles by where the image puts the body (docs/stm32g0/spi.md; some 22 in
+///   this image's instructions, the rest the flash's wait states, 31 read off the windows
+///   of 16 to 48 frames on the STM32G0B1RE), so 34 is taken; the thread's wait for the
+///   engines' completion is some 13 in the instructions, 15 read off the same windows,
+///   so 20 is taken.
+///
+///   so a frame reads floor(1000 x (W +- turn) / W) permille: 983 to 1016 for the
+///   polled loop at PCLK/4, 995 to 1004 at PCLK/16; 990 to 1009 and 997 to 1002 on the
+///   engines. A frame cannot be shorter than its bits on this clock, so a reading below
+///   that is a broken instrument, and one above it a gap on the wire: both are findings.
+constexpr uint32_t polled_turn_cycles = 34;
+constexpr uint32_t engines_turn_cycles = 20;
+bool window_ok(uint32_t permille, SpiClock rate, uint32_t turn) {
+    const uint32_t wire = 32u * 16u * spi_division(rate);
+    return permille >= 1000u * (wire - turn) / wire && permille <= 1000u * (wire + turn) / wire;
 }
 
 }  // namespace ext
@@ -4858,14 +4902,15 @@ void tu_wide() {
             print(serial, "  ", ext::path_name(e.path), " at PCLK/", spi_division(c),
                   ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods", crlf);
             if (e.path == ext::Path::engines) {
-                engines_wire = engines_wire && wire_ok(pm);
+                engines_wire = engines_wire && ext::window_ok(pm, c, ext::engines_turn_cycles);
             } else {
-                polled_wire = polled_wire && wire_ok(pm);
+                polled_wire = polled_wire && ext::window_ok(pm, c, ext::polled_turn_cycles);
             }
         }
     }
-    bench.verdict("THE ENGINES' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the "
-                  "window is its sixteen SCK periods, -1 % to +3 %, at PCLK/16 and PCLK/4",
+    bench.verdict("THE ENGINES' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the window is its "
+                  "sixteen SCK periods, within one empty turn of the wait that ends a window (window_ok()), "
+                  "at PCLK/16 and PCLK/4",
                   engines_wire);
     bench.verdict("...and so do the polled loop's, its two half-words in flight", polled_wire);
 

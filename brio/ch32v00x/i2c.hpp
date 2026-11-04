@@ -733,9 +733,10 @@ public:
             // transmit block's completion hands a write half back to the
             // event vector (the class comment), the receive block's ends a
             // read. Both at HIGH (DmaPriority's rule): the host does not
-            // overrun - a byte a starved channel has not moved leaves BTF
-            // up and SCL held low until it is, stretching the bus and
-            // losing nothing (15.3's notes).
+            // overrun - a byte a starved receive channel has not moved leaves
+            // BTF up and SCL held low until it is, stretching the bus and
+            // losing nothing (15.3's notes). A transmit channel starved past
+            // a byte's end is answered in tx_dma's entry (isr()).
             TxEngine::template arm<TxOwner>(S::data_address(), DmaPriority::high);
             RxEngine::template arm<RxOwner>(S::data_address(), DmaPriority::high);
         }
@@ -947,13 +948,14 @@ public:
                 // ends here as the pump's would on a late TxE: the
                 // repeated START for a read to follow, STOP otherwise
                 // (the completion, served later, finds the phase moved on).
-                // BTF with bytes still to move is a channel that stopped
-                // serving - a live one refills the data register within a
-                // few bus cycles of each TxE, a byte time ahead of BTF -
-                // and BTF is a level that would re-enter this vector for
-                // ever: the tenure ends i2c_dma_fault, its STOP requested
-                // (on the CH32V203, a request another peripheral left held
-                // on the channel's OR froze it so, docs/ch32vx03/dma.md).
+                // BTF with bytes still to move is a channel that has not
+                // served a TxE for a byte's time: a block above it holds it
+                // (letter y of test_ch32_i2c), or, on the CH32V203, a request
+                // another peripheral left held on its OR froze it
+                // (docs/ch32vx03/dma.md). The vector cannot tell which, and BTF
+                // is a level that would re-enter it for as long as that lasts:
+                // the tenure ends i2c_dma_fault, its STOP requested, the bytes
+                // so far on the wire.
                 if ((s1 & i2c_btf) != 0u) {
                     if (!dma_tx_drained()) {
                         put_engines_away();

@@ -548,7 +548,11 @@ default ring loses nothing beside four copies at very_high at 5.625 and
 11.25 Mbaud; armed low (`rx_priority`), it loses nothing beside two and
 a third to a half of its frames beside three or four, the overrun count
 saturating at 255; the vector is quiet after every starved leg (the
-overrun with nothing to take, above). The table is [dma.md](dma.md)'s.
+overrun with nothing to take, above). Inside such a leg it is not: RXNE stands
+under the wait for a frame's RXNEIE until the stream takes it, and the vector
+re-enters for as long, 37383 to 175444 entries over a leg of 4096 frames at three
+and four copies, the thread up to 28260 cycles late (two runs of the letter on the
+STM32F446RE). The table is [dma.md](dma.md)'s.
 
 **`tx_idle()` is the wire's** (letter e): its first true lands 1594..1603
 and 1598..1604 cycles after the last stop bit's rising edge on the pad at
@@ -913,6 +917,10 @@ Driver gaps:
 - The receive errors' COUNTS under the engine are bounded, not exact
   (above): exact counts would need the CPU's read of DR, which the
   engine's rule forbids - declined.
+- A bound on the wait for a frame's entries over a starved stream: its copies
+  ending let the letter's thread back in, and a load that does not end through
+  the thread is not staged - the shape is an open choice, a channel given up or
+  an edge reported late.
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): the

@@ -913,9 +913,9 @@ public:
             // Both at high (DmaPriority's rule): the host does not overrun.
             // A byte its receive channel has not taken leaves RxNE up and
             // the next one in the shifter, BTF, and SCL held low until DATAR
-            // is read; a byte its transmit channel has not written holds SCL
-            // the same way - a starved channel stretches the bus and loses
-            // nothing (15.6). Both interrupt on completion and on error: the
+            // is read, so a starved receive channel stretches the bus and
+            // loses nothing (15.6); a transmit channel starved past a byte's
+            // end is transmit_dma_step()'s. Both interrupt on completion and on error: the
             // transmit block's completion hands a write half back to the
             // event vector (the file header), the receive block's ends a read.
             TxEngine::template arm<TxOwner>(S::data_address(), DmaPriority::high);
@@ -1552,17 +1552,19 @@ private:
 
     /**
      * BTF on the event vector while the transmit block's completion has not
-     * been served: that vector is late, or the channel stopped serving.
+     * been served: that vector is late, or the channel has fallen behind.
      * BTF with the channel's count at zero is the first - every byte
      * written, the last one out - and the half ends here as the pump's
      * would on a late TxE: the repeated START for a read to follow
      * (request_restart() takes DMAEN down in its store), STOP otherwise
      * (finish()'s store); the completion, served later, finds the phase
-     * moved on. A count still standing is a channel that stopped serving,
-     * since a live one refills DATAR within a few bus cycles of each TxE, a
-     * byte time ahead of BTF (a request another peripheral left held on the
-     * channel's OR stops it, docs/design/dma.md): the tenure ends
-     * i2c_dma_fault, its STOP requested. One CNTR load on that entry.
+     * moved on. A count still standing is a channel that has not served a
+     * TxE for a byte's time: a block above it holds it (letter y of
+     * test_x035_i2c), or a request another peripheral left held on its OR
+     * stops it (docs/design/dma.md). The vector cannot tell which, and BTF
+     * is a level that would re-enter it for as long as that lasts: the
+     * tenure ends i2c_dma_fault, its STOP requested, the bytes so far on the
+     * wire. One CNTR load on that entry.
      */
     [[gnu::always_inline]] static bool transmit_dma_step(uint16_t s1) {
         if constexpr (has_dma) {

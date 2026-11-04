@@ -339,7 +339,8 @@ a write-then-read's repeated START.
   write before a read raises the buffer line and requests its repeated START
   on the TxE of its last byte. A BTF served before that completion reads the
   transmit channel's count: at zero the event vector completes the DMA block
-  itself, and a count standing is a channel that stopped serving. That, or a
+  itself, and a count standing is a channel that has not served a TxE for a
+  byte's time, starved by a block above it or dead. That, or a
   channel's transfer error, ends the tenure `i2c_dma_fault` with its STOP;
   this host declares that status in its header, beyond the four wire codes
   of util/i2c_bus.hpp.
@@ -350,7 +351,7 @@ a write-then-read's repeated START.
   [../design/dma.md](../design/dma.md), "The check"), and the host runs one
   tenure at a time. An error puts away only the DMA block the tenure has in
   flight. Both engines arm at high, the transmit level of the same page's
-  rule: the host does not overrun - a byte a starved channel has not moved
+  rule: the host does not overrun - a byte a starved receive channel has not moved
   leaves BTF up and SCL held low until it is (15.3's notes), the bus slower
   and nothing lost.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
@@ -409,13 +410,13 @@ wire letters talk to a CH32X035F8U6 running `twi_peer` (peer firmware on
 the shared twi_link protocol), and decline when the wire reads low. This
 board uses I2C1's remap code 011, PB5 SCL and PB6 SDA, wired to that
 board's PC16 and PC17, with a 1.5 kOhm resistor from each line to its
-PB3, which its I2C images drive high. On this part the suite is three
+PB3, which its I2C images drive high. On this part the suite is four
 images (`test_ch32_i2c-1`, the single-host wire letters and letter v; `-2`, the
 kernel, the two-host, the dead-channel and the raw letters; `-3`, letters
-n, l, u and t), the whole being over the 40 KB of program flash. On the
+n, l, u and t; `-4`, letter y), the whole being over the 40 KB of program flash. On the
 CH32V003F4P6 it builds as nine group images under the part's 15 KB, and no
 group holds the kernel, the two-host, the client-from-its-vectors, the
-dead-channel, the n, the u or the t letters ("Not covered yet").
+dead-channel, the n, the u, the t or the y letters ("Not covered yet").
 
 - **The reset values are table 15-1's**, and both speeds resolve exactly
   at 48 MHz (CCR 240 and 40).
@@ -498,6 +499,20 @@ dead-channel, the n, the u or the t letters ("Not covered yet").
   only a bound outside the host answers it: under the arbiter the per-bus
   timeout and its `recover()` (the letter's own wait stands in for it), and with
   no per-bus timeout nothing. Each completes intact once the timer is reset.
+- **A block above the host's channels** (letter y, image `-4`, twelve runs of eight rows a shape):
+  a memory-to-memory block of 30000 words on channel 1 at very_high, which leaves the
+  channels below it nothing until it ends, at 100 kHz. Caught at its third byte, a
+  write of eight ends `i2c_dma_fault` in every row with the block still running, the
+  far end holding four, the event vector entered three times (SB, ADDR, the BTF that
+  ends it): BTF with the count standing is answered once and does not re-enter, and
+  the vector cannot tell this channel from a dead one. Up before the START the block
+  costs a write nothing, no byte having gone to raise BTF: SCL stands and a write of
+  two or eight lands whole when it ends. Reads of one, two and eight under it, and a
+  read of eight caught at its third byte, are exact in every row with the event
+  vector at two entries, the answer behind the block. A read of two starved from its
+  start draws more off the target, which counted four, the reply exact. So a block
+  above `high` that can outlast a byte (90 us at 100 kHz, 22.5 at 400) can end a write;
+  a copy at its default `low` lies below it.
 - **The peripheral's own request does not outlive its gate** (letter p): a
   read stalled over that dead channel, RxNE and BTF standing under DMAEN,
   gave channel 7's next enable four items while the peripheral stayed
@@ -1020,7 +1035,7 @@ Implemented but not bench-verified, each with what would measure it:
   between 50 and 100 kHz, and this peripheral at 400 kHz under any of them, 100 kHz
   included, are unmeasured; a letter sweeping them would.
 - The kernel letter, the two-host letters j and v, the dead-channel
-  letter p, the standing BUSY's letter u and the bounds' letter t on the CH32V003, which no group image of the part holds (the
+  letter p, the standing BUSY's letter u, the bounds' letter t and the starved channels' letter y on the CH32V003, which no group image of the part holds (the
   suite's header says which letters each image carries): the arbiter over
   the host, the client against another chip's controller and the dead
   channel's guards are proven on the CH32V006, and that run stands for

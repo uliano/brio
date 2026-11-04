@@ -108,8 +108,8 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + eleven negatives; bench suite `test_samc_spi`
-(19 letters, a to s, in three images, one per arrangement of the DMA
-channels: `-1` every letter but o and q, `-2` letter o, `-3` letter q, letter a
+(20 letters, a to t, in three images, one per arrangement of the DMA
+channels: `-1` every letter but o, q and t, `-2` letter o, `-3` letters q and t, letter a
 in all three - a letter is one command key of the suite's console and the
 group of verdicts it runs; a to e are the registers with no wire, the
 command channel to the peer, the matrix of modes and bit orders, the
@@ -390,8 +390,11 @@ item a reader would apply without checking the row.
     alone - and the request's end is the SERCOM's TXC: `dma_isr()`,
     bound in the SERCOM's vector and in the DMAC's, ends it there, the
     select released after the last edge. TXC raised between two beats -
-    a buffer run dry - enters the vector early, where `dma_isr()`
-    answers false, and the next beat clears it. In that vector,
+    a buffer run dry, the channel behind a load above it - enters the
+    vector early, where `dma_isr()` clears it and answers false: only a
+    frame's end sets the flag, so a request takes an entry a frame at most
+    however long the load stands, and a last beat landing around that store
+    has its frame waited out there, bounded. In that vector,
     TXC and DRE up with the transmit channel enabled and nothing pending
     is a channel that lost its trigger, ended `spi_dma_fault`; a bus
     error on either channel (the DMAC's vector) and a receive channel
@@ -663,6 +666,20 @@ the two spans:
   write cleared it (32.8.6) and the tail waited for the last character's:
   the peer's receive run counted 64 exact and ended complete, the select
   held to the last. Three runs of k on this image, every one so.
+- A TRANSMIT CHANNEL BEHIND A LOAD (letter t, no wire and no peer, fifteen
+  runs). A block of 24000 words on channel 0 at level 3, one software trigger
+  for the whole block, leaves the level 2 below it nothing for its 2528 us. A
+  write of 16 at 1 MHz or of 256 at 12 MHz caught at its third frame takes two
+  SERCOM entries a row, the dry buffer's and the last frame's, against 597 a row
+  when the entry left the flag for the next beat to clear, and is answered
+  `spi_ok` behind the load, 40 rows of 40; up before the launch the load costs one
+  entry, as no load does. A load of 4 to 64 beats swept across the end of a write
+  of 48 at 12 MHz: 3100 rows of 3100 `spi_ok`, at most two entries, with the last
+  beat landing around the entry's store in 21 of them (counted in a build for the
+  purpose), and with no row lost in a build without that wait either: a frame there
+  is 32 core cycles, and the wait is for the 16 of a frame at 24 MHz, which no sweep
+  reached. A load paced by a timer's overflow at 12 MHz of requests does not starve
+  the level below it: that level is served in its gaps.
 - A REQUEST'S END (letter s, no wire and no peer). The D/C on a real pad
   (PB23), read after the end, the select on a spy group in SRAM: a command
   stalled on a clockless SERCOM, polled with data behind it, polled alone
@@ -786,10 +803,10 @@ the two spans:
   frames, best of 8, three runs): E, the engines' least busy cycles of
   the core - `start()`, the one TXC vector, and the turns of the loop
   the bench waits in (interrupts masked while it tests the end, the
-  core asleep between two tests) - 1007 written and 978 read from the
-  flash (910 and 873 with the vectors and the loops in SRAM); F, the
-  polled request's rest above the wire, 467 to 469 and 391 (447 and 371);
-  E - F, 538 to 540 written and 587 read (463 and 502).
+  core asleep between two tests) - 1013 written and 988 read from the
+  flash (905 and 872 with the vectors and the loops in SRAM); F, the
+  polled request's rest above the wire, 480 and 403 (444 and 368);
+  E - F, 533 written and 585 read (461 and 504).
   The engines' wall carries the vector's latency, x 1.13 of the wire at
   64 frames and x 1.03 at 1024 frames at 12 MHz. A polled request holds
   the core for its frames' wire time - or the loop's turn where that is

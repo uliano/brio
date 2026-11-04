@@ -1195,9 +1195,16 @@ judged code to 16 MHz from the polled loop and the half-word engines - a
 frame on the engines a half-word beat, the beat the frame - in ten runs
 of the letter. Timed from two windows of 16 and 48 frames at the same
 rung (the transaction's fixed cost cancels), a frame inside the window
-takes 999 and 993 permille of its sixteen SCK periods on the polled loop at
-PCLK/16 and PCLK/4 and 1000 and 1002 on the engines. The F446's own
-16-bit client run is exact at every judged code.
+reads 1000 and 989 permille of its sixteen SCK periods on the polled loop at
+PCLK/16 and PCLK/4 and 999 and 999 on the engines, twelve runs alike. SCK and
+the ruler are one clock, so a frame cannot be shorter than its bits: the 989 is
+the ruler's, each window ending at the first poll to find the flag, up to one
+empty turn late, 31 core cycles read off windows of 16 to 48 frames, against
+the 2048 the difference weighs at PCLK/4. The letter judges that span,
+floor(1000 x (W +- turn) / W) with a turn of 34 on the loop and 20 on the
+engines, W the difference's cycles on the wire: 983 to 1016 and 995 to 1004 on the
+loop, windows a tick landed in taken again. The F446's own 16-bit client run is
+exact at every judged code.
 At 32 MHz, above that client's ceiling, the answers are read wrong in
 every frame while the client hears them all - the 8-bit signature.
 

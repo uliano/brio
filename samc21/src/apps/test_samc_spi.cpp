@@ -1,5 +1,5 @@
 // build: boards = c21j
-// build: groups = abcdefghijklmnprs,ao,aq
+// build: groups = abcdefghijklmnprs,ao,aqt
 // build: monitor_speed = 115200
 //
 // test_samc_spi - the SERCOM in SPI mode (DS60001479M ch. 32) and, over
@@ -103,6 +103,10 @@
 //      from STANDBY (RUNSTDBY; the RTC on OSCULP32K the backstop)
 //   k  the host's rare paths: the spin budget on a clockless SERCOM, and
 //      an early TXC under a handler (into the peer's receive-only run)
+//   t  THE TRANSMIT CHANNEL STARVED, no wire and no peer: a block on channel 0 at
+//      level 3 above the write-only host's channel 1, up from the request's start,
+//      from its third frame and swept across its end, the SERCOM's entries counted
+//      and the answer judged against the load's end
 //   s  A REQUEST'S END, no wire and no peer: D/C and the select high after a
 //      stalled command (polled and on the engines), a stalled data phase, a
 //      transfer error and recover() over a request in flight; the one busy
@@ -115,11 +119,12 @@
 // THREE IMAGES, one per arrangement of the DMA channels, each channel with
 // one owner for the whole image (util/dma_owner.hpp; the groups line above):
 // test_samc_spi-1 gives both to SERCOM1, the host's transmit engine on
-// channel 0 and its receive engine on channel 1, for every letter but o and
-// q; test_samc_spi-2 gives channel 0 to the console's transmit engine and
+// channel 0 and its receive engine on channel 1, for every letter but o, q
+// and t; test_samc_spi-2 gives channel 0 to the console's transmit engine and
 // channel 1 to the write-only host, letter o's display shape;
 // test_samc_spi-3 gives channel 0 to SERCOM2's loop Uart and channel 1 to the
-// write-only host, letter q's. Letter a, wireless, rides in all three.
+// write-only host, letter q's and letter t's, whose load takes channel 0 by
+// hand while the loop Uart is down. Letter a, wireless, rides in all three.
 
 #include <stdint.h>
 
@@ -2801,6 +2806,8 @@ volatile uint8_t dma_status = 0;
 volatile bool sck_at_end = false;
 volatile uint32_t dma_end_at = 0;
 volatile bool console_engined = false;
+/// The SERCOM vector's entries, counted in letter t's image.
+volatile uint32_t sercom_entries = 0;
 
 template <typename H>
 void engage() {
@@ -3946,6 +3953,175 @@ void tr_rate() {
 
 #endif  // SPI_SELECT_CONTROL
 
+// ---- t - the transmit channel starved --------------------------------------------
+
+/**
+ * A WRITE WHOSE CHANNEL A LOAD HOLDS STILL. TXC rises at a frame's end with DATA empty
+ * (32.8.6), and from the launch to the request's end it is armed, so a transmit channel
+ * that falls a beat behind raises it with the block unfinished. The load is channel 0 at
+ * level 3, above the host's level 2 (25.6.2.4): load_beats words from a cell to a cell,
+ * one software trigger for the whole block (TRIGACT, 25.8.20; the engines' own TRIGACT is
+ * a beat, and a timer-paced channel of that kind at 12 MHz of requests leaves the level
+ * below its gaps), so the level below takes no grant until the block is over. It ends by
+ * itself, so a vector that re-entered for its whole length still gives the suite back.
+ *
+ * ENTRIES. The entry's store or a beat clears TXC and only a frame's end sets it, and the
+ * load stands still once in a row, so the buffer runs dry once: that frame's entry and the
+ * last frame's, each at most followed by one more with nothing up, the line still high
+ * as the store reaches the bus bridge: at most four. Up before the launch nothing stands
+ * dry behind a frame, two. A vector re-entering on a standing flag took 597 a row over
+ * this block on the old engine.
+ *
+ * THE ANSWER. Started from the third frame the block cannot end before the load, so
+ * dma_end_at after the load's own end is the proof no early TXC was taken for the end:
+ * spi_ok with `early` zero, and spi_dma_fault never, a starved channel being alive.
+ */
+namespace rt {
+#ifndef SPI_SELECT_CONTROL
+using Load = DmaChannel<0>;
+constexpr uint16_t load_beats = 24000;  // a block of some 4 ms (printed)
+alignas(4) volatile uint32_t load_cell[2];
+
+bool load_arm() {
+    if (!Load::arm(0, 3, DmaCompletion::silent)) return false;
+    // arm() takes TRIGACT beat, a request per beat: this block is one software trigger.
+    DMAC_REGS->DMAC_CHID = DMAC_CHID_ID(0u);
+    DMAC_REGS->DMAC_CHCTRLB = DMAC_CHCTRLB_TRIGACT(DMAC_CHCTRLB_TRIGACT_BLOCK_Val) | DMAC_CHCTRLB_LVL(3u);
+    return true;
+}
+
+void load_start(uint16_t beats = load_beats) {
+    volatile dmac_descriptor_registers_t& s = Load::slot();
+    s.DMAC_BTCTRL = static_cast<uint16_t>(DMAC_BTCTRL_VALID_Msk |
+                                          DMAC_BTCTRL_BEATSIZE(DMAC_BTCTRL_BEATSIZE_WORD_Val) |
+                                          DMAC_BTCTRL_BLOCKACT(DMAC_BTCTRL_BLOCKACT_INT_Val));
+    s.DMAC_BTCNT = beats;
+    s.DMAC_SRCADDR = reinterpret_cast<uint32_t>(&load_cell[0]);
+    s.DMAC_DSTADDR = reinterpret_cast<uint32_t>(&load_cell[1]);
+    s.DMAC_DESCADDR = 0u;
+    Load::enable();
+    DMAC_REGS->DMAC_SWTRIGCTRL = 1u;
+}
+
+void load_release() { Load::release(); }
+
+struct Row {
+    uint16_t rows = 0;
+    uint16_t ok = 0;        ///< spi_ok, answered once
+    uint16_t faulted = 0;   ///< spi_dma_fault
+    uint16_t early = 0;     ///< answered while the load still ran
+    uint32_t entries_max = 0;
+    uint32_t entries_sum = 0;
+};
+
+/// One write of `n` frames at `baud`, the load up after `after_frames` frames' time
+/// (0: before the launch; 0xFF: no load at all). The load's ruler reading at its end
+/// waits for the channel's disable; the request's end comes from the vector.
+void starved_write(uint16_t n, uint8_t baud, uint8_t after_frames, Row& row, uint16_t beats = load_beats) {
+    const bool load = after_frames != 0xFFu;
+    if (load && after_frames == 0u) {
+        load_start(beats);
+    }
+    dm::dma_done = false;
+    dm::dma_status = 0xEEu;
+    dm::sercom_entries = 0;
+    (void)dm::WLoop::start(dm::request<dm::WLoop>(dm::big_tx, nullptr, n, baud, SpiMode::mode0, SpiEngine::dma));
+    if (load && after_frames != 0u) {
+        const uint32_t t0 = wall();
+        // A frame is 16 x (BAUD + 1) core cycles, 8 x (BAUD + 1) ticks of the ruler.
+        while (wall() - t0 < 8u * (baud + 1u) * after_frames) {
+        }
+        load_start(beats);
+    }
+    bool early = false;
+    if (load) {
+        while (Load::enabled() && !dm::dma_done) {
+        }
+        early = dm::dma_done;
+    }
+    const uint32_t t1 = Ticker::millis();
+    while (!dm::dma_done && Ticker::millis() - t1 < 100u) {
+    }
+    while (load && Load::enabled()) {
+    }
+    row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.early = static_cast<uint16_t>(row.early + (early ? 1u : 0u));
+    row.faulted = static_cast<uint16_t>(row.faulted + (dm::dma_status == spi_dma_fault ? 1u : 0u));
+    row.ok = static_cast<uint16_t>(row.ok + (dm::dma_done && dm::dma_status == spi_ok ? 1u : 0u));
+    const uint32_t e = dm::sercom_entries;
+    row.entries_sum += e;
+    if (e > row.entries_max) row.entries_max = e;
+    if (!dm::dma_done) {
+        (void)dm::WLoop::recover();
+    }
+}
+
+void print_row(const char* what, uint16_t n, const Row& r) {
+    print(serial, "  ", what, " of ", n, ", ", r.rows, " rows: spi_ok ", r.ok, ", spi_dma_fault ", r.faulted,
+          ", answered with the load up ", r.early, ", SERCOM entries a row ",
+          r.entries_sum / (r.rows != 0u ? r.rows : 1u), ", at most ", r.entries_max, crlf);
+}
+#endif
+}  // namespace rt
+
+void tt_starved() {
+#ifndef SPI_SELECT_CONTROL
+    const bool up = dm::WLoop::init(clock) && rt::load_arm();
+    dm::engage<dm::WLoop>();
+    dm::fill_stream(dm::big_tx, 256, 0x13);
+    // The load alone: how long it holds the bus.
+    const uint32_t t0 = wall();
+    rt::load_start();
+    while (rt::Load::enabled()) {
+    }
+    const uint32_t load_ticks = wall() - t0;
+    print(serial, "  the load: ", rt::load_beats, " words in one block, ", load_ticks / 24u, " us, ",
+          load_ticks * 2u * 10u / rt::load_beats, " tenths of a core cycle a beat", crlf);
+    rt::Row plain{}, from_start{}, third_1m{}, third_12m{};
+    for (uint8_t k = 0; k < 40u; ++k) {
+        rt::starved_write(16, 23, 0xFFu, plain);
+        rt::starved_write(16, 23, 0, from_start);
+        rt::starved_write(16, 23, 3, third_1m);
+        rt::starved_write(256, 1, 3, third_12m);
+    }
+    // A SHORT LOAD SWEPT ACROSS THE BLOCK'S END at 12 MHz, a frame in 32 core cycles: a load of
+    // a few frames' length ends as the dry buffer's entry runs, so the last beat can land
+    // beside its store (last_frame_out() in the host), which must still answer, spi_ok.
+    rt::Row sweep{};
+    for (uint8_t k = 0; k < 4u; ++k) {
+        for (uint8_t after = 24; after <= 48u; ++after) {
+            for (uint16_t beats = 4; beats <= 64u; beats = static_cast<uint16_t>(beats + 2u)) {
+                rt::starved_write(48, 1, after, sweep, beats);
+            }
+        }
+    }
+    rt::print_row("no load, a write at 1 MHz", 16, plain);
+    rt::print_row("the load from the start, a write at 1 MHz", 16, from_start);
+    rt::print_row("the load from the third frame, a write at 1 MHz", 16, third_1m);
+    rt::print_row("the load from the third frame, a write at 12 MHz", 256, third_12m);
+    print(serial, "  a load of 4 to 64 beats swept across the end of a write of 48 at 12 MHz, ", sweep.rows, " rows: spi_ok ",
+          sweep.ok, ", spi_dma_fault ", sweep.faulted, ", no answer ", sweep.rows - sweep.ok - sweep.faulted,
+          ", SERCOM entries a row ", sweep.entries_sum / sweep.rows, ", at most ", sweep.entries_max, crlf);
+    dm::disengage();
+    dm::WLoop::release();
+    rt::load_release();
+    (void)link_command_mode();
+    bench.verdict("the host and the load come up", up);
+    bench.verdict("with no load a write takes one entry, spi_ok", plain.ok == plain.rows && plain.entries_max <= 1u);
+    const auto judged = [](const rt::Row& r, uint32_t most) {
+        return r.rows != 0u && r.ok == r.rows && r.faulted == 0u && r.early == 0u && r.entries_max <= most;
+    };
+    bench.verdict("A WRITE STARVED FROM ITS START stands: spi_ok, after the load, at most 2 entries",
+                  judged(from_start, 2));
+    bench.verdict("STARVED FROM ITS THIRD FRAME at 1 MHz: spi_ok, after the load, at most 4 entries",
+                  judged(third_1m, 4));
+    bench.verdict("STARVED FROM ITS THIRD FRAME at 12 MHz: spi_ok, after the load, at most 4 entries",
+                  judged(third_12m, 4));
+    bench.verdict("A SHORT LOAD SWEPT ACROSS THE BLOCK'S END at 12 MHz: every row answered spi_ok",
+                  sweep.rows != 0u && sweep.ok == sweep.rows);
+#endif
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -3957,6 +4133,11 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// ONE vector for the whole SERCOM, and only letter j's client arms it:
 /// the hosts run every request polled and arm no interrupt.
 extern "C" void SERCOM1_Handler() {
+#ifndef SPI_SELECT_CONTROL
+    if constexpr (dm::rule_two_image) {
+        dm::sercom_entries = dm::sercom_entries + 1u;
+    }
+#endif
     dm::dma_vector();
     if (client_isr && Raw::ssl_flag()) {
         ssl_at = wall();
@@ -4072,6 +4253,8 @@ int main() {
                  tq_rule_two, false);
     bench.letter('r', "the write on one channel against the wire: BAUD 0..7, SRAM and flash", tr_rate,
                  false);
+    bench.letter('t', "THE TRANSMIT CHANNEL STARVED: a block on a channel above it, the entries counted",
+                 tt_starved);
 #endif
 
     bench.menu();

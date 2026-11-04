@@ -202,6 +202,8 @@ itself keeps the reset value, `low`, on the STM32G0 and the STM32F4.)
   while its data register is full, so a starved channel slows the bus and never overruns. That does not cover the
   read's tail: a channel starved over the last bytes finds the wire already over,
   and the host's entry settles it (the STM32G0, FMPI2C and DesignWare I2C pages).
+Nor a write on the CH32V00x, the CH32X035 and the CH32V203/V303: a transmit channel
+starved past a byte's end ends the tenure `i2c_dma_fault` (their I2C pages).
 - **A memory-to-memory copy arms at the lowest level.** No request
   paces it: it asks for the bus on every cycle of its block. A channel it
   outranks on a strictly ranked controller waits for about the whole

@@ -1124,6 +1124,13 @@ With the ring at its default `very_high` the pair starves nothing (letter
 `p`, ten runs on the STM32G0B1RE: 115200 with a 2 KB pair, 921600 with 512 B
 and 2 KB pairs - every byte in sequence, no overrun, no kick).
 
+RXFT is a level and only the channel takes the FIFO below it, so over a ring ranked
+low a pair that holds the FIFO above seven eighths keeps the vector re-entering, a
+kick at each entry, until the channel is served: 35248 and 37202 entries over a leg of
+2.5 s and 530 pairs from a far board at 1 and 2 Mbaud with 2 KB pairs, some 70 a pair
+(letter `6`, one run on the STM32G0B1RE with the entries counted in a build for the
+purpose), against one or two at the default level.
+
 WHAT THE KICK COSTS, read in the release listing of `test_stm32_dma`'s
 USART2 vector: an entry that does not kick pays a literal load, a mask
 test, one more ISR load and a branch over the vector it already had; a
@@ -1685,6 +1692,9 @@ restarts).
 ## Not covered yet
 
 Declined with a reason (every field of chapter 33 is implemented):
+- **A bound on RXFT's entries over a ring a program ranked low.** The watch taken
+  down at its first entry needs a way back, and a wedge inside a continuous stream
+  offers none but the watch itself; the shape is an open choice.
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
   a second node on CK, TX and RX, and the wires this desk carries

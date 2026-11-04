@@ -1025,9 +1025,9 @@ public:
             // BOTH AT HIGH (DmaPriority's rule): the host does not overrun.
             // A byte its receive channel has not taken leaves RxNE up and the
             // next one in the shift register, BTF, and the host holds SCL low
-            // until DATAR is read; a byte its transmit channel has not
-            // written holds SCL the same way - a starved channel stretches
-            // the bus and loses nothing (19.3's notes).
+            // until DATAR is read, so a starved receive channel stretches the
+            // bus and loses nothing (19.3's notes); a transmit channel starved
+            // past a byte's end is transmit_dma_step()'s.
             TxEngine::arm(S::data_address(), DmaPriority::high);
             RxEngine::arm(S::data_address(), DmaPriority::high);
         }
@@ -1696,16 +1696,15 @@ private:
     /// block's completion - the TxE of the last byte in the shifter.
     ///
     /// BTF PROVES THE BLOCK'S END ONLY WITH THE CHANNEL'S COUNT AT ZERO.
-    /// BTF is the data register empty at a byte's end: under a live channel
-    /// that is the block's last byte, the count long at zero - the channel
-    /// refills the register within a few bus cycles of each TxE, a byte
-    /// time ahead of BTF. A count still standing is a channel that stopped
-    /// serving - a request another peripheral left held on its OR froze
-    /// its handshake (docs/ch32vx03/dma.md) - and the bytes are not on the
-    /// wire: measured, such a channel moves ONE byte of the block and BTF
-    /// follows it with the rest of the count standing. That tenure ends
-    /// i2c_dma_fault, its STOP requested; one CNTR load on the one BTF
-    /// entry of a write.
+    /// BTF is the data register empty at a byte's end: under a channel keeping
+    /// up that is the block's last byte, the count long at zero. A count still
+    /// standing is a channel that has not served a TxE for a byte's time - a
+    /// block above it holds it (letter y of test_vx03_i2c: four bytes of eight
+    /// on the wire), or a request another peripheral left held on its OR froze
+    /// its handshake (docs/ch32vx03/dma.md: one byte of the block on the wire).
+    /// The vector cannot tell which, and BTF is a level that would re-enter it
+    /// for as long as that lasts: the tenure ends i2c_dma_fault, its STOP
+    /// requested; one CNTR load on the one BTF entry of a write.
     [[gnu::always_inline]] static bool transmit_dma_step(uint16_t s1) {
         if constexpr (has_engines) {
             if ((s1 & i2c_txe) == 0u) {

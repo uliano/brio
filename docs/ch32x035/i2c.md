@@ -296,7 +296,8 @@ write-then-read's repeated START.
 
   The engine parameters (engines: the DMA channels bound to the host) are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither, at `high` (the host
-  stretches SCL behind a starved channel and loses nothing, 15.6). The program
+  stretches SCL behind a starved receive channel and loses nothing, 15.6; a
+  transmit channel starved past a byte's end ends the tenure). The program
   calls no init of the DMA controller: the host's `init()` arms both engines,
   and arming opens the controller's gate. Which mechanism moves a request's
   data is the request's `engine` field (util/i2c_bus.hpp's `I2cEngine`):
@@ -374,7 +375,7 @@ PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot. The suite is two images, `test_x035_i2c-1` (the
 single-host wire letters) and `-2` (the kernel, the two hosts, the dead
 channel, the stuck BUSY, the vectors' client, the cost, the bounds, the live
-tenure): `z` is 59 and 61 verdicts, green.
+tenure): `z` is 64 and 61 verdicts, green.
 
 - **The lot probe** answered present: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -501,6 +502,20 @@ tenure): `z` is 59 and 61 verdicts, green.
   only a bound outside the host answers it: under the arbiter the per-bus
   timeout and its `recover()` (the letter's own wait stands in for it), and with
   no per-bus timeout nothing. Each completes intact once the timer is reset.
+- **A block above the host's channels** (letter y, twelve runs of eight rows a shape):
+  a memory-to-memory block of 30000 words on channel 1 at very_high, which leaves the
+  channels below it nothing until it ends, at 100 kHz. Caught at its third byte, a
+  write of eight ends `i2c_dma_fault` in every row with the block still running, the
+  far end holding four, the event vector entered three times (SB, ADDR, the BTF that
+  ends it): BTF with the count standing is answered once and does not re-enter, and
+  the vector cannot tell this channel from a dead one. Up before the START the block
+  costs a write nothing, no byte having gone to raise BTF: SCL stands and a write of
+  two or eight lands whole when it ends. Reads of one, two and eight under it, and a
+  read of eight caught at its third byte, are exact in every row with the event
+  vector at two entries, the answer behind the block. A read of two starved from its
+  start draws more off the target, which counted four, the reply exact. So a block
+  above `high` that can outlast a byte (90 us at 100 kHz, 22.5 at 400) can end a write;
+  a copy at its default `low` lies below it.
 - **The peripheral's own request does not outlive its gate** (letter p): a
   read stalled under DMAEN, RxNE and BTF standing, gave channel 7's next
   enable four items while the peripheral stayed live, and none once its

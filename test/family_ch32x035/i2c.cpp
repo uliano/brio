@@ -122,7 +122,6 @@ void host_verbs(uint8_t* buf) {
     (void)H::status();
     (void)H::busy();
     (void)H::unwedges();
-    (void)H::unwedge_busy();
     (void)H::unstick();
     (void)H::recover();
     H::release();

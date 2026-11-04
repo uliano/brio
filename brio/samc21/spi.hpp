@@ -979,13 +979,19 @@ public:
  * closes the last frame on the wire, where a receive block's completion would come up
  * to half a bit early (RXC, the file header), so no vector here waits for the shifter.
  * Both channels are silent, armed for their transfer errors alone (DmaCompletion). A
- * buffer that ran dry BETWEEN two beats raises TXC too, the channel late for one frame,
- * and the next beat clears it ("cleared ... by writing new data to DATA", 32.8.6): only a
- * transmit channel that has disabled itself has written its last beat, and then TXC can
- * only be the last frame's. A receive channel's last beat follows RXC, which is up by
- * then, by a few bus cycles at most; a bound on it that runs out is a fault. What the
- * contradiction proves is a fault too: TXC up, DRE up, and a transmit channel enabled
- * with nothing pending has lost its trigger, and no beat would ever clear the flag.
+ * buffer that ran dry BETWEEN two beats raises TXC too, the channel a frame late, and the
+ * beat that clears it may wait as long as a load above the channel lasts. So that entry
+ * clears the flag itself ("cleared by writing a one to it", 32.8.6): the flag is set by a
+ * frame's end and by nothing else, it stays down however long the buffer stands dry, and
+ * a request takes at most an entry a frame instead of re-entering the vector for the
+ * length of the load. Only a transmit channel that has disabled itself has written its
+ * last beat, and then TXC can only be the last frame's. The channel looked at again
+ * behind that store says whether a last beat landed around it, whose frame's end the
+ * store may have taken: the vector then waits out one frame, bounded, in that one case.
+ * A receive channel's last beat follows RXC, which is up by then, by a few bus cycles at
+ * most; a bound on it that runs out is a fault. What the contradiction proves is a fault
+ * too: TXC up, DRE up, and a transmit channel enabled with nothing pending has lost its
+ * trigger, and no beat would ever come.
  *
  * THE TWO VECTORS ARE BOTH THE PROGRAM'S, each calling dma_isr(): the SERCOM's for TXC
  * and the DMAC's for a channel's bus error, the second shared with every other owner of a
@@ -1493,9 +1499,10 @@ public:
     /// and from DMAC_Handler, and from nowhere else (the class comment). True when
     /// the transaction just completed, the select released: the edge the program's
     /// glue posts TransferDone{status()} on. Runs to completion and waits at most a
-    /// few bus cycles, bounded, for a receive channel's last beat. False, and free, on
-    /// a host with no engines; one load and a branch between its requests, which is
-    /// what this body costs another owner's completion.
+    /// few bus cycles, bounded, for a receive channel's last beat, and one frame in the
+    /// rare case of last_frame_out(). False, and free, on a host with no engines; one load
+    /// and a branch between its requests, which is what this body costs another owner's
+    /// completion.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             // Nothing of this host is pending between its requests: a channel
@@ -1901,16 +1908,21 @@ private:
     }
 
     /// TXC stands on a request on the engines (the class comment): the last frame's when
-    /// the transmit channel has written its last beat; otherwise a buffer that ran dry,
-    /// which the next beat clears, or a channel that lost its trigger, a contradiction: the
-    /// flags read again after the channel, a beat landing between the two looks having
-    /// cleared them.
+    /// the transmit channel has written its last beat; otherwise a buffer that ran dry, or a
+    /// channel that lost its trigger, a contradiction: the flags read again after the
+    /// channel, a beat landing between the two looks having cleared them. The dry buffer's
+    /// flag is cleared here, a channel behind a load being alive and its next beat as far
+    /// off as the load's end.
     [[gnu::always_inline]] static bool transmit_complete() {
         if (TxEngine::running()) {
             if (TxEngine::waiting() && S::dre_flag() && S::txc_flag()) {
                 return end_on_fault();
             }
-            return false;
+            S::clear_flags(SpiFlag::txc);
+            if (TxEngine::running()) {
+                return false;
+            }
+            last_frame_out();
         }
         if constexpr (has_rx_engine) {
             if (tenure_reads_) {
@@ -1936,6 +1948,14 @@ private:
         status_ = spi_ok;   // over a refusal that wrote status() while this one flew
         dma_active_ = false;
         return true;
+    }
+
+    /// The last beat landed around the store that cleared a dry buffer's TXC, and that
+    /// store may have taken the last frame's end: the frame is waited out on the flag,
+    /// turns_a_frame_ looks covering it, and either way it is over when this returns.
+    [[gnu::noinline, gnu::cold]] static void last_frame_out() {
+        for (uint32_t left = turns_a_frame_; left != 0u && !S::txc_flag(); --left) {
+        }
     }
 
     /// A channel's bus error, or a channel found dead: the vector decides and does not work
