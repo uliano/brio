@@ -70,6 +70,13 @@
 //      the next write byte for byte after any refusal, and a START parked
 //      behind a held SDA taken by the clear start() opens with; declined by
 //      name where nothing answers 0x3A
+//   q  THE PUMP'S ENTRIES on the self-link: the event vector's entries counted
+//      per Request shape, identities; a late entry staged with the vector's
+//      line off (the last byte and STOPF up together, TXIS beside a NACK's
+//      STOPF), and a read half's address refused after the repeated START
+//   r  THE RECEIVE STREAM AT THE STOPF ENTRY on the self-link: its request
+//      taken away, DMA1 under a higher-priority stream, the memory under four
+//      copies; the last byte judged in the vector, before any reply
 //
 // and against the desk partner's `twi_peer` (the second set, `t`):
 //   n  Fast-mode Plus acknowledged, a held SDA and a held clock, the rebase
@@ -81,6 +88,8 @@
 //      second and a later data byte, a write of one and of two, under both
 //      engines and both speeds and in and out of the band, the partner's tally
 //      judging each, the next request whole
+//   s  letter r's two loads at Fast-mode Plus, the narrowest window between the
+//      last byte and the STOP, reads against the partner's pattern
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -96,6 +105,7 @@
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/syscfg.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/post.hpp"
@@ -175,6 +185,19 @@ volatile bool xfer_done = false;
 /// Entries of the two DMA streams' vectors, counted whoever owns them.
 volatile uint32_t tx_dma_entries = 0;
 volatile uint32_t rx_dma_entries = 0;
+/// Every entry of the event vector, whatever it found.
+volatile uint32_t ev_total = 0;
+/// Letters r and s: read by the vector at each STOPF entry of the engined host,
+/// before its body runs.
+struct StopWatch {
+    volatile bool on = false;
+    volatile uint32_t entries = 0;
+    volatile uint32_t en_up = 0;     ///< SxCR.EN of the receive stream still up
+    volatile uint32_t rxne_up = 0;   ///< and of those, the last byte still in RXDR
+    const volatile uint8_t* cell = nullptr;   ///< the Request's last byte
+    volatile uint8_t seen = 0;       ///< what it held when the body said the tenure was over
+};
+StopWatch stop_watch;
 
 /// What the EVENT vector saw, in order, for the tenure being watched: the
 /// ISR's own reading of ISR before the engine touches it. Four entries is
@@ -614,9 +637,10 @@ void te_scan() {
                   "on this bus, and the engine says so in the arbiter's own vocabulary",
                   nacked == 112u && answered == 0u && other == 0u);
 
-    // The order of the two flags, read by the ISR before the engine touched
-    // them. A NACK is not the end: 23.4.9 makes the peripheral send the
-    // STOP by itself, and the completion is that STOP.
+    // The one entry a probe nobody answers takes, read by the vector before the
+    // engine touched anything: NACKIE stays down, and 23.4.9 makes the peripheral
+    // send the STOP by itself, so the completion is that STOP and NACKF stands
+    // beside it.
     arm_log();
     const uint8_t st = probe(0x42);
     const uint8_t seen = ev_n;
@@ -624,13 +648,10 @@ void te_scan() {
           " error ones; ISR at each: ", hex(ev_log[0]), " ", hex(ev_log[1]), " ", hex(ev_log[2]),
           crlf);
     bench.verdict("the tenure ends i2c_nack_addr", st == i2c_nack_addr);
-    bench.verdict("NACKF comes FIRST and alone - the address went unanswered and no data byte "
-                  "ever moved",
-                  seen >= 1u && (ev_log[0] & FmpI2cFlag::nack) != 0u &&
-                      (ev_log[0] & FmpI2cFlag::stop) == 0u);
-    bench.verdict("... and the STOP the peripheral sends by itself arrives as its OWN interrupt, "
-                  "which is what completes the tenure (23.4.9)",
-                  seen >= 2u && (ev_log[1] & FmpI2cFlag::stop) != 0u);
+    bench.verdict("ONE entry, the STOP the peripheral sends by itself, and NACKF up beside it: "
+                  "23.4.9's order with NACKIE down",
+                  seen == 1u && (ev_log[0] & FmpI2cFlag::nack) != 0u &&
+                      (ev_log[0] & FmpI2cFlag::stop) != 0u);
     bench.verdict("no error interrupt was raised: a NACK is not an error on this block, it is an "
                   "event",
                   er_n == 0u);
@@ -657,11 +678,10 @@ void te_scan() {
 ///
 /// THE PERIOD IS READ ON THE FIRST EIGHT RISING EDGES AND NO LATER ONES: the
 /// address and direction bits of a tenure that has raised no event yet. The
-/// ninth rise is where the block samples the acknowledge, and its NACK entry
-/// (some 230 cycles) lands right there: it dated that rise late, or at 400 kHz
-/// covered SCL's whole high phase so that the rise went unseen, one run of the
-/// letter in ten, a period read 12 to 16 per cent long on a wire that had
-/// nothing wrong. Every rising edge is still counted in `edges`.
+/// ninth rise is where the block samples the acknowledge and the STOP follows
+/// it, and the classic host beside it takes its acknowledge failure as an
+/// interrupt right there, which dates that rise late or covers SCL's whole high
+/// phase at 400 kHz. Every rising edge is still counted in `edges`.
 struct SclReading {
     uint32_t edges = 0;
     uint32_t shortest = 0;   ///< the shortest gap between two rising edges, in core cycles
@@ -1336,10 +1356,10 @@ void tj_engines() {
                   DmaHost::has_engines && fmpi2c_dma_placement_valid(true, 1, 5, 2) &&
                       fmpi2c_dma_placement_valid(false, 1, 2, 2));
 
-    // A WRITE tenure whose data would ride the transmit engine: the engine
-    // is started before the START bit (23.4.16's own order; its first
-    // byte waits for the first TXIS, after the address), and the address
-    // is NACKed before a byte reaches TXDR.
+    // A WRITE tenure whose data would ride the transmit engine: the first byte
+    // stored in TXDR and the stream started on the rest before the START bit
+    // (23.4.16's own order), and the address is NACKed before a TXIS asks the
+    // stream for anything.
     static const uint8_t out[4] = {0xA5, 0x5A, 0x00, 0xFF};
     arm_log();
     const uint8_t st = tenure<DmaHost>(0x42, out, 4, nullptr, 0);
@@ -1498,6 +1518,10 @@ struct Far {
     static inline volatile uint8_t pos = 0;
     static inline volatile uint8_t took = 0;
     static inline volatile uint8_t refuse_at = 0;
+    /// Letter q: ACK goes down as this written byte is taken, so the repeated
+    /// START's address is not acknowledged (27.6.1: ACK answers a matched address
+    /// too); the letter puts it back.
+    static inline volatile uint8_t deaf_at = 0;
     static inline volatile uint8_t matches = 0;   ///< address matches, whoever reads them
     static inline uint8_t sink[32];
 
@@ -1526,6 +1550,10 @@ struct Far {
                 if (took == refuse_at) {
                     ClassicTarget::acknowledge(true);
                 } else if (refuse_at != 0u && took + 1u == refuse_at) {
+                    ClassicTarget::acknowledge(false);
+                }
+                if (took == deaf_at) {
+                    deaf_at = 0;
                     ClassicTarget::acknowledge(false);
                 }
                 break;
@@ -1726,8 +1754,8 @@ void tm_self_link() {
     // THE ENGINE NAMED, judged on the streams: which mechanism carried a
     // half is read from the stream's memory address (zeroed before the
     // tenure with the stream stopped, written by nothing but a block
-    // start, stm32f4/dma.hpp's launch()) and from its vector, entered once
-    // by the block's completion; identities, no tolerance.
+    // start, stm32f4/dma.hpp's launch()), and its vector stays quiet, each
+    // stream armed for its errors alone; identities, no tolerance.
     dma_host_live = true;
     (void)DmaHost::init(clock, base_config);
     using TxRegs = DmaStream<TxEngine::controller, TxEngine::stream>;
@@ -1762,18 +1790,19 @@ void tm_self_link() {
     Far::took = 0;
     t = traced(one_out, 2, nullptr, 0, I2cEngine::dma);
     const bool w2 = t.status == i2c_ok && t.tx_at == reinterpret_cast<uint32_t>(one_out + 1) &&
-                    t.tx_n == 1u && Far::took == 2u && Far::sink[0] == one_out[0] &&
+                    t.tx_n == 0u && Far::took == 2u && Far::sink[0] == one_out[0] &&
                     Far::sink[1] == one_out[1];
     t = traced(nullptr, 0, &one_in, 1, I2cEngine::dma);
-    const bool r1 = t.status == i2c_ok && t.rx && t.rx_n == 1u && one_in == Far::value(0);
+    const bool r1 = t.status == i2c_ok && t.rx && t.rx_n == 0u && one_in == Far::value(0);
     print(serial, "  dma, a write of one: ", w1 ? "no stream, exact" : "WRONG",
           "; a write of two: ", w2 ? "the stream on the second byte, exact" : "WRONG",
           "; a read of one: ", r1 ? "on the receive stream, exact" : "WRONG", crlf);
     bench.verdict("dma with the first byte in TXDR before the START: a write of one starts no "
-                  "stream and enters no stream vector, a write of two starts the stream on its "
-                  "second byte, completing once, both byte-exact",
+                  "stream, a write of two starts the stream on its second byte, no stream vector "
+                  "entered, both byte-exact",
                   w1 && w2);
-    bench.verdict("... and a read of one is on the receive stream, completing once, byte-exact", r1);
+    bench.verdict("... and a read of one is on the receive stream, no stream vector entered, "
+                  "byte-exact", r1);
     uint8_t eight_in[8] = {};
     static const uint8_t eight_out[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     Far::took = 0;
@@ -2192,9 +2221,9 @@ void tn_partner() {
 // requested in a row, and if the first is written "in less than two FMPI2C
 // kernel clock cycles after the TXIS/DMA request" while the APB-to-kernel
 // ratio is between 1.5 and 3, the second "is not internally detected" and the
-// block stalls until a PE cycle. The host under `dma` has its first byte in
-// TXDR before the START, its one path in and out of the band, so these writes
-// judge that path. The HSI as the kernel against the 45 MHz APB1 is a ratio of
+// block stalls until a PE cycle. The host has its first byte in TXDR before the
+// START, its one path under `interrupt` and `dma`, in and out of the band, so
+// these writes judge that path. The HSI as the kernel against the 45 MHz APB1 is a ratio of
 // 2.81; two kernel cycles there are 125 ns, 22 core cycles at 180 MHz. THE
 // CONTROL is the sequence the erratum describes, staged by the letter through
 // the resource's verbs: it must stall, or the letter proves nothing.
@@ -2384,9 +2413,10 @@ void to_erratum() {
 
     // ---- what a stall and a wrong byte look like to this letter ----
     // A tenure whose transmit interrupt the letter takes away after start() is a
-    // stall made by hand: the address goes out and nobody ever writes TXDR. And
-    // a byte changed after its sum was taken is what the partner's sum exists to
-    // see. Each on the APB1 kernel, outside the band.
+    // stall made by hand: the address and the byte start() stored go out, and
+    // nobody writes TXDR after them. And a byte changed after its sum was taken
+    // is what the partner's sum exists to see. Each on the APB1 kernel, outside
+    // the band.
     {
         twilink::Params a{};
         a.ms = 80;
@@ -2412,8 +2442,8 @@ void to_erratum() {
         }
         const bool staged = !sync && !xfer_done && !SclPad::read();
         (void)Host::recover();
-        S::interrupt(FmpI2cInterrupt::tx, true);
-        uint16_t sum = 0;
+        // The stalled tenure's one byte, then the sixteen of the next write.
+        uint16_t sum = trial_out[0];
         for (uint8_t i = 0; i < 16u; ++i) {
             sum = static_cast<uint16_t>(sum + trial_out[i]);
         }
@@ -2432,7 +2462,7 @@ void to_erratum() {
                       "SCL low, inside the bound",
                       cmd && staged);
         bench.verdict("... and one byte changed after its sum was taken moves the partner's sum",
-                      rep && st == i2c_ok && r.count == 16u && r.sum != sum);
+                      rep && st == i2c_ok && r.count == 17u && r.sum != sum);
     }
 
     // ---- outside the band: the host's one path holds there too ----
@@ -2512,8 +2542,8 @@ void to_erratum() {
     print(serial, "  inside the band: the host on the DMA engines ", dma_stalls, " stalls in ",
           dma_tenures, " tenures; the control ", control_stalls, " stalls in ", control_tenures,
           crlf);
-    bench.verdict("inside the band on the interrupt: no stall and every byte of every write - the "
-                  "vector writes TXDR outside the erratum's two kernel cycles",
+    bench.verdict("inside the band on the interrupt, the first byte in TXDR before the START: no "
+                  "stall and every byte of every write",
                   pump_exact);
     bench.verdict("inside the band on the DMA engines, the host's own path, a write of one "
                   "included: no stall and every byte of every write",
@@ -2522,9 +2552,9 @@ void to_erratum() {
                   "stalled with its first byte on the wire and nothing after it, and the PE "
                   "cycle recovers it",
                   control_accounted);
-    // THE BOUND: 2828 stalls in 20240 tenures of this control measured, 14.0 per
-    // cent, so 440 tenures with none would come up (1 - 0.14)^440, less than once
-    // in 10^28 runs. A control with no stall is a letter that cannot fail.
+    // THE BOUND: 951 stalls in 6600 tenures of this control measured, 14.4 per
+    // cent, so 440 tenures with none would come up (1 - 0.144)^440, less than once
+    // in 10^29 runs. A control with no stall is a letter that cannot fail.
     bench.verdict("... and THE LETTER CAN FAIL: the erratum is alive on this die, at least one "
                   "stall in the control's tenures",
                   control_stalls != 0u);
@@ -2877,6 +2907,770 @@ void tp_refusals() {
 }
 
 // =============================================================================
+// q - THE PUMP'S ENTRIES, counted, and a late entry (the self-link)
+// =============================================================================
+
+/// A wait on the tick, bounded: true when `done` came true inside `ms`.
+template <typename Done>
+bool wait_until(Done done, uint32_t ms) {
+    const uint32_t t0 = Ticker::ticks();
+    while (!done()) {
+        if (Ticker::ticks() - t0 >= ms) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The far end up and the plain host over it; false, said by name, on a board
+/// without the two wires, as letter m does.
+bool far_ready() {
+    Far::live = true;
+    Far::refuse_at = 0;
+    Far::deaf_at = 0;
+    const bool far_up = ClassicTarget::init(clock, I2cAddressConfig{.own = self_addr});
+    if (!host_ready()) {
+        bench.verdict("the host came up", false);
+        return false;
+    }
+    const uint8_t found = probe(self_addr);
+    if (!far_up || found != i2c_ok) {
+        print(serial, "  nothing answers ", hex(self_addr), " (status ", found,
+              "): this board does not wire I2C1 to FMPI2C1 - the letter declines by name", crlf);
+        ClassicTarget::release();
+        Far::live = false;
+        (void)host_ready();
+        return false;
+    }
+    return true;
+}
+
+void far_down() {
+    ClassicTarget::release();
+    Far::live = false;
+    (void)host_ready();
+}
+
+/// One Request shape and the entries of the event vector it must take.
+struct CountedShape {
+    uint8_t tx;
+    uint8_t rx;
+    uint8_t entries;
+};
+
+/// How many shapes took exactly their entries, moved their bytes and left the
+/// two stream vectors quiet. The count is read 100 us after the completion, past
+/// any entry a flag taken down late would add (the STOP's own settling is under a
+/// period at 400 kHz, 2.7 us).
+template <typename Bus, size_t rows>
+uint8_t counted_shapes(const CountedShape (&shapes)[rows], I2cEngine e, const char* name) {
+    static const uint8_t out[8] = {0x31, 0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xA8};
+    uint8_t right = 0;
+    for (const CountedShape& sh : shapes) {
+        uint8_t in[8];
+        for (uint8_t& b : in) {
+            b = 0xEE;
+        }
+        Far::took = 0;
+        ev_total = 0;
+        tx_dma_entries = 0;
+        rx_dma_entries = 0;
+        const uint8_t st = tenure<Bus>(self_addr, out, sh.tx, in, sh.rx, FmpI2cSpeed::fast_400k, e);
+        (void)delay_us(clock, 100u);
+        const uint32_t n = ev_total;
+        bool exact = st == i2c_ok && n == sh.entries && tx_dma_entries == 0u &&
+                     rx_dma_entries == 0u && Far::took == sh.tx;
+        for (uint8_t i = 0; i < sh.tx && exact; ++i) {
+            exact = Far::sink[i] == out[i];
+        }
+        for (uint8_t i = 0; i < sh.rx && exact; ++i) {
+            exact = in[i] == Far::value(i);
+        }
+        if (!exact) {
+            print(serial, "    ", name, " ", sh.tx, "+", sh.rx, ": status ", st, ", entries ", n,
+                  " of ", sh.entries, ", stream vectors ", tx_dma_entries, " and ", rx_dma_entries,
+                  ", the far end took ", Far::took, crlf);
+        }
+        right = static_cast<uint8_t>(right + (exact ? 1u : 0u));
+    }
+    return right;
+}
+
+struct LateRow {
+    uint16_t rows = 0;
+    uint16_t up = 0;      ///< the stage reached: every flag the row wants up before the entry
+    uint16_t right = 0;   ///< the status, the bytes and the one entry
+};
+
+/// A READ'S LAST BYTE ON A LATE ENTRY. The event vector's line is taken down the
+/// moment RXIE falls (at the start, for a read of one), as a long handler ahead of
+/// the vector would hold it off, and comes back with STOPF and RXNE both up: the
+/// byte in RXDR, the NACK and the STOP gone out.
+void late_read(uint8_t n, FmpI2cSpeed speed, LateRow& row) {
+    uint8_t in[8];
+    for (uint8_t& b : in) {
+        b = 0xEE;
+    }
+    Host::Request r{};
+    r.addr = self_addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = n;
+    r.speed = speed;
+    const uint32_t limit = trial_limit_ms(n, speed);
+    ev_total = 0;
+    xfer_done = false;
+    if (n == 1u) {
+        Nvic::disable(S::event_irq);
+    }
+    (void)Host::start(r);
+    const bool fell = wait_until([] { return (S::interrupts() & FmpI2cInterrupt::rx) == 0u; }, limit);
+    Nvic::disable(S::event_irq);
+    constexpr uint32_t both = FmpI2cFlag::stop | FmpI2cFlag::rxne;
+    const bool up = fell && wait_until([] { return (S::flags() & both) == both; }, limit);
+    Nvic::enable(S::event_irq);
+    const bool done = wait_until([] { return xfer_done; }, limit);
+    (void)delay_us(clock, 100u);
+    bool exact = done && Host::status() == i2c_ok && ev_total == n &&
+                 (S::flags() & FmpI2cFlag::rxne) == 0u;
+    for (uint8_t i = 0; i < n && exact; ++i) {
+        exact = in[i] == Far::value(i);
+    }
+    row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.up = static_cast<uint16_t>(row.up + (up ? 1u : 0u));
+    row.right = static_cast<uint16_t>(row.right + (exact ? 1u : 0u));
+    if (!exact) {
+        print(serial, "    late read of ", n, ": fell ", fell, ", up ", up, ", done ", done,
+              ", status ", Host::status(), ", entries ", ev_total, ", in ", hex(in[0]), " ",
+              hex(in[1]), crlf);
+    }
+}
+
+/// A NACK ON A LATE ENTRY, the line down from before the START. `at` zero: an
+/// absent address, the first byte still in TXDR. `at` one: the first byte refused,
+/// and with two or more bytes TXIS up beside NACKF and STOPF, the byte that left
+/// having asked for its successor and the vector not yet in. Later bytes have no
+/// such row: with no vector to serve TXIS the first byte's ninth pulse stretches.
+/// The next write is judged byte for byte on the far end.
+template <typename Bus>
+void late_refusal(uint8_t tx, uint8_t rx, uint8_t at, I2cEngine e, FmpI2cSpeed speed, LateRow& row,
+                  uint16_t& txis_beside) {
+    static const uint8_t out[8] = {0xD1, 0xC2, 0xB3, 0xA4, 0x95, 0x86, 0x77, 0x68};
+    static const uint8_t after[8] = {0x13, 0x24, 0x35, 0x46, 0x57, 0x68, 0x79, 0x8A};
+    uint8_t in[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    typename Bus::Request r{};
+    r.addr = at == 0u ? 0x42u : self_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = tx;
+    r.rx = lend<Lease::reply>(rx != 0u ? in : nullptr);
+    r.rx_len = rx;
+    r.speed = speed;
+    r.engine = e;
+    Far::refuse_at = at;
+    const uint32_t limit = trial_limit_ms(tx, speed);
+    ev_total = 0;
+    xfer_done = false;
+    Nvic::disable(S::event_irq);
+    (void)Bus::start(r);
+    constexpr uint32_t both = FmpI2cFlag::stop | FmpI2cFlag::nack;
+    const bool up = wait_until([] { return (S::flags() & both) == both; }, limit);
+    const uint32_t f = S::flags();
+    Nvic::enable(S::event_irq);
+    const bool done = wait_until([] { return xfer_done; }, limit);
+    (void)delay_us(clock, 100u);
+    const uint8_t want = at == 0u ? i2c_nack_addr : i2c_nack_data;
+    bool exact = done && Bus::status() == want && ev_total == 1u && in[0] == 0xEEu;
+    Far::refuse_at = 0;
+    ClassicTarget::acknowledge(true);
+    Far::took = 0;
+    const uint8_t next = tenure<Bus>(self_addr, after, 8, nullptr, 0, speed, e);
+    bool whole = next == i2c_ok && Far::took == 8u;
+    for (uint8_t i = 0; i < 8u && whole; ++i) {
+        whole = Far::sink[i] == after[i];
+    }
+    if ((f & FmpI2cFlag::txis) != 0u) {
+        txis_beside = static_cast<uint16_t>(txis_beside + 1u);
+    }
+    row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.up = static_cast<uint16_t>(row.up + (up ? 1u : 0u));
+    row.right = static_cast<uint16_t>(row.right + (exact && whole ? 1u : 0u));
+    if (!exact || !whole) {
+        print(serial, "    late refusal ", tx, "+", rx, " at ", at, ": up ", up, ", ISR ", hex(f),
+              ", status ", Bus::status(), " of ", want, ", entries ", ev_total, ", next ", next,
+              " took ", Far::took, crlf);
+    }
+}
+
+/// A READ HALF'S ADDRESS REFUSED AFTER THE REPEATED START. The far end takes its
+/// acknowledge away as it takes the write half's last byte, so the write is
+/// acknowledged and the address after the repeated START is not: AUTOEND is set by
+/// then, and the NACK must still end in the STOP that raises STOPF. The far end's
+/// vector has nine SCL periods of that address to run in.
+template <typename Bus>
+void deaf_read(uint8_t tx, I2cEngine e, uint8_t entries, FmpI2cSpeed speed, LateRow& row) {
+    static const uint8_t out[4] = {0x1A, 0x2B, 0x3C, 0x4D};
+    uint8_t in[2] = {0xEE, 0xEE};
+    Far::took = 0;
+    Far::matches = 0;
+    Far::deaf_at = tx;
+    ev_total = 0;
+    const uint8_t st = tenure<Bus>(self_addr, out, tx, in, 2, speed, e);
+    (void)delay_us(clock, 100u);
+    const uint32_t n = ev_total;
+    const uint8_t took = Far::took;
+    const bool free = (S::cr2() & (FMPI2C_CR2_START | FMPI2C_CR2_STOP)) == 0u && !S::busy();
+    ClassicTarget::acknowledge(true);
+    const uint8_t after = tenure<Bus>(self_addr, nullptr, 0, nullptr, 0, speed, e);
+    const bool exact = st == i2c_nack_addr && n == entries && took == tx && in[0] == 0xEEu &&
+                       free && after == i2c_ok;
+    row.rows = static_cast<uint16_t>(row.rows + 1u);
+    row.up = static_cast<uint16_t>(row.up + (took == tx ? 1u : 0u));
+    row.right = static_cast<uint16_t>(row.right + (exact ? 1u : 0u));
+    if (!exact) {
+        print(serial, "    deaf read ", tx, "+2: status ", st, ", entries ", n, " of ", entries,
+              ", the far end took ", took, ", free ", free, ", next ", after, crlf);
+    }
+}
+
+void tq_entries() {
+    if (!far_ready()) {
+        return;
+    }
+    // ---- the entries, identities ----
+    // A write half's first byte is stored before the START and a read half's last
+    // waits for STOPF, so a pumped half of N bytes takes N - 1 entries; STOPF is
+    // one and TC, in a write-then-read, one more: tx + rx in every shape that has
+    // data, one for the probe.
+    constexpr CountedShape pump[] = {{0, 0, 1}, {1, 0, 1}, {2, 0, 2}, {3, 0, 3}, {8, 0, 8},
+                                     {0, 1, 1}, {0, 2, 2}, {0, 3, 3}, {0, 8, 8}, {1, 1, 2},
+                                     {1, 2, 3}, {2, 4, 6}, {8, 8, 16}};
+    // On the streams: STOPF, and TC in a write-then-read.
+    constexpr CountedShape engines[] = {{1, 0, 1}, {2, 0, 1}, {8, 0, 1}, {0, 1, 1},
+                                        {0, 2, 1}, {0, 8, 1}, {1, 1, 2}, {2, 4, 2}, {8, 8, 2}};
+    constexpr uint8_t pump_rows = sizeof(pump) / sizeof(pump[0]);
+    constexpr uint8_t engine_rows = sizeof(engines) / sizeof(engines[0]);
+    const uint8_t plain = counted_shapes<Host>(pump, I2cEngine::interrupt, "the plain host");
+    // An absent address, written or read: the one entry, STOPF.
+    uint8_t absent = 0;
+    static const uint8_t four[4] = {1, 2, 3, 4};
+    uint8_t in[4];
+    ev_total = 0;
+    absent = static_cast<uint8_t>(absent + (tenure<Host>(0x42, nullptr, 0, nullptr, 0,
+                                                         FmpI2cSpeed::fast_400k) == i2c_nack_addr &&
+                                            ev_total == 1u ? 1u : 0u));
+    ev_total = 0;
+    absent = static_cast<uint8_t>(absent + (tenure<Host>(0x42, four, 4, nullptr, 0,
+                                                         FmpI2cSpeed::fast_400k) == i2c_nack_addr &&
+                                            ev_total == 1u ? 1u : 0u));
+    ev_total = 0;
+    absent = static_cast<uint8_t>(absent + (tenure<Host>(0x42, nullptr, 0, in, 4,
+                                                         FmpI2cSpeed::fast_400k) == i2c_nack_addr &&
+                                            ev_total == 1u ? 1u : 0u));
+    print(serial, "  entries as the shapes want them: the plain host ", plain, " of ", pump_rows,
+          ", an address nobody answers ", absent, " of 3", crlf);
+    bench.verdict("a write of N and a read of N take N interrupts, a write-then-read tx + rx, on "
+                  "the plain host, the bytes exact",
+                  plain == pump_rows);
+    bench.verdict("an address not acknowledged takes one interrupt, written, read or probed",
+                  absent == 3u);
+
+    Dma<1>::init();
+    dma_host_live = true;
+    (void)DmaHost::init(clock, base_config);
+    const uint8_t named = counted_shapes<DmaHost>(pump, I2cEngine::interrupt, "interrupt, engined");
+    const uint8_t streams = counted_shapes<DmaHost>(engines, I2cEngine::dma, "dma");
+    print(serial, "  interrupt on the engined host ", named, " of ", pump_rows, "; dma ", streams,
+          " of ", engine_rows, crlf);
+    bench.verdict("interrupt on the engined host takes the same entries", named == pump_rows);
+    bench.verdict("dma takes STOPF and the write-then-read's TC, no stream vector entered, the "
+                  "bytes exact",
+                  streams == engine_rows);
+
+    // ---- a read half's address refused after the repeated START ----
+    LateRow deaf{};
+    for (uint8_t pass = 0; pass < 10u; ++pass) {
+        deaf_read<DmaHost>(1, I2cEngine::dma, 2, FmpI2cSpeed::fast_400k, deaf);
+        deaf_read<DmaHost>(2, I2cEngine::dma, 2, FmpI2cSpeed::fast_400k, deaf);
+        deaf_read<DmaHost>(1, I2cEngine::interrupt, 2, FmpI2cSpeed::fast_400k, deaf);
+        deaf_read<DmaHost>(2, I2cEngine::interrupt, 3, FmpI2cSpeed::standard_100k, deaf);
+    }
+    print(serial, "  the read half's address refused after a repeated START: ", deaf.right, " of ",
+          deaf.rows, " right, the far end having taken the write in ", deaf.up, crlf);
+    bench.verdict("a read half's address refused after the repeated START ends in the STOP that "
+                  "raises STOPF: i2c_nack_addr, the bus let go, the next tenure running",
+                  deaf.rows == 40u && deaf.up == 40u && deaf.right == 40u);
+
+    // ---- the NACK on a late entry, under a stream and on the vector ----
+    LateRow late_nack{};
+    uint16_t txis = 0;
+    constexpr Refusal refused[] = {{1, 0, 0}, {8, 0, 0}, {2, 4, 0}, {1, 0, 1}, {8, 0, 1}, {2, 4, 1}};
+    for (uint8_t pass = 0; pass < 10u; ++pass) {
+        for (const Refusal& row : refused) {
+            late_refusal<DmaHost>(row.tx, row.rx, row.at, I2cEngine::dma, FmpI2cSpeed::fast_400k,
+                                  late_nack, txis);
+            late_refusal<DmaHost>(row.tx, row.rx, row.at, I2cEngine::interrupt,
+                                  FmpI2cSpeed::fast_400k, late_nack, txis);
+        }
+    }
+    dma_host_live = false;
+    DmaHost::release();
+    (void)host_ready();
+    print(serial, "  a NACK on a late entry, 120 rows: the stage reached in ", late_nack.up,
+          ", right ", late_nack.right, ", TXIS up beside STOPF in ", txis, crlf);
+    bench.verdict("a NACK on a late entry, the address's or the first byte's, on either mechanism: "
+                  "one entry, the right status, the next write whole",
+                  late_nack.rows == 120u && late_nack.up == 120u && late_nack.right == 120u);
+    // Two rows of a pass refuse the first byte of two or more with no vector and
+    // no stream to answer the TXIS it raised (8 and 2+4 under interrupt), twenty in
+    // ten passes; under dma the stream answers it.
+    bench.verdict("... TXIS up beside STOPF among them, the store a late entry must not make",
+                  txis >= 20u);
+
+    // ---- a read's last byte on a late entry ----
+    LateRow late_100{};
+    LateRow late_400{};
+    for (uint8_t pass = 0; pass < 20u; ++pass) {
+        for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{8}}) {
+            late_read(n, FmpI2cSpeed::standard_100k, late_100);
+            late_read(n, FmpI2cSpeed::fast_400k, late_400);
+        }
+    }
+    print(serial, "  the last byte on a late entry, reads of 1, 2, 3 and 8: 100 kHz ", late_100.right,
+          " of ", late_100.rows, " right (RXNE and STOPF up together in ", late_100.up, "), 400 kHz ",
+          late_400.right, " of ", late_400.rows, " right (", late_400.up, ")", crlf);
+    bench.verdict("a read's last byte waits under a late entry: RXNE and STOPF up together, the "
+                  "byte read at the STOPF entry, every byte exact, N entries",
+                  late_100.rows == 80u && late_100.up == 80u && late_100.right == 80u &&
+                      late_400.rows == 80u && late_400.up == 80u && late_400.right == 80u);
+    far_down();
+}
+
+// =============================================================================
+// r - THE RECEIVE STREAM AT THE STOPF ENTRY (the self-link)
+// =============================================================================
+//
+// With no completion entry STOPF is the tenure's one edge, and STOPF says the
+// wire is over, not the stream: RXNE rose about a period and a half earlier at the
+// bus's rate, and the stream has its peripheral port's arbitration and its memory
+// port's still to go (RM0390 9.3.5). Three stages make it late. Taking the request
+// away decides it: the stream is never asked. A very_high stream on the same
+// controller outranks it on the peripheral port. Four copies on DMA2 share the
+// memory with its memory port through the bus matrix.
+//
+// The verdict is the byte in memory at the moment the host's body says the tenure
+// is over, read in the vector, ahead of anything a reply could read. How often the
+// stream was late is printed beside it, and the first stage is judged on it, being
+// the one that decides the lateness. The lag itself is measured with the vector's
+// line off (stream_lag()): what the last byte's stream takes against what the bus
+// gives it.
+
+using LoadStream = DmaStream<1, 1>;   ///< RM0390 table 28: TIM2_UP on DMA1 stream 1, channel 3
+using LoadTimer = Tim<2>;
+alignas(4) uint32_t load_cells[64];
+
+/// A stream of DMA1 at very_high, TIM2's count into memory at every update, a beat
+/// every `period` + 1 of TIM2's 90 MHz clock: above the receive stream's `high` on
+/// both of the controller's ports.
+void load_on(uint32_t period) {
+    LoadTimer::init();
+    (void)LoadTimer::configure(TimConfig{.prescaler = 0, .period = period});
+    DmaTransfer t{};
+    t.peripheral = &LoadTimer::regs().CNT;
+    t.memory = load_cells;
+    t.count = 64;
+    t.config.channel = 3;
+    t.config.direction = DmaDirection::peripheral_to_memory;
+    t.config.circular = true;
+    t.config.memory_increment = true;
+    t.config.peripheral_width = DmaWidth::word;
+    t.config.memory_width = DmaWidth::word;
+    t.config.priority = DmaPriority::very_high;
+    (void)LoadStream::load(t);
+    LoadTimer::interrupts(LoadTimer::update_dma, true);
+    LoadTimer::enable(true);
+}
+
+void load_off() {
+    LoadTimer::enable(false);
+    LoadTimer::interrupts(LoadTimer::update_dma, false);
+    LoadStream::stop();
+    LoadTimer::release();
+}
+
+alignas(16) uint32_t copy_src[4][256];
+alignas(16) uint32_t copy_dst[4][256];
+using CopyA = DmaCopyEngine<2, 0>;
+using CopyB = DmaCopyEngine<2, 4>;
+using CopyC = DmaCopyEngine<2, 5>;
+using CopyD = DmaCopyEngine<2, 7>;
+
+/// One copy engine kept busy: a block of 1 KB started whenever the last ended.
+template <typename E>
+void keep_busy(uint8_t i) {
+    if (!E::busy()) {
+        (void)E::copy(copy_dst[i], copy_src[i], 256u);
+    }
+}
+
+void copies_on() {
+    Dma<2>::init();
+    CopyA::arm(DmaPriority::very_high);
+    CopyB::arm(DmaPriority::very_high);
+    CopyC::arm(DmaPriority::very_high);
+    CopyD::arm(DmaPriority::very_high);
+}
+
+void copies_turn() {
+    keep_busy<CopyA>(0);
+    keep_busy<CopyB>(1);
+    keep_busy<CopyC>(2);
+    keep_busy<CopyD>(3);
+}
+
+/// The engines' two moments for the bare copies: DMA2's vectors are not bound, and
+/// abandon() is the verb that frees a block before its completion was seen.
+void copies_off() {
+    (void)CopyA::abandon();
+    (void)CopyB::abandon();
+    (void)CopyC::abandon();
+    (void)CopyD::abandon();
+}
+
+struct ProofRow {
+    uint32_t tenures = 0;
+    uint32_t in_memory = 0;  ///< the last byte right in the vector, every byte right after
+    uint32_t en_up = 0;      ///< the stream still running at STOPF
+    uint32_t rxne_up = 0;    ///< and never asked: the byte still in RXDR
+    uint32_t slow = 0;       ///< no completion inside the first bound: a starved stream's stretch
+    uint32_t lost = 0;       ///< no completion at all
+};
+
+void proof_print(const char* name, const ProofRow& r) {
+    print(serial, "  ", name, ": ", r.tenures, " reads, ", r.in_memory, " exact, the stream running "
+          "at STOPF ", r.en_up, ", the byte still in RXDR ", r.rxne_up, ", stretched past the bound ",
+          r.slow, ", unanswered ", r.lost, crlf);
+}
+
+/// One read of `n` on the streams, the wait turning `spin`; `starve` takes the
+/// request away as the block's count reaches one, so the last byte's stream is
+/// never asked. The bytes want `value(i)`.
+template <typename Value, typename Spin>
+void proof_read(uint8_t addr, uint8_t n, FmpI2cSpeed speed, bool starve, Value value, Spin spin,
+                ProofRow& row) {
+    static uint8_t in[255];
+    for (uint16_t i = 0; i < n; ++i) {
+        in[i] = static_cast<uint8_t>(~value(i));
+    }
+    DmaHost::Request r{};
+    r.addr = addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = n;
+    r.speed = speed;
+    r.engine = I2cEngine::dma;
+    stop_watch.cell = &in[n - 1u];
+    stop_watch.seen = static_cast<uint8_t>(~value(n - 1u));
+    stop_watch.on = true;
+    const uint32_t en0 = stop_watch.en_up;
+    const uint32_t rx0 = stop_watch.rxne_up;
+    xfer_done = false;
+    (void)DmaHost::start(r);
+    if (starve) {
+        if (n > 1u) {
+            (void)wait_until([] { return RxEngine::remaining() <= 1u; }, trial_limit_ms(n, speed));
+        }
+        S::dma_receive(false);
+    }
+    const uint32_t bound = trial_limit_ms(n, speed);
+    const uint32_t t0 = Ticker::ticks();
+    bool slow = false;
+    while (!xfer_done && Ticker::ticks() - t0 < 50u * bound) {
+        spin();
+        slow = slow || Ticker::ticks() - t0 >= bound;
+    }
+    stop_watch.on = false;
+    bool exact = xfer_done && DmaHost::status() == i2c_ok && stop_watch.seen == value(n - 1u);
+    for (uint16_t i = 0; i < n && exact; ++i) {
+        exact = in[i] == value(i);
+    }
+    if (!xfer_done) {
+        (void)DmaHost::recover();
+        row.lost = row.lost + 1u;
+    }
+    row.tenures = row.tenures + 1u;
+    row.in_memory = row.in_memory + (exact ? 1u : 0u);
+    row.en_up = row.en_up + (stop_watch.en_up - en0);
+    row.rxne_up = row.rxne_up + (stop_watch.rxne_up - rx0);
+    row.slow = row.slow + (slow ? 1u : 0u);
+}
+
+/// THE LAG AND THE WINDOW, in core cycles, polled. The vector's line is off and
+/// the receive request held down until RXNE rises, then let up: the time to EN low
+/// is the stream's own, from its request to its last byte in memory, and the time
+/// to STOPF the bus's. A turn of the poll is two register loads, 20 to 30 cycles,
+/// which is the figures' resolution; a row a tick's entry landed in is not kept.
+struct LagRow {
+    uint32_t runs = 0;
+    uint32_t lag_max = 0;
+    uint32_t window_min = 0xFFFF'FFFFu;
+    uint32_t wrong = 0;
+};
+
+template <typename Value, typename Spin>
+void stream_lag(uint8_t addr, FmpI2cSpeed speed, Value value, Spin spin, LagRow& row) {
+    static uint8_t in;
+    in = static_cast<uint8_t>(~value(0));
+    DmaHost::Request r{};
+    r.addr = addr;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(&in));
+    r.rx_len = 1;
+    r.speed = speed;
+    r.engine = I2cEngine::dma;
+    xfer_done = false;
+    Nvic::disable(S::event_irq);
+    (void)DmaHost::start(r);
+    S::dma_receive(false);
+    const uint32_t limit = trial_limit_ms(1, speed);
+    (void)wait_until([&spin] {
+        spin();
+        return (S::flags() & FmpI2cFlag::rxne) != 0u;
+    }, limit);
+    using RxRegs = DmaStream<RxEngine::controller, RxEngine::stream>;
+    const uint32_t period = systick_period();
+    const uint32_t tick = Ticker::ticks();
+    const uint32_t t0 = SysTick->VAL;
+    S::dma_receive(true);
+    uint32_t en_at = 0;
+    uint32_t stop_at = 0;
+    bool en_low = false;
+    bool stopped = false;
+    for (uint32_t turns = 200'000u; turns != 0u && !(en_low && stopped); --turns) {
+        const uint32_t cr = RxRegs::regs().CR;
+        const uint32_t f = S::flags();
+        const uint32_t now = SysTick->VAL;
+        if (!en_low && (cr & DMA_SxCR_EN) == 0u) {
+            en_low = true;
+            en_at = since(t0, now, period);
+        }
+        if (!stopped && (f & FmpI2cFlag::stop) != 0u) {
+            stopped = true;
+            stop_at = since(t0, now, period);
+        }
+    }
+    const bool ticked = Ticker::ticks() != tick;
+    Nvic::enable(S::event_irq);
+    (void)wait_until([] { return xfer_done; }, limit);
+    if (!xfer_done || in != value(0)) {
+        row.wrong = row.wrong + 1u;
+    }
+    if (!ticked && en_low && stopped) {
+        row.runs = row.runs + 1u;
+        row.lag_max = en_at > row.lag_max ? en_at : row.lag_max;
+        row.window_min = stop_at < row.window_min ? stop_at : row.window_min;
+    }
+}
+
+void lag_print(const char* name, const LagRow& r) {
+    print(serial, "  ", name, ", the last byte's stream against the bus, ", r.runs, " runs: its "
+          "longest ", r.lag_max, " core cycles, the shortest window to STOPF ", r.window_min,
+          ", wrong ", r.wrong, crlf);
+}
+
+void tr_stream_proof() {
+    if (!far_ready()) {
+        return;
+    }
+    Dma<1>::init();
+    dma_host_live = true;
+    const bool up = DmaHost::init(clock, base_config);
+    const FmpI2cSpeed v = FmpI2cSpeed::fast_400k;
+    auto far = [](uint16_t i) { return Far::value(static_cast<uint8_t>(i)); };
+    auto idle = [] {};
+
+    // ---- the stream never asked for the last byte ----
+    ProofRow never{};
+    for (uint8_t pass = 0; pass < 50u; ++pass) {
+        for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
+            proof_read(self_addr, n, v, true, far, idle, never);
+        }
+    }
+    proof_print("the request taken away for the last byte", never);
+    bench.verdict("THE STREAM NEVER ASKED: the last byte stands in RXDR under a running stream at "
+                  "every STOPF entry, and the host's own read puts it in memory before it answers",
+                  up && never.tenures == 150u && never.en_up == 150u && never.rxne_up == 150u &&
+                      never.in_memory == 150u);
+    const uint8_t after_never = tenure<DmaHost>(self_addr, nullptr, 0, nullptr, 0, v, I2cEngine::dma);
+    bench.verdict("... and the next tenure runs", after_never == i2c_ok);
+
+    // ---- a stream above it on the controller ----
+    ProofRow above{};
+    for (const uint32_t period : {uint32_t{4}, uint32_t{9}, uint32_t{19}, uint32_t{39}, uint32_t{79}}) {
+        ProofRow one{};
+        load_on(period);
+        for (uint8_t pass = 0; pass < 40u; ++pass) {
+            for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{16}}) {
+                proof_read(self_addr, n, v, false, far, idle, one);
+            }
+        }
+        load_off();
+        print(serial, "    period ", period + 1u, " of TIM2's clock: ", one.tenures, " reads, ",
+              one.in_memory, " exact, running at STOPF ", one.en_up, ", the byte in RXDR ",
+              one.rxne_up, ", stretched ", one.slow, ", unanswered ", one.lost, crlf);
+        above.tenures += one.tenures;
+        above.in_memory += one.in_memory;
+        above.en_up += one.en_up;
+        above.rxne_up += one.rxne_up;
+        above.slow += one.slow;
+        above.lost += one.lost;
+    }
+    proof_print("a very_high stream above it", above);
+    bench.verdict("A STREAM AT VERY_HIGH ON THE SAME CONTROLLER: every byte exact, the last in "
+                  "memory when the host answers",
+                  above.in_memory == above.tenures && above.lost == 0u);
+
+    // ---- four copies through the memory ----
+    copies_on();
+    ProofRow copies{};
+    for (uint16_t pass = 0; pass < 100u; ++pass) {
+        for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{16}}) {
+            proof_read(self_addr, n, v, false, far, copies_turn, copies);
+        }
+    }
+    proof_print("four copies at very_high on DMA2", copies);
+    bench.verdict("FOUR COPIES ON DMA2 THROUGH THE MEMORY: every byte exact, the last in memory "
+                  "when the host answers",
+                  copies.in_memory == copies.tenures && copies.lost == 0u);
+
+    // ---- the lag, against the window ----
+    LagRow lag_copies{};
+    for (uint16_t k = 0; k < 200u; ++k) {
+        stream_lag(self_addr, v, far, copies_turn, lag_copies);
+    }
+    copies_off();
+    lag_print("400 kHz, four copies", lag_copies);
+    LagRow lag_quiet{};
+    for (uint16_t k = 0; k < 200u; ++k) {
+        stream_lag(self_addr, v, far, idle, lag_quiet);
+    }
+    lag_print("400 kHz, nothing else", lag_quiet);
+    LagRow lag_above{};
+    load_on(9);
+    for (uint16_t k = 0; k < 200u; ++k) {
+        stream_lag(self_addr, v, far, idle, lag_above);
+    }
+    const uint16_t a0 = LoadStream::count();
+    const uint32_t b0 = SysTick->VAL;
+    while (LoadStream::count() == a0) {
+    }
+    const uint32_t b1 = SysTick->VAL;
+    load_off();
+    lag_print("400 kHz, a very_high stream, a beat every 10 of TIM2's clock", lag_above);
+    print(serial, "    that stream moved a beat in ", since(b0, b1, systick_period()),
+          " core cycles at the sample", crlf);
+    bench.verdict("the lag rows' reads are exact",
+                  lag_copies.wrong == 0u && lag_quiet.wrong == 0u && lag_above.wrong == 0u);
+
+    dma_host_live = false;
+    DmaHost::release();
+    far_down();
+}
+
+// =============================================================================
+// s - THE SAME AT FAST-MODE PLUS, against the partner (set `t`)
+// =============================================================================
+//
+// At 1 MHz the last byte's RXNE and the STOP are closest. The partner serves its
+// counting pattern on from where the last read stopped, so a lost or repeated byte
+// moves every read after it too.
+
+void ts_stream_proof_fm() {
+    if (!need_twi_peer()) {
+        return;
+    }
+    Dma<1>::init();
+    const FmpI2cSpeed v = FmpI2cSpeed::fast_plus_1m;
+    constexpr uint8_t seed = 0x40;
+    /// One batch: the partner told to serve, the engined host at Fm+, `reads` of
+    /// each length, the wait turning `spin`, the partner's tally read back.
+    auto batch = [&](auto spin, ProofRow& row, uint16_t reads, LagRow* lag = nullptr) {
+        twilink::Params a{};
+        a.ms = static_cast<uint16_t>(reads * 3u * 4u + 50u);
+        a.addr = twilink::dut_addr;
+        a.seed = seed;
+        a.pattern = twilink::pattern_counting;
+        (void)host_ready();
+        if (!Link::act(Op::serve, a)) {
+            return false;
+        }
+        const uint32_t t0 = Ticker::ticks();
+        dma_host_live = true;
+        const bool up = DmaHost::init(clock, base_config);
+        DmaHost::fast_plus_drive(true);
+        uint16_t at = 0;
+        for (uint16_t k = 0; k < reads && up; ++k) {
+            for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
+                const uint16_t from = at;
+                proof_read(twilink::dut_addr, n, v, false,
+                           [from](uint16_t i) {
+                               return twilink::pattern_value(twilink::pattern_counting, seed,
+                                                             static_cast<uint16_t>(from + i));
+                           },
+                           spin, row);
+                at = static_cast<uint16_t>(at + n);
+            }
+            if (lag != nullptr) {
+                const uint16_t from = at;
+                stream_lag(twilink::dut_addr, v,
+                           [from](uint16_t i) {
+                               return twilink::pattern_value(twilink::pattern_counting, seed,
+                                                             static_cast<uint16_t>(from + i));
+                           },
+                           spin, *lag);
+                at = static_cast<uint16_t>(at + 1u);
+                row.tenures = row.tenures + 1u;
+                row.in_memory = row.in_memory + 1u;
+            }
+        }
+        DmaHost::fast_plus_drive(false);
+        dma_host_live = false;
+        while (Ticker::ticks() - t0 < static_cast<uint32_t>(a.ms) + 5u) {
+        }
+        (void)host_ready();
+        twilink::Report rep{};
+        return Link::report(rep) && rep.aux1 == static_cast<uint8_t>(at) &&
+               rep.addr_hits == static_cast<uint16_t>(row.tenures);
+    };
+
+    ProofRow quiet{};
+    LagRow lag_quiet{};
+    const bool q_ok = batch([] {}, quiet, 100, &lag_quiet);
+    proof_print("Fm+, nothing else on the bus matrix", quiet);
+    lag_print("Fm+, nothing else", lag_quiet);
+    bench.verdict("Fm+ with nothing else moving: every byte exact, the partner's tally the host's",
+                  q_ok && quiet.in_memory == quiet.tenures && quiet.lost == 0u && lag_quiet.wrong == 0u);
+
+    ProofRow above{};
+    LagRow lag_above{};
+    load_on(9);
+    const bool a_ok = batch([] {}, above, 100, &lag_above);
+    load_off();
+    proof_print("Fm+, a very_high stream above it, a beat every 10 of TIM2's clock", above);
+    lag_print("Fm+, the very_high stream", lag_above);
+    bench.verdict("... under a very_high stream on the same controller, the same",
+                  a_ok && above.in_memory == above.tenures && above.lost == 0u && lag_above.wrong == 0u);
+
+    copies_on();
+    ProofRow copies{};
+    LagRow lag{};
+    const bool c_ok = batch(copies_turn, copies, 100, &lag);
+    copies_off();
+    proof_print("Fm+, four copies at very_high on DMA2", copies);
+    lag_print("Fm+, four copies", lag);
+    bench.verdict("... under four copies through the memory, the same",
+                  c_ok && copies.in_memory == copies.tenures && copies.lost == 0u && lag.wrong == 0u);
+    (void)host_ready();
+    bench.verdict("... and the channel is back at the boot rate", need_twi_peer());
+}
+
+// =============================================================================
 // the menu
 // =============================================================================
 
@@ -2909,6 +3703,7 @@ extern "C" void I2C1_ER_IRQHandler() {
 }
 
 extern "C" void FMPI2C1_EV_IRQHandler() {
+    ev_total = ev_total + 1u;
     if (ev_n < 4u) {
         ev_log[ev_n] = brio::FmpI2c<1>::flags();
         ev_n = static_cast<uint8_t>(ev_n + 1u);
@@ -2918,8 +3713,23 @@ extern "C" void FMPI2C1_EV_IRQHandler() {
         return;
     }
     if (dma_host_live) {
+        if (stop_watch.on) {
+            const uint32_t f = brio::FmpI2c<1>::flags();
+            if ((f & brio::FmpI2cFlag::stop) != 0u) {
+                stop_watch.entries = stop_watch.entries + 1u;
+                if (brio::DmaStream<RxEngine::controller, RxEngine::stream>::enabled()) {
+                    stop_watch.en_up = stop_watch.en_up + 1u;
+                    if ((f & brio::FmpI2cFlag::rxne) != 0u) {
+                        stop_watch.rxne_up = stop_watch.rxne_up + 1u;
+                    }
+                }
+            }
+        }
         if (DmaHost::isr()) {
             xfer_done = true;
+            if (stop_watch.on) {
+                stop_watch.seen = *stop_watch.cell;
+            }
         }
         return;
     }
@@ -3021,12 +3831,16 @@ int main() {
     bench.letter('k', "the recovery verbs", tk_recovery);
     bench.letter('l', "the client, configured and never addressed", tl_client);
     bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
+    bench.letter('q', "THE PUMP'S ENTRIES, and a late entry", tq_entries);
+    bench.letter('r', "THE RECEIVE STREAM AT THE STOPF ENTRY", tr_stream_proof);
     bench.second_letter('n', "THE DESK PARTNER: Fm+ acknowledged, a held SDA, a held clock",
                         tn_partner);
     bench.second_letter('o', "ES0298 2.12.8: writes in and out of the clock-ratio band",
                         to_erratum);
     bench.second_letter('p', "A REFUSED WRITE, position by position, against the partner",
                         tp_refusals);
+    bench.second_letter('s', "THE RECEIVE STREAM AT FAST-MODE PLUS, against the partner",
+                        ts_stream_proof_fm);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

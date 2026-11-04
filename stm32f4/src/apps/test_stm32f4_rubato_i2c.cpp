@@ -460,13 +460,10 @@ struct OnFmpi2c1 {
         if (!Host::idle()) {
             return "the host's engine is not between tenures";
         }
-        // At rest the event and error enables the engine arms at init()
-        // (RXIE, TXIE, NACKIE, STOPIE, ERRIE), TCIE taken away by finish(),
-        // and both DMA request enables clear (put_engines_away()).
-        constexpr uint32_t at_rest = FmpI2cInterrupt::rx | FmpI2cInterrupt::tx | FmpI2cInterrupt::nack |
-                                     FmpI2cInterrupt::stop | FmpI2cInterrupt::error;
-        if (Res::interrupts() != at_rest || Res::dma_transmit() || Res::dma_receive()) {
-            return "the host's enables are not at rest (TCIE off, both DMA requests off)";
+        // At rest ERRIE alone: start() arms a tenure's enables and finish()
+        // takes them back with both DMA request enables, in one store each.
+        if (Res::interrupts() != FmpI2cInterrupt::error || Res::dma_transmit() || Res::dma_receive()) {
+            return "the host's enables are not at rest (ERRIE alone, both DMA requests off)";
         }
         if (Res::starting()) {
             return "a START stands in CR2";
