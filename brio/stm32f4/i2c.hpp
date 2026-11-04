@@ -43,7 +43,9 @@
  *     extern "C" void I2C3_EV_IRQHandler() { if (Bus::isr()) { done = true; } }
  *     extern "C" void I2C3_ER_IRQHandler() { if (Bus::error_isr()) { done = true; } }
  *     ...
- *     Bus::start(r);      // r: one Request, its buffers lent until done
+ *     // r: one Request. True: already complete, read Bus::status(), no vector follows.
+ *     // False: r's buffers lent until done.
+ *     if (Bus::start(r)) { done = true; }
  *
  * and under the arbiter the vectors post the completion instead:
  * `if (Bus::isr()) { post<Arb>(TransferDone{Bus::status()}); }`.
@@ -170,7 +172,7 @@
  *
  * Two optional DMA engine slots, the shape every brio bus task has: name
  * a stm32f4/dma.hpp DmaTxEngine and DmaRxEngine and the data phases of a
- * Request that names `dma` move without the CPU (I2cHost's comment);
+ * Request that names `dma` move without the CPU but for a read of two (I2cHost's comment);
  * name neither (the default) and every engine branch disappears. A stream and a channel are not free - the request
  * mapping gives an instance one, two or three (controller, stream,
  * channel) cells and no others, all of them on DMA1 - so a slot is checked
@@ -767,8 +769,9 @@ struct I2cHostConfig {
  * clock; a speed the clock cannot produce, an address outside 0x08..0x77
  * (util/i2c_bus.hpp), and `engine = I2cEngine::dma` on a host with no
  * engines bound are answered i2c_rejected inside start(), no byte moved -
- * the one synchronous completion of an I2C engine, and the arbiter
- * replies with status() for it.
+ * one of the two synchronous completions of an I2C engine, the other being
+ * a STOP held past stop_drain_us, i2c_timeout; the arbiter replies with status()
+ * for both.
  *
  * THE PROGRAM NAMES THE ENGINE of every Request (Request::engine,
  * util/i2c_bus.hpp). `interrupt`, the default, runs both phases on the
@@ -928,7 +931,8 @@ public:
             // BTF rises, "stretching SCL low" until DR is written; a byte
             // its receive stream has not taken does the same until DR is
             // read (RM0090 27.3.3), so a late stream slows the bus and
-            // loses nothing. A read of one has no next byte to hold: its wire ends
+            // loses no byte of the request (a read of three or more late across its last two
+            // clocks more off the target, docs/stm32f4/i2c.md). A read of one has no next byte to hold: its wire ends
             // by itself and the answer follows when the stream is served, or the
             // arbiter's timeout answers for one never served (docs/stm32f4/i2c.md).
             TxEngine::arm(S::data_address(), DmaPriority::high);

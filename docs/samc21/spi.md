@@ -396,7 +396,10 @@ item a reader would apply without checking the row.
     however long the load stands, and a last beat landing around that store
     has its frame waited out there, bounded. In that vector,
     TXC and DRE up with the transmit channel enabled and nothing pending
-    is a channel that lost its trigger, ended `spi_dma_fault`; a bus
+    is a channel that lost its trigger, ended `spi_dma_fault`. A channel that loses it after
+    the first dry entry cleared TXC gets no such entry: only `SpiBus`'s timeout answers, and
+    with none, its default, nothing does; it needs another channel disabled mid-block
+    beside one a load is starving (dmac.md), read from the code and not staged; a bus
     error on either channel (the DMAC's vector) and a receive channel
     whose last beat does not land within 64 turns of a masked select and
     load, hundreds of core cycles against a beat's few, end the same way.

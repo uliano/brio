@@ -107,9 +107,9 @@ tenure's STOP to leave the control register, then a bound of 100 us for the bus
 to free. Both are timed on the system counter and each ends a few microseconds
 past its name, later if a handler holds the core; with the counter stopped each
 is a count of polls, some 26 ms and 800 us at 48 MHz ("The two bounds of
-`start()`", below). Beyond that the program has one thing to keep, the per-bus
-timeout: it answers a client holding the clock past the first bound, and
-`start()` resets by itself a BUSY left up over an idle wire ("A BUSY left
+`start()`", below). `start()` itself answers a client holding the clock past the first bound, and
+keeps the program one thing, the per-bus timeout, for a clock held through a
+tenure, a dead channel and a START under a slow foreign clock; and `start()` resets by itself a BUSY left up over an idle wire ("A BUSY left
 standing", below). On a bus with a second controller a START's fate depends on
 that controller's clock ("What the silicon does"). The
 event vector moves a request's data one byte an entry when the request

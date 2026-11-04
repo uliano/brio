@@ -79,7 +79,7 @@
  * Who calls what. init() runs in main, after the clock task (the timing
  * is computed from the rate the clock type claims) and before the
  * kernel's run(). start() is the arbiter's, called in its own dispatch:
- * it is the one place on the host's request path that waits - for the last
+ * outside the DMA vector's end_behind() it is the one place on the host's request path that waits - for the last
  * tenure's STOP to leave CTLR1 (stop_drain_us, 5 ms), then for BUSY to clear
  * (bus_free_us, 100 us), each timed on the STK and bounded by a count of
  * polls where the STK is not running - and it masks nothing. isr()
@@ -1035,8 +1035,9 @@ public:
     /// hands its half back to that vector (the class comment); the receive block completing ends
     /// a read phase, STOP after it unless a one-byte read set it at ADDR.
     /// A transfer error ends the tenure with i2c_dma_fault. INTFR is read
-    /// once for both. True when the tenure just completed. It masks
-    /// nothing and waits for nothing.
+    /// once for both. True when the tenure just completed. It masks nothing. It waits only when a write's completion finds BTF up:
+    /// end_behind() polls in this vector, each poll bounded, some 180 us at 100 kHz from a live
+    /// client, and no other interrupt enters meanwhile.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_dma) {
             const uint32_t intfr = RxEngine::block_flags();

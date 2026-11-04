@@ -1303,8 +1303,8 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   is lost at any rung; a 512 B pair at 1 Mbaud loses nothing (the kick
   cures its 4-character starvations); past the FIFO's nine characters
   frames go - some 5800 at 1 Mbaud with 2 KB pairs, some 61500 at 6.4 Mbaud - in
-  500-odd gaps, NOT ONE BYTE CORRUPT OR TAKEN TWICE and never more gaps
-  than `rx_skips()` moved, the receiver delivering to the end of every
+  500-odd gaps, NOT ONE BYTE CORRUPT OR TAKEN TWICE and on these legs never more gaps
+  than `rx_skips()` moved (a read at the end of a load can share moves), the receiver delivering to the end of every
   leg: THE KICK RACING A CHARACTER LOSES NOTHING IT DOES NOT REPORT, to
   6.4 Mbaud. `rx_skips()` is an EPOCH under an overrun, not a count:
   one ORE costs many characters and moves it once (some 16100 lost against

@@ -332,9 +332,10 @@ measured transfer error, not staged on I2C). And a DMA load that starves the cha
 tenure holds SCL and that timeout answers ([the FMPI2C page](../stm32f4/fmpi2c.md),
 [the RP2350 I2C page](../rp2350/i2c.md), in either direction on the CH32V00x, the
 CH32X035 and the CH32V203/V303), where `interrupt` does not wait on the load; with no
-per-bus timeout nothing answers. On those three a read of three bytes or more can
-also take one byte more off the target, its reply exact, when a block above its
-channel starts on the second-last byte ([the CH32V00x I2C page](../ch32v00x/i2c.md)).
+per-bus timeout nothing answers. On those three and the STM32F4's classic host a
+read of three bytes or more can also take more off the target, its reply exact, when a
+block above its channel catches its last two ([the CH32V00x I2C
+page](../ch32v00x/i2c.md), [the STM32F4 I2C page](../stm32f4/i2c.md)).
 
 **A half the engines cannot carry completes on the interrupt**, under
 `dma` too, and is not refused. Here I2C parts from SPI, whose host refuses
@@ -475,7 +476,7 @@ request that names it does not compile
 
 A client holding a line low for ever (SDA, or the clock in the middle
 of a byte) leaves a tenure in flight, and so does a DMA load that keeps a
-read's channel from the peripheral while it holds SCL: the kernel keeps running, since
+channel from the peripheral while it holds SCL: the kernel keeps running, since
 nothing waits, but the arbiter keeps waiting and later requests pile up
 until the arbiter rejects them. The requesters hear those rejections, and
 nothing recovers the bus. The silicon does not close this. Of the
@@ -642,7 +643,7 @@ These four share an event machine and its consequences:
 - Two vectors, `isr()` for the events and `error_isr()`; `timing_of` and
   `reference_hz()`; `unstick()` returns the clocks it took; `dma_isr()`,
   `Request::engine` and `has_dma`, `dma` carrying a half at any length, the
-  one-byte read included, but for the CH32V303's 64 KB case above.
+  one-byte read included, but for the CH32V303's 64 KB case and the STM32F4's read of two above.
 - **`start()` spends dispatch time on the bus.** This lineage cannot queue
   a START behind a STOP and nothing in its chapters signals the STOP's
   leaving, so `start()` waits for it: about one bit period when a tenure
@@ -651,8 +652,9 @@ These four share an event machine and its consequences:
 `i2c_timeout` in `status()`, no START and no vector, no `recover()` under the hold,
 and the arbiter goes on to its next request. Each WCH host's paragraph below has
 what it does about a BUSY left standing after the second.
-- The event line is raised by `start()` and dropped at the completion, so
-  the BTF a STOP leaves standing does not re-enter the vector.
+- The event line is raised by `start()`, down through every DMA block and dropped at
+  the completion, so the BTF a STOP or a starved channel leaves standing does not
+  re-enter the vector.
 - A write-then-read requests its repeated START on the TxE of the last
   written byte, while that byte shifts, and not at BTF. Measured: with the
   START at BTF, a CH32V303VCT6 and a CH32V203C8T6 each lost that byte when

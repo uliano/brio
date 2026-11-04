@@ -127,7 +127,8 @@
  * and one compare a run, nothing a byte. Where the ring skips at the
  * look that finds the gap (util/ring.hpp's HardwareRing and SkipRing),
  * no run handed out holds one and the epoch moves between two runs, so
- * no line is ever delivered across a gap: the line begun is torn, and
+ * no line is delivered across a gap (a run the epoch did not move for can hold one on
+ * the STM32F4's and STM32G0's receive engines, their USART pages): the line begun is torn, and
  * what the ring held when the gap was found is skipped with it. A
  * transport whose release can refuse and that does not report its skips
  * is refused at compile time; over a transport without the verb (a test

@@ -362,7 +362,7 @@ moved skips: the tail jumps to the head, everything queued is
 discarded with the drop, which is necessarily behind the head, and the
 epoch moves, between two runs and never inside one, the meaning
 `HardwareRing`'s skip has. No run handed out holds a drop, so no line
-is ever delivered across one: the line begun is torn, and the stream
+is delivered across one, but for the exception below: the line begun is torn, and the stream
 resumes at the next end of line or after a silence (below). What the
 skip throws away beside the drop, the whole lines queued with it, is
 lost only while bytes are being lost anyway. Under an overload so
@@ -384,7 +384,8 @@ capture, a simulated port) nothing of this is compiled.
 
 **What the transport guarantees, and what it does not.** A line the
 transport delivers is intact: no byte of it was dropped, refused or
-flagged, and no two pieces of the stream were joined to make it. That
+flagged, and no two pieces of the stream were joined to make it. Under a receive engine on the STM32F4 and the STM32G0 this has one known exception: a gap can land
+in a run `rx_skips()` did not move for, and a line can then hold it (their USART pages). That
 is all. It can still be a fragment: where a drop took a line's own end
 of line, the bytes after the drop up to the next end of line are
 delivered as a line whose beginning is lost (the undecidable cases

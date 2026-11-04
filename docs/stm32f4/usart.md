@@ -945,6 +945,9 @@ Driver gaps:
   with RXNEIE left armed, where a thread held out rarely looked in between.
   `util/line_reader.hpp` can then hand a line with that gap in it. Moving the epoch again at
   each look until the stream has passed the gap does not close it (36 and 57 in a run), and why is not known.
+- Bytes out of order under a ring armed low: a consumer reading during a starved leg saw them in one
+  control leg, on an image before the wait for a frame came down; 0 of 30 such legs on the final image.
+  The cause is not known, so that is a rate and not a proof.
 - A wake from Stop: this USART has no wake unit (the G0's WUF); the
   power chapter says what a Stop does to a pending receive.
 - The receive errors' COUNTS under the engine are bounded, not exact

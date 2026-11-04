@@ -109,7 +109,8 @@
  * for the last byte's RxNE of at most 100 000 STAR1 polls
  * (wait_until()) whose answer receive_step() discards - a bound that
  * runs out reads DATAR regardless and reports i2c_ok with what it
- * holds, and whether a case reaches it is not recorded. unstick() spins
+ * holds, and whether a case reaches it is not recorded. dma_isr() waits too, bounded, when
+ * a write's completion finds BTF up (end_behind()). unstick() spins
  * its half bits on delay_us(), nine pulses and a STOP at most. The
  * Request's two buffers are lent from the post to the I2cDone the
  * arbiter replies with: the vectors read and write them in place, so

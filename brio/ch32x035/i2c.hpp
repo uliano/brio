@@ -54,7 +54,8 @@
  * i2c_ok with what it holds (receive_step() and wait_until()). At that
  * point the byte is already in the shifter, so a target stretching SCL
  * cannot hold it back; whether a measured case reaches the bound is not
- * recorded (docs/ch32x035/i2c.md lists it as open).
+ * recorded (docs/ch32x035/i2c.md lists it as open). dma_isr() waits too, bounded, when a
+ * write's completion finds BTF up (end_behind()).
  * The Request's two buffers are lent from the post to the I2cDone the
  * arbiter replies with: untouched and in scope until then, which nothing
  * checks. The client's polled verbs are the loop's, its service() and
@@ -1232,8 +1233,9 @@ public:
     /// hands its half back to it (the file header); the receive block completing ends a
     /// read phase, STOP after it unless a one-byte read set it at ADDR. A
     /// transfer error ends the tenure with i2c_dma_fault. INTFR is read
-    /// once for both. True when the tenure just completed. It masks nothing
-    /// and waits for nothing.
+    /// once for both. True when the tenure just completed. It masks nothing. It waits only when a write's completion finds BTF up:
+    /// end_behind() polls in this vector, each poll bounded, some 180 us at 100 kHz from a live
+    /// client, and no other interrupt enters meanwhile.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_dma) {
             const uint32_t intfr = RxEngine::block_flags();

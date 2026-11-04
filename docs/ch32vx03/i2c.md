@@ -164,7 +164,7 @@ What decides correctness even there:
   answers a request naming `I2cEngine::dma` `i2c_rejected`, nothing on
   the wire; `Bus::has_dma` says at compile time which a host is.
 
-What the host waits for, and where - three places, each bounded:
+What the host waits for, and where - four places, each bounded:
 
 - **`start()`, in the arbiter's dispatch**, for the last tenure's STOP
   to leave CTLR1 (a bound of 5 ms), then for BUSY to clear (a bound of 100 us),
