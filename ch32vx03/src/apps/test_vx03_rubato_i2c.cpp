@@ -41,13 +41,13 @@
 //   the repeated START requested on the last
 //   written byte's TxE; a refused last byte closed with a void write; the
 //   event vector off between tenures, the error vector on. start() runs in
-//   the arbiter's dispatch and WAITS there, bounded, in delay_us(1) turns:
+//   the arbiter's dispatch and WAITS there, bounded, on the STK's counter:
 //   for the last STOP to leave CTLR1 (5 ms) and for BUSY (100 us, then
 //   unwedge_busy(), SWRST where BUSY stands over an idle wire, counted by
 //   unwedges()) - and its last act is the CTLR1 store that sets START. So a
-//   preemption inside start() lengthens a wait it lands in (each turn is
-//   timed on the STK, so a turn held off is a longer turn, never a shorter
-//   bound) or moves the START: a gap between tenures. Inside a tenure the
+//   preemption inside start() spends a wait it lands in (the counter runs
+//   through it, and a last look at the bit follows the bound, so a wait held
+//   off ends no earlier) or moves the START: a gap between tenures. Inside a tenure the
 //   machine holds SCL at SB, at ADDR until its two reads and at BTF (19.3)
 //   while a vector is late. THE PREDICTION: strict at every speed, path and
 //   pass; letter x's landings inside start() find MSL clear, because a START

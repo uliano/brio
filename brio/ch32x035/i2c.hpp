@@ -171,8 +171,10 @@
  * seeing its STOP can leave it standing over an idle wire - 15.9.1's own
  * case for SWRST, "when no stop condition is detected on the bus but the
  * busy bit is 1". `start()` answers it when its bounded wait for BUSY
- * runs out and both lines read high, the wire being the guard that keeps
- * another master's busy bus out of it, and counts it (`unwedges()`).
+ * runs out and one read finds both lines high, and counts it (`unwedges()`).
+ * One read cannot tell that case from another controller's clock: both lines
+ * also read high in SCL's high phase on a 1, and the reset is then taken in a
+ * live tenure (measured, docs/ch32x035/i2c.md).
  *
  * A START into a held line is not refused by this die (measured,
  * docs/ch32x035/i2c.md): set by a peripheral that saw another device take
@@ -1027,12 +1029,12 @@ public:
     /**
      * 15.9.1's own case: SWRST "resets the I2C module when no stop
      * condition is detected on the bus but the busy bit is 1". When the
-     * bounded wait for BUSY runs out and the wire says idle - both lines
-     * high - the bit is the peripheral's own and the chapter's reset is
-     * taken; a bus another master really holds never has both lines high
-     * for long, and is never reset out from under it. SWRST takes CTLR2
-     * with it, so the whole configuration is written again. True when the
-     * machine was reset.
+     * bounded wait for BUSY runs out and one read finds both lines high the
+     * chapter's reset is taken. That read also passes in a tenure another
+     * controller is clocking, at the fraction of its bits both lines stand
+     * high (measured, docs/ch32x035/i2c.md, "A request into another
+     * controller's tenure"). SWRST takes CTLR2 with it, so the whole
+     * configuration is written again. True when the machine was reset.
      */
     static bool unwedge_busy() {
         if (!S::busy() || !SclPin::read() || !SdaPin::read()) {
@@ -1754,20 +1756,52 @@ private:
     static constexpr uint16_t stop_drain_us = 5'000;
 
     /// How long start() then waits for BUSY to clear: our STOP seen by the
-    /// bus takes a moment, another device's traffic takes longer.
+    /// bus takes a moment, a bit at 100 kHz, another controller's traffic
+    /// takes longer. A hundred microseconds is twice SMBus's 50 us ceiling on
+    /// a clock's high phase.
     static constexpr uint16_t bus_free_us = 100;
 
-    /// Poll `pred` for at least `us` microseconds, timed on the STK
-    /// (delay.hpp); true as soon as it holds. delay_us() refuses when the
-    /// STK is not running, and the bound is then a count of polls - a
-    /// bound still.
+    /// The least a poll of wait_for_us() can take: its loop is more than
+    /// eight instructions, a peripheral load among them, on a core that
+    /// retires one a cycle at most. The poll budget below rests on it.
+    static constexpr uint32_t poll_min_cycles = 8;
+
+    /// Poll `pred` for at least `us` microseconds; true as soon as it holds.
+    /// The first look is here, in line and on no counter: the path that
+    /// finds the bus free costs that one read.
     template <typename Pred>
-    static bool wait_for_us(Pred pred, uint16_t us) {
-        for (uint16_t t = 0; t < us; ++t) {
+    [[gnu::always_inline]] static bool wait_for_us(Pred pred, uint16_t us) {
+        return pred() || poll_for_us(pred, us);
+    }
+
+    /// The time on the STK's counter (RM 7.5.5), which runs at HCLK from
+    /// Ticker::init() on, in main and in a handler, masked or not: each poll
+    /// adds what the counter's low half moved since the last, one period
+    /// folded in where it restarted from zero, so the bound may span many
+    /// ticks. A gap of a whole period or more between two polls, a handler
+    /// that long, is lost from the sum and the wait ends later, never
+    /// earlier. THE BUDGET is what ends it where the counter does not move,
+    /// before Ticker::init(): it allows the time asked at poll_min_cycles a
+    /// poll, so it cannot run out first while the counter runs, and a program
+    /// that calls start() before the ticker waits longer than asked, by the
+    /// poll's real length over poll_min_cycles (docs/ch32x035/i2c.md has it measured). Out of
+    /// line and cold, reached only on a bus not free, with every call of its
+    /// poll inlined.
+    template <typename Pred>
+    [[gnu::noinline, gnu::cold, gnu::flatten]] static bool poll_for_us(Pred pred, uint16_t us) {
+        const uint32_t cycles = us * delay_rate_.cycles_per_us;
+        const uint32_t period = stk()->CMPLR + 1u;
+        uint32_t polls = cycles / poll_min_cycles;
+        uint32_t last = stk()->CNTL;
+        uint32_t elapsed = 0;
+        while (elapsed < cycles && polls != 0u) {
             if (pred()) {
                 return true;
             }
-            (void)delay_us(delay_rate_, 1);
+            --polls;
+            const uint32_t now = stk()->CNTL;
+            elapsed += now >= last ? now - last : now + period - last;
+            last = now;
         }
         return pred();
     }

@@ -1468,7 +1468,7 @@ suite with the path in the flash and in SRAM, nothing else moved:
 | the SPI receive loop's turn, a frame at /2 and /4 (the wire 16, 32) | the driver | 47.9, 47.9, aligned likewise | 24.0 or 26.0, 40.0 or 42.0 (two values, by the address modulo four) | (with the transmit-only loop's) |
 | the USART transmit engine's completion, the DMA vector's body | the driver | 285 to 289 (324 at most) with the vector on a word; the line idle at a block boundary above 1.5 Mbaud | 129 to 132 (154 at most), gapless to 3 Mbaud | 356 |
 | a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 518 an engined port's `isr()`; the suite's vector 2060 |
-| the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver | 213, 257 (341 at most) | 145, 160 to 163 behind a vector in the flash (207 at most) | 968 for one plain host |
+| the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver | 201, 244 or 245 (325 at most) | 132, 148 behind a vector in the flash (187 at most) | 968 for one plain host |
 | the console's handler body (115200, `test_x035_spi`) | the program | 148 | 66 | 404 |
 | the tick's handler body | the program | 65 | 29 | 100 |
 

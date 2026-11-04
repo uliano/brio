@@ -301,7 +301,8 @@ inline constexpr uint8_t pattern_fixed = 1;      ///< seed every time
 ///              its HOST writes to, count = bytes that host writes,
 ///              seed/pattern = those bytes, ms = deadline, aux16 =
 ///              microseconds to wait after the bus goes Busy before
-///              arming the held START
+///              arming the held START; aux8 = the rate its host writes
+///              at on a peer that serves it: 0 100 kHz, 1 400, 2 20, 3 50
 ///   coll       addr = the address SHARED with the DUT's own client,
 ///              seed = the byte it serves (fixed), ms = deadline
 ///   hold_sda   aux16 = microseconds to hold SDA low at most, aux8 =

@@ -41,11 +41,11 @@
 //   I2cEngine::interrupt every byte on the event vector. Which a request
 //   names is this suite's choice by its shape (Host, below). start() waits,
 //   bounded, for the last STOP to leave CTLR1 (stop_drain_us 5 ms) and for
-//   BUSY (bus_free_us 100 us), each a count of delay_us(1) turns, takes
+//   BUSY (bus_free_us 100 us), each timed on the STK's counter, takes
 //   SWRST for a BUSY standing over an idle wire (unwedges()), and stores
 //   START last: nothing is on the wire before that store, so a preemption
 //   inside start() is a later START - a gap between tenures - or a wait it
-//   lands in lasting longer, never shorter; inside a tenure the master
+//   lands in spent, a look at the bit behind it, never ended early; inside a tenure the master
 //   holds SCL at SB, at ADDR until its two reads and at BTF (15.3, 15.6)
 //   while a vector is late.
 //   THE PREDICTION: strict at every speed, path and pass; unwedges() and the

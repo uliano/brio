@@ -600,9 +600,10 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
 /// on the wire sees - and the STOP that closes it. This end's START is set
 /// on that STOP and never inside the window, because a CH32 START on a busy
 /// bus whose clock stands still goes out at the controller's tick, into the
-/// window (the header). `arb` writes the pattern to `target`; `host_read`
-/// reads `count` bytes from it, `aux8` times back to back, and the report
-/// carries the bytes read (twi_link.hpp).
+/// window (the header). `arb` writes the pattern to `target`, at the rate its
+/// `aux8` names (0 at 100 kHz, 1 at 400, 2 at 20, 3 at 50, any other at 100);
+/// `host_read` reads `count` bytes from it, `aux8` times back to back, and the
+/// report carries the bytes read (twi_link.hpp).
 twilink::Report run_host(const twilink::Params& a, bool read) {
     twilink::Report r{};
     host_live = true;
@@ -650,6 +651,15 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
     }
 
     r.flags |= twilink::report_host_ran;
+    // `arb`'s aux8 2 and 3: the 100 kHz divider made five and two times longer
+    // in the register, the far suites' foreign clock slower than the bound they
+    // wait for.
+    if (!read && (a.aux8 == 2u || a.aux8 == 3u)) {
+        I2cTiming slow = Host::timing_of(I2cSpeed::standard_100k);
+        slow.ckcfgr = static_cast<uint16_t>(slow.ckcfgr * (a.aux8 == 2u ? 5u : 2u));
+        Raw::timing(slow);
+        Raw::enable();
+    }
     // ONE TENURE, waited out on the vectors' completion within the deadline.
     const auto tenure = [&]() -> bool {
         host_done = false;
@@ -667,7 +677,7 @@ twilink::Report run_host(const twilink::Params& a, bool read) {
                                 .rx = {},
                                 .rx_len = 0,
                                 .reply = {},
-                                .speed = I2cSpeed::standard_100k});
+                                .speed = !read && a.aux8 == 1u ? I2cSpeed::fast_400k : I2cSpeed::standard_100k});
         if (sync_done) {
             host_status = Host::status();
             host_done = true;

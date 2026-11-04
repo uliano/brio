@@ -92,8 +92,8 @@
  * called by the arbiter from its dispatch, main context, and waits
  * there, bounded, for the last tenure's STOP to leave CTLR1
  * (stop_drain_us, 5 ms) and then for BUSY to clear (bus_free_us,
- * 100 us), both timed on the STK through delay_us() at the rate the
- * clock type claims - with the counter stopped each is a count of polls.
+ * 100 us), both timed on the STK at the rate the clock type claims -
+ * with the counter stopped each is a count of polls.
  * When the first runs out start() writes nothing and returns false: the
  * tenure parks, no START and no event vector, and the arbiter's per-bus
  * timeout is what answers it. When the second runs out unwedge_busy()
@@ -1154,11 +1154,11 @@ public:
      * into it is held by the hardware for ever, because the hardware is
      * waiting for a bus that is already free.
      *
-     * So: when the bounded wait for BUSY runs out AND THE WIRE SAYS IDLE,
-     * the bit is the peripheral's own and the chapter's reset is taken.
-     * The wire is what guards it: a bus another master is really holding
-     * must never be reset out from under it, and there both lines are not
-     * high. True when the machine was reset.
+     * So: when the bounded wait for BUSY runs out and one read finds both
+     * lines high, the chapter's reset is taken. That read also passes in a
+     * tenure another controller is clocking, at the fraction of its bits
+     * both lines stand high (measured, docs/ch32vx03/i2c.md, "A request into
+     * another controller's tenure"). True when the machine was reset.
      */
     static bool unwedge_busy() {
         if (!S::busy() || !SclPin::read() || !SdaPin::read()) {
@@ -1918,20 +1918,52 @@ private:
     static constexpr uint16_t stop_drain_us = 5'000;
 
     /// How long start() then waits for BUSY to clear: our STOP seen by
-    /// the bus takes a moment, another device's traffic takes longer.
+    /// the bus takes a moment, a bit at 100 kHz, another controller's traffic
+    /// takes longer. A hundred microseconds is twice SMBus's 50 us ceiling on
+    /// a clock's high phase.
     static constexpr uint16_t bus_free_us = 100;
 
-    /// Poll `pred` for at least `us` microseconds, timed on the STK
-    /// (delay.hpp); true as soon as it holds. delay_us() refuses when the
-    /// STK is not running, and the bound is then a count of polls - a
-    /// bound still.
+    /// The least a poll of wait_for_us() can take: its loop is more than
+    /// eight instructions, a peripheral load among them, on a core that
+    /// retires one a cycle at most. The poll budget below rests on it.
+    static constexpr uint32_t poll_min_cycles = 8;
+
+    /// Poll `pred` for at least `us` microseconds; true as soon as it holds.
+    /// The first look is here, in line and on no counter: the path that
+    /// finds the bus free costs that one read.
     template <typename Pred>
-    static bool wait_for_us(Pred pred, uint16_t us) {
-        for (uint16_t t = 0; t < us; ++t) {
+    [[gnu::always_inline]] static bool wait_for_us(Pred pred, uint16_t us) {
+        return pred() || poll_for_us(pred, us);
+    }
+
+    /// The time on the STK's counter (the QingKe V4 manual ch. 5), which runs at HCLK from
+    /// Ticker::init() on, in main and in a handler, masked or not: each poll
+    /// adds what the counter's low half moved since the last, one period
+    /// folded in where it restarted from zero, so the bound may span many
+    /// ticks. A gap of a whole period or more between two polls, a handler
+    /// that long, is lost from the sum and the wait ends later, never
+    /// earlier. THE BUDGET is what ends it where the counter does not move,
+    /// before Ticker::init(): it allows the time asked at poll_min_cycles a
+    /// poll, so it cannot run out first while the counter runs, and a program
+    /// that calls start() before the ticker waits longer than asked, by the
+    /// poll's real length over poll_min_cycles (docs/ch32vx03/i2c.md has it measured). Out of
+    /// line and cold, reached only on a bus not free, with every call of its
+    /// poll inlined.
+    template <typename Pred>
+    [[gnu::noinline, gnu::cold, gnu::flatten]] static bool poll_for_us(Pred pred, uint16_t us) {
+        const uint32_t cycles = us * delay_rate_.cycles_per_us;
+        const uint32_t period = stk()->CMPLR + 1u;
+        uint32_t polls = cycles / poll_min_cycles;
+        uint32_t last = stk()->CNTL;
+        uint32_t elapsed = 0;
+        while (elapsed < cycles && polls != 0u) {
             if (pred()) {
                 return true;
             }
-            (void)delay_us(delay_rate_, 1);
+            --polls;
+            const uint32_t now = stk()->CNTL;
+            elapsed += now >= last ? now - last : now + period - last;
+            last = now;
         }
         return pred();
     }

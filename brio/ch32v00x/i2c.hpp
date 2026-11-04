@@ -80,8 +80,9 @@
  * is computed from the rate the clock type claims) and before the
  * kernel's run(). start() is the arbiter's, called in its own dispatch:
  * it is the one place on the host's request path that waits - for the last
- * tenure's STOP to leave CTLR1 (stop_drain_us), then for BUSY to clear
- * (bus_free_us), each a bound of polls - and it masks nothing. isr()
+ * tenure's STOP to leave CTLR1 (stop_drain_us, 5 ms), then for BUSY to clear
+ * (bus_free_us, 100 us), each timed on the STK and bounded by a count of
+ * polls where the STK is not running - and it masks nothing. isr()
  * and error_isr() are the bodies of the event and the error vectors,
  * dma_isr() the body of both DMA channels' vectors; the program binds
  * each under the crt's name and calls it nowhere else, and an unbound
@@ -159,6 +160,17 @@
  * last byte went into the shifter requests the repeated START as the
  * pump's does.
  *
+ * BUSY is the wire (15.10.7: "low level exists in SDA or SCL"), a STOP is
+ * what takes it down, and a line that went low with no STOP behind it leaves
+ * it standing over both lines high: 15.10.1's own case for SWRST. A client
+ * holding the clock past the per-bus timeout leaves it (recover() runs under
+ * the low SCL), and so does a restart that takes the pull-ups down and up.
+ * start() takes the reset when BUSY has stood for the whole of bus_free_us
+ * and no read in that time found either line low (wait_bus_free()), so a bus
+ * another controller is clocking does not pass; a foreign clock whose high
+ * phase is longer than the bound is taken for an idle wire
+ * (docs/ch32v00x/i2c.md has the measurement and what the watch can miss).
+ *
  * There is no rise-time register, on either part. 15.3's text names an
  * "R16_I2C1_RTR" the register list (table 15-1) does not carry - the
  * CH32V003's manual does the same in its 13.3 against its table 13-1
@@ -200,8 +212,7 @@
  * header-byte sequence, EV9, has no user); PEC (the resource has the
  * enable, no tenure shape asks for it); the general call as a host
  * verb; a wake from Standby on an address match, which this family's
- * PWR chapter does not offer; a step in start() for a BUSY standing over
- * an idle wire, which meets the per-bus timeout instead.
+ * PWR chapter does not offer.
  */
 
 #pragma once
@@ -776,8 +787,9 @@ public:
     /// (docs/design/i2c-bus.md). It waits, bounded: up to
     /// stop_drain_us for the last STOP to leave CTLR1 - past that the
     /// tenure parks, false with no START and no vector, for the per-bus
-    /// timeout to answer - then up to bus_free_us for BUSY. It masks
-    /// nothing.
+    /// timeout to answer, and with no such timeout nothing answers it -
+    /// then up to bus_free_us for BUSY, resetting a BUSY that stood over
+    /// an idle wire for all of it (wait_bus_free()). It masks nothing.
     static bool start(const Request& r) {
         // What the tenure's entries read, and nothing else of the Request:
         // the reply and the speed are the arbiter's and start()'s.
@@ -810,15 +822,15 @@ public:
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
             return false;
         }
-        // BUSY clears a moment after our STOP is seen; a bus still busy
-        // after bus_free_us is someone else's, or a wire whose STOP this
-        // block never saw. The START goes in anyway. Measured: into a line a
-        // peer holds low it is answered ARLO, and i2c_arb_lost is the reply,
-        // inside any per-bus timeout; into a tenure another controller is
-        // clocking it is held until the STOP; over a BUSY left standing on an
-        // idle wire it is held until the per-bus timeout's recover(), and
-        // with no such timeout nothing answers (docs/ch32v00x/i2c.md).
-        (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
+        // BUSY clears a moment after our STOP is seen. On a bus still busy
+        // the wait is out of line, and the START goes in behind it whatever
+        // it found. Measured: into a line a peer holds low it is answered
+        // ARLO, and i2c_arb_lost is the reply, inside any per-bus timeout;
+        // into a tenure another controller is clocking it is held until the
+        // STOP (docs/ch32v00x/i2c.md).
+        if (S::busy()) {
+            wait_bus_free();
+        }
         apply(r.speed);
         // One CTLR1 store: START, with POS and ACK down for the address
         // phase. Read after STAR1, it is also the second half of a stale
@@ -830,6 +842,10 @@ public:
         S::interrupts(i2c_itevten, i2c_itbufen);
         return false;
     }
+
+    /// How many times start() has reset a BUSY standing over an idle wire:
+    /// a count, what a suite prints to say whether the case was reached.
+    static uint16_t unwedges() { return unwedged_; }
 
     /// The engine's completion status, for the TransferDone payload:
     /// i2c_ok or one of i2c_bus.hpp's codes, or i2c_dma_fault. Read it in
@@ -1130,11 +1146,7 @@ public:
         }
         phase_ = Phase::idle;
         S::buffer_interrupt(false);
-        S::software_reset();
-        S::timing(table_[static_cast<uint8_t>(applied_)]);
-        S::enable();
-        S::ack(false);
-        S::interrupts(i2c_iterren, i2c_itevten | i2c_itbufen);
+        reset_block();
         Pfic::enable(S::event_irq());
         Pfic::enable(S::error_irq());
         return true;
@@ -1513,31 +1525,107 @@ private:
     /// How long start() waits for the last tenure's STOP to leave the
     /// wire. A STOP takes a bit period; what can hold it longer is a
     /// slow client stretching the clock after the last acknowledge while
-    /// it digests a write, and five thousand polls of at least a
-    /// microsecond each - five milliseconds at the least, a fifth of SMBus's
-    /// 25 ms clock-low limit - is the bound. What start() spends here is
-    /// the kernel dispatch's time, which is why it is bounded at all.
+    /// it digests a write, and five milliseconds, a fifth of SMBus's 25 ms
+    /// clock-low limit, is the bound. What start() spends here is the
+    /// kernel dispatch's time, which is why it is bounded at all.
     static constexpr uint16_t stop_drain_us = 5'000;
 
-    /// How long start() then waits for BUSY to clear: our STOP seen by
-    /// the bus takes a moment, another device's traffic takes longer. At 48
-    /// MHz the poll and the delay around it take 3.3 us, not the one the
-    /// delay asks, so the bound is some 330 us (measured, BUSY never clearing).
+    /// How long start() then waits for BUSY to clear, and watches the lines
+    /// while it does: our STOP seen by the bus takes a moment, a bit at
+    /// 100 kHz, and another controller's traffic takes longer. A hundred
+    /// microseconds is twice SMBus's 50 us ceiling on a clock's high phase,
+    /// so a clock within that ceiling shows a low line inside the bound.
     static constexpr uint16_t bus_free_us = 100;
 
-    /// Poll `pred` `us` times with a delay of at least a microsecond between
-    /// polls, timed on the STK (delay.hpp), so for at least `us` microseconds;
-    /// true as soon as it holds. delay_us() refuses when the STK is not
-    /// running, and the bound is then a count of polls - a bound still.
+    /// The least a poll of wait_for_us() can take: its loop is more than
+    /// eight instructions, a peripheral load among them, on a core that
+    /// retires one a cycle at most. The poll budget below rests on it.
+    static constexpr uint32_t poll_min_cycles = 8;
+
+    /// Poll `pred` for at least `us` microseconds; true as soon as it holds.
+    /// The first look is here, in line and on no counter: the path that
+    /// finds the bus free costs that one read.
     template <typename Pred>
-    static bool wait_for_us(Pred pred, uint16_t us) {
-        for (uint16_t t = 0; t < us; ++t) {
+    [[gnu::always_inline]] static bool wait_for_us(Pred pred, uint16_t us) {
+        return pred() || poll_for_us(pred, us);
+    }
+
+    /// The time on the STK's counter (RM 6.5.4), which runs at HCLK from
+    /// Ticker::init() on, in main and in a handler, masked or not: each poll
+    /// adds what the counter moved since the last, one period folded in
+    /// where it restarted from zero, so the bound may span many ticks. A
+    /// gap of a whole period or more between two polls, a handler that long,
+    /// is lost from the sum and the wait ends later, never earlier. THE
+    /// BUDGET is what ends it where the counter does not move, before
+    /// Ticker::init(): it allows the time asked at poll_min_cycles a poll,
+    /// so it cannot run out first while the counter runs, and a program that
+    /// calls start() before the ticker waits longer than asked, by the
+    /// poll's real length over poll_min_cycles (docs/ch32v00x/i2c.md has it
+    /// measured). Out of line and cold, reached only on a bus not free, with
+    /// every call of its poll inlined, since the poll's length is the watch's
+    /// resolution (wait_bus_free()).
+    template <typename Pred>
+    [[gnu::noinline, gnu::cold, gnu::flatten]] static bool poll_for_us(Pred pred, uint16_t us) {
+        const uint32_t cycles = us * delay_rate_.cycles_per_us;
+        const uint32_t period = stk()->CMP + 1u;
+        uint32_t polls = cycles / poll_min_cycles;
+        uint32_t last = stk()->CNT;
+        uint32_t elapsed = 0;
+        while (elapsed < cycles && polls != 0u) {
             if (pred()) {
                 return true;
             }
-            (void)delay_us(delay_rate_, 1);
+            --polls;
+            const uint32_t now = stk()->CNT;
+            elapsed += now >= last ? now - last : now + period - last;
+            last = now;
         }
         return pred();
+    }
+
+    /**
+     * BUSY found up at start(): the wait for it, with both lines watched
+     * through the whole bound, and 15.10.1's own case at its end. SWRST
+     * "can reset the I2C module when the stop condition is not detected on
+     * the bus but the bus bit is 1", and the same paragraph asks first that
+     * "the pin of the I2C bus is released and the bus is idle". One read
+     * cannot say that: both lines read high at some instant of a tenure
+     * another controller is clocking, in SCL's high phase on a 1. So the
+     * reset is taken only when BUSY stood for the whole of bus_free_us and
+     * no read in that time found either line low. A low phase shorter than
+     * a poll can fall between two reads; the bound spans many polls and a
+     * tenure many low phases (docs/ch32v00x/i2c.md derives what that can
+     * miss). Cold, and it writes nothing unless it resets.
+     */
+    [[gnu::noinline, gnu::cold]] static void wait_bus_free() {
+        bool line_low = false;
+        const bool freed = poll_for_us(
+            [&line_low] {
+                if (!S::busy()) {
+                    return true;
+                }
+                if (!SclPin::read() || !SdaPin::read()) {
+                    line_low = true;
+                }
+                return false;
+            },
+            bus_free_us);
+        if (!freed && !line_low) {
+            reset_block();
+            ++unwedged_;
+        }
+    }
+
+    /// SWRST pulsed and everything it takes put back: it clears CTLR1, the
+    /// enable with it, CTLR2's FREQ and enables, and the timing (measured,
+    /// docs/ch32v00x/i2c.md). At rest the error line alone, as init() leaves
+    /// it.
+    static void reset_block() {
+        S::software_reset();
+        S::timing(table_[static_cast<uint8_t>(applied_)]);
+        S::enable();
+        S::ack(false);
+        S::interrupts(i2c_iterren, i2c_itevten | i2c_itbufen);
     }
 
     template <typename Pred>
@@ -1567,6 +1655,7 @@ private:
     static inline volatile Phase phase_ = Phase::idle;
     static inline volatile uint8_t status_ = i2c_ok;   ///< written by the vectors, read by the thread
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
+    static inline uint16_t unwedged_ = 0;
     static inline I2cDuty duty_ = I2cDuty::ratio_2;
     static inline uint32_t pclk_hz_ = 0;
     static inline I2cTiming table_[i2c_speed_count]{};

@@ -693,17 +693,19 @@ the SMBus alert.
 fast mode's shape. The engine slots are fixed to DMA channels 6 and 7, the
 transmit DMA block's completion handing the tenure back to the event vector. On the pump the first two data bytes load in the ADDR entry, so a one- or
 two-byte write takes three entries, and a one-byte index has its repeated
-START requested there. `start()` takes no step for a BUSY left standing over
-an idle wire: the request meets the per-bus timeout ([the CH32V00x I2C
-page](../ch32v00x/i2c.md)). `unstick()` also clears the STOPF its own
+START requested there. After the wait for the STOP, a BUSY that stood through the whole of
+`bus_free_us` with no read finding a line low takes 15.10.1's SWRST, counted
+(`unwedges()`) ([the CH32V00x I2C page](../ch32v00x/i2c.md)). `unstick()` also clears the STOPF its own
 STOP leaves.
 
 **CH32V203 and CH32V303 (`ch32vx03`).** `reference_hz()` is PB1, with a
 `duty` and the wire's rise time at init. The bus clock is refused outside
 19.12.2's 4..60 MHz window, narrower than the stratum's own PB1 ceiling. The
 engine slots are fixed to the instance's own channels (I2C1 on DMA1's 6 and
-7, I2C2 on its 4 and 5). After the wait for the STOP, a BUSY standing with
-both lines high takes 19.12.1's SWRST, counted (`unwedges()`). `busy()` is
+7, I2C2 on its 4 and 5). After the wait for the STOP, a BUSY standing with one read finding both lines
+high takes 19.12.1's SWRST, counted (`unwedges()`); that read also passes in
+another controller's tenure ([the CH32V203/CH32V303 I2C
+page](../ch32vx03/i2c.md)). `busy()` is
 for a sleep site. On the pump the first two data bytes load in the ADDR
 entry. The client half takes `I2cClientOptions` (a polled client with its
 three enables down) and has `flush()`, the PE cycle for a byte the
@@ -716,8 +718,9 @@ it holds its timing. Six columns, the part's first off the debug port
 the default, the debug port's refused while the probe owns it and the USB
 pads while USB_IOEN does. The engine slots are fixed to DMA channels 6 and 7
 (ORs shared with USART2). On the pump the first two bytes load in the ADDR
-entry. After the wait for the STOP, a BUSY over an idle wire takes 15.9.1's
-SWRST, counted (`unwedges()`). `unstick()` drives a line low push-pull and
+entry. After the wait for the STOP, a BUSY standing with one read finding both lines
+high takes 15.9.1's SWRST, counted (`unwedges()`); that read also passes in
+another controller's tenure ([the CH32X035 I2C page](../ch32x035/i2c.md)). `unstick()` drives a line low push-pull and
 releases it as an input, this series having no open-drain GPIO. The client is
 polled (`I2cClientOptions`) or on its vectors, with `flush()`. `Placement`,
 the last template argument (`util/placement.hpp`), can put the hot path in
