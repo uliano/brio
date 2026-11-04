@@ -610,21 +610,75 @@ buffer staying on the pump.
 **The F1 lineage: the STM32F4's classic host and the three WCH hosts.**
 These four share an event machine and its consequences:
 
-- Two vectors, with a NACK on the event one (it is not an error on this
+- Two vectors, `isr()` for the events and `error_isr()`; `timing_of` and
+  `reference_hz()`; `unstick()` returns the clocks it took; `dma_isr()`,
+  `Request::engine` and `has_dma`, `dma` carrying a half at any length, the
+  one-byte read included, but for the CH32V303's 64 KB case above.
+- **`start()` spends dispatch time on the bus.** This lineage cannot queue
+  a START behind a STOP and nothing in its chapters signals the STOP's
+  leaving, so `start()` waits for it: about one bit period when a tenure
+  is started at the last one's completion, bounded at 5 ms. A clock held
+  past that parks the tenure, no START and no vector, for the per-bus
+  timeout to answer.
+- The event line is raised by `start()` and dropped at the completion, so
+  the BTF a STOP leaves standing does not re-enter the vector.
+- A write-then-read requests its repeated START on the TxE of the last
+  written byte, while that byte shifts, and not at BTF. Measured: with the
+  START at BTF, a CH32V303VCT6 and a CH32V203C8T6 each lost that byte when
+  the chip's own two controllers were host and target and the target was
+  polled by the core that also served the host's vectors. The CH32V203C8T6's
+  target served from its own vector took every byte, and so did a target
+  polled by a core of its own on another board (both those parts, and the
+  CH32X035). The TxE order, where WCH's interrupt example also puts it,
+  delivered in every arrangement measured ([the CH32V203/CH32V303 I2C
+  page](../ch32vx03/i2c.md), [the CH32V00x I2C page](../ch32v00x/i2c.md)). On
+  the STM32F4 it also saves the host's own stretch at the turnaround ([the
+  STM32F4 I2C page](../stm32f4/i2c.md)).
+- The price is a NACK of that byte arriving with the START pending; an
+  acknowledged tenure pays only the SB entry's test, a few instructions. No host
+  stores to the control register there: the controller generates the
+  repeated START anyway, and a withdrawal races it (measured: it hung the
+  event vector on the STM32F4 with the core at 48 MHz, wedged the bus on the
+  CH32V00x at 400 kHz, and lost on the CH32V203 with the core at 8 MHz).
+  The host answers `i2c_nack_data` and closes behind that repeated START with
+  a void write: the address with the write bit and its STOP, one address byte
+  on the wire when the client NACKs that byte.
+- An ADD10, or any event the address phase does not serve, ends the tenure
+  `i2c_bus_error` with the STOP and then a data-register store that clears
+  ADD10, which the STOP alone does not (measured on the STM32F446 and the
+  CH32V303).
+
+**STM32F4's classic host (`stm32f4`).** `reference_hz()` is the instance's
+own APB1 clock. An `I2cHostConfig` at init holds fast mode's duty shape, the
+wire's two rise times and the noise filters. `digital_filter_max()` is advice
+and not a refusal; `repeated_start_setup_at_risk()` publishes an erratum's
+window a write-then-read sits in. `spurious_bus_errors()` is as the G0's, and
+here a bus error never ends a tenure at all, the manual and the erratum
+agreeing that a controller's transfer is unaffected. The engine slots sit on
+the request mapping's own cells. On the pump the first two data bytes load in
+the ADDR entry, so a one- or two-byte write and a register index take no TxE
+interrupt. `claim_smba_pad()` is for the SMBus alert.
+
+**STM32F4's FMPI2C1 (`stm32f4 (2)`).** The STM32G0's surface almost entire,
+`recover()` being 23.4.6's PE cycle and nothing more, and three speeds where
+the family's other host has two. `reference_hz()` is the APB clock the
+registers are on and `kernel_hz()` the clock the arithmetic divides: the same
+rate by default (`FmpI2cHostConfig::kernel` at `pclk`), two different rates on
+SYSCLK or the HSI. Two vectors, with a NACK on the event one (it is not an error on this
 peripheral) and NACKIE left down: every NACK ends in the STOP that raises
 STOPF, and that entry reads NACKF. It is the address's when TXE is clear and
 nothing refilled TXDR, which the pump's position or the transmit stream's count
 tells, read with the stream stopped. A read's last byte is taken at STOPF; on a
 stream that entry reads SxCR.EN first, stops a stream still running and stores
-what it had not taken, so the reply cannot overtake the byte. A tenure's
-interrupt and DMA enables go in one CR1 store each way (`enables()`), ERRIE alone
-at rest. A controller's BERR is counted and never acted on. The engine slots sit
-on the mapping's single cell per direction, armed for their errors alone, `dma`
-carrying both phases, a half with no buffer apart, with the engines armed before
-the START (23.4.16's order). A write half's first byte goes into TXDR before the
-START under `interrupt` and under `dma` (ES0298 2.12.8's first workaround, one
-path inside that erratum's band of clock ratios and outside it, a write of one
-byte arming no TXIE and starting no stream). `start()` does not wait for the last STOP,
+what it had not taken. A tenure's interrupt and DMA enables go in one CR1 store
+each way (`enables()`), ERRIE alone at rest. A controller's BERR is counted and
+never acted on. The engine slots sit on the mapping's single cell per direction,
+armed for their errors alone, `dma` carrying both phases, a half with no buffer
+apart, with the engines armed before the START (23.4.16's order). A write half's
+first byte goes into TXDR before the START under `interrupt` and under `dma`
+(ES0298 2.12.8's first workaround, one path inside that erratum's band of clock
+ratios and outside it, a write of one byte arming no TXIE and starting no
+stream). `start()` does not wait for the last STOP,
 since this peripheral queues a START behind one itself. `claim_smba_pad()` is for
 the SMBus alert.
 
