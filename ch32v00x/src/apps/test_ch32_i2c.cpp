@@ -113,23 +113,33 @@
 //   v  THIS BOARD AS THE CLIENT FROM ITS VECTORS: letter j's two client
 //      cases with the interrupt enables up, service() and error_service()
 //      on i2c1_ev and i2c1_er - one entry per event, the body timed
+//   l  THE FIRST BYTES AT THE ENTRY THAT CLEARS ADDR: TxE at ADDR, after its
+//      clear and behind each store, raw, and two stores three ways against the
+//      peer's tally; the host's writes of 1 to 4 and its 1 + 1 and 2 + 1 by
+//      their entries; a refused last byte never i2c_ok; the first byte refused
+//      with the second committed, and the next write answering for itself
+//   u  A BUSY LEFT STANDING OVER AN IDLE WIRE: every way of making it tried and
+//      counted, what takes it down, what a request meets raw and through the
+//      arbiter, and the way that takes no hand on the wire - a client holding
+//      the clock past the per-bus timeout
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
 // `--timeout 400`.
 //
 // build: boards = v006k8,v003f4
-// build: groups = ai,bcw,d,e,fk,g,q,r
-// build: groups.v006k8 = abcdefgikrw,hjpqv,n
+// build: groups = ai,bcw,d,e,fk,g,q,r,l
+// build: groups.v006k8 = abcdefgikrw,hjpqv,nlu
 // (the kernel letter h, the two-host letters j and v, the dead-channel
-// letter p and the engine letter n are in no group of the CH32V003 build:
-// h, j and n each alone are over the part's 15 KB and their prose is not
-// for shortening, v and p are born with the part's return to the desk -
-// they run on the CH32V006.
+// letter p, the engine letter n and the standing BUSY's letter u are in no
+// group of the CH32V003 build: h, j, n and u each alone are over the part's
+// 15 KB and their prose is not for shortening, v and p are born with the
+// part's return to the desk - they run on the CH32V006.
 // There the suite whole is over the 40 KB of program flash, so it builds
 // as three images: the single-host wire letters; the kernel with the
-// two-host, the dead-channel and the raw letters; and the engine letter,
-// which with the first would leave under 5 % of the flash)
+// two-host, the dead-channel and the raw letters; and the engine letter
+// with the first bytes and the standing BUSY, which with the first would
+// leave under 5 % of the flash)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -194,12 +204,17 @@ constexpr uint8_t nobody_addr = 0x23;
 volatile bool host_done = false;
 volatile bool dma_host_live = false;
 /// Does this image carry a letter that brings the DMA host up (g, j, n, p,
-/// r)? An image without one binds no DMA host in its vectors: on the
+/// r, u)? An image without one binds no DMA host in its vectors: on the
 /// CH32V003 the host's engine paths are a few hundred bytes of its 15 KB.
 constexpr bool dma_letters =
     selection_carries(test_letters, 'g') || selection_carries(test_letters, 'j') ||
     selection_carries(test_letters, 'n') || selection_carries(test_letters, 'p') ||
-    selection_carries(test_letters, 'r');
+    selection_carries(test_letters, 'r') || selection_carries(test_letters, 'u');
+/// Does this image carry a letter that runs the arbiter (h, i, u)? An image
+/// without one binds no arbiter in its vectors: the host's body inlined a
+/// second time is a few hundred bytes of the CH32V003's 15 KB.
+constexpr bool arbiter_letters = selection_carries(test_letters, 'h') || selection_carries(test_letters, 'i') ||
+                                 selection_carries(test_letters, 'u');
 volatile uint32_t dma6_entries = 0;   // the transmit channel's vector
 volatile uint32_t dma7_entries = 0;   // the receive channel's
 volatile bool bus_ao_live = false;
@@ -1789,11 +1804,14 @@ void tn_engine() {
     print(serial, "  2. interrupt: write 16 ", iw, " (", iw_ev, " event entries), read 16 ", ir, " (", ir_ev,
           "), 4+4 ", ic, "; DMA entries ", ie, ", channels ", untouched ? "untouched" : "TOUCHED", ", mism ",
           imism, "; peer count ", b.count, crlf);
+    // THE ENTRIES ARE COUNTED: the write SB, ADDR with the first two bytes, 14
+    // TxE and BTF; the read SB, ADDR, 13 RxNE down to three left and two BTF.
+    // host_isr_entries counts the event vector alone, so a tick adds nothing.
     bench.verdict("interrupt at SIXTEEN BYTES on the host with engines bound touches no channel: no DMA "
-                  "entry, both channels' CFGR and CNTR as init() left them, one event entry a byte or "
-                  "more - and the three tenures i2c_ok, exact (count 40)",
-                  iw == i2c_ok && ir == i2c_ok && ic == i2c_ok && untouched && ie == 0u && iw_ev >= 16u &&
-                      ir_ev >= 16u && imism == 0u && brep && b.count == 40u);
+                  "entry, both channels' CFGR and CNTR as init() left them, 17 event entries for the "
+                  "write and 17 for the read - and the three tenures i2c_ok, exact (count 40)",
+                  iw == i2c_ok && ir == i2c_ok && ic == i2c_ok && untouched && ie == 0u && iw_ev == 17u &&
+                      ir_ev == 17u && imism == 0u && brep && b.count == 40u);
 
     // ---- 3. dma on the host with no engines ----
     twilink::Params q{};
@@ -2768,6 +2786,704 @@ void tq_controller() {
 }
 
 // ===========================================================================
+// l - the first bytes of a write, at the entry that clears ADDR
+// ===========================================================================
+//
+// The host's ADDR entry loads the shifter and the data register (15.3, EVT8_1
+// then EVT8) instead of raising the buffer vector for them. What the silicon
+// does there is asked raw first, the vectors dark; then the host's own
+// tenures are judged by their entries, their statuses and the peer's tally.
+
+/// START and the address with the write bit, the vectors dark, up to ADDR:
+/// STAR1 as it stood there, 0xFFFF when a step never came.
+uint16_t raw_to_addr() {
+    H::start();
+    if (raw_wait(i2c_sb, 2000) == 0xFFFF'FFFFu) {
+        return 0xFFFF;
+    }
+    H::data(static_cast<uint8_t>(twilink::dut_addr << 1));
+    if (raw_wait(i2c_addr, 2000) == 0xFFFF'FFFFu) {
+        return 0xFFFF;
+    }
+    return H::status1();
+}
+
+/// Three ways of storing two bytes behind ADDR's clear: TxE polled before the
+/// second store, the host's order; one STAR1 read between the stores, its
+/// answer ignored; the two stores back to back. A store over a byte not yet
+/// in the shifter would replace it, and the peer's tally says so.
+enum class Load : uint8_t { polled, one_read, back_to_back };
+
+struct LoadRow {
+    uint16_t at_addr = 0;        ///< STAR1 at ADDR
+    uint16_t after_clear = 0;    ///< STAR1 right after ADDR's clear
+    uint16_t after_second = 0;   ///< STAR1 right after the second store
+    uint16_t polls_max = 0;      ///< STAR1 reads that found TxE down behind the first store
+    uint8_t done = 0;            ///< tenures that reached BTF and their STOP
+    uint16_t sum = 0;            ///< what the peer should have summed
+};
+
+constexpr uint8_t load_tenures = 8;
+
+LoadRow load_row(Load how, I2cSpeed speed) {
+    LoadRow row{};
+    raw_up(speed);
+    for (uint8_t k = 0; k < load_tenures; ++k) {
+        const uint8_t b1 = static_cast<uint8_t>(0x10u + k);
+        const uint8_t b2 = static_cast<uint8_t>(0x80u + k);
+        row.at_addr = raw_to_addr();
+        if (row.at_addr == 0xFFFFu) {
+            break;
+        }
+        (void)H::clear_addr();
+        row.after_clear = H::status1();
+        H::data(b1);
+        if (how == Load::polled) {
+            uint16_t polls = 0;
+            while ((H::status1() & i2c_txe) == 0u && polls < 2000u) {
+                ++polls;
+            }
+            row.polls_max = polls > row.polls_max ? polls : row.polls_max;
+        } else if (how == Load::one_read) {
+            (void)H::status1();
+        }
+        H::data(b2);
+        row.after_second = H::status1();
+        row.sum = static_cast<uint16_t>(row.sum + b1 + b2);
+        if (raw_wait(i2c_btf, 2000) == 0xFFFF'FFFFu) {
+            H::stop();
+            break;
+        }
+        H::stop();
+        ++row.done;
+        settle_ms(1);
+    }
+    return row;
+}
+
+/// One serve's worth of the host's writes of `n` bytes, judged by the entries
+/// each took, its status and the peer's count, sum and first byte. THE ENTRIES
+/// ARE COUNTED, NOT BOUNDED: SB, ADDR and BTF, and one TxE a byte past the two
+/// the ADDR entry loads: 3, 3, 4, 5 for 1, 2, 3, 4 bytes. One more is a STAR1
+/// read that found TxE down and left the byte to the buffer vector.
+bool load_writes(I2cSpeed speed) {
+    twilink::Params a{};
+    a.ms = 200;
+    a.addr = twilink::dut_addr;
+    if (!peer_act(Op::serve, a)) {
+        return false;
+    }
+    bool good = true;
+    uint16_t sum = 0;
+    uint8_t took = 0;
+    uint32_t ev[4] = {};
+    uint8_t sts[4] = {};
+    for (uint8_t n = 1; n <= 4u; ++n) {
+        for (uint8_t i = 0; i < n; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0x21u * n + i);
+            sum = static_cast<uint16_t>(sum + tx_buf[i]);
+        }
+        took = static_cast<uint8_t>(took + n);
+        sts[n - 1u] = host_tenure(twilink::dut_addr, tx_buf, n, nullptr, 0, speed);
+        ev[n - 1u] = host_isr_entries;
+        good = good && sts[n - 1u] == i2c_ok && ev[n - 1u] == (n < 3u ? 3u : n + 1u);
+    }
+    host_ready();
+    settle_ms(220);
+    twilink::Report r{};
+    good = good && peer_report(r) && r.aux0 == took && r.sum == sum && r.addr_hits == 4u;
+    print(serial, "  ", i2c_speed_hz(speed) / 1000u, " kHz, writes of 1, 2, 3, 4: status ", sts[0], "/", sts[1], "/", sts[2],
+          "/", sts[3], ", event entries ", ev[0], "/", ev[1], "/", ev[2], "/", ev[3], " (3/3/4/5); the peer took ", r.aux0,
+          " (", took, ") sum ", hex(r.sum), " (", hex(sum), ")", good ? "" : "  <- WRONG", crlf);
+    return good;
+}
+
+/// A write of `len` with byte `nack_at` refused, its first bytes committed by
+/// the ADDR entry, then what the next tenure does. THE STALE BYTE CHOSEN TO
+/// TELL: a refusal of the first byte leaves the second in the data register,
+/// and `stale` is an address. Had it opened the next write, that write's
+/// answer would be that address's, not its own. The peer stays deaf after its
+/// refusal until its window closes (twi_peer's header), so the next write is
+/// set behind that window.
+struct RefusedRow {
+    uint8_t status = no_answer;
+    uint16_t s1 = 0;
+    uint16_t c1 = 0;
+    uint8_t next = no_answer;
+    uint8_t took = 0;
+    uint16_t sum = 0;
+    bool nacked = false;
+};
+
+RefusedRow refused_row(uint8_t len, uint8_t nack_at, uint8_t stale, uint8_t next_addr, I2cSpeed speed) {
+    RefusedRow row{};
+    twilink::Params f{};
+    f.ms = 60;
+    f.addr = twilink::dut_addr;
+    f.nack_at = nack_at;
+    if (!peer_act(Op::serve, f)) {
+        return row;
+    }
+    for (uint8_t i = 0; i < len; ++i) {
+        tx_buf[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    tx_buf[nack_at] = stale;   // the byte behind the refused one, when there is one
+    row.status = host_tenure(twilink::dut_addr, tx_buf, len, nullptr, 0, speed);
+    settle_ms(1);
+    row.s1 = H::status1();
+    row.c1 = H::regs().CTLR1;
+    settle_ms(80);   // the serve's window over, the command address back
+    if (next_addr == twilink::command_addr) {
+        // A write to the command address, its bytes judged by the peer's own
+        // decoder, and the read of its acknowledgement.
+        row.next = command_once(Op::ping, no_payload, 0) ? i2c_ok : no_answer;
+    } else {
+        row.next = host_tenure(next_addr, tx_buf, 1, nullptr, 0, link_speed);
+    }
+    twilink::Report r{};
+    if (peer_report(r)) {
+        row.took = r.aux0;
+        row.sum = r.sum;
+        row.nacked = (r.flags & twilink::report_nacked) != 0u;
+    }
+    return row;
+}
+
+void tl_first_bytes() {
+    if (!need_peer()) {
+        return;
+    }
+    bool order_ok = true;
+    bool flags_ok = true;
+    uint16_t polls_max = 0;
+    bool writes_ok = true;
+    bool wr_ok = true;
+    bool stop_ok = true;
+    bool first_refused_ok = true;
+    bool stale_ok = true;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        const uint32_t khz = i2c_speed_hz(speed) / 1000u;
+        // ---- 1. the silicon, raw ----
+        for (const Load how : {Load::polled, Load::one_read, Load::back_to_back}) {
+            twilink::Params a{};
+            a.ms = 100;
+            a.addr = twilink::dut_addr;
+            if (!peer_act(Op::serve, a)) {
+                bench.verdict("the peer accepted the serve", false);
+                return;
+            }
+            const LoadRow row = load_row(how, speed);
+            raw_down();
+            settle_ms(120);
+            twilink::Report r{};
+            const bool rep = peer_report(r);
+            const bool exact = rep && row.done == load_tenures && r.aux0 == 2u * load_tenures && r.sum == row.sum;
+            print(serial, "  ", khz, " kHz raw, ",
+                  how == Load::polled ? "TxE polled: " : how == Load::one_read ? "one read:   " : "back to back:",
+                  " STAR1 at ADDR ", hex(row.at_addr), ", after its clear ", hex(row.after_clear), ", after the second store ",
+                  hex(row.after_second), "; TxE found down ", row.polls_max, " times; the peer took ", r.aux0, " (",
+                  2u * load_tenures, ") sum ", hex(r.sum), " (", hex(row.sum), ")", exact ? "" : "  <- LOST", crlf);
+            flags_ok = flags_ok && (row.at_addr & i2c_txe) != 0u && (row.after_clear & i2c_txe) != 0u &&
+                       (row.after_second & i2c_txe) == 0u;
+            if (how == Load::polled) {
+                order_ok = order_ok && exact;
+                polls_max = row.polls_max > polls_max ? row.polls_max : polls_max;
+            }
+        }
+        // ---- 2. the host: plain writes ----
+        writes_ok = load_writes(speed) && writes_ok;
+        // ---- 3. the host: a write before a read ----
+        // SB, ADDR with the index and the repeated START, SB, ADDR, RxNE: 5.
+        // Two written: one TxE more, for the repeated START: 6.
+        {
+            twilink::Params a{};
+            a.ms = 100;
+            a.addr = twilink::dut_addr;
+            a.seed = 0x60;
+            a.pattern = twilink::pattern_counting;
+            if (!peer_act(Op::serve, a)) {
+                bench.verdict("the peer accepted the serve", false);
+                return;
+            }
+            tx_buf[0] = 0x4A;
+            tx_buf[1] = 0x4B;
+            rx_buf[0] = 0xEE;
+            const uint8_t st1 = host_tenure(twilink::dut_addr, tx_buf, 1, rx_buf, 1, speed);
+            const uint32_t ev1 = host_isr_entries;
+            const uint8_t got1 = rx_buf[0];
+            rx_buf[0] = 0xEE;
+            const uint8_t st2 = host_tenure(twilink::dut_addr, tx_buf, 2, rx_buf, 1, speed);
+            const uint32_t ev2 = host_isr_entries;
+            const uint8_t got2 = rx_buf[0];
+            host_ready();
+            settle_ms(120);
+            twilink::Report r{};
+            const bool good = peer_report(r) && st1 == i2c_ok && st2 == i2c_ok && ev1 == 5u && ev2 == 6u &&
+                              got1 == twilink::pattern_value(a.pattern, a.seed, 0) &&
+                              got2 == twilink::pattern_value(a.pattern, a.seed, 1) && r.aux0 == 3u &&
+                              r.sum == 0x4Au + 0x4Au + 0x4Bu;
+            wr_ok = wr_ok && good;
+            print(serial, "  ", khz, " kHz, 1 + 1 and 2 + 1: status ", st1, "/", st2, ", event entries ", ev1, "/", ev2,
+                  " (5/6), read ", hex(got1), " ", hex(got2), ", the peer took ", r.aux0, " (3) sum ", hex(r.sum),
+                  good ? "" : "  <- WRONG", crlf);
+        }
+        // ---- 4. the STOP's place: a refused last byte is never i2c_ok ----
+        for (const uint8_t n : {uint8_t{1}, uint8_t{2}}) {
+            const RefusedRow row = refused_row(n, n, 0x00, twilink::command_addr, speed);
+            const bool good = row.status == i2c_nack_data && row.nacked && row.took == n;
+            stop_ok = stop_ok && good;
+            print(serial, "  ", khz, " kHz, ", n, " written, the last refused: status ", row.status, ", the peer took ",
+                  row.took, ", the next write ", row.next, good ? "" : "  <- WRONG", crlf);
+        }
+        // ---- 5. the first byte refused, the second committed in DATAR ----
+        // The refused byte is the peer's one: its count and sum hold it alone
+        // if the committed byte never went out. Two aims for the stale byte:
+        // the next write at nobody with the stale byte the peer's command
+        // address (a stale opening would be acknowledged, an i2c_ok); the next
+        // write at the command address, a whole frame, with the stale byte
+        // nobody's (a stale opening would be refused, the frame never taken).
+        for (const uint8_t len : {uint8_t{2}, uint8_t{4}}) {
+            const uint8_t stale_cmd = static_cast<uint8_t>(twilink::command_addr << 1);
+            const uint8_t stale_nobody = static_cast<uint8_t>(nobody_addr << 1);
+            const RefusedRow a = refused_row(len, 1, stale_cmd, nobody_addr, speed);
+            const RefusedRow b = refused_row(len, 1, stale_nobody, twilink::command_addr, speed);
+            const bool one = a.status == i2c_nack_data && b.status == i2c_nack_data && a.took == 1u && b.took == 1u &&
+                             a.sum == 0x30u && b.sum == 0x30u && a.nacked && b.nacked;
+            const bool stale = a.next == i2c_nack_addr && b.next == i2c_ok;
+            first_refused_ok = first_refused_ok && one;
+            stale_ok = stale_ok && stale;
+            print(serial, "  ", khz, " kHz, ", len, " written, the first refused: status ", a.status, "/", b.status,
+                  ", STAR1 ", hex(a.s1), " CTLR1 ", hex(a.c1), " a millisecond later; the peer took ", a.took, "/", b.took,
+                  " sum ", hex(a.sum), "/", hex(b.sum), "; the next write, the stale byte another address's: ", a.next,
+                  " (i2c_nack_addr ", i2c_nack_addr, ") and ", b.next, " (i2c_ok ", i2c_ok, ")", one && stale ? "" : "  <- WRONG",
+                  crlf);
+        }
+    }
+    print(serial, "  TxE found down behind the first store, the host's order: at most ", polls_max, " STAR1 reads", crlf);
+    bench.verdict("the flags as the chapter draws them: TxE up at ADDR and after its clear (EVT8_1), down behind the "
+                  "second store, both speeds",
+                  flags_ok);
+    bench.verdict("two bytes stored behind ADDR's clear, TxE read between, byte-exact at the peer, both speeds", order_ok);
+    bench.verdict("the host's plain writes of 1, 2, 3, 4: i2c_ok, byte-exact, SB, ADDR and BTF and one entry a byte past "
+                  "the two the ADDR entry loads, both speeds",
+                  writes_ok);
+    bench.verdict("the host's 1 + 1 and 2 + 1: i2c_ok, byte-exact, five and six entries, both speeds", wr_ok);
+    bench.verdict("the STOP stays at BTF: a last byte refused is i2c_nack_data, never i2c_ok, both speeds", stop_ok);
+    bench.verdict("the first byte refused with the second committed: i2c_nack_data, and the peer never saw the second, "
+                  "both speeds",
+                  first_refused_ok);
+    bench.verdict("the committed byte opens no next write: that write answers for its own address, its frame whole, both speeds", stale_ok);
+    bench.verdict("and the command channel is back", command(Op::ping));
+}
+
+// ===========================================================================
+// u - a BUSY left standing over an idle wire
+// ===========================================================================
+//
+// 15.10.7: BUSY is "low level exists in SDA or SCL", cleared when a stop bit is
+// detected, and 15.10.1 names SWRST for "the stop condition is not detected on
+// the bus but the bus bit is 1". This host's start() takes no step for it; the
+// letter says what a request meets. Stages by hand on the two pads, then the
+// way nothing but the wire's own life produces it: a client holding the clock
+// past the per-bus timeout, recover() run under its low SCL, the client
+// letting go. The third way, the pull-ups' reset - the peer board restarted,
+// both lines down and up - cannot be staged from here; the print at the
+// letter's entry reads what the last one left (the block must have been up).
+
+struct Staged {
+    bool busy_mid;
+    bool busy_end;
+    bool lines_high;
+    bool busy_later;
+};
+
+enum class Stage : uint8_t {
+    start_no_stop,       ///< START by hand, SDA let go under a low clock, then SCL
+    scl_pulse,           ///< SCL alone low and let go, SDA high throughout
+    sda_pulse,           ///< SDA alone: a START and its STOP, the control
+    both_low_sda_first,  ///< both low over recover(), SDA let go first, then SCL
+    both_low_scl_first,  ///< both low over recover(), SCL let go first: a STOP, the control
+    scl_low_recover,     ///< SCL alone low over recover(), then let go
+    pe_over_start,       ///< START by hand, PE down, no STOP, PE up
+    gate_over_start,     ///< START by hand, gate shut, no STOP, gate open
+    reset_over_start,    ///< START by hand, the reset line, no STOP
+    tenure_recovered,    ///< a real tenure cut mid-byte by recover()
+    count,
+};
+
+const char* stage_name(Stage s) {
+    switch (s) {
+        case Stage::start_no_stop: return "START, SDA up under a low SCL, SCL up";
+        case Stage::scl_pulse: return "SCL alone low, up";
+        case Stage::sda_pulse: return "SDA alone low, up (a STOP, the control)";
+        case Stage::both_low_sda_first: return "both low over recover(), SDA up, SCL up";
+        case Stage::both_low_scl_first: return "both low over recover(), SCL up, SDA up (a STOP, the control)";
+        case Stage::scl_low_recover: return "SCL low over recover(), up";
+        case Stage::pe_over_start: return "START, PE down, no STOP, PE up";
+        case Stage::gate_over_start: return "START, gate shut, no STOP, gate open";
+        case Stage::reset_over_start: return "START, the reset line, no STOP";
+        case Stage::tenure_recovered: return "a tenure cut mid-byte by recover()";
+        default: return "?";
+    }
+}
+
+/// A line pulled low from its pad, and given back to the peripheral; a line
+/// the suite holds for twenty microseconds, over any bit's edge at both speeds.
+template <class Line>
+void line_low() {
+    Line::output(false, PinDrive::open_drain);
+    (void)delay_us(clock, 20);
+}
+template <class Line>
+void line_up() {
+    Line::function(PinDrive::open_drain);
+    (void)delay_us(clock, 20);
+}
+
+Staged stage_busy(Stage s) {
+    Staged out{};
+    host_ready();
+    (void)delay_us(clock, 50);
+    const auto no_stop = [] {
+        line_low<SclPin>();
+        line_up<SdaPin>();
+        line_up<SclPin>();
+    };
+    switch (s) {
+        case Stage::start_no_stop:
+            line_low<SdaPin>();
+            out.busy_mid = H::busy();
+            no_stop();
+            break;
+        case Stage::scl_pulse:
+            line_low<SclPin>();
+            out.busy_mid = H::busy();
+            line_up<SclPin>();
+            break;
+        case Stage::sda_pulse:
+            line_low<SdaPin>();
+            out.busy_mid = H::busy();
+            line_up<SdaPin>();
+            break;
+        case Stage::both_low_sda_first:
+        case Stage::both_low_scl_first:
+            line_low<SdaPin>();
+            line_low<SclPin>();
+            (void)Host::recover();
+            (void)delay_us(clock, 20);
+            out.busy_mid = H::busy();
+            if (s == Stage::both_low_sda_first) {
+                line_up<SdaPin>();
+                line_up<SclPin>();
+            } else {
+                line_up<SclPin>();
+                line_up<SdaPin>();
+            }
+            break;
+        case Stage::scl_low_recover:
+            line_low<SclPin>();
+            (void)Host::recover();
+            (void)delay_us(clock, 20);
+            out.busy_mid = H::busy();
+            line_up<SclPin>();
+            break;
+        case Stage::pe_over_start:
+            line_low<SdaPin>();
+            H::disable();
+            out.busy_mid = H::busy();
+            no_stop();
+            H::enable();
+            break;
+        case Stage::gate_over_start:
+            line_low<SdaPin>();
+            H::bus_clock(false);
+            no_stop();
+            H::bus_clock(true);
+            out.busy_mid = H::busy();
+            break;
+        case Stage::reset_over_start:
+            line_low<SdaPin>();
+            H::reset();
+            H::timing(*i2c_timing_for(SysClock::hz, link_speed));
+            H::enable();
+            (void)delay_us(clock, 20);
+            out.busy_mid = H::busy();
+            no_stop();
+            break;
+        case Stage::tenure_recovered: {
+            Host::Request r{};
+            r.addr = twilink::command_addr;
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+            r.tx_len = 8;
+            r.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+            r.rx_len = 0;
+            r.speed = link_speed;
+            host_done = false;
+            (void)Host::start(r);
+            (void)delay_us(clock, 300);   // at 100 kHz, inside the second data byte
+            out.busy_mid = H::busy();
+            (void)Host::recover();
+            break;
+        }
+        default:
+            break;
+    }
+    (void)delay_us(clock, 50);
+    out.lines_high = SclPin::read() && SdaPin::read();
+    out.busy_end = H::busy();
+    settle_ms(2);
+    out.busy_later = H::busy();
+    return out;
+}
+
+/// The probe of the peer's command address a request names here.
+Host::Request command_probe(I2cSpeed speed) {
+    Host::Request r = kl::request(twilink::command_addr, kl::out_a);
+    r.tx_len = 0;
+    r.speed = speed;
+    return r;
+}
+
+/// One request through the arbiter: its one reply and the time to it. THE
+/// BOUND ON THE ANSWER: the per-bus timeout is 20 ms of ticks of 1 ms, armed in
+/// the dispatch that calls start(), so it fires between 19 and 20 ms behind its
+/// arming, and the dispatch's own wait, 100 polls of BUSY at 3.3 us a poll
+/// (printed here as start()'s 326 us), comes before the event is handled, and
+/// the tick and the kernel's loop add under a millisecond: from 19 to 22 ms.
+struct ArbAnswer {
+    uint8_t replies;
+    uint8_t status;
+    uint32_t us;
+};
+constexpr uint32_t arb_timeout_min_us = 19'000;
+constexpr uint32_t arb_timeout_max_us = 22'000;
+
+ArbAnswer ask_arbiter(const Host::Request& r) {
+    kl::Probe::clear_tally();
+    const uint32_t c0 = Ticker::cycles();
+    post<kl::I2cArb>(r);
+    kl::pump_until(1, 100);
+    const uint32_t us = (Ticker::cycles() - c0) / (SysClock::hz / 1'000'000u);
+    return {kl::Probe::n, kl::Probe::replies[0], us};
+}
+
+bool timed_out(const ArbAnswer& a) {
+    return a.replies == 1u && a.status == i2c_timeout && a.us >= arb_timeout_min_us && a.us <= arb_timeout_max_us;
+}
+
+void tu_unwedge() {
+    (void)wire_pulled_up();   // the bus port's gate
+    print(serial, "  at the letter's entry, as the wire left it: the block ", H::enabled() ? "up" : "not up", ", BUSY ",
+          H::busy() ? 1 : 0, ", lines SCL ", SclPin::read() ? 1 : 0, " SDA ", SdaPin::read() ? 1 : 0, crlf);
+    if (!need_peer()) {
+        return;
+    }
+    // ---- 1. the stagings, and how often each leaves it ----
+    constexpr uint8_t tries = 8;
+    uint8_t sibling_way = 0;
+    uint8_t scl_alone = 0;
+    uint8_t controls = 0;
+    for (uint8_t i = 0; i < static_cast<uint8_t>(Stage::count); ++i) {
+        const Stage s = static_cast<Stage>(i);
+        uint8_t mid = 0;
+        uint8_t standing = 0;
+        uint8_t later = 0;
+        for (uint8_t k = 0; k < tries; ++k) {
+            const Staged w = stage_busy(s);
+            mid = static_cast<uint8_t>(mid + (w.busy_mid ? 1u : 0u));
+            standing = static_cast<uint8_t>(standing + (w.busy_end && w.lines_high ? 1u : 0u));
+            later = static_cast<uint8_t>(later + (w.busy_later && w.lines_high ? 1u : 0u));
+            (void)Host::recover();
+            settle_ms(1);
+        }
+        print(serial, "  ", stage_name(s), ": BUSY in the middle ", mid, " of ", tries, ", standing over both lines high ",
+              standing, ", still 2 ms later ", later, crlf);
+        if (s == Stage::start_no_stop) {
+            sibling_way = later;
+        } else if (s == Stage::scl_pulse) {
+            scl_alone = later;
+        } else if (s == Stage::sda_pulse || s == Stage::both_low_scl_first) {
+            controls = static_cast<uint8_t>(controls + later);
+        }
+    }
+    // ---- 2. what clears it, the wire and the block left to themselves ----
+    uint8_t swrst_cleared = 0;
+    for (uint8_t way = 0; way < 4u; ++way) {
+        uint8_t cleared = 0;
+        for (uint8_t k = 0; k < tries; ++k) {
+            const Staged w = stage_busy(k % 2u == 0u ? Stage::start_no_stop : Stage::scl_pulse);
+            if (way == 0u) {
+                hold_bus_busy(20);
+            } else if (way == 1u) {
+                H::disable();
+                H::enable();
+            } else if (way == 2u) {
+                H::software_reset();
+                H::timing(*i2c_timing_for(SysClock::hz, link_speed));
+                H::enable();
+            } else {
+                settle_ms(50);
+            }
+            (void)delay_us(clock, 20);
+            cleared = static_cast<uint8_t>(cleared + (w.busy_end && !H::busy() ? 1u : 0u));
+            (void)Host::recover();
+        }
+        if (way == 2u) {
+            swrst_cleared = cleared;
+        }
+        print(serial, "  ",
+              way == 0u   ? "a START and a STOP on the wire"
+              : way == 1u ? "a PE cycle"
+              : way == 2u ? "SWRST"
+                          : "fifty milliseconds alone",
+              " took BUSY down ", cleared, " of ", tries, crlf);
+    }
+    // ---- 3. what a request meets, raw on the host: start(), then its bound ----
+    // THE WINDOW: 30 ms, over the per-bus timeout's 20 this suite's arbiter
+    // holds and the 22 of its bound. At the speed in force nothing touches the
+    // block; at the other, apply() makes a PE cycle first.
+    bool same_speed_held = true;
+    for (const I2cSpeed speed : {link_speed, I2cSpeed::fast_400k}) {
+        for (const Stage st : {Stage::start_no_stop, Stage::scl_pulse}) {
+            const Staged w = stage_busy(st);
+            const Host::Request r = command_probe(speed);
+            host_done = false;
+            host_isr_entries = 0;
+            error_isr_entries = 0;
+            constexpr uint32_t per_us = SysClock::hz / 1'000'000u;
+            const uint32_t c0 = Ticker::cycles();
+            const bool sync = Host::start(r);
+            const uint32_t start_us = (Ticker::cycles() - c0) / per_us;
+            while (!host_done && Ticker::cycles() - c0 < 30'000u * per_us) {
+            }
+            const uint32_t done_us = (Ticker::cycles() - c0) / per_us;
+            const bool answered = host_done;
+            const uint16_t s1 = H::status1();
+            const uint16_t s2 = H::status2();
+            const uint16_t c1 = H::regs().CTLR1;
+            const uint32_t ev = host_isr_entries;
+            const uint32_t er = error_isr_entries;
+            if (!answered) {
+                (void)Host::recover();
+            }
+            settle_ms(1);
+            const bool busy_after = H::busy();
+            const uint8_t next = host_tenure(twilink::command_addr, nullptr, 0, nullptr, 0, link_speed);
+            print(serial, "  ", i2c_speed_hz(speed) / 1000u, " kHz (", speed == link_speed ? "in force" : "a PE cycle first",
+                  ") over \"", stage_name(st), "\": BUSY ", w.busy_end ? 1 : 0, ", start() ", sync ? "true" : "false", " in ",
+                  start_us, " us, ", answered ? "answered at " : "no answer in ", done_us, " us, event entries ", ev, " error ",
+                  er, ", STAR1 ", hex(s1), " STAR2 ", hex(s2), " CTLR1 ", hex(c1), "; recover()ed, BUSY ", busy_after ? 1 : 0,
+                  ", the next probe ", next, crlf);
+            if (speed == link_speed) {
+                same_speed_held = same_speed_held && w.busy_end && !sync && !answered && ev == 0u && er == 0u &&
+                                  (s1 & i2c_sb) == 0u && (c1 & i2c_start) != 0u && !busy_after && next == i2c_ok;
+            }
+        }
+    }
+    // ---- 4. through the arbiter ----
+    (void)stage_busy(Stage::start_no_stop);
+    kl::BusKernel::init_all();
+    bus_ao_live = true;
+    const ArbAnswer wedged = ask_arbiter(command_probe(link_speed));
+    const ArbAnswer behind = ask_arbiter(command_probe(link_speed));
+    print(serial, "  through the arbiter: ", wedged.replies, " reply, status ", wedged.status, " after ", wedged.us,
+          " us (i2c_timeout = ", i2c_timeout, "); the next request ", behind.status, " after ", behind.us, " us", crlf);
+    kl::drain(5);
+    bus_ao_live = false;
+    // ---- 5. no hand on the wire: a client holding the clock past the limit ----
+    // The peer stretches the address for 45 ms under the arbiter's 20: its
+    // i2c_timeout and recover() come under a low SCL, and SWRST leaves BUSY up
+    // over it. The client lets go with no STOP. The first request behind it
+    // meets what the stagings left; the second a clean block.
+    bool held_seen = true;
+    bool held_next_ok = true;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        host_ready();
+        settle_ms(10);
+        twilink::Params held{};
+        held.count = 16;
+        held.ms = 200;
+        held.addr = twilink::dut_addr;
+        held.hold_us = 45'000;
+        if (!peer_act(Op::serve, held)) {
+            bench.verdict("the peer accepted the 45 ms stretch", false);
+            return;
+        }
+        kl::BusKernel::init_all();
+        bus_ao_live = true;
+        kl::drain(5);
+        Host::Request r = kl::request(twilink::dut_addr, kl::out_a);
+        r.speed = speed;
+        const ArbAnswer first = ask_arbiter(r);
+        const bool scl_low = !SclPin::read();
+        const bool busy_low = H::busy();
+        kl::drain(100);   // the hold's 45 ms over, and the address's byte alone left to the peer
+        const bool lines_high = SclPin::read() && SdaPin::read();
+        const bool busy_idle = H::busy();
+        const ArbAnswer second = ask_arbiter(command_probe(speed));
+        kl::drain(2);
+        const ArbAnswer third = ask_arbiter(command_probe(speed));
+        kl::drain(2);
+        bus_ao_live = false;
+        print(serial, "  a client holding the clock 45 ms, ", i2c_speed_hz(speed) / 1000u, " kHz: status ", first.status,
+              " after ", first.us, " us, SCL low at the reply ", scl_low ? 1 : 0, ", BUSY ", busy_low ? 1 : 0,
+              "; the client gone, lines high ", lines_high ? 1 : 0, ", BUSY ", busy_idle ? 1 : 0,
+              "; the request behind it: status ", second.status, " after ", second.us, " us; the next: status ",
+              third.status, " after ", third.us, " us", crlf);
+        held_seen = held_seen && timed_out(first) && scl_low && lines_high && busy_idle && timed_out(second);
+        // A wire outcome: i2c_nack_addr while the peer's serve keeps its client
+        // on the other address, i2c_ok once it is back.
+        held_next_ok = held_next_ok && third.replies == 1u && (third.status == i2c_ok || third.status == i2c_nack_addr) &&
+                       third.us < 2'000u;
+        settle_ms(250);
+    }
+    // ---- 6. reads, the way it was seen on another die: rate, not a verdict ----
+    twilink::Params a{};
+    a.ms = 200;
+    a.addr = twilink::dut_addr;
+    uint16_t reads = 0;
+    uint16_t standing = 0;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        for (const bool dma : {false, true}) {
+            host_ready();
+            if (!peer_act(Op::serve, a)) {
+                bench.verdict("the peer accepted the serve", false);
+                return;
+            }
+            bring_up(dma);
+            for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{16}}) {
+                for (uint8_t k = 0; k < 4u; ++k) {
+                    if (either_tenure(dma, nullptr, 0, rx_buf, n, speed) == i2c_ok) {
+                        (void)delay_us(clock, 300);   // the STOP on the wire, over the slowest bit by far
+                        ++reads;
+                        standing = static_cast<uint16_t>(standing + (H::busy() ? 1u : 0u));
+                    }
+                }
+            }
+            put_down(dma);
+            settle_ms(220);
+        }
+    }
+    print(serial, "  reads of 1, 2, 3, 4 and 16 on the pump and on the engines, both speeds: BUSY standing 300 us after ",
+          standing, " of ", reads, crlf);
+    bench.verdict("the state is made by hand: a START with no STOP, and SCL low alone, each leaves BUSY up over both lines "
+                  "high, every time; a STOP takes it down, every time",
+                  sibling_way == tries && scl_alone == tries && controls == 0u);
+    bench.verdict("SWRST takes it down, every time", swrst_cleared == tries);
+    bench.verdict("A REQUEST at the speed in force meets it so: start() false, its START held, no SB and no vector within "
+                  "the window; recover() frees the block and the next probe is i2c_ok",
+                  same_speed_held);
+    bench.verdict("THROUGH THE ARBITER: one reply, i2c_timeout at the per-bus limit, and the next request i2c_ok",
+                  timed_out(wedged) && behind.replies == 1u && behind.status == i2c_ok);
+    bench.verdict("NO HAND ON THE WIRE: a client holding the clock past the limit leaves it behind recover(), and the "
+                  "request behind that is a second i2c_timeout",
+                  held_seen);
+    bench.verdict("and the one behind that reaches the wire", held_next_ok);
+    host_ready();
+    bench.verdict("and the command channel is back", command(Op::ping));
+}
+
+// ===========================================================================
 // p - the dead channel and the release pulse
 // ===========================================================================
 //
@@ -3097,7 +3813,7 @@ BRIO_CH32_VECTOR(i2c1_ev_handler) {
         }
         return;
     }
-    if (bus_ao_live) {
+    if (arbiter_letters && bus_ao_live) {
         if (Host::isr()) {
             brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
         }
@@ -3121,7 +3837,7 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
         }
         return;
     }
-    if (bus_ao_live) {
+    if (arbiter_letters && bus_ao_live) {
         if (Host::error_isr()) {
             brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
         }
@@ -3185,6 +3901,10 @@ int main() {
     bench.letter('r', "THE REPEATED START on the last byte's TxE: 1 to 4 written then read, "
                       "acknowledged and the last refused, both speeds, pump and engines",
                  tr_restart);
+    bench.letter('l', "THE FIRST BYTES at the entry that clears ADDR: the flags raw, the host's writes by their entries, "
+                      "a byte committed behind a refused one", tl_first_bytes);
+    bench.letter('u', "A BUSY LEFT STANDING over an idle wire: how it is made, what a request meets, a client holding the "
+                      "clock past the limit", tu_unwedge);
     bench.letter('w', "the wire probe: each line held low for 500 ms, for the other end to read (no verdict)",
                  tw_wire_probe, false);
 

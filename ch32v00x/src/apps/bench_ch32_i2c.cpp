@@ -36,9 +36,9 @@
 //      writes of 16 and 255 bytes, then every op through the pump
 //      (`i2c.*`, I2cHost<1>) and through the engines (`i2c.*.dma`,
 //      DmaTxEngine<6> + DmaRxEngine<7>, every request naming
-//      I2cEngine::dma): i2c.write and i2c.read of 1, 2, 4,
-//      16 and 255 bytes, i2c.wr (one byte written, a repeated START, 1, 2
-//      and 16 read; n counts both), i2c.probe (0x2C) and i2c.probe.nack
+//      I2cEngine::dma): i2c.write and i2c.read of 1, 2, 3, 4,
+//      16 and 255 bytes, i2c.wr (one byte written, a repeated START, 1, 2,
+//      3, 4 and 16 read; n counts both), i2c.probe (0x2C) and i2c.probe.nack
 //      (0x23, nobody), i2c.write.nack (1 and 2 bytes to 0x23: the NACK
 //      named from the address). Each the best of 8 runs, every byte read
 //      judged against the peer's pattern - a run whose tenure failed is
@@ -472,25 +472,25 @@ void measure_period(I2cSpeed speed) {
           " Hz; the register's own ", I2cPump::scl_hz(speed), " Hz", crlf);
 }
 
-/// The busy cycles of the writes and the reads of 1, 2, 4, 16 and 255
+/// The busy cycles of the writes and the reads of 1, 2, 3, 4, 16 and 255
 /// bytes one host ran at one speed: what the engines' arithmetic reads.
 struct OpsBusy {
-    uint32_t write[5];
-    uint32_t read[5];
+    uint32_t write[6];
+    uint32_t read[6];
 };
 
 template <typename Host>
 OpsBusy i2c_ops(const char* const names[6], I2cSpeed speed) {
     OpsBusy b{};
     uint8_t j = 0;
-    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{4}, uint8_t{16}, uint8_t{255}}) {
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{16}, uint8_t{255}}) {
         b.write[j++] = run_i2c<Host>(names[0], I2cShape::write, n, speed).busy;
     }
     j = 0;
-    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{4}, uint8_t{16}, uint8_t{255}}) {
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{16}, uint8_t{255}}) {
         b.read[j++] = run_i2c<Host>(names[1], I2cShape::read, n, speed).busy;
     }
-    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{16}}) {
+    for (const uint8_t n : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{16}}) {
         run_i2c<Host>(names[2], I2cShape::wr, n, speed);
     }
     run_i2c<Host>(names[3], I2cShape::probe_ack, 0, speed);
@@ -512,16 +512,17 @@ OpsBusy i2c_ops(const char* const names[6], I2cSpeed speed) {
 /// one holds. The engines cost the core fewer cycles from the smallest N
 /// with E <= F + N x b; 0 when they already do at no byte. A read of one
 /// or two bytes is a procedure of its own on the pump (one entry for
-/// both), so the lines of 1 and 2 bytes are compared as measured.
+/// both), and the first two bytes of a write load in the entry that clears
+/// ADDR, so the lines of 1, 2 and 3 bytes are compared as measured.
 /// Printed, not judged: docs/ch32v00x/i2c.md's guidance reads these lines.
-void engine_arithmetic(const char* what, const uint32_t pump[5], const uint32_t dma[5]) {
-    const int32_t b = (static_cast<int32_t>(pump[4]) - static_cast<int32_t>(pump[3])) / 239;
-    const int32_t f = static_cast<int32_t>(pump[2]) - 4 * b;
+void engine_arithmetic(const char* what, const uint32_t pump[6], const uint32_t dma[6]) {
+    const int32_t b = (static_cast<int32_t>(pump[5]) - static_cast<int32_t>(pump[4])) / 239;
+    const int32_t f = static_cast<int32_t>(pump[3]) - 4 * b;
     const int32_t e = static_cast<int32_t>(dma[0]);
     const int32_t n = e <= f || b <= 0 ? 0 : (e - f + b - 1) / b;
     print(serial, "  ", what, ": b ", b, ", F ", f, ", E ", e, "; the engines cheaper from N = ", n,
-          "; measured at 1 and 2 bytes, pump ", pump[0], " and ", pump[1], ", engines ", dma[0], " and ",
-          dma[1], crlf);
+          "; measured at 1, 2 and 3 bytes, pump ", pump[0], ", ", pump[1], " and ", pump[2], ", engines ", dma[0],
+          ", ", dma[1], " and ", dma[2], crlf);
 }
 
 void ti_i2c() {

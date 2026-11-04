@@ -79,9 +79,9 @@
  * Who calls what. init() runs in main, after the clock task (the timing
  * is computed from the rate the clock type claims) and before the
  * kernel's run(). start() is the arbiter's, called in its own dispatch:
- * it is the one place on the host's request path that waits - up to 5 ms
- * for the last tenure's STOP to leave CTLR1 (stop_drain_us), then up to
- * 100 us for BUSY to clear (bus_free_us) - and it masks nothing. isr()
+ * it is the one place on the host's request path that waits - for the last
+ * tenure's STOP to leave CTLR1 (stop_drain_us), then for BUSY to clear
+ * (bus_free_us), each a bound of polls - and it masks nothing. isr()
  * and error_isr() are the bodies of the event and the error vectors,
  * dma_isr() the body of both DMA channels' vectors; the program binds
  * each under the crt's name and calls it nowhere else, and an unbound
@@ -108,17 +108,29 @@
  * sets STOP and reads N-1 and N. All of it is in `isr()`, phase by
  * phase, and the reason the ITBUFEN enable is switched on and off
  * during a tenure: TxE and RxNE interrupt only while the byte pump (the
- * vector moving one byte an entry) needs them, BTF (under ITEVTEN
- * alone) carries the rest. ITEVTEN is the tenure's in turn - raised by
+ * vector moving one byte an entry past a write's first two) needs them,
+ * BTF (under ITEVTEN alone) carries the rest. ITEVTEN is the tenure's in
+ * turn - raised by
  * start(), dropped at its end - because the BTF a STOP leaves standing
  * until the condition is out (15.10.6) and the slave half's STOPF would
  * otherwise enter the vector between tenures for nothing; a DMA read
  * phase drops it too, the channel's completion ending that phase
  * (begin_receive()).
  *
+ * The entry that clears ADDR loads a write's first two bytes (first_bytes()).
+ * TxE stands at ADDR and after its clear, EV8_1: the first store goes
+ * through the data register into the empty shifter, TxE is up again on the
+ * next read of STAR1, EV8, and the data register takes the second (measured,
+ * docs/ch32v00x/i2c.md). So a write of one or two bytes never raises the
+ * buffer line: three entries, SB, ADDR and BTF, with the STOP at BTF, once
+ * the last byte's acknowledge is known. A NACK of the first byte leaves the
+ * second in the data register, which never reaches the wire: the STOP goes
+ * out and the next tenure's address replaces it at SB (measured).
+ *
  * The repeated START of a write-then-read is requested while the last
  * written byte is still going out, on the TxE that says it went into the
- * shifter: 15.10.1's START bit, set in master mode, makes the controller
+ * shifter - for a one-byte index, in the entry that stored it: 15.10.1's
+ * START bit, set in master mode, makes the controller
  * repeat the start condition, and requested while a byte shifts it goes
  * out as that byte ends (measured: every written byte taken, and no BTF
  * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
@@ -188,7 +200,8 @@
  * header-byte sequence, EV9, has no user); PEC (the resource has the
  * enable, no tenure shape asks for it); the general call as a host
  * verb; a wake from Standby on an address match, which this family's
- * PWR chapter does not offer.
+ * PWR chapter does not offer; a step in start() for a BUSY standing over
+ * an idle wire, which meets the per-bus timeout instead.
  */
 
 #pragma once
@@ -798,10 +811,13 @@ public:
             return false;
         }
         // BUSY clears a moment after our STOP is seen; a bus still busy
-        // after bus_free_us is someone else's. The START goes in anyway.
-        // Measured: into a line a peer holds low it is answered ARLO, and
-        // i2c_arb_lost is the reply, inside any per-bus timeout; into a
-        // tenure another controller is clocking it is held until the STOP.
+        // after bus_free_us is someone else's, or a wire whose STOP this
+        // block never saw. The START goes in anyway. Measured: into a line a
+        // peer holds low it is answered ARLO, and i2c_arb_lost is the reply,
+        // inside any per-bus timeout; into a tenure another controller is
+        // clocking it is held until the STOP; over a BUSY left standing on an
+        // idle wire it is held until the per-bus timeout's recover(), and
+        // with no such timeout nothing answers (docs/ch32v00x/i2c.md).
         (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
         // One CTLR1 store: START, with POS and ACK down for the address
@@ -895,10 +911,8 @@ public:
                         return false;
                     }
                 }
-                (void)S::clear_addr();
-                phase_ = Phase::tx;
-                S::buffer_interrupt(true);   // EV8_1 follows at once
-                return false;
+                (void)S::status2();   // STAR1 was read above: this read clears ADDR
+                return first_bytes();
 
             case Phase::tx:
                 return transmit_step(s1);
@@ -1247,6 +1261,37 @@ private:
         return finish(i2c_bus_error);
     }
 
+    /// EV8_1 and EV8 in the entry that cleared ADDR (the file header). The
+    /// first byte goes straight through the data register into the empty
+    /// shifter, and one read of STAR1, not a loop, asks whether TxE is up
+    /// again: then the data register takes the second byte, or a one-byte
+    /// index before a read has its repeated START requested. A TxE not seen
+    /// leaves that step to the buffer vector, raised whenever a byte or a
+    /// repeated START remains; a write whose bytes are all in ends on BTF
+    /// with that vector never raised.
+    [[gnu::always_inline]] static bool first_bytes() {
+        const uint8_t* const tx = t_.tx.get();
+        const uint8_t len = t_.tx_len;
+        uint8_t pos = 1;
+        phase_ = Phase::tx;
+        S::data(tx[0]);
+        if (S::flag(i2c_txe)) {
+            if (len != 1u) {
+                S::data(tx[1]);
+                pos = 2;
+            } else if (t_.rx_len != 0u) {
+                phase_ = Phase::restart;   // the buffer vector is down already
+                S::start();
+                return false;
+            }
+        }
+        pos_ = pos;
+        if (pos < len || t_.rx_len != 0u) {
+            S::buffer_interrupt(true);
+        }
+        return false;
+    }
+
     /// EV8 on the buffer vector, and EV8_2 on the event vector. A plain
     /// write drops the buffer vector with its last byte and ends on BTF; a
     /// read half to follow keeps it, and the TxE that says the last byte
@@ -1468,19 +1513,22 @@ private:
     /// How long start() waits for the last tenure's STOP to leave the
     /// wire. A STOP takes a bit period; what can hold it longer is a
     /// slow client stretching the clock after the last acknowledge while
-    /// it digests a write, and five milliseconds - a fifth of SMBus's
+    /// it digests a write, and five thousand polls of at least a
+    /// microsecond each - five milliseconds at the least, a fifth of SMBus's
     /// 25 ms clock-low limit - is the bound. What start() spends here is
     /// the kernel dispatch's time, which is why it is bounded at all.
     static constexpr uint16_t stop_drain_us = 5'000;
 
     /// How long start() then waits for BUSY to clear: our STOP seen by
-    /// the bus takes a moment, another device's traffic takes longer.
+    /// the bus takes a moment, another device's traffic takes longer. At 48
+    /// MHz the poll and the delay around it take 3.3 us, not the one the
+    /// delay asks, so the bound is some 330 us (measured, BUSY never clearing).
     static constexpr uint16_t bus_free_us = 100;
 
-    /// Poll `pred` for at least `us` microseconds, timed on the STK
-    /// (delay.hpp); true as soon as it holds. delay_us() refuses when the
-    /// STK is not running, and the bound is then a count of polls - a
-    /// bound still.
+    /// Poll `pred` `us` times with a delay of at least a microsecond between
+    /// polls, timed on the STK (delay.hpp), so for at least `us` microseconds;
+    /// true as soon as it holds. delay_us() refuses when the STK is not
+    /// running, and the bound is then a count of polls - a bound still.
     template <typename Pred>
     static bool wait_for_us(Pred pred, uint16_t us) {
         for (uint16_t t = 0; t < us; ++t) {
