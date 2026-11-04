@@ -47,7 +47,7 @@
 // requests alone and refuses an asynchronous one (letter f judges it).
 //
 // What is exercised, letter by letter:
-//   a  the block, WIRELESS: table 645 as the driver states it, the rate
+//   a  the block, WIRELESS: table 677 as the driver states it, the rate
 //      arithmetic at this clk_peri (75 Mbit/s at the top), the PrimeCell
 //      identity against the device description, the reset state, the
 //      refusals; then the loop-back proven, sixteen frames polled
@@ -324,7 +324,7 @@ bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; 
 // a - the block, wireless
 // =============================================================================
 void ta_block() {
-    bench.verdict("table 645 as the driver states it: the groups of four are RX, CSn, SCK, TX and "
+    bench.verdict("table 677 as the driver states it: the groups of four are RX, CSn, SCK, TX and "
                   "the instance is bit 3 of the pad - SPI0 on 2/6/18/22/34/38 (SCK), SPI1 on "
                   "10/14/26/30/42/46, with no second function column anywhere",
                   spi_sck_pin(0, 2) && spi_sck_pin(0, 22) && spi_sck_pin(0, 38) &&

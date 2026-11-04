@@ -1156,7 +1156,7 @@ others to the cycle):
 What the rows say - the RP2040's reading on both halves:
 
 - WARM, the placement buys nothing on a path the cache holds and costs
-  the call: 4 to 40 cycles under InRam. A warm figure that differs more
+  the call: up to 40 cycles under InRam. A warm figure that differs more
   is one image's set conflicts, not the place: the F column's UART
   handlers miss lines warm that the other three images do not, and so
   does

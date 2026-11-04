@@ -95,7 +95,7 @@
  * nonlinearity spikes at codes 0x200, 0x600, 0xa00 and 0xe00 are gone,
  * "improving the ADC's precision by around 0.5 ENOB" (12.4.1) over the
  * other chip's 8.7 bits - 9.2 by 12.4's feature list, 9 minimum and 9.5
- * typical by the electrical table. Appendix E has no ADC erratum at all
+ * typical by the electrical table. Appendix D has no ADC erratum at all
  * - and the erratum numbered E11 in this chip's sheet is an XIP one,
  * which is why an erratum is never cited here by its bare number.
  *

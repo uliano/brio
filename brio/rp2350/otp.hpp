@@ -504,7 +504,12 @@ struct Otp {
     /// a failed consistency check FAULTS here instead of returning a
     /// value (13.1.1), so a caller uses these when a wrong answer is
     /// worse than a stopped program - and checks `readable()` first when
-    /// it is not.
+    /// it is not. `readable()` does not see RP2350-E17, every stepping: a
+    /// guarded ECC read judges the row asked for and the other row of its
+    /// even-odd pair, and also faults when that other row is not valid ECC
+    /// data, a programmed raw row or a half-written ECC row (zero, a blank
+    /// row, is valid). `raw_guarded()` is outside the erratum, which names
+    /// the ECC read.
     static uint16_t ecc_guarded(uint16_t row) {
         return *reinterpret_cast<volatile uint16_t*>(
             static_cast<uintptr_t>(otp_ecc_guarded_window + 2u * row));

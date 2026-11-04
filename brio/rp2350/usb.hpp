@@ -72,7 +72,7 @@
  *    (the host's termination, so that the pins do not float while the
  *    block is unused), MAIN_CTRL with PHY_ISO set.
  *  - DP and DM can be GPIO here. They are pads of GPIO bank 1 (9.4's
- *    table 647), whose function-select registers are the IO_QSPI
+ *    table 679), whose function-select registers are the IO_QSPI
  *    block's USBPHY_DP_CTRL and USBPHY_DM_CTRL and whose SIO face is
  *    the high bank's bits 24 and 25 - GPIO 56 and 57. They must not be
  *    GPIO while this driver owns them, and two facts guarantee it: bank
@@ -107,7 +107,7 @@
  * the new AVAILABLE with the old length. Every submit here does that.
  * This chip also has LINESTATE_TUNING.DEV_BUFF_CONTROL_DOUBLE_READ_FIX,
  * on at reset, which reads the word twice and makes the second write
- * unnecessary - but 12.7.3.7.1 and the warning under table 1194 still
+ * unnecessary - but 12.7.3.7.1 and the warning under table 1305 still
  * prescribe the two-step store, so the two-step store is what this
  * driver does and the fix is a second line of defence. LINESTATE_TUNING
  * is otherwise left exactly as it resets, as 12.7.2 asks: this file
@@ -218,7 +218,7 @@ struct Usb {
         return reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(usbctrl_dpram_base + offset));
     }
     /// The endpoint control word of endpoint 1..15, one direction
-    /// (table 1192; endpoint zero has none, its buffers being fixed).
+    /// (table 1304; endpoint zero has none, its buffers being fixed).
     static volatile uint32_t& ep_control(uint8_t number, bool in) {
         return dpram_word(0x08u + 8u * (number - 1u) + (in ? 0u : 4u));
     }

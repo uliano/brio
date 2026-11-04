@@ -23,7 +23,7 @@
  * docs/pl022/README.md) and this file is what that file asks of a
  * family -
  *
- *  - the pin table of 9.4 (table 645) with its function code;
+ *  - the pin table of 9.4 (table 677) with its function code;
  *  - `Rp2350Pl022`, the chip traits: the register block and where each
  *    instance's sits, the reset bits of 7.5, the interrupt lines of 3.2,
  *    the atomic set/clear aliases of 2.1.3, the DREQ numbers of
@@ -398,7 +398,7 @@ static_assert((SpiInterrupt::overrun | SpiInterrupt::rx_timeout) == SPI_SSPICR_B
 static_assert(SpiDmaControl::tx == SPI_SSPDMACR_TXDMAE_BITS &&
               SpiDmaControl::rx == SPI_SSPDMACR_RXDMAE_BITS);
 
-// Table 645's one column, and a pin set from the wrong instance.
+// Table 677's one column, and a pin set from the wrong instance.
 static_assert(spi_rx_pin(0, 0) && spi_cs_pin(0, 1) && spi_sck_pin(0, 2) && spi_tx_pin(0, 3));
 static_assert(spi_rx_pin(1, 8) && spi_cs_pin(1, 9) && spi_sck_pin(1, 10) && spi_tx_pin(1, 11));
 static_assert(spi_sck_pin(0, 18) && spi_tx_pin(0, 19) && spi_rx_pin(0, 16) && spi_cs_pin(0, 17));

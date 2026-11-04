@@ -127,7 +127,7 @@ struct PowerDomainBit {
 };
 
 /**
- * The twelve states of table 475, spelled Pc.m as the datasheet spells
+ * The twelve states of table 507, spelled Pc.m as the datasheet spells
  * them: `p0_0` is everything on, `p1_7` is the switched core, the XIP
  * cache and both SRAM domains off. The value IS the four-bit field.
  */
@@ -162,10 +162,10 @@ constexpr bool is_low_power_state(PowerState s) {
  *  - a P1.m state may only be left for a P0.m one, never for another
  *    P1.m.
  *
- * The prose of 6.2.3 states a fourth rule - that leaving a P1.m state
- * may not power a powered-off SRAM domain back on - which its OWN table
- * contradicts (P1.1 -> P0.0 is listed as valid), and which the register
- * description does not repeat. The register's three are what this
+ * The prose of 6.2.3 adds that a P1.m state may be left for a P0.m one
+ * "except transitions that would result in a powered on SRAM domain
+ * becoming powered off": the first rule's consequence, not a fourth rule,
+ * and table 508 lists the same set. The register's three are what this
  * function enforces, and what the bench suite measures against
  * STATE.BAD_SW_REQ.
  */
@@ -905,6 +905,10 @@ struct AonTimer {
     // ---- running, reading, setting (12.10.3) --------------------------------
 
     static bool running() { return (POWMAN->TIMER & POWMAN_TIMER_RUN_BITS) != 0u; }
+    /// Starts or stops the count. A 1 written to TIMER.RUN loads the count
+    /// from the SET_TIME registers (12.10.3's note), so a stop and a start
+    /// is no pause: a program that wants one keeps the value and sets it
+    /// again before the start.
     static void run(bool on) { write_timer(on ? POWMAN_TIMER_RUN_BITS : 0u, POWMAN_TIMER_RUN_BITS); }
 
     /**

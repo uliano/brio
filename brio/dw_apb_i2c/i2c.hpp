@@ -1468,12 +1468,12 @@ public:
         return released_at == 0xFF ? 0u : released_at;
     }
 
-    /// Put the engine back where start() is legal - the verb a timed
+    /// Put the host back where start() is legal - the verb a timed
     /// I2cBus calls on a tenure that never answered: the engines put
-    /// away, the block reset (a command under way with no STOP holds
-    /// the block enabled forever, and the family's reset is the one
-    /// way out), the configuration and the timing rewritten. The wire
-    /// stays the application's (unstick()).
+    /// away first, so nothing still writes a lent buffer when the arbiter
+    /// answers, the peripheral reset (a command under way with no STOP holds
+    /// it enabled forever), the configuration and the timing rewritten.
+    /// The wire stays the application's (unstick()).
     static bool recover() {
         Chip::Interrupts::disable(S::irq());
         if constexpr (has_engines) {
@@ -2037,10 +2037,12 @@ public:
         }
         if ((up & I2cInterrupt::gen_call) != 0u) {
             // GEN_CALL STANDS THROUGH THE ADDRESS'S ACKNOWLEDGE: a clear
-            // inside that bit does not hold (measured on the RP pair: two
-            // to seventeen entries in the 8 us after the address at
-            // 100 kHz). Masked from here to the general call's first data
-            // byte, which always follows, so the call is one event.
+            // while the bit stands does not hold, and the line re-enters
+            // (traced on the RP2040 in the 8 us after the address at 100 kHz;
+            // no suite re-runs it, every brio host refusing 0x00). Masked
+            // from here to the general call's first data byte, so the call is
+            // one event; a foreign host's call with no data byte leaves it
+            // masked until this client's next received byte.
             S::clear_pending(I2cInterrupt::gen_call);
             S::interrupts(I2cInterrupt::gen_call, false);
             general_call_masked_ = true;

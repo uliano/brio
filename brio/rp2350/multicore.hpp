@@ -125,7 +125,7 @@
  *
  * What the bootrom does not hand over, and what this file's own entry
  * shim does on core 1 before the program's entry runs. The ROM sets the
- * stack pointer and the vector base and jumps (table 451); everything
+ * stack pointer and the vector base and jumps (table 462); everything
  * else of a core's private state is the program's:
  *
  *  - on the Hazard3 half, the global pointer. gp is a register, not a
@@ -544,10 +544,8 @@ using Core1 = Core1Of<>;
  * header). It is offered because a program may want an ordered,
  * counted cross-core channel of its own, and because a bench suite has
  * to be able to say what the hardware is: 3.1.5 calls the FIFOs four
- * entries deep and the FIFO_ST register description calls them eight, so
- * the depth here is a measurement and not a constant - and the
- * measurement says four, which is 3.1.5's number
- * (docs/rp2350/multicore.md).
+ * entries deep, the FIFO_ST register description four words, and the
+ * measurement says four too (docs/rp2350/multicore.md).
  *
  * Every verb is this core's own end: the outgoing FIFO is the one this
  * core writes, the incoming one the one it reads. push() and pop() read

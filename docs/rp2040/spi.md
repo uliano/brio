@@ -450,12 +450,18 @@ desk partner's peer (the last group below).
     requests (ten runs).
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
-    7.8125 MHz): wall less the wire's cycles **308 for one byte, 432 for
-    three, 750 for sixteen** (746 in one run of ten), of which the block's
-    mode-0 gap is 24 / 72 / 384, the wait for the end of each phase's last
-    frame one SCK period, 16 cycles a phase, and the phase boundary's drain
-    (the data frames wait for the command frame to come back whole and its
-    last edge, so D/C flips on the wire) one frame's latency.
+    7.8125 MHz): wall less the wire's cycles **301 for one byte, 425 for
+    three, 743 for sixteen**, each the same in three runs of the letter. Of
+    these cycles the block's gap between the frames of a phase is 0 / 24 / 336,
+    at 1.5 SCK periods (16 frames in mode 0 less mode 3 read 374: fifteen gaps
+    and the 14 cycles that follow); the wait for the end of each phase's last
+    frame is one SCK period from the receive flag, 16 cycles, 8 of them past
+    the frame's last edge; and the phase boundary's drain (the data frames wait
+    for the command frame to come back whole and its last edge, so D/C flips on
+    the wire) means a second frame start. What remains, 287, 373 and 379, is the
+    host's own code and each phase's frame start, which no letter splits; a
+    request of 16 frames in one phase in mode 3, with neither gap nor wait, reads
+    275 over the wire.
 - **WHICH ENGINE COSTS THE CORE LESS** (`test_rp2040_spi` letter f; the IP
   stratum's page, "Which engine costs the core less", has the arithmetic).
   Nothing in the host reads these figures: they are the programmer's guidance.
@@ -572,8 +578,8 @@ desk partner's peer (the last group below).
   the DMA line's handler 204 of those with the meter's
   stamps, its wait for the end of the last frame one read of SSPSR at this
   rate - and the transaction's **fixed cost, the wall less its frames' nominal
-  wire, is 904 cycles (7.2 us), of which 96 the block's mode-0 gap**: 808, 766
-  at 3.906 MHz and 816 for 16-bit frames. Inside the
+  wire, is 904 cycles (7.2 us), of which 90 the block's fifteen mode-0 gaps**: 814,
+  at 3.906 MHz too, and 822 for 16-bit frames. Inside the
   block the engines run at the wire with the block's gap, by the
   difference of 16 and 256 frames: **38.00 cycles a byte at 31.25 MHz**
   (32 of bits and 6 of gap) in four runs of ten (35.7 to 38.8 in the

@@ -459,8 +459,8 @@ the same.
     mode 0 and 32.0 / 32.0 in mode 3** - the wire with the block's gap, and
     the wire - at 9.375 MHz 152 / 128, and 16-bit frames 70 / 64 and 280 /
     256: the wire's own figures to the hundredth. At 75 MHz its three
-    accesses a frame set the pace: **23 / 26 cycles a frame** against a
-    16-cycle frame (23.25 on the Cortex-M33 with the host in SRAM), 16-bit
+    accesses a frame set the pace: **23 / 27 cycles a frame** against a
+    16-cycle frame (23.25 / 26 with the host in SRAM), 16-bit
     frames at the wire (35 / 32).
   - THE WRITE SHAPE (`spi.poll`, no in buffer): at /4 and /16 the same
     figures - the receive loop discarding, since a frame read under the
@@ -483,7 +483,7 @@ the same.
 
     | | mode 0 | mode 1 |
     |---|---|---|
-    | read and stored, 8-bit | 23 / 26 (19) | 23 / 26 (16) |
+    | read and stored, 8-bit | 23 / 27 (19) | 23 / 27 (16) |
     | read and stored, 16-bit | the wire (35) | the wire (32) |
     | no in buffer, 8-bit | the wire (19) | the wire (16) |
     | no in buffer, 16-bit | the wire (35) | the wire (32) |
@@ -492,7 +492,7 @@ the same.
     long one that wants the wire names the engines, as does any request the
     other active objects must keep running through: on the engines 256
     frames in mode 3 take the wire and the fixed cost, where the loop takes 1.44
-    / 1.63 times the nominal wire's time (larger being slower).
+    / 1.69 times the nominal wire's time (larger being slower).
   - THE RECEIVE SHAPE UNDER A LONG HANDLER: 100 receive requests of 256
     frames on the loop-back at each of the three rates with the tick's
     handler stretched to 1500 cycles - eight frames being 128, 256 and
@@ -505,7 +505,7 @@ the same.
   - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
     0, 2 and 15 data bytes with it high, polled, nothing read back, at
     9.375 MHz): wall less the wire's cycles **211 / 181 for one byte,
-    301 / 266 for three, 622 / 585 for sixteen**, each the same in three runs
+    301 / 266 for three, 622 / 582 or 585 for sixteen** in three runs
     of the letter on `bench_rp2350`; `bench_rp2350_ram`, the host in SRAM,
     reads 216 / 187, 303 / 279 and 625 / 596, so a figure belongs to its image.
     No XIP miss is in the three-byte figure: `spi.cold`'s warm repeat reads
@@ -517,7 +517,7 @@ the same.
     period from the receive flag, 16 cycles, 8 of them past the frame's last
     edge; and the phase boundary's drain (the data frames wait for the command
     frame to come back whole and its last edge, so D/C flips on the wire) means
-    a second frame start. What remains, 203 / 173, 261 / 226 and 270 / 233, is
+    a second frame start. What remains, 203 / 173, 261 / 226 and 270 / 230 or 233, is
     the host's own code and each phase's frame start, which no letter splits;
     a request of 16 frames in one phase in mode 3, with neither gap nor wait,
     reads 181 / 159 over the wire.
@@ -541,15 +541,15 @@ the same.
   engines less its 32 frames on the wire, F the intercept of two polled lengths
   (an 8-frame request's wall less 8 frames at the loop's own pace, that pace the
   difference of a 24- and an 8-frame request), both at clk_peri / 4 in mode 3,
-  the best of fifteen in three rounds 3 ms apart; Cortex-M33 / Hazard3, 27
-  runs each (twelve of the letter alone, fifteen inside `z`): **E 450 / 476 for a read and 455 / 480 for a write, F 264 /
-  289 to 290 and 261 / 280**, the loop's frame there 31.6 / 31.7 to 31.8 and 32.1 /
-  32.5 cycles; the two loops' turns at clk_peri / 2 on the host with no
+  the best of fifteen in three rounds 3 ms apart; Cortex-M33 / Hazard3, twelve
+  runs of the letter each: **E 457 / 480 for a read and 460 / 483 (479 in one run) for a write, F 268 /
+  295 and 265 / 298**, the loop's frame there 31.8 / 31.8 and 32.3 /
+  32.0 cycles; the two loops' turns at clk_peri / 2 on the host with no
   engines, 23.0 / 26.0 received and stored and 16.0 / 16.0 written on TNF -
   the wire's own frame. The walls are net of the XIP cache's misses, which the
   letter prints beside them ([the RP2040's page](../rp2040/spi.md) says why;
-  these runs counted none). So E - F is 186 / 187 for a read and 194 /
-  200 for a write, and the engines cost the core fewer cycles than the
+  these runs counted none). So E - F is 189 / 185 for a read and 195 /
+  185 for a write, and the engines cost the core fewer cycles than the
   loop from ceil((E - F) / frame) frames, a frame the wire's or the loop's
   turn, the longer (mode 3, 8-bit frames; in modes 0 and 2 the wire's frame is
   9.5 periods, so the counts are the same or smaller where the wire sets the
@@ -558,14 +558,14 @@ the same.
 
   | rate | a frame read, the count | a frame written, the count |
   |---|---|---|
-  | clk_peri / 2, 75 MHz | 23 / 26 cycles (the loop), 9 / 8 | 16 (the wire), 13 / 13 |
-  | / 4, 37.5 MHz | 32 (the wire), 6 / 6 | 32, 7 / 7 |
-  | / 8, 18.75 MHz | 64, 3 / 3 | 64, 4 / 4 |
+  | clk_peri / 2, 75 MHz | 23 / 26 cycles (the loop), 9 / 8 | 16 (the wire), 13 / 12 |
+  | / 4, 37.5 MHz | 32 (the wire), 6 / 6 | 32, 7 / 6 |
+  | / 8, 18.75 MHz | 64, 3 / 3 | 64, 4 / 3 |
   | / 16, 9.4 MHz | 128, 2 / 2 | 128, 2 / 2 |
   | / 32 and slower | 256 and more, 1 | 1 |
 
   In words: at clk_peri / 32 and slower the engines cost the core less from a
-  single frame on both halves; at / 2 a read needs nine frames to repay them on the Cortex-M33 and eight on Hazard3, and a write thirteen on both. The core's
+  single frame on both halves; at / 2 a read needs nine frames to repay them on the Cortex-M33 and eight on Hazard3, and a write thirteen and twelve. The core's
   cycles are not all a choice weighs (what else must run meanwhile, the
   vector's wait below), which is why the program chooses.
 - **dma IS DMA AT ANY LENGTH** (letter f, both halves): one frame, read and
@@ -656,25 +656,19 @@ the same.
   Hazard3, the same binding built twice: `bench_rp2350_ram`, the host
   InRam and the vectors placed, so that the code fetches nothing from the
   flash, and `bench_rp2350`, both in the flash. From SRAM `start()` returns
-  after **215 / 179 cycles** - one compare for the rate, the select, its
+  after **222 / 186 cycles** - one compare for the rate, the select, its
   two pins kept, both engines started - and the transaction's ONE interrupt
-  follows the last frame, its handler 154 / 125 cycles with the wait for
+  follows the last frame, its handler 163 / 137 cycles with the wait for
   the end of the last frame (one read of SSPSR at these rates); a
-  transaction costs the core **647 to 752 / 364 to 469 busy cycles**
+  transaction costs the core **671 to 776 / 383 to 488 busy cycles**
   whatever its size, and its fixed cost, the wall less the nominal wire, is
-  **523 / 471 cycles at 16 frames (3.5 / 3.1 us)**, of which the block's gap
-  is 48 at 75 MHz; net of the gap the fixed cost is 475 / 423 cycles at 75
-  MHz and 466 / 414 at 18.75 MHz, the same at 16 and at 256 frames. From the
-  flash the same instructions read `start()` at 208 to 787 / 174 cycles, the
-  handler at 459 to 730 / 103 to 263 and the fixed cost at 1432 to 1764 /
-  626 to 736 for 16 frames (ten runs on each half), and THE DIFFERENCE IS
-  THE DMA LINE'S VECTOR IN THE FLASH, NOT THE REQUEST'S CODE: the image with
-  the vectors placed in SRAM and the host left in the flash reads 765 / 725
-  cycles warm, its handler 136 / 105 ([platform.md](platform.md), "A handler
-  in SRAM", the V column), and on the Cortex-M33 the excess comes with the
-  sleep - the core spinning on a flag in RAM between the start and the
-  completion reads a 256-byte block in 5294 cycles where the sleeping core
-  reads 6087 to 6330. Warm code misses when more of its lines fall in one
+  **538 / 490 cycles at 16 frames (3.6 / 3.3 us)**, of which the block's
+  fifteen gaps are 45 at 75 MHz; net of the gaps the fixed cost is 493 / 445
+  cycles at 75 and at 18.75 MHz, the same at 16 and at 256 frames. From the
+  flash, three runs of the letter, the same instructions read `start()` at 215 /
+  180 cycles, the handler at 138 / 112 and the fixed cost at 518 / 477 for 16
+  frames, so warm, in this layout, the flash is no dearer than SRAM. Another
+  layout can be: warm code misses when more of its lines fall in one
   set of the cache than the set holds: the cache is two-way, and it does
   not evict the least recently used line (4.4.1.3: "Cache eviction policy is
   random"; measured, three lines of one set touched in the order A, B, A, C,
@@ -682,9 +676,9 @@ the same.
   times in 256), so a path whose lines share a set with two more lines of
   the code around it refetches some of them every time it runs, at 66 to
   82 cycles a line. Which code shares a set is decided by the link, so any
-  image may meet such a conflict on any path, and a path in SRAM cannot;
-  which lines of this image share a set with the vector's is not counted
-  ("Not covered yet"). THE FRAMES' OWN TIME IS NOT THE NOMINAL
+  image may meet such a conflict on any path, and a path in SRAM cannot: the
+  F column of [platform.md](platform.md), "A handler in SRAM", is one that met
+  it on the DMA line's vector, whose lines were not counted. THE FRAMES' OWN TIME IS NOT THE NOMINAL
   WIRE'S: in mode 0 the PL022 raises its frame signal between two frames
   of a continuous transfer (12.3.4.10, and 12.3.4.12 for mode 2), and the
   gap is 1.5 SCK periods - measured 19 cycles a byte at 75 MHz where the
@@ -707,9 +701,9 @@ the same.
   byte engines, or from a misaligned buffer, is refused, and named polled it runs at the
   loop's 35 cycles a frame, the core held for it. The core spinning on a
   flag in RAM or on a register behind the APB bridge while the engines
-  run changes a 256-byte block by under a hundredth from SRAM (5339
-  asleep against 5311 / 5287 against 5273); from the flash the sleeping
-  Cortex-M33 pays the vector's misses above, 6087 to 6330 against 5294.
+  run changes a 256-byte block by under a hundredth from SRAM (5354
+  asleep against 5322 / 5306 against 5292) and from the flash (5334 against
+  5306 / 5293 against 5278).
 - **THE FIRST TRANSACTION PAYS THE XIP CACHE ITS FILL, AND WHERE THE
   HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE.** A line of 8 bytes costs
   66 to 82 cycles at the boot's XIP setting (EBh at CLKDIV 3,
@@ -729,21 +723,21 @@ the same.
   three-byte polled request with every line of the cache invalidated
   first (`Xip::invalidate_all()`), under the mask so that no tick's
   handler lands in the one shot, the counters cleared before the start
-  and read after the wall - **5577 / 4991 cycles missing 74 / 71 lines
-  with the host in the flash (Cortex-M33 / Hazard3), 853 / 757 to 759
-  missing 5 / 2 with it InRam, against `spi.req`'s 678 / 656 warm from the
-  flash and 687 / 660 to 662 InRam**; the few left are the
+  and read after the wall - **5583 / 5036 cycles missing 74 / 70 lines
+  with the host in the flash (Cortex-M33 / Hazard3), 853 / 760
+  missing 5 / 5 with it InRam, against `spi.req`'s 685 / 650 warm from the
+  flash and 687 / 663 InRam**; the few left are the
   caller's (the call site with the ruler's reads around it, and on the
-  Cortex-M33 the veneer). THE WARM PRICE of InRam is the call: on the
+  Cortex-M33 the veneer). WARM, InRam reads dearer in `spi.req`: on the
   Cortex-M33 a `bl` reaches 16 MB and the SRAM is 256 MB from the flash,
   so a call across goes through a stub the linker inserts (`ldr.w pc,
-  [pc]` and a word), a request 8 to 10 cycles dearer in `spi.req`; on Hazard3
-  `auipc` and `jalr` reach, and the request reads 4 to 7 cycles dearer. The
+  [pc]` and a word), the request 2 to 5 cycles dearer; on Hazard3
+  `auipc` and `jalr` reach, and it reads 6 to 14 dearer, so the call is not all of it and the rest is not split. The
   engined block cold (letter d after letter c, 16 frames) from the flash 13028
   / 10143 cycles, with the host InRam 3896 / 3928, with the vectors placed
   7862 / 6948, with both 1639 / 2457, against 725 to 781 warm with the host
   or the vectors in SRAM (1688 to 2020 / 882 to 992 warm from the flash in
-  this image, letter d's item above).
+  that table's image).
 - **THE VENDOR'S LIBRARY DOING THE SAME TRANSFER ON THE SAME BOARD** is
   the oracle for both numbers: the pico-sdk 2.3.1's `hardware_spi` and
   `hardware_dma`, built by its own CMake with its own crt, SPI0 on the

@@ -484,7 +484,7 @@ void tn_write_nack() {
     // holds ahead of it. The longest write, so that the channel is still
     // pouring into the flushed FIFO when the host's vector comes: refused at the
     // twentieth, some 217 of its 253 entries remain, where a write of 64 leaves
-    // 44, which were gone before the vector on the Cortex-M33 - and the abort's
+    // some 26 of its 62, which were gone before the vector on the Cortex-M33 - and the abort's
     // stop is judged only on a block that outlasts the vector (the rest falls
     // into the flushed FIFO whether the channel is stopped or not).
     twilink::Params a = serve_params(300, 0x10);

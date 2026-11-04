@@ -1108,7 +1108,8 @@ void e_cold() {
     const SpiRate& rate = e_rates[2];
     const uint32_t sck = Plain::sck_hz(rate.clock);
     const uint32_t wire = static_cast<uint32_t>(static_cast<uint64_t>(3) * 8u * Ruler::hz() / sck);
-    const uint32_t gap = static_cast<uint32_t>(static_cast<uint64_t>(3) * 3u * Ruler::hz() / (2u * sck));
+    // One gap: a gap stands between two frames of a phase, and the command byte's phase has one frame.
+    const uint32_t gap = static_cast<uint32_t>(static_cast<uint64_t>(3) * Ruler::hz() / (2u * sck));
     const ColdRun first = e_cold_once(false);
     const ColdRun repeat = e_cold_once(false);
     const ColdRun cold = e_cold_once(true);

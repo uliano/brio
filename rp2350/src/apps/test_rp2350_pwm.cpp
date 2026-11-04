@@ -23,7 +23,7 @@
 //   GP17 (slice 0 B, an output)  ->  GP9  (slice 4 B, an INPUT)
 //   GP12 (slice 6 A, an output) <->  GP14 (slice 7 A, no input at all)
 //
-// - no pad the pair uses. Only a B pin is a PWM input (table 1130), which
+// - no pad the pair uses. Only a B pin is a PWM input (table 1183), which
 // is why the two measuring wires end on an odd GPIO. The measuring slice
 // counts the edges of the wire (the frequency) or the divided clock while
 // the wire is high (the duty) over a window the system timer times. The
@@ -37,7 +37,7 @@
 // every frequency below is judged against.
 //
 // What is exercised, letter by letter:
-//   a  the block, WIRELESS: table 1130 as the driver states it in both
+//   a  the block, WIRELESS: table 1183 as the driver states it in both
 //      halves, the period arithmetic and the chooser at this clk_sys, the
 //      divider's own refusals, the reset state, a configuration read
 //      back, the counter running and stopped, twelve slices started in
@@ -434,7 +434,7 @@ void ti_solved() {
 // a - the block, wireless
 // =============================================================================
 void ta_block() {
-    bench.verdict("table 1130 as the driver states it: GPIO 0 is 0A, 1 is 0B, 13 is 6B, 15 is 7B, "
+    bench.verdict("table 1183 as the driver states it: GPIO 0 is 0A, 1 is 0B, 13 is 6B, 15 is 7B, "
                   "16 is 0A again, 31 is 7B - and the half this chip added, 32 is 8A, 39 is 11B, "
                   "40 is 8A again, 47 is 11B; only an odd GPIO is an input",
                   pwm_slice_of(0) == 0u && !pwm_pin_is_b(0) && pwm_pin_is_b(1) &&
@@ -983,7 +983,7 @@ void th_lamp() {
 // =============================================================================
 
 /// ONE OUTPUT of a slice above the seventh, on THE TWO PADS that carry it
-/// (table 1130's repeat: GP32 and GP40 are both slice 8's A). No wire of
+/// (table 1183's repeat: GP32 and GP40 are both slice 8's A). No wire of
 /// this desk reaches those pads, and no slice can read an A output
 /// anyway, so what measures them is SIO - which reads a pad whoever owns
 /// it - and both bits come from ONE word read, which is what makes

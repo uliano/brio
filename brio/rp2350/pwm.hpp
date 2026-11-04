@@ -71,7 +71,7 @@
  * belongs to one line: enabled in both, whichever handler runs first
  * clears its raw flag and the other line's handler finds nothing.
  *
- * The pins (table 1130, and the GPIO function table of 9.4). Every GPIO
+ * The pins (table 1183, and the GPIO function table of 9.4). Every GPIO
  * is a PWM pin. GPIO 0..31 belong to slices 0..7 - GPIO n to slice
  * (n / 2) mod 8, its A output when n is even, its B when odd, the pattern
  * repeating at GPIO 16 - and GPIO 32..47 belong to slices 8..11 the same
@@ -121,7 +121,7 @@ inline constexpr uint8_t pwm_slice_count = 12;
 /// The two interrupt lines of 12.5.2.7.
 inline constexpr uint8_t pwm_irq_lines = 2;
 
-/// Table 1130: the slice of a GPIO. GPIO 0..31 walk slices 0..7 twice,
+/// Table 1183: the slice of a GPIO. GPIO 0..31 walk slices 0..7 twice,
 /// GPIO 32..47 walk slices 8..11 twice.
 constexpr uint8_t pwm_slice_of(uint8_t pin) {
     return pin < 32u ? static_cast<uint8_t>((pin >> 1) & 7u)
@@ -522,7 +522,7 @@ struct PwmPair {
     PwmPair() = delete;
     static_assert(pwm_pin_valid(pin_a) && pwm_pin_valid(pin_b), "brio PwmPair: this package has no such GPIO");
     static_assert(pwm_slice_of(pin_a) == pwm_slice_of(pin_b) && !pwm_pin_is_b(pin_a) && pwm_pin_is_b(pin_b),
-                  "brio PwmPair: the pair is the A and the B output of ONE slice (table 1130: an even GPIO "
+                  "brio PwmPair: the pair is the A and the B output of ONE slice (table 1183: an even GPIO "
                   "and an odd one of the same slice)");
     static_assert(top < 0xFFFFu, "brio PwmPair: TOP 0xFFFE at most");
 
@@ -573,7 +573,7 @@ template <uint8_t pin_b>
 struct PwmEdgeCounter {
     PwmEdgeCounter() = delete;
     static_assert(pwm_pin_valid(pin_b) && pwm_pin_is_b(pin_b),
-                  "brio PwmEdgeCounter: only a B pin is an input (table 1130: an odd GPIO this package has)");
+                  "brio PwmEdgeCounter: only a B pin is an input (table 1183: an odd GPIO this package has)");
     using Slice = PwmSlice<pwm_slice_of(pin_b)>;
 
     static bool setup(bool falling = false, PwmDivider divider = {}, uint16_t top = 0xFFFF,
@@ -603,7 +603,7 @@ template <uint8_t pin_b>
 struct PwmLevelCounter {
     PwmLevelCounter() = delete;
     static_assert(pwm_pin_valid(pin_b) && pwm_pin_is_b(pin_b),
-                  "brio PwmLevelCounter: only a B pin is an input (table 1130: an odd GPIO this package has)");
+                  "brio PwmLevelCounter: only a B pin is an input (table 1183: an odd GPIO this package has)");
     using Slice = PwmSlice<pwm_slice_of(pin_b)>;
 
     static bool setup(PwmDivider divider = {}, uint16_t top = 0xFFFF, PinPull pull = PinPull::none) {
@@ -672,7 +672,7 @@ struct PwmPeriodicTick {
 // The chapter's own arithmetic, pinned at compile time
 // =============================================================================
 
-// Table 1130, in both halves of the map and at both of its repeats.
+// Table 1183, in both halves of the map and at both of its repeats.
 static_assert(pwm_slice_of(0) == 0u && pwm_slice_of(13) == 6u && pwm_slice_of(15) == 7u &&
               pwm_slice_of(16) == 0u && pwm_slice_of(29) == 6u && pwm_slice_of(31) == 7u);
 static_assert(pwm_slice_of(32) == 8u && pwm_slice_of(35) == 9u && pwm_slice_of(39) == 11u &&

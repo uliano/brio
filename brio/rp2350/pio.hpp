@@ -148,7 +148,7 @@
  * read of RXFx + 3 takes the top byte of an entry, where a right-shifting
  * IN leaves eight bits (11.6.4).
  *
- * No erratum of appendix E names this block. What does reach it is
+ * No erratum of appendix D names this block. What does reach it is
  * RP2350-E9, which is the pads': a floating pad with its input buffer
  * enabled reads high on stepping A2, so a program that watches an
  * undriven pin is watching the leak and not the wire (rp2350/pin.hpp).

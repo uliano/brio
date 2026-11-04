@@ -1193,13 +1193,16 @@ SpiReqRun e_best(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     return best;
 }
 
-/// The wire's cycles for `bytes` at `sck`, and the same with mode 0's gap of
-/// 1.5 SCK periods a frame (letter d's measurement, 12.3.4.10).
+/// The wire's cycles for `bytes` at `sck`.
 uint32_t e_wire_cycles(uint32_t bytes, uint32_t sck) {
     return static_cast<uint32_t>(static_cast<uint64_t>(bytes) * 8u * Ruler::hz() / sck);
 }
+/// Mode 0's gaps in a phase of `frames`, 1.5 SCK periods between two frames
+/// (letter d's measurement, 12.3.4.10): none at a phase's last frame, so none
+/// in a command phase of one byte. spi.poll's sixteen frames, mode 0 less mode
+/// 3, read fifteen of them and the last frame's half period.
 uint32_t e_gap_cycles(uint32_t frames, uint32_t sck) {
-    return static_cast<uint32_t>(static_cast<uint64_t>(frames) * 3u * Ruler::hz() / (2u * sck));
+    return frames > 1u ? (frames - 1u) * (3u * Ruler::hz() / (2u * sck)) : 0u;
 }
 
 void e_print_per_frame(const char* op, const SpiRate& rate, SpiDataSize bits, SpiMode mode,
@@ -1338,7 +1341,7 @@ void e_cold() {
     const SpiRate& rate = e_rates[2];
     const uint32_t sck = Plain::sck_hz(rate.clock);
     const uint32_t wire = e_wire_cycles(3, sck);
-    const uint32_t gap = e_gap_cycles(3, sck);
+    const uint32_t gap = e_gap_cycles(2, sck);   // the command byte's phase has none
     const ColdRun first = e_cold_once(false);
     const ColdRun repeat = e_cold_once(false);
     const ColdRun cold = e_cold_once(true);
@@ -1405,7 +1408,7 @@ void te_host() {
             e_best<Plain>(1, len, req_rate.clock, SpiMode::mode0, SpiDataSize::bits8, true, false);
         const uint32_t n = 1u + len;
         const uint32_t wire = e_wire_cycles(n, req_sck);
-        const uint32_t gap = e_gap_cycles(n, req_sck);
+        const uint32_t gap = e_gap_cycles(len, req_sck);   // the command byte's phase has none
         bench_line(serial, "spi.req", n, run.sample, Ruler::hz(), req_sck / 8u);
         print(serial, "  spi.req: a command byte and ", len, " data bytes at ", req_rate.name,
               ": the wire ", wire, " cycles (", wire + gap, " with the gap), the fixed cost ",

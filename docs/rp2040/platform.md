@@ -736,9 +736,8 @@ cell WARM / COLD - cold read by letter c, the XIP cache flushed before
 every timed run). F: every driver InFlash and every vector in the flash
 (the default); R: the drivers InRam; V: the vectors placed; B: both.
 Each cell is the range over three runs or more where the runs spread
-(ten warm on F, thirteen on B, six on R; letter i ten times cold on F
-and twenty on B); the I2C rows are letter i's over five warm and five cold
-runs on each image.
+(ten warm on F, thirteen on B, six on R); the I2C rows are letter i's over five
+warm and five cold runs on each image.
 
 | path | F | R | V | B |
 |---|---|---|---|---|
