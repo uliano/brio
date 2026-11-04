@@ -34,7 +34,7 @@
  *                        is the application's.
  *
  * The smallest use, a bus with one device driven from the loop
- * (docs/stm32f4/i2c.md, "How to use it", on the STM32F429I-DISC1):
+ * (docs/stm32f4/i2c.md's opening, on the STM32F429I-DISC1):
  *
  *     constexpr brio::I2cPins pins{.scl = {'A', 8, brio::PinFunction::af4},
  *                                  .sda = {'C', 9, brio::PinFunction::af4}};
@@ -1763,7 +1763,7 @@ private:
         *t_.rx++ = S::data();
         // Bounded (wait_until's 400 000 polls) and its answer discarded: a
         // bound that runs out reads DR regardless and the tenure reports
-        // i2c_ok (docs/stm32f4/i2c.md lists it as open).
+        // i2c_ok (docs/stm32f4/i2c.md lists it).
         (void)wait_until([] { return S::flag(I2cFlag::rx_not_empty); });
         *t_.rx = S::data();
         return finish(i2c_ok);

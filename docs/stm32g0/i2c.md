@@ -4,13 +4,15 @@ This document is for a programmer who needs a device on an I2C bus: a
 sensor read, a register written, several devices sharing two wires
 through the bus arbiter ([design/i2c-bus.md](../design/i2c-bus.md) is
 the model), or this chip answering as a target. `brio/stm32g0/i2c.hpp`
-is RM0444 chapter 32 as three types: `I2c<n>`, the instance;
-`I2cHost<n, pins, TxEngine, RxEngine>`, the transfer engine
-`util/i2c_bus.hpp` drives; and `I2cClient<n, pins>`, the target role (the
-manual's controller and target are this page's host and client too).
+is RM0444 chapter 32 as three types: `I2c<n>`, the resource, one function per
+register fact; `I2cHost<n, pins, TxEngine, RxEngine>`, the host task, which
+`util/i2c_bus.hpp` drives (a task, in brio, is a driver layer with state of its
+own, served from its peripheral's interrupts; `TxEngine` and `RxEngine` name the
+DMA channels bound to the host, its engines); and `I2cClient<n, pins>`, the target
+role (the manual's controller and target are this page's host and client too).
 `I2cHost`'s Request has the fields of `avrxt/twi.hpp`'s and
 `samc21/i2c.hpp`'s, so `util/i2c_bus.hpp` and `util/bus_master.hpp` drive
-this engine as they are written, and one more, `engine`, which names the
+this host as they are written, and one more, `engine`, which names the
 mechanism that moves the data (`util/i2c_bus.hpp`): the interrupt, what a
 request naming nothing gets, or the DMA channels bound to the host.
 
@@ -49,32 +51,38 @@ brio::post<Sensors>(I2cHw::Request{
 
 An excerpt: it assumes the program's platform `P`, its clock object
 `clock` and an active object `MyAo` that handles `I2cDone`, whose `status`
-field is `i2c_ok` or the code that says what the wire did. `init()`
+field is `i2c_ok` or the code that says what the wire did. `4` is the arbiter's
+queue of requests and `BusPassThrough` the failure policy that hands every status
+to the requester and retries nothing. One request is one tenure: one START to its
+STOP, the bus held for one request. `init()`
 answers whether there is a bus at all, and the empty branch is where a
 program decides what it does without one; `start()` is the arbiter's to
 call and to answer, so the active object reads the outcome in its
-`I2cDone`, a refused request included (`i2c_rejected`). What decides
-correctness even there: pull-up resistors on
-both wires,
-which are the board's and not the chip's; the two pads named with the
-alternate-function numbers the datasheet gives for that instance, which
-nothing in the code can check; `init()` after the clock task's, with a
-kernel clock chosen (HSI16 keeps the bus rate whatever the core does, and
-at 16 MHz it refuses Fm+: below);
-and the instance's vector bound to `isr()`, with the completion posted
-to the bus active object as above. A request's buffers are lent until
-the reply event arrives ([design/kernel.md](../design/kernel.md), the
-loans). The per-bus timeout given to the arbiter is what ends a
-tenure a wedged device holds, because on this silicon a held data line
-parks the START and raises no error, unless a PE cycle came first (below,
-"The two signatures"), and it must sit above the longest legal tenure: the
-20 ms here fits requests of some 200 bytes at 100 kHz, nine periods a
-byte, and a longer one or a device that stretches wants more
-([design/i2c-bus.md](../design/i2c-bus.md)). The chapter is built whole and measured on
-the Nucleo's own self-link and, on the same bus, against the desk
-partner, an STM32F446RE - the host under the preemptive kernel too -
-and on the two smaller parts against a second STM32G0; what is not
-covered is listed at the end, with the reason in each case.
+`I2cDone`, a request the host refuses included (`i2c_rejected`).
+
+What decides correctness even there:
+
+- **Pull-ups and pads.** Pull-up resistors on both wires are the board's and not
+  the chip's; the two pads are named with the alternate-function numbers the
+  datasheet gives for that instance, which nothing in the code can check.
+- **`init()` after the clock task's, with a kernel clock chosen.** HSI16 keeps the
+  bus rate whatever the core does, and at 16 MHz it refuses Fm+ (below).
+- **The vector.** The instance's vector is bound to `isr()`, with the completion
+  posted to the bus active object as above.
+- **The buffers.** A request's buffers are lent until the reply event arrives
+  ([design/kernel.md](../design/kernel.md), the loans).
+- **The timeout.** The per-bus timeout given to the arbiter is what ends a tenure
+  a wedged device holds, because on this silicon a held data line parks the START
+  and raises no error, unless a PE cycle came first (below, "The two signatures").
+  It must sit above the longest legal tenure: the 20 ms here fits requests of some
+  200 bytes at 100 kHz, nine periods a byte, and a longer one or a device that
+  stretches wants more ([design/i2c-bus.md](../design/i2c-bus.md)).
+
+The chapter is built whole and measured on the STM32G0B1RE: on the Nucleo's own
+self-link and, on the same bus, against a partner board, an STM32F446RE, the host
+under the preemptive kernel too. The two smaller parts have run the suite's peer
+letters against a second STM32G0, not today's suite (the sections on those parts);
+what is not covered is listed at the end, with the reason in each case.
 
 ## Documents of record
 
@@ -87,7 +95,8 @@ covered is listed at the end, with the reason in each case.
   analog filter's delay.
 - ES0548 Rev 3 items 2.10.1 and 2.10.2, both live on this die's
   revision, and 2.2.4 from outside the chapter (it bites the wake). ES0418
-  Rev 5 item 2.11.6, the STM32G071's alone ("On the STM32G071RB" below).
+  Rev 5 item 2.11.6, listed on the STM32G071's sheet and not on the G0B1's or the
+  G031's; the other parts' sheets have not been read ("On the STM32G071RB" below).
 
 ## What the silicon does
 
@@ -150,7 +159,7 @@ both instances' bodies. I2C1's line is its own everywhere - and it is
 also EXTI line 23, the wake, so arming the wake needs the EXTI's mask
 and not just WUPEN.
 
-**What the chapter offers a controller's transfer, and what the engine
+**What the chapter offers a controller's transfer, and what the host
 takes** - the inventory every cost below is read against:
 
 | offer (section) | taken? | why |
@@ -159,12 +168,12 @@ takes** - the inventory every cost below is read against:
 | TC with AUTOEND clear (32.4.9, 32.9.2) | yes, for a write-then-read alone | the repeated START is the CR2 store at TC; every other shape never raises TC and its enable stays down |
 | RELOAD and TCR past 255 bytes (32.4.9) | resource only | the Request's lengths are eight bits on every target (below, "Not covered yet") |
 | one TXDR and one RXDR, no FIFO (32.9.10, 32.9.11) | the silicon's | one interrupt per data byte, called the pump on this page; the DMA engines below carry a longer run |
-| the first byte written before the START (TXE stands at rest, 32.9.7) | yes, on either engine | the TXIS for that byte never rises (the TXIS events count NBYTES, 32.4.9): a one-byte write is the STOPF alone, the vendor's library does the same; and ES0418 2.11.6's first workaround is the host's one path (below) |
+| the first byte written before the START (TXE stands at rest, 32.9.7) | yes, under `interrupt` and under `dma` | the TXIS for that byte never rises (the TXIS events count NBYTES, 32.4.9): a one-byte write is the STOPF alone, the vendor's library does the same; and it is ES0418 2.11.6's first workaround, in the band or out of it (below) |
 | a TXDR flush by writing TXE (32.9.7) | yes, at every start() with a write half | a byte a failed tenure left in TXDR refuses the preload (32.9.11) and is sent in its place, the write's last byte never (measured, "A refused write" below) |
 | the last byte of a read left in RXDR | yes | nothing follows it - the controller NACKs it and stops under AUTOEND - so RXIE goes down after the second-to-last and the STOPF entry reads it: a one-byte read is one interrupt |
 | NACKIE (table 181) | declined | a STOP follows every NACK by itself (32.4.9), so the STOPF entry reads NACKF from the status register and one entry serves a refused tenure |
 | the six enables at their flags' bit positions (table 181, 32.9.7) | yes | the pending mask is CR1 masked and shifted, no test per enable |
-| TXDMAEN and RXDMAEN (32.7) | yes, two engine parameters | the program names the engine per request (`Request::engine`, below): under `dma` a read half with a buffer rides a channel at any length, a write half past its preloaded first byte, and neither takes a data interrupt; a half with no buffer stays on the pump |
+| TXDMAEN and RXDMAEN (32.7) | yes, two engine parameters | the program names the mechanism per request (`Request::engine`, below): under `dma` a read half with a buffer rides a channel at any length, a write half past its preloaded first byte, and neither takes a data interrupt; a half with no buffer stays on the pump |
 | the independent kernel clock, the Fm+ drive, the wake, SMBus, the PEC, both filters | yes, measured (below) | none of them bears on a transfer's cost but the filters' share of the SCL period |
 
 ## Types and verbs
@@ -172,7 +181,7 @@ takes** - the inventory every cost below is read against:
 `I2c<n>` carries the whole register description: the enable and 32.4.6's
 disable, the configuration (TIMINGR, both filters, NOSTRETCH, SBC, the
 general call, the wake, the SMBus enables and the PEC), the two own
-addresses with OA2's seven mask codes, the controller's transfer engine
+addresses with OA2's seven mask codes, the controller's transfer
 (`transfer()`, `transfer_now()`, `start()`, `stop()`, `reload()`), the
 data registers, the flags with their W1C clears, the interrupts, the two
 DMA enables, `enables()` - the seven interrupt enables and the two DMA
@@ -199,7 +208,7 @@ four field times and 32.4.8's minimum stretch. `i2c_setup_ok()` and
 inequalities. The SMBus time-outs have the same pair,
 `i2c_timeout_code_for()` and `i2c_timeout_us()`.
 
-`I2cHost<n, pins, TxEngine, RxEngine>` is the engine: one Request is one
+`I2cHost<n, pins, TxEngine, RxEngine>` is the host task: one Request is one
 bus tenure in the four shapes I2C devices use (write, read,
 write-then-read joined by a repeated START, and the empty probe),
 asynchronous whenever the wire moves, with the `i2c_*` codes produced
@@ -208,9 +217,9 @@ clock cannot produce, an address outside 0x08..0x77 (`i2c_rejected`;
 the general call and the 10-bit prefixes are refused by every host,
 [../design/i2c-bus.md](../design/i2c-bus.md)) and `dma` on a host with
 no engines bound (`i2c_rejected` too) - complete inside `start()` and reach
-the requester through the arbiter all the same. So would a START still
-standing (`i2c_bus_error`), which only a program's own use of the resource can
-leave, the arbiter's `recover()` taking a parked one.
+the requester through the arbiter all the same. A START still standing completes
+there too, as `i2c_bus_error`; only a program's own use of the resource can leave
+one, because the arbiter's `recover()` takes a parked one.
 `init(clock, kernel, filters, bus)`, `rebase(hz)` (a ClockUser),
 `speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
 `recover()`, `unstick()`, `fast_plus_drive()` and
@@ -218,17 +227,18 @@ leave, the arbiter's `recover()` taking a parked one.
 in one store at `start()` and puts them back to ERRIE alone at its end,
 so nothing one tenure armed or dropped reaches the next. The two DMA
 engine parameters default to `NoDmaEngine` and every DMA branch folds away,
-and `has_dma` says which a host is. Named, they carry the data of a
+and `has_dma` says which a host is; one engine of two does not compile. Named,
+they carry the data of a
 tenure (32.7: the address cannot be moved by DMA) when the Request says
 so in `engine`, and the host never chooses: `interrupt`, the default,
 runs both halves on the pump at any length; `dma` runs them on the
 engines at any length - 32.7.1 loads TXDR whenever
-TXIS is set and 32.7.2 empties RXDR whenever RXNE is, with no length below
-which either does not hold. A write half's first byte goes into TXDR before
-the START on either value, so its channel starts on the second byte and a
-write of one byte starts none; a read of one starts its channel. The one half
-the engines do not carry is a half with no buffer (a null pointer and a
-length), which stays on the pump under `dma` too: a write sends 0xFF for each
+TXIS is set and 32.7.2 empties RXDR whenever RXNE is, and neither names a minimum
+length. A half is a request's written bytes or its read bytes. A write half's first
+byte goes into TXDR before the START on either value, so its channel starts on the
+second byte and a write of one byte starts none; a read of one starts its channel.
+The Request does not offer a half with no buffer (a null pointer and a length) as a
+use; if one comes it stays on the pump under `dma` too: a write sends 0xFF for each
 byte, a read discards what it receives, and the request completes. A channel
 is this host's alone ([../design/dma.md](../design/dma.md), the ownership
 rule), so `start()` does not ask it whether it started. `dma` on a host
@@ -241,20 +251,20 @@ padding after `speed`: `Request` is 28 bytes with it and without it, a
 errors alone: the tenure's own STOP after NBYTES proves every byte went
 through TXDR and RXDR, so a tenure takes the I2C's interrupts and no DMA
 one, and the tenure's one exit (`finish()`, run by the vector that ends
-it: the status set, the enables put back, the flags swept) completes the transmit engine
-on that proof ([dma.md](dma.md), "Two moments"). A channel's transfer
+it: the status set, the enables put back, the flags swept) closes the transmit
+engine's DMA block on that proof ([dma.md](dma.md), "Two moments"). A channel's transfer
 error is the one DMA event the host takes: `dma_isr()`, the body the
 program binds to the channels' vectors, ends the tenure with a STOP and
 the status `i2c_dma_fault` (a DMA channel reported an error mid-tenure)
 and returns true, and that vector posts `TransferDone` as the I2C
-vector does. Both arm at `high` ([the DMA design
+vector does. Both engines arm at DMA priority `high` ([the DMA design
 page](../design/dma.md)):
 a byte the receive channel has not taken leaves RXNE up and holds the
 next in the shift register with SCL stretched until RXDR is read, and a
 byte the transmit channel has not written stretches SCL after the ninth
 pulse until TXDR is (32.4.7) - a starved channel slows the bus and loses
 nothing. The resource's `release()` - the host's and the client's -
-disables the block and gates its clock, no reset pulse; the tasks'
+disables the peripheral and gates its clock, no reset pulse; the tasks'
 `init()` start from the reset line, so a DMA enable a tenure left set
 cannot raise its request again when the clock returns
 ([dma.md](dma.md), "A released requester holds nothing here").
@@ -293,7 +303,8 @@ names nothing runs on the interrupt. An excerpt, in the smallest use's
 setting (`P`, `clock`, `MyAo`, `bus_pins`), the engined host taking the
 place of `I2cHw` and an arbiter of its own the place of `Sensors`; its
 `init()` and its I2C1 vector are the smallest use's with these two names, and
-no DMA call joins them: an engine's arming opens the controller's clock.
+the program makes no DMA call of its own: arming an engine opens the DMA
+controller's clock.
 `init()` enables both channels' interrupt lines for a transfer error, so both
 vectors are bound: an unbound one is the crt's silent spin. DMA1's channel 1
 has a vector of its own on every part of the family and
@@ -366,7 +377,7 @@ the reason is in the findings.
 
 ## Bench findings
 
-Measured by `test_stm32_i2c` on the Nucleo-G0B1RE's desk, 235 verdicts
+Measured by `test_stm32_i2c` on the Nucleo-G0B1RE, 235 verdicts
 in two sets, `z` green in three runs, `w` in three, and letters `c`, `u`, `v`
 and `B` in ten each
 (the letters named below are the suite's console keys, each the group of
@@ -412,19 +423,19 @@ peripheral sends by itself after a NACK raises its own flag later; an
 entry that served NACKF and then swept the status register would clear
 that STOPF the moment it set, and the tenure would keep its status, lose
 its flags and never complete, and the symptom would look like an order
-dependency between letters, as a race usually does at first. The engine
-takes no NACK interrupt at all: the STOPF entry reads NACKF, which
+dependency between letters. The host takes no NACK interrupt at all: the STOPF
+entry reads NACKF, which
 stands until cleared, and names the refusal ("A refused write" below says
 how).
 
 **Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
-ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
+ERRIE a plain I2C host arms for BERR and ARLO. They are swept at the
 bottom of the handler, and the sweep touches nothing a branch owns: a
 flag that sets between the handler's read of the status and the sweep -
 a TXIS, a byte in RXDR, the TC that ends a write-then-read's write half -
 is the next entry's to serve. What a sweep cannot reach is disarmed, and
 inside a tenure that is TCR alone, which only RELOAD raises and which the
-engine never asks for. TC is never disarmed there: RM0444 32.4.7 keeps
+host never asks for. TC is never disarmed there: RM0444 32.4.7 keeps
 SCL stretched as long as TC stands, so a disarmed TCIE would be a lost
 repeated START and a tenure left to the per-bus timeout. ERRIE is never
 disarmed either: all six error conditions have a clear bit, so an error
@@ -455,11 +466,12 @@ target's SDADEL and SCLDEL are solved against the fastest bus it expects,
 so a client is subject to the same 20 MHz floor - and HSI16 is 16 MHz,
 while the wake from Stop accepts HSI16 and nothing else (32.4.16).
 
-**A requested rate is a ceiling, and the oracle's would not be.** This
+**A requested rate is a ceiling, and the rate of ST's timing utility would not
+be.** This
 wire's own tSYNC, measured as the difference between a tenure's average
 period and the register's own tSCLL + tSCLH (a 32-byte tenure, duration /
 (9 x 33), the target in NOSTRETCH so it holds the clock for nothing, at
-64 MHz on PCLK), is **451, 402 and 395 ns** at the three speeds on the desk's
+64 MHz on PCLK), is **451, 402 and 396 ns** at the three speeds on the bench's
 wire (the self-link's two nodes shared with two more boards' taps,
 2.2 kOhm pull-ups) - against the 1000 / 750 / 500 ns the manual's tables
 charge, so a chooser solved against those runs this wire fast: 105.1 kHz
@@ -497,7 +509,7 @@ charges at its floor - the gap a stated `sync_ns` closes (the 100 kHz
 rung brought within a per cent, above); the 16 MHz rung's 929 is the
 same register shape on a kernel a quarter as fast, its fixed costs a
 larger share. At a 2 MHz core the stopwatch cannot time SCL: with the
-kernel on HSI16 the tenure takes 0.64 of the 100 kHz wire because the
+kernel on HSI16 the tenure's rate reads 0.64 of the 100 kHz asked because the
 controller holds SCL low until its TXIS entry refills TXDR and the
 target stretches until its own entry reads RXDR (32.4.9, 32.4.17), both
 served by the one 2 MHz core - and no pad is spare for SCL's edges. That
@@ -505,7 +517,7 @@ rung's rate rests on the register instead: its TIMINGR on HSI16 is
 0x1091222B, the very word the 16 MHz rung timed at 929 on a 16 MHz
 kernel, and the letter checks the identity.
 
-**ST's own arithmetic is the oracle, and its error runs fast.** The HAL
+**ST's own arithmetic, the reference for the choice above, errs fast.** The HAL
 takes a precomputed TIMINGR; ST computes it in CubeMX and in the timing
 utility its STM32Cube examples ship (`I2C_GetTiming()`, the
 `i2c_timing_utility.c` of STM32CubeH7's and STM32CubeU5's I2C examples,
@@ -517,8 +529,8 @@ rate asked inside a band of plus or minus 20 per cent - so it lands on
 either side of the rate on its own model, and on a wire with faster edges
 than it assumes, above it. At 64 MHz it answers 0x60702729, 0x10A11626
 and 0x00610E1A: on the fastest wire 109.6 kHz, 477.6 kHz and 1.23 MHz;
-on this one (its halves plus the measured 452, 403 and 396 ns) 106.1 kHz,
-427.3 kHz and 950 kHz - two rungs of three above the rate asked, the Fm+
+on this one (its halves plus the measured 451, 402 and 396 ns) 106.2 kHz,
+427.4 kHz and 950 kHz - two rungs of three above the rate asked, the Fm+
 one below it because this wire's 396 ns exceed the 322 its typical edges
 make. It also answers an Fm+ word at 16 MHz, where ES0548 2.10.1 asks
 20. The two methods agree on everything but that charge -
@@ -541,7 +553,8 @@ or 564 and 1032 us, where the baseline plus nine holds would be 419, 689 and
 1139: some 12 to 15 us a hold short, because
 a commanded hold lands on top of the client's own turnaround, its ISR's
 entry and read, which already stretch SCL in the unstretched baseline;
-the suite judges the slope, where that constant cancels. With NOSTRETCH set, a
+the suite judges the slope, where most of that shortfall cancels (the slope itself
+reads 4 per cent over the commanded step). With NOSTRETCH set, a
 late target raises OVR and **0xFF goes out in the missing byte's place**,
 exactly as 32.4.8 says, while the tenure itself completes - an underrun
 is not a fault the controller sees.
@@ -550,16 +563,16 @@ is not a fault the controller sees.
 the host's own unserved hold trips TIMEOUTA at a 4 ms limit (ISR
 `0x1023`), and a **peer's 6 ms hold does not trip it** - nor does
 TIMEOUTB, which 32.9.6 makes this controller's own cumulative stretch
-(tLOW:MEXT). So 32.4.12's "if SCL is tied low" is this controller's own
-hold, and **on this block no silicon time-out watches a wire a client
+(tLOW:MEXT). So at these limits, on this die, 32.4.12's "if SCL is tied low" reads
+as this controller's own hold, and **no silicon time-out tripped on a wire a client
 wedged**. The SAM C21's differ, a client's stretch of SCL ending there
 under its armed time-outs, and neither sees a held SDA
 ([../design/i2c-bus.md](../design/i2c-bus.md), "The per-bus timeout"). TIDLE = 1 is
 accepted and reads back, but bus idle detection did not raise TIMEOUT on
 a bus idle for 2 ms against a 50 us limit - recorded, not judged. The
 FMPI2C of the STM32F446RE, this register file, reads otherwise on both counts
-([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)); the second list below says what
-would reconcile them.
+([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)); what separates them is not
+established, and the second list below says what would.
 
 **The PEC is the standard's CRC-8, pinned against a bitwise reference**:
 hardware `0x3D` against `0x3D` computed with C(x) = x8 + x2 + x + 1 over
@@ -590,7 +603,7 @@ unmoved. A filter deep enough to eat the low period is refused by
 `0xFF` when nine clocks and a STOP leave SDA still low (a short, not a
 client), and 0 again once the pad is given back.
 
-**`util/i2c_bus.hpp` over this engine**: four tenures queued through
+**`util/i2c_bus.hpp` over this host**: four tenures queued through
 `I2cBus` come back in order with the NACK delivered in its place as a
 reply; what will not fit the queue is rejected on the spot and every
 request is still answered exactly once; an idle bus votes for the sleep
@@ -601,26 +614,19 @@ carry the next tenure to `i2c_ok`.
 
 **ES0548 2.10.2 did not fire once.** The spurious master BERR was swept 0
 times across a whole `z` run. The driver counts it and never reports it -
-the erratum's own workaround - so `i2c_bus_error` from the engine is
+the erratum's own workaround - so `i2c_bus_error` from the host is
 `start()`'s answer below and never a flag this erratum can forge.
 
 **A START still standing is not taken by the ICR on this die.** 32.9.8 says
 writing ADDRCF "also clears the START bit", and `start()` opens with that write.
-Letter `c` parks a START behind a held SDA with the resource's own verb, ADDR
-clear: it stands through the write, where the same sequence on the STM32F446RE's
-FMPI2C takes it at once ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)). So the
-CR2 store at the end of `start()` can refuse (32.9.2 forbids moving CR2 while
-START stands), and the host answers `i2c_bus_error` with nothing moved. No
+Letter `c` parks a START behind a held SDA with `I2c<n>`'s own verb, with ADDR not
+set: the START stands through the write, where the same sequence on the
+STM32F446RE's FMPI2C takes it at once ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)).
+So the CR2 store at the end of `start()` can refuse (32.9.2 forbids moving CR2 while
+START stands), and the host answers `i2c_bus_error` with nothing on the wire and CR2
+unmoved; the first byte stays in TXDR, and under `dma` the channels stay started. No
 request through the arbiter meets this: a parked tenure is timed out, and
 `recover()`'s PE cycle, which the letter also judges, takes the START.
-
-Two facts about the bench itself: **a long wait inside an
-interrupt must be a counted loop**, because a stopwatch built on SysTick's
-VAL against the tick count runs backwards when a tick handler cannot
-preempt the interrupt reading it; and **a wire letter needs a flushed
-marker between its steps**, because an I2C storm starves main so
-completely that a letter which prints only at its end reports nothing at
-all.
 
 ### The host's cost (bench_stm32 letter i)
 
@@ -640,9 +646,10 @@ or two, the ruler read in the Stopwatch: about 400 cycles, the same in
 every column). The vendor's column is ST's HAL v1.4.7 on the same board
 and the same client (`HAL_I2C_Master_Transmit_IT`,
 `_Receive_IT`, `Mem_Read_IT`, a zero-length transmit as the probe, the
-DMA variants), CubeMX's G0 handler shape on the vector. At the 400 kHz
-rung, a rung being one of the three speeds - 374.4 kHz on the desk's wire under the ceiling default for brio,
-the HAL's TIMINGR words solved against the manual's budgets:
+DMA variants), CubeMX's G0 handler shape on the vector. A rung is one of the three
+speeds. This table is the 400 kHz rung, 374.4 kHz on the bench's wire under brio's
+ceiling default; the HAL's column ran on its TIMINGR words solved against the
+manual's budgets:
 
 | tenure | the rest (cycles), interrupts: brio | ST HAL |
 |---|---|---|
@@ -655,7 +662,7 @@ the HAL's TIMINGR words solved against the manual's budgets:
 | register read 1 + 16 | 1675, 17 | 2313, 19 |
 | probe answered | 1163, 1 | 1393, 1 |
 | probe not answered | 838, 1 | - |
-| write 255 through the engine: wall over wire, no cycles | x 1.00 | x 1.00 |
+| write 255 through the engines: wall over wire, no cycles | x 1.00 | x 1.00 |
 
 - **The interrupts are the silicon's floor.** N for a write or a read of
   N bytes, two for a one-byte register read, one for a probe either
@@ -667,20 +674,23 @@ the HAL's TIMINGR words solved against the manual's budgets:
   this engineless host: the slope from the 2- to the 16-byte rows is 169
   and 176 cycles between the meter's stamps (the bench's two reads of its
   timer around each entry), and 42 of those are the
-  stamps' own (`bench_stm32` letter `r`). ST's entry is 168 by the same
+  stamps' own (`bench_stm32` letter `r`, in another group image of the same
+  source, the letter `i` image not carrying it). ST's entry is 168 by the same
   reckoning. The core's own exception entry and return, which no stamp
   sees, comes on top of both (about 35 cycles, below). At 400 kHz a byte
   is 1538 cycles of wire, so the pump costs about a tenth of the core and
   keeps the wire's pace (x 1.00 at 255 bytes). The decode is one mask
   from CR1 (the six enables sit at their flags' positions) and one test
   for the six errors.
-- **`start()` is 230 cycles on the engineless host.** The letter's stopwatch
-  (its ruler) reads 292, and one read of it costs 62: the tenure copies the five
+- **`start()` is about 233 cycles for a write on the engineless host.** The letter's
+  stopwatch (its ruler) reads 292, and one read of it costs 59 (`bench_stm32` letter
+  `r`, the other group image again): the tenure copies the five
   fields its entries read and not the whole Request, and the CR2 word is built
   inline. The engined host's `start()`, timed the same way under "Which engine"
-  below, reads 346 to 353 cycles naming `interrupt` and 352 to 429 naming
-  `dma`. The 61 cycles it adds under `interrupt` (353 against 292, the same
-  ruler in both) are its own code: the engine
+  below, reads 325 to 353 cycles naming `interrupt` (the writes 346 to 353, the
+  reads 325 and 332) and 352 to 429 naming
+  `dma`. The 61 cycles it adds under `interrupt` (353 against 292, both writes, the
+  same ruler in both) are its own code: the engine
   field's compares, the two engine flags cleared, and a function about
   twice the engineless one's size (596 bytes against 316
   in this image) that keeps more of its state on the stack.
@@ -695,14 +705,15 @@ the HAL's TIMINGR words solved against the manual's budgets:
   the HAL's figure - the HAL preloads too, but its entry is the generic `I2C_Master_ISR_IT` (168
   cycles a byte, 403 for its STOPF entry against 228), it reads a
   one-byte read through an RXNE entry, and its register read takes four
-  interrupts to this engine's two.
+  interrupts to this host's two.
 - **The pump takes no placement** ([platform.md](platform.md), "Code in
   SRAM", which defines `InRam` and `.fast_text`): its entry through
-  util/placement.hpp's trampoline - built and
+util/placement.hpp's trampoline - built and
   measured in a scratch build, the same letter, a 255-byte tenure at
   100 kHz - took a written byte 167 cycles as an `InRam` instance behind
   the vector in the flash against 161 flattened inline in it, and a read
-  one 176 against 178: the veneer and the instance's own frame eat what
+  one 176 against 178 (both of that build, whose flash figures are not the 169 and
+  176 above): the veneer and the instance's own frame eat what
   the fetch saves on a body this short, so `I2cHost` has no placement
   parameter and an `InRam` given to it does not compile. The engined
   tenure's STOPF entry, once a tenure, came out 39 cycles shorter from
@@ -712,7 +723,7 @@ the HAL's TIMINGR words solved against the manual's budgets:
   the flash (`bench_stm32` with its vectors in `.fast_text`, a scratch
   build).
 - **The rungs are measured as the slope**: 98.3 kHz, 374.4 kHz and
-  854.0 kHz on the desk's wire under the ceiling default; the HAL's
+  854.0 kHz on the bench's wire under the ceiling default; the HAL's
   column was taken at the words solved against the manual's 1000 / 750
   / 500 ns of tSYNC, 106.5 kHz, 482.8 kHz and 1.216 MHz on the same
   board. `the rest` is a handler's and a channel's cost and the wire's
@@ -720,14 +731,14 @@ the HAL's TIMINGR words solved against the manual's budgets:
   rungs.
 - **The 1 MHz rung is not claimed as Fm+.** Released from low, SCL
   reaches the input's threshold 8 cycles and SDA 12 cycles after the
-  same steps on a line already high (125 and 190 ns at 64 MHz, the
-  poll's turn the resolution) - on an RC edge about 90 and 130 ns from
+  same steps on a line already high (125 and 190 ns at 64 MHz, to one turn of the
+  polling loop) - on an RC edge about 90 and 130 ns from
   30 to 70 per cent, the second over the 120 ns Fm+ allows a rise. The
   data is byte-exact at that rung all the same, on this short link.
 
 ### Which engine, by the cycles (bench_stm32 letter i, `i2c.cost`)
 
-The figures a program names its engine by: one Request on one engined
+The figures a program names its mechanism by: one Request on one engined
 host, a write and a read of 1, 2, 3, 4, 8 and 16 bytes, its `engine` field
 the only change between `interrupt` and `dma`, each side `start()` alone
 (masked, one ruler read in it), the host's vector and the DMA's metered in
@@ -750,28 +761,28 @@ A write of one under `dma` is the pump's preload and the pump's STOPF, its
 channel never started: it pays 6 cycles in `start()` and no more. From two bytes
 the channel carries the rest.
 
-On this block the engines cost the core fewer cycles than the pump from
+On this peripheral the engines cost the core fewer cycles than the pump from
 the smallest length N where E - F <= (N - 1) x b ([the I2C bus design
 page](../design/i2c-bus.md)): E is what the engines spend on a half,
 F what the pump spends on it beyond its bytes, b the pump's cost of a
 byte, and N - 1 because a half's first byte takes the pump no interrupt -
 the write's is preloaded, the read's taken at the STOPF.
 
-- **E - F, written**, is the write of two with the extra entry taken out:
+- **E - F for a write half** is the write of two with the extra entry taken out:
   the difference of -73 has one entry fewer on the engines, 176 cycles of slope
   between the stamps, so **103** (76 at `start()`, the channel's program; 27 at
-  the STOPF, completing the transmit engine). **Read**, the one-byte row, one
-  entry on each side so the stamps cancel: **64** (92 at `start()`; -28 at the
-  STOPF, the pump's last byte no longer read there).
+  the STOPF, closing the transmit engine's DMA block). **For a read half**, the
+  one-byte row, one entry on each side so the stamps cancel: **64** (92 at `start()`;
+  -28 at the STOPF, the pump's last byte no longer read there).
 - **b** is the slope of this engined host's pump, 176 cycles written and
   178 read between the stamps (the engineless host's 169 and 176 above
   are another body behind the same vector: the last item of this list); less
-  the stamps' 42 (`bench_stm32` letter `r`), that is 134 and 136. The core's own
+  the stamps' 42 (`bench_stm32` letter `r`, the other group image), that is 134 and 136. The core's own
   exception entry and return, which no stamp sees, comes on top: about
   35 cycles, an estimate and not a measurement - the Cortex-M0+'s entry
   latency is 15 cycles at zero wait states (ARM's figure, which the
   RP2040 datasheet 2.4.3.6 reproduces: the copy of the Cortex-M0+'s
-  figures on the desk), the return unstacks the same eight words, and
+  figures at hand), the return unstacks the same eight words, and
   this flash adds two wait states to the vector's fetch. So b is **about
   170 both ways**, and 134 at the least.
 - **So N = 2 in both directions, at every speed**: 103 and 64 are both under
@@ -782,13 +793,15 @@ the write's is preloaded, the read's taken at the STOPF.
   them, and a running program would lose a few cycles of contention at
   most, against the slack the choice at two bytes has: 170 less 103 is 67
   cycles written, 170 less 64 is 106 read.
-- **A register read names one engine for both halves.** The letter's own rows
+- **A register read names one mechanism for both halves.** The letter's own rows
   at 400 kHz, `start()` and the vector between the stamps, the pump's on the
   engineless host: at 1 + 1, 283 + 456 against 437 + 489, two entries each, so
   the pump by 187; at 1 + 2, 284 + 638 and three entries against 443 + 489 and
   two, level on the stamps (+10) with an entry fewer; at 1 + 16, 284 + 3102
-  against 443 + 489, the engines by 2454. So a one-byte index with a read of two
-  or more names `dma`.
+  against 443 + 489, the engines by 2454. The letter has no such row naming
+  `interrupt` on the engined host, whose `start()` reads about 60 cycles longer, so
+  on one host these would read about 126, -50 and 2515. Either way a one-byte index
+  with a read of two or more names `dma`.
 - **The speed changes neither figure.** The pump does not stretch at the
   top rung: SCL stretches only when TXDR is still empty or RXDR still full
   a whole byte after TXIS or RXNE rose (32.4.7), which at 64 MHz is at
@@ -800,19 +813,20 @@ the write's is preloaded, the read's taken at the STOPF.
 - **The core sleeps while a channel works.** `idle()` is DSB and WFI and
   asks no channel anything (`stm32g0/platform.hpp`), and in Sleep the DMA
   stays clocked (RM0444 table 27, and 5.4.18's DMA1SMEN and DMA2SMEN are set
-  at reset and written by no verb here). A Stop stops the DMA (table 27), and
-  a busy bus votes against one (the arbiter's PrepareSleep voter, above).
+at reset and written by no verb here). A Stop stops the DMA (table 27), and
+  a busy bus votes against one (the arbiter answers the `PrepareSleep` round,
+  [design/power.md](../design/power.md)).
   So on this family `dma` costs no sleep, only its fixed cycles.
 - **The choice itself costs `start()` one byte load and two compares**
   (the release listing): the first refuses `dma` on an engineless host
   and a value past the enumeration, the second skips the engines' launch
-  under `interrupt`; the two engine flags are cleared whichever engine is
+  under `interrupt`; the two engine flags are cleared whichever value is
   named. The vector's byte branches hold no call. A write half's preload is
-  the same flush, load and store under both values, and costs `dma` some fifteen
-  instructions over a channel carrying the whole run: the byte's load and store,
-  `pos_`, the run's address and length a byte on. On the cycles, 27: `start()`'s
-  difference between a write of two and a read of two, one image against itself,
-  was -21 with TXDR left empty and is +6.
+  the same flush, load and store under both values. Against a channel carrying the
+  whole run it costs `dma` some fifteen instructions: the byte's load and store, the
+  pump's position `pos_`, and the run's address and length moved on a byte. On the
+  cycles, 27: `start()`'s difference between a write of two and a read of two, one
+  image against itself, is +6, and -21 with TXDR left empty.
 - **The same instructions placed elsewhere cost differently**: two
   builds whose I2C vector is the same instruction for instruction, 20
   bytes apart in the flash, ran this letter's pump about 10 cycles an
@@ -824,17 +838,17 @@ the write's is preloaded, the read's taken at the STOPF.
   image's, and a difference between two rows of one image is what N
   rests on.
 
-**A refused write, position by position** (letter `v`, on the self-link,
-11 verdicts, ten runs of ten). I2C2 refuses through its target byte control the
-data byte the letter names; an address nobody answers refuses the address.
+**A refused write, position by position** (`test_stm32_i2c`'s letter `v`, on the self-link,
+11 verdicts, ten runs of ten). I2C2 NACKs through its target byte control the
+data byte the letter names; an address nobody answers is not acknowledged.
 Nineteen rows - the address under writes of one, two and sixteen and under a 1+4
 and a 2+4; a write of one, alone and as a 1+4; the first byte of two, of a 2+4 and
 of sixteen; the second of the same three; the third of three and of sixteen, the
 seventh and last of sixteen, the 200th and last of 255 - on PCLK and HSI16, at 100
-and 400 kHz, each followed by a write of sixteen on either engine, with no `init()`
-and no PE cycle between: either would flush TXDR. Each is judged on `status()`,
-the client's count and bytes, and the next request byte for byte with its entries
-exact: 152 rows under each engine, a run.
+and 400 kHz, each followed by a write of sixteen naming either mechanism, with no
+`init()` and no PE cycle between: either would flush TXDR. Each is judged on
+`status()`, the client's count and bytes, and the next request byte for byte with
+its entries exact: 152 rows under `interrupt` and 152 under `dma`, a run.
 
 | refused, under `dma` | rows in ten runs | right |
 |---|---|---|
@@ -849,34 +863,35 @@ The 1520 rows under `interrupt` and the 380 on the engineless host are right too
 and every next request is whole. How the STOPF entry tells them apart, in three
 cases:
 - **The address refused.** The preload never left TXDR, so TXE is clear, and no
-  TXIS rose (32.4.9), so nothing moved: on the pump `pos_`, on an engine the
+  TXIS rose (32.4.9), so nothing moved: on the pump `pos_`, under `dma` the
   channel's count.
 - **A data byte refused, TXDR refilled.** TXE reads clear too, the channel or the
   vector having refilled TXDR behind the byte on the wire, and the count has moved.
 - **A data byte refused, the channel not served yet.** The count stands, but the
-  byte left: TXE is set. Eight rows take TXDMAEN away just after `start()` to stage
-  this one, and answer `i2c_nack_data`.
+  byte left: TXE is set. Eight rows beyond the 152 take TXDMAEN away just after
+  `start()` to stage this one, and answer `i2c_nack_data`.
 
-TXE alone fails the second case and the count alone the third: a scratch build of
-each read 0 of 24 first-byte rows right, and all eight starved rows wrong,
-respectively.
+TXE alone fails the second case and the count alone the third: in a scratch build of
+each, TXE alone got 0 of 24 first-byte rows right, and the count alone got all eight
+starved rows wrong.
 
 **Nothing of a failed request reaches the next one**, because `start()` flushes
 TXDR ahead of every write half. A byte stays there through the NACK and the STOP:
 the preload an address nobody answered, or the next byte a channel or the vector
 loaded ahead of a refusal. With no flush the next write sends it first and the
 NBYTES count drops that write's last: the letter's own control, a write of two by
-the resource's verbs after a refused first byte, puts the channel's byte at the
+the resource's verbs after a NACKed first byte, puts the channel's byte at the
 client ahead of its own, and a scratch build with the flush left out fails the
-next-request verdicts on both engines. TXIS is not a second trap here, though a
+next-request verdicts under both mechanisms. TXIS is not a second trap here, though
+a NACK can leave it standing with no store to clear it (32.9.7, and the starved
 refusal can leave it standing with no store to clear it (32.9.7, and the starved
 rows leave it eight times of eight): `start()` stores the first byte before it arms
 TXIE or TXDMAEN in one store, so a standing TXIS is gone before either can see it.
 
-**ES0418 2.11.6's band, by name** (letter `B`, 5 verdicts, ten runs of ten). The
+**ES0418 2.11.6's band, by name** (`test_stm32_i2c`'s letter `B`, 5 verdicts, ten runs of ten). The
 STM32G071's sheet lists "Transmission stalled after first byte transfer": with the
 first byte not in TXDR and written within two kernel cycles of its request, and
-PCLK over the kernel clock between 1.5 and 3, the block stalls until a PE cycle
+PCLK over the kernel clock between 1.5 and 3, the peripheral stalls until a PE cycle
 (the STM32G071RB's section below). The G0B1's and the G031's sheets do not list it.
 The letter runs HSI16 against PCLK at 44 MHz, a ratio of 2.75, where two kernel
 cycles are 5.5 cycles of the clock the channel runs on (this family pins HPRE and
@@ -894,12 +909,12 @@ ten runs, at 100 and 400 kHz:
 Every byte of every row is at the client. **The last row is the erratum's own
 sequence and it does not stall this die**, at this ratio: under 0.05 per cent at 95
 per cent confidence (three over 6200). That says this die and this sequence, not why:
-nothing here times a channel's first store against the 5.5 cycles, and the
-STM32F446RE's stream, on a core four times its APB's clock, falls inside its window
-and stalls 14 per cent of the time ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)).
+nothing here times a channel's first store against the 5.5 cycles, and on the
+STM32F446RE, a core four times its APB's clock, the same sequence on a stream stalls
+14 per cent of the time ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)).
 The host's preload makes the question moot for its own path on any part.
 
-**What judges the engine named, letter `u`.** An exact count of the host
+**What judges the mechanism named, `test_stm32_i2c`'s letter `u`.** An exact count of the host
 vector's entries, a half of m bytes on the pump taking m (m - 1 TXIS or
 RXNE, and the STOPF), a half on the engines the STOPF alone and no DMA
 vector; and because one byte costs the pump one entry too, the channel's
@@ -922,18 +937,18 @@ no entry on either vector, no BUSY.
 ### The peer bus (letters n..t)
 
 The same two nodes carry a peer board running `twi_peer`, the suites' scriptable
-target - the desk's
-STM32F446RE, its I2C1 on PB8/PB9 (`ident` fw 0x0400) - beside I2C2's
-taps, so this desk carries the self-link and the peer at once and the
+target - an STM32F446RE, its I2C1 on PB8/PB9 (`ident` fw 0x0400) - beside I2C2's
+taps, so this bench carries the self-link and the peer at once and the
 suite runs both. Letters b..l, u, v, B, x and y (fourteen of them in `z`, `x` and
 `y` run by name) skip only when the boot probe finds no self-link. The peer
 letters, under their own all-key `w`, fail when nobody answers, so `z` runs with
-the far board on its dark console, a program that stays off the bus. The two do not disturb each other: the peer's command client answers 0x6B
+the far board on its dark console, a program that stays off the bus. The two do
+not disturb each other: the peer's command client answers 0x6B
 alone, which no self-link letter sends, and I2C2 is released while a
 peer letter runs.
 
 **The wire format is one command protocol shared by every architecture's
-peer.** Here **one command is two tenures of the engine
+peer.** Here **one command is two tenures of the host
 under test** - a write carrying the frame, then a read collecting the
 answer - so the command channel is itself a measurement of this driver.
 Ten of ten round trips, and `ident` names the peer's unique-ID word and
@@ -965,7 +980,7 @@ under the rate, and inside the quarter the verdict allows, the request's
 own cost being inside the reading. All three speeds carry a write and a
 read byte-exact, Fm+ included - at **722..723 thousandths of 1 MHz**,
 which is the far end's doing and not this controller's: the peer's
-target is a 400 kHz block that stretches every byte, so the verdict on
+target is a 400 kHz peripheral that stretches every byte, so the verdict on
 the Fm+ rung claims only that the kernel clock can produce it. **And
 one target configuration serves all three rungs** on a target of this
 family: a target's `speed` names the row its SDADEL and SCLDEL are
@@ -986,7 +1001,7 @@ measure a client of this same die holding SDA down: the silicon sees a
 park and raises nothing (BUSY alone, no ARLO, no BERR), and the
 arbiter's `i2c_timeout` at 20 ms is the whole answer. With the peer told
 to hold SDA from its own GPIO for 300 ms, the same tenure comes back
-**`i2c_arb_lost` in 0 ms, with SDA still low at the reply** - the engine
+**`i2c_arb_lost` in 0 ms, with SDA still low at the reply** - the host
 reporting a wire code of its own where the other arrangement reported
 nothing at all. What separates the two is a PE cycle before the START:
 this letter's request runs at 400 kHz after commands at 100 kHz, and
@@ -1060,13 +1075,6 @@ an instrument that spends its commanded hold at ADDR as well puts the
 full N back inside the measured window - which is how 2 ms a byte
 prices an 8-byte tenure at the 16 ms the model predicts.
 
-**A rule of the suite about the vector and not the wire**, shared with the
-SPI suite: a peer command re-inits the host, which hands
-I2C1's vector back to the suite's bare pump, so an arbiter that held it must
-take it again afterwards or every later completion is consumed by
-the wrong branch and answered `i2c_timeout` on a tenure that ran
-perfectly.
-
 ### The stack under the preemptive kernel (`test_stm32_rubato_i2c`)
 
 Measured by `test_stm32_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
@@ -1074,7 +1082,7 @@ Measured by `test_stm32_rubato_i2c`: `util/i2c_bus.hpp`'s arbiter
 `I2cHost<1>` on PB8/PB9 (DMA1 channels 1 and 2, PCLK under the static
 PLL at 64 MHz) inside Rubato, the preemptive kernel type, against the same
 STM32F446RE `twi_peer`, while TIM14 posts to the highest of the suite's active
-objects (the pack) every 97, 193 or 389 us
+objects (together, the pack) every 97, 193 or 389 us
 and its dispatch spins 300 or 3000 cycles - at 97 us x 3000, 48 % of
 the core. Every letter runs once with TIM14 silent and six times under
 it; **202 verdicts, green in three runs of `z`**. The pack, the command
@@ -1089,30 +1097,30 @@ it delays the START: a gap between tenures. Inside a tenure every byte
 decision is the vector's, and a late vector is a held SCL (32.4.8,
 32.4.9). Letter `x` counts it on 400 writes of 16 bytes on the engines:
 `start()` takes 443 cycles with TIM14 silent, the suite's naming of the
-engine (below) included; under 97 us x 3000 the interrupt landed inside
-it 0 times in each of three runs, against the 28 that independent ticks
-would give (400 x 443 / 6208). Nothing the thread does after the START
-store, `start()`'s last register write with the engines armed before
-it, can reach the wire: the tenure on the wire is the vector's from its
+mechanism (below) included; under 97 us x 3000 the interrupt landed inside
+it once in one run of three and not at all in the other two, against the 28 that
+independent ticks would give in each (400 x 443 / 6208). Nothing the thread does
+after the START store, `start()`'s last register write with the engines armed
+before it, can reach the wire: the tenure on the wire is the vector's from its
 first bit.
 
-**The tenure cycle locks to the pressure's period.** Were the ticks
-independent of the tenures, about 28 of the 400 would land inside
-`start()`; none does, run after run. So the loop of one tenure - the
+**The tenure cycle appears to lock to the pressure's period.** Were the ticks
+independent of the tenures, about 28 of each 400 would land inside
+`start()`; one did in three runs. That reads as the loop of one tenure - the
 write, its STOPF, the reply up the pack and the next request down -
-does not drift across the tick's period: it settles at one phase of it,
-and at the phase it settles at here no tick falls inside `start()`.
-Which step of that loop sets the phase is not established. A program's
-own periodic interrupt and its bus traffic can lock the same way, at a
+settling at one phase of the tick's period, a phase at which a tick seldom falls
+inside `start()`. The letter times no phase, so the lock is inferred and which
+step of that loop would set it is not established. A program's
+own periodic interrupt and its bus traffic may lock the same way, at a
 phase its own path's lengths decide; the cost to the program is at most
 one dispatch's length added to each tenure a tick meets, and nothing on
 the wire.
 
-**Every shape on both paths, under every pressure as in the control.**
-The shared body's Requests name no engine, so the suite names it in a
+**Every shape under `interrupt` and under `dma`, under every pressure as in the
+control.** The shared body's Requests name no mechanism, so the suite names it in a
 wrapper around `start()`: `dma` when either half carries two bytes or
-more, `interrupt` otherwise. Letter `o`, at 400 kHz against one serve
-counted to its last byte: the probe, reads of 1 (the pump, the byte taken
+more, `interrupt` otherwise. Letter `o`, at 400 kHz against one serve (the
+peer's commanded turn as a target) counted to its last byte: the probe, reads of 1 (the pump, the byte taken
 at STOPF) and of 2, 3, 8 and 32 (the receive engine), write-then-reads of
 1+1 (both halves the pump), 1+2 (the written byte the preload, the read on the
 receive engine) and 2+8 (the preload and both engines), writes of 1 (the
@@ -1121,7 +1129,7 @@ preload alone) and of 2, 3, 8 and
 peer's count, sum and address matches exact (a write-then-read is two).
 A shape's post-to-reply under pressure is the control's plus at most one
 dispatch and the path behind it: the 32-byte write 827 or 828 us silent and at
-most 884 pressed, the probe 58 and at most 115, over three runs. Letter `p`: a read of 16,
+most 884 under pressure, the probe 58 and at most 115, over three runs. Letter `p`: a read of 16,
 a 1+4 and a write of 16 byte-exact at 100 and 400 kHz (the write of 16
 at best in 1600 and 442 us against the wire's 1530 and 382), and the peer's
 commanded stretch of 1000 us a byte priced from below - a read of 8 in
@@ -1130,7 +1138,7 @@ against its eight (the address's and one before every byte the peer
 takes or gives, the write's last falling after its tenure), under the
 20 ms timeout.
 
-**The vocabulary under pressure, and a refused byte on the engine.**
+**The vocabulary under pressure, and a NACKed byte on the transmit engine.**
 Letter `q`: a deaf client - the peer's client parked at twi_link's
 `deaf_addr`, 0x5D - answers the probe and a four-byte write
 `i2c_nack_addr` (TXE clear and the transmit channel's count unmoved), and the
@@ -1138,7 +1146,7 @@ probe of 0x5D `i2c_ok`; a write to 0x7A and one to the general call
 answer `i2c_rejected`, the peer, answering the general call, matching
 only the probe that follows; the third byte of six refused answers
 `i2c_nack_data` - a write of six rides the transmit engine, so this is
-the NACK named mid-block ("A refused write" above), its untransmitted
+the NACK named mid DMA block ("A refused write" above), its untransmitted
 tail abandoned and counted - the peer reporting the refusal and two
 address matches, the tenure's and the probe's after it; the last written
 byte of a 2+4 refused answers `i2c_nack_data` with the controller let
@@ -1147,11 +1155,11 @@ probe after it and no byte served - no repeated START followed. The next
 tenure is `i2c_ok` after each.
 
 **The arbiter with three requesters of three priorities.** Letter `w`:
-the Client above the arbiter (20 write-then-reads of 1+6, the preload and the
+the suite's requester above the arbiter (20 write-then-reads of 1+6, the preload and the
 receive engine, two outstanding), a requester below it (10 writes
 of one byte, the preload), and in a pressure pass the preempting object
 itself (8 probes posted from its tick): every reply `i2c_ok`, to its
-requester, in its order - the Client's slot k complete and slot k+1
+requester, in its order - the upper requester's slot k complete and slot k+1
 untouched at reply k, which Rubato makes exact because the requester
 above the arbiter runs its reply inside the arbiter's own dispatch,
 before the next waiting request starts - nothing rejected, no timeout,
@@ -1176,7 +1184,7 @@ the second way (its request at 400 kHz after commands at 100): that is
 the second signature, and the self-link's park the first. Under the
 flood - after its first probe, one at a tick only when the suite's console
 object has turned since the last, which on this core is most ticks: 180 to 722 a
-pass, 560 to 565 of the 972 ticks at 97 us x 3000 - every request was
+pass, 547 to 550 of the 972 ticks at 97 us x 3000 - every request was
 answered exactly once: while held `i2c_rejected` (the FIFO full),
 `i2c_timeout` or `i2c_arb_lost`, after the release `i2c_ok`, or
 `i2c_nack_addr` in the moment the peer's client was not yet back (3 of
@@ -1277,7 +1285,7 @@ Driver gaps:
   vector posting "the host reads" and leaving SCL held, a dispatch giving
   the byte) is the one place a held-off reader would stretch the clock;
   no util service serves a target that way (`I2cClient` is served from
-  its vector), and the desk peer, the STM32F446RE's `twi_peer`, has no
+  its vector), and the peer board, the STM32F446RE's `twi_peer`, has no
   `host_read` to read from this board's target. Born with the first util
   target object.
 
@@ -1311,7 +1319,7 @@ Implemented but not bench-verified:
 
 - **The client's general call** (`general_call`, GCEN): written and read
   back, not taken on the wire - every brio host refuses address
-  0x00, this chip's own and the desk partner's. A controller that sends a
+  0x00, this chip's own and the peer board's. A controller that sends a
   general call would measure it.
 
 - **The held request of an I2C.** `test_stm32_dma` letter `r` measures a
@@ -1321,13 +1329,13 @@ Implemented but not bench-verified:
   it rests on what that letter measures of the other three requesters
   ([dma.md](dma.md), "A released requester holds nothing here") - the
   self-link's engined letters pass with the pulse in place. A
-  tenure abandoned mid-block, then released and initialized again, would
+  tenure abandoned mid DMA block, then released and initialized again, would
   measure it.
 - **I2C3** - present on the STM32G0B1RE, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
 - **The suite as it stands on the two smaller parts.** It is built for the
   STM32G071RB and the STM32G031K8 and today's verdict counts are the
-  STM32G0B1RE's alone (200 and 35). Letters `u` and `v` and the engine figures
+  STM32G0B1RE's alone (200 and 35). Letters `u` and `v` and the figures of "Which engine"
   are measured on the STM32G0B1RE only; those letters on a self-link on those two
   boards, and `bench_stm32`'s letter `i` there, would measure them. The suite's
   key `w` against a peer on each board, on the STM32G031K8 through its group
@@ -1340,14 +1348,14 @@ Implemented but not bench-verified:
   does not trip TIMEOUTA at a 4 ms limit, and TIDLE did not raise TIMEOUT on a bus
   idle for 2 ms against 50 us; on the FMPI2C a peer's 40 ms hold trips it at 25 ms,
   and TIDLE raises it at 51 us. The register file is the same and the limits are
-  not. Letter `i` with the FMPI2C's own limits and hold would say whether the two
-  dies differ or the limits do.
+  not. `test_stm32_i2c`'s letter `i` with the FMPI2C's own limits and hold would say
+  whether the two dies differ or the limits do.
 - **The HAL's column on the same wire as brio's.** The cost table's two
   columns were not taken in one session; a re-run of ST's library against the
   same client would put them on one wire.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
   it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the self-link
-  letters are compiled there and probe for it at boot - but that desk
+  letters are compiled there and probe for it at boot - but that board
   carries the peer link on the same two pads, the probe answers no, and
   I2C2 as a client has never run on that die. Two jumpers from CN3-11
   and CN3-13 to CN4-7 and CN4-8, with the peer wires off, would run
@@ -1383,7 +1391,7 @@ Implemented but not bench-verified:
   serializing (the second sees the first's START and waits, at every
   rate, 0.75 to 5.75 us after the STOP against the peer's 2 us), so a
   race wants one START committed inside the other's detection window, a
-  fraction of a microsecond that nothing on this desk can aim. A peer
+  fraction of a microsecond that nothing on this bench can aim. A peer
   whose START is released by software at a delay the DUT sweeps would
   measure it.
 - **The filters' suppression itself.** A glitch needs a source on the

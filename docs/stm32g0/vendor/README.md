@@ -187,7 +187,7 @@ partial, "-" = absent.
 | **2.9.1 / 2.9.2** LPTIM stuck (A / P) | the G0B1's 2.8.1 / 2.8.2, structurally and in `test_stm32_lptim` letter `i` | unchanged: 82/82 on this die, both halves of the flag-clear discipline behaving as on the other |
 | **2.11.1** I2C tSU;DAT floors (P) | `test_stm32_i2c` letter `m`'s refusals | identical - the floors are the driver's compile-time and run-time refusals and do not depend on the die |
 | **2.11.2** I2C spurious BERR (A) | `test_stm32_i2c` letter `m` counts BERR over the run | not seen |
-| **2.11.6** I2C stalled when PCLK/I2CCLK is in 1.5..3 (A) | - | NOT REACHED: this suite's ratios are 4 (a 64 MHz PCLK with the HSI16 kernel), 1 (PCLK as the kernel) and 0.125 (the 2 MHz core), none of them in the band |
+| **2.11.6** I2C stalled when PCLK/I2CCLK is in 1.5..3 (A) | `test_stm32_i2c` letter `B`, a ratio of 2.75 | not yet run on this board; on the STM32G0B1RE, whose sheet does not list the item, it judges the host's path in the band ([../i2c.md](../i2c.md)) |
 | **2.11.3 / 2.11.5 / 2.11.7** own-address match, NOSTRETCH underrun, SMBus slave timeout | multi-master, the NOSTRETCH target and the SMBus target are SELF-LINK roles | not staged on this board: its I2C1 faces a peer, not a second instance of its own |
 | **2.12.2** noisy receive line (A) | `test_stm32_serial` letter `f` | the G0B1's 2.11.1, staged identically |
 | **2.12.3** prescaler documentation | `test_stm32_serial` letter `a` | measured on this die too, and worse than a missing divider: a BASIC instance takes the PRESC value, reads it back and transmits nothing |

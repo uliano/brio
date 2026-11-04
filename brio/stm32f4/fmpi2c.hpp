@@ -29,14 +29,14 @@
  *                              two ISR bodies - a client is a protocol and
  *                              the protocol is the application's.
  *
- * The smallest use, a bus host under the arbiter (docs/stm32f4/fmpi2c.md,
- * "How to use it", on the Nucleo-F446RE):
+ * The smallest use, a bus host under the arbiter (docs/stm32f4/fmpi2c.md's
+ * opening has it with a request and its reply, on the Nucleo-F446RE):
  *
  *     constexpr FmpI2cPins pins{.scl = {'C', 6, PinFunction::af4},
  *                               .sda = {'C', 7, PinFunction::af4}};
  *     using Bus = FmpI2cHost<1, pins>;
  *     using BusAo = I2cBus<Bus, P, 4>;   // an active object in the Tenuto
- *     Bus::init(clock);                  // after the clock task
+ *     if (!Bus::init(clock)) { }         // after the clock task; false: no bus
  *     extern "C" void FMPI2C1_EV_IRQHandler() {
  *         if (Bus::isr()) { post<BusAo>(TransferDone{Bus::status()}); }
  *     }
@@ -67,8 +67,10 @@
  * RELOAD and AUTOEND, one TIMINGR word, OAR1/OAR2 with the second
  * address's mask, ISR and ICR, PECR, TIMEOUTR, separate RXDR and TXDR -
  * register for register and bit for bit the block brio/stm32g0/i2c.hpp
- * drives. So this file is that file, with the same verb names and the same
- * shapes, and every place it differs says why. What differs is this
+ * drives. So this file has that file's verb names and shapes. Where this
+ * family's silicon differs the file says why; where the host's byte path
+ * differs with no reason in the silicon, docs/stm32f4/fmpi2c.md's inventory
+ * says that. What differs is this
  * family's own: two vectors instead of one (RM0390 table 142 splits the
  * events from the errors, as every other peripheral of this stratum does),
  * a kernel-clock multiplexer in RCC_DCKCFGR2 instead of RCC_CCIPR, the
@@ -347,13 +349,15 @@ inline constexpr uint16_t fmpi2c_analog_filter_max_ns = 260;
  * timing utility (I2C_GetTiming, shipped with the STM32Cube examples)
  * charges the filter, two kernel periods and a "typical" rise and fall of
  * 640 + 20 / 250 + 100 / 60 + 100 ns, and both run a wire with faster
- * edges FASTER than asked (the bench measured 494 kHz for 400 on a 2.2
- * kOhm self-link). So the default here is ZERO, which means "not
+ * edges FASTER than asked (at 45 MHz, table 135's budget on a 2.2 kOhm
+ * self-link's measured 250 ns is 473 kHz for 400, by the arithmetic; no
+ * letter runs such a word). So the default here is ZERO, which means "not
  * measured": the chooser then charges the FLOOR alone
  * (fmpi2c_sync_floor_cycles(), no slope at all), the fastest any wire can
  * make, and the asked rate is a CEILING - a real wire only adds its slopes
  * and runs slower. A caller who has measured its bus states its tSYNC1 +
- * tSYNC2 here and gets the asked rate itself; a value under the floor is
+ * tSYNC2 here and runs nearer the asked rate, to the prescaler's resolution
+ * (docs/stm32f4/fmpi2c.md has how near); a value under the floor is
  * physically impossible and the floor is charged instead.
  */
 struct FmpI2cBusTiming {
@@ -2095,10 +2099,10 @@ public:
     /// floors drop the fast end of the vocabulary first: on the HSI's
     /// 16 MHz, Fm+ is gone.)
     static bool speed_ok(FmpI2cSpeed s) { return valid_[static_cast<uint8_t>(s)]; }
-    /// What a speed really runs at on this bus - the produced rate, not the
-    /// asked one: exact on a bus whose tSYNC init() was told, and on an
-    /// unmeasured one the fastest any wire makes (a real wire runs at or
-    /// below it).
+    /// What a speed runs at on this bus by the arithmetic - the produced rate,
+    /// not the asked one: on a bus whose tSYNC init() was told, the period
+    /// formula with that tSYNC, and on an unmeasured one the fastest any wire
+    /// makes (a real wire runs at or below it).
     static uint32_t scl_hz(FmpI2cSpeed s) {
         return fmpi2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], cfg_.filters,
                              cfg_.bus ? *cfg_.bus : fmpi2c_bus_timing(s));
@@ -2177,9 +2181,10 @@ public:
         if constexpr (has_engines) {
             launch_dma();
         }
-        // It cannot refuse: the address was checked above, and the clear
-        // above wrote ADDRCF, which also clears START (23.7.8, ES0298 2.12.6),
-        // so no START stands here whatever came before.
+        // Its answer is not read. The address was checked above, and the clear
+        // above wrote ADDRCF, which also clears START (23.7.8, ES0298 2.12.6,
+        // measured taking a parked one on the STM32F446RE alone), so only a
+        // program's own use of the resource could stand a START here.
         (void)S::transfer_now(r.addr, opens_read, nbytes, !two_phase);
         return false;
     }

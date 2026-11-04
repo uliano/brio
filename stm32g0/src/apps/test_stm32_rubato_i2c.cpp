@@ -40,8 +40,8 @@
 //   holds SCL while TXIS or RXNE waits for a late vector (32.4.8, 32.4.9).
 //   THE PREDICTION: strict at every speed, path and pass; letter x's
 //   landings inside start() find the wire idle.
-//   THE HELD WIRE has two signatures on this host (docs/stm32g0/i2c.md, "THE
-//   WEDGE HAS A SECOND SIGNATURE"): a START into a line already seen low
+//   THE HELD WIRE has two signatures on this host (docs/stm32g0/i2c.md, "And
+//   the wedge has a second signature"): a START into a line already seen low
 //   parks with BUSY standing and only the arbiter's 20 ms answers
 //   (i2c_timeout), and a START put out at once into the held line loses its
 //   first one bit (i2c_arb_lost). A speed change is a PE cycle before the

@@ -1846,7 +1846,7 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * TXDR and one RXDR (32.9.10, 32.9.11) - AND THE TENURE'S FRAME COSTS
  * NONE BEYOND THE STOP. What the chapter offers around the byte, and
  * this engine takes:
- *   - THE FIRST BYTE PRELOADED, ON EITHER ENGINE. TXE stands at rest
+ *   - THE FIRST BYTE PRELOADED, UNDER EITHER MECHANISM. TXE stands at rest
  *     (32.9.7), so start() writes a write half's first byte into TXDR before
  *     the START: the byte moves to the shifter at the address's acknowledge
  *     and the TXIS that would have asked for it never rises (the TXIS events
@@ -1854,9 +1854,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  *     only with TXE set (32.9.11), so a byte a failed tenure left there - the
  *     preload an address nobody answered never sent, or the next one a
  *     channel poured ahead of a refusal - is FLUSHED first (TXE is writable
- *     to one for exactly that, 32.9.7). That store also takes down a TXIS a
- *     failed tenure left standing (32.9.7), before start() arms TXIE or
- *     TXDMAEN, so no such level can reach the vector or a channel. On a part
+ *     to one for exactly that, 32.9.7). The first byte's own store into TXDR
+ *     takes down a TXIS a failed tenure left standing (32.9.7), before start()
+ *     arms TXIE or TXDMAEN, so no such level can reach the vector or a
+ *     channel; the flush does not. On a part
  *     whose errata list "Transmission stalled after first byte transfer"
  *     (ES0418 2.11.6, the STM32G071) the preload is the sheet's first
  *     workaround, and the host's one path whatever its clocks' ratio.
@@ -1912,10 +1913,10 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * THE PROGRAM NAMES THE ENGINE of every Request (Request::engine,
  * util/i2c_bus.hpp), and start() reads it with one compare: `interrupt`,
  * the default, puts both halves on the pump at any length; `dma` puts
- * every half the engines can carry on them at any length - one byte
- * included: 32.7.1 loads TXDR "whenever the TXIS bit is set" and 32.7.2
- * empties RXDR "whenever the RXNE bit is set", the NBYTES counter ending
- * the transfer, and neither names a length below which it does not hold. A
+ * every half the engines can carry on them at any length: 32.7.1 loads TXDR
+ * "whenever the TXIS bit is set" and 32.7.2 empties RXDR "whenever the RXNE
+ * bit is set", the NBYTES counter ending the transfer, and neither names a
+ * minimum length, so a read of one byte rides its channel. A
  * write half's first byte is the preload's on either value, so its channel
  * carries the rest and a write of one starts none. WHAT THE ENGINES CANNOT
  * CARRY IS A HALF WITH NO BUFFER: under either value it stays on the pump,
@@ -2269,7 +2270,7 @@ public:
             // the preload (32.9.11) and go out in its place, the last byte
             // of this half never (NBYTES).
             S::flush_tx();
-            // The first byte PRELOADED, on either engine (the class comment),
+            // The first byte PRELOADED, under either mechanism (the class comment),
             // ahead of TXDMAEN and TXIE, both in the store below.
             S::data(r.tx.get() != nullptr ? r.tx.get()[0] : uint8_t{0xFF});
             pos_ = 1;
