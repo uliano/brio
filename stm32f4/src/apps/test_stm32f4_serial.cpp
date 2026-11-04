@@ -55,7 +55,9 @@
 //      two, three and four copies at very_high, at 5.625 and 11.25 Mbaud
 //      - the default never loses a byte, two copies starve nothing, four
 //      starve the ring armed low; and the overrun a starved stream leaves
-//      with nothing to take cleared, the vector quiet after it
+//      with nothing to take cleared, the vector quiet after it. The vector's
+//      entries against a bound derived from its states, and the same four
+//      copies in a load that does not end until the thread ends it
 //   h  THE TRANSMIT ROOM AND EDGE, AND in_handler(): tx_room() the ring's
 //      capacity on an idle port, less a run written with interrupts
 //      masked, the capacity again after the wire time; tx_drained() false
@@ -129,6 +131,7 @@
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -772,6 +775,7 @@ using RingStream = DmaStream<2, 1>;
 constexpr uint32_t arb_chars = 4096;
 
 struct ArbLeg {
+    uint32_t pos = 0;       ///< the next position of the pattern, arb_judge()'s
     uint32_t got = 0;       ///< bytes the ring holds
     uint32_t lost = 0;      ///< positions of the pattern skipped over
     uint32_t gaps = 0;      ///< places they were skipped
@@ -779,34 +783,72 @@ struct ArbLeg {
     uint32_t entries = 0;   ///< USART6 vector entries during the leg
     uint32_t after = 0;     ///< and in the millisecond of silence after it
     uint32_t late = 0;      ///< the longest a store into DR waited past its time, cycles
+    uint32_t marks = 0;     ///< the ring stream's half and full marks, its vector's entries
+    uint32_t bursts = 1;    ///< stores late enough for the line to fall idle, and the first
+    uint32_t looks = 0;     ///< empty looks at the ring during the leg
+    uint32_t parks = 0;     ///< the times the wait for a frame was taken down
+    uint32_t seen_skips = 0;  ///< rx_skips() at the last run, arb_judge()'s
+    uint32_t unseen = 0;    ///< runs with a gap in them and the epoch not moved
+    uint32_t strays = 0;    ///< bytes handed out of the pattern's order
+    const uint8_t* stray_at = nullptr;  ///< the first of them, in the ring
+    uint8_t stray_was = 0;  ///< and what it read then
     uint8_t ore = 0;
     uint8_t faults = 0;
+    bool thread_ended = false;   ///< the load still up when the thread ended it
     DmaPriority level = DmaPriority::low;   ///< the ring stream's SxCR.PL, read back
 };
+
+/// The vector's entries a leg may cost, derived from rx_vector()'s states. The first entry
+/// is the idle line of the port coming up. Each time the wait for a frame is armed - once
+/// at the start, once a stream mark - it can cost at most five: the turn into it, the two
+/// the allowance lets by, the one that takes RXNEIE down, the one that finds the stream
+/// moved. A burst on a stream served in time costs at most four: the idle line that ended
+/// the last, the two let by, the frame that finds it moved. An empty look arms the wait
+/// again, and the entry behind it takes it down or finds the stream moved: two at most.
+constexpr uint32_t arb_entry_bound(const ArbLeg& l) {
+    return 1u + 5u * (1u + l.marks) + 4u * l.bursts + 2u * l.looks;
+}
 
 /// The ring's content against the pattern: a byte that is not the next
 /// position's is looked for further on (the pattern's period is 256), the
 /// positions stepped over LOST.
 template <typename Port>
 void arb_judge(ArbLeg& leg) {
-    uint32_t pos = 0;
     for (;;) {
         const auto run = Port::read_span();
         if (run.empty()) {
             break;
         }
+        // `unseen` counts the runs with a gap in them that find the epoch where the last run
+        // left it: a consumer that reads the epoch beside the run (util/line_reader.hpp) takes
+        // the bytes behind such a gap for the stream. Printed and not judged:
+        // docs/stm32f4/usart.md lists what stays of it.
+        const uint32_t skips = Port::rx_skips();
+        const uint32_t gaps = leg.gaps;
         for (const uint8_t b : run) {
             uint32_t k = 0;
-            while (k < 256u && pattern(pos + k) != b) {
+            while (k < 256u && pattern(leg.pos + k) != b) {
                 ++k;
+            }
+            // No gap in these legs reaches half the pattern's period between two looks that
+            // find bytes: a byte that far ahead came out of order. Counted apart, not judged.
+            if (k >= 128u) {
+                if (leg.strays == 0u) {
+                    leg.stray_at = &b;
+                    leg.stray_was = b;
+                }
+                ++leg.strays;
+                continue;
             }
             if (k != 0u) {
                 leg.lost += k;
                 ++leg.gaps;
             }
-            pos += k + 1u;
+            leg.pos += k + 1u;
             ++leg.got;
         }
+        leg.unseen += (leg.gaps != gaps && skips == leg.seen_skips) ? 1u : 0u;
+        leg.seen_skips = skips;
         (void)Port::consume(static_cast<uint32_t>(run.size()));
     }
 }
@@ -824,17 +866,27 @@ uint32_t keep_busy(uint8_t i, bool bytes) {
     return ok ? 1u : 0u;
 }
 
+/// A store this far past its time can leave the line idle for an idle frame's detection. The
+/// period is eleven bits and a frame plus an idle frame twenty, which alone asks nine bits of
+/// lateness; the receiver counts its idle frame from the stop bit as it sampled it, half a bit
+/// early, and the next start bit leaves up to a bit behind its store: seven bits, rounded down,
+/// and the time read behind the store, so a burst is never missed in the count.
+constexpr uint32_t arb_idle_after(uint32_t period) { return period * 7u / 11u; }
+
 template <typename Port>
 ArbLeg arb_leg(uint8_t who, uint32_t baud, uint8_t copies, bool bytes) {
     ArbLeg leg{};
     (void)up<Port>(who, baud);
+    leg.seen_skips = Port::rx_skips();
     CopyA::arm(DmaPriority::very_high);
     CopyB::arm(DmaPriority::very_high);
     CopyC::arm(DmaPriority::very_high);
     CopyD::arm(DmaPriority::very_high);
     leg.level = RingStream::priority();
     const uint32_t period = 11u * (SysClock::hz / baud);
-    uint32_t next = CycleCounter::now() + period;
+    const uint32_t idle_after = arb_idle_after(period);
+    uint32_t last_store = CycleCounter::now();
+    uint32_t next = last_store + period;
     for (uint32_t i = 0; i < arb_chars; ++i) {
         for (;;) {
             const int32_t d = static_cast<int32_t>(CycleCounter::now() - next);
@@ -850,15 +902,88 @@ ArbLeg arb_leg(uint8_t who, uint32_t baud, uint8_t copies, bool bytes) {
             if (copies >= 4u) { leg.copies += keep_busy<CopyD>(3, bytes); }
         }
         Res::write_data(pattern(i));
-        next = CycleCounter::now() + period;   // never two stores closer than a frame
+        const uint32_t stored = CycleCounter::now();
+        leg.bursts += stored - last_store >= period + idle_after ? 1u : 0u;
+        last_store = stored;
+        next = stored + period;   // never two stores closer than a frame
     }
     while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
     }
     wait_ms(1);
     leg.entries = usart_entries;
+    leg.marks = dma_entries;
     wait_ms(1);
     leg.after = usart_entries - leg.entries;
+    leg.parks = Port::rx_parks();
     arb_judge<Port>(leg);
+    leg.ore = Port::hw_overruns();
+    leg.faults = Port::dma_faults();
+    return leg;
+}
+
+// The same four copies in a load that does not end until the thread ends it: TIM7's handler,
+// never the thread, starts a block whenever the last ended, so a vector that holds the thread
+// out cannot end the load by holding it. The handler's own bound, a tenth of a second against
+// a leg of about 10 ms, lets a thread that never ran read its verdict instead of hanging
+// the suite. With `looks` the thread looks at the ring as a consumer told by the edge does.
+
+constexpr uint32_t endless_tick_hz = 20'000;
+constexpr uint32_t endless_ticks_most = endless_tick_hz / 10u;
+volatile bool endless_on = false;
+volatile uint32_t endless_ticks = 0;
+
+template <typename Port>
+ArbLeg endless_leg(uint8_t who, uint32_t baud, bool looks) {
+    ArbLeg leg{};
+    (void)up<Port>(who, baud);
+    leg.seen_skips = Port::rx_skips();
+    CopyA::arm(DmaPriority::very_high);
+    CopyB::arm(DmaPriority::very_high);
+    CopyC::arm(DmaPriority::very_high);
+    CopyD::arm(DmaPriority::very_high);
+    endless_ticks = 0;
+    endless_on = true;
+    Tim<7>::enable(true);
+    wait_ms(1);
+    const uint32_t period = 11u * (SysClock::hz / baud);
+    const uint32_t idle_after = arb_idle_after(period);
+    uint32_t last_store = CycleCounter::now();
+    uint32_t next = last_store + period;
+    uint32_t seen = edges;
+    for (uint32_t i = 0; i < arb_chars; ++i) {
+        for (;;) {
+            const int32_t d = static_cast<int32_t>(CycleCounter::now() - next);
+            if (d >= 0) {
+                if (static_cast<uint32_t>(d) > leg.late) {
+                    leg.late = static_cast<uint32_t>(d);
+                }
+                break;
+            }
+            if (looks && edges != seen) {
+                seen = edges;
+                arb_judge<Port>(leg);
+                ++leg.looks;
+            }
+        }
+        Res::write_data(pattern(i));
+        const uint32_t stored = CycleCounter::now();
+        leg.bursts += stored - last_store >= period + idle_after ? 1u : 0u;
+        last_store = stored;
+        next = stored + period;
+    }
+    leg.thread_ended = endless_on;
+    endless_on = false;
+    Tim<7>::enable(false);
+    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
+    }
+    wait_ms(1);
+    leg.entries = usart_entries;
+    leg.marks = dma_entries;
+    leg.parks = Port::rx_parks();
+    arb_judge<Port>(leg);
+    ++leg.looks;
+    wait_ms(1);
+    leg.after = usart_entries - leg.entries;
     leg.ore = Port::hw_overruns();
     leg.faults = Port::dma_faults();
     return leg;
@@ -875,6 +1000,8 @@ void tg_arbitration() {
     bool two_whole = true;
     bool four_starve = true;
     bool quiet = true;
+    bool bounded = true;
+    uint32_t parks = 0;
     static constexpr uint32_t rates[] = {5'625'000, 11'250'000};
     for (const uint32_t baud : rates) {
         for (uint8_t beat = 0; beat < 2u; ++beat) {
@@ -885,10 +1012,15 @@ void tg_arbitration() {
                 const ArbLeg lo = arb_leg<RingLow>(6, baud, copies, beat == 1u);
                 const ArbLeg hi = arb_leg<RingHigh>(5, baud, copies, beat == 1u);
                 print(serial, "  ", baud, beat == 1u ? " byte" : " word", ", ", copies,
-                      " copies | ring low: ", lo.lost, " of ", arb_chars, " lost in ", lo.gaps,
-                      " gaps, ORE ", lo.ore, ", ", lo.entries, " vector entries, the thread ",
-                      lo.late, " cycles late at worst | default: ", hi.lost, " lost, ORE ",
-                      hi.ore, ", ", hi.entries, " entries, ", hi.late, " late", crlf);
+                      " copies | ring low: ", lo.got, " of ", arb_chars, " delivered, ", lo.lost, " stepped over in ", lo.gaps,
+                      " gaps, ORE ", lo.ore, ", ", lo.entries, " vector entries (bound ",
+                      arb_entry_bound(lo), ", ", lo.parks, " taken down), the thread ",
+                      lo.late, " cycles late at worst | default: ", hi.got, " delivered, ", hi.lost, " stepped over, ORE ",
+                      hi.ore, ", ", hi.entries, " entries (bound ", arb_entry_bound(hi), "), ",
+                      hi.late, " late", crlf);
+                bounded = bounded && lo.entries <= arb_entry_bound(lo) &&
+                          hi.entries <= arb_entry_bound(hi);
+                parks += lo.parks;
                 levels = levels && lo.level == DmaPriority::low &&
                          hi.level == DmaPriority::very_high;
                 default_whole = default_whole && hi.got == arb_chars && hi.lost == 0u &&
@@ -897,12 +1029,43 @@ void tg_arbitration() {
                     two_whole = two_whole && lo.got == arb_chars && lo.lost == 0u;
                 }
                 if (copies == 4u) {
-                    four_starve = four_starve && lo.lost > 0u;
+                    four_starve = four_starve && lo.got < arb_chars;
                 }
                 quiet = quiet && lo.after == 0u && hi.after == 0u;
             }
         }
     }
+    // The load that does not end, the ring ranked below it: read at the end, and read by a
+    // consumer told by the edge. Every byte the ring holds is the pattern's in order
+    // (arb_judge's count); a byte not delivered is one an overrun reported.
+    Tim<7>::init();
+    (void)TimPeriodicTick<Tim<7>>::setup(0, Tim<7>::clock_hz(clock) / endless_tick_hz - 1u);
+    Tim<7>::enable(false);
+    Nvic::enable(Tim<7>::irq());
+    bool thread_ended = true;
+    bool endless_bounded = true;
+    bool endless_counted = true;
+    bool endless_parked = true;
+    for (const uint32_t baud : rates) {
+        for (const bool looks : {false, true}) {
+            const ArbLeg e = endless_leg<RingLow>(6, baud, looks);
+            print(serial, "  ", baud, ", the load that does not end, ", looks ? "a consumer on the edge" : "read at the end",
+                  ": ", e.got, " of ", arb_chars, " delivered, ", e.lost, " stepped over in ", e.gaps,
+                  " gaps, ORE ", e.ore, "; ", e.entries, " vector entries (bound ", arb_entry_bound(e), ", ",
+                  e.marks, " marks, ", e.bursts, " bursts, ", e.looks, " empty looks), ", e.parks,
+                  " taken down, ", e.unseen, " gaps ahead of the epoch, ", e.strays, " out of order (the first read ",
+                  e.stray_was, ", the cell now ", e.stray_at != nullptr ? *e.stray_at : uint8_t{0},
+                  "); the thread ", e.late, " cycles late at worst, ",
+                  e.thread_ended ? "and it ended the load" : "THE HANDLER'S BOUND ENDED THE LOAD", crlf);
+            thread_ended = thread_ended && e.thread_ended;
+            endless_bounded = endless_bounded && e.entries <= arb_entry_bound(e);
+            endless_counted = endless_counted && e.faults == 0u && e.got + e.lost <= arb_chars &&
+                              (e.got == arb_chars || e.ore != 0u);
+            endless_parked = endless_parked && e.parks != 0u;
+        }
+    }
+    Nvic::disable(Tim<7>::irq());
+    Tim<7>::release();
     down();
     bench.verdict("rx_priority reaches the silicon: the ring's SxCR.PL read back 0 when the "
                   "options say low and 3 by default", levels);
@@ -915,6 +1078,17 @@ void tg_arbitration() {
                   "leg: the level decides correctness on this controller", four_starve);
     bench.verdict("THE OVERRUN WITH NOTHING TO TAKE IS CLEARED: after every starved leg the "
                   "vector is quiet - no entry in a millisecond of silence", quiet);
+    print(serial, "  the wait for a frame taken down ", parks, " times over the low legs", crlf);
+    bench.verdict("A STARVED RING COSTS A BOUNDED NUMBER OF ENTRIES, at both levels, on every leg: "
+                  "the bound from the marks and the bursts", bounded);
+    bench.verdict("A LOAD THAT DOES NOT END leaves the thread running: every store made, and the thread "
+                  "the one that ended it", thread_ended);
+    bench.verdict("... at the same bound on the entries, read at the end or by a consumer on the edge",
+                  endless_bounded);
+    bench.verdict("... and the stage reached the case: the wait for a frame taken down on every such leg",
+                  endless_parked);
+    bench.verdict("... every byte delivered in order, or an overrun reported",
+                  endless_counted);
 }
 
 // ---- h  the transmit room and edge, and in_handler() -----------------------------------
@@ -2978,7 +3152,7 @@ void t8_ring_copies() {
                     two_whole = two_whole && lo.up && lo.c.got == f8_frames && lo.c.gaps == 0u;
                 }
                 if (copies == 4u) {
-                    four_starve = four_starve && lo.c.lost > 0u;
+                    four_starve = four_starve && lo.c.got < f8_frames;
                 }
                 honest = honest && lo.c.bad == 0u && (lo.c.lost == 0u || lo.ore != 0u);
             }
@@ -4025,6 +4199,20 @@ extern "C" void EXTI9_5_IRQHandler() {
     (void)Exti::clear(6);
 }
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+/// Letter g's load that does not end: the copies started from here, never the thread.
+extern "C" void TIM7_IRQHandler() {
+    brio::Tim<7>::clear_flags(brio::Tim<7>::update_flag);
+    if (endless_on) {
+        (void)keep_busy<CopyA>(0, false);
+        (void)keep_busy<CopyB>(1, false);
+        (void)keep_busy<CopyC>(2, false);
+        (void)keep_busy<CopyD>(3, false);
+        endless_ticks = endless_ticks + 1u;
+        if (endless_ticks >= endless_ticks_most) {
+            endless_on = false;
+        }
+    }
+}
 
 int main() {
     const bool clock_ok = SysClock::init();

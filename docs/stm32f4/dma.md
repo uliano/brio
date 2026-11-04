@@ -714,14 +714,12 @@ of the letter at both rates:
 |---|---|---|
 | none | 0 lost | 0 lost |
 | two | 0 lost | 0 lost |
-| three | 1505 to 1968 lost | 0 lost |
-| four | 167 to 2027 lost | 0 lost |
+| three | all but 2 to 5 of 4096 lost | 0 lost |
+| four | all but 1 to 3 of 4096 lost | 0 lost |
 
-Word and byte beats alike. While the ring is starved the USART's vector
-re-enters back to back on the frame standing in DR - its wait for a
-frame has RXNEIE armed (usart.md) - some 32000 to 159000 entries a leg,
-and the thread that feeds the line ran up to 28000 cycles late. So on
-this controller the level DECIDES CORRECTNESS, and it takes a third copy
+Word and byte beats alike. While the ring is starved the USART's vector takes its wait for a frame down
+(usart.md), 4 entries a leg, and the thread that feeds the line runs at most 2700
+cycles late. So on this controller the level DECIDES CORRECTNESS, and it takes a third copy
 where the STM32G0's takes a second; why the third and not the second is
 not measured.
 

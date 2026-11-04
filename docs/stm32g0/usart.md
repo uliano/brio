@@ -330,7 +330,8 @@ a compile-time refusal in the task.
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
   `wakes`, `rx_kicks` - eight bits each, SATURATING at 255: a storm of
-  errors never reads back as a few), `clear_errors`, `release()`, and `fifo_mode` - the FIFO
+  errors never reads back as a few), `rx_parks` (the receive engine's watch taken down, since
+  `init()`), `clear_errors`, `release()`, and `fifo_mode` - the FIFO
   decision as the instantiation resolved it: the option where it is
   stated, otherwise ON where the instance has the FIFO
   (`has_fifo_mode`: a FULL USART, every LPUART) unless `wake_from_stop`
@@ -681,7 +682,8 @@ neither. `uart_engines_distinct()` lives here.
   UNDER THE ENGINE, WITH A KICK: `isr()` drops and raises DMAR when an
   entry for the line's IDLE, a receive error or RXFT at seven eighths
   finds RXFNE still set - the cure for this silicon's FIFO wedge, the
-  bench finding below - and `rx_kicks()` counts it. Without the FIFO
+  bench finding below - and `rx_kicks()` counts it; over a channel starved
+  rather than wedged the watch goes down at its second entry, the same finding. Without the FIFO
   (`.fifo = false`) there is nothing to wedge and nothing to watch.
 - **`release()` stops the instance before its channels**: 10.4.5 stops a
   circular transfer by stopping the peripheral's requests first, a ring
@@ -1061,7 +1063,7 @@ two sequences (DMAR before or after UE and the channel, the threshold
 code, IDLEIE, DMAT and the transmit channel, the receive channel's
 number, starved by number or by level) was measured shared or harmless.
 Neither ES0548 Rev 3 nor ES0418 Rev 5 lists it. How often a starvation
-wedges depends on the cycle at which the grant comes back - 0 to 17 % of
+wedges depends on the cycle at which the grant comes back - 0 to 31 % of
 the episodes for one length, moved by a few cycles of the copies' launch.
 This paragraph and the next table are measured facts of the silicon, taken
 with registers read by hand under that staging; no suite letter reprints
@@ -1106,13 +1108,13 @@ saturates at 255 a leg, and the host's pump decides the bytes sent):
 
 | baud, pair | longest starvation | bytes and kicks over the ten runs |
 |---|---|---|
-| 115200, 2 x 2048 B | 2.6 characters | 23040 to 23104 bytes in sequence, 0 or 1 kick |
-| 921600, 2 x 256 B | 3.7 to 4.3 characters | 137080 to 158700 in sequence, 22 to 36 kicks |
-| 921600, 2 x 512 B | 6.8 to 6.9 characters | 146740 to 158700 in sequence, 77 to 114 kicks |
-| 921600, 2 x 2048 B | 21.8 to 22.2 characters | 397 to 402 gaps of 2696 to 2988 bytes, each run's bytes lost equal to its `rx_skips()`, the stream in sequence to its end |
-| 921600, no copies, after | - | 149960 to 158700 in sequence, no kick |
+| 115200, 2 x 2048 B | 2.5 characters | 23104 bytes in sequence, 146 to 157 kicks |
+| 921600, 2 x 256 B | 3.6 to 4.0 characters | 158240 to 158700 in sequence, 110 to 132 kicks |
+| 921600, 2 x 512 B | 6.5 to 6.9 characters | 157780 to 158700 in sequence, 188 to 231 kicks |
+| 921600, 2 x 2048 B | 22.0 to 22.8 characters | 401 and 402 gaps of 2922 to 2982 bytes, each run's bytes lost within two of its `rx_skips()`, the stream in sequence to its end |
+| 921600, no copies, after | - | 158240 to 158700 in sequence, no kick |
 
-A kick at 3.7 characters is a wedge cured: that starvation alone queues
+A kick at 3.6 characters is a wedge cured: that starvation alone queues
 four entries, short of the seven RXFT watches and with no IDLE inside a
 continuous stream. The same board without the kick, with the pair on
 channels 1 and 2 and the oracle's measurement: 28 of 992 frames delivered
@@ -1124,23 +1126,37 @@ With the ring at its default `very_high` the pair starves nothing (letter
 `p`, ten runs on the STM32G0B1RE: 115200 with a 2 KB pair, 921600 with 512 B
 and 2 KB pairs - every byte in sequence, no overrun, no kick).
 
-RXFT is a level and only the channel takes the FIFO below it, so over a ring ranked
-low a pair that holds the FIFO above seven eighths keeps the vector re-entering, a
-kick at each entry, until the channel is served: 35248 and 37202 entries over a leg of
-2.5 s and 530 pairs from a far board at 1 and 2 Mbaud with 2 KB pairs, some 70 a pair
-(letter `6`, one run on the STM32G0B1RE with the entries counted in a build for the
-purpose), against one or two at the default level.
+RXFT is a level and only the channel takes the FIFO below it, and an overrun cleared through ICR
+rises again with the next character, so over a ring ranked low a pair that holds the FIFO
+full would keep the vector re-entering, a kick at each entry, until the channel is served. The second entry
+for either since the watch came up kicks once more and takes the watch down, RXFTIE and EIE in
+one store, and tells the consumer; `rx_parks()` counts these. What brings it back is the line's IDLE, the
+ring's half or full mark, or a look at the ring (`read_byte`, `read_bulk`, `read_span`), the only way
+back a wedge inside a continuous stream leaves: at most two entries between one way back
+and the next. An overrun raised meanwhile stands and is counted once, by the entry behind
+that look, before the look reads the ring, so gaps with no look between them can share one
+move of `rx_skips()`. Letter `6`, fifteen runs on the
+STM32G0B1RE against the far STM32F446RE, ring ranked low, 2.5 s, with the entries taken over a
+thread that looks in a tight loop, 530 pairs of 2 KB:
+
+| rate | watch left up: entries | taken down: entries, times down | frames lost, either way |
+|---|---|---|---|
+| 1 Mbaud | 15555 | 8307 to 8370, 4059 to 4089 | some 5800 |
+| 2 Mbaud | 15677 | 9527 to 9554, 4687 to 4706 | some 16100 |
+| 3.2 Mbaud | 15307 | 10439 to 10499, 5099 to 5137 | some 28600 |
+| 6.4 Mbaud | 17241 | 10484 to 10567, 5167 to 5207 | some 61500 |
+
+With no look at the ring until the load ends, the pair started from its own completions'
+vectors so the thread cannot end it by being held out, half a second at 1 and 2 Mbaud: 8 to 23
+entries against some 80000 with the watch left up. At the default level one entry a leg, whatever the pair.
 
 WHAT THE KICK COSTS, read in the release listing of `test_stm32_dma`'s
 USART2 vector: an entry that does not kick pays a literal load, a mask
 test, one more ISR load and a branch over the vector it already had; a
 kick is a call to `rx_request_restart()` - the guard, a CR3 load, a BICS
 and two stores, the mask held for six instructions - and the saturating
-count, about twenty cycles. The RXFT entry is a LEVEL: under a starvation
-of seven characters or more the vector re-enters, kicking, until the
-channel is served (77201 kicks in 10 s with 256-byte pairs back to back at
-921600, where more than nine characters pile up between relaunches) - a cost that
-exists only past the point where the FIFO off already loses every frame.
+count, about twenty cycles. The second entry since the watch came up adds
+the store that takes it down, the guard around it and the edge's load and test.
 
 ### Against a far board: the STM32F446RE's `usart_peer` (the second all-key `t`)
 
@@ -1286,13 +1302,13 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   with no gap for 2.5 s at 1, 2, 3.2 and 6.4 Mbaud. With no pair nothing
   is lost at any rung; a 512 B pair at 1 Mbaud loses nothing (the kick
   cures its 4-character starvations); past the FIFO's nine characters
-  frames go - 5746 at 1 Mbaud with 2 KB pairs, 60783 at 6.4 Mbaud - in
+  frames go - some 5800 at 1 Mbaud with 2 KB pairs, some 61500 at 6.4 Mbaud - in
   500-odd gaps, NOT ONE BYTE CORRUPT OR TAKEN TWICE and never more gaps
   than `rx_skips()` moved, the receiver delivering to the end of every
   leg: THE KICK RACING A CHARACTER LOSES NOTHING IT DOES NOT REPORT, to
   6.4 Mbaud. `rx_skips()` is an EPOCH under an overrun, not a count:
-  one ORE costs many characters and moves it once (15881 lost against
-  13354 at 2 Mbaud, 60783 against 20011 at 6.4). At the default level
+  one ORE costs many characters and moves it once (some 16100 lost against
+  8200 at 2 Mbaud, some 61500 against 9800 at 6.4). At the default level
   the ring outranks the pair at every rung, no kick.
 - **Finding 4 over the wire** (`7`): the DMA study saw a whole message
   vanish now and then from a host-fed stream with no counter moving.
@@ -1692,9 +1708,13 @@ restarts).
 ## Not covered yet
 
 Declined with a reason (every field of chapter 33 is implemented):
-- **A bound on RXFT's entries over a ring a program ranked low.** The watch taken
-  down at its first entry needs a way back, and a wedge inside a continuous stream
-  offers none but the watch itself; the shape is an open choice.
+- **A gap in a run the epoch did not move for.** An overrun is counted when it is seen and
+  the FIFO's characters are still to come ahead of the gap, so a consumer that looks
+  in between sees `rx_skips()` move at that look and not at the run that holds the gap: letter
+  `6` prints them, all 501 gaps at 1 Mbaud with 2 KB pairs, 10 to 23 of some 580 at 6.4 Mbaud with
+  512 B ones, as many with the watch left up. `util/line_reader.hpp` can then hand a line with that gap in it.
+  Moving the epoch again at each look until the channel has passed the FIFO's nine characters
+  takes off most and not all (38 of 501), and why it leaves those is not known.
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
   a second node on CK, TX and RX, and the wires this desk carries

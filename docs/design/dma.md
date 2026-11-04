@@ -257,8 +257,7 @@ starve nothing, and the ring at HIGH loses nothing beside any of them
 ([the RP2350 DMA page](../rp2350/dma.md)). The STM32F4's arbiter ranks
 its streams port by port (RM0090 10.3.4), and there one or two copies
 ranked above a receive ring on the same controller never starved it
-at 11.25 Mbaud, three or four did (a ring armed low lost up to half
-its frames), and the ring at the highest level lost nothing beside
+at 11.25 Mbaud, three or four did (a ring armed low lost all but a few of its frames), and the ring at the highest level lost nothing beside
 four; a copy on the other controller, DMA2 against a ring on DMA1,
 reaches it only through the bus matrix and starved nothing
 ([the STM32F4 DMA page](../stm32f4/dma.md)). The rule is the same

@@ -178,7 +178,8 @@
  * never falls silent is not held for a lap. Two interrupts a burst, none
  * a byte. The edge itself is gated as the interrupt receiver's is: true
  * once per idle-to-busy transition of the consumer, re-opened when its
- * look finds the ring empty.
+ * look finds the ring empty. A stream that does not move has the wait for
+ * a frame taken down until its mark or the consumer's look (rx_vector()).
  *
  * What the channel's read cannot do: an error on the frame right after one
  * the vector counted is lost - the stream's read of that frame clears the
@@ -992,6 +993,17 @@ class Uart {
     // the overrun cleared there with nothing to take is then not counted
     // twice (rx_vector()).
     static inline volatile bool m_rx_ore_counted = false;
+    // The wait for a frame over a stream that does not move (rx_vector()):
+    // `m_rx_behind_left`, the entries still allowed to find RXNE standing;
+    // `m_rx_parked`, RXNEIE taken down until the stream's mark or the
+    // consumer's look; `m_rx_parks`, the times it was.
+    static inline volatile uint8_t m_rx_behind_left = 0;
+    static inline volatile bool m_rx_parked = false;
+    static inline volatile uint32_t m_rx_parks = 0;
+
+    /// rx_vector()'s allowance: the entries that may find RXNE standing and
+    /// the stream unmoved before RXNEIE goes down.
+    static constexpr uint8_t rx_behind_entries = 2;
 
     /// write_bulk()'s copy into the ring: the runtime's memcpy for a run
     /// of at least this many bytes, whatever the alignment of its two ends
@@ -1121,6 +1133,8 @@ public:
             arm_rx();
             S::dma_receive(true);
             m_rx_waiting = false;
+            m_rx_parked = false;
+            m_rx_parks = 0;
             S::regs().CR1 |= USART_CR1_IDLEIE | USART_CR1_PEIE;
             S::error_interrupt(true);
         } else {
@@ -1180,6 +1194,11 @@ public:
                 m_rx_drained = false;
                 edge = true;   // the consumer must come: its look re-binds the stream
             } else if (f != 0u) {
+                if (m_rx_parked) {   // the stream moved: the wait for a frame goes on
+                    m_rx_parked = false;
+                    m_rx_behind_left = rx_behind_entries;
+                    S::rxne_interrupt(true);
+                }
                 edge = told();   // the half or the full mark of a lap
             }
         }
@@ -1212,11 +1231,25 @@ public:
             }
             // waiting(): a look that writes nothing - empty() may skip,
             // moving the tail under a run the consumer holds.
+            if (m_rx_parked) {
+                unpark_rx();
+            }
             if (m_rx.waiting() != 0u && m_rx_drained) {
                 m_rx_drained = false;
                 return true;
             }
             return false;
+        }
+    }
+
+    /// The times the vector took its wait for a frame down over a stream
+    /// that did not move (rx_vector()), since init(). A measure of a starved
+    /// ring, zero on a healthy one. Always 0, and free, without an engine.
+    static uint32_t rx_parks() {
+        if constexpr (has_rx_engine) {
+            return m_rx_parks;
+        } else {
+            return 0;
         }
     }
 
@@ -1725,26 +1758,50 @@ private:
     /// consumer's, so is the restart); a look that finds the ring empty
     /// RE-OPENS THE EDGE and looks again, so a byte that landed before the
     /// gate opened is in this run and one after it raises the edge - no
-    /// wakeup lost between the two, at worst one edge more.
+    /// wakeup lost between the two, at worst one edge more. A wait for a
+    /// frame the vector took down comes back first: rx_vector() says why
+    /// the look is what brings it, and its entry counts an overrun that stood
+    /// while it was down.
     static std::span<const uint8_t> look() {
         if (m_rx_restart) {
             arm_rx();
+        }
+        const bool parked = m_rx_parked;
+        if (parked) {
+            m_rx_drained = true;   // the entry behind tells, if the stream is still behind
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            unpark_rx();
         }
         std::span<const uint8_t> run = m_rx.read_span();
         if (run.empty()) {
             m_rx_drained = true;
             std::atomic_signal_fence(std::memory_order_seq_cst);
             run = m_rx.read_span();
+        } else if (parked) {
+            m_rx_drained = false;
         }
         return run;
     }
 
+    /// A look brings the wait for a frame back. Masked for the decision
+    /// alone, the flag and one bit-band store, against a mark's entry doing
+    /// the same; the next entry that finds the stream unmoved takes it down
+    /// at once.
+    static void unpark_rx() {
+        typename Stm32f4Platform<>::CriticalSection cs;
+        if (m_rx_parked) {
+            m_rx_parked = false;
+            m_rx_behind_left = 0;
+            S::rxne_interrupt(true);
+        }
+    }
+
     /// THE EDGE'S GATE, for the vectors: true once per idle-to-busy
-    /// transition of the consumer. Each vector calls it only where the
-    /// stream has written since the consumer was last told - an idle line,
-    /// a burst's first frame, a lap's mark - so no look at the view is
-    /// needed here, which a handler may not take (the view is the
-    /// consumer's).
+    /// transition of the consumer. Each vector calls it where the stream
+    /// has written since the consumer was last told - an idle line, a
+    /// burst's first frame, a lap's mark - or, from the wait taken down, is
+    /// about to, so no look at the view is needed here, which a handler may
+    /// not take (the view is the consumer's).
     [[gnu::always_inline]] static bool told() {
         if (m_rx_drained) {
             m_rx_drained = false;
@@ -1807,6 +1864,27 @@ private:
      * overrun unless the entry that began the wait already did, and turns
      * back to waiting for the end. A frame completing between the two
      * loads is the one the DR read takes, inside an overrun already.
+     *
+     * A STREAM THAT DOES NOT MOVE. RXNE stands under RXNEIE until the
+     * stream reads DR, and nothing else may: the CPU's read takes a byte
+     * the stream is owed, and clearing the flag with a written zero (25.6.1)
+     * lets the next frame overwrite DR with no ORE. So an entry that finds
+     * RXNE up and the stream unmoved cannot clear what raised it, and left
+     * armed it re-enters without the thread running for as long as the
+     * stream is starved. rx_behind_entries such entries are let by (a stream
+     * merely behind a burst of another stream's); the next takes RXNEIE
+     * down, IDLE standing unread (its clear needs the same read of DR, so
+     * IDLEIE would enter at once), and tells the consumer, ahead of the
+     * byte. What brings RXNEIE back: the stream's half or full mark, its
+     * proof of moving, or the consumer's look, the one way back a burst too
+     * short for a mark has, since no interrupt of this peripheral marks a
+     * stream's read. So the consumer that was told comes, finds nothing, and
+     * asks again by arming the entry that tells it again while the stream
+     * stays starved: one entry a look, the kernel running between them.
+     * Nothing is lost by the wait: the stream takes its frames whenever it
+     * is served, and an overrun is counted at the first entry that sees it,
+     * the stream's read then taking the flag down, and a look comes after
+     * that entry.
      */
     [[gnu::always_inline]] static bool rx_vector(uint32_t st) {
         USART_TypeDef& r = S::regs();
@@ -1822,6 +1900,7 @@ private:
             count_errors(st & UsartFlag::receive_errors);
             m_rx_ore_counted = (st & UsartFlag::ore) != 0u;
             m_rx_waiting = true;
+            m_rx_behind_left = rx_behind_entries;
             const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
             m_rx_at = at;
             r.CR1 = (r.CR1 & ~(USART_CR1_IDLEIE | USART_CR1_PEIE)) | USART_CR1_RXNEIE;
@@ -1835,7 +1914,25 @@ private:
         const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
         if (at == m_rx_at) {
             if ((st & (UsartFlag::ore | UsartFlag::rxne)) != UsartFlag::ore) {
-                return edge;   // the stream has a frame to take, or nothing stands
+                if ((st & UsartFlag::rxne) == 0u) {
+                    return edge;   // nothing stands: the transmitter's entry
+                }
+                // The stream has a frame to take and has not taken it. An ORE
+                // this status read shows goes with the stream's next read
+                // (the header): counted here, once, or never.
+                if ((st & UsartFlag::ore) != 0u && !m_rx_ore_counted) {
+                    count_errors(UsartFlag::ore);
+                    m_rx_ore_counted = true;
+                }
+                const uint8_t left = m_rx_behind_left;
+                if (left != 0u) {
+                    m_rx_behind_left = static_cast<uint8_t>(left - 1u);
+                    return edge;
+                }
+                S::rxne_interrupt(false);
+                m_rx_parked = true;
+                m_rx_parks = m_rx_parks + 1u;
+                return told() || edge;
             }
             // The overrun with nothing to take: DR read, the clear done.
             (void)r.DR;
@@ -1843,6 +1940,7 @@ private:
                 count_errors(UsartFlag::ore);
             }
             m_rx_waiting = false;
+            m_rx_parked = false;
             r.CR1 = (r.CR1 & ~USART_CR1_RXNEIE) | USART_CR1_IDLEIE | USART_CR1_PEIE;
             r.CR3 |= USART_CR3_EIE;
             return told() || edge;
@@ -1854,6 +1952,7 @@ private:
             m_rx_at = static_cast<uint16_t>(RxEngine::remaining());
         } else {
             m_rx_waiting = false;
+            m_rx_parked = false;
             r.CR1 = (r.CR1 & ~USART_CR1_RXNEIE) | USART_CR1_IDLEIE | USART_CR1_PEIE;
             r.CR3 |= USART_CR3_EIE;
         }

@@ -111,8 +111,8 @@
 //      with the DWT's counter stopped
 //   r  (the Nucleo-F446RE, by name only) A LOAD THAT TAKES ALL OF APB1: nothing answering
 //      ahead of a starved stream, the read and the next one exact when the load comes off;
-//      runs of two and eight starved from the start and from the third byte, the event
-//      vector's entries, the bytes at the target
+//      runs of two and eight starved from the start, from the third byte and across a
+//      read's last two, the event vector's entries, the bytes at the target and its pointer
 //   s  (the Nucleo-F446RE) A CLIENT HOLDS THE CLOCK PAST THE DRAIN: a request right behind a
 //      stretched acknowledge, through an arbiter with a per-bus timeout and one with none: the
 //      answer, its time, what it moved, and the next requests with no init() and no recover()
@@ -122,6 +122,7 @@
 
 #include <stdint.h>
 
+#include <utility>
 #include <variant>
 
 #include "stm32f4/clock.hpp"
@@ -2402,9 +2403,13 @@ struct StarvedRow {
     uint16_t right = 0;      ///< answered i2c_ok, every byte, once the load came off
     uint16_t given_max = 0;  ///< a read: the most bytes the target's pointer moved
     uint16_t given_min = 0xFFFFu;
+    uint16_t refused = 0;    ///< answered i2c_nack_data, the target having refused the last byte
+    uint16_t took_ok = 0;    ///< of those and the rest, answered i2c_ok
 };
 
-void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = true) {
+void starved_run(uint8_t n, bool write, uint16_t late_us, StarvedRow& row, bool load = true,
+                 uint8_t refuse_at = 0, uint8_t read_too = 0) {
+    const bool late = late_us != 0u;
     static uint8_t cells[9];
     const uint8_t from = 0x10;
     (void)Regs::up(clock);
@@ -2418,6 +2423,11 @@ void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = 
         }
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(cells));
         r.tx_len = n;
+        if (read_too != 0u) {
+            static uint8_t behind[8];
+            r.rx = lend<Lease::reply>(static_cast<uint8_t*>(behind));
+            r.rx_len = read_too;
+        }
     } else {
         Regs::ptr = from;
         for (uint8_t i = 0; i < n; ++i) {
@@ -2427,6 +2437,7 @@ void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = 
         r.rx_len = n;
     }
     Regs::took = 0;
+    Regs::refuse_at = refuse_at;
     if (load && !late) {
         paced_on(3, 5);
     }
@@ -2435,8 +2446,8 @@ void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = 
     xfer_done = false;
     (void)DmaHost::start(r);
     if (load && late) {
-        // The address and two bytes at 100 kHz, 270 us, and the load comes up.
-        (void)delay_us(clock, 300);
+        // At 100 kHz the address and k bytes are 90 x (k + 1) us, and the load comes up.
+        (void)delay_us(clock, late_us);
         paced_on(3, 5);
     }
     const uint32_t t0 = Ticker::ticks();
@@ -2445,7 +2456,11 @@ void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = 
     }
     row.entries = row.entries + read_watch.ev_entries;
     row.early = static_cast<uint16_t>(row.early + ((load && xfer_done) ? 1u : 0u));
-    row.stretched = static_cast<uint16_t>(row.stretched + ((S::host() && S::flag(I2cFlag::byte_finished)) ? 1u : 0u));
+    // Not on a refused row: a status read here is half of a clear the stream's store would
+    // then finish, and BTF left standing by that store is what those rows ask about.
+    if (refuse_at == 0u) {
+        row.stretched = static_cast<uint16_t>(row.stretched + ((S::host() && S::flag(I2cFlag::byte_finished)) ? 1u : 0u));
+    }
     if (load) {
         paced_off(3);
     }
@@ -2453,6 +2468,9 @@ void starved_run(uint8_t n, bool write, bool late, StarvedRow& row, bool load = 
     }
     read_watch.on = false;
     spin_ms(1);
+    Regs::refuse_at = 0;
+    row.refused = static_cast<uint16_t>(row.refused + ((xfer_done && DmaHost::status() == i2c_nack_data) ? 1u : 0u));
+    row.took_ok = static_cast<uint16_t>(row.took_ok + ((xfer_done && DmaHost::status() == i2c_ok) ? 1u : 0u));
     bool right = xfer_done && DmaHost::status() == i2c_ok;
     if (write) {
         right = right && Regs::took == n;
@@ -2487,6 +2505,8 @@ void tr_all_of_apb1() {
     bus_ao_live = false;
     const bool up = DmaHost::init(clock);
     dma_host_live = true;
+    // The target afresh: a read behind a read leaves the byte it loaded for the next one.
+    (void)Regs::up(clock);
     ReadRow total{};
     copies_on();
     paced_on(3, 12);
@@ -2548,17 +2568,56 @@ void tr_all_of_apb1() {
                   "read and the next one exact when the load comes off",
                   rows == 100u && wire_first == 100u && answered_early == 0u && right == 100u &&
                       next_right == 100u);
-    StarvedRow plain_rd2{}, plain_rd8{}, rd2{}, rd8{}, wr2{}, wr8{}, late_rd8{}, late_wr8{};
+    StarvedRow plain_rd2{}, plain_rd8{}, rd2{}, rd8{}, wr2{}, wr8{}, late_rd8{}, late_wr8{}, last_rd8{};
+    StarvedRow plain_no8{}, late_no8{}, start_no8{}, plain_no_rd{}, late_no_rd{}, last_no8{}, last_no_rd{}, last_wr8{};
+    // Three from the end: the address and six bytes are 630 us, the seventh in the shifter from
+    // 540 and the eighth wanted in DR then. Load up at 600: the eighth's store waits, the seventh
+    // ends, BTF rises and SCL holds until the load comes off, the store going in over BTF.
+    constexpr uint16_t last_store_us = 600;
+    // The address and two bytes are 270 us at 100 kHz; the address and six, 630, and the
+    // seventh ends at 720: 680 catches the seventh in the shifter with the sixth served.
+    constexpr uint16_t third_us = 300;
+    constexpr uint16_t seventh_us = 680;
     for (uint8_t k = 0; k < 50u; ++k) {
-        starved_run(2, false, false, plain_rd2, false);
-        starved_run(8, false, false, plain_rd8, false);
-        starved_run(2, false, false, rd2);
-        starved_run(8, false, false, rd8);
-        starved_run(2, true, false, wr2);
-        starved_run(8, true, false, wr8);
-        starved_run(8, false, true, late_rd8);
-        starved_run(8, true, true, late_wr8);
+        starved_run(2, false, 0, plain_rd2, false);
+        starved_run(8, false, 0, plain_rd8, false);
+        starved_run(2, false, 0, rd2);
+        starved_run(8, false, 0, rd8);
+        starved_run(2, true, 0, wr2);
+        starved_run(8, true, 0, wr8);
+        starved_run(8, false, third_us, late_rd8);
+        starved_run(8, true, third_us, late_wr8);
+        starved_run(8, false, seventh_us, last_rd8);
+        // The last written byte refused, on a stream a load held: BTF standing behind the
+        // late bytes must not end the write ahead of that byte's acknowledge.
+        starved_run(8, true, 0, plain_no8, false, 8);
+        starved_run(8, true, third_us, late_no8, true, 8);
+        starved_run(8, true, 0, start_no8, true, 8);
+        starved_run(8, true, 0, plain_no_rd, false, 8, 2);
+        starved_run(8, true, third_us, late_no_rd, true, 8, 2);
+        starved_run(8, true, last_store_us, last_wr8);
+        starved_run(8, true, last_store_us, last_no8, true, 8);
+        starved_run(8, true, last_store_us, last_no_rd, true, 8, 2);
     }
+    for (const auto& [what, row] : {std::pair<const char*, const StarvedRow&>{"no load", plain_no8},
+                                    {"all of APB1 from the third byte", late_no8},
+                                    {"all of APB1 from the start", start_no8},
+                                    {"no load, a read of two behind it", plain_no_rd},
+                                    {"all of APB1 from the third byte, a read of two behind it", late_no_rd},
+                                    {"the last store held", last_no8},
+                                    {"the last store held, a read of two behind it", last_no_rd}}) {
+        print(serial, "  the last of eight written refused, ", what, ", ", row.rows, " rows: i2c_nack_data ", row.refused,
+              ", i2c_ok ", row.took_ok, crlf);
+    }
+    starved_print("the last store held, a write", 8, last_wr8);
+    bench.verdict("... the last store's stage reached the case: BTF standing with the eighth byte's store held, every byte there when it went in",
+                  last_wr8.stretched == last_wr8.rows && last_wr8.right == last_wr8.rows);
+    bench.verdict("A REFUSED LAST BYTE ON A STREAM IS REPORTED, late or on time, a read behind it or none: i2c_nack_data every row "
+                  "and never i2c_ok",
+                  plain_no8.refused == plain_no8.rows && late_no8.refused == late_no8.rows &&
+                      start_no8.refused == start_no8.rows && plain_no_rd.refused == plain_no_rd.rows &&
+                      late_no_rd.refused == late_no_rd.rows && last_no8.refused == last_no8.rows &&
+                      last_no_rd.refused == last_no_rd.rows);
     starved_print("no load, a read", 2, plain_rd2);
     starved_print("no load, a read", 8, plain_rd8);
     starved_print("all of APB1, a read", 2, rd2);
@@ -2567,11 +2626,26 @@ void tr_all_of_apb1() {
     starved_print("all of APB1, a write", 8, wr8);
     starved_print("all of APB1 from the third byte, a read", 8, late_rd8);
     starved_print("all of APB1 from the third byte, a write", 8, late_wr8);
+    starved_print("all of APB1 from the seventh byte, a read", 8, last_rd8);
     bench.verdict("A RUN OF TWO OR EIGHT STARVED: nothing answers ahead of the stream, the event vector takes SB's and ADDR's entries "
                   "alone, and every byte is there when the load comes off",
                   rd2.right == rd2.rows && rd8.right == rd8.rows && wr2.right == wr2.rows && wr8.right == wr8.rows &&
-                      late_rd8.right == late_rd8.rows && late_wr8.right == late_wr8.rows && rd2.early == 0u && rd8.early == 0u &&
-                      wr2.early == 0u && wr8.early == 0u && late_rd8.early == 0u && late_wr8.early == 0u);
+                      late_rd8.right == late_rd8.rows && late_wr8.right == late_wr8.rows && last_rd8.right == last_rd8.rows &&
+                      rd8.early == 0u && wr2.early == 0u && wr8.early == 0u && late_rd8.early == 0u && late_wr8.early == 0u &&
+                      last_rd8.early == 0u);
+    // The witness is the target's own pointer, so the bound is an identity: a read of n with
+    // no load moves it n + 1 (the byte the target loads behind the NACK, stated by the two
+    // no-load rows), and any byte more is a byte clocked off the target.
+    bench.verdict("A READ OF TWO UNDER ALL OF APB1 CLOCKS NO THIRD BYTE: no stream to wait for, answered with the load up, "
+                  "the target's pointer where the same read with no load leaves it, every row",
+                  rd2.early == rd2.rows && plain_rd2.given_min == 3u && plain_rd2.given_max == 3u &&
+                      rd2.given_min == 3u && rd2.given_max == 3u);
+    bench.verdict("A READ OF EIGHT STARVED ANYWHERE BUT ACROSS ITS LAST TWO BYTES clocks no byte more: the pointer at nine, as with no load",
+                  plain_rd8.given_min == 9u && plain_rd8.given_max == 9u && rd8.given_min == 9u && rd8.given_max == 9u &&
+                      late_rd8.given_min == 9u && late_rd8.given_max == 9u);
+    bench.verdict("A READ OF EIGHT STARVED ACROSS ITS LAST TWO BYTES CLOCKS ONE MORE, the reply exact: the pointer at ten "
+                  "(the page's limit, stated, not a wish)",
+                  last_rd8.given_max == 10u);
     dma_host_live = false;
     DmaHost::release();
     (void)host_ready();
@@ -2581,7 +2655,7 @@ void tr_all_of_apb1() {
 // p - THE STREAM'S COMPLETION HELD OFF
 // =============================================================================
 //
-// A read of two or more under dma: the STOP is requested in the stream's completion
+// A read of three or more under dma: the STOP is requested in the stream's completion
 // entry (RM0390 24.3.8), and the chapter does not say what the wire does between the
 // last byte in memory and that entry. The stage: the stream's vector line off, a poll
 // that dates the count's zero, a hold of `hold` core cycles counting SCL's rising edges,
@@ -2713,7 +2787,7 @@ void tp_held() {
     HoldRow all{};
     for (const I2cSpeed v : {I2cSpeed::fast_400k, I2cSpeed::standard_100k}) {
         const uint32_t bit = v == I2cSpeed::fast_400k ? 456u : 1800u;
-        for (const uint8_t n : {uint8_t{2}, uint8_t{8}}) {
+        for (const uint8_t n : {uint8_t{3}, uint8_t{8}}) {
             // In quarters of a bit, up to forty bits: past the next byte's nine clocks
             // and past a STOP's bit, so any byte the peripheral would clock is seen.
             for (const uint32_t quarters : {uint32_t{0}, uint32_t{2}, uint32_t{4}, uint32_t{8},

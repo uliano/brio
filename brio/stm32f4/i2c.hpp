@@ -778,7 +778,11 @@ struct I2cHostConfig {
  * gives a one-byte receive its own sequence - ACK cleared before ADDR is
  * cleared, which prime_receive() does at the read's SB for the pump as
  * well, the STOP programmed after ADDR's clear - while CR2.LAST makes the
- * block NACK the last byte of a longer receive run. A stream is this
+ * block NACK the last byte of a longer receive run. A read of two alone
+ * takes no stream: 24.3.3's two-byte procedure on the event vector, because
+ * LAST acts only once the stream has taken the first byte (launch_rx()).
+ * The same late stream costs a read of three or more one byte clocked off
+ * the target, at its last two bytes (docs/stm32f4/i2c.md). A stream is this
  * host's alone (the ownership rule, docs/design/dma.md), so its start is not
  * asked whether it took: the transmit stream's comes at the ADDR entry,
  * before ADDR's clear, the receive stream's at the read's SB, before the
@@ -1078,7 +1082,7 @@ public:
      * ADDR to the stream's completion, which ends a read and raises it for
      * a write's last BTF. A stream that falls a byte behind leaves BTF up
      * until it is served, so with the vector on, a load that starved the
-     * stream re-entered this handler for as long as it stood: a read of two
+     * stream re-entered this handler for as long as it stood: a read
      * on the Nucleo-F446RE held the core here for good, the thread that
      * could lift the load never running again, and a write of eight took
      * BTF for its end and answered i2c_ok with four bytes on the wire
@@ -1692,7 +1696,7 @@ private:
     /// read-modify-write (START is down: SB is what brought us here).
     [[gnu::always_inline]] static void prime_receive() {
         uint32_t bits = t_.rx_len != 1u ? I2C_CR1_ACK : 0u;
-        if (t_.rx_len == 2u && !dma_serves_rx()) {
+        if (t_.rx_len == 2u) {
             bits |= I2C_CR1_POS;
         }
         I2C_TypeDef& reg = S::regs();
@@ -1707,7 +1711,8 @@ private:
                 // The stream is running since the SB (launch_rx()); DMAEN
                 // before ADDR's clear (24.3.8). LAST makes the block NACK
                 // the run's last byte, and 24.3.8 gives it to runs of two
-                // or more; a run of one had ACK cleared at its SB
+                // or more, here of three or more (launch_rx() says why
+                // two is not on a stream); a run of one had ACK cleared at its SB
                 // (prime_receive()) and takes 24.3.8's own sequence: the
                 // STOP programmed after ADDR's clear.
                 const uint32_t last = t_.rx_len != 1u ? I2C_CR2_LAST : 0u;
@@ -1811,9 +1816,18 @@ private:
     /// waiting for DMAEN (raised at ADDR, begin_receive()). The start's
     /// answer is not read: the stream is this host's alone, and its last
     /// block ended with its last tenure.
+    ///
+    /// A read of two starts none. 24.3.8's LAST acts after EOT_1, which
+    /// comes when the stream takes the first byte: a stream late past the
+    /// second byte's acknowledge leaves that byte acknowledged, BTF up,
+    /// and its read of the first releases SCL for a third byte off the
+    /// target, the one LAST then refuses. 24.3.3's two-byte procedure
+    /// holds the wire at BTF for the STOP to go in ahead of the first
+    /// read, whatever the load: the event vector takes it, one entry as
+    /// the stream's completion was.
     [[gnu::always_inline]] static void launch_rx() {
         if constexpr (has_engines) {
-            if (t_.dma) {
+            if (t_.dma && t_.rx_len != 2u) {
                 (void)RxEngine::start(std::span<uint8_t>(t_.rx, t_.rx_len));
                 t_.rx_dma = true;
             }

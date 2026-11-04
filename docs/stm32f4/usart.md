@@ -182,7 +182,8 @@ from those four measurements.
 | RDR, one level (25.4.3): no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | the block has nothing deeper to batch; at 5.625 Mbaud a byte is 320 cycles and the interrupt receiver keeps up with the console's and the tick's handlers beside it, an overrun counted when a longer one holds it off |
 | DMAR and a circular stream (25.4.13, dma.md) | the receive engine | the bulk path: no entry a byte, no re-arm between laps |
 | IDLE and IDLEIE: an idle frame after a frame (25.6.1) | the engine's burst edge | the end of a burst one frame after its last stop bit; the stream's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
-| RXNEIE beside DMAR | the engine's wait for a frame | RXNE is the stream's request and the interrupt both: the stream still takes the byte and the vector learns one came - the only way to know the clear finished, and the edge of a burst of one frame |
+| RXNEIE beside DMAR | the engine's wait for a frame | RXNE is the stream's request and the interrupt both: the stream still takes the byte and the vector learns one came - the only way to know the clear finished, and the edge of a burst of one frame; taken down over a stream that does not move |
+| RXNE's clear by a written zero (25.6.1, "recommended only for multibuffer communication") | declined | it would quiet the vector over a starved stream, and the next frame would then overwrite DR with no ORE: a byte lost unreported |
 | EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises, then disarmed until the stream's next read finishes its clear |
 | the half and full marks of the stream's lap (dma.md) | the engine's edge with no silence | a stream that never pauses is told twice a lap |
 | a receiver time-out | none on this block | the STM32G0's RTOF is a later generation's |
@@ -281,7 +282,8 @@ TX and RX inside the chip and leaves the RX pad alone.
   an engine the SkipRing's skips, one at the consumer's look after
   `isr()` reported a byte refused by a full ring, dropped for FE or PE,
   or an overrun; with one the view's skips plus an ORE and a restart
-  after a transfer error, an FE frame being stored),
+  after a transfer error, an FE frame being stored), `rx_parks` (the times the wait
+  for a frame was taken down over a stream that did not move),
   the counters `rx_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns` - each
   SATURATING at 255, so a storm of errors never reads as a few -
@@ -320,7 +322,7 @@ TX and RX inside the chip and leaves the RX pad alone.
   character, so a starved receive stream overruns, and a starved transmit
   one leaves the line idle a while. On this controller the level decides
   correctness: a ring armed low beside three copies at very_high on its
-  own DMA2 lost up to half of what came, the default ring nothing beside
+  own DMA2 lost all but a few frames of what came, the default ring nothing beside
   four ([dma.md](dma.md), `test_stm32f4_serial` letter g).
 - WITH A TRANSMIT ENGINE THE MASK COVERS THE CLAIM AND NOTHING ELSE. Two
   contexts start blocks - a print in the loop and the completion handler
@@ -370,6 +372,23 @@ TX and RX inside the chip and leaves the RX pad alone.
   began the wait did, and turns back to waiting for the end: one compare
   more on the unmoved entry. A frame completing between the two loads is
   the one the DR read takes, inside an overrun already.
+- A STREAM THAT DOES NOT MOVE TAKES THE WAIT DOWN. RXNE stands under
+  RXNEIE until the stream reads DR and only the stream may, so an entry
+  over a starved stream cannot clear what raised it and left armed would
+  keep the thread out for as long as the stream is starved. Two such entries
+  are let by; the third takes RXNEIE down (IDLE stands unread too, its clear
+  being the same read, so IDLEIE stays down) and reports the edge ahead of
+  the byte, and `rx_parks()` counts it. No interrupt of this peripheral marks
+  a stream's read, so what brings RXNEIE back is the stream's half or full
+  mark, or a look at the ring: `read_byte`, `read_bulk`,
+  `read_span` or `harvest`. So a consumer told by the edge comes, finds
+  nothing and asks again, one entry a look for as long as the stream stays starved,
+  the kernel running between them. A program with no look pending has one
+  entry at each mark. An overrun is counted at the first entry that sees it,
+  since the stream's read then takes the flag down, and a look runs that entry
+  before it reads the ring. A consumer's priority is
+  what that asking competes at: active objects below it wait for as long as the
+  starvation lasts and it keeps asking.
 - WHAT THE CHANNEL'S READ BOUNDS. A frame whose error rises while its
   flag from the frame before stands (seen, not yet cleared) is cleared by
   its own read unseen: a run of errored frames counts every other one,
@@ -543,16 +562,23 @@ three count 2. Ten breaks under a thread polling SR as fast as it can:
 7 counted. The interrupt receiver drops each break's frame and counts
 it (40 of 40 data bytes, FE 10 for 10).
 
-**The ring against copies on its own controller** (letter g, DMA2): the
-default ring loses nothing beside four copies at very_high at 5.625 and
-11.25 Mbaud; armed low (`rx_priority`), it loses nothing beside two and
-a third to a half of its frames beside three or four, the overrun count
-saturating at 255; the vector is quiet after every starved leg (the
-overrun with nothing to take, above). Inside such a leg it is not: RXNE stands
-under the wait for a frame's RXNEIE until the stream takes it, and the vector
-re-enters for as long, 37383 to 175444 entries over a leg of 4096 frames at three
-and four copies, the thread up to 28260 cycles late (two runs of the letter on the
-STM32F446RE). The table is [dma.md](dma.md)'s.
+**The ring against copies on its own controller** (letter g, DMA2, fifteen runs on the
+STM32F446RE): the default ring loses nothing beside four copies at very_high at 5.625 and 11.25
+Mbaud; armed low (`rx_priority`), it loses nothing beside two, and beside three or four,
+the copies started by the thread that feeds the line, 1 to 5 of 4096 frames reach it, with an
+overrun reported. The vector is quiet after every starved leg (the overrun with nothing to
+take, above). Inside such a leg it takes 4 entries, the wait for a frame down after the
+third, the thread at most 2661 cycles late. With RXNEIE left armed the same legs took 31000 to 137000
+entries and the thread up to 28300 cycles late, which is also what kept its copies from starting.
+The letter holds every leg to a bound from the vector's states: one for the port coming up, five
+a stream mark, four a burst, the line falling idle (a store seven bits late), two a look.
+
+The same copies as a load that does not end, started from a timer's vector so the thread cannot
+end it by being held out: the thread feeds its 4096 frames and ends the load, every run.
+Read at the end, 4 to 6 entries a leg, against 68000 to 71000 left armed, where only
+the handler's own bound of a tenth of a second ended the load. With a consumer told by the edge, one entry a look
+while the ring stays starved: 5540 to 5815 entries over 3993 to 4103 looks, the
+thread at most 3308 cycles late, 563 to 751 frames delivered and the rest behind counted overruns.
 
 **`tx_idle()` is the wire's** (letter e): its first true lands 1594..1603
 and 1598..1604 cycles after the last stop bit's rising edge on the pad at
@@ -759,7 +785,7 @@ is crystal against crystal - and every rate it SENDS it states (a
   back to back from the far chip at 4.27 and 6.4 Mbaud: at its default
   level the ring loses nothing beside up to four very-high copies, word
   or byte beats; ranked low, two copies starve nothing and THREE do -
-  3299 of 4096 lost at 4.27 Mbaud word beats, every loss an overrun the
+  1 to 7 of 4096 reach the ring, every loss behind an overrun the
   ring reports, never a corrupt byte (design/dma.md's three copies on
   this arbiter, now with a wire as the sender).
 - **Half duplex against a second board** (`9`): this end's HDSEL single
@@ -912,15 +938,18 @@ Driver gaps:
 - Nine-bit words through the TASK (the resource's `write_word`/
   `read_word` speak them; the rings carry bytes) - declined, as on the
   other strata.
+- A gap in a run the epoch did not move for. An overrun is counted when it is seen, and the
+  frame in DR is still to come ahead of the gap, so a consumer that looks in
+  between sees `rx_skips()` move at the first look and not at the run that holds the gap: 45 to
+  138 of some 450 gaps a leg under letter `g`'s consumer on the edge, 426 to 649 of 567 to 842
+  with RXNEIE left armed, where a thread held out rarely looked in between.
+  `util/line_reader.hpp` can then hand a line with that gap in it. Moving the epoch again at
+  each look until the stream has passed the gap does not close it (36 and 57 in a run), and why is not known.
 - A wake from Stop: this USART has no wake unit (the G0's WUF); the
   power chapter says what a Stop does to a pending receive.
 - The receive errors' COUNTS under the engine are bounded, not exact
   (above): exact counts would need the CPU's read of DR, which the
   engine's rule forbids - declined.
-- A bound on the wait for a frame's entries over a starved stream: its copies
-  ending let the letter's thread back in, and a load that does not end through
-  the thread is not staged - the shape is an open choice, a channel given up or
-  an edge reported late.
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): the

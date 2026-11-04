@@ -7152,7 +7152,9 @@ void tW_glitch_map() {
 // gap must be one rx_skips() counted, and the receiver must keep going -
 // where the kick (DMAR dropped and raised, docs/stm32g0/usart.md) races a
 // character arriving on the very toggle, a byte lost uncounted or taken
-// twice shows here. The same at the default level is the control.
+// twice shows here. The same at the default level is the control. The
+// vector's entries are judged against a bound from the watch's states, and
+// the pair runs once more as a load that does not end until the thread ends it.
 
 constexpr UartOptions link_low{.tx_speed = PinSpeed::very_high, .rx_priority = DmaPriority::low};
 constexpr UartOptions link_low8{.over8 = true, .tx_speed = PinSpeed::very_high, .rx_priority = DmaPriority::low};
@@ -7186,20 +7188,82 @@ struct RingLeg {
     uint8_t ore = 0, kicks = 0, faults = 0;
     uint32_t pairs = 0;
     uint16_t peer_count = 0;
+    uint32_t entries = 0;      ///< USART1's vector entries over the leg
+    uint32_t parks = 0;        ///< the watch taken down
+    uint32_t marks = 0;        ///< the ring's half and full marks the bytes crossed
+    uint32_t looks = 0;        ///< the looks at the ring that found it empty
+    uint32_t unseen = 0;       ///< runs with a gap in them and the epoch not moved
+    bool thread_ended = false; ///< the load that does not end still up when the thread ended it
 };
 
+// The pair in a load that does not end until the thread ends it: each copy started again from
+// its own completion's vector, never the thread, so a vector that holds the thread out cannot
+// end the load by holding it. The vectors' own bound lets a thread that never ran read its
+// verdict instead of hanging the suite: at about 25 000 cycles a 2 KB pair of 64 MHz, 4000
+// pairs are some 1.5 s against the half second the leg keeps it up.
+volatile bool endless_on = false;
+volatile uint32_t endless_left = 0;
+constexpr uint32_t endless_load_ms = 500;
+constexpr uint32_t endless_pairs_most = 4000;
+
+/// A copy's completion, from its vector: started again while the load stands.
+template <typename Copy>
+void endless_again(uint8_t which) {
+    if ((Copy::service() & Copy::flag_complete) == 0u) {
+        return;
+    }
+    (void)Copy::complete();
+    if (endless_on) {
+        (void)Copy::copy(&pair_dst[which][0], &pair_src[0], pair_most);
+        const uint32_t left = endless_left;
+        endless_left = left - 1u;
+        endless_on = left > 1u;
+    }
+}
+
+enum class RingLoad : uint8_t {
+    paced,       ///< the pair every 5 ms from the thread, the ring polled
+    end_read,    ///< no end but the thread's, the ring read when it ends
+    end_edge,    ///< no end but the thread's, the ring read on the edge
+};
+
+/// The vector's entries a leg may cost, derived from isr_entry(). Whatever brings the watch
+/// back - the start, a mark, a look - two entries at most take it down again; so two for
+/// each time it went down and two for each mark and the start. A look that finds the watch
+/// up costs nothing, so the looks are not in the bound: the parks stand for them, one look
+/// or mark between any two. The one entry the watch does not count is an idle line, and
+/// the blast has none until its end.
+constexpr uint32_t ring_entry_bound(const RingLeg& l) {
+    return 1u + 2u * (1u + l.marks + l.parks);
+}
+
+/// One look at the ring. `unseen` counts the runs with a gap in them that find the epoch
+/// where the last look left it: a consumer that reads the epoch beside the run
+/// (util/line_reader.hpp) takes the bytes behind such a gap for the stream. Printed and not
+/// judged: docs/stm32g0/usart.md lists what stays of it.
 template <typename Port>
-void ring_drain(CountCheck& c, uint32_t& budget) {
+void ring_drain(CountCheck& c, uint32_t& budget, uint32_t& seen_skips, uint32_t& unseen) {
     const std::span<const uint8_t> run = Port::read_span();
+    const uint32_t skips = Port::rx_skips();
+    const uint32_t gaps = c.gaps;
     for (const uint8_t b : run) {
         c.take(b);
     }
+    unseen += (c.gaps != gaps && skips == seen_skips) ? 1u : 0u;
+    seen_skips = skips;
     (void)Port::consume(static_cast<uint32_t>(run.size()));
     budget += static_cast<uint32_t>(run.size());
 }
 
 template <typename Port>
-RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
+void ring_drain(CountCheck& c, uint32_t& budget) {
+    uint32_t seen = Port::rx_skips();
+    uint32_t unseen = 0;
+    ring_drain<Port>(c, budget, seen, unseen);
+}
+
+template <typename Port>
+RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode, RingLoad load = RingLoad::paced) {
     using CopyA = typename Pair<Port>::A;
     using CopyB = typename Pair<Port>::B;
     RingLeg l{};
@@ -7219,17 +7283,41 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
     loop_mode = mode;
     l.up = acted && Port::init(clock, rate);
     if (pair != 0u) {
-        CopyA::arm(DmaPriority::low, DmaIrq::error_only);
-        CopyB::arm(DmaPriority::low, DmaIrq::error_only);
+        const DmaIrq irq = load == RingLoad::paced ? DmaIrq::error_only : DmaIrq::complete_and_error;
+        CopyA::arm(DmaPriority::low, irq);
+        CopyB::arm(DmaPriority::low, irq);
     }
     const uint32_t skips0 = Port::rx_skips();
+    uint32_t seen_skips = skips0;
+    loop_irqs = 0;
     const uint32_t t0 = Ticker::millis();
     uint32_t next_pair = t0;
     uint32_t last_byte = t0;
     bool running = false;
+    if (load != RingLoad::paced && l.up) {
+        endless_left = 2u * endless_pairs_most;
+        endless_on = true;
+        (void)CopyA::copy(&pair_dst[0][0], &pair_src[0], pair);
+        (void)CopyB::copy(&pair_dst[1][0], &pair_src[0], pair);
+        uint32_t seen = rx_edges;
+        while (Ticker::millis() - t0 < endless_load_ms) {
+            if (load == RingLoad::end_edge && rx_edges != seen) {
+                seen = rx_edges;
+                uint32_t n = 0;
+                ring_drain<Port>(l.c, n, seen_skips, l.unseen);
+                ++l.looks;
+            }
+            feed();
+        }
+        l.thread_ended = endless_on;
+        endless_on = false;
+        last_byte = Ticker::millis();
+        pair = 0;   // the thread's own relaunch below stays out
+    }
     while (l.up && Ticker::millis() - t0 < 3200u) {
         uint32_t n = 0;
-        ring_drain<Port>(l.c, n);
+        ring_drain<Port>(l.c, n, seen_skips, l.unseen);
+        l.looks += n == 0u ? 1u : 0u;
         if (n != 0u) {
             last_byte = Ticker::millis();
         } else if (Ticker::millis() - last_byte > 150u && l.c.got != 0u) {
@@ -7252,13 +7340,16 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
     }
     for (uint32_t spins = 1'000'000u; pair != 0u && !(CopyA::poll() && CopyB::poll()) && spins != 0u; --spins) {
     }
-    if (pair != 0u) {
+    if (l.pair != 0u) {
         CopyA::stop();
         CopyB::stop();
     }
     uint32_t n = 0;
-    ring_drain<Port>(l.c, n);
+    ring_drain<Port>(l.c, n, seen_skips, l.unseen);
     l.c.close();
+    l.entries = loop_irqs;
+    l.parks = Port::rx_parks();
+    l.marks = l.c.got / (link_ring / 2u) + 1u;
     l.skips = Port::rx_skips() - skips0;
     l.ore = Port::hw_overruns();
     l.kicks = Port::rx_kicks();
@@ -7272,11 +7363,11 @@ RingLeg ring_leg_on(uint32_t rate, uint16_t pair, bool low, uint8_t mode) {
 }
 
 template <typename = void>   // instantiated by letter 6 alone, the pair with it
-RingLeg ring_leg(uint32_t rate, uint16_t pair, bool low) {
+RingLeg ring_leg(uint32_t rate, uint16_t pair, bool low, RingLoad load = RingLoad::paced) {
     const bool fast = !LinkIrq::can_baud(u1_hz, rate);
     if (low) {
-        return fast ? ring_leg_on<LinkLow8>(rate, pair, true, mode_link_low8)
-                    : ring_leg_on<LinkLow>(rate, pair, true, mode_link_low);
+        return fast ? ring_leg_on<LinkLow8>(rate, pair, true, mode_link_low8, load)
+                    : ring_leg_on<LinkLow>(rate, pair, true, mode_link_low, load);
     }
     return fast ? ring_leg_on<LinkDma8>(rate, pair, false, mode_link_dma8)
                 : ring_leg_on<LinkDma>(rate, pair, false, mode_link_dma);
@@ -7297,15 +7388,18 @@ void t6_ring() {
         }
         static constexpr uint32_t rates[] = {1'000'000, 2'000'000, 3'200'000, 6'400'000};
         const uint16_t pairs[] = {0, static_cast<uint16_t>(pair_most / 4u), static_cast<uint16_t>(pair_most)};
-        bool counted = true, alive = true, control = true, within = true;
+        bool counted = true, alive = true, control = true, within = true, bounded = true;
         uint32_t kicks = 0, lost_total = 0;
         for (const uint32_t rate : rates) {
             for (const uint16_t pair : pairs) {
                 const RingLeg l = ring_leg(rate, pair, true);
                 print(serial, "  ", rate, " baud, ring LOW, pair of ", pair, " B (", l.pairs, " pairs): ", l.c.got,
                       " in, ", l.c.gaps, " gaps (", l.c.lost, " frames), ", l.c.bad, " bad; skips ", l.skips, ", ORE ",
-                      l.ore, ", kicks ", l.kicks, ", faults ", l.faults, "; the peer sent ", l.peer_count,
-                      " (mod 2^16)", crlf);
+                      l.ore, ", kicks ", l.kicks, ", faults ", l.faults, "; ", l.entries, " vector entries (bound ",
+                      ring_entry_bound(l), ", ", l.parks, " watch taken down, ", l.looks, " empty looks, ", l.unseen,
+                      " gaps ahead of the epoch); the peer sent ",
+                      l.peer_count, " (mod 2^16)", crlf);
+                bounded = bounded && l.entries <= ring_entry_bound(l);
                 // Every gap a skip the transport counted, no corrupt byte, and
                 // the stream delivered to its end (a second's worth at least).
                 counted = counted && l.up && l.c.bad == 0u && l.c.gaps <= l.skips;
@@ -7316,8 +7410,29 @@ void t6_ring() {
             }
             const RingLeg h = ring_leg(rate, static_cast<uint16_t>(pair_most), false);
             print(serial, "  ", rate, " baud, ring at its DEFAULT level, pair of ", pair_most, " B: ", h.c.got, " in, ",
-                  h.c.gaps, " gaps, ", h.c.bad, " bad, kicks ", h.kicks, crlf);
+                  h.c.gaps, " gaps, ", h.c.bad, " bad, kicks ", h.kicks, "; ", h.entries, " vector entries (bound ",
+                  ring_entry_bound(h), ")", crlf);
             control = control && h.up && h.c.gaps == 0u && h.c.bad == 0u && h.c.got >= rate / 10u;
+            bounded = bounded && h.entries <= ring_entry_bound(h);
+        }
+        // The load that does not end, the same pair, the ring ranked below it.
+        bool thread_ended = true, end_bounded = true, end_counted = true, end_reached = true;
+        for (const uint32_t rate : {uint32_t{1'000'000}, uint32_t{2'000'000}}) {
+            for (const RingLoad load : {RingLoad::end_read, RingLoad::end_edge}) {
+                const RingLeg e = ring_leg(rate, static_cast<uint16_t>(pair_most), true, load);
+                print(serial, "  ", rate, " baud, the load that does not end, ",
+                      load == RingLoad::end_edge ? "a consumer on the edge" : "read when it ends", ": ", e.c.got, " in, ",
+                      e.c.gaps, " gaps (", e.c.lost, " frames), ", e.c.bad, " bad; skips ", e.skips, ", ORE ", e.ore,
+                      ", kicks ", e.kicks, "; ", e.entries, " vector entries (bound ", ring_entry_bound(e), ", ", e.parks,
+                      " watch taken down, ", e.looks, " empty looks, ", e.unseen, " gaps ahead of the epoch); ",
+                      e.thread_ended ? "the thread ended the load" : "THE VECTORS' BOUND ENDED THE LOAD", crlf);
+                thread_ended = thread_ended && e.thread_ended;
+                end_bounded = end_bounded && e.entries <= ring_entry_bound(e);
+                // Read at its end, several gaps can share one overrun left standing: the epoch moved.
+                end_counted = end_counted && e.up && e.c.bad == 0u &&
+                              (load == RingLoad::end_read ? (e.c.gaps == 0u || e.skips != 0u) : e.c.gaps <= e.skips);
+                end_reached = end_reached && e.parks != 0u;
+            }
         }
         print(serial, "  the kick fired ", kicks, " times over the low legs (255 a leg at most), ", lost_total,
               " frames lost to the pair, every one in a counted gap", crlf);
@@ -7326,6 +7441,12 @@ void t6_ring() {
               "character loses nothing it does not report, to 6.4 Mbaud", counted);
         judge("and the receiver keeps going: every leg delivered to its end", alive);
         judge("the ring at its default level outranks the pair: every byte, every rung", control);
+        judge("A STARVED RING COSTS A BOUNDED NUMBER OF ENTRIES, every rung, both levels: the bound from the marks, "
+              "the looks and the bytes", bounded);
+        judge("A LOAD THAT DOES NOT END leaves the thread running: the thread the one that ended it", thread_ended);
+        judge("... at the same bound on the entries, read at its end or by a consumer on the edge", end_bounded);
+        judge("... and the stage reached the case: the watch taken down on every such leg", end_reached);
+        judge("... every gap counted, no byte corrupt or taken twice", end_counted);
         link_release();
     }
 }
@@ -9308,8 +9429,8 @@ bool usart1_link(uint8_t m) {
             case mode_link_dma: (void)LinkDma::isr(); return true;
             case mode_link_irq8: (void)LinkIrq8::isr(); return true;
             case mode_link_dma8: (void)LinkDma8::isr(); return true;
-            case mode_link_low: (void)LinkLow::isr(); return true;
-            case mode_link_low8: (void)LinkLow8::isr(); return true;
+            case mode_link_low: rx_edges = rx_edges + (LinkLow::isr() ? 1u : 0u); return true;
+            case mode_link_low8: rx_edges = rx_edges + (LinkLow8::isr() ? 1u : 0u); return true;
             default: break;
         }
     }
@@ -9380,8 +9501,8 @@ bool dma23_link(uint8_t m) {
         switch (m) {
             case mode_link_dma: (void)LinkDma::dma_isr(); return true;
             case mode_link_dma8: (void)LinkDma8::dma_isr(); return true;
-            case mode_link_low: (void)LinkLow::dma_isr(); return true;
-            case mode_link_low8: (void)LinkLow8::dma_isr(); return true;
+            case mode_link_low: rx_edges = rx_edges + (LinkLow::dma_isr() ? 1u : 0u); return true;
+            case mode_link_low8: rx_edges = rx_edges + (LinkLow8::dma_isr() ? 1u : 0u); return true;
             default: break;
         }
     }
@@ -9414,9 +9535,17 @@ bool dma23_bridge() {
 template <bool on = image_has_link>
 void dma1_ch1_copy() {
     if constexpr (on) {
-        (void)Pair<std::bool_constant<on>>::A::service();
+        endless_again<typename Pair<std::bool_constant<on>>::A>(0);
     } else {
         Nvic::disable(DMA1_Channel1_IRQn);
+    }
+}
+
+/// Letter 6's second copy on channel 2's line, shared with the receive engines on 3.
+template <bool on = test_letter_carried('6')>
+void dma1_ch2_copy() {
+    if constexpr (on) {
+        endless_again<typename Pair<std::bool_constant<on>>::B>(1);
     }
 }
 
@@ -9524,6 +9653,7 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
     if (dma23_bridge()) {
         return;
     }
+    dma1_ch2_copy();
     const uint8_t m = loop_mode;
     bool edge = false;
     if (!dma23_transport(m, edge) && !dma23_link(m)) {

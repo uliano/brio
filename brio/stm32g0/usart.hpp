@@ -1360,6 +1360,13 @@ struct Usart {
         InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_RXFTIE) : (regs().CR3 & ~USART_CR3_RXFTIE);
     }
+    /// EIE and RXFTIE in one store: the receive engine's watch, taken down
+    /// and brought back whole over a channel that does not move.
+    static void rx_watch_interrupts(bool on) {
+        InterruptGuard guard;
+        constexpr uint32_t watch = USART_CR3_EIE | USART_CR3_RXFTIE;
+        regs().CR3 = on ? (regs().CR3 | watch) : (regs().CR3 & ~watch);
+    }
     static void tx_threshold_interrupt(bool on) {
         InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_TXFTIE) : (regs().CR3 & ~USART_CR3_TXFTIE);
@@ -1688,6 +1695,18 @@ struct UartRxRing<true, Owner, size, Engine> {
  * starvation above one character loses frames. A healthy stream never
  * kicks; rx_kicks() counts the kicks.
  *
+ * RXFT is a level only the channel takes below the threshold, and ORE,
+ * cleared through ICR, rises again with the next character, so a kick over
+ * a channel that is starved rather than wedged changes nothing and the
+ * entry comes straight back. The second entry for either since the watch
+ * came up kicks once more and takes the watch down, RXFTIE and EIE in one
+ * store (rx_parks() counts these), telling the consumer. The way back is the
+ * line's IDLE and the ring's marks, which harvest() runs, or a look at the
+ * ring, the only one a wedge inside a continuous stream leaves: at most two
+ * entries between one way back and the next, the kernel running between
+ * them. Errors raised meanwhile stand and are counted once, at the entry
+ * behind that look, which runs before the look reads the ring.
+ *
  * Where the hot paths run from: the task's placement, its last template
  * parameter (util/placement.hpp). Both interrupt bodies take it, each one
  * function of it: isr() - the receiver, the transmitter's FIFO refill or
@@ -1838,6 +1857,12 @@ class UartTask {
     /// The receive request presented anew (isr()'s kick, rx_kicks()).
     /// Touched only under a receive engine with the FIFO on.
     static inline volatile uint8_t m_rx_kicks = 0;
+    /// The receive engine's watch (isr_entry()): the entries it has raised
+    /// since it came up, whether it is down, and the times it was taken
+    /// down. Touched only under a receive engine with the FIFO on.
+    static inline volatile uint8_t m_rx_watch_entries = 0;
+    static inline volatile bool m_rx_parked = false;
+    static inline volatile uint32_t m_rx_parks = 0;
 
     /// The transmit edge: set where the transmitter finds the ring dry
     /// (the transmit entry that disarms, or a transmit block's completion
@@ -2097,6 +2122,9 @@ public:
                 // The wedge's watch: RXFT at seven eighths enters the
                 // vector one entry and the shift register short of an
                 // overrun, where the kick still loses nothing.
+                m_rx_parked = false;
+                m_rx_parks = 0;
+                m_rx_watch_entries = 0;
                 S::rx_threshold_interrupt(true);
             }
         } else if constexpr (rx_paced) {
@@ -2221,6 +2249,11 @@ public:
         if constexpr (!has_rx_engine) {
             return false;
         } else {
+            if constexpr (rx_kick) {
+                if (m_rx_parked) {   // an idle line, an error or a mark: the watch comes back
+                    unpark_rx();
+                }
+            }
             const uint32_t st = S::status();
             const uint32_t errors = st & UsartFlag::receive_errors;
             if (errors != 0u) {
@@ -2258,6 +2291,18 @@ public:
             }
             m_rx_drained = false;
             return true;
+        }
+    }
+
+    /// The times the vector took the receive engine's watch down over a
+    /// channel that did not move (the class comment), since init(). A
+    /// measure of a starved ring, zero on a healthy one. Always 0, and free,
+    /// without a receive engine or without the FIFO.
+    static uint32_t rx_parks() {
+        if constexpr (rx_kick) {
+            return m_rx_parks;
+        } else {
+            return 0;
         }
     }
 
@@ -2404,6 +2449,7 @@ private:
             // here would take a byte from under the channel. IDLE is
             // cleared through ICR; the errors are harvest()'s, through ICR
             // too.
+            bool watch_down = false;
             if constexpr (rx_kick) {
                 // THE KICK, before harvest() clears the errors: an entry for
                 // the line's IDLE, a receive error or the threshold that
@@ -2411,10 +2457,18 @@ private:
                 // a healthy channel having emptied it within a few bus
                 // cycles - is a request the channel is not serving, and
                 // DMAR dropped and raised presents it anew (the class
-                // comment). A threshold entry is a level: it re-enters while
-                // a starved channel leaves the FIFO above it.
+                // comment). The threshold is a level and an overrun rises
+                // again with the next character, so a kick that cured
+                // leaves neither standing and the second entry since the
+                // watch came up takes it down, whatever the channel did:
+                // below. IDLE needs a new silence to rise again and is not
+                // counted.
                 if ((st & (UsartFlag::idle | UsartFlag::receive_errors | UsartFlag::rxft)) != 0u &&
                     (r.ISR & UsartFlag::rxne) != 0u) {
+                    if ((st & UsartFlag::idle) == 0u) {
+                        watch_down = m_rx_watch_entries != 0u;
+                        m_rx_watch_entries = 1u;
+                    }
                     S::rx_request_restart();
                     bump(m_rx_kicks);
                 }
@@ -2422,6 +2476,17 @@ private:
             if ((st & (UsartFlag::idle | UsartFlag::receive_errors)) != 0u) {
                 r.ICR = UsartClear::idle;
                 edge = harvest();
+            }
+            if constexpr (rx_kick) {
+                if (watch_down) {   // behind harvest(), whose way back it undoes
+                    S::rx_watch_interrupts(false);
+                    m_rx_parked = true;
+                    m_rx_parks = m_rx_parks + 1u;
+                    if (m_rx_drained) {
+                        m_rx_drained = false;
+                        edge = true;
+                    }
+                }
             }
         } else if constexpr (fifo_mode) {
             if constexpr (rx_paced) {
@@ -2561,6 +2626,7 @@ public:
         if constexpr (has_rx_engine) {
             m_rx_drained = true;   // before the look (m_rx_drained says why)
         }
+        look_brings_watch();
         const auto v = m_rx.pop();
         if (!v) {
             return false;
@@ -2640,6 +2706,7 @@ public:
             if constexpr (has_rx_engine) {
                 m_rx_drained = true;   // before the look (m_rx_drained says why)
             }
+            look_brings_watch();
             auto src = m_rx.read_span();
             if (src.empty()) {
                 break;
@@ -2679,6 +2746,7 @@ public:
     static std::span<const uint8_t> read_span() {
         if constexpr (has_rx_engine) {
             m_rx_drained = true;   // before the look (m_rx_drained says why)
+            look_brings_watch();
             const std::span<const uint8_t> run = m_rx.read_span();
             if (!run.empty()) {
                 m_rx_drained = false;
@@ -3065,6 +3133,29 @@ private:
         if (!m_rx.push(b)) [[unlikely]] {
             bump(m_rx_overruns);
             m_rx.lost();
+        }
+    }
+
+    /// A look at the receive ring: the watch comes back first if it is down
+    /// (the class comment), its entry counting an overrun that stood
+    /// meanwhile. One load, and nothing at all without a receive engine and
+    /// the FIFO. The caller has set m_rx_drained.
+    [[gnu::always_inline]] static void look_brings_watch() {
+        if constexpr (rx_kick) {
+            if (m_rx_parked) {
+                unpark_rx();
+            }
+        }
+    }
+
+    /// The watch back up. Masked for the decision alone, against a vector
+    /// doing the same, so a look and a mark cannot both store.
+    static void unpark_rx() {
+        InterruptGuard guard;
+        if (m_rx_parked) {
+            m_rx_parked = false;
+            m_rx_watch_entries = 0;
+            S::rx_watch_interrupts(true);
         }
     }
 

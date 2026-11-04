@@ -318,7 +318,9 @@ which, per request:
 **The host never chooses.** No value hides a threshold set by cost: under
 `dma`, a half the engines can carry goes on them at one byte as readily
 as at 255. The lengths that stay off them are the silicon's, listed
-below. The host could count only its own core cycles; the program knows
+below. A family's chapter can give one length a shape of its own: the STM32F4's
+classic host reads two bytes on the event vector under `dma`, its LAST being late
+for them ([the STM32F4 I2C page](../stm32f4/i2c.md)). The host could count only its own core cycles; the program knows
 what else must run, and whether the core should sleep during the tenure.
 A wrong choice costs core cycles, a sleep, or wire time when a pump
 stretches the clock (below).

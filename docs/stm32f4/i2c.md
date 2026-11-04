@@ -125,6 +125,14 @@ What decides correctness even there:
   Under `I2cBus` ("How to use it") the
   20 ms it is given fits some 200 bytes at 100 kHz, nine periods a byte: a 255-byte
   request, 23 ms of wire, or a device that stretches wants more.
+- **A read that has an effect, under `dma`.** A device whose read moves a FIFO loses what
+  leaves it. A read of three or more on a stream ends under LAST, which acts once the stream
+  has taken the last byte but one. A stream held off from that byte's arrival through the
+  last byte's acknowledge, one byte on the wire (90 us at 100 kHz, 22 us at 400), has the
+  last byte acknowledged and one more clocked off the target; the reply is exact and `i2c_ok`.
+  Reading such a device, name `interrupt` or read two at a time, if the program's DMA load
+  can hold a stream that long: every read under `interrupt` and a read of one or two under
+  `dma` hold the wire and clock nothing more at any load ("A load past what the bus takes").
 - **The pads first.** The trap of a bring-up that drives the resource by hand is
   that a peripheral configured before its pads are handed over comes up BUSY over
   an idle wire and never gets a START out ("What the silicon does"); `init()` hands
@@ -354,7 +362,7 @@ drain on the Nucleo-F446RE:
   controller's own STOP, and CR1 untouchable while STOP stands (27.6.1),
   start() waits for it, in the caller (the arbiter's dispatch). The bound is
   5 ms; a tenure started at once behind a completion pays about a bit period:
-  1820 to 1872 cycles at 100 kHz and 316 to 381 at 400 (`bench_stm32f4` letter
+  1848 to 1884 cycles at 100 kHz and 323 to 376 at 400 (`bench_stm32f4` letter
   `i`). The alternatives were weighed and
   declined: a deferred START needs an event the chapter has not got, and
   a timer of the bus's own would cost a timer and an interrupt a tenure
@@ -365,12 +373,16 @@ drain on the Nucleo-F446RE:
   before the last byte's acknowledge, a deadline no handler of a program
   guarantees, and 27.3.3 gives the BTF procedures for exactly that case.
 - *The DMA requests and LAST.* Used for every phase of a Request that
-  names `dma`, one byte included, and the read's end is the stream's ("A read
+  names `dma`, one byte included, a read of two excepted, and a read's end is the stream's ("A read
   under `dma` ends on its stream", in the bench findings). The transmit stream is started in the
   ADDR entry, before ADDR's clear, with DMAEN raised behind it;
   the receive stream at the read's SB, before the address goes out, so
   the entry that arranges ACK and POS for the read knows which procedure
-  it arranges them for. A receive run of two or more runs under LAST; a
+  it arranges them for. A receive run of three or more runs under LAST, EOT_1 being the
+  stream's taking of the last byte but one, so a stream late there has the last byte
+  acknowledged; a read of two takes the chapter's two-byte procedure on the event vector, no
+  stream, because there that lateness is the whole read and the procedure holds the wire
+  whatever the load, one entry for the stream's completion; a
   run of one under its own sequence: ACK down at the SB, as the pump's,
   and the STOP after ADDR's clear, the first of 27.3.8's two places for
   it (ST's library takes the second, the completion). The transmit
@@ -462,8 +474,8 @@ release contract, docs/design/dma.md) - and `claim_smba_pad` hands over the aler
 program in SMBus mode wants. Both engines arm at DMA priority `high`: the host
 does not overrun - a byte its streams have not moved leaves TxE or RxNE
 up and BTF rises, "stretching SCL low" until DR is served (RM0090
-27.3.3), so a late stream slows the bus and loses no byte (a read of two starved from
-its start does clock a third off the target, "A load past what the bus takes" below). A
+27.3.3), so a late stream slows the bus and loses no byte (a read of three or more late
+across its last two does clock one more off the target, "A load past what the bus takes" below). A
 read of one has no next byte to hold: its wire ends by itself and the answer follows when the stream is served,
 and the arbiter's timeout answers for one never served ("A read under `dma` ends on its stream" below).
 `I2cClient::release` gates the peripheral the same way, its `init` starting from
@@ -775,7 +787,8 @@ in band over the bus under test: letter `n`, 13 verdicts, green in every run of
 **A read under `dma` ends on its stream** (`test_stm32f4_i2c` letters `o` and `p` on the
 self-link, ten and fifteen runs, 180 MHz with 45 MHz on APB1). In that phase the event vector
 is down, and `dma_isr()` ends the tenure when the receive stream's count reaches zero;
-a run of two or more has its STOP requested there (27.3.8), a run of one at ADDR's clear.
+a run of three or more has its STOP requested there (27.3.8), a run of one at ADDR's clear. A
+read of two has no stream and ends on the event vector's BTF.
 Three other things can answer while the phase stands, and none says `i2c_ok`: a transfer error
 (`i2c_dma_fault`), lost arbitration (`i2c_arb_lost`) and the arbiter's timeout (`i2c_timeout`).
 A NACK cannot, this end sending the acknowledges. So the question the
@@ -791,53 +804,63 @@ at 400 kHz and 500 each at 100 kHz, a row stopped after three reads with no answ
 | load | beats in 100 us | wire over ahead of a read of one's completion, 400 kHz, 100 kHz | past the letter's first bound, reads of all lengths | no answer in fifty times that |
 |---|---|---|---|---|
 | nothing else | 0 | 0, 0 | 0 | 0 |
-| six streams every 32 | 1691 | 0, 0 | 0 | 0 |
-| four every 17 | 2115 | 0, 0 | 0 | 0 |
-| three every 13 | 1902 to 1908 | 0, 0 | 0 | 0 |
+| six streams every 32 | 1690, 1691 | 0, 0 | 0 | 0 |
+| four every 17 | 2029 to 2118 | 0, 0 | 0 | 0 |
+| three every 13 | 2070 to 2073 | 0, 0 | 0 | 0 |
 | four copies | 0 | 0, 0 | 0 | 0 |
-| two every 16, and the copies | 1127 | 0, 0 | 0 | 0 |
-| six every 48, and the copies | 1126 | 0, 0 | 0 | 0 |
+| two every 16, and the copies | 1126 | 0, 0 | 0 | 0 |
+| six every 48, and the copies | 1126, 1127 | 0, 0 | 0 | 0 |
 | two every 8, and the copies | 1500 | 0, 0 | 0 | 0 |
-| three every 16, and the copies | 1689 | 1498 of 1500, 497 of 500 | 1422 of 6000 | 0 |
+| three every 16, and the copies | 1689 to 1701 | 1499 of 1500, 491 of 500 | 796 of 6000 | 0 |
 
 Every read answered was exact and `i2c_ok`, 54000 in all, with the stream still once the reply
-stood. A stream late on a run of two or more stretches SCL until it takes the byte ("stretching
+stood. A stream late on a run of three or more stretches SCL until it takes the byte ("stretching
 SCL low", 27.3.3); on a read of one the wire ends by itself and the answer follows when the
 stream is served, the "wire over" column. The first bound is twice the wire and three ticks and
 the last fifty times that; past it the letter answers as an arbiter's timeout would, with
-`recover()`, and the next read is whole. The event vector took two entries a read, SB
-and ADDR, at every load.
+`recover()`, and the next read is whole. The event vector took two entries a read on a stream, SB
+and ADDR, at every load, and three a read of two, BTF the third.
 
 **A load past what the bus takes is the case that decides** (letter `r`, run by its own key and not
-under `z`, ten runs). Three streams every 5, asking 5400 beats in 100 us against the bus's 2250: the
-stream is not served at all while the load stands. A read of one's wire ended with the byte in DR, 1000 of 1000. Nothing answered ahead of the
-stream, 0 of 1000, and when the load came off the read and the read of eight behind it were exact,
-1000 of 1000 each. Three every 12 and the copies, 1968 to 2151 beats: 1997 of the 2000 reads of one had the
-wire over first, 2228 of 6000 reads of all lengths ran past the first bound, all answered and all exact. What
+under `z`, fifteen runs). Three streams every 5, asking 5400 beats in 100 us against the bus's 2250: the
+stream is not served at all while the load stands. A read of one's wire ended with the byte in DR, 1500 of 1500. Nothing answered ahead of the
+stream, 0 of 1500, and when the load came off the read and the read of eight behind it were exact,
+1500 of 1500 each. Three every 12 and the copies, 2243 to 2247 beats: 2998 of the 3000 reads of one had the
+wire over first, 3410 of 9000 reads of all lengths ran past the first bound, all answered and all exact. What
 such a load can do to the core is in [dma.md](dma.md)'s "Not covered yet".
 
 Runs of two and eight on the same three streams every 5, starved from their start or from
-the third byte, 50 rows each a run: SCL is held, BTF standing but for a write starved from its
+the third byte, 50 rows each a run: on a stream SCL is held, BTF standing but for a write starved from its
 start, whose first byte never reaches the shifter; the thread runs on, the event vector
 takes SB's and ADDR's entries alone, nothing answers while the load stands, and when it comes
-off every byte is there, read and written. **A read of two starved from its start clocks one
-byte more than it asked:** LAST acts at the stream's end, so the second byte is acknowledged
-and the target's pointer moves four places where a read of two with no load moves it three. The
-reply is exact and `i2c_ok`, and a client whose read has a side effect has lost that byte. A read
-of eight moves it nine, as with no load.
+off every byte is there, read and written. A read of two is not on a stream: it ends with the load
+up, exact, the target's pointer at three, as with no load. A read of eight moves it nine, as
+with no load, starved from its start or its third byte. **A read of eight starved across its last two
+bytes clocks one more:** the load up from the seventh, 50 of 50, the eighth is acknowledged, since LAST
+acts when the stream takes the seventh, the wire waits on BTF, and that take lets a ninth out, NACKed. The
+pointer moves ten; the reply is exact and `i2c_ok`, and a client whose read has a side effect has
+lost that byte. It takes a stream held off for a byte on the wire at that one place, and every read
+of three or more has that place.
 
 **Why the event vector stays down in these phases.** With it up, BTF standing under a stream the
-load held re-entered the handler for as long as the load stood: a read of two under three streams every 8,
+load held re-entered the handler for as long as the load stood: a read under three streams every 8,
 the rate that load took depending on the image (2027, 2108 and 2248 beats in 100 us, and at the
 last of them every run), counted 1.07 billion entries when a probe looked, the thread that could lift the
 load never running, the arbiter's timeout with it. And a write of eight, the load up from its third byte, took that BTF for its end:
 `i2c_ok` with four bytes at the target, 50 of 50.
 
+**A stream's store takes BTF down on this block** ("cleared by software by either a read or write in
+the DR register", 24.6.6), so BTF at the end of a phase on the stream is the last byte's. Staged in letter `r`, the
+eighth byte of a write held behind the stream by that load, BTF standing 50 of 50 rows with SCL held
+until the load comes off, and the store goes in over it: with the target refusing that byte,
+`i2c_nack_data` 50 of 50, a read of two behind it or none, and from the third byte, from the start and
+with no load the same, over fifteen runs.
+
 **A completion held off clocks no further byte.** The chapter asks for the STOP "in the DMA
 Transfer Complete interrupt routine" and does not say what the wire does until it comes. Letter
 `p`, the stream's vector line off, a poll dating the count's zero, then a hold of up to forty bit
 periods counting SCL's rising edges, the line back on, and the wire followed for forty bits at
-100 kHz: reads of two and eight at both speeds, 3600 over fifteen runs. At most one rising edge
+100 kHz: reads of three and eight at both speeds, 3600 over fifteen runs. At most one rising edge
 behind the last byte, the STOP's own; RxNE down at the end; each read and the read of eight behind
 it exact. So a handler that runs long, or a mask, holds the bus with no byte clocked past the
 NACK: the wire is stretched for that long, and the target sees nothing but the stretch.
@@ -864,14 +887,14 @@ the pump:
 
 | tenure | brio on the Nucleo-F446RE: irq, isr, fixed | ST's HAL on the STM32F429I-DISC1: irq, isr, fixed |
 |---|---|---|
-| write of 1 | 3, 453, 210 | 5, 758, 387 |
-| write of 2 | 3, 490, 209 | 6, 955, 426 |
-| write of 3 | 4, 641, 202 | - |
-| register read 1+1 | 5, 765, 596 | 9, 1996, 1171 |
-| register read 1+2 | 5, 801, 625 | 10, 1837, 816 |
-| register read 1+16 | 19, 2683, 676 | 23, 3843, 792 |
-| probe (ACK / NACK) | 2, 276 / 259 | polled, fixed 578 |
-| write of 255 on the engines | 4, 581, x 1.00 | 4, 807, x 1.00 |
+| write of 1 | 3, 409, 183 | 5, 758, 387 |
+| write of 2 | 3, 448, 183 | 6, 955, 426 |
+| write of 3 | 4, 602, 171 | - |
+| register read 1+1 | 5, 714, 568 | 9, 1996, 1171 |
+| register read 1+2 | 5, 756, 597 | 10, 1837, 816 |
+| register read 1+16 | 19, 2517, 645 | 23, 3843, 792 |
+| probe (ACK / NACK) | 2, 241 / 242 | polled, fixed 578 |
+| write of 255 on the engines | 4, 559, x 1.00 | 4, 807, x 1.00 |
 
 The HAL's column is ST's v1.8.5 (`HAL_I2C_Master_Transmit_IT`/`_DMA`,
 `HAL_I2C_Mem_Read_IT`/`_DMA`) in a scratch program with brio's crt, clock
@@ -882,24 +905,24 @@ behind a polled index, is not a row either (15648 core cycles busy). Its `fixed`
 that device's and is not set against brio's, whose target is served on the
 same core; the interrupts and the handler's cycles compare.
 
-- **The pump costs 107 cycles of handler a byte written and 126 a byte
-  read** (the slope between the 16- and the 255-byte rows; 110 and 134
+- **The pump costs 97 cycles of handler a byte written and 118 a byte
+  read** (the slope between the 16- and the 255-byte rows; 101 and 125
   between 2 and 16), against the HAL's 148 and 153. A 255-byte write and
   read are x 1.00 on the pump (256 interrupts) and on the engines (4 and
   3).
 - **The STOP's drain is the next tenure's**: `start()` called at a
-  completion waits for the STOP to leave the wire, 1820 to 1872 cycles at
-  100 kHz and 316 to 381 at 400 (the tenure before a write, a read or a
+  completion waits for the STOP to leave the wire, 1848 to 1884 cycles at
+  100 kHz and 323 to 376 at 400 (the tenure before a write, a read or a
   register read of two), over the 181 it reads on a quiet bus; the HAL's
   own call waits for BUSY the same way (1728 cycles at 100 kHz).
 - **The engines' fixed cost per tenure** is their start inside the
   vector - the transmit stream's in the ADDR entry, the receive stream's
   at the read's SB - and their completion entries: a write of 255 is 4
-  interrupts and 587 cycles of handler, a read of 255 is 3 and 497, and
+  interrupts and 559 cycles of handler, a read of 255 is 3 and 477, and
   a register read under `dma`, its index on the transmit stream too, 7
-  and 1031 at 1+16 (the "Which engine" table below).
-- **The longest single entry** of each vector over the letter: events 223
-  cycles, errors 190, the streams 127.
+  and 991 at 1+16 (the "Which engine" table below).
+- **The longest single entry** of each vector over the letter: events 221
+  cycles, errors 197, the streams 120.
 - **The same code placed elsewhere costs differently**: the FMPI2C1
   host's rows, whose code was the same in two builds of this letter,
   moved by eight to ten cycles a byte between them - the image's layout
@@ -909,28 +932,29 @@ same core; the interrupts and the handler's cycles compare.
 I2C1 the host, every row of one image; `irq` and `isr` the I2C vectors'
 and the two streams', between the meter's stamps, the bench's two timer reads
 around each entry). The column leaves out `start()`, the streams here being started
-in the vectors: 161 to 193 cycles - on the pump the writes and
-register reads 166 to 173 and the reads 183 to 193, on the engines 161 to 164 and 179
-and 180 - so adding it takes 3 to 13 cycles off each difference, and moves no length below (a
-read of two, -5 here, stays the tie).
+in the vectors: 163 to 193 cycles - on the pump the writes and
+register reads 166 and the reads 190 to 193, on the engines 163 and 164 and 179
+and 180 - so adding it takes 2 to 13 cycles off each difference, and moves no length below.
+A read of two under `dma` runs the pump's own procedure, no stream in it, so its row is the
+same code in another place, its -8 the image's layout.
 At 400 kHz, the 100 kHz rows within a few cycles of these:
 
 | phase | `interrupt`: irq, isr | `dma`: irq, isr | `dma` - `interrupt` |
 |---|---|---|---|
-| write 1 | 3, 453 | 4, 580 | +127 |
-| write 2 | 3, 489 | 4, 587 | +98 |
-| write 3 | 4, 640 | 4, 587 | -53 |
-| write 16 | 17, 2032 | 4, 587 | -1445 |
-| read 1 | 3, 448 | 3, 496 | +48 |
-| read 2 | 3, 506 | 3, 501 | -5 |
-| read 16 | 17, 2382 | 3, 497 | -1885 |
-| register read 1+1 | 5, 765 | 7, 1027 | +262 |
-| register read 1+2 | 5, 801 | 7, 1035 | +234 |
-| register read 1+16 | 19, 2683 | 7, 1031 | -1652 |
+| write 1 | 3, 409 | 4, 552 | +143 |
+| write 2 | 3, 448 | 4, 559 | +111 |
+| write 3 | 4, 602 | 4, 559 | -43 |
+| write 16 | 17, 1864 | 4, 559 | -1305 |
+| read 1 | 3, 420 | 3, 480 | +60 |
+| read 2 | 3, 477 | 3, 469 | -8 |
+| read 16 | 17, 2231 | 3, 477 | -1754 |
+| register read 1+1 | 5, 714 | 7, 992 | +278 |
+| register read 1+2 | 5, 756 | 7, 987 | +231 |
+| register read 1+16 | 19, 2517 | 7, 991 | -1526 |
 
 The pump's figure a byte past the second is the slope of the table's
-rows from 2 to 16 bytes, 110 cycles written and 134 read, one entry each
-(107 and 126 between 16 and 255 bytes, the letter's own per-byte line),
+rows from 2 to 16 bytes, 101 cycles written and 125 read, one entry each
+(97 and 118 between 16 and 255 bytes, the letter's own per-byte line),
 and an entry's own exception entry and
 return - about 24 cycles on the Cortex-M4 (ARM DDI 0439B 3.9.1, twelve
 each way at zero wait states), which no stamp sees - comes on top for
@@ -938,23 +962,22 @@ every interrupt counted. So, in core cycles:
 - **a write costs the core fewer cycles on the engines from three
   bytes**: EV8_1 loads the first two in the entry that clears ADDR, so the
   pump takes no interrupt for a write of one or two and the engines add
-  their stream's start and its completion entry (+127 and +98, one
+  their stream's start and its completion entry (+143 and +111, one
   interrupt more);
-- **a read from three bytes, a read of two being a tie**: the engines'
-  receive run under LAST ends in one completion entry, within a few cycles of
-  the pump's two-byte procedure (-5 here, the same three interrupts, and +23 in
-  another build of the same code, placement's reach). The pump's third byte
-  costs it 134 cycles and an entry;
+- **a read from three bytes, a read of two being the same procedure either way**: the engines'
+  receive run under LAST ends in one completion entry, at about the
+  cost of the pump's two-byte procedure, the same three interrupts. The pump's third byte
+  costs it 125 cycles and an entry;
 - **a register read with a one-byte index from four read bytes**. A Request has
   one mechanism for both halves, so a short register read is cheaper on the pump:
   under `dma` the index rides the transmit stream too - its completion and the
   TxE behind it, where the repeated START is requested, are two
   interrupts the pump's ADDR entry does without - so the engines' register
-  read stays at about 1030 cycles and 7 interrupts whatever its length.
-  The pump's grows 36 cycles and no interrupt from 1+1 to 1+2 (765 to 801,
-  the two-byte procedure), then 134 cycles and one interrupt a byte: at
-  1+4 the engines lead by some forty cycles, by the slopes (801 + 2 x 134 = 1069 against about 1030, 7
-  interrupts each), and from 1+5 by about 134 cycles and an entry more with every byte.
+  read stays at about 990 cycles and 7 interrupts whatever its length.
+  The pump's grows 42 cycles and no interrupt from 1+1 to 1+2 (714 to 756,
+  the two-byte procedure), then 125 cycles and one interrupt a byte: at
+  1+4 the engines lead by some fifteen cycles, by the slopes (756 + 2 x 125 = 1006 against about 990, 7
+  interrupts each), and from 1+5 by about 125 cycles and an entry more with every byte.
 The speed moves none of these lengths: the streams and the vectors
 cost within a few cycles of the same at both rows, and the wire's time between them is
 the core's to spend elsewhere. The core sleeps while a stream works: the
@@ -1146,9 +1169,10 @@ under `z`, wants a finger.
 ## Not covered yet
 
 Driver gaps, each with its reason:
-- The third byte a read of two clocks when its stream is starved from the start ("A load
-  past what the bus takes"). The remedy is not studied: it is reached only under a load
-  at the bus's own figure.
+- The byte a read of three or more clocks when its stream is late across its last two ("A
+  load past what the bus takes"). 27.3.3's procedure from byte N-2, a stream of N-3 and two BTF
+  entries behind it, would close it at two more entries on every such read; the page's opening
+  says what a program does instead.
 - 10-bit addressing on the HOST side. The resource has the mode and the
   client matches such an address; the host's header sequence (EV9,
   ADD10) has no user, and the arbiter's Request has no shape for a

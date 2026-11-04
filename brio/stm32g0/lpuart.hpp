@@ -542,6 +542,12 @@ struct Lpuart {
         InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_RXFTIE) : (regs().CR3 & ~USART_CR3_RXFTIE);
     }
+    /// EIE and RXFTIE in one store: the receive engine's watch, as on the USART.
+    static void rx_watch_interrupts(bool on) {
+        InterruptGuard guard;
+        constexpr uint32_t watch = USART_CR3_EIE | USART_CR3_RXFTIE;
+        regs().CR3 = on ? (regs().CR3 | watch) : (regs().CR3 & ~watch);
+    }
     static void tx_threshold_interrupt(bool on) {
         InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_TXFTIE) : (regs().CR3 & ~USART_CR3_TXFTIE);
