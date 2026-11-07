@@ -54,7 +54,7 @@ A frame memory that answers is the bench plane of design/gfx.md's three
 planes of truth - a display driver and every primitive above it can be
 judged pixel for pixel against what the silicon holds, with no eye on
 the glass. The app is a letter menu over the board's own USB-C (CDC
-ACM, `brio run OU <letter>`): the controller's read registers, the read
+ACM, `brio run f411.u <letter>`): the controller's read registers, the read
 stream's alignment found by search, read_memory_continue, the whole
 frame written and read back and timed, the write and read rate ladders
 judged by read-back, the eight MADCTL scan orders, and brio/gfx drawing
@@ -73,7 +73,7 @@ datasheet's 12.5 MHz ceiling) reads back exact and 24 MHz does not; a
 to fail; the whole frame (460800 bytes) writes in about 0.8 s at 6 MHz
 through the polled pump and reads back in about 1.5 s at 3 MHz.
 
-### What it found (35 verdicts, all passing; `brio run OU z`)
+### What it found (35 verdicts, all passing; `brio run f411.u z`)
 
 - **The controller answers on SDO.** The device code (BFh) reads
   `02 04 94 81` behind ONE DUMMY CLOCK - the stream is a bit late, so

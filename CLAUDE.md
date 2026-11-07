@@ -575,19 +575,26 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 # The bench and the repository have ONE command, bin/brio (put bin/ on
 # the PATH); its guts are the cli/ package. The verbs:
 brio list                  # serial devices, USB probes, the bench manifest
-brio flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
-brio flash C test_samc_uart # ... or OpenOCD/SWD - the BOARD TYPE decides both
-brio flash E console       # ... or OpenOCD/ST-LINK (a Nucleo in the example manifest)
-brio flash P --elf PATH    # an ELF kept outside the tree as it is, no build, the same
+brio flash adb.1 test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
+brio flash sc21.1 test_samc_uart # ... or OpenOCD/SWD - the BOARD TYPE decides both
+brio flash gb1 console     # ... or OpenOCD/ST-LINK (a Nucleo in the example manifest)
+brio flash w203 --elf PATH # an ELF kept outside the tree as it is, no build, the same
                            # programmer path and resets (never a bare OpenOCD line: a
                            # WCH-Link left unreset garbles its console, docs/probes/wch-link.md)
-                           # the project to build in and the flash mechanism
-brio run C z               # drive the console, judge "ALL: N pass, M fail"
-brio console A             # device path + speed, for your own monitor
-brio duo A:a B:script.txt  # instrument peer scripted, then the DUT
+brio run sc21.1 z          # drive the console, judge "ALL: N pass, M fail"
+brio run r2350.rv.u a      # a VIEW: the same board built for Hazard3, its USB console
+brio console adb.1         # device path + speed, for your own monitor
+brio duo adb.1:a adb.2:script.txt  # instrument peer scripted, then the DUT
 brio stress --letters ...  # the host end of the UART suites
-brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
-                                             # provisioning: UPDI-only, survive reflash)
+brio fuses adb.1 bootsize=128  # read/write fuses over UPDI (fuses are
+                           # provisioning: UPDI-only, survive reflash)
+# A board's NAME is <family><board>[.<n>][.<view>]: the family one letter
+# (a AVR, s SAM, g STM32G0, f STM32F4, w WCH QingKe, r Raspberry Pi), the
+# chip's short mark (the series for an AVR: adb, ada, aea, am0), a number
+# only to tell identical boards apart, then a view - the same board reached
+# another way (u its own USB console, rv the other architecture, c1 a
+# second core's console). Grammar: cli/bench/common.py; examples:
+# cli/bench/bench_boards.py's header.
 ```
 
 - The multi-board bench, three separate concerns (detail:

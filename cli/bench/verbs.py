@@ -6,14 +6,14 @@
 #  pyserial):
 #
 #      brio list
-#      brio flash A test_avr_pin
-#      brio run A a
-#      brio console A
-#      brio duo A:a B:scripts/peer.txt
-#      brio fuses A
-#      brio fuses A bootsize=128 codesize=0
-#      brio fuses C
-#      brio fuses C bodvdd_hysteresis=1
+#      brio flash adb.1 test_avr_pin
+#      brio run adb.1 a
+#      brio console adb.1
+#      brio duo adb.1:a adb.2:scripts/peer.txt
+#      brio fuses adb.1
+#      brio fuses adb.1 bootsize=128 codesize=0
+#      brio fuses sc21.1
+#      brio fuses sc21.1 bodvdd_hysteresis=1
 #
 #  Three concerns, kept apart on purpose:
 #    1. BUILD   - one CMake target per app x board TYPE, auto-discovered from
@@ -33,7 +33,8 @@
 #  the "ALL: N pass, M fail" verdict grammar, the campaign shape - is one
 #  story on both, which is the point.
 #
-#  A board NAME ("A", "B") is a desk position from the manifest. The consoles
+#  A board NAME ("adb.1", "w203.u") is a board of the manifest or one of
+#  its views (cli/bench/common.py, BOARD_NAME_RE, says the grammar). The consoles
 #  are OBSERVABILITY ONLY: firmware never goes in through them, they only
 #  carry the suite's verdicts back.
 #
@@ -91,7 +92,7 @@ def cmd_list(args):
     print("Manifest (%s):" % os.path.relpath(manifest_path(), ROOT))
     if not manifest.BOARDS:
         print("  (empty)")
-    for name, entry in sorted(manifest.BOARDS.items()):
+    for name, entry in board_names():
         console = console_of(entry) or "(none)"
         mark = "ok     " if console_of(entry) and os.path.exists(console) \
                else "MISSING"
@@ -107,9 +108,9 @@ def cmd_list(args):
         spec = BOARD_TYPES.get(entry["board"])
         origin = "%s/ via %s" % (spec["project"], spec["flash"]) if spec \
                  else "UNKNOWN TYPE"
-        print("  %-4s type %-5s  id %-8s %s  console %s"
+        print("  %-12s type %-13s id %-8s %s  console %s"
               % (name, entry["board"], entry.get("id") or "-", mark, console))
-        print("       %-24s programmer %s" % (origin, how))
+        print("  %-12s %-36s programmer %s" % ("", origin, how))
     return 0
 
 

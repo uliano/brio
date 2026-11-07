@@ -17,9 +17,23 @@
 #    3. ORCHESTRATION - bin/brio, which reads this manifest, resolves a
 #                       target, flashes and drives the consoles.
 #
-#  A board's NAME here is what brio commands take (`brio flash A blink`);
-#  it is a desk position, not a chip. Moving a chip to another position or
-#  another USB socket means editing this file - nothing else.
+#  A board's NAME here is what brio commands take (`brio flash adb blink`):
+#  <family><board>[.<n>], all lower case. The family is one letter - a
+#  AVR, s SAM, g STM32G0, f STM32F4, w WCH QingKe, r Raspberry Pi - and
+#  the board the chip's short mark: the series for an AVR (adb, ada,
+#  aea, am0 for the megaAVR 0-series), the number elsewhere (sc21, gb1,
+#  f446, w203, r2350). A number after a dot tells IDENTICAL boards apart
+#  (adb.1, adb.2) and appears only when the desk holds more than one;
+#  the bare name of such a board is refused with the list. The name
+#  follows the board: moving it to another USB socket means editing its
+#  entry here - nothing else.
+#
+#  VIEWS. The same hardware reached another way is a VIEW of its board,
+#  named after a further dot and declared in the board's "views" as the
+#  fields it overrides: "u" a console over the board's own USB, "rv" the
+#  image built for the chip's other architecture, "c1" a second core's
+#  console - `brio run r2350.rv.u a`. A view is never an entry of its
+#  own, so a probe's serial is written once per board.
 #
 #  BOARD TYPES (the keys of cli/bench/common.py's BOARD_TYPES) decide which
 #  project builds for a board and how firmware gets in:
@@ -93,15 +107,16 @@
 # ============================================================================
 
 BOARDS = {
-    "A": {
-        # An AVR128DB48 board: console on a CH340 (by-path), an Atmel-ICE
+    "adb": {
+        # An AVR128DB48 board (the only one of its kind on this desk, so no
+        # number): console on a CH340 (by-path), an Atmel-ICE
         # over UPDI. "serial" is needed only with two such probes attached.
         "board": "db48",
         "id": "brio-a",
         "console": "/dev/serial/by-path/pci-0000:00:14.0-usb-0:1.1:1.0-port0",
         "programmer": {"type": "atmelice_updi", "serial": None},
     },
-    "C": {
+    "sc21": {
         # An ATSAMC21J18A board: console on a CH340, an Atmel-ICE as a
         # CMSIS-DAP probe over SWD.
         "board": "c21j",
@@ -110,7 +125,7 @@ BOARDS = {
         "console": "/dev/serial/by-path/pci-0000:00:14.0-usb-0:1.2:1.0-port0",
         "programmer": {"type": "openocd_cmsisdap", "serial": "J000000000000"},
     },
-    "E": {
+    "gb1": {
         # A Nucleo-G0B1RE: the on-board ST-LINK is both the probe and the
         # console, one USB serial for both.
         "board": "g0b1re",
@@ -119,14 +134,14 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_000000000000000000000000-if02",
         "programmer": {"type": "openocd_stlink", "serial": "000000000000000000000000"},
     },
-    "F": {
+    "g71": {
         "board": "g071rb",
         "id": None,
         "device_uid": None,
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_111111111111111111111111-if02",
         "programmer": {"type": "openocd_stlink", "serial": "111111111111111111111111"},
     },
-    "G": {
+    "g31": {
         # A Nucleo-32; the same ST-LINK arrangement, and the mass-storage
         # flasher as the fallback: {"type": "stlink_msd", "label": "NODE_G031K8"}.
         "board": "g031k8",
@@ -135,7 +150,7 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_222222222222222222222222-if02",
         "programmer": {"type": "openocd_stlink", "serial": "222222222222222222222222"},
     },
-    "K": {
+    "r2040": {
         # A WeAct RP2040 board on a Raspberry Pi Debug Probe: port D on
         # the board's SWD header, port U crossed onto GP0/GP1 (UART0),
         # so the probe's own CDC port (interface -if01, a real USB
@@ -146,27 +161,23 @@ BOARDS = {
         "programmer": {"type": "openocd_cmsisdap", "serial": "E666666666666666",
                        "backend": "usb_bulk"},
     },
-    "R": {
+    "r2350": {
         # A WeAct RP2350B core board on a second Raspberry Pi Debug Probe,
-        # wired exactly as the RP2040 one above. THE ARM HALF.
+        # wired exactly as the RP2040 one above, built for the Arm pair.
+        # Its "rv" view is THE SAME PIECE OF HARDWARE built for the RISC-V
+        # pair: the board TYPE carries the preset and the preset carries
+        # the architecture, so the view overrides "board" and nothing
+        # else - same console, same probe.
         "board": "weact2350b",
         "id": None,
         "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E777777777777777-if01",
         "programmer": {"type": "openocd_cmsisdap", "serial": "E777777777777777",
                        "backend": "usb_bulk"},
+        "views": {
+            "rv": {"board": "weact2350b-rv"},
+        },
     },
-    "R-rv": {
-        # THE SAME PIECE OF HARDWARE, built for the RISC-V pair: one
-        # physical board, two entries, because the board TYPE carries the
-        # preset and the preset carries the architecture. Same console,
-        # same probe, same serial - only "board" differs.
-        "board": "weact2350b-rv",
-        "id": None,
-        "console": "/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E777777777777777-if01",
-        "programmer": {"type": "openocd_cmsisdap", "serial": "E777777777777777",
-                       "backend": "usb_bulk"},
-    },
-    "I": {
+    "w006": {
         # A CH32V006K8 board on a WCH-Link: the probe's serial pins wired
         # to the board's USART1 (PD5/PD6), so one USB cable carries the
         # debug transport and the console. The WCH-Link carries a real
@@ -178,7 +189,7 @@ BOARDS = {
         "console": "/dev/serial/by-id/usb-wch.cn_WCH-Link_333333333333-if01",
         "programmer": {"type": "wch_link", "serial": "333333333333"},
     },
-    "T": {
+    "wx35": {
         # WCH's CH32X035 evaluation board, QFN20 edition (a CH32X035F8U6),
         # on a WCH-LinkE: PC18 = SWDIO and PC19 = SWCLK, the probe's
         # serial pins wired to the board's "Serial port 2" (USART2, PA2 TX

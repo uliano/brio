@@ -135,11 +135,11 @@ BOARD_TYPES = {
     # decided by the IMAGE_DEF in the image that is flashed (rp2350/
     # CMakeLists.txt). So a board type here names a board AND an
     # architecture: weact2350b is the WeAct RP2350B core board built for
-    # Arm, weact2350b-rv the same board built for RISC-V, the way K and
-    # K1 are one board under two consoles. Both are written by the SAME
-    # verb: a rescue through the debug port alone, then programming as
-    # core 0 of the Arm pair, then a reset - which works whatever the
-    # image already in the flash was doing (flash.py's
+    # Arm, weact2350b-rv the same board built for RISC-V - in the
+    # manifest one board with an "rv" view (board_entry below). Both are
+    # written by the SAME verb: a rescue through the debug port alone,
+    # then programming as core 0 of the Arm pair, then a reset - which
+    # works whatever the image already in the flash was doing (flash.py's
     # rp2350_openocd_argvs), through Raspberry Pi's OpenOCD fork, the
     # only build that examines this chip's four cores.
     "weact2350b": {"project": "rp2350", "preset": "rp2350-arm-release",
@@ -180,12 +180,74 @@ def die(msg):
 #  Manifest / env resolution
 # ---------------------------------------------------------------------------
 
+# A board's NAME is <family><board>[.<n>]: a family letter (a AVR, s SAM,
+# g STM32G0, f STM32F4, w WCH QingKe, r Raspberry Pi), the chip's short
+# mark (db for the AVR DB series, c21, 446, 203, 2350...), and a number
+# after a dot only when the desk holds more than one identical board
+# (adb.1, adb.2). A VIEW of a board follows after a further dot: the same
+# hardware reached another way - a console over the board's own USB (u),
+# the image built for the chip's other architecture (rv), a second core's
+# console (c1) - declared in the board's "views" as the fields it
+# overrides, so the probe's serial is written once per board.
+BOARD_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(\.[0-9]+)?$")
+VIEW_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$")
+
+
+def _check_names():
+    for name, entry in manifest.BOARDS.items():
+        if not BOARD_NAME_RE.match(name):
+            die("manifest board name '%s' is not <family><board>[.<n>] "
+                "(lower case, the number only for identical boards)" % name)
+        for view in entry.get("views") or {}:
+            if not VIEW_NAME_RE.match(view):
+                die("manifest board '%s': view name '%s' is not lower-case "
+                    "letters and digits, dot-separated, starting with a letter"
+                    % (name, view))
+
+
+def _with_view(entry, view):
+    merged = {k: v for k, v in entry.items() if k != "views"}
+    if view is not None:
+        merged.update(entry["views"][view])
+    return merged
+
+
+def board_names():
+    """Every name the manifest resolves, each board followed by its views,
+    as (name, resolved entry) pairs."""
+    _check_names()
+    out = []
+    for name in sorted(manifest.BOARDS):
+        entry = manifest.BOARDS[name]
+        out.append((name, _with_view(entry, None)))
+        for view in sorted(entry.get("views") or {}):
+            out.append(("%s.%s" % (name, view), _with_view(entry, view)))
+    return out
+
+
 def board_entry(name):
-    entry = manifest.BOARDS.get(name)
-    if entry is None:
-        die("no board '%s' in the manifest (have: %s) - edit the manifest"
-            % (name, ", ".join(sorted(manifest.BOARDS)) or "none"))
-    return entry
+    """The manifest entry a name resolves to: a board, or a board's view
+    with the view's fields laid over the board's."""
+    _check_names()
+    boards = manifest.BOARDS
+    if name in boards:
+        return _with_view(boards[name], None)
+    parts = name.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        base, view = ".".join(parts[:i]), ".".join(parts[i:])
+        if base in boards:
+            views = boards[base].get("views") or {}
+            if view not in views:
+                die("board '%s' has no view '%s' (its views: %s)"
+                    % (base, view, ", ".join(sorted(views)) or "none"))
+            return _with_view(boards[base], view)
+    twins = sorted(n for n in boards
+                   if n.startswith(name + ".") and n[len(name) + 1:].isdigit())
+    if twins:
+        die("'%s' names %d identical boards - say which: %s"
+            % (name, len(twins), ", ".join(twins)))
+    die("no board '%s' in the manifest (have: %s) - edit the manifest"
+        % (name, ", ".join(n for n, _ in board_names()) or "none"))
 
 
 def apps_roster(project):

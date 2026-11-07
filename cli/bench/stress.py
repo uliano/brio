@@ -70,7 +70,7 @@ is a count of bytes, never a rate.
 
 USE
 
-    brio flash C test_samc_uart
+    brio flash sc21.1 test_samc_uart
     brio stress --board <board> --letters efhijklmnp
 
     brio stress --board <board> --letters h --repeat 5

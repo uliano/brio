@@ -96,6 +96,22 @@ others appear in its comments); the
 desk that is really there is `private/bench_boards.py`, which
 `bin/brio` loads first when it exists and which is never published.
 
+A board's name is short and says what it is: one letter for the family
+(`a` AVR, `s` SAM, `g` STM32G0, `f` STM32F4, `w` WCH QingKe, `r`
+Raspberry Pi), then the chip's mark - the series for an AVR (`adb`,
+`ada`, `aea`, `am0` for the megaAVR 0-series), the number elsewhere
+(`sc21`, `gb1`, `f446`, `w203`, `r2350`). A number after a dot tells
+identical boards apart (`adb.1`, `adb.2`) and appears only when the
+desk holds more than one; the bare name of such a board is refused
+with the list. The same board reached another way is a VIEW of it,
+named after a further dot and declared inside the board's entry as
+the fields it changes: `u` a console over the board's own USB, `rv`
+the image built for the chip's other architecture, `c1` a second
+core's console. So `brio run r2350.rv.u a` drives the RP2350 board
+built for RISC-V through its USB console, and the probe's serial is
+written once, in the board's entry. The grammar is checked when the
+manifest is read (`cli/bench/common.py`, `board_entry`).
+
 **The tool puts the two together.** `brio flash <board> <app>` builds
 the app for the board's type and flashes it through the board's
 programmer; `brio run <board> z` drives the board's console and judges
@@ -138,8 +154,9 @@ cores over one set of peripherals, and which pair runs is decided by
 the image in the flash. One physical board therefore wears two types:
 `weact2350b` builds it for Arm and `weact2350b-rv` for RISC-V, the same
 hardware and the same probe, differing only in the preset the type
-names. Both are written by the same verb, which does not depend on the
-state the board is in: a rescue over the debug port alone, then
+names - in the manifest one board with an `rv` view. Both are written
+by the same verb, which does not depend on the state the board is in:
+a rescue over the debug port alone, then
 programming as core 0 of the Arm pair, then a reset that hands the chip
 to whatever the new image asks for. So the board is recoverable from any
 state a program can put it in, whichever architecture was running
