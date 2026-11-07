@@ -384,11 +384,21 @@ void switch_hclk(uint32_t hclk) {
 constexpr uint32_t ladder[] = {96'000'000UL, 48'000'000UL, 24'000'000UL, 12'000'000UL, 6'000'000UL, 1'500'000UL};
 constexpr uint8_t ladder_rungs = sizeof(ladder) / sizeof(ladder[0]);
 
+/// THE PORT EMPTIED, with the device stopped - the one moment
+/// util/usb/cdc.hpp's discard() may run, and the only way its rings ever
+/// empty: neither a bus reset nor stop() and start() touches them. A
+/// letter that judges a FRESH enumeration starts from them empty, so what
+/// an earlier letter's pour left in the receive ring - full, and the bulk
+/// OUT left unarmed behind it, USB's own flow control - or in the transmit
+/// ring is not judged as this letter's.
+void fresh_port() { Port::discard(); }
+
 // =============================================================================
 // a - the controller, and the host enumerating the device
 // =============================================================================
 void ta_enumerate() {
     Device::stop();
+    fresh_port();
     Usb::release();
     wait_ms(20);
 
@@ -562,6 +572,7 @@ void tu_reconnect() {
                       Device::state() == UsbDeviceState::detached && Device::resets() == resets);
 
     wait_ms(500);
+    fresh_port();
     Device::start();
     const uint32_t took = wait_configured(2000u);
     print(serial, "  re-attached: resets ", resets, " -> ", Device::resets(), ", address ",
@@ -880,11 +891,25 @@ void tn_asleep() {
           Device::setups() - setups0, " setups, ", Usb::overruns() - ov0,
           " FIFO overflows; state=", state_name(Device::state()), " address=", Device::address(),
           " last request=", hex(Device::last_request()), crlf);
-    bench.verdict("AN ENUMERATION DOES NOT COMPLETE WITH THE CORE ASLEEP between its interrupts: "
-                  "the SETUPs arrive and the descriptors the block reads out of RAM for the IN "
-                  "stages do not - which is what the controller's bus-master count, held from "
-                  "its pull-up to its detach, keeps the kernel's idle path from doing",
-                  took == 0u && Device::setups() != setups0);
+    // WHETHER IT COMPLETES IS A FINDING, NOT A VERDICT. It is a question
+    // of the die: on the CH32V303VCT6 the block's reads out of RAM starve
+    // with the core asleep and the enumeration dies at its first IN stage;
+    // on the CH32V303CBT6 it completes - the same answer test_vx03_dma's
+    // letter c prints for a DMA channel in a Sleep. The chapter states
+    // neither, and brio depends on neither: the controller's bus-master
+    // count, held from its pull-up to its detach, keeps the kernel's idle
+    // path from sleeping on every die. What is judged is that the
+    // measurement ran - the host's SETUPs reached the device with the core
+    // asleep - and that the port is whole once the core is awake.
+    print(serial, "  FINDING: an enumeration with the core asleep between its interrupts ",
+          took != 0u ? "COMPLETES on this die - the block's IN stages are read out of RAM in "
+                       "the sleep"
+                     : "DOES NOT COMPLETE on this die - the SETUPs arrive and the IN stages the "
+                       "block reads out of RAM do not",
+          crlf);
+    bench.verdict("the host's SETUPs reached the device with the core asleep between its "
+                  "interrupts - the measurement above ran",
+                  Device::setups() != setups0);
     if (took == 0u) {
         Device::stop();
         wait_ms(300);
@@ -1190,6 +1215,7 @@ void th_ladder_data() {
 // =============================================================================
 void tk_divider() {
     Device::stop();
+    fresh_port();
     Usb::release();
     wait_ms(20);
     while (!Serial::tx_idle()) {
@@ -1391,6 +1417,10 @@ void tr_pool() {
     wait_ms(300);
     small_pool = true;
     const bool up = Usb256::init(clock);
+    // The baseline before the pull-up, the port's rings emptied: a host
+    // may write from the moment the port exists (fresh_port()'s reason).
+    Port256::discard();
+    const uint32_t rx0 = Port256::rx_bytes();
     Device256::start();
     const uint32_t t0 = Ticker::millis();
     while (!Device256::configured() && Ticker::millis() - t0 < 2000u) {
@@ -1403,7 +1433,6 @@ void tr_pool() {
                   "with not one byte left",
                   up && conf && Usb256::buffer_free() == 0u && Usb256::buffer_used() == 256u &&
                       Port256::configured() && Port256::out_armed());
-    const uint32_t rx0 = Port256::rx_bytes();
     uint32_t echoed = 0;
     uint32_t idle_since = Ticker::millis();
     const uint32_t t1 = Ticker::millis();

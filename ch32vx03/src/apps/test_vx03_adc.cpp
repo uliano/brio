@@ -1655,9 +1655,38 @@ void ts_dual_modes() {
         constexpr uint32_t conv = adc_conversion_half_cycles(AdcSampleTime::cycles1_5) *
                                   core_per_adcclk / 2u;   // 14 ADCCLK, 112 core cycles
 
-        const auto run = [&](AdcDualMode m) -> Stamps {
-            (void)A1::dual(AdcDualMode::independent);
-            (void)A1::dual(m);
+        // THE MODE ENTERED, AND SEEN QUIET, BEFORE THE TRIGGER. Measured on
+        // the CH32V303CBT6: with both converters on, the write of an
+        // interleaved mode starts the pair BY ITSELF now and then (from one
+        // write in eight to one in several hundred, varying from boot to
+        // boot) - with the trigger written at once after
+        // it, both converters then end together at the first poll; with a
+        // wait between, ADC2's sequence is already running when the
+        // trigger comes. The chapter says nothing of it (12.2.7) and brio
+        // depends on neither answer, so it is a finding, printed: the
+        // letter enters the mode, waits, and takes the trigger only after
+        // a wait in which neither converter ended - writing independent
+        // and the mode again when one did. THE WAIT, 4 us, is 48 ADCCLK: a
+        // whole 28-ADCCLK period of the slow sequence and a 14-ADCCLK
+        // conversion of it, with six to spare for the write's crossing
+        // into ADCCLK - so a sequence the write started has ended a
+        // conversion inside it. The same wait after the independent write
+        // lets a conversion in flight end before the flags are cleared.
+        constexpr uint32_t settle_us = 4;
+        constexpr uint8_t entries = 8;
+        uint16_t unbidden = 0;
+        const auto run = [&](AdcDualMode m, bool& clean) -> Stamps {
+            clean = false;
+            for (uint8_t k = 0; k < entries && !clean; ++k) {
+                (void)A1::dual(AdcDualMode::independent);
+                wait_us(settle_us);
+                A1::clear_flags(AdcFlag::all);
+                A2::clear_flags(AdcFlag::all);
+                (void)A1::dual(m);
+                wait_us(settle_us);
+                clean = !A1::ready() && !A2::ready();
+                unbidden = static_cast<uint16_t>(unbidden + (clean ? 0u : 1u));
+            }
             A1::clear_flags(AdcFlag::all);
             A2::clear_flags(AdcFlag::all);
             return stamp_two([] { A1::start(); }, [] { return A2::ready(); },
@@ -1668,10 +1697,12 @@ void ts_dual_modes() {
 
         // FAST INTERLEAVED (7): one trigger, ADC2 at once and ADC1 seven
         // ADCCLK behind it.
-        const Stamps fast = run(AdcDualMode::fast_interleaved);
+        bool fast_clean = false;
+        const Stamps fast = run(AdcDualMode::fast_interleaved, fast_clean);
         const uint32_t pair_fast = A1::data();
         // SLOW INTERLEAVED (8): fourteen behind, and ADC2 again after 28.
-        const Stamps slow = run(AdcDualMode::slow_interleaved);
+        bool slow_clean = false;
+        const Stamps slow = run(AdcDualMode::slow_interleaved, slow_clean);
         (void)A1::dual(AdcDualMode::independent);
 
         const auto show = [](const char* name, const Stamps& st) {
@@ -1691,30 +1722,33 @@ void ts_dual_modes() {
         const uint16_t fast2 = static_cast<uint16_t>((pair_fast >> 16) & adc_max_count);
         print(serial, "  the source on input ", src, ": the fast pair read ", fast1, " (ADC1) and ",
               fast2, " (ADC2)", crlf);
+        print(serial, "  FINDING: the mode write started the pair by itself ", unbidden,
+              " time(s) before an entry that stood quiet for ", settle_us, " us", crlf);
         bench.verdict("both converters up and sampling one input under 7 ADCCLK", up);
+        bench.verdict("each interleaved mode entered and seen quiet before its trigger, within "
+                      "the letter's eight entries",
+                      fast_clean && slow_clean);
         // THE BOUND: both converters run on one ADCCLK, so the spacing of
         // their ends is a whole number of its cycles; each stamp is late
         // by up to one turn of the poll - so the measured spacing is the
-        // chapter's to within a turn.
-        // And the two modes told apart whatever the turn: each spacing
-        // nearer its own figure than the other mode's (the midpoint, 10.5
-        // ADCCLK).
-        constexpr uint32_t midpoint = 21u * core_per_adcclk / 2u;
+        // chapter's to within a turn. That turn (some 35 core cycles) is
+        // more than half the 56 that separate seven ADCCLK from fourteen,
+        // so one pair's spacing cannot tell the two modes apart; what
+        // does is what follows the pair: the fast mode converts one pair
+        // per trigger with CONT clear, the slow one keeps converting
+        // (note 2 under figure 12-9, judged below).
         bench.verdict("FAST INTERLEAVED: one trigger converts ADC2 first and ADC1 SEVEN ADCCLK "
-                      "after it (figure 12-8), to within one turn of the poll and nearer seven "
-                      "than fourteen",
-                      fast.na >= 1u && fast.nb >= 1u && fast.b[0] > fast.a[0] &&
-                          gap(fast.b[0] - fast.a[0], 7u * core_per_adcclk) <= fast.turn &&
-                          fast.b[0] - fast.a[0] < midpoint);
+                      "after it (figure 12-8), to within one turn of the poll - and ONE pair, "
+                      "CONT being clear",
+                      fast.na == 1u && fast.nb == 1u && fast.b[0] > fast.a[0] &&
+                          gap(fast.b[0] - fast.a[0], 7u * core_per_adcclk) <= fast.turn);
         bench.verdict("and both converted the one input - the source's level in each half of "
                       "the master's register",
                       is_source(fast1) && is_source(fast2));
         bench.verdict("SLOW INTERLEAVED: ADC1 FOURTEEN ADCCLK after ADC2 (figure 12-9), to "
-                      "within one turn and nearer fourteen than seven - the delay that tells "
-                      "the two modes apart",
+                      "within one turn",
                       slow.na >= 1u && slow.nb >= 1u && slow.b[0] > slow.a[0] &&
-                          gap(slow.b[0] - slow.a[0], 14u * core_per_adcclk) <= slow.turn &&
-                          slow.b[0] - slow.a[0] > midpoint);
+                          gap(slow.b[0] - slow.a[0], 14u * core_per_adcclk) <= slow.turn);
         // Note 2 under figure 12-9: a new ADC2 start every 28 ADCCLK, with
         // no CONT - so one trigger keeps the pair converting.
         bench.verdict("and ONE trigger keeps it going: ADC2's next conversions 28 ADCCLK apart "

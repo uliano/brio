@@ -298,6 +298,15 @@ uint32_t place_alarm(uint32_t counts) {
     return Rtc::alarm(at) ? at : 0u;
 }
 
+/// RTC counts since `since`, never negative: count() can return a stale
+/// copy up to three counts below the read before it (ch32vx03/rtc.hpp),
+/// and an unsigned difference across such a read is some four billion -
+/// a bounded wait ended at once, a span of ten counts closed after one.
+uint32_t rtc_since(uint32_t since) {
+    const int32_t d = static_cast<int32_t>(Rtc::count() - since);
+    return d > 0 ? static_cast<uint32_t>(d) : 0u;
+}
+
 // ===========================================================================
 // a - what the boot found, the mode pair, the two flags
 // ===========================================================================
@@ -945,7 +954,7 @@ Probe::Status Probe::only(const Event& e) {
 void pump_until_blip(uint32_t guard_ms) {
     const uint32_t start = Rtc::count();
     const uint32_t bound = (guard_ms * tr_hz) / 1000u;
-    while (Probe::blips == 0u && (Rtc::count() - start) < bound) {
+    while (Probe::blips == 0u && rtc_since(start) < bound) {
         TimeEvents<P>::process();
         if (!Kernel::step()) {
             Kernel::idle_if_empty();
@@ -1438,7 +1447,7 @@ void tg_iwdg() {
     token.returned = 1;
     token.rtc_at_wake = Rtc::count();
     const uint32_t start = Rtc::count();
-    while ((Rtc::count() - start) < 2u * tr_hz) {
+    while (rtc_since(start) < 2u * tr_hz) {
     }
     Reset::software();
 }
@@ -1496,12 +1505,28 @@ using DynSite = Ch32vx03SleepSite<Dyn>;
 /// what the tree really runs at, not what the driver believes.
 uint32_t hclk_by_rtc() {
     (void)Rtc::synchronize();
-    const uint32_t c0 = Rtc::count();
-    while (Rtc::count() == c0) {
+    // THE START IS AN EDGE OF THE COUNT, found as the first read above
+    // every read before it - twice, because the first sample may itself
+    // be one of the stale copies count() can return (up to three counts
+    // low, ch32vx03/rtc.hpp), and then its first "edge" is no edge. A
+    // stale read is never ABOVE the count, so the running maximum only
+    // moves at a real edge once one fresh read has been seen.
+    uint32_t hi = Rtc::count();
+    for (uint8_t edges = 0; edges < 2u; ++edges) {
+        const uint32_t from = hi;
+        while (hi == from) {
+            const uint32_t r = Rtc::count();
+            if (static_cast<int32_t>(r - hi) > 0) {
+                hi = r;
+            }
+        }
     }
     Stopwatch w;
-    const uint32_t c1 = Rtc::count();
-    while (Rtc::count() - c1 < 10u) {
+    // AND THE END IS THE FIRST READ TEN COUNTS ON, never an unsigned
+    // difference across a stale read: that one is four billion, and it
+    // would end this window after one count of the ten - a 96 MHz tree
+    // read as 9.6 MHz.
+    while (rtc_since(hi) < 10u) {
         (void)w.cycles();   // polled, so no wrap of the counter goes unseen
     }
     const uint64_t cycles = w.cycles();
@@ -1543,7 +1568,16 @@ void tk_dynamic() {
         const uint32_t measured = hclk_by_rtc();
         const uint32_t asked = Dyn::rate_hz(i);
         const uint32_t off = measured > asked ? measured - asked : asked - measured;
-        const bool near = off <= asked / 100u;
+        // THE BOUND. The ruler's own error is one poll turn at each end of
+        // a 9.77 ms window - a few parts per million. What remains is the
+        // two clocks: a crystal rung is the board's HSE against its LSE,
+        // two crystals some 150 ppm apart on these boards, and one per
+        // cent is generous against that; the HSI rung is the HSI's own
+        // accuracy after calibration at 0..70 C (CH32V203 table 4-13: -1.0
+        // to +1.6 %, CH32V303 table 4-14: -1.8 to +1.8 %), the wider of
+        // the two.
+        const bool hsi_rung = Dyn::rate_source(i) == SysclkSource::hsi;
+        const bool near = off <= (hsi_rung ? (asked / 1000u) * 18u : asked / 100u);
         all_back = all_back && switched && alarm_hits != 0u &&
                    sws_at_wake == static_cast<uint8_t>(SysclkSource::hsi) && back;
         all_near = all_near && near;
@@ -1559,7 +1593,8 @@ void tk_dynamic() {
                   "rate IN FORCE and not the boot one",
                   all_back);
     bench.verdict("and the core then runs at that rate: the core's counter against the RTC "
-                  "within one per cent at every rung",
+                  "within one per cent at every crystal rung, and within the HSI's own 1.8 "
+                  "per cent on the bare HSI",
                   all_near);
     bench.verdict("and the program's own rate is in force again, the console legible",
                   Dyn::rate_index() == 0u && Rcc::sysclk_status() == SysClock::sysclk_source);

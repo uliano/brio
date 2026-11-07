@@ -305,11 +305,21 @@ uint32_t wait_for_traffic(uint32_t budget_ms) {
     return 0;
 }
 
+/// THE PORT EMPTIED, with the device stopped - the one moment
+/// util/usb/cdc.hpp's discard() may run, and the only way its rings ever
+/// empty: neither a bus reset nor stop() and start() touches them. A
+/// letter that judges a FRESH enumeration starts from them empty, so what
+/// an earlier letter's pour left in the receive ring - full, and the bulk
+/// OUT left unarmed behind it, USB's own flow control - or in the transmit
+/// ring is not judged as this letter's.
+void fresh_port() { Port::discard(); }
+
 // =============================================================================
 // a - the controller, and the host enumerating the device
 // =============================================================================
 void ta_enumerate() {
     Device::stop();
+    fresh_port();
     Usb::release();
     wait_ms(20);
 
@@ -416,6 +426,7 @@ void tu_reconnect() {
                       Device::state() == UsbDeviceState::detached);
 
     wait_ms(500);
+    fresh_port();
     Device::start();
     const uint32_t took = wait_configured(2000u);
     print(serial, "  re-attached: resets ", resets, " -> ", Device::resets(), ", address ",
@@ -766,6 +777,7 @@ void td_overflow() {
 // =============================================================================
 void tk_divider() {
     Device::stop();
+    fresh_port();
     Usb::release();
     wait_ms(20);
     while (!Serial::tx_idle()) {
@@ -932,6 +944,14 @@ void tx_two_ports() {
     wait_ms(500);
     two_ports = true;
     const bool up = Usb2::init(clock);
+    // THE BASELINE BEFORE THE PULL-UP: a host may write from the moment
+    // the two ports exist, which is before this letter's print - so the
+    // counts start here, with the ports' rings emptied (fresh_port()'s
+    // reason) and no host able to see the device yet.
+    Port2A::discard();
+    Port2B::discard();
+    const uint32_t a0 = Port2A::rx_bytes();
+    const uint32_t b0 = Port2B::rx_bytes();
     Device2::start();
     const uint32_t took = wait_configured2(2000u);
     const uint16_t used = Usb2::buffer_used();
@@ -949,8 +969,6 @@ void tx_two_ports() {
                   used == 464u && total == 512u);
     print(serial, "  12 s: port A echoes every byte, port B every byte plus one - run the "
                   "script's x now", crlf);
-    const uint32_t a0 = Port2A::rx_bytes();
-    const uint32_t b0 = Port2B::rx_bytes();
     uint32_t a_echo = 0;
     uint32_t b_echo = 0;
     const uint32_t t0 = Ticker::millis();
