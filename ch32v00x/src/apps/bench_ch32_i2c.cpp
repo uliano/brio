@@ -90,7 +90,7 @@
 // relative path, not copied.
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -529,7 +529,7 @@ void engine_arithmetic(const char* what, const uint32_t pump[6], const uint32_t 
 
 void ti_i2c() {
     print(serial,
-          ch32board::weact ? "  I2C1 the host on PC2 SCL / PC1 SDA, column 0 (the pump, and DmaTxEngine<6> + "
+          board::is("v006f8") ? "  I2C1 the host on PC2 SCL / PC1 SDA, column 0 (the pump, and DmaTxEngine<6> + "
                              "DmaRxEngine<7>), the PEER BOARD's twi_peer serving at 0x2C, the wire's "
                              "pull-ups the peer's"
                            : "  I2C1 the host on PB5 SCL / PB6 SDA, column 3 (the pump, and DmaTxEngine<6> + "

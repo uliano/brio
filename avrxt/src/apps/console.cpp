@@ -38,25 +38,25 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
 using P = brio::AvrPlatform;
 
 // The clock: the ONE truth about CLK_PER for every driver of this
 // target (avrxt/clock.hpp): the board's HF source at its rate (the DB
 // board's 24 MHz crystal, the DA board's 24 MHz external clock, the EA
-// board's 20 MHz crystal - avr_board.hpp), OSCHF fallback at the same
+// board's 20 MHz crystal - board.hpp), OSCHF fallback at the same
 // CLK_PER; `clock` is an empty tag passed to driver inits.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
 
 using Led = brio::Pin<'F', 2>;
-// The board's console (avr_board.hpp); the vectors bound below are
+// The board's console (board.hpp); the vectors bound below are
 // USART2's, which the static_assert keeps honest.
-using Serial = brio::Uart<board_console_usart, board_console_route>;  // rings 64/256 (defaults)
-static_assert(board_console_usart == 2, "console.cpp binds USART2's vectors");
+using Serial = brio::Uart<board::console_usart, board::console_route>;  // rings 64/256 (defaults)
+static_assert(board::console_usart == 2, "console.cpp binds USART2's vectors");
 constexpr Serial serial;                          // tag for print(serial, ...)
 
 // ---- events -----------------------------------------------------------------

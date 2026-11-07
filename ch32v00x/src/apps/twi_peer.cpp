@@ -125,7 +125,7 @@
 // register, and every architecture on this link compiles the same file.
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 namespace {
@@ -849,7 +849,7 @@ void help() {
 /// address match that rises between the loop's last look at STAR1 and it
 /// (15.10.7). Typed between tenures, as a human does, it costs nothing.
 void status() {
-    print(console, ch32board::weact ? "  I2C1 PC2/PC1, enabled=" : "  I2C1 PB5/PB6, enabled=", Raw::enabled(),
+    print(console, board::is("v006f8") ? "  I2C1 PC2/PC1, enabled=" : "  I2C1 PB5/PB6, enabled=", Raw::enabled(),
           " STAR1=", hex(Raw::status1()),
           " own address=", hex(own_addr_), crlf);
     print(console, "  SDA reads ", SdaPin::read() ? "high" : "LOW", ", SCL reads ",
@@ -899,7 +899,7 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
 }
 
 int main() {
-    crystal_ok = ch32board::has_crystal && SysClock::init();
+    crystal_ok = board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = Ticker::init(clock);
@@ -915,7 +915,7 @@ int main() {
     print(console, crlf, "twi_peer - I2C instrument target (", device::part_name, ", label '",
           label, "', fw ", hex(firmware_version), ", VDD ", supply_mv, " mV)", crlf);
     print(console,
-          ch32board::weact ? "target I2C1 column 0: SCL PC2, SDA PC1, open drain with NO pull of this "
+          board::is("v006f8") ? "target I2C1 column 0: SCL PC2, SDA PC1, open drain with NO pull of this "
                              "board's own - the far board's resistors hold the bus; command address "
                            : "target I2C1 column 3: SCL PB5, SDA PB6, open drain with NO pull of this "
                              "board's own - the far board's resistors hold the bus; command address ",

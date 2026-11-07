@@ -192,7 +192,7 @@
 //   e  THE SPI HOST ABOVE THE WIRE (ch32v00x/spi.hpp, docs/ch32v00x/
 //      spi.md): SpiHost<1> with NO engines, on the default pads, MISO
 //      floating, the select on PC3 and the D/C line on PC4 (PD0 on the
-//      WeAct board, whose PC4 carries the LED, ch32_board.hpp) - two pads
+//      WeAct board, whose PC4 carries the LED, board.hpp) - two pads
 //      of the board that no other letter and no jumper uses. Every
 //      request is built by hand and handed to start(): no arbiter, so
 //      what the lines hold is the host's own cost and nothing of the
@@ -274,7 +274,7 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -1054,7 +1054,7 @@ constexpr bool ram_twin_carried = device::flash_bytes > 16u * 1024u;
 using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 /// The D/C line: a pad no jumper and no other letter uses - PD0 where PC4
 /// carries the board's LED (the header).
-using DcPin = std::conditional_t<ch32board::weact, Pin<'D', 0>, Pin<'C', 4>>;
+using DcPin = std::conditional_t<board::pc4_free, Pin<'C', 4>, Pin<'D', 0>>;
 
 
 /// A request on the work buffer: `frames` frames of `bits`, the out
@@ -1243,7 +1243,7 @@ void te_spi_host() {
         ram[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
     console_drain();
-    print(serial, ch32board::weact ? "  SpiHost<1> with no engines, MISO floating, the select on PC3, D/C on PD0"
+    print(serial, board::is("v006f8") ? "  SpiHost<1> with no engines, MISO floating, the select on PC3, D/C on PD0"
                                    : "  SpiHost<1> with no engines, MISO floating, the select on PC3, D/C on PC4",
           crlf);
     console_drain();

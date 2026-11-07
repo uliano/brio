@@ -16,10 +16,10 @@ this board.
 
 - **Clock**: a 20 MHz quartz on PA0/PA1 for the EA's crystal oscillator
   (XOSCHF), the "EXT CLK OPTS" solder jumpers in the quartz position;
-  the board's clock type `BoardClock` is
+  the board's clock type `board::Clock` is
   `Clock<ClockSource::crystal, 20'000'000, ClockDiv::div1, 20'000'000>`,
   the last argument OSCHF claimed at 20 MHz
-  (`avrxt/src/apps/avr_board.hpp`). A
+  (the board file, `boards/ea48/board.hpp`). A
   32.768 kHz crystal on PF0/PF1. Neither crystal's pins are ever driven
   by a program on this board, started or not.
 - **Supply**: 5 V (the VDD jumper), measured 5.03 V by the probe. The
@@ -65,17 +65,17 @@ combinations DS80001048D 2.3.1 (rev B1) and 2.2.4 (rev B2) forbid.
 
 - **PD7 (VREFA) carries 100 nF to ground**, the reference's decoupling,
   as on the DA's assembly. PA7 carries nothing: CLKOUT runs there in
-  `test_avr_clock` (`avr_board.hpp`'s `board_pa7_free`).
+  `test_avr_clock` (the board file's `board::pa7_free`).
 - **USART1 ALT1 jumpers**: PC4-PE0, PC5-PE1, PC6-PE2 and PC7-PE3 are
   each one net, and PE0..PE3 run on to the partner board's wires (the
   SPI and USART links of the two-board suites). No program drives a PE
   pin and its PC partner at once: the pin-check tool waves PC4..PC7 and
   leaves PE0..PE3 inputs with no pull, and the suites leave the unused
-  half an input (`board_pc_pe_jumpers`).
+  half an input (`board::pc_pe_jumpers`).
 - **The analog net**: PD6 (the DAC's output) is wired to PD1 and to PD7,
   with 10 kOhm from PD6 to ground, one net of three pins for the
   DAC-to-ADC and DAC-to-AC loops ([../avrxt/dac.md](../avrxt/dac.md)),
-  stated in `avr_board.hpp` (`board_analog_net`, `board_dac_load_ohms`).
+  stated in the board file (`board::analog_net`, `board::dac_load_ohms`).
   The net carries 96 nF besides (its decay through the 10 k is 0.96 ms
   to 1/e, `test_avr_analog` letter n), which is PD7's 100 nF within its
   tolerance. A pad driving the net reaches VIH in 4.7 us and VIL in

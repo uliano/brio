@@ -75,8 +75,8 @@
 // =============================================================================
 //
 // The net: PD6 (the DAC's buffered output) wired to PD1 (AIN1) and PD7
-// (VREFA, AIN7), 10 kOhm from the net to ground (avr_board.hpp's
-// board_analog_net, board_dac_load_ohms). Letter n measures what else is
+// (VREFA, AIN7), 10 kOhm from the net to ground (board.hpp's
+// board::analog_net, board::dac_load_ohms). Letter n measures what else is
 // on it (its capacitance) and every wait after a DAC step below is
 // derived from that measurement's bound (settle_ms).
 //
@@ -113,9 +113,9 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 constexpr uint32_t hz = SysClock::hz;
 constexpr uint32_t tpus = hz / 1'000'000u;          // CLK_PER cycles a microsecond
@@ -270,7 +270,7 @@ void tn_net() {
     A::claim(Wire{});
     A::select(Wire{});
     const Fall off = timed_fall(false);
-    const uint32_t r = board_dac_load_ohms;
+    const uint32_t r = board::dac_load_ohms;
     const uint32_t c_nf = r ? off.t1_us * 1000u / r : 0;   // tau = R C: C [nF] = tau [us] x 1000 / R
     print(serial, "  buffer off: from ", off.v0, " counts, V0/e after ", off.t1_us, " us, V0/e^2 after ",
           off.t2_us, " us -> C = ", c_nf, " nF against ", r, " Ohm", crlf);
@@ -443,7 +443,7 @@ void t3_outen() {
             near(in_long, 2048, two_refs(2048)));
     // the 10 k to ground with the pin released: leakage 5 nA x 10 k = 50 uV;
     // the ADC's offset 1.5 typ x3 + noise: 8 counts
-    if constexpr (board_dac_load_ohms != 0) {
+    if constexpr (board::dac_load_ohms != 0) {
         verdict("the released wire reads ground (<= 8 counts: the 10 k)", wi <= 8);
     }
     D::init({.reference = Ref::v2048});
@@ -1352,7 +1352,7 @@ int main() {
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_analog - the AVR EA's ADC/DAC/VREF (board ", board,
           ", clk=", xtal ? "XTAL" : "OSCHF", " ", hz / 1'000'000u, " MHz, silicon rev ", hex(SYSCFG.REVID), ")", crlf,
-          "the net PD6-PD1-PD7 with ", board_dac_load_ohms, " Ohm to ground; VDD measured ", vdd_mv, " mV", crlf);
+          "the net PD6-PD1-PD7 with ", board::dac_load_ohms, " Ohm to ground; VDD measured ", vdd_mv, " mV", crlf);
     register_tests();
     help();
     bench.prompt();
@@ -1386,9 +1386,9 @@ int main() {
 #include "util/analog.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {

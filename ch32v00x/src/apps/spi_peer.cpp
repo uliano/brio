@@ -110,7 +110,7 @@
 // The ident label is the part number after its CH32 prefix ("V006");
 // ident.xtal says whether the 24 MHz crystal started (the PLL doubles it
 // to 48 MHz, the HSI's PLL the fallback at the same rate); a board with no
-// crystal (ch32_board.hpp) never starts one and says xtal 0.
+// crystal (board.hpp) never starts one and says xtal 0.
 //
 // NOTHING PLACED IN SRAM (util/placement.hpp, docs/ch32v00x/platform.md,
 // "A handler in SRAM"): the host of Op::host_burst keeps the default
@@ -144,7 +144,7 @@
 // register, and every architecture on this link compiles the same file.
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 namespace {
@@ -735,9 +735,9 @@ void help() {
 }
 
 void status() {
-    print(console, ch32board::weact ? "  client SPI1 column 1, enabled=" : "  client SPI1 column 0, enabled=",
+    print(console, board::is("v006f8") ? "  client SPI1 column 1, enabled=" : "  client SPI1 column 0, enabled=",
           Raw::enabled(), " STATR=", hex(Raw::status()), crlf);
-    print(console, ch32board::weact ? "  NSS PC0 reads " : "  NSS PC1 reads ", NssPin::read() ? "high" : "LOW",
+    print(console, board::is("v006f8") ? "  NSS PC0 reads " : "  NSS PC1 reads ", NssPin::read() ? "high" : "LOW",
           ", selected=", Client::selected(),
           ", supply ", supply_mv, " mV", crlf);
     print(console, "  commands=", commands, " actions=", actions, " naks=", naks, " served=", serves,
@@ -767,7 +767,7 @@ BRIO_CH32_VECTOR(dma1_channel2_handler) { (void)PeerRx::service(); }
 BRIO_CH32_VECTOR(dma1_channel3_handler) { (void)PeerTx::service(); }
 
 int main() {
-    crystal_ok = ch32board::has_crystal && SysClock::init();
+    crystal_ok = board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = Ticker::init(clock);
@@ -793,7 +793,7 @@ int main() {
     print(console, crlf, "spi_peer - SPI instrument client (", device::part_name, ", label '", label,
           "', fw ", hex(firmware_version), ", VDD ", supply_mv, " mV)", crlf);
     print(console,
-          ch32board::weact ? "client SPI1 column 1: NSS PC0 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
+          board::is("v006f8") ? "client SPI1 column 1: NSS PC0 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
                              "MISO PC7; command mode = SPI mode 0, MSb first"
                            : "client SPI1 column 0: NSS PC1 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
                              "MISO PC7; command mode = SPI mode 0, MSb first",

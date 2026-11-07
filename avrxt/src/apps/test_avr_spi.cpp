@@ -127,9 +127,9 @@
 
 #include "spi_link.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -2827,10 +2827,10 @@ void tq_demotion() {
 /// The USART that meets PE0..PE2: USART4 at its default route on the
 /// AVR DA/DB; on the AVR EA, which has no USART on PORTE, USART1 on ALT1
 /// (TXD PC4, RXD PC5, XCK PC6), which this board jumpers onto PE0..PE2
-/// (avr_board.hpp's board_pc_pe_jumpers): the same three nets.
+/// (board.hpp's board::pc_pe_jumpers): the same three nets.
 using Mspi = std::conditional_t<(usart_count >= 5), MspiHost<4, UsartRoute::def>,
                                 MspiHost<1, UsartRoute::alt1>>;
-static_assert(usart_count >= 5 || board_pc_pe_jumpers,
+static_assert(usart_count >= 5 || board::pc_pe_jumpers,
               "letter r's Host SPI reaches the SPI pins through the PC4..PC7 jumpers");
 
 struct MspiCase {

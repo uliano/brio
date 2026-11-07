@@ -7,8 +7,9 @@ clocks, the LED and the button, the console bridge, the probe, the
 wires a two-board test needs), how it is connected and flashed, the
 traps its silicon or its layout sets for a program, and what has been
 tested on it. This page is the index of those pages and the explanation
-of the one piece of vocabulary they all use: a board's type, the key
-the bench tool `bin/brio` and the build know a board by.
+of the vocabulary they all use: a board's type, the key the bench tool
+`bin/brio` and the build know a board by, and its board file, the
+header that states the same assembly's facts to the compiler.
 
 Nothing here is a desk. Which board is plugged into which socket, with
 which probe, is the bench manifest, a file each desk keeps for itself
@@ -48,9 +49,11 @@ must know which physical board is which, and the tool must put the two
 together. A verb is the action word after `brio` in a command.
 
 **The build knows board types, never physical boards.** A board type
-names a chip package and everything that follows from it: which of the
+names an assembly - a PCB with the chip, the crystals and the jumpers
+fitted on it - and everything that follows from it: which of the
 sibling CMake projects compiles for it, which release preset that
-project uses, and how firmware gets in. Every application under a
+project uses, which board file the build reads (below, "The board
+file") and how firmware gets in. Every application under a
 project's `src/apps/` becomes one CMake target per board type it names
 in its own header comment, discovered at configure time: an app that
 builds for more than its project's default board says so with a line
@@ -137,7 +140,7 @@ Each type belongs to one project and one way of writing firmware:
 | `db28`, `db32`, `db48`, `da48`, `ea48` | `avrxt/` | avrdude over UPDI, through an EDBG-class probe |
 | `c21j` | `samc21/` | OpenOCD over SWD, through a CMSIS-DAP probe |
 | `g0b1re`, `g071rb`, `g031k8` | `stm32g0/` | OpenOCD through the Nucleo's own ST-LINK |
-| `v006k8`, `v003f4` | `ch32v00x/` | WCH's OpenOCD fork through a WCH-Link |
+| `v006k8`, `v006f8`, `v003f4` | `ch32v00x/` | WCH's OpenOCD fork through a WCH-Link |
 | `v203c8`, `v303vc` | `ch32vx03/` | WCH's OpenOCD fork through a WCH-Link |
 | `x035f8` | `ch32x035/` | the same fork through a WCH-LinkE |
 | `pico`, `picow`, `weact2040` | `rp2040/` | OpenOCD through a CMSIS-DAP probe, the Raspberry Pi Debug Probe |
@@ -162,6 +165,62 @@ to whatever the new image asks for. So the board is recoverable from any
 state a program can put it in, whichever architecture was running
 before ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md);
 the sequences are `cli/bench/flash.py`'s).
+
+## The board file
+
+A board page is the prose about an assembly, written for a person; a
+board file is the same assembly's facts written for the compiler. It is
+one C++ header, `boards/<type>/board.hpp` at the repository's root
+beside `brio/`, one directory per board type that has a board: today
+the CH32V00x project's `v006k8`, `v006f8` and `v003f4` and the AVR
+project's `db48`, `da48` and `ea48`. The AVR types with no board,
+`db28` and `db32`, whose presets exist to link the family's guard, have
+no directory.
+
+**The build chooses the file; the program asks nothing.** A project
+puts `boards/<type>` on the include path of every app it configures for
+that type, the experiments' app halves included, when the directory
+exists, and a program writes `#include "board.hpp"`. It never tests
+which board it is built for. A program that includes the file on a
+type with no directory fails to compile, which is the right answer: it
+reads facts that no board of that type states.
+
+**What goes in: only what is fitted on the board.** LEDs and their
+polarity, buttons, crystals (fitted or not, and their rate), the
+console's instance, route and bridge, fixed circuits that take pads
+(WeAct's software-USB resistors on PD3..PD5 of its CH32V006F8U6 board),
+jumpers, nets that join pads, and option bytes or fuses as the desk
+leaves them where a program depends on them. Every fact is a constant
+or a type alias in one namespace, `board`: `board::Led`,
+`board::has_crystal`, `board::Clock`, `board::pc_pe_jumpers`. Each file
+also defines `board::type`, the board type as a `std::string_view`
+(`"v006f8"`), for the one question no fact answers: which plan of wires
+a two-board pair follows. A program asks it as `board::is("v006f8")`,
+which the compiler decides whatever the optimization level (it is
+`consteval`), so a choice keyed on the board costs no code in a debug
+build either. A fact that something is absent is a fact
+too (`board::xosc32k` false, no 32 kHz crystal), so that a program
+reads the same names on every board of its project. The file holds
+constants only and forms no code.
+
+**What never goes in.** The chip's own facts - its package, the pads it
+bonds, its instances, its errata - stay in the target stratum under
+`brio/`, where every program for the part finds them. The board file
+only states that the part the build names is the one fitted, with a
+`static_assert` on the stratum's part identity (`brio::device::part`
+and `brio::device::package` on the CH32V00x, `brio::avr_die` and
+`brio::package_pins` on the AVR), so a board file compiled for another
+part is a compile error. Nor does the wiring between two boards go in:
+the plan of a pair (which pads of each end carry the SPI, I2C and
+serial links) belongs to the pair, and stays in a header beside the
+apps that use it (`ch32v00x/src/apps/ch32_pair.hpp`), which keys on
+`board::is()`.
+
+**Where it sits.** Above the target strata, beside the apps: a board
+file includes its target's headers, and nothing under `brio/` includes
+a board file ([../design/overview.md](../design/overview.md), "Layering:
+the strata"). The host test project's family fixtures compile without
+one.
 
 ## Consoles and programmers
 

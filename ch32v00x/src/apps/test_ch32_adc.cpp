@@ -12,7 +12,7 @@
 //
 // NOTHING TO WIRE. PD2 (ADC_IN3) and PC4 (ADC_IN2) are read through
 // their internal pulls - PA2 (ADC_IN0) instead of PC4 on the WeAct board,
-// whose PC4 carries the LED and its 10 kOhm (ch32_board.hpp); PD5/PD6 are
+// whose PC4 carries the LED and its 10 kOhm (board.hpp); PD5/PD6 are
 // the console's and are never claimed; the LED is the board's, PC0 on
 // the other boards.
 //
@@ -77,7 +77,7 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -102,12 +102,12 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = ch32board::Led;
+using Led = board::Led;
 
 using In3 = AnalogIn<Pin<'D', 2>>;
 /// The second pad read through its pull: PC4 (IN2), or PA2 (IN0) on the
 /// WeAct board (the header).
-using PulledPin = ch32board::PulledPad;
+using PulledPin = board::PulledPad;
 using In2 = AnalogIn<PulledPin>;
 using T1 = Tim<1>;
 using T2 = Tim<2>;
@@ -761,7 +761,7 @@ void tf_watchdogs() {
         const bool r1 = Adc::watchdog_result(1);
         const bool r2 = Adc::watchdog_result(2);
         const bool ok = r0 == r.expect0 && r1 == r.expect1 && r2 == r.expect2;
-        print(serial, ch32board::weact ? "  scan VREFINT,PA2,PA2 with " : "  scan VREFINT,PC4,PC4 with ", r.name, ": results ", r0, r1, r2, ok ? "  as expected" : "  OFF",
+        print(serial, board::is("v006f8") ? "  scan VREFINT,PA2,PA2 with " : "  scan VREFINT,PC4,PC4 with ", r.name, ": results ", r0, r1, r2, ok ? "  as expected" : "  OFF",
               crlf);
         if (ok) {
             ++right;
@@ -788,7 +788,7 @@ void tg_pads() {
     };
     const PadCase pads[] = {
         {"PD2 (IN3)", In3::channel, [] { Pin<'D', 2>::input(PinPull::up); }, [] { Pin<'D', 2>::input(PinPull::down); }},
-        {ch32board::weact ? "PA2 (IN0)" : "PC4 (IN2)", In2::channel, [] { PulledPin::input(PinPull::up); },
+        {board::is("v006f8") ? "PA2 (IN0)" : "PC4 (IN2)", In2::channel, [] { PulledPin::input(PinPull::up); },
          [] { PulledPin::input(PinPull::down); }},
     };
     uint8_t good = 0;

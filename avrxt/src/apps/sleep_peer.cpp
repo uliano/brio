@@ -56,12 +56,12 @@
 
 #include "sleep_link.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-// The board's HF clock (avr_board.hpp): the DB board's crystal on its
+// The board's HF clock (board.hpp): the DB board's crystal on its
 // XOSCHF, or on the AVR128DA48 board a quartz oscillator feeding EXTCLK, crystal-referenced either way: ident reports
 // slink::clock_crystal for both whenever the source started.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {

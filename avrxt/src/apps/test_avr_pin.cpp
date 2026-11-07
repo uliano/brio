@@ -39,9 +39,9 @@
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {

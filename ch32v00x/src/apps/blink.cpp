@@ -11,7 +11,7 @@
 // Only the glue lines are this target's - the clock type, the pin, the
 // platform, the vector binding.
 //
-// Wiring: the LED's pad is the board's (ch32_board.hpp). The CH32V006K8U6
+// Wiring: the LED's pad is the board's (board.hpp). The CH32V006K8U6
 // module's LED has no pin of its own - it is jumpered to PC0, the pad the
 // apps drive on that board and on the CH32V003's: no bus and no analog
 // function on it, TIM2_CH3 as its alternate function (a dimmable LED,
@@ -32,7 +32,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 
@@ -44,7 +44,7 @@ constexpr SysClock clock;
 
 namespace {
 
-using Led = ch32board::Led;   // the board's LED (see the header)
+using Led = board::Led;   // the board's LED (see the header)
 
 // ---- events -----------------------------------------------------------------
 struct Toggle {};                      // Blinker's own heartbeat

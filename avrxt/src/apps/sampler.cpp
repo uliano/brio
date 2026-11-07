@@ -61,11 +61,11 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
 using P = brio::AvrPlatform;
 #if defined(ADC_PGAEN_bm)
-using Boot = BoardClock;                          // the board's HF source (avr_board.hpp)
+using Boot = board::Clock;                          // the board's HF source (board.hpp)
 #else
 using Boot = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
 #endif

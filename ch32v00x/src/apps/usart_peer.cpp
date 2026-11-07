@@ -32,7 +32,7 @@
 //
 // TIME (usart_link.hpp, TIME IN THE PAYLOAD). HCLK is the module's 24 MHz
 // crystal doubled by the PLL, 48 MHz (Ident::xtal = 1 when the crystal
-// started; without it - and on a board that has none, ch32_board.hpp,
+// started; without it - and on a board that has none, board.hpp,
 // where it is never started - the HSI's PLL runs the same 48 MHz
 // nominal, xtal = 0, and calibrate is refused - this peer has no adoption
 // to offer). The
@@ -107,7 +107,7 @@
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
@@ -144,15 +144,15 @@ using T1 = Tim<1>;
 /// THE TWO LANES (the header): the TX pad's and the RX pad's, each a TIM1
 /// code, a channel (0-based) and the DMA channel of that channel's
 /// compare request (table 8-2: CH1 on 2, CH2 on 3, CH3 on 6, CH4 on 4).
-constexpr uint8_t tx_column = ch32board::weact ? 0 : 6;   ///< 0000: CH1 PD2 | 0110: CH2 PB0
-constexpr uint8_t tx_ch = ch32board::weact ? 0 : 1;
-constexpr uint8_t rx_column = ch32board::weact ? 2 : 6;   ///< 0010: CH4 PD3 | 0110: CH3 PB1
-constexpr uint8_t rx_ch = ch32board::weact ? 3 : 2;
+constexpr uint8_t tx_column = board::is("v006f8") ? 0 : 6;   ///< 0000: CH1 PD2 | 0110: CH2 PB0
+constexpr uint8_t tx_ch = board::is("v006f8") ? 0 : 1;
+constexpr uint8_t rx_column = board::is("v006f8") ? 2 : 6;   ///< 0010: CH4 PD3 | 0110: CH3 PB1
+constexpr uint8_t rx_ch = board::is("v006f8") ? 3 : 2;
 static_assert(tim1_channel_pad(tx_column, tx_ch) == TxPin::pad && tim1_channel_pad(rx_column, rx_ch) == RxPin::pad,
               "table 7-8: each lane's code puts its channel on its link pad");
 static_assert(tx_ch != rx_ch, "the two lanes ride two channels");
-using TxEdges = DmaTxEngine<ch32board::weact ? 2 : 3, uint32_t>;   ///< TIM1 CH1's request | CH2's
-using RxEdges = DmaTxEngine<ch32board::weact ? 4 : 6, uint32_t>;   ///< TIM1 CH4's request | CH3's
+using TxEdges = DmaTxEngine<board::is("v006f8") ? 2 : 3, uint32_t>;   ///< TIM1 CH1's request | CH2's
+using RxEdges = DmaTxEngine<board::is("v006f8") ? 4 : 6, uint32_t>;   ///< TIM1 CH4's request | CH3's
 
 constexpr uint16_t firmware_version = static_cast<uint16_t>((link::peer_ch32v00x << 8) | 0x02u);
 
@@ -936,7 +936,7 @@ void help() {
 }
 
 void status() {
-    print(console, ch32board::weact ? "  link USART2 column 3 (TX PD2, RX PD3) " : "  link USART2 column 4 (TX PB0, RX PB1) ",
+    print(console, board::is("v006f8") ? "  link USART2 column 3 (TX PD2, RX PD3) " : "  link USART2 column 4 (TX PB0, RX PB1) ",
           proven ? "PROVEN" : "searching (dark)",
           standing_off() ? ", STAND-OFF" : "", crlf);
     print(console, "  BRR=", L::brr(), " commands=", commands, " actions=", actions, " naks=", naks, crlf);
@@ -971,7 +971,7 @@ BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_VECTOR(usart1_handler) { (void)Console::isr(); }
 
 int main() {
-    crystal_ok = ch32board::has_crystal && SysClock::init();
+    crystal_ok = board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     (void)Console::init(clock, 115200);
     (void)Ticker::init(clock);
@@ -987,7 +987,7 @@ int main() {
         print(console, "SUPPLY LOW (under ", supply_floor_mv, " mV): the link stays dark", crlf);
     }
     print(console,
-          ch32board::weact ? "link USART2 column 3: TX PD2, RX PD3; command mode 8N1 @ "
+          board::is("v006f8") ? "link USART2 column 3: TX PD2, RX PD3; command mode 8N1 @ "
                            : "link USART2 column 4: TX PB0, RX PB1; command mode 8N1 @ ",
           link::command_baud, crlf);
 

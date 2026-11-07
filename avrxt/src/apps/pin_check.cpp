@@ -26,7 +26,7 @@
 // pins, started or not, and its USART1 ALT1 jumpers make PC4..PC7 and
 // PE0..PE3 four nets: PC4..PC7 wave, PE0..PE3 stay inputs with no pull,
 // so a probe on either end of a pair shows the PC pin's wave (the board
-// table's board_wave_crystal_pins and board_pc_pe_jumpers).
+// file's board::wave_crystal_pins and board::pc_pe_jumpers).
 //
 // It stays a tool with no kernel, no timer interrupt and no verdict
 // grammar: a board that says nothing and waves nowhere is a board for
@@ -84,11 +84,11 @@
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-// The board's HF clock (avr_board.hpp): a crystal on PA0/PA1, or an
+// The board's HF clock (board.hpp): a crystal on PA0/PA1, or an
 // external clock into PA0.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 using Serial = brio::Uart<2, brio::Route::alt1>;
@@ -164,7 +164,7 @@ void banner() {
                     : "OSCHF - NO EXTERNAL CLOCK SEEN ON PA0 (PA0 an input, PA1 waving)",
               crlf);
     }
-    if constexpr (board_wave_crystal_pins) {
+    if constexpr (board::wave_crystal_pins) {
         print(serial, "32k crystal: ",
               on_xosc32k ? "running (PF0/PF1 held)"
                          : "not running (PF0/PF1 waving) - none fitted, or a joint",
@@ -173,7 +173,7 @@ void banner() {
         print(serial, "32k crystal: ", on_xosc32k ? "running" : "NOT RUNNING",
               " (PF0/PF1 never driven)", crlf);
     }
-    if constexpr (board_pc_pe_jumpers) {
+    if constexpr (board::pc_pe_jumpers) {
         print(serial, "PC4..PC7 wave, PE0..PE3 inputs: the jumpers make each pair one net",
               crlf);
     }
@@ -266,7 +266,7 @@ int main() {
     // none fitted simply fails it.
     Xosc32k::start_crystal(Xosc32kStartup::cycles64k, false, true);
     on_xosc32k = Xosc32k::wait_stable();
-    if (!on_xosc32k && board_wave_crystal_pins) {
+    if (!on_xosc32k && board::wave_crystal_pins) {
         Xosc32k::stop();  // PF0/PF1 back to the PORT
     }
 
@@ -274,14 +274,14 @@ int main() {
         // A DA's PA0 is never driven: the board may carry an ACTIVE clock
         // there, and a pin driven against an oscillator's output is two
         // outputs fighting. A DB's crystal pins are passive and may wave.
-        .a = static_cast<uint8_t>(0xFF & ~(on_hf || !has_xoschf || !board_wave_crystal_pins
+        .a = static_cast<uint8_t>(0xFF & ~(on_hf || !has_xoschf || !board::wave_crystal_pins
                                                ? hf_pins : 0)),
         .b = 0x3F,
         .c = 0xFF,
         .d = 0xFF,
-        .e = board_pc_pe_jumpers ? 0x00 : 0x0F,
+        .e = board::pc_pe_jumpers ? 0x00 : 0x0F,
         .f = static_cast<uint8_t>(0x7F & ~reset_pin & ~console_pins & ~led_pin &
-                                  ~button_pin & ~(on_xosc32k || !board_wave_crystal_pins
+                                  ~button_pin & ~(on_xosc32k || !board::wave_crystal_pins
                                                   ? xosc32k_pins : 0)),
     };
 

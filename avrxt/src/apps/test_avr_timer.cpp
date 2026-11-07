@@ -119,9 +119,9 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 /// The letters were first written at 24 MHz and keep their literal text
@@ -145,7 +145,7 @@ using Pwm8Pin = Pin<'C', 0>;         // TCB2 WO
 using ShotPin = Pin<'B', 5>;         // TCB3 WO
 using DirPin = Pin<'C', 1>;          // a level the test drives
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA has four LUTs and two comparators: the pinless LUT the
 // letters use is LUT3 (LUT4 on the DA/DB48), the window's upper
 // comparator and the PC6 output AC1 (AC2 there).
@@ -181,7 +181,7 @@ volatile uint16_t captures = 0;              // how many
 volatile uint16_t irq_count = 0;             // periodic interrupts
 
 void tcb0_frequency() { cap_a = FrequencyMeter<T0>::period_ticks(); captures = captures + 1; }
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 volatile uint32_t mean_sum = 0;              // letter k's mean of consecutive periods
 void tcb0_frequency_mean() {
     const uint16_t t = FrequencyMeter<T0>::period_ticks();
@@ -588,22 +588,22 @@ void t9_event_counter() {
 }
 
 // ---- c CCL ---------------------------------------------------------------------
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA board: LUT2, IN0 = PD0, OUT = PD3, and the second input
 // LUT2's IN1 = PD1 - or, where PD1 is on the board's analog net
-// (avr_board.hpp), its IN2 = PD2: the net carries 96 nF (VREFA's
+// (board.hpp), its IN2 = PD2: the net carries 96 nF (VREFA's
 // capacitor, test_avr_analog letter n), which a pad charges with a time
 // constant of microseconds - past the 2 us the letter reads its output
 // after a change (measured: the OR's 0 -> 1 on PD1 read 0 at 2 us, 1 at
 // 200 us).
 using LutP = Lut<2>;
 using LutA = Pin<'D', 0>;
-using LutB = std::conditional_t<board_analog_net, Pin<'D', 2>, Pin<'D', 1>>;
+using LutB = std::conditional_t<board::analog_net, Pin<'D', 2>, Pin<'D', 1>>;
 using LutOut = Pin<'D', 3>;
 /// The two-input LUT of the letter on the second input's position.
 template <typename F>
 constexpr LutConfig lut_pair(F f) {
-    if constexpr (board_analog_net) {
+    if constexpr (board::analog_net) {
         return {.in0 = LutInput::pin, .in2 = LutInput::pin,
                 .truth = lut_truth([f](bool a, bool, bool c) { return f(a, c); }), .output_pin = true};
     } else {
@@ -619,8 +619,8 @@ using LutOut = Pin<'B', 3>;
 #endif
 
 void tc_ccl() {
-#if defined(BRIO_BOARD_ea48)
-    print(serial, "c CCL: LUT2 AND/OR of PD0/", board_analog_net ? "PD2" : "PD1",
+#if defined(__AVR_AVR64EA48__)
+    print(serial, "c CCL: LUT2 AND/OR of PD0/", board::analog_net ? "PD2" : "PD1",
           " on PD3; ToggleFlipFlop LUT0/1 by TCB1 events; edge detector", crlf);
     quiesce();
     Tca<0>::reset();                 // PD0 is TCA0's WO0: an enabled compare output owns it even disabled
@@ -631,7 +631,7 @@ void tc_ccl() {
     LutA::clear(); LutB::clear();
     LutA::output(); LutB::output();
     Ccl::disable();
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     verdict("LUT2 init (AND)", LutP::init(lut_pair([](bool a, bool b) { return a && b; })));
 #else
     verdict(lut_count == 6 ? "LUT4 init (AND)" : "LUT2 init (AND)", LutP::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
@@ -651,7 +651,7 @@ void tc_ccl() {
     verdict("AND truth table on the pins", ok);
     // reconfigure to OR: the whole block off meanwhile (errata 2.4.1)
     Ccl::disable();
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     LutP::init(lut_pair([](bool a, bool b) { return a || b; }));
 #else
     LutP::init({.in0 = LutInput::pin, .in1 = LutInput::pin,
@@ -1131,7 +1131,7 @@ void ccl_quiesce() {
     Ccl::disable();
     Ccl::sequencer<0>(Sequencer::none);
     Ccl::sequencer<1>(Sequencer::none);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     Lut<0>::disable(); Lut<1>::disable(); Lut<2>::disable();
     Lut<3>::disable();                 // the AVR EA: four LUTs, two sequencers
 #else
@@ -1145,7 +1145,7 @@ void tl_ccl_logic() {
     print(serial, "l CCL: LINK chain, DFF and RS sequencers, LUT1 ALT1 on PC6, pin release", crlf);
     quiesce(); ccl_quiesce();
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     // LINK: LUT2's link input is LUT3's output, read on LUT2's pin PD3
     // (the AVR EA's four LUTs: LUT3's own link, into LUT0, is letter x's)
     Ccl::disable();
@@ -1543,7 +1543,7 @@ void tk_ccl_extras() {
         ChCarry::source(Lut<0>::OutEvent{});
         tcb0_hook = tcb0_frequency;
         FrequencyMeter<T0>::init(clock, ChCarry{});
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
         // The AVR64EA48's OSC32K jitters by a few CLK_PER from cycle to
         // cycle (rtc.md): one two-cycle period read up to 132 ticks off
         // the 32:1 ratio once multiplied by 32. The mean of 32
@@ -1605,7 +1605,7 @@ void tk_ccl_extras() {
 // level holds HIGH (16.3.2.6: it inverts for one CLK_PER - a low pulse,
 // whose end is a rising edge); EVOUT's ALT1 positions PA7, PC7 and PD7
 // following PC1's level - PD7 only on a board that leaves it a free pad
-// (avr_board.hpp's board_analog_net).
+// (board.hpp's board::analog_net).
 void te_evsys() {
     print(serial, "e EVSYS: SPI SCK and USART XCK generators, the software event on a "
                   "held level, EVOUT ALT1 on PA7/PC7/PD7", crlf);
@@ -1684,11 +1684,11 @@ void te_evsys() {
 
     // 4. EVOUT ALT1: PA7, PC7 and PD7 follow PC1's level on channel 3 -
     //    PD7 only where it is a free pad: on a board whose PD7 is on the
-    //    analog net (avr_board.hpp's board_analog_net: VREFA's 100 nF and
+    //    analog net (board.hpp's board::analog_net: VREFA's 100 nF and
     //    the DAC's resistor) no digital output drives it, and EVOUTD ALT1
     //    has no other position, so PA7 and PC7 alone are read there.
-    if constexpr (board_analog_net) {
-        static_assert(board_pa7_free, "letter e reads EVOUTA ALT1 on PA7");
+    if constexpr (board::analog_net) {
+        static_assert(board::pa7_free, "letter e reads EVOUTA ALT1 on PA7");
         EvOut<Pin<'A', 7>>::listen(ChC{});
         EvOut<Pin<'C', 7>>::listen(ChC{});
         DirPin::set(); delay_us(clock, 5);
@@ -2026,7 +2026,7 @@ void tt_tca_modes() {
     quiesce();
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- x the AVR EA's own --------------------------------------------------------------
 // What the AVR EA's chapters leave open against the DA/DB's (the routes
 // its PORTMUX adds, the DA/DB errata with no EA twin, the input menu's
@@ -2048,12 +2048,12 @@ void tx_ea() {
     using D4 = Pin<'D', 4>; using D5 = Pin<'D', 5>; using D6 = Pin<'D', 6>;
     A4::configure({}); A5::configure({}); A6::configure({});
     D4::configure({}); D5::configure({}); D6::configure({});
-    // PD6 is on the board's analog net (avr_board.hpp): its 96 nF and 10 k
+    // PD6 is on the board's analog net (board.hpp): its 96 nF and 10 k
     // take a pad 4.7 us to VIH and 3.3 us to VIL (test_avr_analog letter
     // n) - 30 us is six times that; a bare pad settles in nanoseconds.
     auto park = [](bool high) {
         Tca<1>::output_value<0>(high); Tca<1>::output_value<1>(high); Tca<1>::output_value<2>(high);
-        delay_us(clock, board_analog_net ? 30 : 2);
+        delay_us(clock, board::analog_net ? 30 : 2);
     };
     (void)Tca<1>::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
                         .period = tpms - 1u, .outputs = 0x07, .route = 'A'});
@@ -2293,7 +2293,7 @@ void register_tests() {
     bench.letter('t', "TCA modes", tt_tca_modes);
     bench.letter('e', "EVSYS generators and positions", te_evsys);
     bench.letter('k', "CCL extras", tk_ccl_extras);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     bench.letter('x', "the AVR EA's own", tx_ea);
 #endif
 }

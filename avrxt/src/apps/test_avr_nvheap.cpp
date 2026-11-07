@@ -60,9 +60,9 @@
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 /// The suite's reset-surviving breadcrumb: test d spans a real reset and

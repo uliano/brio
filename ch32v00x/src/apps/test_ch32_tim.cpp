@@ -17,7 +17,7 @@
 // main() probes it (PD2 driven both ways as a GPIO, PD4 read) and the
 // two letters decline with the reason when it is missing. NOT ON THE
 // WEACT BOARD: there PD4 hangs from PD5, the console's transmit pad,
-// through the board's 1.5 kOhm USB resistor (ch32_board.hpp), so the probe
+// through the board's 1.5 kOhm USB resistor (board.hpp), so the probe
 // and letters f and g are not registered - and they have nowhere to move:
 // on the CH32V006's 20-pin package TIM2's channel-1 input (the period
 // meter's TI1) lands only on PD4, on PD3 (a USB stub and a pair wire) and on
@@ -29,7 +29,7 @@
 // 1.5 kOhm pull-up hung from the far board's PB3: letter i wants that pad
 // floating - the far board on an image that leaves PB3 alone - or the
 // resistor outweighs the internal pull. The LED is the board's
-// (ch32_board.hpp), never claimed here.
+// (board.hpp), never claimed here.
 //
 // What is exercised, letter by letter:
 //   a  the blocks, WIRELESS: the reset values of the three, the facts
@@ -81,7 +81,7 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -229,7 +229,7 @@ void ta_blocks() {
                       !T1::flag(T1::update_flag));
     bench.verdict("the dead-time arithmetic: 130 ticks asks code 0x81 (129 -> 130), the top is 1008",
                   tim_dead_time_code(130) == 0x81u && tim_dead_time_ticks(0xFF) == 1008u);
-    print(serial, ch32board::pd4_free ? "  jumper PD2-PD4: " : "  jumper PD2-PD4: not on this board (PD4 is no free pad): ",
+    print(serial, board::pd4_free ? "  jumper PD2-PD4: " : "  jumper PD2-PD4: not on this board (PD4 is no free pad): ",
           jumper_present ? "present" : "ABSENT", crlf);
     all_off();
 }
@@ -933,7 +933,7 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         jumper_present = probe_jumper();
     }
 
@@ -945,7 +945,7 @@ int main() {
     bench.letter('e', "TIM3: clocked by TIM1, on CK_INT, its match pacing a DMA channel", te_tim3);
 #endif
     // Not on a board whose PD4 is no free pad (the header).
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('f', "THE CAPTURES on the jumper: period meter at three duties, interval meter", tf_capture);
         bench.letter('g', "ONE PULSE on the jumper, fired by software and captured", tg_one_pulse);
     }

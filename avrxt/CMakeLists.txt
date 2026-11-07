@@ -52,6 +52,7 @@ include(cmake/avr-mcus.cmake)
 set(AVR_MCU "avr128db48" CACHE STRING "target AVR MCU, e.g. avr128db48/avr128da48/avr64ea48 (see cmake/avr-mcus.cmake)")
 string(TOUPPER "${AVR_MCU}" AVR_MCU_DEFINE)
 avr_short_board("${AVR_MCU}" AVR_BOARD)
+set(AVR_BOARD_DIR "${CMAKE_SOURCE_DIR}/../boards/${AVR_BOARD}")   # its board file's, when it has one
 
 # --- Flags shared by every language + the link step (CCFLAGS applies to C,
 #     C++ and the link step alike).
@@ -151,6 +152,7 @@ file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
     "${CMAKE_SOURCE_DIR}/src/*.S"
+    "${CMAKE_SOURCE_DIR}/../boards/*.hpp"
 )
 foreach(_f IN LISTS _nvheap_id_sources)
     file(TIMESTAMP "${_f}" _ts "%s")
@@ -177,11 +179,17 @@ function(avr_add_app name)
     )
 
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/../brio)
-    # The board TYPE this configure builds for, as a macro: the apps'
-    # src/apps/avr_board.hpp maps it to the facts of that assembly (the HF
-    # source and its rate, the 32 kHz crystal, what hangs on PA7) - facts of
-    # the PCB and what is fitted on it, which the chip's header cannot know.
-    target_compile_definitions(${name} PRIVATE ${AVR_MCU_DEFINES} BRIO_BOARD_${AVR_BOARD})
+    # The board file of the board type this configure builds for,
+    # ../boards/<type>/board.hpp, on the include path when the type has
+    # one: an app writes #include "board.hpp" and reads the facts of that
+    # assembly (the HF source and its rate, the 32 kHz crystal, what hangs
+    # on PA7) - facts of the PCB and what is fitted on it, which the chip's
+    # header cannot know. The packages with no board (db28, db32) have no
+    # directory, and an app that includes the file fails to build there.
+    if(EXISTS ${AVR_BOARD_DIR})
+        target_include_directories(${name} PRIVATE ${AVR_BOARD_DIR})
+    endif()
+    target_compile_definitions(${name} PRIVATE ${AVR_MCU_DEFINES})
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}

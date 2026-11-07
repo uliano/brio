@@ -160,7 +160,12 @@ an app's `boards =` line names are `v006k8` (the default) and `v003f4`.
 Every chapter is tiered for both parts; an app names the second when
 its image fits there (the group axis below) and its wires exist on that
 board; the serial suite stays on the CH32V006, whose USART2 is its
-instrument. The board's type in the bench manifest is what tells
+instrument. What a board type's assembly carries - the LED and its
+polarity, the crystal, the pads its circuits load, the pin suite's
+jumper - an app reads from the type's board file,
+`boards/<type>/board.hpp`, which the build puts on every app's include
+path ([../boards/README.md](../boards/README.md), "The board file").
+The board's type in the bench manifest is what tells
 `bin/brio` to build here and to flash through WCH's OpenOCD fork
 ([../boards/README.md](../boards/README.md)).
 

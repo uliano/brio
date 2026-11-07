@@ -2,7 +2,7 @@
 // every clock source, the prescaler, the OSCHF tune, the 32 kHz main
 // clock, the clock failure detector - exercised with CLK_PER on the
 // CLKOUT pin (PA7) for an oscilloscope where the board leaves PA7 free
-// (avr_board.hpp's board_clkout), and the console reporting what to
+// (board.hpp's board::clkout), and the console reporting what to
 // expect and what the status bits say. Reference test of avrxt/clock.hpp (docs/avrxt/clkctrl.md): keep
 // it passing.
 //
@@ -95,9 +95,9 @@
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -108,8 +108,8 @@ using Serial = Uart<2, Route::alt1>;
 constexpr Serial serial;
 constexpr uint32_t baud = 9600;
 
-// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
-// the board table's (avr_board.hpp).
+// The board's facts (board::clkout, board::xosc32k, board::pa7_free) are
+// the board file's (board.hpp).
 
 uint8_t passed = 0, failed = 0;
 void verdict(const char* name, bool ok) {
@@ -148,7 +148,7 @@ void hold_ms(uint32_t ms) {
 // then the caller switches. If the console cannot follow, say so
 // before going silent.
 void before_switch(uint32_t next_hz, const char* what) {
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, "  -> ", what, " = ", next_hz, " Hz on PA7",
               console_ok(next_hz) ? "" : " (console silent)", crlf);
     } else {
@@ -163,14 +163,14 @@ void before_switch(uint32_t next_hz, const char* what) {
 void back_to_boot() {
     Serial::rebase(SysClock::hz);
     (void)SysClock::init();
-    if constexpr (board_clkout) MainClock::clkout(true);
+    if constexpr (board::clkout) MainClock::clkout(true);
     Serial::rebase(SysClock::hz);
     current_hz = SysClock::hz;
 }
 
 // ---- 1: OSCHF sweep -------------------------------------------------------------
 void t1_oschf() {
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, "1 OSCHF as main clock: 24,20,16,12,8,4,3,2,1 MHz, 2 s each (scope PA7)", crlf);
     } else {
         print(serial, "1 OSCHF as main clock: 24,20,16,12,8,4,3,2,1 MHz, 2 s each", crlf);
@@ -218,7 +218,7 @@ void t2_prescalers() {
 // ---- 3: tune ----------------------------------------------------------------------
 void t3_tune() {
     print(serial, "3 OSCHF manual tune at 16 MHz: steps -32 -16 0 +16 +31 (~0.4 %/step), 2 s each", crlf);
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, "  bench (A5): 14.56, 15.22, 15.97, ~17.0, 17.96 MHz on PA7 - asymmetric, not 0.4 %/step", crlf);
     } else {
         print(serial, "  bench (DB A5): 14.56, 15.22, 15.97, ~17.0, 17.96 MHz - asymmetric, not 0.4 %/step", crlf);
@@ -283,14 +283,14 @@ void t4_crystal_vs_oschf() {
     back_to_boot();
     verdict(has_xoschf ? "crystal re-selected after OSCHF" : "external clock re-selected after OSCHF",
             MainClock::source() == MainSource::extclk);
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, "  (the scope's frequency readout: crystal within ppm, OSCHF within a few %)", crlf);
     }
 }
 
 // ---- 5: 32 kHz main clock ------------------------------------------------------------
 void t5_32k() {
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, "5 OSC32K as the main clock for 2 s (silent): ~32.768 kHz on PA7 (+-10 %)", crlf);
     } else {
         print(serial, "5 OSC32K as the main clock for 2 s (silent): ~32.768 kHz (+-10 %)", crlf);
@@ -308,7 +308,7 @@ void t5_32k() {
     Ticker::resume();
     back_to_boot();
     verdict("back from the 32 kHz main clock", MainClock::source() == MainSource::extclk);
-    if constexpr (board_xosc32k) {
+    if constexpr (board::xosc32k) {
         print(serial, "  XOSC32K: starting the crystal oscillator on PF0/PF1 (fitted here)...", crlf);
     } else {
         print(serial, "  XOSC32K: starting the crystal oscillator on PF0/PF1 (none fitted here)...", crlf);
@@ -320,7 +320,7 @@ void t5_32k() {
     bool st = false;
     while (Ticker::millis() - t0 < 1500) { if (Xosc32k::stable()) { st = true; break; } }
     Xosc32k::stop();
-    if constexpr (board_xosc32k) {
+    if constexpr (board::xosc32k) {
         print(serial, "  XOSC32K stable within 1.5 s: ", st ? "yes" : "no", crlf);
         verdict("XOSC32K result consistent with the board (fitted -> stable)", st);
     } else {
@@ -758,7 +758,7 @@ void run(TestFn fn) {
 }
 
 void help() {
-    if constexpr (board_xosc32k) {
+    if constexpr (board::xosc32k) {
         print(serial, "test_avr_clock: 1 OSCHF sweep | 2 prescalers | 3 tune | 4 external clock vs "
                       "OSCHF | 5 32 kHz main | 6 clock failure | 7 PLL+status | 8 auto-tune | "
                       "9 XOSC32K main | a all | s step mode", crlf);
@@ -784,11 +784,11 @@ int main() {
     const bool xtal = SysClock::init();
     Serial::init(clock, baud);
     Ticker::init();
-    if constexpr (board_clkout) MainClock::clkout(true);   // CLK_PER on PA7
+    if constexpr (board::clkout) MainClock::clkout(true);   // CLK_PER on PA7
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";
-    if constexpr (board_clkout) {
+    if constexpr (board::clkout) {
         print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
               ", boot clk=", xtal ? (has_xoschf ? "XTAL" : "EXTCLK") : "OSCHF",
               " 24 MHz, silicon rev ", hex(SYSCFG.REVID), ", CLKOUT on PA7)", crlf);
@@ -813,7 +813,7 @@ int main() {
         else if (c == 'a' || c == 'A') {
             uint8_t tp = 0, tf = 0;
             for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
-            if constexpr (board_xosc32k) {
+            if constexpr (board::xosc32k) {
                 run(t8_autotune); tp += passed; tf += failed;
                 run(t9_xosc32k_main); tp += passed; tf += failed;
             }
@@ -821,7 +821,7 @@ int main() {
         } else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if constexpr (board_xosc32k) {
+            if constexpr (board::xosc32k) {
                 if (c == '8') { run(t8_autotune); found = true; }
                 if (c == '9') { run(t9_xosc32k_main); found = true; }
             }
@@ -835,7 +835,7 @@ int main() {
 
 // ---- the EA letters (DS40002443A ch. 12) -------------------------------------------
 // CLK_PER runs on PA7 (CLKOUT) from boot where the board leaves PA7 free
-// (board_clkout), for an oscilloscope, as on the DA/DB; letter 6 B then
+// (board::clkout), for an oscilloscope, as on the DA/DB; letter 6 B then
 // sees the hardware clear it, and puts it back.
 //
 // THE RULER of every timed letter is "ruler B": the RTC counting the
@@ -1230,7 +1230,7 @@ void t6_cfd() {
     ClockFailure::clear();
     const uint16_t b_hits = cfd_hits;
     (void)SysClock::init();
-    if constexpr (board_clkout) MainClock::clkout(true);
+    if constexpr (board::clkout) MainClock::clkout(true);
     Serial::rebase(board_hz);
     print(serial, "  B: after the forced failure: MCLKCTRLA ", hex(a), " MCLKCTRLB ", hex(b),
           " -> CLK_PER = OSCHF / ", div, ": ", b_ppm, " ppm of that against the crystal; "
@@ -1242,10 +1242,10 @@ void t6_cfd() {
     verdict("B: CLK_PER is OSCHF at the fuse's rate over the prescaler read back (within 3 %)",
             within(b_ppm, 30'000));
     verdict("B: the interrupt ran", b_hits >= 1);
-    verdict(board_clkout ? "recovered: the crystal re-selected, CLKOUT on"
+    verdict(board::clkout ? "recovered: the crystal re-selected, CLKOUT on"
                          : "recovered: the crystal re-selected",
             MainClock::source() == MainSource::extclk &&
-                (!board_clkout || (CLKCTRL.MCLKCTRLA & CLKCTRL_CLKOUT_bm) != 0));
+                (!board::clkout || (CLKCTRL.MCLKCTRLA & CLKCTRL_CLKOUT_bm) != 0));
 }
 
 // ---- 7: the status bits, the request, the read-modify-write ------------------------
@@ -1383,14 +1383,14 @@ int main() {
     boot_xtal = SysClock::init();
     Serial::init(clock, baud);
     Ticker::init();
-    if constexpr (board_clkout) MainClock::clkout(true);   // CLK_PER on PA7
+    if constexpr (board::clkout) MainClock::clkout(true);   // CLK_PER on PA7
     sei();
     auto board = board_id();
     if (board.empty()) board = "?";
     print(serial, crlf, "test_avr_clock - CLKCTRL test suite (board ", board,
           ", boot clk=", boot_xtal ? "XTAL" : "OSCHF", " ", board_hz / 1'000'000u,
           " MHz, silicon rev ", hex(SYSCFG.REVID),
-          board_clkout ? ", CLKOUT on PA7)" : ", CLKOUT off: PA7 not free)", crlf);
+          board::clkout ? ", CLKOUT on PA7)" : ", CLKOUT off: PA7 not free)", crlf);
     help();
     print(serial, "> ");
     for (;;) {

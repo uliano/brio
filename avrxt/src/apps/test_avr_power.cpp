@@ -53,15 +53,15 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
 namespace {
 
 using namespace brio;
 
 using P = AvrPlatform;
-// The board's HF clock: its source and rate are the board table's.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+// The board's HF clock: its source and rate are the board file's.
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 using Serial = Uart<2, Route::alt1>;
@@ -344,7 +344,7 @@ uint32_t tick_leg(bool stop) {
     return best;
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 /// tick_leg()'s eight periods kept whole: the shortest and the longest,
 /// so the comparison of two legs can be held to their own spread.
 struct TickRange {
@@ -446,7 +446,7 @@ void tb_standby() {
 
     // What stopping and restarting cost, against the same span spun.
     console_drain();
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     // Each leg is the shortest of eight PIT periods, and a period is
     // OSC32K's: the two shortest differ by the wake's cost PLUS at most
     // the periods' own spread (the longest of the eight less the

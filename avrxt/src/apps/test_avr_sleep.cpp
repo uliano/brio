@@ -80,8 +80,8 @@
 // outputs, driven by the PIT through the event system), and letter q on
 // the pins the partner board's wires reach. The EA has no USART4 and no
 // USART reaches PE0, so the link is USART1 on ALT1: its TXD PC4 is
-// jumpered onto PE0 (and PC5..PC7 onto PE1..PE3, avr_board.hpp's
-// board_pc_pe_jumpers), the stimulus and the echo stay on PE2/PE3 and
+// jumpered onto PE0 (and PC5..PC7 onto PE1..PE3, board.hpp's
+// board::pc_pe_jumpers), the stimulus and the echo stay on PE2/PE3 and
 // their PC partners stay inputs. No ADC (its EA engine is not written),
 // no TCD and no op amp: letter o keeps its TCA and AC legs.
 //
@@ -110,14 +110,14 @@
 #include <stdint.h>
 
 #include "avrxt/ac.hpp"
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 #include "avrxt/adc.hpp"
 #endif
 #include "avrxt/ccl.hpp"
 #include "avrxt/clock.hpp"
 #include "avrxt/delay.hpp"
 #include "avrxt/evsys.hpp"
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 #include "avrxt/opamp.hpp"
 #endif
 #include "avrxt/pin.hpp"
@@ -127,7 +127,7 @@
 #include "avrxt/sleep.hpp"
 #include "avrxt/tca.hpp"
 #include "avrxt/tcb.hpp"
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 #include "avrxt/tcd.hpp"
 #endif
 #include "avrxt/twi.hpp"
@@ -138,9 +138,9 @@
 
 #include "sleep_link.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 /// The escape hatch of the two power-down tests. A mode that does not
@@ -189,7 +189,7 @@ using PadPin = Pin<'D', 2>;          ///< EVOUTD, and a fully asynchronous sense
 // of the two FULLY ASYNCHRONOUS positions of every port (port.md),
 // which is what lets an edge on it wake this device from power-down at
 // all; PE3 is this chip's echo back into the peer's hardware capture.
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA: no USART4, and no USART route reaches PE0 (DS40002443A
 // 17.3.3, 17.3.4): USART1's ALT1 TXD is PC4, jumpered onto PE0 on this board, so
 // the command wire is the same net through another pad. PE0 itself stays
@@ -271,7 +271,7 @@ void watch_init(bool standby) {
 // crystal - good enough to keep a byte, not good enough to trust a
 // whole test's output to.
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 /// CLK_PER from OSCHF at the rate its fuse chose (OSCCFG, 20 MHz on this
 /// board's chip: the EA has no FRQSEL), through the prescaler the boot's
 /// Clock left at /1, with the oscillator's own RUNSTDBY as asked.
@@ -403,21 +403,21 @@ SleepRun power_down_once(uint8_t stage, bool sync = true) {
     return r;
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- the AVR EA's self-driven pads (letter p) ------------------------------------
 // The pins a PIT divider can drive while the device is in POWER-DOWN,
 // with no wire: an EVOUT position, or a LUT's output on an asynchronous
 // path (FILTSEL = 0, EDGEDET = 0: table 13-3 note 3). Each pad senses its
 // own drive. On this board PA2/PA3 and PC2/PC3 are the I2C bus, PC6 is the
 // peer's stimulus net, PF2/PF3 the LED and the button, PF6 RESET, and
-// PD1/PD6/PD7 the analog net (avr_board.hpp's board_analog_net: VREFA's
+// PD1/PD6/PD7 the analog net (board.hpp's board::analog_net: VREFA's
 // 100 nF and the DAC's resistor) - none of them is driven here, so
 // EVOUTD's ALT1 (PD7) and LUT2's ALT1 (PD6) are not among the pads.
 using PinA6 = Pin<'A', 6>;           ///< LUT0's ALT1 output
 using PinA7 = Pin<'A', 7>;           ///< EVOUTA ALT1
 using PinC7 = Pin<'C', 7>;           ///< EVOUTC ALT1: the echo's net, PE3 its partner
 using PinD3 = Pin<'D', 3>;           ///< LUT2's output
-static_assert(board_analog_net, "letter p keeps PD6/PD7 (the analog net) undriven");
+static_assert(board::analog_net, "letter p keeps PD6/PD7 (the analog net) undriven");
 using PortaLut = Lut<0>;
 using PortdLut = Lut<2>;
 using ChPin = EventChannel<2>;       ///< the PIT divider into a LUT (letter p)
@@ -456,7 +456,7 @@ void quiesce() {
     console_drain();                  // it moves the main clock: no byte in flight
     Sleep::disarm();
     (void)Watchdog::off();
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
     Vreg::power(VregPower::normal);
     (void)Vreg::high_temp_low_leakage(false);
 #endif
@@ -465,7 +465,7 @@ void quiesce() {
     WakeLut::sense(LutSense::none);
     WakeLut::EventA::unlisten();
     ChCcl::off();
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
     Twi<1>::client_enable(false);
 #endif
     Twi<0>::client_enable(false);     // test m's address-match wake source
@@ -474,7 +474,7 @@ void quiesce() {
     ChPad::off();
     PadPin::configure({});
     PadPin::clear_flag();
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     quiesce_pins();
 #endif
 
@@ -486,7 +486,7 @@ void quiesce() {
     EchoPin::output();
     (void)Port<'E'>::take_flags();
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     Oschf::run_standby(true);         // as Clock::init() left it
 #endif
     (void)use_crystal(true);          // the board's boot configuration
@@ -509,7 +509,7 @@ void quiesce() {
     twis_stops = 0;
     twis_addr = twis_stops;
     twis_n = 0;
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     porta_irqs = 0;
     portc_irqs = 0;
 #endif
@@ -519,7 +519,7 @@ void quiesce() {
 // ---- a the register surface ----------------------------------------------------------
 // No sleeping here: what a program can ask SLPCTRL for, and the two
 // rules the driver enforces rather than merely documents.
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA's SLPCTRL is CTRLA alone (DS40002443A 13.4): the three modes
 // and the erratum's NOP (DS80001048D 2.2.3, the DB's 2.2.4 word for
 // word); there is no VREGCTRL, so no regulator verb exists to test - its
@@ -847,7 +847,7 @@ void td_chain() {
             by_tcb.wakers >= 1 && by_tcb.pits == 0);
     verdict("a TCB whose RUNSTDBY is clear cannot: the PIT had to end that sleep",
             by_pit.wakers == 0 && by_pit.pits == 1);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     print(serial, "  the TCB wake ended after ", by_tcb.ticks, " CLK_PER ticks (its 2 ms "
                   "period is ", waker_2ms, ")", crlf);
 #else
@@ -963,7 +963,7 @@ void tf_power_down() {
     quiesce();
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- g the wake-up in 32 kHz ticks (the AVR EA) -------------------------------------------------
 // The DB's letter g times VREGCTRL's profile on this ruler; the EA has no
 // profile to set, and the question it leaves is whether a wake pays a
@@ -1516,7 +1516,7 @@ void print_train(const char* what, const Train& t) {
 
 constexpr uint8_t train_shots = 8;
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- the clock configurations the deep modes are measured against (the AVR EA) ----
 //
 // Five of them. The EA has no regulator profile to set, so what the legs
@@ -1779,7 +1779,7 @@ void ti_idle_latency() {
             idle.woke == train_shots && idle.hits == train_shots);
     verdict("the awake baseline is a couple of microseconds: interrupt latency "
             "plus the ISR prologue", ba != slink::no_capture && ba < 240u);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     verdict("IDLE adds less than a microsecond to it (the six-cycle wake is "
             "300 ns at 20 MHz)",
             bi != slink::no_capture && ba != slink::no_capture && bi < ba + 24u);
@@ -1794,7 +1794,7 @@ void ti_idle_latency() {
     quiesce();
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- j STANDBY, timed from outside (the AVR EA) -----------------------------------
 // The five clock configurations of the EA (apply_leg_clock), in the
 // peer's 41.7 ns ticks. The two OSCHF restarts are the experiment: beside
@@ -2102,7 +2102,7 @@ void tk_power_down_latency() {
 //
 //   DID THE FRAME SURVIVE? Only if the clock is back before the middle
 //   of the start bit, where the receiver takes its samples: half a bit.
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA's four: no regulator profile, so OSCHF restarts either
 // beside the running crystal or with every other oscillator stopped (the
 // two restarts letter j separates).
@@ -2119,7 +2119,7 @@ struct SfdLeg {
     const char* what;
 };
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 bool apply_sfd_clock(SfdClock c) {
     switch (c) {
         case SfdClock::xtal_kept: return use_crystal(true);
@@ -2203,7 +2203,7 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     delay_us(clock, (30u * 1'000'000u) / leg.baud + 300u);
     const bool have = LinkUart::rxc_flag();
     const UsartFrame f = have ? LinkUart::receive() : UsartFrame{};
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     Oschf::run_standby(true);
 #else
     Vreg::power(VregPower::normal);
@@ -2219,7 +2219,7 @@ bool sfd_once(const SfdLeg& leg, bool& woke, bool& intact, bool& arrived,
     return moved && back;
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA's legs, at the console's rate (460800) and the link's
 // (115200), against the restart times letter j measures: a kept clock
 // back 0.5 us after the edge (j's kept leg less i's awake baseline, 52 -
@@ -2469,7 +2469,7 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
     // until the match and then STAYS AWAKE while the vector serves the
     // frame to its closing STOP.
     if (sleeping) {
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
         // The AVR EA: no wake but the address match (run_leg()'s reason -
         // a PIT wake just before would time a warm crystal), the watchdog
         // the escape hatch in both modes.
@@ -2497,7 +2497,7 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
         }
         for (uint32_t i = 0; i < 2'000'000u && twis_stops == s0; ++i) {
         }
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
         (void)Watchdog::off();
         token.magic = 0;
         token.stage = 0;
@@ -2515,7 +2515,7 @@ bool twi_tenure(SleepMode m, bool sleeping, uint8_t first, slink::Report& r) {
     return peer_report(r, 60);
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA: the same three tenures. No HTLLEN to refuse; the client
 // stretches SCL "during the wake-up period until the main clock is
 // available" (DS40002443A 27.3.5), so the power-down tenure carries the
@@ -2791,7 +2791,7 @@ void tn_ccl_wake() {
 //    source does.
 using TcaU = Tca<0>;
 using AcU = Ac<0>;
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 using AdcU = Adc<0>;
 #ifdef OPAMP
 using OpU = Opamp<0>;
@@ -2834,7 +2834,7 @@ SleepRun ac_leg(bool run_standby) {
     return r;
 }
 
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 struct AdcLeg {
     uint16_t awake;      ///< a software-started conversion before the sleep
     SleepRun run;
@@ -2914,7 +2914,7 @@ SleepRun tcd_leg(SleepMode m, TcdClock src) {
 }
 #endif
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // The AVR EA: TCA0 and AC0 as on the DA/DB. It has no op amp and no TCD;
 // its ADC is another engine (adc.hpp's second half) whose standby leg
 // is not written here yet (docs/avrxt/adc.md) - those legs are the DA/DB's.
@@ -3082,7 +3082,7 @@ void to_runstdby() {
 }
 #endif
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 // ---- p every self-driven pin wakes from power-down on ONE edge (the AVR EA) -----------------
 // DS40002443A 18.3.3.1: every pin of the EA senses fully asynchronously,
 // so one edge of ANY pin wakes it from power-down - on the DA/DB only Px2
@@ -3318,13 +3318,13 @@ void register_tests() {
     bench.letter('d', "the RUNSTDBY chain", td_chain);
     bench.letter('e', "a pin wakes from the deep modes", te_pin_wake);
     bench.letter('f', "power-down stops the rest", tf_power_down);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     bench.letter('g', "the wake-up in 32 kHz ticks", tg_wake_ticks);
 #else
     bench.letter('g', "the voltage regulator", tg_vreg);
 #endif
     bench.letter('n', "the CCL as a wake-up source", tn_ccl_wake);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     bench.letter('o', "RUNSTDBY of TCA and AC", to_runstdby);
     bench.letter('p', "every self-driven pin wakes from power-down on one edge", tp_pin_wake);
 #else
@@ -3336,7 +3336,7 @@ void register_tests() {
     bench.second_letter('k', "power-down timed from outside", tk_power_down_latency);
     bench.second_letter('l', "start-of-frame", tl_sfd);
     bench.second_letter('m', "a TWI address match", tm_twi_wake);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     bench.second_letter('q', "the peer's edges on PE0, PC4, PC6", tq_peer_pins);
 #endif
 }
@@ -3377,7 +3377,7 @@ ISR(PORTE_PORT_vect) {
     wake_irqs = wake_irqs + 1;
 }
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 /// The AVR EA's link is USART1 (ALT1, PC4): its RXC vector carries RXSIF
 /// (DS40002443A 25.3.4.2), and the body is the DA/DB's below.
 ISR(USART1_RXC_vect) {
@@ -3447,7 +3447,7 @@ ISR(AC0_AC_vect) {
     (void)AcU::cmp();
     unit_irqs = unit_irqs + 1;
 }
-#if !defined(BRIO_BOARD_ea48)
+#if !defined(__AVR_AVR64EA48__)
 ISR(ADC0_RESRDY_vect) {
     adc_last = AdcU::resrdy();
     unit_irqs = unit_irqs + 1;
@@ -3489,7 +3489,7 @@ int main() {
 
     auto board = board_id();
     if (board.empty()) board = "?";
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     print(serial, crlf, "test_avr_sleep - sleep test suite (board ", board,
           ", clk=", xtal ? "XTAL" : "OSCHF", " ", crystal_hz / 1'000'000u,
           " MHz, silicon rev ", hex(SYSCFG.REVID), ", RSTFR=", hex(why.raw), ")", crlf);

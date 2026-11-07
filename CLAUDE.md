@@ -63,8 +63,11 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   by its PART and never by an ordinal, and no desk letter (the
   manifest's positions) appears outside private/.
 - `docs/boards/`, `docs/probes/` - one page per board brio is tested on
-  and one per probe (the flash mechanisms and their traps); `brio apps`
-  lists the apps from their own headers. THE DESK - which board is
+  and one per probe (the flash mechanisms and their traps); beside the
+  pages, the BOARD FILES `boards/<type>/board.hpp` at the root state the
+  same assemblies' facts to the compiler (namespace `board`, chosen by
+  the build, never by the app; docs/boards/README.md, "The board file");
+  `brio apps` lists the apps from their own headers. THE DESK - which board is
   plugged in where, the incidents, the end state - is `private/`, a
   git-ignored nested repository: `private/bench_boards.py` (the real
   manifest, loaded before the public example), `private/bench.md` (the
@@ -386,9 +389,10 @@ horizon itself, one entry each.
   private archive.
 - **The first portable example application** (an ILI9481 display over
   SPI, or an MCP47CVB22/MCP3550 DAC-ADC loop): application logic
-  target-free over util and tasks, one thin board file per target. It
-  births the board-file shape and chapter one of a learning track, and
-  closes the open point on TRANSFER GRANULARITY (the frame, the access
+  target-free over util and tasks, one thin board file per target. The
+  board files exist (`boards/<type>/board.hpp`) and the example grows
+  them. It births chapter one of a learning track, and closes the open
+  point on TRANSFER GRANULARITY (the frame, the access
   and the machine word are three widths; "the element type is the
   beat" is the engines' rule the SPI Request does not yet spell),
   measured on a block of 16-bit pixels.
@@ -685,6 +689,7 @@ part, the AVR64EA48) and
 | path | what it holds |
 |---|---|
 | `brio/` | the framework, one directory per stratum (the roster above); the headers' comments are the reference, `docs/<stratum>/README.md` the map. `brio/.clangd` routes each stratum to its own compile database; a fragment in each stratum and each project beside it |
+| `boards/` | the board files, one directory per board type that has a board (`boards/<type>/board.hpp`): the assembly's facts - LEDs, crystals, the console's route, jumpers, nets - as constants in namespace `board`, with `board::type` and a `static_assert` that the build's part is the one fitted; above the target strata, beside the apps, never included from `brio/`; a project adds the configured type's directory to every app's include path when it exists (avrxt and ch32v00x today); a `.clangd` in each directory routes the file to its preset's compile database |
 | `avrxt/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages, the AVR128DA48 and the AVR64EA48; the GROUP axis on the AVR64EA48, every image there held after its link to the SPLIT TIER, the ATmega4809's 48 KB and 6 KB (`cmake/avr-tier-guard.cmake`) |
 | `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part; the GROUP axis on the G031K8 (and per board type) and the SAM's one part |
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |

@@ -486,7 +486,7 @@ CLK_PER, 5 V; `z` 256 verdicts, letters `f` and `j` twelve runs each):
 - Every formula, discipline, capture and input-mode figure repeats the
   DB's to the tick. Its errata under their DA numbers: **2.13.2** not
   taken - ALT2's PF0/PF1 carry this board's 32.768 kHz crystal, which
-  letter `a` never drives (`board_xosc32k`); **2.13.1 NOT reproduced**
+  letter `a` never drives (`board::xosc32k`); **2.13.1 NOT reproduced**
   either (16/16 captures and 8/8 blocked on-times at CNTPRES 4 and 32,
   down to a back-to-back set/clear); **2.13.3 NOT provoked** (mode 7
   with CMPASET = 0 halts, holds and restarts like CMPASET = 300). The

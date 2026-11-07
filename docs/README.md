@@ -86,7 +86,7 @@ documents), and the strata that sit between `util/` and the families:
 | the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO, the host engine, the client |
 | the off-chip devices (`brio/devices/`) | [devices/README.md](devices/README.md) - what sits off the chip over a link the chip provides: the DCS vocabulary, a traits type per display controller, a driver judged against a simulator and against the bench |
 | host (`brio/host/`) | [host/README.md](host/README.md) - the native test target: HostPlatform, the doctest suites, what a simulation is allowed; and [host/simulator.md](host/simulator.md), the contract between a host program and a viewer watching it |
-| the boards | [boards/README.md](boards/README.md) - how a board joins the bench, then one page per board brio is tested on |
+| the boards | [boards/README.md](boards/README.md) - how a board joins the bench, the board file that states an assembly's facts to the compiler, then one page per board brio is tested on |
 | the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |
 
 ## Rules of this directory

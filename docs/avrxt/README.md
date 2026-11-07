@@ -160,15 +160,17 @@ maintained example.
   Setting it is correct under every geometry, because the BOOT section
   always starts at 0; the details, and the run-time check that pairs
   with it, are in [nvm.md](nvm.md).
-- **The board type reaches every app.** `avr_add_app()` defines
-  `BRIO_BOARD_<type>` (the configure's board type, `AVR_BOARD`), and
-  `src/apps/avr_board.hpp`, the board file's first draft, maps it to
-  what the suites read of the assembly: `BoardClock` (the HF source, its
+- **The board file reaches every app.** `avr_add_app()` puts
+  `boards/<type>` (the configure's board type, `AVR_BOARD`) on every
+  app's include path, and the app's `#include "board.hpp"` reads what
+  the suites need of the assembly: `board::Clock` (the HF source, its
   rate and the OSCHF rate behind it), the 32 kHz crystal, what hangs on
   PA7 (CLKOUT allowed or not), whether a crystal pin may be driven,
-  jumpered pin pairs, the console's USART and route. A board type the
-  table does not know is a compile error; the packages with no board
-  (db28, db32) have no row, their one app reading no board fact.
+  jumpered pin pairs, the analog net, the console's USART and route
+  ([../boards/README.md](../boards/README.md), "The board file"). Each
+  board file checks the part the build names against the one fitted
+  (`brio::avr_die` and `brio::package_pins`). The packages with no board
+  (db28, db32) have no directory, their one app reading no board fact.
 - **FLMAPLOCK is set in every image, by default.** gcc 16 places
   `.rodata` in a 32 KB flash section reached through the data-space
   window and emits a write of `NVMCTRL.CTRLB.FLMAP` in `.init`; the
@@ -341,7 +343,7 @@ the init checks with one read of the fuse ([clkctrl.md](clkctrl.md));
 CLK_MAIN tops at 20 MHz (from 4.5 V), and the clock owns
 CLKCTRL.MCLKTIMEBASE (cycles per microsecond, rounded up), rewritten at
 every rate change. The EA board carries a 20 MHz quartz on PA0/PA1, and
-its `BoardClock` is
+its `board::Clock` is
 `Clock<ClockSource::crystal, 20'000'000, ClockDiv::div1, 20'000'000>`.
 Vectors are bound by name in the apps and
 the EA lacks several the DA/DB have (`USART3..5_*`, `TCD0_*`, `ZCD*`,
@@ -386,9 +388,9 @@ monostate, wired by the app as:
     ...
     brio::Ticker::init();   // after clock init, before sei()
 
-ISR vector bindings always live in the app (or a future board file),
-never in portable code: drivers expose `[[gnu::always_inline]]` handler
-bodies (`rxc()`, `dre()`, `pit()`), and the app binds the vector.
+ISR vector bindings always live in the app, never in portable code:
+drivers expose `[[gnu::always_inline]]` handler bodies (`rxc()`,
+`dre()`, `pit()`), and the app binds the vector.
 
 ## Upload (Atmel-ICE, UPDI)
 

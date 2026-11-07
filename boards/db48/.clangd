@@ -1,0 +1,6 @@
+# clangd config for this board file: it parses with the avrxt project's
+# command line for the board type's own preset (the database that
+# configure emits), so the target headers it includes resolve as in the
+# build.
+CompileFlags:
+  CompilationDatabase: ../../build-cmake/avr128db48-release

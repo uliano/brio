@@ -123,7 +123,7 @@ void ta_block() {
         // The output: PA5 where the package bonds it - configure() refuses a
         // pad the package has not got - and the internal route where it does
         // not (the CH32V006's 20-pin package, whose PD4 on the WeAct board
-        // is no free pad: ch32_board.hpp).
+        // is no free pad: board.hpp).
         constexpr OpaOutput out =
             pad_can_drive(opa_output_pad(OpaOutput::pa5)) ? OpaOutput::pa5 : OpaOutput::internal;
         const bool took = Opa::configure({.positive = OpaPositive::pd3, .negative = OpaNegative::gain16,

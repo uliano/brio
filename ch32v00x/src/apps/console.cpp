@@ -52,7 +52,7 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 
@@ -69,7 +69,7 @@ constexpr Serial serial;           // tag for print(serial, ...)
 
 constexpr uint32_t console_baud = 115200;
 
-using Led = ch32board::Led;        // the board's LED (ch32_board.hpp)
+using Led = board::Led;        // the board's LED (board.hpp)
 
 // ---- events -----------------------------------------------------------------
 struct Beat {};                                    // Console's own heartbeat
@@ -81,8 +81,8 @@ struct Lamp : brio::Fsm<Lamp, SetLed> {
 
     static void init() {
         // Dark first: a jumpered LED hangs from 3.3 V, WeAct's hangs from
-        // its pad to ground (ch32_board.hpp).
-        Led::output(!ch32board::led_active_high);
+        // its pad to ground (board.hpp).
+        Led::output(!board::led_active_high);
         start(&steady);
     }
 

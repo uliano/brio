@@ -200,6 +200,17 @@ comes from the include rule, and several libraries would add ceremony
 without enforcement. A pure type produced by a target and consumed by
 `util/` lives in `util/` (`util/timestamp.hpp` is one).
 
+Above the target strata, beside the applications, sits one directory
+that is not a stratum: `boards/` at the repository's root, one header
+per board type, `boards/<type>/board.hpp`. A board file states the
+facts of an assembly - what is fitted on the PCB around the chip: the
+LED, the crystals, the console's route, the jumpers - as constants in
+namespace `board`; the build puts the configured type's directory on
+the include path, and an application includes `board.hpp`. A board
+file may include its target's stratum, and nothing under `brio/` ever
+includes one: a chip's facts stay in its stratum, a board's in its file
+([../boards/README.md](../boards/README.md), "The board file").
+
 A stratum is named for exactly the family it has been proven on, and
 widens only when a real chip proves it shares the stratum. One name
 per architecture holds on three axes: `brio/<arch>/` for the code,

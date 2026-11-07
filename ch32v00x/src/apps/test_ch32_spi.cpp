@@ -26,7 +26,7 @@
 // PC3, a pad with no wire, so the peer's dark listener is never selected
 // by them and what goes out on SCK and MOSI reaches a deselected client.
 // Letter i's D/C line is a second pad with no wire: PC4 on the module,
-// PD0 on the WeAct board, whose PC4 carries the LED (ch32_board.hpp).
+// PD0 on the WeAct board, whose PC4 carries the LED (board.hpp).
 // The peer FAILS loudly when it does not answer. That peer answers its
 // windows in spi_link's mode 0 (its client answers in every mode MSb
 // first) and serves the EXTENDED EXCHANGE - 16-bit frames, the CRC with
@@ -161,7 +161,7 @@
 
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
@@ -194,7 +194,7 @@ using CsPin = Pin<ch32pair::spi_pins.nss.port, ch32pair::spi_pins.nss.pin>;
 using LoneCs = Pin<'C', 3>;
 /// The D/C line of letter i's command rule: a pad with no wire either -
 /// PD0 where PC4 carries the board's LED (the header).
-using DcPin = std::conditional_t<ch32board::weact, Pin<'D', 0>, Pin<'C', 4>>;
+using DcPin = std::conditional_t<board::pc4_free, Pin<'C', 4>, Pin<'D', 0>>;
 
 static_assert(ch32pair::spi_pins.sck == Pad{'C', 5} && ch32pair::spi_pins.mosi == Pad{'C', 6} &&
                   ch32pair::spi_pins.miso == Pad{'C', 7},
@@ -3942,7 +3942,7 @@ void banner() {
     print(serial, crlf, "test_ch32_spi - ", device::part_name, " SPI (RM ch. 16) against the CH32X035's spi_peer",
           crlf);
     print(serial,
-          ch32board::weact ? "  PC5 SCK, PC6 MOSI, PC7 MISO, PC0 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
+          board::is("v006f8") ? "  PC5 SCK, PC6 MOSI, PC7 MISO, PC0 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
                              "single-board letters' select (no wire)"
                            : "  PC5 SCK, PC6 MOSI, PC7 MISO, PC1 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
                              "single-board letters' select (no wire)",

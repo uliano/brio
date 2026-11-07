@@ -67,7 +67,7 @@
 // a route table of another shape - 17.3.3/17.3.4). No USART reaches PORTE
 // there, so THE LINK - every loop-back letter and the two-board half - is
 // USART1 on ALT1: TXD PC4, RXD PC5, XCK PC6, XDIR PC7, which the AVR64EA48
-// board jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers), the
+// board jumpers onto PE0..PE3 (board.hpp's board::pc_pe_jumpers), the
 // same four nets to the peer; the PE pads stay inputs, one driver a net.
 // The instance smoke is USART0 ALT1 and USART1 DEFAULT (there is no
 // USART3), letter a reads every USART0/USART1 route back in USARTROUTEA,
@@ -103,9 +103,9 @@
 
 #include "usart_link.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -131,10 +131,10 @@ using U3 = Usart<3>;
 /// On the AVR DA/DB it is USART4 at its default route (TXD PE0, RXD PE1,
 /// XCK PE2, XDIR PE3). The AVR EA has no USART on PORTE: there it is
 /// USART1 on ALT1 (TXD PC4, RXD PC5, XCK PC6, XDIR PC7), which this board
-/// jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers) - the same
+/// jumpers onto PE0..PE3 (board.hpp's board::pc_pe_jumpers) - the same
 /// four nets, each with one driver: the PE pads stay inputs throughout.
 constexpr bool link_on_porte = usart_count >= 5;
-static_assert(link_on_porte || board_pc_pe_jumpers,
+static_assert(link_on_porte || board::pc_pe_jumpers,
               "the link reaches the board-to-board wires through the PC4..PC7 jumpers");
 constexpr uint8_t link_n = link_on_porte ? 4 : 1;
 constexpr UsartRoute link_route = link_on_porte ? UsartRoute::def : UsartRoute::alt1;

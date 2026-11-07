@@ -73,6 +73,10 @@ endif()
 if(NOT CH32V00X_PACKAGE_DEFINE MATCHES "^CH32V00[36][A-Z][0-9]$")
     message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part number must carry its package letter and memory code (ch32v006f8)")
 endif()
+# The board type: the part number without "ch32" (v006k8), which names
+# the ASSEMBLY the build is for, and its board file's directory.
+string(SUBSTRING "${CH32V00X_MCU}" 4 6 CH32V00X_BOARD)          # v006k8
+set(CH32V00X_BOARD_DIR "${CMAKE_SOURCE_DIR}/../boards/${CH32V00X_BOARD}")
 if(CH32V00X_PART_DEFINE STREQUAL "CH32V003")
     set(_ch32_arch_default "rv32ec_xw")
 else()
@@ -150,6 +154,7 @@ file(GLOB_RECURSE _nvheap_id_sources CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_SOURCE_DIR}/src/*.c"   "${CMAKE_SOURCE_DIR}/src/*.h"
     "${CMAKE_SOURCE_DIR}/src/*.S"
+    "${CMAKE_SOURCE_DIR}/../boards/*.hpp"
 )
 foreach(_f IN LISTS _nvheap_id_sources)
     file(TIMESTAMP "${_f}" _ts "%s")
@@ -172,6 +177,14 @@ function(ch32_add_app name)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/../brio
     )
+    # The board file of the board type this configure builds for,
+    # ../boards/<type>/board.hpp, on the include path when the type has
+    # one: an app writes #include "board.hpp" and reads the facts of that
+    # assembly (the LED, the crystal, the pads the board's circuits load) -
+    # facts of the PCB and what is fitted on it, which the part cannot know.
+    if(EXISTS ${CH32V00X_BOARD_DIR})
+        target_include_directories(${name} PRIVATE ${CH32V00X_BOARD_DIR})
+    endif()
 
     target_compile_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
@@ -250,7 +263,6 @@ endfunction()
 #     split boards and each app's groups, plain and per board type, so
 #     bin/brio can resolve "<app>-<n>" and refuse the bare name where it
 #     is not an image.
-string(SUBSTRING "${CH32V00X_MCU}" 4 6 CH32V00X_BOARD)          # v006k8
 set(CH32V00X_SPLIT_BOARDS v003f4)
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS

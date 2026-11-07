@@ -35,7 +35,7 @@
 //    with the reason when the jumper is missing.
 //    NOT ON THE WEACT BOARD: its PD4 hangs from PD5, the console's
 //    transmit pad, through the board's 1.5 kOhm USB resistor
-//    (ch32_board.hpp), so the probe and the ruler's letters - b, c, e,
+//    (board.hpp), so the probe and the ruler's letters - b, c, e,
 //    g, r, t - are not registered there, and they have nowhere to move:
 //    on the CH32V006's 20-pin package TIM2's channel 1 lands only on PD4,
 //    PD3 (a USB stub and a pair wire) and the pair's PC0, PC1, PC5, and
@@ -143,7 +143,7 @@
 // SKIPPED with the reason. The far chip's only clock is an RC, so letter 1
 // calibrates it against this module's 24 MHz crystal, and every letter
 // calibrates it again first (its HSI wanders by a few hundred ppm in a
-// second). A board with no crystal (ch32_board.hpp) is the reference all
+// second). A board with no crystal (board.hpp) is the reference all
 // the same, on its HSI's PLL: the peer adopts that clock, and a verdict
 // whose bound is a figure against a crystal is printed and not judged
 // there:
@@ -202,7 +202,7 @@
 #include "../../../avrxt/src/apps/usart_link.hpp"
 #include "held_request.hpp"
 
-#include "ch32_board.hpp"
+#include "board.hpp"
 #include "ch32_pair.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
@@ -2856,7 +2856,7 @@ const char* num(uint32_t v) {
 /// The start of every letter: the peer found, and calibrated again against
 /// this crystal (the HSI wanders; usart_peer.cpp's TIME).
 bool ready() {
-    if (!crystal_ok && ch32board::has_crystal) {
+    if (!crystal_ok && board::has_crystal) {
         print(serial, "  this module's crystal did not start: the two-board key needs it as the reference", crlf);
         bench.verdict("HCLK on the 24 MHz crystal", false);
         return false;
@@ -2882,14 +2882,14 @@ bool ready() {
 // 1 - the rendezvous, and the calibration
 // ---------------------------------------------------------------------------
 void t1_link() {
-    if constexpr (ch32board::has_crystal) {
+    if constexpr (board::has_crystal) {
         bench.verdict("HCLK runs on the module's 24 MHz crystal (the reference of this key)", crystal_ok);
     } else {
         print(serial, "  this board has no crystal: the reference of this key is its HSI's PLL, and a figure "
                       "against a crystal is printed, not judged", crlf);
     }
     const bool found = ensure_link();
-    bench.verdict(ch32board::weact ? "command mode on USART2's column 3 (8N1, 115200) and the peer answers a ping"
+    bench.verdict(board::is("v006f8") ? "command mode on USART2's column 3 (8N1, 115200) and the peer answers a ping"
                                    : "command mode on USART2's column 4 (8N1, 115200) and the peer answers a ping",
                   found);
     if (!found) {
@@ -2964,7 +2964,7 @@ void t1_link() {
     print_ppm(-first);
     print(serial, " (the peer's console 'c' names the trim)", crlf);
     bench.verdict("the peer timed a gapless run of 4000 frames at 1 Mbaud", first_ok);
-    if constexpr (ch32board::has_crystal) {
+    if constexpr (board::has_crystal) {
         bench.verdict("its HSI, as found, lies inside table 3-9's -1.7 % to +1.6 % (0 to 70 C)",
                       first_ok && -first >= -17'000 && -first <= 16'000);
     } else {
@@ -2983,7 +2983,7 @@ void t1_link() {
     }
     print(serial, "  after the adoption, run to run: ", after_ppm[0], ", ", after_ppm[1], ", ", after_ppm[2],
           " ppm (the HSI's wander)", crlf);
-    if constexpr (ch32board::has_crystal) {
+    if constexpr (board::has_crystal) {
         bench.verdict("each run after the adoption reads this crystal within 1000 ppm of the adopted clock", all &&
                       near(after_ppm[0], 0, 1000) && near(after_ppm[1], 0, 1000) && near(after_ppm[2], 0, 1000));
     } else {
@@ -3063,9 +3063,9 @@ void t2_rates() {
         print(serial, "  ", rate, ": BRR ", usart_divisor(SysClock::pclk_hz, rate), ", the far chip times ");
         print_ppm(k.ppm - r0.ppm);
         print(serial, " against the divisor's ", expect, " ppm", crlf);
-        constexpr int32_t span_bound_ppm = ch32board::has_crystal ? 500 : 1000;
+        constexpr int32_t span_bound_ppm = board::has_crystal ? 500 : 1000;
         judge(num(rate),
-              ch32board::has_crystal ? " baud: the rate on the wire is HCLK / BRR within 500 ppm, timed by the far chip"
+              board::has_crystal ? " baud: the rate on the wire is HCLK / BRR within 500 ppm, timed by the far chip"
                                      : " baud: the rate on the wire is HCLK / BRR within 1000 ppm (two HSIs), timed "
                                        "by the far chip",
               r0.ok && k.ok && near(k.ppm - r0.ppm, expect, span_bound_ppm));
@@ -3156,9 +3156,9 @@ void t3_frames() {
         // The same two runs back to back as the ladder's: 1000 ppm where
         // this end's clock is an HSI too (the ladder's comment); half a bit
         // of a 19-half-bit frame is 2.6 %, far above either bound.
-        constexpr int32_t stop_bound_ppm = ch32board::has_crystal ? 500 : 1000;
+        constexpr int32_t stop_bound_ppm = board::has_crystal ? 500 : 1000;
         judge(stop == link::stop_half ? "half a stop bit" : "one and a half stop bits",
-              ch32board::has_crystal ? ": the frame on the wire is that long, within 500 ppm of an 8N1 run's"
+              board::has_crystal ? ": the frame on the wire is that long, within 500 ppm of an 8N1 run's"
                                      : ": the frame on the wire is that long, within 1000 ppm of an 8N1 run's (two HSIs)",
               r0.ok && k.ok && near(k.ppm - r0.ppm, 0, stop_bound_ppm));
     }
@@ -3611,12 +3611,12 @@ void t7_half_duplex() {
         (void)U2::half_duplex(false);
         link::Report r{};
         (void)peer_report(r, 0);
-        print(serial, ch32board::weact ? "  HDSEL on PD2 at " : "  HDSEL on PB0 at ", rate, ": ", d.frames, " frames, last ", hex(d.last), ", fe ", d.fe,
+        print(serial, board::is("v006f8") ? "  HDSEL on PD2 at " : "  HDSEL on PB0 at ", rate, ": ", d.frames, " frames, last ", hex(d.last), ", fe ", d.fe,
               "; the peer drove ", r.count, crlf);
         heard_all = heard_all && up && d.frames == 4u && d.fe == 0u && d.last == 0x5Au;
         (void)link_command_mode();
     }
-    judge(ch32board::weact ? "HDSEL on PD2 hears the four frames a second chip drives onto that wire, at 9600 and 115200"
+    judge(board::is("v006f8") ? "HDSEL on PD2 hears the four frames a second chip drives onto that wire, at 9600 and 115200"
                            : "HDSEL on PB0 hears the four frames a second chip drives onto that wire, at 9600 and 115200",
           heard_all);
 
@@ -3913,7 +3913,7 @@ void banner() {
     print(serial, crlf, "test_ch32_serial - ", device::part_name, " USART (RM ch. 14)", crlf);
 #if BRIO_CH32_HAS_USART2
     print(serial,
-          ch32board::pd4_free ? "  USART2 on column 3 as the instrument; the jumper for b, c, e and g: PD2 (USART2_TX) <-> PD4 "
+          board::pd4_free ? "  USART2 on column 3 as the instrument; the jumper for b, c, e and g: PD2 (USART2_TX) <-> PD4 "
                                 "(TIM2_CH1): "
                               : "  USART2 on column 3 as the instrument; no jumper on this board (PD4 is no free pad), "
                                 "the ruler's letters not registered: ",
@@ -3983,7 +3983,7 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
 #endif   // BRIO_CH32_HAS_USART2
 
 int main() {
-    if constexpr (two_board_image && ch32board::has_crystal) {
+    if constexpr (two_board_image && board::has_crystal) {
         crystal_ok = SysClock::init();
     }
     const bool clock_ok = crystal_ok || HsiClock::init();
@@ -3991,7 +3991,7 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 #if BRIO_CH32_HAS_USART2
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         jumper_present = probe_jumper();
     }
 
@@ -3999,16 +3999,16 @@ int main() {
     // THE RULER'S LETTERS (b, c, e, g, r, t) are not registered where PD4
     // is no free pad (the header): they read the ruler on PD4 or drive its
     // pull.
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('b', "every frame format both ways, and the single wire as a bus", tb_formats);
         bench.letter('c', "the baud generator: a start bit to the cycle at eight rates, the floor", tc_baud);
     }
     bench.letter('d', "the bit-banged line: clean, parity, framing, noise, the tolerance", td_banged);
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('e', "LIN: the break timed on the jumper, detected at ten and eleven bits", te_lin);
     }
     bench.letter('f', "mute mode: the idle-line wake and the address mark", tf_mute);
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('g', "IrDA: the pulse on the jumper, normal and low power; the decoder", tg_irda);
     }
     if constexpr (flow_pads) {
@@ -4017,11 +4017,11 @@ int main() {
     bench.letter('i', "the DMA engines on USART2's channels 6 and 7: fed, then timed", ti_dma);
     bench.letter('j', "the flags and the vector: TXE, TC, RXNE, IDLE, PE, one interrupt each", tj_flags);
     bench.letter('q', "errors under the receive engine: breaks in a stream, nothing stolen", tq_errors);
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('r', "tx_idle() against the last stop bit on the jumper", tr_tx_idle);
     }
     bench.letter('s', "the burst edge from the vector, nothing polled", ts_edge);
-    if constexpr (ch32board::pd4_free) {
+    if constexpr (board::pd4_free) {
         bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
     }
     bench.letter('u', "an overrun at a burst's tail under the receive engine: no storm", tu_overrun_tail);
@@ -4042,7 +4042,7 @@ int main() {
     bench.second_letter('6', "the receive engine on channel 7 under the peer's blast; a run of errored frames",
                         two::t6_engine);
     bench.second_letter('7',
-                        ch32board::weact ? "half duplex on PD2: drive_rxd heard, the wired AND"
+                        board::is("v006f8") ? "half duplex on PD2: drive_rxd heard, the wired AND"
                                          : "half duplex on PB0: drive_rxd heard, the wired AND",
                         two::t7_half_duplex);
     bench.second_letter('8', "mute by address and by idle line, IrDA between two WCH codecs", two::t8_modes);

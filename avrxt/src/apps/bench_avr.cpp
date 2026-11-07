@@ -337,10 +337,10 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-// The board's HF clock: its source and rate are the board table's.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+// The board's HF clock: its source and rate are the board file's.
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -661,10 +661,10 @@ namespace de {
 using SpiHw = SpiHost<0, SpiRoute::alt1>;   // PE0 MOSI, PE1 MISO, PE2 SCK
 // The select and the D/C, two real pads: PA2/PA3 where they are free;
 // on the AVR EA board (PC4..PC7 jumpered to the partner's wires,
-// avr_board.hpp's board_pc_pe_jumpers) PA2/PA3 are the I2C bus the
+// board.hpp's board::pc_pe_jumpers) PA2/PA3 are the I2C bus the
 // partner board shares, so PD2/PD3 there.
-using Cs = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 2>, Pin<'A', 2>>;
-using Dc = std::conditional_t<board_pc_pe_jumpers, Pin<'D', 3>, Pin<'A', 3>>;
+using Cs = std::conditional_t<board::pc_pe_jumpers, Pin<'D', 2>, Pin<'A', 2>>;
+using Dc = std::conditional_t<board::pc_pe_jumpers, Pin<'D', 3>, Pin<'A', 3>>;
 using S0 = SpiHw::Resource;
 /// The refusal's witness: the SPI's SCK event counted by TCB0.
 using ChSck = EventChannel<0>;

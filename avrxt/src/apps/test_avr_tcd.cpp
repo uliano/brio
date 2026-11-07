@@ -28,7 +28,7 @@
 // the AVR128DA48 board that clock is also CLK_PER - so letter f measures
 // the PLL from it against its own source, exactly. Letter j reads WOC and
 // WOD on the DEFAULT route's PA6/PA7 where the board leaves PA7 free
-// (avr_board.hpp's board_pa7_free); a board that loads PA7 reads them
+// (board.hpp's board::pa7_free); a board that loads PA7 reads them
 // on the ALT2 route instead (PF2/PF3 - on the REV 1.2 PCB the LED, lit
 // for the measurement, and the button's pin, which must not be pressed
 // meanwhile).
@@ -37,7 +37,7 @@
 // USART2 ALT1 (PF4/PF5) at 460800 - PF4/PF5 are never claimed here, and
 // test a claims PF0..PF3 (the ALT2 route) only for as long as the
 // alternate-route erratum measurement takes - and only on a board whose
-// PF0/PF1 carry no 32 kHz crystal (avr_board.hpp's board_xosc32k).
+// PF0/PF1 carry no 32 kHz crystal (board.hpp's board::xosc32k).
 //
 // Commands: ? for the menu, z runs a..l.
 
@@ -57,9 +57,9 @@
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -91,8 +91,8 @@ using ChInB = EventChannel<3>;     ///< PD4 -> TCD input B
 using ChTcd = EventChannel<4>;     ///< a TCD event generator, or a PORTF pin
 using ChF = EventChannel<5>;       ///< a second PORTF pin (test j where PA7 is not free)
 
-// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
-// the board table's (avr_board.hpp).
+// The board's facts (board::clkout, board::xosc32k, board::pa7_free) are
+// the board file's (board.hpp).
 
 // The instruments.
 using CycleTcb = Tcb<0>;
@@ -397,10 +397,10 @@ void ta_routes() {
         // ALT2: PF0 = WOA, PF1 = WOB. PORTF pin events live on channels
         // 4-5. PF1 gets a pull-up so an UNDRIVEN pad reads a steady high
         // (zero edges) instead of floating. A board whose 32.768 kHz
-        // crystal sits on PF0/PF1 (avr_board.hpp's board_xosc32k) never
+        // crystal sits on PF0/PF1 (board.hpp's board::xosc32k) never
         // has them driven: ALT2 is the only alternate route this package
         // bonds, so the erratum's two verdicts are not taken there.
-        if constexpr (board_xosc32k) {
+        if constexpr (board::xosc32k) {
             print(serial, "    ALT2 route (PF0/PF1) not driven: this board's 32 kHz crystal "
                           "is there - errata ", has_xoschf ? "2.14.2" : "2.13.2",
                   " not measured", crlf);
@@ -1679,7 +1679,7 @@ void tj_outputs() {
         c.enable_wod = true;
         c.wo_c = TcdWaveformSelect::pwm_a;
         c.wo_d = TcdWaveformSelect::pwm_b;
-        if constexpr (board_pa7_free) {
+        if constexpr (board::pa7_free) {
             verdict("all four outputs, WOC = A and WOD = B", D::init(c));
             probe_cd();
             arm_meters(ChA{}, ChB{});
@@ -2009,7 +2009,7 @@ void help() {
                   "f the PLL | g capture | h input modes | i dithering | "
                   "j output plumbing | k the two vectors | l PROGEV, FIFTY with AUPDATE"
                   "    -> z = all of a..l", crlf);
-    print(serial, board_pa7_free
+    print(serial, board::pa7_free
                       ? "  No wires: WOA..WOD on PA4..PA7 read back as pin events into TCB "
                         "meters, the TCD's own CMPBCLR event as the cycle counter, PD3/PD4 "
                         "driven from PORT as the two input-event sources. PF0..PF3 (ALT2) are "

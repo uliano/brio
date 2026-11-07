@@ -47,7 +47,7 @@
 //
 // THE AVR EA: no USART reaches PORTE, so the link is USART1 on ALT1 - TXD
 // PC4, RXD PC5, XCK PC6 - which the AVR64EA48 board jumpers onto PE0..PE2
-// (avr_board.hpp's board_pc_pe_jumpers): the same nets; the PE pads stay
+// (board.hpp's board::pc_pe_jumpers): the same nets; the PE pads stay
 // inputs.
 //
 // A DUT OF ANOTHER FAMILY is met where its silicon differs (the SAM C21's
@@ -83,12 +83,12 @@
 
 #include "usart_link.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-// The board's HF clock (avr_board.hpp): the DB board's crystal on its
+// The board's HF clock (board.hpp): the DB board's crystal on its
 // XOSCHF, or on the AVR128DA48 board a quartz oscillator feeding EXTCLK, so the time base is crystal-referenced on either part
 // and `ident` reports it so (xtal = 1) whenever the source started.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -102,10 +102,10 @@ constexpr Console console;
 /// THE LINK: the USART whose pads are the board-to-board wires PE0..PE3 -
 /// USART4 at its default route on the AVR DA/DB; on the AVR EA, which has
 /// no USART on PORTE, USART1 on ALT1 (TXD PC4, RXD PC5, XCK PC6), which
-/// its board jumpers onto PE0..PE3 (avr_board.hpp's board_pc_pe_jumpers):
+/// its board jumpers onto PE0..PE3 (board.hpp's board::pc_pe_jumpers):
 /// the same nets, each with one driver - the PE pads stay inputs.
 constexpr bool link_on_porte = usart_count >= 5;
-static_assert(link_on_porte || board_pc_pe_jumpers,
+static_assert(link_on_porte || board::pc_pe_jumpers,
               "the link reaches the board-to-board wires through the PC4..PC7 jumpers");
 constexpr uint8_t link_n = link_on_porte ? 4 : 1;
 constexpr UsartRoute link_route = link_on_porte ? UsartRoute::def : UsartRoute::alt1;

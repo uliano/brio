@@ -83,9 +83,9 @@
 #include "avrxt/userrow.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -106,8 +106,8 @@ using ChCarry = EventChannel<4>;
 using ChSnap = EventChannel<5>;      // software / RTC OVF / RTC CMP
 
 constexpr uint32_t crystal_hz = SysClock::hz;
-// The board's facts (board_clkout, board_xosc32k, board_pa7_free) are
-// the board table's (avr_board.hpp).
+// The board's facts (board::clkout, board::xosc32k, board::pa7_free) are
+// the board file's (board.hpp).
 constexpr uint32_t nominal_hz = 32768;           // CLK_RTC from OSC32K
 // Crystal ticks in one nominal CLK_RTC cycle (24e6 / 32768 = 732.42).
 constexpr uint32_t ticks_per_rtc_x100 = (crystal_hz * 100ul) / nominal_hz;
@@ -936,7 +936,7 @@ void help() {
           crlf);
     return;
 #endif
-    if constexpr (board_xosc32k) {
+    if constexpr (board::xosc32k) {
         print(serial, "test_avr_rtc: 1 resource verbs | 2 counter period | 3 compare phase | "
                       "4 crystal error correction | 5 busy flags | 6 first tick | "
                       "7 PIT and counter together | 8 OSC1K | 9 XOSC32K | a all", crlf);
@@ -1002,7 +1002,7 @@ int main() {
         else if (c == 'a' || c == 'A') {
             uint8_t tp = 0, tf = 0;
             for (const Test& t : tests) { run(t.fn); tp += passed; tf += failed; }
-            if constexpr (board_xosc32k) {
+            if constexpr (board::xosc32k) {
                 run(t9_xosc32k); tp += passed; tf += failed;
             }
 #if defined(RTC_EVGEN0SEL_gm)
@@ -1012,7 +1012,7 @@ int main() {
         } else {
             bool found = false;
             for (const Test& t : tests) if (t.key == c) { run(t.fn); found = true; }
-            if constexpr (board_xosc32k) {
+            if constexpr (board::xosc32k) {
                 if (c == '9') { run(t9_xosc32k); found = true; }
             }
 #if defined(RTC_EVGEN0SEL_gm)

@@ -62,11 +62,11 @@
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
 using P = brio::AvrPlatform;
 
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 namespace {
@@ -75,7 +75,7 @@ using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
 
 // ---- the routes, named ----------------------------------------------------
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
 using LedPin = brio::Pin<'B', 2>;                 // EVOUTB: a free pad, not the LED
 using ProbePin = brio::Pin<'D', 2>;               // EVOUTD, the analyzer
 using PulsePin = brio::Pin<'C', 7>;               // EVOUTC ALT1, software events
@@ -128,7 +128,7 @@ struct Cycler : brio::Fsm<Cycler, Next> {
         return brio::match(e,
             [](brio::Entry) {
                 ProbeChannel::source(brio::EvPin<Button0>{});  // PA2 level on PD2
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
                 announce("phase 2: PF3 level -> PD2 (press the button)");
 #else
                 announce("phase 2: PA2 level -> PD2 (press button 0)");
@@ -156,12 +156,12 @@ private:
         brio::TimeStamp ts;
         brio::Ticker::now(ts);
         brio::print(serial, ts, " ", what, brio::crlf);
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
         observe();
 #endif
         phase.arm(brio::ticks_from_secs<P>(10));
     }
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     /// The EVOUT pads read back through their own input buffers: edges
     /// on PD2 (the probe) and PB2 (the static route) over 300 ms, sampled
     /// every 10 us (the loop's reads stretch the window past 300 ms) -
@@ -200,7 +200,7 @@ int main() {
     brio::EvOut<LedPin>::listen(LedChannel{});
     sei();
 
-#if defined(BRIO_BOARD_ea48)
+#if defined(__AVR_AVR64EA48__)
     brio::print(serial, brio::crlf, "events0 (clk=", xtal ? "XTAL" : "OSCHF",
                 ", silicon rev ", brio::hex(SYSCFG.REVID), ")", brio::crlf,
                 "PB2 <- PIT/8192 (4 Hz, no CPU, PIT slot 0); PD2 <- channel 1, rewired every 10 s",

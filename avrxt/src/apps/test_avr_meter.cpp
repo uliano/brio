@@ -45,15 +45,15 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
-#include "avr_board.hpp"
+#include "board.hpp"
 
 namespace {
 
 using namespace brio;
 
 using P = AvrPlatform;
-// The board's HF clock: its source and rate are the board table's.
-using SysClock = BoardClock;   // the board's HF source (avr_board.hpp)
+// The board's HF clock: its source and rate are the board file's.
+using SysClock = board::Clock;   // the board's HF source (board.hpp)
 constexpr SysClock clock;
 
 using Serial = Uart<2, Route::alt1>;
