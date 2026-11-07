@@ -25,18 +25,19 @@
 // PB2 driven ACTIVE HIGH and a KEY button on PA0. Wiring on this bench:
 // a WCH-Link's own serial pins are wired to PA9 (USART1_TX) and PA10
 // (USART1_RX), the instance's default pads, and the same probe drives
-// the two-wire debug port on PA13/PA14, so one cable carries both. WCH's
+// the two-wire debug port on PA13/PA14, so one cable carries both. The
+// WeAct CH32V303CBT6 board is the same board around another part; WCH's
 // CH32V303 evaluation board is wired the same way, with its LED jumpered
 // to PB2 and its KEY to PA0, so the same image source serves it - but
-// that board's LED hangs from 3.3 V and lights with the pad LOW, so
-// there `LED ON` darkens it.
+// that board's LED hangs from 3.3 V and lights with the pad LOW, which
+// the image knows by the part's number (below).
 // Connect at 115200 8N1 and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | BEATS | ERR
 //
 // Between keystrokes the CPU sleeps in WFI, woken by the system counter
 // or the USART. No polling anywhere.
 //
-// build: boards = v203c6,v203c8,v203rb,v303vc
+// build: boards = v203c6,v203c8,v203rb,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -73,11 +74,19 @@ constexpr Serial serial;           // tag for print(serial, ...)
 constexpr uint32_t console_baud = 115200;
 
 using Led = brio::Pin<'B', 2>;     // presumed the board's LED (see header)
-// The CH32V303's board is WCH's evaluation board, whose LED hangs from
-// 3.3 V and lights with the pad low; the WeAct CH32V203 board's lights
-// with it high (see header). The part's class names the board.
-constexpr bool led_lit_low =
-    brio::device::device_class == brio::DeviceClass::v30x_d8;
+/// THE LED'S POLARITY IS THE BOARD'S - a fact no part or device class
+/// implies and the build has no name for: the CH32V303VC is benched on
+/// WCH's evaluation board, whose LED hangs from 3.3 V and lights with the
+/// pad low (docs/boards/ch32v303-evt.md); every other part on a WeAct core
+/// board (the CH32V203C8T6's, the CH32V303CBT6's), whose LED lights with
+/// it high. So the part's NUMBER names the board here, and a board file is
+/// where the fact belongs.
+constexpr bool same_name(const char* a, const char* b) {
+    for (; *a != '\0' && *a == *b; ++a, ++b) {
+    }
+    return *a == *b;
+}
+constexpr bool led_lit_low = same_name(brio::device::part_name, "CH32V303VC");
 
 // ---- events -----------------------------------------------------------------
 struct Beat {};                                    // Console's own heartbeat

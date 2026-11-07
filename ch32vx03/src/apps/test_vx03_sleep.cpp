@@ -99,7 +99,7 @@
 //      at some 200 ms; the reset flags, SBF, WUF and the RTC's count at the
 //      next boot say which of the two ended it
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abcdhk,efgwijrx
 // build: monitor_speed = 115200
 

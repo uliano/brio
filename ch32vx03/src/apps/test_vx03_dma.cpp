@@ -43,9 +43,10 @@
 //   c  THE SLEEP: four kilobytes started, the platform's idle() for one
 //      tick and for ten with the count of working bus masters set aside
 //      (it would keep the core awake), the count read on return - the
-//      number that says the bus matrix served the core alone - and the
-//      same block finished awake and verified; on the CH32V303 the same
-//      again on DMA2's first channel
+//      number that says whether the bus matrix served the core alone,
+//      which the dies measured answer differently (a FINDING printed,
+//      not judged) - and the same block finished awake and verified; on
+//      the CH32V303 the same again on DMA2's first channel
 //   d  THE TRANSFER ERROR: five addresses no peripheral answers at,
 //      read by a channel with its error interrupt armed, then WRITTEN at
 //      each width, with the image's own pattern in the locked flash at
@@ -71,7 +72,7 @@
 //      to DMA1 through the piecewise verbs, which never see a transfer
 //      whole, to show whether this die's lot is one the note restricts
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -482,10 +483,12 @@ void sleep_on_dma2() {
         print(serial, "  DMA2: 4096 B awake: ", awake_us, " us; asleep: ", moved_one,
               " B across one idle(), ", moved_ten, " B across ten (", moved_ten / 10u,
               " B a wake)", crlf);
-        bench.verdict("the second controller starves in Sleep the same way: four kilobytes that "
-                      "take well under a millisecond awake do not finish in ten milliseconds of "
-                      "sleep, tens of bytes a wake",
-                      awake_done && awake_us < 1000UL && moved_one < 256u && moved_ten < 1024u);
+        print(serial, "  FINDING: in Sleep DMA2's channel ", moved_ten == 4096u ? "KEEPS MOVING" : "STALLS",
+              " - ", moved_ten, " B across ten sleeps", crlf);
+        bench.verdict("the second controller's block takes well under a millisecond awake, and "
+                      "what it moves across ten sleeps is the finding above, not a verdict: the "
+                      "dies measured differ (the comment on letter c)",
+                      awake_done && awake_us < 1000UL);
         bench.verdict("and its block too finishes the moment the core is awake again, byte for "
                       "byte",
                       exact);
@@ -494,7 +497,7 @@ void sleep_on_dma2() {
 }
 
 // ===========================================================================
-// c - the sleep: in Sleep no bus master but the core gets a cycle
+// c - the sleep: what a channel moves while the core is not awake
 // ===========================================================================
 void tc_sleep() {
     all_off();
@@ -540,13 +543,22 @@ void tc_sleep() {
     print(serial, "  4096 B awake: ", awake_us, " us; asleep: ", moved_one,
           " B across one idle(), ", moved_ten, " B across ten (", moved_ten / 10u,
           " B a wake)", crlf);
-    bench.verdict("the same four kilobytes that take well under a millisecond awake do not "
-                  "finish in ten milliseconds of sleep: in Sleep no bus master but the core "
-                  "gets a cycle",
-                  awake_done && awake_us < 1000UL && moved_ten < 4096u);
-    bench.verdict("what moves across a sleep is the handful of items already in flight plus "
-                  "what the wake itself runs - tens of bytes a wake, not thousands",
-                  moved_one < 256u && moved_ten < 1024u);
+    // Whether the channel moves while the core sleeps is PRINTED, not
+    // judged: RM 2.3.2 says every peripheral runs in Sleep, the
+    // CH32V203C8T6 and the CH32V303VCT6 starve the channel (the handful
+    // of items in flight and what each wake runs, tens of bytes a wake)
+    // and the CH32V303CBT6 serves it (the block done inside the first
+    // sleep a tick ends). Either way the idle path refuses a sleep over a
+    // working channel (ch32vx03/bus_activity.hpp), so nothing in brio
+    // depends on the answer; on a die that serves it the refusal costs a
+    // sleep and breaks nothing. The first idle() returns at once on the
+    // latch the last interrupt left (ch32vx03/platform.hpp), on every die.
+    print(serial, "  FINDING: in Sleep the DMA ", moved_ten == 4096u ? "KEEPS MOVING" : "STALLS", " - ",
+          moved_ten, " B across ten sleeps against 4096 awake", crlf);
+    bench.verdict("the same four kilobytes take well under a millisecond awake; what they do "
+                  "across ten sleeps is the finding above, not a verdict: the dies measured "
+                  "differ, and the idle path refuses a sleep over a working channel on all of them",
+                  awake_done && awake_us < 1000UL);
     bench.verdict("and the block finishes the moment the core is awake again, byte for byte",
                   exact);
     all_off();

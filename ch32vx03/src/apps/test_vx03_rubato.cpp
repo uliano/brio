@@ -125,7 +125,7 @@
 //      dispatches and the interrupt sampled in letters a..g plus what lies
 //      below a sample, the arithmetic beside the verdict.
 //
-// build: boards = v203c8,v303vc
+// build: boards = v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -49,9 +49,9 @@
 #                       Raspberry Pi Debug Probe
 #      f429zi f446re f411ce   STM32F4 boards, written by OpenOCD over SWD
 #                       through an ST-LINK (a board's own, or a standalone V3)
-#      v203c8 v303vc    CH32V203C8 / CH32V303VC, written by WCH's OpenOCD
-#                       fork through a WCH-Link over this family's two-wire
-#                       debug port
+#      v203c8 v303cb v303vc   CH32V203C8 / CH32V303CB / CH32V303VC,
+#                       written by WCH's OpenOCD fork through a WCH-Link
+#                       over this family's two-wire debug port
 #      x035f8           CH32X035F8U6 on WCH's evaluation board, written by
 #                       the same OpenOCD fork through a WCH-LinkE over the
 #                       series' two-wire debug port (PC18/PC19)

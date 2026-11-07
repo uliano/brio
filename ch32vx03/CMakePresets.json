@@ -142,6 +142,16 @@
             }
         },
         {
+            "name": "ch32v303cb-debug",
+            "displayName": "CH32V303CB (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32v303cb-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CH32VX03_MCU": "ch32v303cb"
+            }
+        },
+        {
             "name": "ch32v303vc-debug",
             "displayName": "CH32V303VC (debug, -Og)",
             "generator": "Ninja",
@@ -167,6 +177,7 @@
         { "name": "ch32v303rc-release", "configurePreset": "ch32v303rc-release" },
         { "name": "ch32v303vc-release", "configurePreset": "ch32v303vc-release" },
         { "name": "ch32v203c8-debug", "configurePreset": "ch32v203c8-debug" },
+        { "name": "ch32v303cb-debug", "configurePreset": "ch32v303cb-debug" },
         { "name": "ch32v303vc-debug", "configurePreset": "ch32v303vc-debug" }
     ]
 }

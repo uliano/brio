@@ -2,11 +2,12 @@
 // ch. 18) of the CH32V203 and the CH32V303, beyond the console
 // personality: the resource ch32vx03/usart.hpp's `Usart<n>` in every mode
 // the chapter has, and the transport `Uart`'s options and engines, on the
-// instances the console does not own. Letters a..l and r are both series';
-// m, q and s the CH32V203C8 board's crossed pair's; p the CH32V303's upper
-// ports, registered on the part that has them and compiled out of every
-// other image; and the TWO-BOARD KEY `y` (below), with the CH32V303's n
-// and o in it.
+// instances the console does not own. Letters a..g and j..l and r are
+// both series'; h and i the full USART4's, registered where the part has
+// one; m, q and s the CH32V203C8 board's crossed pair's; p the CH32V303RC's
+// and VC's upper ports, registered on the part that has them and compiled
+// out of every other image; and the TWO-BOARD KEY `y` (below), with n
+// (where the link's engines are DMA2's) and o (on the CH32V303 class) in it.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -38,15 +39,17 @@
 //     opening names that part as the exception whose UART4 is a USART4,
 //     with a CK, a CTS and an RTS pad - so the synchronous mode and the
 //     smartcard have an instance to run on that is not the console's. On
-//     the CH32V303 the fourth port is a UART4 with TX and RX alone, and
-//     letters h and i decline there by name.
+//     the CH32V303RC and VC the fourth port is a UART4 with TX and RX
+//     alone, and the CH32V303CB has none: letters h and i register only
+//     where the part has the full USART4.
 //
 // WIRES ADD LETTERS and each is detected rather than assumed: PA2 to PA3
 // (USART2's own loopback, letter l) and the crossed pair of USART2's
 // pads with UART4's default ones, PA2-PB1 with PB0-PA3 on the CH32V203C8
-// board (letters m, q and s). Without them the letters say so and pass
-// nothing. The CH32V303 board's pair is retired - its UART4 default pads
-// PC10/PC11 are the desk pair's SPI link - and with it that part's m, q
+// board (letters m, q and s, registered where the part has a fourth port).
+// Without them the letters say so and pass nothing. On the CH32V303RC and
+// VC the pair is retired - UART4's default pads PC10/PC11 are the desk
+// pair's SPI link there (vx03_pair.hpp) - and with it those parts' m, q
 // and s, whose subjects the two-board key takes up against the far chip.
 //
 // THE RATE ON THE WIRE IS TIMED ON THE CORE'S COUNTER. A loop and the
@@ -137,8 +140,8 @@
 //      refused by init()
 //
 // THE TWO-BOARD KEY `y`, letters 1 to 9, outside z: the desk pair's serial
-// link - the CH32V203C8's USART3 (PB10/PB11) crossed to UART4 on the
-// CH32V303's second column (PB0/PB1), vx03_link_dut.hpp - as the DUT, the
+// link - USART3 on PB10/PB11, or UART4 on its second column (PB0/PB1) on
+// the CH32V303RC and VC, vx03_link_dut.hpp - as the DUT, the
 // far chip running usart_peer, driven in band over the link itself
 // (usart_link.hpp), every leg judged from what the far chip reports or from
 // what this end received, FAILING loudly when nobody answers; a leg the
@@ -168,11 +171,14 @@
 //      errored frames the far engine draws (two and twelve bits apart),
 //      and the burst edge from the vector - a burst of one, a burst of
 //      sixteen at 1 Mbaud told within two frames on one interrupt
-// and on the CH32V303RC and VC, in the same key:
+// and in the same key, where the link's port is UART4, whose engines are
+// DMA2's (the CH32V303RC and VC):
 //   n  UART4'S ENGINES ON DMA2, on its second column: a message round the
 //      far echo, four kilobytes each way at 921600 with every counter
 //      read, the transmit engine timed on this counter and by the far one
-//   o  THE LOT'S REGISTERS: CTLR4 probed on USART2 and UART4 and every
+// and on every part of the CH32V303 class, whose notes give it the lot's
+// registers (ch32vx03/usart.hpp):
+//   o  THE LOT'S REGISTERS: CTLR4 probed on USART2 and the link's port and every
 //      other register compared across the probe; then - where the die has
 //      it - the MARK parity judged by the far receiver; where it has not,
 //      CTLR4 and M_EXT stored RAW and both USART2's own pad and the far
@@ -186,10 +192,10 @@
 // groups line below; design/overview.md, "A suite's image fits the
 // family's smallest chip"); none of them is an end of the pair, so no
 // digit is in either. The CH32V203C8 builds two images, the single-board
-// letters and the two-board key; the CH32V303VC one. Letter p is the
-// CH32V303's and in no group.
+// letters and the two-board key; the CH32V303CB and VC one each. Letter p
+// is the CH32V303RC's and VC's and in no group.
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abcdefghij,klmqrs
 // build: groups.v203c8 = abcdefghijklmqrs,123456789
 // build: monitor_speed = 115200
@@ -277,9 +283,19 @@ constexpr UsartPads cross_pads =
     has_fourth ? usart_pads_for(4, 0) : UsartPads{Pad{'B', 0}, Pad{'B', 1}};
 using CrossTxPad = Pin<cross_pads.tx.port, cross_pads.tx.pin>;
 using CrossRxPad = Pin<cross_pads.rx.port, cross_pads.rx.pin>;
-/// The CH32V303's crossed pair is UART4's default column, and its letters
-/// print the pads they were given.
-constexpr bool v303_pair = device::device_class == DeviceClass::v30x_d8;
+/// Whether the crossed pair is retired: UART4's default column is the desk
+/// pair's SPI link on this part (vx03_pair.hpp), so m, q and s do not
+/// register; and whether they register at all - where the part has a
+/// fourth port and keeps the pair.
+constexpr bool pair_retired = vx03pair::fourth_default_on_spi_link;
+constexpr bool crossed_pair_part = has_fourth && !pair_retired;
+static_assert(!crossed_pair_part || (cross_pads.tx == Pad{'B', 0} && cross_pads.rx == Pad{'B', 1}),
+              "letter m names the straps PA2-PB1 and PB0-PA3: UART4's default column must be PB0/PB1");
+static_assert(!pair_retired || (cross_pads.tx == Pad{'C', 10} && cross_pads.rx == Pad{'C', 11}),
+              "a retired pair's wires are named PA2-PC11 and PC10-PA3: UART4's default column PC10/PC11");
+/// The fourth port's vector entry follows the DEVICE CLASS's table (the
+/// tail differs: device.hpp's Irq table) - a class fact.
+constexpr bool v30x_vectors = device::device_class == DeviceClass::v30x_d8;
 
 /// The transport with both engines, for the loopback letter: USART2
 /// transmits on DMA channel 7 and receives on 6 (table 11-5).
@@ -734,9 +750,9 @@ void bang_idle(uint8_t bits, uint32_t baud = 9600) {
 
 // ---- the instrument's life cycle -------------------------------------------
 
-/// The CH32V303's extras put back (defined with letters n..p): nothing on
-/// a part without them.
-template <bool on = (device::device_class == DeviceClass::v30x_d8)>
+/// The extras put back (defined with letters n..p) - DMA2's two UART4
+/// channels, UART5..UART8: nothing on a part without them.
+template <bool on = (device::dma_controller_count >= 2u || device::has_usart(5))>
 void upper_off();
 
 /// Everything back: both vectors released, both instruments reset and
@@ -1094,15 +1110,17 @@ void tb_frame() {
         U2::bus_clock(false);
         console_drain();
     }
-    (void)gaps;
     bench.verdict("the two WHOLE stop codes are on the wire: the gap between two zero words is "
                   "one bit time under the 1 code and two under the 2 code",
                   whole == 2u);
-    bench.verdict("THE TWO HALF CODES ARE NOT AN ORDINARY FRAME'S: an ordinary transmitter "
-                  "sends one whole stop bit for the 0.5 code and two for the 1.5 code, both "
-                  "rounded up - 18.10.5 offers four codes and the halves belong to the "
-                  "smartcard, where letter i measures them",
-                  rounded == 2u);
+    // What the two HALF codes put on the wire is a FINDING, not a
+    // verdict: 18.10.5 offers the four codes with no restriction, the
+    // CH32V203C8T6 and the CH32V303VCT6 send them rounded up to whole
+    // bits, the CH32V303CBT6 sends the halves as asked, and nothing in
+    // brio computes a frame time from the stop code.
+    print(serial, "  FINDING: the half stop codes are ",
+          gaps == 4u ? "THE HALVES on the wire" : rounded == 2u ? "ROUNDED UP to whole bits" : "neither halves nor whole",
+          crlf);
 
     // TE's idle frame (18.2): the first byte waits a whole frame.
     U2::bus_clock(true);
@@ -1636,7 +1654,7 @@ void ck_counter_stop() {
 void th_synchronous() {
     all_off();
     if (!has_fourth) {
-        print(serial, "  this part has two usarts and no fourth: the synchronous mode has no "
+        print(serial, "  this part has no fourth serial port: the synchronous mode has no "
                       "instrument here", crlf);
         bench.verdict("the letter declines where the part has no fourth serial port, and says "
                       "so", true);
@@ -1997,8 +2015,8 @@ void tj_flags() {
 
     // The fourth port's own vector, which is the device class's tail.
     if (!has_fourth) {
-        bench.verdict("the fourth serial port's vector is not this part's to reach: two usarts "
-                      "and no fourth", true);
+        bench.verdict("the fourth serial port's vector is not this part's to reach: it has no "
+                      "fourth serial port", true);
         all_off();
         return;
     }
@@ -2015,7 +2033,7 @@ void tj_flags() {
     wait_us(4000);
     const uint32_t fourth = u4_interrupts;
     print(serial, "  the fourth port's vector ran ", fourth, " times", crlf);
-    if constexpr (v303_pair) {
+    if constexpr (v30x_vectors) {
         bench.verdict("the fourth serial port's vector is its own - entry 68 of this device "
                       "class's table, and a transmission complete reaches it",
                       fourth >= 1u);
@@ -2280,14 +2298,14 @@ uint32_t cross_run(uint32_t count, bool from_u2) {
 void tm_cross() {
     all_off();
     if (!has_fourth) {
-        print(serial, "  this part has two usarts and no fourth: the crossed pair has no peer "
+        print(serial, "  this part has no fourth serial port: the crossed pair has no peer "
                       "here", crlf);
         bench.verdict("the letter declines where the part has no fourth serial port, and says "
                       "so", true);
         return;
     }
     if (!need_cross_wires()) {
-        if constexpr (v303_pair) {
+        if constexpr (pair_retired) {
             print(serial, "  the wires PA2-PC11 and PC10-PA3 are ABSENT: the crossed pair "
                   "measures nothing", crlf);
         } else {
@@ -2297,7 +2315,7 @@ void tm_cross() {
         bench.verdict("the crossed-pair letter declines without its wires, and says so", true);
         return;
     }
-    if constexpr (v303_pair) {
+    if constexpr (pair_retired) {
         print(serial, "  the wires PA2-PC11 and PC10-PA3 are in place", crlf);
     } else {
         print(serial, "  the straps PA2-PB1 and PB0-PA3 are in place", crlf);
@@ -3160,9 +3178,9 @@ void t3_frames() {
     // THE STOP LENGTHS AS A FOREIGN RECEIVER TIMES THEM: gapless runs of
     // 2000 frames at 1 Mbaud under the four codes, each span against the
     // 1-stop run's. A frame of 1 stop is 20 half bits and of 2 is 22, so
-    // the 2 code reads 1.1 of the 1 code; the single-board letter b found
-    // this transmitter ROUNDING the halves up (0.5 sends one, 1.5 two),
-    // which the far chip either confirms or refutes here.
+    // the 2 code reads 1.1 of the 1 code; what the half codes are on the
+    // wire - rounded up or the halves - is letter b's finding on this
+    // chip's own pad, timed again here by the far chip.
     uint32_t spans[4] = {};
     bool timed_all = true;
     static constexpr uint8_t stops[4] = {1, 2, link::stop_half, link::stop_one_half};
@@ -3188,9 +3206,16 @@ void t3_frames() {
           half, "; the 1.5 code against the 2: ", one_half, " (bound ", bound, ")", crlf);
     bench.verdict("the far receiver times the stop lengths: two stop bits make a frame of 22 half bits against 20",
                   timed_all && D::within(two, 100'000, bound));
-    bench.verdict("THE HALVES ARE ROUNDED UP ON THE WIRE, as letter b measured on this chip's own pad: the 0.5 code "
-                  "sends a frame as long as the 1 code's, the 1.5 code one as long as the 2 code's",
-                  timed_all && D::within(half, 0, bound) && D::within(one_half, 0, bound));
+    // The half codes as the far receiver times them: a FINDING, as in
+    // letter b - rounded up (0 ppm against the whole code's frame) on the
+    // CH32V203C8T6 and the CH32V303VCT6, the halves (19 half bits against
+    // 20, -50000 ppm; 21 against 22, -45455 ppm) on the CH32V303CBT6.
+    const bool far_rounded = D::within(half, 0, bound) && D::within(one_half, 0, bound);
+    const bool far_halves = D::within(half, -50'000, bound) && D::within(one_half, -45'455, bound);
+    print(serial, "  FINDING: the far receiver times the half codes as ",
+          far_halves ? "THE HALVES" : far_rounded ? "ROUNDED UP to whole bits" : "neither halves nor whole", crlf);
+    bench.verdict("the far receiver timed every run of the four codes (what the halves are is the finding above)",
+                  timed_all);
     // What neither chip has: 5- and 6-bit words, nine data bits with a
     // parity bit - the peer refuses each, and this end's vocabulary too.
     bool refused = true;
@@ -3594,8 +3619,11 @@ constexpr DmaSlot link_tx_slot = usart_dma_tx_slot(link_n);
 using LinkRxEngine = DmaRxEngine<link_rx_slot.controller, link_rx_slot.channel>;
 using LinkTxEngine = DmaTxEngine<link_tx_slot.controller, link_tx_slot.channel>;
 using LinkRing = Uart<link_n, P, 512, 64, UartFormat{}, NoDmaEngine, LinkRxEngine, link_column>;
-/// The link with both engines: letter n's transport on the CH32V303.
+/// The link with both engines: letter n's transport, where they are DMA2's.
 using LinkDma = Uart<link_n, P, 256, 256, UartFormat{}, LinkTxEngine, LinkRxEngine, link_column>;
+/// Whether the link's two engines are DMA2's (UART4's slots, table 11-3):
+/// letter n's subject, registered where they are.
+constexpr bool link_on_dma2 = link_present && link_tx_slot.controller == 2u && link_rx_slot.controller == 2u;
 /// Which transport owns the link's two vectors: 1 the ring, 2 both engines.
 volatile uint8_t link_owner = 0;
 volatile uint32_t link_edges = 0;
@@ -4070,7 +4098,7 @@ void t9_ring() {
 }  // namespace two
 
 // ===========================================================================
-// n and o - the CH32V303's two letters on the pair's link
+// n and o - the link's engines on DMA2, and the class's lot registers
 // ===========================================================================
 
 namespace two {
@@ -4117,7 +4145,7 @@ uint32_t engine_out(uint32_t rate, uint32_t n) {
 // n - UART4's engines on DMA2, against the far chip
 // ---------------------------------------------------------------------------
 
-template <bool on = (v303_pair && link_present && device::dma_controller_count >= 2u)>
+template <bool on = link_on_dma2>
 void tn_pair_engines() {
     if constexpr (on) {
         if (!ready()) {
@@ -4332,9 +4360,15 @@ uint32_t raw_low_run(const UartFormat& f, uint16_t ctlr4, uint16_t m_ext) {
 
 /// THE FAR RECEIVER'S JUDGEMENT of `count` words the link's port sends
 /// with `ctlr4` and `m_ext` stored raw: the peer sinks them at `far` and
-/// reports its count, its parity errors and its sum.
+/// reports its count, its parity errors and its sum. `spaced` leaves the
+/// line idle for one whole far frame after each word: a short word's frame
+/// (seven bits for a five-bit word) is shorter than the far receiver's ten,
+/// and a word sent back to back puts its start bit inside the far frame's
+/// data bits - one far frame of idle lets the far stop sample fall on idle
+/// whatever the word's length. The sink's deadline, two frames a word,
+/// covers the gap.
 link::Report far_judges(const link::Cfg& far, const UartFormat& f, uint16_t word, uint16_t count, uint16_t ctlr4,
-                        uint16_t m_ext) {
+                        uint16_t m_ext, bool spaced = false) {
     link::Report r{};
     link::Params a{};
     a.cfg = far;
@@ -4350,6 +4384,9 @@ link::Report far_judges(const link::Cfg& far, const UartFormat& f, uint16_t word
     for (uint16_t i = 0; i < count; ++i) {
         D::put(static_cast<uint8_t>(word));
         D::wait_tc();
+        if (spaced) {
+            wait_us(10u * 1'000'000u / far.rate + 1u);   // one far 8N1 frame: ten bits
+        }
     }
     W::enable(false);
     W::regs().CTLR4 = 0;
@@ -4358,7 +4395,7 @@ link::Report far_judges(const link::Cfg& far, const UartFormat& f, uint16_t word
     return r;
 }
 
-template <bool on = (v303_pair && link_present)>
+template <bool on = (usart_class_has_lot_registers && link_present)>
 void to_lot_registers() {
     if constexpr (on) {
         if (!ready()) {
@@ -4380,16 +4417,16 @@ void to_lot_registers() {
         const bool present4 = W::ctlr4_present();
         const UsartWords after2 = usart_words<U2>();
         const UsartWords after4 = usart_words<W>();
-        print(serial, "  CTLR4's address read ", hex(word2), " on USART2 and ", hex(word4),
-              " on UART4 before the probe; the probe says ", present2 ? "PRESENT" : "absent", " and ",
+        print(serial, "  CTLR4's address read ", hex(word2), " on USART2 and ", hex(word4), " on ",
+              vx03link::port_kind, link_n, " before the probe; the probe says ", present2 ? "PRESENT" : "absent", " and ",
               present4 ? "PRESENT" : "absent", crlf);
         bench.verdict("the CTLR4 probe answers on both ports and leaves BRR, CTLR1..3 and GPR of each block "
                       "exactly as it found them, whatever the address turned out to be",
                       up && before2 == after2 && before4 == after4);
 
         // The two ends' rates on this core's counter, which the frames
-        // themselves cannot tell: USART2's run on its free pad, UART4's into
-        // the far sink, eleven bits a frame at 9600.
+        // themselves cannot tell: USART2's run on its free pad, the link
+        // port's into the far sink, eleven bits a frame at 9600.
         port_on<U2>();
         wait_us(3000);
         const uint32_t pm2 = usart_permille<U2>(baud, 11, 16);
@@ -4410,24 +4447,35 @@ void to_lot_registers() {
             link::Report r{};
             (void)D::report(r, 5);
         }
-        print(serial, "  16 frames of 8E1 at 9600 in ", pm2, " (USART2) and ", pm4, " (UART4) thousandths of their "
-              "wire time", crlf);
+        print(serial, "  16 frames of 8E1 at 9600 in ", pm2, " (USART2) and ", pm4, " (", vx03link::port_kind, link_n,
+              ") thousandths of their wire time", crlf);
         bench.verdict("both ports run at the rate asked: 16 frames each in their wire time at 9600, -1 % to +3 %",
                       wire_ok(pm2) && wire_ok(pm4));
 
         if (present2 && present4) {
-            // MARK on the wire: the parity bit held HIGH - for a zero byte,
-            // whose even parity bit is zero, a parity error at a far even
-            // receiver on every frame; for 0x01, whose is one, none.
+            // MARK and the TRANSMITTED parity bit: a FINDING, not a verdict.
+            // 18.10.8 calls CHECK_SEL a "checksum function select" and
+            // MS_ERR a receive-mode flag, and says nothing of the
+            // transmitter; on the CH32V303CBT6, the one die measured with
+            // the register, the transmitted bit stays COMPUTED under MARK
+            // (a zero byte under even parity reaches a far even receiver
+            // with no error) while the RECEIVER flags a parity bit that is
+            // not the selected level with MS_ERR. The leg below counts the
+            // far receiver's parity errors and prints what they say.
             const link::Report zero =
                 far_judges(link::Cfg{.parity = 1, .rate = baud}, parity_frame, 0x00, 8, usart_check_mark, 0);
             const link::Report one =
                 far_judges(link::Cfg{.parity = 1, .rate = baud}, parity_frame, 0x01, 8, usart_check_mark, 0);
             print(serial, "  MARK into a far even receiver: 0x00 perr ", zero.perr, " of ", zero.count, ", 0x01 perr ",
                   one.perr, " of ", one.count, crlf);
-            judge("MARK holds the parity bit high on the wire: the far even receiver flags a zero byte and passes "
-                  "0x01",
-                  zero.count == 8u && zero.perr == 8u && one.count == 8u && one.perr == 0u);
+            const bool held = zero.count == 8u && zero.perr == 8u && one.count == 8u && one.perr == 0u;
+            const bool computed = zero.count == 8u && zero.perr == 0u && one.count == 8u && one.perr == 0u;
+            print(serial, "  FINDING: under MARK the transmitted parity bit is ",
+                  held ? "HELD HIGH" : computed ? "COMPUTED, as without the register" : "neither held nor computed",
+                  crlf);
+            judge("under MARK every frame reaches the far receiver (what the transmitted parity bit is under it is "
+                  "the finding above)",
+                  zero.count == 8u && one.count == 8u);
         } else {
             print(serial, "  this die's lot has no CTLR4 by the probe: the MARK and SPACE parity is asked of the "
                   "WIRE instead", crlf);
@@ -4449,18 +4497,19 @@ void to_lot_registers() {
             bench.verdict("THE PAD AGREES WITH THE PROBE: CTLR4 stored raw with MARK or SPACE leaves the parity bit "
                           "computed - ten low bits under even parity, nine under odd, as without it",
                           even_plain == 10u && even_mark == 10u && odd_plain == 9u && odd_space == 9u);
-            // AND THE FAR RECEIVER: UART4 with MARK stored raw sends zero
-            // bytes into a far EVEN receiver - a held one would be a parity
+            // AND THE FAR RECEIVER: the link port with MARK stored raw sends
+            // zero bytes into a far EVEN receiver - a held one would be a parity
             // error each - and with SPACE into a far ODD one.
             const link::Report mark =
                 far_judges(link::Cfg{.parity = 1, .rate = baud}, parity_frame, 0x00, 8, usart_check_mark, 0);
             const link::Report space = far_judges(link::Cfg{.parity = 2, .rate = baud},
                                                   UartFormat{UartBits::eight, UartParity::odd}, 0x00, 8,
                                                   usart_check_space, 0);
-            print(serial, "  UART4 with CTLR4 stored raw, zero bytes: MARK into a far even receiver perr ", mark.perr,
+            print(serial, "  ", vx03link::port_kind, link_n,
+                  " with CTLR4 stored raw, zero bytes: MARK into a far even receiver perr ", mark.perr,
                   " of ", mark.count, ", SPACE into a far odd one perr ", space.perr, " of ", space.count, crlf);
-            judge("THE FAR RECEIVER AGREES: UART4's parity bit stays computed under a raw MARK and a raw SPACE - the "
-                  "register absent, not write-only",
+            judge("THE FAR RECEIVER AGREES: the link port's parity bit stays computed under a raw MARK and a raw "
+                  "SPACE - the register absent, not write-only",
                   mark.count == 8u && mark.perr == 0u && space.count == 8u && space.perr == 0u);
         }
 
@@ -4474,7 +4523,7 @@ void to_lot_registers() {
         (void)U2::short_word(UsartShortWord::off);
         (void)W::short_word(UsartShortWord::off);
         print(serial, "  M_EXT kept a seven-bit word: ", short2 ? "yes" : "no", " on USART2, ", short4 ? "yes" : "no",
-              " on UART4", crlf);
+              " on ", vx03link::port_kind, link_n, crlf);
         // A short word into a far 8N1 receiver: its missing top bits are
         // the stop bit's and the idle line's ones - 0x55 as seven bits reads
         // 0xD5, as five (0x15) reads 0xF5; a word left at eight bits reads
@@ -4482,9 +4531,12 @@ void to_lot_registers() {
         const link::Cfg far8{};
         if (short2 && short4) {
             const link::Report seven = far_judges(far8, UartFormat{}, 0x55, 4, 0,
-                                                  usart_ctlr1_short_word(UsartShortWord::seven));
+                                                  usart_ctlr1_short_word(UsartShortWord::seven), true);
             const link::Report five =
-                far_judges(far8, UartFormat{}, 0x15, 4, 0, usart_ctlr1_short_word(UsartShortWord::five));
+                far_judges(far8, UartFormat{}, 0x15, 4, 0, usart_ctlr1_short_word(UsartShortWord::five), true);
+            print(serial, "  short words into a far 8N1 receiver, one far frame apart: 0x55 as seven bits summed ",
+                  seven.sum, " over ", seven.count, ", 0x15 as five bits ", five.sum, " over ", five.count,
+                  " (", 4u * 0xD5u, " and ", 4u * 0xF5u, " if each reads with the stop's ones on top)", crlf);
             judge("seven- and five-bit words reach a far 8N1 receiver with their top bits the stop's ones",
                   seven.count == 4u && seven.sum == 4u * 0xD5u && five.count == 4u && five.sum == 4u * 0xF5u);
         } else {
@@ -4500,10 +4552,11 @@ void to_lot_registers() {
                           eight == 9u && seven == 9u && five == 9u);
             const link::Report fk = far_judges(far8, UartFormat{}, 0x00, 4, 0,
                                                usart_ctlr1_short_word(UsartShortWord::five));
-            print(serial, "  UART4 with the five-bit code stored raw, zero words: the far chip counted ", fk.count,
+            print(serial, "  ", vx03link::port_kind, link_n,
+                  " with the five-bit code stored raw, zero words: the far chip counted ", fk.count,
                   ", sum ", fk.sum, ", ferr ", fk.ferr, crlf);
-            judge("AND THE FAR RECEIVER: UART4's zero words under a raw five-bit code arrive as zero bytes, the word "
-                  "eight bits long",
+            judge("AND THE FAR RECEIVER: the link port's zero words under a raw five-bit code arrive as zero bytes, "
+                  "the word eight bits long",
                   fk.count == 4u && fk.sum == 0u && fk.ferr == 0u);
         }
 
@@ -4774,7 +4827,7 @@ bool link_usart_vector() {
             (void)two::LinkPlain::isr();
             return true;
         }
-        if constexpr (v303_pair) {
+        if constexpr (two::link_on_dma2) {
             if (two::link_owner == 2u) {
                 (void)two::LinkDma::isr();
                 return true;
@@ -4793,7 +4846,7 @@ void link_dma_vector() {
                 two::link_edges = two::link_edges + 1u;
             }
         }
-        if constexpr (v303_pair) {
+        if constexpr (two::link_on_dma2) {
             if (two::link_owner == 2u) {
                 (void)two::LinkDma::dma_isr();
             }
@@ -4819,17 +4872,17 @@ void upper_vector() {
     }
 }
 
-/// The CH32V303's letters, registered where the part has what they ask.
-template <bool on = (v303_pair && has_fourth)>
-void register_v303_letters() {
+/// The upper ports' letter, registered where the part has UART5..UART8.
+template <bool on = device::has_usart(5)>
+void register_upper_letters() {
     if constexpr (on) {
         bench.letter('p', "UART5..UART8 with no wire: the pads, the frame, the vectors",
                      tp_upper_ports<>);
     }
 }
 
-/// The two-board key's letters, where the part is one end of the pair; on
-/// the CH32V303 its n and o with them.
+/// The two-board key's letters, where the part is one end of the pair; n
+/// where the link's engines are DMA2's, o on the CH32V303 class.
 template <bool on = link_present>
 void register_two_letters() {
     if constexpr (on) {
@@ -4847,9 +4900,11 @@ void register_two_letters() {
         bench.second_letter('7', "HALF DUPLEX: HDSEL hearing a second chip, the wired AND", two::t7_half_duplex);
         bench.second_letter('8', "MUTE AND IRDA across the wire", two::t8_modes);
         bench.second_letter('9', "THE RING: rx_pending(), a broken stream's counts, the burst edge", two::t9_ring);
-        if constexpr (v303_pair) {
+        if constexpr (two::link_on_dma2) {
             bench.second_letter('n', "UART4'S ENGINES ON DMA2 against the far chip: 4 KB each way",
                                 two::tn_pair_engines<>);
+        }
+        if constexpr (usart_class_has_lot_registers) {
             bench.second_letter('o', "THE LOT'S REGISTERS: CTLR4, M_EXT, RX_BUSY, the far receiver's verdict",
                                 two::to_lot_registers<>);
         }
@@ -4923,7 +4978,7 @@ BRIO_CH32_LEAF_VECTOR(uart4_handler) {
     if (!has_fourth) {
         return;
     }
-    if constexpr (v303_pair) {
+    if constexpr (vx03link::on_fourth_port) {
         if (link_usart_vector<>()) {
             return;   // a two-board transport owns the vector: its edge states
         }
@@ -4952,31 +5007,33 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
     }
 }
 
-// The CH32V303's: UART4's two DMA2 channels and the four upper ports'
-// vectors. On the other series these bodies are empty and nothing in the
-// vector table names them.
+// UART4's two DMA2 channels, where UART4 is the link (the CH32V303RC and
+// VC), and the four upper ports' vectors. Elsewhere these bodies are empty;
+// on the CH32V203 nothing in the vector table names them.
 BRIO_CH32_VECTOR(dma2_channel3_handler) {
-    if constexpr (v303_pair) {
+    if constexpr (vx03link::on_fourth_port) {
         link_dma_vector<>();
     }
 }
 BRIO_CH32_VECTOR(dma2_channel5_handler) {
-    if constexpr (v303_pair) {
+    if constexpr (vx03link::on_fourth_port) {
         link_dma_vector<>();
     }
 }
 
-/// The CH32V203C8's link: USART3 and its receive channel, DMA1's third, for
-/// the two-board key's ring. On the CH32V303 nothing here is the link's and
-/// the bodies are empty: bound LEAF (the vector guard's candidates; under
-/// the V4B's ilp32 a leaf binding that calls out is the plain one).
+/// USART3's link and its receive channel, DMA1's third, for the two-board
+/// key's ring, where USART3 is the link (the CH32V203C8, the CH32V303CB).
+/// Where UART4 is, nothing here is the link's and the bodies are empty.
+/// USART3's body is a leaf wherever it is not empty (the vector guard
+/// holds it to that on the CH32V303); the channel's calls out on the
+/// CH32V303CB, so it takes the trampoline there and everywhere.
 BRIO_CH32_LEAF_VECTOR(usart3_handler) {
-    if constexpr (!v303_pair) {
+    if constexpr (!vx03link::on_fourth_port) {
         (void)link_usart_vector<>();
     }
 }
-BRIO_CH32_LEAF_VECTOR(dma1_channel3_handler) {
-    if constexpr (!v303_pair) {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
+    if constexpr (!vx03link::on_fourth_port) {
         link_dma_vector<>();
     }
 }
@@ -4999,25 +5056,28 @@ int main() {
     bench.letter('e', "LIN: the break sent and the break detected", te_lin);
     bench.letter('f', "half duplex on one wire, and no pull-up on it", tf_half_duplex);
     bench.letter('g', "IrDA: the encoder's pulse and the decoder", tg_irda);
-    bench.letter('h', "the synchronous mode on the fourth port's clock pad", th_synchronous);
-    bench.letter('i', "the smartcard: its register face and its card clock", ti_smartcard);
+    if constexpr (has_full_fourth) {
+        bench.letter('h', "the synchronous mode on the fourth port's clock pad", th_synchronous);
+        bench.letter('i', "the smartcard: its register face and its card clock", ti_smartcard);
+    }
     bench.letter('j', "the flags and the two vectors", tj_flags);
     bench.letter('k', "hardware flow control: the CTS hold and the RTS hand", tk_flow);
     bench.letter('l', "the loopback PA2-PA3, when it is strapped", tl_loopback);
-    // The crossed pair's letters where the board keeps it: the CH32V203C8
-    // board's PA2-PB1 and PB0-PA3. The CH32V303 board's pair is retired -
-    // its PC10/PC11 are the SPI link's - and UART4's engines and the lot's
-    // registers are its letters n and o against the far chip instead.
-    if constexpr (!v303_pair) {
+    // The crossed pair's letters where the part has a fourth port and the
+    // board keeps the pair: the CH32V203C8 board's PA2-PB1 and PB0-PA3. On
+    // the CH32V303RC and VC the pair is retired - UART4's PC10/PC11 are the
+    // SPI link's - and UART4's engines and the lot's registers are letters
+    // n and o against the far chip instead.
+    if constexpr (crossed_pair_part) {
         bench.letter('m', "the crossed pair, when it is strapped", tm_cross);
         bench.letter('q', "errors under the engine on the pair: breaks in a stream, nothing stolen",
                      tq_errors);
     }
     bench.letter('r', "tx_idle() against the last stop bit on the pad", tr_tx_idle);
-    if constexpr (!v303_pair) {
+    if constexpr (crossed_pair_part) {
         bench.letter('s', "the burst edge from the vector on the pair, nothing polled", ts_edge);
     }
-    register_v303_letters();
+    register_upper_letters();
     register_two_letters();
 
     if (serial_ok) {

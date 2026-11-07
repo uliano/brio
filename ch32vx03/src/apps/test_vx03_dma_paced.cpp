@@ -55,7 +55,7 @@
 //      ping-pong engine filling two blocks in turn on TIM8's update
 //      (channel 1), each serviced from its channel's own handler
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -939,14 +939,18 @@ void tl_dma2_engines() {
 }
 
 
-/// The letters of the second controller, registered where there is one:
-/// a template, so a part without DMA2 carries neither their code nor
-/// their prose.
+/// The letters of the second controller, registered where there is one
+/// AND the timers they pace it with: k on TIM5, TIM6 or TIM7, l on TIM5
+/// and TIM8 - the CH32V303RC's and VC's, so the CH32V303CB, whose DMA2 has
+/// none of them to answer, carries neither. A template, so a part without
+/// them carries neither their code nor their prose.
 template <bool on = (device::dma_controller_count >= 2u)>
 void register_dma2_letters() {
-    if constexpr (on) {
+    if constexpr (on && (device::has_tim5 || tim_present(6) || tim_present(7))) {
         bench.letter('k', "DMA2: request-gated transfers from the timers' updates",
                      tk_dma2_requests<>);
+    }
+    if constexpr (on && device::has_tim5 && tim_present(8)) {
         bench.letter('l', "DMA2: the loop and ping-pong engines", tl_dma2_engines<>);
     }
 }

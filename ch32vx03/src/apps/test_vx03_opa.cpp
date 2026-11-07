@@ -37,14 +37,18 @@
 // PE8; on that board's evaluation wiring several of them carry a wire to
 // another pad left a floating input, which a pad driven by its own port or
 // by an amplifier drives with it, and PB2 is BOOT1 behind ten kilohms to
-// ground. On the CH32V203's board PA2 and PB0 are strapped to PB1 and PA3
-// (the crossed serial pair, inputs here) and PA6 and PA7 share a node with
-// PA8, never driven; and on the bench pair PB10, PB11, PB14 and PB15 there,
-// PB0 and PB1 on the CH32V303, are wires to the other board, which runs its
-// dark console while this suite does. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug
-// port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals),
-// PA0 on the CH32V203's board (its KEY) - and PB2, left undriven, as in
-// every suite of this target.
+// ground. The CH32V303CB's LQFP48 bonds none of port E and of port C only
+// PC13..PC15: each amplifier there has its CH0 pair and its first output
+// alone (OPA1 and OPA2 both pairs), and the letters judge what it bonds.
+// On the WeAct boards (the CH32V203C8T6's, the CH32V303CBT6's) PA2 and PB0
+// are strapped to PB1 and PA3 (the crossed serial pair) and PA6 and PA7
+// share a node with PA8, never driven; and on the bench pair PB10..PB15
+// there, PB0 and PB1 on the CH32V303VC, are wires to the other board, which
+// runs its dark console while this suite does. OPA3's CH0 negative input
+// is PB2, the WeAct boards' LED - lit while letters f and h drive it,
+// released dark at their end - and OPA4's first output is PA0, their KEY.
+// NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port),
+// PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals).
 //
 // What is exercised, letter by letter:
 //   a  OPA2 AS A COMPARATOR: its inputs driven to each rail in turn and
@@ -66,7 +70,7 @@
 //      time each amplifier's output takes to follow a rail-to-rail step of
 //      its inputs' difference, in each mode the die has
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -138,6 +142,17 @@ void bring_up() {
     vdda_mv = Adc<1>::vdda_mv(Adc<1>::read_settled(4));
 }
 
+/// A pad back to a floating input where this package bonds it: the
+/// CH32V303CB's LQFP48 bonds no second output of any amplifier and no CH1
+/// pair of OPA3 and OPA4 (ports C and E), and a Pin on a pad the package
+/// does not bond does not compile.
+template <class Io>
+void release_io() {
+    if constexpr (pad_bonded(Io::pad)) {
+        Io::pin::release();
+    }
+}
+
 void all_off() {
     Opa<1>::release();
     Opa<2>::release();
@@ -146,13 +161,13 @@ void all_off() {
     N1a::pin::release();
     N1b::pin::release();
     O1a::pin::release();
-    O1b::pin::release();
+    release_io<O1b>();
     P2a::pin::release();
     P2b::pin::release();
     N2a::pin::release();
     N2b::pin::release();
     O2a::pin::release();
-    O2b::pin::release();
+    release_io<O2b>();
     Adc<1>::release();
 }
 
@@ -259,7 +274,12 @@ bool pad_strapped() {
     return high && low;
 }
 
+/// `out1`: whether this package bonds OPA2's second output - not on the
+/// CH32V303CB, whose letter then judges the input selections alone. The
+/// pad's type is named through `out1`, so a part without it forms none.
+template <bool out1 = pad_bonded(O2b::pad)>
 void tb_selections() {
+    using Ob = OpaOut<(out1 ? 2 : 2), OpaPin::out1>;
     all_off();
     bring_up();
 
@@ -268,7 +288,10 @@ void tb_selections() {
     // push-pull neighbour on the same node would answer for the
     // amplifier. The strap is probed HERE, before anything is driven,
     // and never cached - a wire can leave the desk between two letters.
-    const bool out1_strapped = pad_strapped<O2b::pin, N2b::pin>();
+    bool out1_strapped = false;
+    if constexpr (out1) {
+        out1_strapped = pad_strapped<typename Ob::pin, N2b::pin>();
+    }
 
     // Both input pairs are driven, one pair at each rail, so that
     // SELECTING the other pair is what changes the output.
@@ -277,7 +300,9 @@ void tb_selections() {
     P2b::pin::output(false);   // PA7 low
     N2b::pin::output(true);    // PA5 high
     O2a::claim();
-    O2b::claim();
+    if constexpr (out1) {
+        Ob::claim();
+    }
 
     (void)Opa<2>::configure({.positive = OpaPin::positive0,
                              .negative = OpaPin::negative0,
@@ -291,6 +316,22 @@ void tb_selections() {
     wait_us(1000);
     const uint16_t pair1 = read_channel(O2a::adc_channel);
 
+    if constexpr (!out1) {
+        print(serial, "  the CH0 pair (PB14 high, PB10 low) puts the output at ", pair0,
+              " counts; the CH1 pair (PA7 low, PA5 high) at ", pair1, crlf);
+        print(serial, "  this package bonds no second output (P", O2b::pad.port, O2b::pad.pin,
+              "): the output move has no pad to land on", crlf);
+        bench.verdict("the positive input is a choice of two pads, and the choice is what the "
+                      "output follows",
+                      pair0 >= 3900u);
+        bench.verdict("so is the negative one: the same amplifier on the other pair reads the "
+                      "other rail",
+                      pair1 <= 100u);
+        bench.verdict("the driver says which channel the selected output lands on",
+                      Opa<2>::adc_channel() == O2a::adc_channel);
+        all_off();
+        return;
+    }
     if (out1_strapped) {
         print(serial, "  SKIPPED, no verdict claimed for the output move: PA4 (OPA2's OUT1) "
                       "is strapped to PA5, which this letter drives - a wire beats an "
@@ -302,11 +343,11 @@ void tb_selections() {
         all_off();
         return;
     }
-    if constexpr (O2b::reaches_adc) {
-        const uint16_t other_before = read_channel(O2b::adc_channel);
+    if constexpr (Ob::reaches_adc) {
+        const uint16_t other_before = read_channel(Ob::adc_channel);
         (void)Opa<2>::output(OpaPin::out1);
         wait_us(1000);
-        const uint16_t other_after = read_channel(O2b::adc_channel);
+        const uint16_t other_after = read_channel(Ob::adc_channel);
         const uint16_t first_after = read_channel(O2a::adc_channel);
         const uint8_t routed = Opa<2>::adc_channel();
         // OUT0, left behind, is no longer driven - and a pad nobody drives
@@ -321,7 +362,7 @@ void tb_selections() {
 
         print(serial, "  the CH0 pair (PB14 high, PB10 low) puts the output at ", pair0,
               " counts; the CH1 pair (PA7 low, PA5 high) at ", pair1, crlf);
-        print(serial, "  moved to OUT1 (PA4, channel ", O2b::adc_channel, "): that pad read ",
+        print(serial, "  moved to OUT1 (PA4, channel ", Ob::adc_channel, "): that pad read ",
               other_before, " counts before and ", other_after, " after; OUT0 left behind read ",
               first_after, " counts, then ", first_released ? "its pull-up" : "LOW",
               " as an input", crlf);
@@ -337,13 +378,13 @@ void tb_selections() {
         bench.verdict("and the one it left stops being driven: its own pull-up takes it",
                       first_released);
         bench.verdict("the driver says which channel the selected output lands on",
-                      routed == O2b::adc_channel);
-    } else {
+                      routed == Ob::adc_channel);
+    } else if constexpr (out1) {
         // OUT1 is PE14 here, which no converter channel reads: the CH1
         // pair says LOW, taken against the pad's pull-up.
         (void)Opa<2>::output(OpaPin::out1);
         wait_us(1000);
-        const bool other_low = !digital_level<O2b>(false);
+        const bool other_low = !digital_level<Ob>(false);
         // OUT0, left behind, is no longer driven: its own pull wins.
         O2a::pin::input(PinPull::up);
         wait_us(200);
@@ -375,7 +416,11 @@ void tb_selections() {
 // ===========================================================================
 // c - OPA1 on its own six pads
 // ===========================================================================
+/// `out1`: whether this package bonds OPA1's second output - not on the
+/// CH32V303CB, where the other input pair is judged on the first output.
+template <bool out1 = pad_bonded(O1b::pad)>
 void tc_first_amplifier() {
+    using Ob = OpaOut<(out1 ? 1 : 1), OpaPin::out1>;
     all_off();
     bring_up();
 
@@ -394,27 +439,41 @@ void tc_first_amplifier() {
     wait_us(1000);
     const uint16_t low = read_channel(O1a::adc_channel);
 
-    // Its other input pair and its other output.
+    // Its other input pair and its other output - the first output again
+    // where this package bonds no second one, the first pair's pads let go
+    // first so that nothing the port drives sits on that output's node (a
+    // board strap from PB0 to PA3 is the WeAct board's crossed pair).
     P1a::pin::output(true);    // PB15 high
     N1a::pin::output(false);   // PB11 low
-    O1b::claim();
+    if constexpr (out1) {
+        Ob::claim();
+    } else {
+        P1b::pin::release();
+        N1b::pin::release();
+    }
     (void)Opa<1>::configure({.positive = OpaPin::positive0,
                              .negative = OpaPin::negative0,
-                             .output = OpaPin::out1});
+                             .output = out1 ? OpaPin::out1 : OpaPin::out0});
     wait_us(1000);
     uint16_t other = 0;
-    if constexpr (O1b::reaches_adc) {
-        other = read_channel(O1b::adc_channel);
+    if constexpr (!out1) {
+        other = read_channel(O1a::adc_channel);
+    } else if constexpr (Ob::reaches_adc) {
+        other = read_channel(Ob::adc_channel);
     } else {
         // PE15 on the CH32V303: a level, against its pull-down.
-        other = digital_level<O1b>(true) ? adc_max_count : uint16_t{0};
+        other = digital_level<Ob>(true) ? adc_max_count : uint16_t{0};
     }
 
     print(serial, "  OPA1, positive PB0 negative PA6, output PA3 (channel ",
           O1a::adc_channel, "): ", high, " counts one way, ", low, " the other", crlf);
-    if constexpr (O1b::reaches_adc) {
+    if constexpr (!out1) {
+        print(serial, "  its CH0 pair (PB15 high, PB11 low) on OUT0, this package bonding no "
+                      "second output: ",
+              other, " counts", crlf);
+    } else if constexpr (Ob::reaches_adc) {
         print(serial, "  its CH0 pair (PB15 high, PB11 low) on OUT1 (PB1, channel ",
-              O1b::adc_channel, "): ", other, " counts", crlf);
+              Ob::adc_channel, "): ", other, " counts", crlf);
     } else {
         print(serial, "  its CH0 pair (PB15 high, PB11 low) on OUT1 (PE15, no converter "
                       "channel): ",
@@ -424,8 +483,9 @@ void tc_first_amplifier() {
                   "negative one",
                   high >= 3900u);
     bench.verdict("and low with them swapped", low <= 100u);
-    bench.verdict("its other input pair and its other output work the same way, on four more "
-                  "pads",
+    bench.verdict(out1 ? "its other input pair and its other output work the same way, on four more "
+                         "pads"
+                       : "its other input pair works the same way, on two more pads",
                   other >= 3900u);
 
     all_off();
@@ -568,12 +628,12 @@ void te_output() {
 template <uint8_t n>
 void release_upper() {
     Opa<n>::release();
-    OpaIn<n, OpaPin::positive0>::pin::release();
-    OpaIn<n, OpaPin::positive1>::pin::release();
-    OpaIn<n, OpaPin::negative0>::pin::release();
-    OpaIn<n, OpaPin::negative1>::pin::release();
-    OpaOut<n, OpaPin::out0>::pin::release();
-    OpaOut<n, OpaPin::out1>::pin::release();
+    release_io<OpaIn<n, OpaPin::positive0>>();
+    release_io<OpaIn<n, OpaPin::positive1>>();
+    release_io<OpaIn<n, OpaPin::negative0>>();
+    release_io<OpaIn<n, OpaPin::negative1>>();
+    release_io<OpaOut<n, OpaPin::out0>>();
+    release_io<OpaOut<n, OpaPin::out1>>();
 }
 
 // ===========================================================================
@@ -590,6 +650,10 @@ void upper_amplifier() {
         using Oa = OpaOut<n, OpaPin::out0>;
         using Ob = OpaOut<n, OpaPin::out1>;
         static_assert(Oa::reaches_adc && !Ob::reaches_adc);
+        /// What this package bonds beyond the CH0 pair and OUT0: the CH1
+        /// pair on port C and OUT1 on port E - neither on the CH32V303CB.
+        constexpr bool pair1 = pad_bonded(Pb::pad) && pad_bonded(Nb::pad);
+        constexpr bool out1 = pad_bonded(Ob::pad);
         all_off();
         release_upper<n>();
         bring_up();
@@ -609,47 +673,53 @@ void upper_amplifier() {
         wait_us(1000);
         const uint16_t low0 = read_channel(Oa::adc_channel);
 
-        // The CH1 pair, the other way round again, so the SELECTION is
-        // what moves the output: CH0 still says low.
-        Pb::pin::output(true);
-        Nb::pin::output(false);
-        (void)A::positive(OpaPin::positive1);
-        (void)A::negative(OpaPin::negative1);
-        wait_us(1000);
-        const uint16_t high1 = read_channel(Oa::adc_channel);
-
-        // OUT1, on port E: read as a level, both ways.
-        (void)A::output(OpaPin::out1);
-        Ob::claim();
-        const bool out1_high = digital_level<Ob>(true);
-        Pb::pin::clear();
-        Nb::pin::set();
-        wait_us(1000);
-        const bool out1_low = !digital_level<Ob>(false);
-        // And OUT0, left behind, is no longer driven: its own pull wins.
-        Oa::pin::input(PinPull::up);
-        wait_us(200);
-        const bool out0_released = Oa::pin::read();
-
         print(serial, "  OPA", n, " on OUT0 (channel ", Oa::adc_channel, "): CH0 pair ", high0,
-              " one way and ", low0, " the other, CH1 pair ", high1, crlf);
-        print(serial, "  on OUT1 (P", Ob::pad.port, Ob::pad.pin, ", no converter channel): ",
-              out1_high ? "HIGH" : "low", " against its pull-down, ",
-              out1_low ? "LOW" : "high", " against its pull-up; OUT0 left behind reads ",
-              out0_released ? "its pull-up" : "LOW", crlf);
+              " one way and ", low0, " the other");
         bench.verdict(n == 3u ? "OPA3 takes its three selections and saturates to either rail "
                                 "from its CH0 pair (PB13, PB2) on PA1"
                               : "OPA4 takes its three selections and saturates to either rail "
                                 "from its CH0 pair (PB12, PB1) on PA0",
                       cfg && high0 >= 3900u && low0 <= 100u);
-        bench.verdict(n == 3u ? "its CH1 pair (PC5, PC2) moves the same output the other way"
-                              : "its CH1 pair (PC4, PC3) moves the same output the other way",
-                      high1 >= 3900u);
-        bench.verdict(n == 3u ? "and its second output, PE7, carries both levels where no "
-                                "converter channel can read it - the 2 V swing clearing VIH"
-                              : "and its second output, PE8, carries both levels where no "
-                                "converter channel can read it - the 2 V swing clearing VIH",
-                      out1_high && out1_low && out0_released);
+        if constexpr (pair1 && out1) {
+            // The CH1 pair, the other way round again, so the SELECTION is
+            // what moves the output: CH0 still says low.
+            Pb::pin::output(true);
+            Nb::pin::output(false);
+            (void)A::positive(OpaPin::positive1);
+            (void)A::negative(OpaPin::negative1);
+            wait_us(1000);
+            const uint16_t high1 = read_channel(Oa::adc_channel);
+
+            // OUT1, on port E: read as a level, both ways.
+            (void)A::output(OpaPin::out1);
+            Ob::claim();
+            const bool out1_high = digital_level<Ob>(true);
+            Pb::pin::clear();
+            Nb::pin::set();
+            wait_us(1000);
+            const bool out1_low = !digital_level<Ob>(false);
+            // And OUT0, left behind, is no longer driven: its own pull wins.
+            Oa::pin::input(PinPull::up);
+            wait_us(200);
+            const bool out0_released = Oa::pin::read();
+
+            print(serial, ", CH1 pair ", high1, crlf);
+            print(serial, "  on OUT1 (P", Ob::pad.port, Ob::pad.pin, ", no converter channel): ",
+                  out1_high ? "HIGH" : "low", " against its pull-down, ",
+                  out1_low ? "LOW" : "high", " against its pull-up; OUT0 left behind reads ",
+                  out0_released ? "its pull-up" : "LOW", crlf);
+            bench.verdict(n == 3u ? "its CH1 pair (PC5, PC2) moves the same output the other way"
+                                  : "its CH1 pair (PC4, PC3) moves the same output the other way",
+                          high1 >= 3900u);
+            bench.verdict(n == 3u ? "and its second output, PE7, carries both levels where no "
+                                    "converter channel can read it - the 2 V swing clearing VIH"
+                                  : "and its second output, PE8, carries both levels where no "
+                                    "converter channel can read it - the 2 V swing clearing VIH",
+                          out1_high && out1_low && out0_released);
+        } else {
+            static_assert(!pair1 && !out1, "a package bonds both of the CH1 pair and OUT1, or neither");
+            print(serial, "; this package bonds neither its CH1 pair nor its second output", crlf);
+        }
         release_upper<n>();
         all_off();
     }
@@ -833,8 +903,11 @@ void th_high_speed() {
 template <bool on = opa_class_has_four>
 void register_upper_letters() {
     if constexpr (on) {
-        bench.letter('f', "OPA3: both input pairs, both outputs", tf_opa3<>);
-        bench.letter('g', "OPA4: both input pairs, both outputs", tg_opa4<>);
+        constexpr bool whole = pad_bonded(opa_pad(3, OpaPin::out1));
+        bench.letter('f', whole ? "OPA3: both input pairs, both outputs" : "OPA3: its CH0 pair on its first output",
+                     tf_opa3<>);
+        bench.letter('g', whole ? "OPA4: both input pairs, both outputs" : "OPA4: its CH0 pair on its first output",
+                     tg_opa4<>);
         bench.letter('h', "the high-speed bits, and how fast an output follows", th_high_speed<>);
     }
 }

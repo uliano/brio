@@ -34,13 +34,15 @@
 // Wiring: on a WeAct CH32V203C8T6 core board the USB-C connector is on
 // PA11/PA12, which is the USBD block's pair (the USBFS one on PB6/PB7
 // is a different peripheral and a different chapter) - measured, the
-// host's pull-downs hold those two pads and PB6/PB7 are free. On WCH's
-// CH32V303 evaluation board it is the connector P14, on PA11/PA12 too,
-// which that part gives its host/device controller. The clock must be
-// 48, 96 or 144 MHz for either controller to be fed its 48. The LED is
-// the board's on PB2 (active high on the WeAct board, low on WCH's).
+// host's pull-downs hold those two pads and PB6/PB7 are free. The WeAct
+// CH32V303CBT6 board has the same connector on the same two pads, and on
+// WCH's CH32V303 evaluation board it is the connector P14, on PA11/PA12
+// too - which the CH32V303 gives its host/device controller. The clock
+// must be 48, 96 or 144 MHz for either controller to be fed its 48. The
+// LED is the board's on PB2 (active high on the WeAct boards, low on
+// WCH's).
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -75,12 +77,19 @@ constexpr SysClock clock;
 namespace {
 
 using Led = brio::Pin<'B', 2>;
-// The CH32V303's board is WCH's evaluation board, whose LED hangs from
-// 3.3 V and lights with the pad low (docs/boards/ch32v303-evt.md); the
-// WeAct CH32V203 board's lights with it high. The part's class names the
-// board.
-constexpr bool led_lit_low =
-    brio::device::device_class == brio::DeviceClass::v30x_d8;
+/// THE LED'S POLARITY IS THE BOARD'S - a fact no part or device class
+/// implies and the build has no name for: the CH32V303VC is benched on
+/// WCH's evaluation board, whose LED hangs from 3.3 V and lights with the
+/// pad low (docs/boards/ch32v303-evt.md); every other part on a WeAct core
+/// board (the CH32V203C8T6's, the CH32V303CBT6's), whose LED lights with
+/// it high. So the part's NUMBER names the board here, and a board file is
+/// where the fact belongs.
+constexpr bool same_name(const char* a, const char* b) {
+    for (; *a != '\0' && *a == *b; ++a, ++b) {
+    }
+    return *a == *b;
+}
+constexpr bool led_lit_low = same_name(brio::device::part_name, "CH32V303VC");
 
 // The device controller with its CAN-safe 384 bytes of packet memory
 // where the part has one; the host/device controller with its buffers

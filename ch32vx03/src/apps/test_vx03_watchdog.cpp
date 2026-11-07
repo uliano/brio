@@ -17,10 +17,12 @@
 // predicate, the early-wake-up flag and both time-out arithmetics, all
 // measured with neither watchdog armed - and THE RESETS ARE TWO LETTERS
 // BY NAME, w and v, which reboot the board once per leg and resume from
-// a .noinit token:
-//     brio run <board> w --app test_vx03_watchdog --expect="->" --timeout 60
-//     brio run <board> v --app test_vx03_watchdog --expect="->" --timeout 60
-//     brio run <board> p --app test_vx03_watchdog --timeout 60
+// a .noinit token - with p, by name as well; each ends on its own tally
+// line, which the judge's "fail" marker waits for (a letter by name
+// prints no ALL: line):
+//     brio run <board> w --app test_vx03_watchdog --expect=fail --timeout 60
+//     brio run <board> v --app test_vx03_watchdog --expect=fail --timeout 60
+//     brio run <board> p --app test_vx03_watchdog --expect=fail --timeout 60
 // Their legs are the ones only a reset can prove: the independent
 // watchdog's time-out MEASURED against the tick and IWDGRSTF at the next
 // boot, the window one's time-out and WWDGRSTF, a refresh BEFORE the
@@ -62,7 +64,7 @@
 //      one another; then Iwdg::force_reset() and Wwdg::force_reset(),
 //      each timed by the tick's vector and named by its flag
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

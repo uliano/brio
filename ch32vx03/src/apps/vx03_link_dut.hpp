@@ -6,12 +6,13 @@
 // tooling beside the suites that include it, as usart_link.hpp sits
 // beside the peers; nothing in brio knows it exists.
 //
-// THE LINK (docs/boards/weact-ch32v203c8.md, docs/boards/ch32v303-evt.md):
-// USART3 on its default column (TX PB10, RX PB11) on the CH32V203C8,
-// crossed to UART4 on its SECOND column (TX PB0, RX PB1) on the CH32V303 -
-// each the other's DUT and peer. A part that is not one end of it keeps
-// USART2's name, so a suite still links there, and registers none of its
-// two-board letters (`present`).
+// THE LINK (docs/boards/weact-ch32v203c8.md, docs/boards/ch32v303-evt.md),
+// each end the other's DUT and peer, on the port vx03_pair.hpp's one rule
+// chooses from the part's facts: UART4 on its second column (TX PB0, RX
+// PB1) where the fourth port is a plain UART with that column, USART3 on
+// its default column (TX PB10, RX PB11) everywhere else. A part with
+// neither keeps USART2's name, so a suite still links there, and registers
+// none of its two-board letters (`present`).
 //
 // BOTH ENDS RUN ON THEIR CRYSTALS (8 MHz x18 = 144 MHz, PCLK1 72 MHz), so
 // both divide one bus rate by one arithmetic and every rate is the same
@@ -39,23 +40,38 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "vx03_pair.hpp"
 
 // THE LINK PROTOCOL IS SHARED, NOT COPIED: pure encoding, not one register.
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
 namespace vx03link {
 
-inline constexpr bool v303 = brio::device::device_class == brio::DeviceClass::v30x_d8;
-inline constexpr uint8_t wanted = v303 ? 4 : 3;
-inline constexpr uint8_t wanted_column = v303 ? 1 : 0;
-/// Whether this part is one end of the pair: the CH32V203C8's USART3, the
-/// CH32V303RC's and VC's UART4 on its second column.
+/// The link's port and column as the part's facts choose them, ONE rule for
+/// both ends (vx03_pair.hpp, the header).
+inline constexpr uint8_t wanted = vx03pair::link_port;
+inline constexpr uint8_t wanted_column = vx03pair::link_column;
+/// Whether this part is one end of the pair: UART4 on its second column, or
+/// USART3 on its default one (the header).
 inline constexpr bool present = brio::device::has_usart(wanted) && brio::usart_remap_valid(wanted, wanted_column);
 inline constexpr uint8_t port_n = present ? wanted : 2;
 inline constexpr uint8_t column = present ? wanted_column : 0;
 inline constexpr brio::UsartPads pads = brio::usart_pads_for(port_n, column);
-/// The far chip's series, as its ident label spells it after the V.
-inline constexpr char far_series[4] = {v303 ? '2' : '3', '0', '3', '\0'};
+/// Whether the link is UART4 (its vectors and DMA2's channels 3 and 5) or
+/// USART3 (its vector and DMA1's channels 2 and 3, table 11-5), for the
+/// suites that bind both sets.
+inline constexpr bool on_fourth_port = present && port_n == 4;
+/// The link port's name for a message: "USART" where the instance is a full
+/// USART, "UART" where it carries TX and RX alone, before port_n.
+inline constexpr const char* port_kind = brio::device::usart_full(port_n) ? "USART" : "UART";
+
+/// Whether an ident label names a part of this stratum - "V203..." or
+/// "V303...", the part number after its CH32 prefix (vx03_peer.hpp): the
+/// far chip is whichever part the desk pairs with this one, and its label
+/// says which.
+inline constexpr bool stratum_label(const char* label) {
+    return label[0] == 'V' && (label[1] == '2' || label[1] == '3') && label[2] == '0' && label[3] == '3';
+}
 
 template <typename Out, typename Clk>
 struct Dut {
@@ -271,11 +287,10 @@ struct Dut {
     }
 
     /// Whether an ident is the far chip's peer: this protocol's sanity,
-    /// the kind 0x05, the label the other series' part number.
+    /// the kind 0x05, a part number of this stratum for its label.
     static bool far_peer(const link::Ident& d) {
         return d.sanity == link::ident_sanity && link::peer_kind(d.version) == link::peer_ch32vx03 &&
-               d.label[0] == 'V' && d.label[1] == far_series[0] && d.label[2] == far_series[1] &&
-               d.label[3] == far_series[2];
+               stratum_label(d.label);
     }
 
     /// The report of the last action, after its bound has had time to run.

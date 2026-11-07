@@ -4,8 +4,8 @@
 // I2cHost and its DMA engines, run against the desk partner and its
 // unchanged instrument (ch32vx03/src/apps/twi_peer.cpp) while an object of
 // the highest priority preempts it at moments the traffic does not choose.
-// ONE SOURCE, TWO IMAGES: the CH32V203C8T6 against the CH32V303VCT6 and the
-// other way round, each board the other's peer, as test_vx03_i2c's peer
+// ONE SOURCE, ONE IMAGE PER END of the desk pair - the CH32V203C8T6 and the
+// CH32V303 board -, each board the other's peer, as test_vx03_i2c's peer
 // letters are. Every verdict is the traffic judged byte-exact and every
 // status the one the wire produced, as those Tenuto letters judge them;
 // nothing here changes a driver or a service.
@@ -106,15 +106,13 @@
 // does not rise for a Stop after a refused byte, so the deadline's re-init
 // is what puts ACK back) - I2cTraits::refusal_holds_address below.
 //
-// THE WIRES, fixed on the desk (docs/boards/weact-ch32v203c8.md,
-// docs/boards/ch32v303-evt.md; test_vx03_i2c's pair): V203 PB6 to V303 PB6
-// (SCL), V203 PB7 to V303 PB7 (SDA), 2.2 kOhm from each line to the
-// CH32V203C8T6 board's 3.3 V, the grounds. THE PULL-UPS ARE ONE BOARD'S:
-// a CH32V303VCT6 run needs the CH32V203C8T6's board powered, and every
-// letter that drives the wire first reads both lines high on their pads
-// (I2cTraits::bring_up()). The CH32V303's PA4 is not 5 V tolerant: that
-// board stays powered whenever the CH32V203's runs. NOTHING LIT: no letter
-// drives the LED's pad PB2.
+// THE WIRES, fixed on the desk (docs/boards/; test_vx03_i2c's pair): PB6
+// to PB6 (SCL), PB7 to PB7 (SDA), I2C1's default column at both ends,
+// 2.2 kOhm from each line to the CH32V203C8T6 board's 3.3 V, the grounds.
+// THE PULL-UPS ARE ONE BOARD'S: a run on the CH32V303 end needs the
+// CH32V203C8T6's board powered, and every letter that drives the wire
+// first reads both lines high on their pads (I2cTraits::bring_up()).
+// NOTHING LIT: no letter drives the LED's pad PB2.
 //
 // The letters (z: n o p q w h i; x outside it), each but i and x run as
 // seven passes (the shared body's control and six pressures):
@@ -151,7 +149,7 @@
 //   x  (outside z) 400 writes of 16 silent and 400 under 97 us x 3000:
 //      the landings inside start() counted, and of them those with MSL set.
 //
-// build: boards = v203c8,v303vc
+// build: boards = v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -195,8 +193,6 @@ namespace {
 
 using namespace brio;
 
-constexpr bool v303 = device::device_class == DeviceClass::v30x_d8;
-
 using P = Ch32vx03RubatoPlatform<>;
 constexpr uint32_t core_hz = SysClock::hz;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
@@ -219,7 +215,9 @@ static_assert(Pulse::clock_hz(SysClock{}) == SysClock::hz, "TIM2 counts HCLK at 
 constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
 static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
 constexpr const char* pressure_name = "TIM2";
-constexpr const char* peer_name = v303 ? "the CH32V203C8T6" : "the CH32V303VCT6";
+/// The far board, named generically: whichever part the desk pairs with this
+/// one, which its ident names once it answers.
+constexpr const char* peer_name = "the desk partner";
 
 /// A busy wait of `cycles` HCLK cycles: the STK counter read bare, one
 /// load a turn, the restart folded in, for a span under half a period; the
@@ -349,7 +347,7 @@ struct I2cTraits {
     /// begins.
     static void tick_spin_begin();
     /// Both lines high on their pads before the letter's first tenure: the
-    /// pull-ups are the CH32V203C8T6 board's, so on the CH32V303VCT6 a line
+    /// pull-ups are the CH32V203C8T6 board's, so on the CH32V303 end a line
     /// low at rest is that board unpowered (or a line held).
     static bool bring_up() { return SclPin::read() && SdaPin::read(); }
 };

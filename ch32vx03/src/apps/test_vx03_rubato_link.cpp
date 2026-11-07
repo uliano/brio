@@ -5,10 +5,9 @@
 // ch32vx03/usart.hpp's Uart and its receive engine, run against the desk
 // partner and its unchanged instruments (ch32vx03/src/apps/spi_peer.cpp,
 // usart_peer.cpp) while an object of the highest priority preempts them at
-// moments the traffic does not choose. ONE SOURCE, TWO IMAGES: the
-// CH32V203C8T6 against the CH32V303VCT6 and the other way round, each
-// board the other's peer, as test_vx03_spi's and test_vx03_serial's pair
-// letters are. Every verdict is the traffic judged byte-exact, as those
+// moments the traffic does not choose. ONE SOURCE, ONE IMAGE PER END of
+// the desk pair, each board the other's peer, as test_vx03_spi's and
+// test_vx03_serial's pair letters are. Every verdict is the traffic judged byte-exact, as those
 // Tenuto suites judge it; nothing here changes a driver or a service.
 //
 // A test_<target>_<subject> suite in the bench grammar (util/testbench.hpp)
@@ -22,10 +21,11 @@
 // the reference manual's chapters (RM 20 the SPI, RM 18 the USART, RM 11
 // the DMA) and the driver headers:
 //
-//   THE SPI HOST. The pair's instance (test_vx03_spi's): SPI2 on its one
-//   column on the CH32V203C8 (SCK PB13, MISO PB14, MOSI PB15, the select
-//   PB12), SPI3 on its SECOND column on the CH32V303VC (SCK PC10, MISO
-//   PC11, MOSI PC12, the select PA4), with the DMA engines on the
+//   THE SPI HOST. The pair's instance (vx03_pair.hpp's rule): SPI2 on its
+//   one column where the part has no SPI3 - the CH32V203C8, the CH32V303CB
+//   (SCK PB13, MISO PB14, MOSI PB15, the select PB12) -, SPI3 on its SECOND
+//   column where it has - the CH32V303VC (SCK PC10, MISO PC11, MOSI PC12,
+//   the select PA4) -, with the DMA engines on the
 //   instance's own two slots (table 11-5: SPI2 on DMA1's 4 and 5, SPI3 on
 //   DMA2's 1 and 2), the receive channel at very_high and the transmit at
 //   high, half-word beats for 16-bit frames. The select is a GPIO the
@@ -46,10 +46,11 @@
 //   outlasts a byte frame at /128 and faster, a 16-bit one at /64 and faster.
 //   The clock waits for the read, so that is a gap on the bus and the bound
 //   on lost frames is ZERO in every pass.
-//   THE UART. The pair's link port (vx03_link_dut.hpp): USART3 on PB10/PB11
-//   on the CH32V203C8, UART4 on its second column, PB0/PB1, on the
-//   CH32V303VC, both engines on the port's slots (RM 11.2.3: USART3 on
-//   DMA1's 2 and 3, UART4 on DMA2's 5 and 3) - the receive engine a
+//   THE UART. The pair's link port (vx03_pair.hpp's rule): USART3 on
+//   PB10/PB11 on the CH32V203C8 and the CH32V303CB, UART4 on its second
+//   column, PB0/PB1, on the CH32V303VC, both engines on the port's slots
+//   (RM 11.2.3: USART3 on DMA1's 2 and 3, UART4 on DMA2's 5 and 3) - the
+//   receive engine a
 //   circular ring of 2048 over the whole storage, never re-armed, the port
 //   told at the idle line, at RXNE for a one-frame burst and at the half
 //   and full marks of a lap; the transmit engine a block a contiguous run
@@ -73,8 +74,8 @@
 //   platform.md) and the way back, is shorter than the shortest period's
 //   13968 cycles, so no tick finds the last one still queued; at 97 us x
 //   3000 it takes 21 % of the core. TIM2's update request is a DMA1
-//   channel 2 row on the CH32V203 - the link's transmit channel there - so
-//   UDE and every CCxDE stay clear, and letter i reads them clear.
+//   channel 2 row - the link's transmit channel where the link is USART3 -
+//   so UDE and every CCxDE stay clear, and letter i reads them clear.
 //   THE RULER. The kernel ticker's composed cycles() (the tick count and
 //   the STK counter's position, ch32vx03/ticker.hpp), which the shared
 //   body's passes and spans need monotone across a tick; spin() reads the
@@ -89,19 +90,17 @@
 //   character every 87 us (12500 cycles), against the longest preemption
 //   there, a 3000-cycle spin and the scheduler.
 //
-// THE WIRES, fixed on the desk (docs/boards/weact-ch32v203c8.md,
-// docs/boards/ch32v303-evt.md; test_vx03_spi's and test_vx03_serial's
-// pair):
-//   SPI    V203 PB12 - V303 PA4 (the select), PB13 - PC10 (SCK), PB14 -
-//          PC11 (MISO), PB15 - PC12 (MOSI): the pair's flat cable, 33 Ohm
-//          on SCK at each end, 56 Ohm at the V203's PB14 and at the V303's
-//          PC12, two grounds of its own
-//   UART   V203 PB10 (USART3 TX) -> V303 PB1 (UART4 RX), V203 PB11 <- V303
-//          PB0
+// THE WIRES, fixed on the desk (docs/boards/; test_vx03_spi's and
+// test_vx03_serial's pair), each end on the pads its own rule names:
+//   SPI    the select, SCK, MISO and MOSI of each end's instance, select to
+//          select (PB12..PB15 on an SPI2 end; PA4, PC10, PC11, PC12 on an
+//          SPI3 end)
+//   UART   each end's TX into the other's RX (PB10/PB11 on a USART3 end,
+//          PB0/PB1 on a UART4 end)
 // The SPI letters (key z) want the peer running `spi_peer`, the UART ones
-// (key y) `usart_peer`. The CH32V303's PA4 is not 5 V tolerant: that board
-// stays powered whenever the CH32V203's runs. NOTHING LIT: no letter drives
-// the LED's pad PB2.
+// (key y) `usart_peer`. An SPI3 end's select PA4 is not 5 V tolerant: that
+// board stays powered whenever the far one runs. NOTHING LIT: no letter
+// drives the LED's pad PB2.
 //
 // The letters (z: n o p w i; y: t u v), each of z and y run as seven passes
 // (the shared body's control and six pressures):
@@ -175,7 +174,7 @@
 //      period (56016 cycles) on average, so a pass with none has a chance
 //      of e^-21.
 //
-// build: boards = v203c8,v303vc
+// build: boards = v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -223,9 +222,8 @@ namespace {
 
 using namespace brio;
 
-static_assert(vx03link::present, "the link suite runs on the desk pair's two parts, the CH32V203C8 and the "
-                                 "CH32V303VC (the boards line)");
-constexpr bool v303 = vx03link::v303;
+static_assert(vx03link::present, "the link suite runs on a part that is one end of the desk pair "
+                                 "(vx03_link_dut.hpp, the boards line)");
 
 using P = Ch32vx03RubatoPlatform<>;
 constexpr uint32_t core_hz = SysClock::hz;
@@ -273,9 +271,14 @@ TwoKeyTestBench<Serial, 'y'> bench;
 // ---- the SPI link ------------------------------------------------------------------
 
 /// SPI3 on its second column where the part has SPI3, SPI2's one column
-/// otherwise (the file header).
-constexpr uint8_t pair_n = spi_present(3) ? 3u : 2u;
-constexpr uint8_t pair_code = pair_n == 3u ? 1u : 0u;
+/// otherwise (the file header, vx03_pair.hpp's rule).
+constexpr uint8_t pair_n = vx03pair::spi_link_instance;
+constexpr uint8_t pair_code = vx03pair::spi_link_column;
+static_assert(pair_n == 2u || pair_n == 3u, "the link suite hosts the far client on SPI2 or SPI3");
+/// Which vectors the two links take: SPI3's engines on DMA2's channels 1
+/// and 2 or SPI2's on DMA1's 4 and 5; UART4's on DMA2's 5 and 3 or
+/// USART3's on DMA1's 2 and 3 (table 11-5, RM 11.2.3).
+constexpr bool spi_on_third = pair_n == 3u;
 constexpr SpiPins link_pins = spi_pins_for(pair_n, pair_code);
 using PairS = Spi<pair_n>;
 /// The instance's own slots, the element a half-word: 16-bit frames ride
@@ -321,7 +324,9 @@ static_assert(Pulse::clock_hz(SysClock{}) == SysClock::hz, "TIM2 counts HCLK at 
 constexpr uint32_t pulse_per_us = SysClock::hz / 1'000'000u;
 static_assert(389u * pulse_per_us - 1u <= 0xFFFFu, "the longest period fits TIM2's 16 bits");
 constexpr const char* pressure_name = "TIM2";
-constexpr const char* peer_name = v303 ? "the CH32V203C8T6" : "the CH32V303VCT6";
+/// The far board, named generically: whichever part the desk pairs with this
+/// one, which its ident names once it answers.
+constexpr const char* peer_name = "the desk partner";
 
 /// Letter w's rate and Pressure's length on this host (the file header):
 /// /8, and a dma request of one frame, on the engines; Minor's polled requests
@@ -458,12 +463,11 @@ void task_down() {
 // n - the peer's command channel
 // =============================================================================
 
-/// The far chip's spi_peer: the sanity byte, the stratum's kind and the
-/// other series' part number as its label (vx03_peer.hpp).
+/// The far chip's spi_peer: the sanity byte, the stratum's kind and a part
+/// number of this stratum as its label (vx03_peer.hpp).
 bool far_spi_peer(const spilink::Ident& d) {
     return d.sanity == spilink::ident_sanity && spilink::peer_kind(d.version) == spilink::peer_ch32vx03 &&
-           d.label[0] == 'V' && d.label[1] == vx03link::far_series[0] && d.label[2] == vx03link::far_series[1] &&
-           d.label[3] == vx03link::far_series[2];
+           vx03link::stratum_label(d.label);
 }
 
 void tn_peer_link() {
@@ -984,9 +988,9 @@ void console_banner() {
     bench.menu();
 }
 
-/// DMA2's gate, the CH32V303's (its SPI3 and UART4 rows); a part with one
-/// controller forms no Dma<2> at all.
-template <bool on = v303>
+/// DMA2's gate, where either link's rows are DMA2's (SPI3's, UART4's); a
+/// part whose links are both on DMA1 forms no Dma<2> at all.
+template <bool on = (PairS::dma_rx_slot.controller == 2u || link_rx_slot.controller == 2u)>
 void open_second_controller() {
     if constexpr (on) {
         Dma<on ? 2u : 1u>::open();
@@ -997,11 +1001,11 @@ void open_second_controller() {
 
 // ---- target glue ------------------------------------------------------------
 //
-// Each vector is the binding of one part: the other part's body is empty.
-// A vector that posts is BRIO_CH32_VECTOR, a naked trampoline under the
-// CH32V303's ilp32f; one the CH32V203 alone uses is bound LEAF, which is
-// BRIO_CH32_VECTOR exactly under the V4B's ilp32 and a true leaf (an empty
-// body) on the CH32V303.
+// Each vector is the binding of one arrangement of the links: where the
+// part's link is another instance, the body is empty. A vector that posts
+// is BRIO_CH32_VECTOR, a naked trampoline under the CH32V303's ilp32f
+// whatever the part's arrangement, since every vector here posts on some
+// part of the class.
 
 BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) {
@@ -1031,25 +1035,25 @@ BRIO_CH32_VECTOR(tim2_handler) {
         brio::post<SpiArb>(brio::TransferDone{Host::status()});
     }
 }
-/// The CH32V203's SPI2: DMA1's channel 4 receives, 5 transmits.
-BRIO_CH32_LEAF_VECTOR(dma1_channel4_handler) {
-    if constexpr (!v303) {
+/// SPI2: DMA1's channel 4 receives, 5 transmits.
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
+    if constexpr (!spi_on_third) {
         spi_engine_done(Host::dma_rx_isr());
     }
 }
-BRIO_CH32_LEAF_VECTOR(dma1_channel5_handler) {
-    if constexpr (!v303) {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
+    if constexpr (!spi_on_third) {
         spi_engine_done(Host::dma_tx_isr());
     }
 }
-/// The CH32V303's SPI3: DMA2's channel 1 receives, 2 transmits.
+/// SPI3: DMA2's channel 1 receives, 2 transmits.
 BRIO_CH32_VECTOR(dma2_channel1_handler) {
-    if constexpr (v303) {
+    if constexpr (spi_on_third) {
         spi_engine_done(Host::dma_rx_isr());
     }
 }
 BRIO_CH32_VECTOR(dma2_channel2_handler) {
-    if constexpr (v303) {
+    if constexpr (spi_on_third) {
         spi_engine_done(Host::dma_tx_isr());
     }
 }
@@ -1057,43 +1061,43 @@ BRIO_CH32_VECTOR(dma2_channel2_handler) {
 // The link port: the instance's vector (the idle line, a burst's first
 // frame, the errors) and its two channels' (the ring's marks, a block's
 // completion).
-BRIO_CH32_LEAF_VECTOR(usart3_handler) {
-    if constexpr (!v303) {
+BRIO_CH32_VECTOR(usart3_handler) {
+    if constexpr (!vx03link::on_fourth_port) {
         if (link_live && LinkPort::isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }
     }
 }
-BRIO_CH32_LEAF_VECTOR(dma1_channel3_handler) {
-    if constexpr (!v303) {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
+    if constexpr (!vx03link::on_fourth_port) {
         if (link_live && LinkPort::dma_isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }
     }
 }
-BRIO_CH32_LEAF_VECTOR(dma1_channel2_handler) {
-    if constexpr (!v303) {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
+    if constexpr (!vx03link::on_fourth_port) {
         if (link_live && LinkPort::dma_isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }
     }
 }
 BRIO_CH32_VECTOR(uart4_handler) {
-    if constexpr (v303) {
+    if constexpr (vx03link::on_fourth_port) {
         if (link_live && LinkPort::isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }
     }
 }
 BRIO_CH32_VECTOR(dma2_channel3_handler) {
-    if constexpr (v303) {
+    if constexpr (vx03link::on_fourth_port) {
         if (link_live && LinkPort::dma_isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }
     }
 }
 BRIO_CH32_VECTOR(dma2_channel5_handler) {
-    if constexpr (v303) {
+    if constexpr (vx03link::on_fourth_port) {
         if (link_live && LinkPort::dma_isr()) {
             brio::post<LinePort>(brio::RxActivity{});
         }

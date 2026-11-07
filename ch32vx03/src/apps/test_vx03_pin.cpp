@@ -76,7 +76,7 @@
 //   k  THE KEY on PA0, by name: ten seconds of levels at 10 ms while a
 //      person presses the button
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

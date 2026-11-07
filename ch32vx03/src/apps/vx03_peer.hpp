@@ -1,5 +1,6 @@
 // vx03_peer.hpp - what every bench peer of this stratum shares: the time
-// base, the ident label and the die on the banner. App-level bench
+// base, the ident label and the die on the banner; the pair's two links
+// are vx03_pair.hpp's, which this file includes. App-level bench
 // tooling beside the peers that include it, as the link protocols sit
 // beside theirs; nothing in brio knows it exists.
 //
@@ -22,7 +23,7 @@
 // at twice the fastest host's SCK, a port's at the far port's 4.5 Mbaud).
 //
 // THE LABEL is the part number after its CH32 prefix ("V203C8",
-// "V303VC"), NUL padded to eight characters: with two parts of this
+// "V303CB"), NUL padded to eight characters: with two parts of this
 // stratum on one bus, WHICH PART answers is what a DUT reads, and the
 // CLASS follows from it (CH32V20x_D6, CH32V30x_D8). The die - the chip
 // identifier and the UID - is on the peer's console banner instead.
@@ -35,6 +36,7 @@
 #include "ch32vx03/device.hpp"
 #include "ch32vx03/nvm.hpp"
 #include "util/print.hpp"
+#include "vx03_pair.hpp"
 
 namespace vx03peer {
 
@@ -88,7 +90,7 @@ inline bool start_spi_clock(bool& crystal) {
 
 /// THE SERIAL PEER'S TIME BASE is the same 144 MHz: USART3 and UART4
 /// count PCLK1, and 18.3's divisor floor of 16 on a 72 MHz bus is the 4.5
-/// Mbaud both desk ports reach - the far port's top, so the peer's bus
+/// Mbaud either link port reaches - the far port's top, so the peer's bus
 /// must be as fast; and a PB1 timer then counts 144 MHz, SIX core cycles
 /// a protocol tick, so every edge the waveform engine places and every
 /// span the receiver stamps converts to ticks exactly.

@@ -15,14 +15,17 @@
 // ONE PEER FOR THE STRATUM, ON THE PORT AND THE TIMER THE PART LINKS.
 // `PeerLink<...>` names the port, its column, the timer whose two channels
 // share the port's pads, and the two DMA channels table 11-5 wires to
-// those channels; the part picks it:
-//  - the CH32V203C8: USART3 on its default column (TX PB10, RX PB11,
-//    table 10-25) and TIM2 on its code 10 (CH3 PB10, CH4 PB11, table
-//    10-16), the channels' requests on DMA1's channels 1 and 7;
-//  - the CH32V303RC and VC: UART4 on its SECOND column (TX PB0, RX PB1,
-//    table 10-26 - its default is PC10/PC11, the SPI link's pads on the
-//    desk) and TIM3 on its code 00 (CH3 PB0, CH4 PB1, table 10-17), the
-//    requests on DMA1's channels 2 and 3.
+// those channels; vx03_pair.hpp's one rule, read off the part's facts,
+// picks it:
+//  - USART3 on its default column (TX PB10, RX PB11, table 10-25) and
+//    TIM2 on its code 10 (CH3 PB10, CH4 PB11, table 10-16), the channels'
+//    requests on DMA1's channels 1 and 7 - the CH32V203C8, the CH32V303CB
+//    and RB;
+//  - UART4 on its SECOND column (TX PB0, RX PB1, table 10-26 - its default
+//    is PC10/PC11, the SPI link's pads on the desk where the part has
+//    SPI3) and TIM3 on its code 00 (CH3 PB0, CH4 PB1, table 10-17), the
+//    requests on DMA1's channels 2 and 3 - where the fourth port is a
+//    plain UART with that column, the CH32V303RC and VC.
 // The port is polled through the resource - no interrupt, no ring: an
 // instrument's loop owns the instance (RM 18.10.1's flags read and cleared
 // in the loop). The desk wires it crossed, full duplex, to the far chip of
@@ -111,8 +114,9 @@
 // link: UART4 has none, USART3's PB12 is the SPI link's select), as are
 // clk2x (this block has no OVER8, 18.3), invert_xck and mpcm (this
 // receiver wakes on ONE address, 18.10.4's ADD, where the protocol's MPCM
-// hands every address frame up); 5- and 6-bit words (M_EXT is the
-// CH32V303's lot's, absent on this desk's die, docs/ch32vx03/usart.md) and
+// hands every address frame up); 5- and 6-bit words (M_EXT is a register
+// some lots of the CH32V303 have and others lack, docs/ch32vx03/usart.md,
+// and the peer serves every die alike) and
 // nine data bits with a parity bit are refused; the four stop codes are
 // served as CTLR2.STOP takes them - and a frame this transmitter SENDS at
 // the 0.5 and 1.5 codes is one and two stop bits long (measured,
@@ -131,10 +135,10 @@
 // beat).
 //
 // The ident label is the part number after its CH32 prefix ("V203C8",
-// "V303VC", vx03_peer.hpp), the die on the banner; the version's high byte
+// "V303CB", vx03_peer.hpp), the die on the banner; the version's high byte
 // is usart_link.hpp's peer_ch32vx03.
 //
-// build: boards = v203c8,v303vc
+// build: boards = v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -202,20 +206,21 @@ struct PeerLink {
                             DmaOwner<DmaPeriph::tim, t, DmaSignal::compare4>>);
 };
 
-/// The part's link (the header): UART4's second column where the part is
-/// a CH32V303, USART3's default one on the CH32V203.
-constexpr bool v303 = device::device_class == DeviceClass::v30x_d8;
-using V303Link = PeerLink<4, 1, 3, 0, DmaRequest::tim3_ch3, DmaRequest::tim3_ch4>;
-using V203Link = PeerLink<3, 0, 2, 2, DmaRequest::tim2_ch3, DmaRequest::tim2_ch4>;
+/// The part's link (the header): UART4's second column where
+/// vx03_pair.hpp's rule puts it, USART3's default one otherwise.
+using FourthLink = PeerLink<4, 1, 3, 0, DmaRequest::tim3_ch3, DmaRequest::tim3_ch4>;
+using ThirdLink = PeerLink<3, 0, 2, 2, DmaRequest::tim2_ch3, DmaRequest::tim2_ch4>;
 template <bool b>
 struct LinkOf {
-    using type = V203Link;
+    using type = ThirdLink;
 };
 template <>
 struct LinkOf<true> {
-    using type = V303Link;
+    using type = FourthLink;
 };
-using L = LinkOf<v303>::type;
+using L = LinkOf<vx03pair::link_on_fourth>::type;
+static_assert(L::instance == vx03pair::link_port && L::column == vx03pair::link_column,
+              "usart_peer: the link is vx03_pair.hpp's");
 using U = L::Port;
 using T = L::T;
 using TxPin = L::TxPin;
@@ -1201,7 +1206,7 @@ void help() {
 }
 
 void status() {
-    print(console, "  link ", v303 ? "UART" : "USART", L::instance, " column ", L::column, " (TX P", L::pads.tx.port,
+    print(console, "  link ", device::usart_full(L::instance) ? "USART" : "UART", L::instance, " column ", L::column, " (TX P", L::pads.tx.port,
           L::pads.tx.pin, ", RX P", L::pads.rx.port, L::pads.rx.pin, ") ", proven ? "PROVEN" : "searching (dark)",
           standing_off() ? ", STAND-OFF" : "", crlf);
     print(console, "  BRR=", U::brr(), " commands=", commands, " actions=", actions, " naks=", naks,
@@ -1233,7 +1238,7 @@ int main() {
     print(console, crlf, "usart_peer - USART instrument peer (", device::part_name, ", ");
     vx03peer::print_die(console);
     print(console, ", label '", label, "', fw ", hex(firmware_version), ")", crlf);
-    print(console, "link ", v303 ? "UART" : "USART", L::instance, " column ", L::column, ": TX P", L::pads.tx.port,
+    print(console, "link ", device::usart_full(L::instance) ? "USART" : "UART", L::instance, " column ", L::column, ": TX P", L::pads.tx.port,
           L::pads.tx.pin, ", RX P", L::pads.rx.port, L::pads.rx.pin, "; the engine TIM", L::timer, " column ",
           L::timer_column, " CH3/CH4 on DMA1 channels ", L::tx_slot.channel, " and ", L::rx_slot.channel,
           "; command mode 8N1 @ ", link::command_baud, crlf);

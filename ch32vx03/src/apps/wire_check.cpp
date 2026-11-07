@@ -16,20 +16,26 @@
 // pad shorted to ground 0 then 0 - and an external pull-up on the wire
 // (the I2C pair) changes none of that, because a driven low wins.
 //
-// The pads are this bench's. The two boards are a pair: the CH32V203's
+// The pads are this bench's, one list a board: the WeAct core board's
+// (the CH32V203C8T6's and the CH32V303CBT6's, one PCB) and WCH's CH32V303
+// evaluation board's, the list chosen by the part the image is built for.
+// Paired with the CH32V303CBT6, the CH32V203's SPI2, I2C1 and USART3 meet
+// the same instances on the same pads (PB12..PB15, PB6/PB7, PB10/PB11
+// crossed). Paired with the evaluation board, the CH32V203's
 // SPI2 (PB12..PB15) meets the CH32V303's SPI3 on its second column
 // (PA4, PC10, PC11, PC12), I2C1 meets I2C1 (PB6/PB7), and the CH32V203's
 // USART3 (PB10/PB11) crosses the CH32V303's UART4 on its second column
-// (PB0/PB1). Beside the pair, on the CH32V203 board: the crossed
+// (PB0/PB1). Beside the pair, on the WeAct board: the crossed
 // USART2/UART4 pair on the board itself and the five pads the optional
-// straps use; on the CH32V303 board: SPI2 against SPI3's first column
+// straps use; on the evaluation board: SPI2 against SPI3's first column
 // (four lines), TIM3's channel 1 into PA1, TIM8's channel 1 into PB8 -
 // and the pads of the links the pair retired (PA2/PA3, PB10/PB11), kept
-// in the list so that their absence is measured too. On the CH32V303 the
-// console's own two (PA9/PA10), the debug port, the USB pads, the LED,
-// the KEY and the two crystals are not here and are never touched.
+// in the list so that their absence is measured too. On the evaluation
+// board the console's own two (PA9/PA10), the debug port, the USB pads,
+// the LED, the KEY and the two crystals are not here and are never
+// touched.
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

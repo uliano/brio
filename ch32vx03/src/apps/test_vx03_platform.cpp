@@ -137,7 +137,7 @@
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abcdefgitw,mno
 // (on the 32 KB parts the suite is two images, test_vx03_platform-1 and
 // -2: the whole is over the CH32V203C6's 28 KB of image; `i` runs as

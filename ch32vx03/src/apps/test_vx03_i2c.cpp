@@ -59,7 +59,8 @@
 // THE PADS. PB6 and PB7. NEVER TOUCHED: PA9/PA10 (the
 // console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
 // PC14/PC15 and the crystal's pins, PB10..PB15 (the pair's serial and SPI
-// links on the CH32V203, the SPI2-SPI3 jumpers on the CH32V303), the rest
+// links on the CH32V203C8 and the CH32V303CB, the SPI2-SPI3 jumpers on the
+// CH32V303VC), the rest
 // of PA0..PA8 - and PB2, the LED, left undriven, as in every suite of this
 // target.
 //
@@ -169,7 +170,7 @@
 // letters (the groups line below; design/overview.md, "A suite's image
 // fits the family's smallest chip"). The CH32V203C8 builds three images of
 // its own (the groups.v203c8 line); the CH32V303 builds one.
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = ab,cd,ef,gh,ijkr,ln,o,qs,tw,y
 // build: groups.v203c8 = abcdefgh,ijklnoqrstw,y
 // build: monitor_speed = 115200

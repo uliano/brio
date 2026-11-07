@@ -10,13 +10,14 @@
 //
 //  - ONE PEER FOR THE STRATUM, ON THE INSTANCE AND COLUMN THE PART LINKS.
 //    `PeerLink<instance, column>` names the pads, the block, the two tasks
-//    and the two DMA channels table 11-5 wires to that instance; the part
-//    picks it: SPI2 on its one column (NSS PB12, SCK PB13, MISO PB14, MOSI
-//    PB15, DMA1's channels 4 and 5) where the part has no SPI3 - the
-//    CH32V203C8 and RB -, and SPI3 on its SECOND column (NSS PA4, SCK PC10,
-//    MISO PC11, MOSI PC12, DMA2's channels 1 and 2) where it has - the
-//    CH32V303RC and VC, whose SPI3 default column is the very pads of SPI1's
-//    second one and carries the evaluation board's jumpers to SPI2. Both
+//    and the two DMA channels table 11-5 wires to that instance;
+//    vx03_pair.hpp's rule picks it from the part's facts: SPI2 on its one
+//    column (NSS PB12, SCK PB13, MISO PB14, MOSI PB15, DMA1's channels 4 and
+//    5) where the part has no SPI3 - the CH32V203C8 and RB, the CH32V303CB
+//    and RB -, and SPI3 on its SECOND column (NSS PA4, SCK PC10, MISO PC11,
+//    MOSI PC12, DMA2's channels 1 and 2) where it has - the CH32V303RC and
+//    VC, whose SPI3 default column is the very pads of SPI1's second one
+//    and carries the evaluation board's jumpers to SPI2. Both
 //    selects are HARDWARE NSS: the client frames on its NSS PAD (SSM clear,
 //    the pad pulled up by the client's init), and the runs read the same pad
 //    for the window's close. Nothing of the other instances is touched.
@@ -104,10 +105,10 @@
 //   ? help | i status and counters | 0 back to the dark client | 3 trace
 //
 // The ident label is the part number after its CH32 prefix ("V203C8",
-// "V303VC", vx03_peer.hpp), the die on the banner; ident.xtal is 1 when the
+// "V303CB", vx03_peer.hpp), the die on the banner; ident.xtal is 1 when the
 // crystal started; the version's high byte is spi_link.hpp's peer_ch32vx03.
 //
-// build: boards = v203c8,v303vc
+// build: boards = v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -171,9 +172,9 @@ struct PeerLink {
 };
 
 /// The part's link: SPI3's second column where the part has SPI3, SPI2's
-/// one column otherwise (the header).
-constexpr uint8_t link_instance = spi_present(3) ? 3u : 2u;
-constexpr uint8_t link_column = link_instance == 3u ? 1u : 0u;
+/// one column otherwise (the header, vx03_pair.hpp's rule).
+constexpr uint8_t link_instance = vx03pair::spi_link_instance;
+constexpr uint8_t link_column = vx03pair::spi_link_column;
 static_assert(spi_present(link_instance), "spi_peer: this part has no second SPI to link on");
 using L = PeerLink<link_instance, link_column>;
 using Client = L::Client;
@@ -839,8 +840,9 @@ template <uint8_t k>
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Console::isr(); }
 BRIO_CH32_LEAF_VECTOR(spi2_handler) { disarm<2>(); }
-/// SPI3's vector, the CH32V303's; on the CH32V203 nothing in the vector
-/// table names it.
+/// SPI3's vector, the CH32V303 class's table entry: its body forms
+/// something only where SPI3 is the link; on the CH32V203 nothing in the
+/// vector table names it.
 BRIO_CH32_LEAF_VECTOR(spi3_handler) { disarm<3>(); }
 
 int main() {

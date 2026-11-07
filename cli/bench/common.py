@@ -103,6 +103,11 @@ BOARD_TYPES = {
     # WCH-Link of either kind.
     "v303vc": {"project": "ch32vx03", "preset": "ch32v303vc-release",
                "mcu": "ch32v303vc", "flash": "wch_openocd"},
+    # The CH32V303CB on WeAct's core board, the CH32V203C8 board's PCB
+    # around the 128 KB CH32V303: the same class, preset of its own,
+    # written the same way.
+    "v303cb": {"project": "ch32vx03", "preset": "ch32v303cb-release",
+               "mcu": "ch32v303cb", "flash": "wch_openocd"},
     # The CH32X035F8U6 on WCH's evaluation board (the QFN20 edition): the
     # QingKe V4C (RV32IMAC) of the CH32X035 series, its own project and
     # preset, the same OpenOCD fork through a WCH-LinkE, over the two-wire

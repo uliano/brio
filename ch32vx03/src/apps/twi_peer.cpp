@@ -118,13 +118,13 @@
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
 // The ident label is the part number without its CH32 prefix ("V203C8",
-// "V303VC", vx03_peer.hpp): with two parts of this stratum on one bus,
+// "V303CB", vx03_peer.hpp): with two parts of this stratum on one bus,
 // WHICH PART is the target is the thing measured, and the die (the chip
 // identifier and the UID) is on this console's banner instead.
 // ident.xtal is 1 when the crystal started, 0 on the HSI's fallback; the
 // version's high byte is twi_link.hpp's peer_ch32vx03.
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -28,20 +28,21 @@
 //
 // WHAT IT MEASURES WITH:
 //
-//  - SPI1's own LOOPBACK on the CH32V203C8T6's board: a strap from PA7
-//    (MOSI) to PA6 (MISO) through PA8, so the host's own frames come back.
+//  - SPI1's own LOOPBACK on the WeAct boards (the CH32V203C8T6's, the
+//    CH32V303CBT6's): a strap from PA7 (MOSI) to PA6 (MISO) through PA8, so
+//    the host's own frames come back.
 //    PA8 is the third pad of that node and this suite NEVER drives it: it
 //    is left a floating input for the whole run. The strap is probed at
 //    every letter that needs it (a plain output on PA7 read on PA6 against
 //    the opposite pull), never cached. SPI1 runs SOFTWARE SELECT ONLY: its
-//    NSS pad PA4 is left an input (on the CH32V303 board it is the pair's
-//    select wire).
-//  - THE PAIR: the CH32V203C8T6's SPI2 (NSS PB12, SCK PB13, MISO PB14,
-//    MOSI PB15) wired to the CH32V303VCT6's SPI3 on its SECOND column (NSS
-//    PA4, SCK PC10, MISO PC11, MOSI PC12), both selects hardware NSS pads,
-//    over the pair's cable with its series resistors and its two grounds
-//    beside SCK (docs/boards/). Each board's suite
-//    links on its own end; the far board runs `spi_peer`.
+//    NSS pad PA4 is left an input (on an SPI3 end it is the pair's select
+//    wire).
+//  - THE PAIR: each end's link instance (vx03_pair.hpp's rule) - SPI2
+//    (NSS PB12, SCK PB13, MISO PB14, MOSI PB15) on the CH32V203C8T6 and the
+//    CH32V303CBT6, SPI3 on its SECOND column (NSS PA4, SCK PC10, MISO PC11,
+//    MOSI PC12) on the CH32V303VCT6 - select to select, both hardware NSS
+//    pads, over the pair's wires (docs/boards/). Each board's suite links
+//    on its own end; the far board runs `spi_peer`.
 //  - On the CH32V303VCT6's evaluation board, four jumpers between SPI2's
 //    column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
 //    PB15-PB5, each looked for before it is used - for letters h and i.
@@ -143,7 +144,8 @@
 //      question the library has not settled - and every row's blocks
 //      judged against the wire at the rate asked
 // and the pair's, `y`, on the instance each part links (SPI2 on the
-// CH32V203C8, SPI3's second column on the CH32V303VC), each bound derived
+// CH32V203C8 and the CH32V303CB, SPI3's second column on the CH32V303VC),
+// each bound derived
 // in the section's comment from the two datasheets' SPI tables and the
 // peer's loops:
 //   d  THE PEER: ping, ident (kind 0x05, the far part's label, its
@@ -186,7 +188,7 @@
 //      and /8, on both far serves, behind the polled host and the engines,
 //      and with the far client listening only - no verdict
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abe,cv,fs,g
 // build: groups.v203c8 = abcefv,gs,djklmnoqrtx
 // build: monitor_speed = 115200
@@ -214,6 +216,9 @@
 #include "util/testbench.hpp"
 
 #include "../../../avrxt/src/apps/spi_link.hpp"
+// The desk pair's SPI link as the part's facts choose it, one rule with
+// spi_peer's.
+#include "vx03_pair.hpp"
 
 namespace {
 
@@ -271,16 +276,17 @@ using NssPad = Pin<loop_pins.nss.port, loop_pins.nss.pin>;
 /// it back to a floating input and prove it is one; never driven.
 using ThirdPad = Pin<'A', 8>;
 
-/// THE PAIR'S LINK, the second set's instance: SPI2's one column on the
-/// CH32V203C8 and RB, SPI3's SECOND column (NSS PA4, SCK PC10, MISO PC11,
-/// MOSI PC12) on the CH32V303RC and VC - the desk pair's four wires
-/// (docs/boards/), both selects hardware NSS pads. A part with SPI1 alone
-/// links nothing and registers none of the letters; the names below are
-/// formed on SPI1 there so that every part compiles them.
-constexpr uint8_t pair_spi = spi_present(3) ? 3u : (has_two_spi ? 2u : 0u);
+/// THE PAIR'S LINK, the second set's instance (vx03_pair.hpp's rule): SPI2's
+/// one column on the CH32V203C8 and RB and the CH32V303CB and RB, SPI3's
+/// SECOND column (NSS PA4, SCK PC10, MISO PC11, MOSI PC12) on the CH32V303RC
+/// and VC - the desk pair's four wires (docs/boards/), both selects hardware
+/// NSS pads. A part with SPI1 alone links nothing and registers none of the
+/// letters; the names below are formed on SPI1 there so that every part
+/// compiles them.
+constexpr uint8_t pair_spi = vx03pair::spi_link_instance;
 constexpr bool has_pair = pair_spi != 0u;
 constexpr uint8_t pair_n = has_pair ? pair_spi : 1u;
-constexpr uint8_t pair_code = pair_spi == 3u ? 1u : 0u;
+constexpr uint8_t pair_code = vx03pair::spi_link_column;
 constexpr SpiPins pair_pins = spi_pins_for(pair_n, pair_code);
 using PairS = Spi<pair_n>;
 using PairTx = DmaTxEngine<PairS::dma_tx_slot.controller, PairS::dma_tx_slot.channel, uint16_t>;
@@ -346,14 +352,18 @@ bool done_within_ms(uint32_t ms);
 /// an error at every width both ways, and what lies just past the memory a
 /// channel can read answers one to a read. So a block whose out buffer ends
 /// there runs until it steps off it, mid-block, its first frames on the wire.
-/// THE END IT STEPS OFF: the first byte past the SRAM on the CH32V203C8, and
-/// the first past the flash array on the CH32V303VC, because the SRAM's end
-/// there is a 64 KB boundary, and on DMA1 the driver refuses a run across one
-/// before a channel moves (11.2.3, dma.hpp's crosses()). A run stepping off
-/// reads those last bytes and writes nothing there.
+/// THE END IT STEPS OFF: the first byte past the SRAM (the CH32V203C8's,
+/// measured), unless that end is a 64 KB boundary on a DMA1 held to 11.2.3's
+/// rule - there the driver refuses a run across it before a channel moves
+/// (dma.hpp's crosses()) - and then the first past the flash array (the
+/// CH32V303VC's, measured: its 64 KB of SRAM end on one). A run stepping off
+/// reads those last bytes and writes nothing there. The CH32V303CB's 32 KB
+/// end on no such boundary, so its end is its SRAM's, not yet measured.
 constexpr uint32_t refused_address = 0x2FFF'F000UL;
+constexpr uint32_t sram_end_address = 0x2000'0000UL + device::sram_bytes;
+constexpr bool sram_end_refused = dma1_bounded_to_64k && sram_end_address % 0x1'0000UL == 0u;
 constexpr uint32_t late_end_address =
-    device::device_class == DeviceClass::v30x_d8 ? 0x0807'8000UL : 0x2000'0000UL + device::sram_bytes;
+    sram_end_refused ? 0x0800'0000UL + device::flash_array_bytes : sram_end_address;
 
 /// The way a block ends in a transfer error: `late` steps off that end
 /// after `fault_good_frames` frames, on the transmit channel's beat; `tx_first`
@@ -2904,17 +2914,31 @@ void td_peer() {
         }
         print(serial, "    ", bit_behind, " of the later frames one BIT late; the far client heard ", o.r.count,
               " mism ", o.r.mism, crlf);
-        // THE CLIENT RESTARTS ITS FRAME AT THE LATE LOAD (both classes, the
-        // same frames from either peer): from there it is one bit behind the
-        // host both ways - every later answer one bit late, and the window's
-        // last frame never completes (n - 1 heard).
+        // WHAT THE FAR CLIENT DOES WITH A LATE FIRST ANSWER IS A FINDING, NOT
+        // A VERDICT. The manual does not say (20.2.3 describes a buffer
+        // loaded before the first sampling edge), brio's client contract is
+        // the preload (spi.hpp: the first answer in the buffer with the
+        // select high) and the peer's late write lands inside the first bit
+        // at a cycle that moves run to run. Two shapes have been measured:
+        // the CH32V203C8T6 and the CH32V303VCT6 load the SHIFTER at once and
+        // restart the frame one bit behind (every later answer one bit late,
+        // n - 1 heard); the CH32V303CBT6 buffers the write until a frame
+        // boundary of its own, which with SPE raised mid-frame falls one
+        // frame later in most runs and at once in some. The verdict asks what
+        // every die agrees on: the host never stalls (the window completes)
+        // and the client's answers are wrong rather than missing.
         const bool far_frame_restarted = o.ran && o.reported && bit_behind == e.count - 1u &&
                                          o.r.count == e.count - 1u;
-        bench.verdict("THE DUMMY IS MEASURED: a client whose first answer comes inside the first frame has it in "
-                      "the SHIFTER AT ONCE, at the next bit - the first frame the leftover's top bit over the "
-                      "answer's seven - and RESTARTS its frame there: one bit behind the host both ways, every "
-                      "later answer one bit late and the last frame unfinished",
-                      bit_late && far_frame_restarted);
+        const bool buffered_then_restart = o.ran && o.reported && xrx[0] == 0x00u && o.r.count == e.count - 1u;
+        print(serial, "  FINDING: the far client's late first answer ",
+              bit_late && far_frame_restarted ? "went into the SHIFTER AT ONCE and the frame restarted there"
+              : buffered_then_restart       ? "was BUFFERED to a frame boundary of the client's own"
+                                            : "took a shape neither of the two measured ones",
+              crlf);
+        bench.verdict("THE DUMMY IS MEASURED: a client whose first answer comes inside the first frame leaves the "
+                      "host its window complete and its answers wrong rather than missing (the shape is the "
+                      "finding above, not a verdict: the dies measured differ)",
+                      o.ran && o.reported && o.r.count < e.count);
     }
 
     // ---- sink_slow: what a client that never drains does ----
@@ -3645,10 +3669,19 @@ void tm_select() {
               " with SPE up, ", low_between ? "LOW" : "high", " between frames, ", high_after ? "high" : "LOW",
               " after SPE came down; this end read ", n - mism, " of ", n, " exact, the far client heard ", r.count,
               " mism ", r.mism, crlf);
-        bench.verdict("SSOE IS THE HOST'S OWN SELECT: the pad high under SPE until the first frame, low from it to "
-                      "SPE down, and the far client it frames carries the exchange exact both ways",
-                      acked && frames && high_before && !low_enabled && low_between && high_after && mism == 0u &&
-                          rp && r.count == n && r.mism == 0u);
+        // WHEN the pad falls is a FINDING, not a verdict: 20.2.1 says it is
+        // pulled down "when the SPI host sends the output outward" and
+        // names no moment; the CH32V203C8T6 and the CH32V303VCT6 drop it
+        // with the first frame, the CH32V303CBT6 with SPE itself. Nothing
+        // in brio uses SSOE as an engine's select (spi.md declines it), so
+        // the verdict asks what every die agrees on: high before SPE, low
+        // between frames, high after SPE comes down, the exchange exact.
+        print(serial, "  FINDING: SSOE's select falls ", low_enabled ? "WITH SPE" : "with the FIRST FRAME", crlf);
+        bench.verdict("SSOE IS THE HOST'S OWN SELECT: the pad high before SPE, low between frames, high again "
+                      "once SPE is down (when it falls is the finding above), and the far client it frames "
+                      "carries the exchange exact both ways",
+                      acked && frames && high_before && low_between && high_after && mism == 0u && rp &&
+                          r.count == n && r.mism == 0u);
         settle_ms(20);
         (void)link_command_mode();
     }
@@ -4645,11 +4678,12 @@ void tg_two_ways() {
     refusals = busy_refused && refusals;
     nexts = next_exact() && nexts;
     // On the CH32V303's DMA1 a span across 64 KB (11.2.3's note (1)). The real
-    // run is in flash across 0x0801 0000, which the VC's array carries past the
-    // image's own bytes wherever the image ends; the SRAM here is one page
-    // ending at that same kind of boundary, so the in side's run is its last
-    // bytes and what lies past them, refused before anything is written. On the
-    // spans that end on the boundary or start on it nothing is refused.
+    // run is in flash across 0x0801 0000, which every CH32V303's window (128 KB
+    // at least) carries past the image's own bytes wherever the image ends; the
+    // in side's run straddles 0x2001 0000 - the SRAM's end on the 64 KB parts,
+    // past it on the CH32V303CB's 32 KB - refused before anything is written
+    // or read. On the spans that end on the boundary or start on it nothing is
+    // refused.
     if constexpr (DmaRxEngine<1, S1::dma_rx_channel>::bounded_to_64k) {
         const auto* const flash_top = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(0x0801'0000UL));
         q.tx = lend<Lease::reply>(flash_top - 16);

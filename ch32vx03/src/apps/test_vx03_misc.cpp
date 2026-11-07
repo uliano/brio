@@ -49,7 +49,7 @@
 //   w  (by name) THE SCRATCH ACROSS A SYSTEM RESET: a byte written, the
 //      board rebooted, the register read at the next boot
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

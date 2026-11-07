@@ -49,16 +49,17 @@
 //      one step a trigger, between the holding register and the
 //      amplitude MAMP selects
 //   f  THE STREAM: DmaLoopEngine on DMA2's channel 3 playing a table into
-//      DAC1 at the pace of TIM6's TRGO, the laps counted by the channel's
-//      handler and every level found on the pad by the converter - then
-//      the same into DAC2 on its own request, DMA2's channel 4
+//      DAC1 at the pace of the pacer's TRGO (TIM6, or TIM2 on a part
+//      without it), the laps counted by the channel's handler and every
+//      level found on the pad by the converter - then the same into DAC2
+//      on its own request, DMA2's channel 4
 //   g  THE DUAL STREAM: one engine on DAC1's request feeding both channels
-//      through the dual holding register, one word a TIM6 update
+//      through the dual holding register, one word a pacer update
 //   h  BOTH CHANNELS AT ONCE: each pad following its own channel's
 //      configuration - RM V2.3's 17.4.1 closed with a note that both would
 //      follow channel 1's, and RM V2.5 deleted it
 //
-// build: boards = v303vc
+// build: boards = v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -110,11 +111,14 @@ using Row2 = DmaRequestOf<DmaRequest::dac2>;
 using Player2 = DmaLoopEngine<Row2::controller, Row2::channel, uint16_t>;
 static_assert(Row2::controller == 2u && Row2::channel == 4u);
 
-/// The timer that paces letters f and g: TIM6, code 0 of table 17-1 - the
-/// basic timer whose one job is this TRGO, on the CH32V303RC and VC.
-using Pacer = Tim<6>;
-constexpr DacTrigger pacer_trigger = DacTrigger::tim6_trgo;
-static_assert(dac_trigger_timer(pacer_trigger) == Pacer::instance);
+/// The timer that paces letters f, g and h: TIM6, code 0 of table 17-1 -
+/// the basic timer whose one job is this TRGO - where the part has it (the
+/// CH32V303RC and VC), and TIM2, the general-purpose timer table 17-1
+/// names on every part, where it has not (the CH32V303CB and RB).
+constexpr uint8_t pacer_n = tim_present(6) ? 6u : 2u;
+using Pacer = Tim<pacer_n>;
+constexpr DacTrigger pacer_trigger = pacer_n == 6u ? DacTrigger::tim6_trgo : DacTrigger::tim2_trgo;
+static_assert(dac_trigger_timer(pacer_trigger) == Pacer::instance && dac_trigger_valid(pacer_trigger));
 
 constexpr uint32_t ticks_per_us = SysClock::hz / 1'000'000u;
 
@@ -541,10 +545,19 @@ void tc_triggers() {
           by_interrupt ? "was" : "was not", " (", exti_calls, " line interrupts taken)", crlf);
     bench.verdict("the line is selected onto PB9's port", selected);
     bench.verdict("an edge on a line that is only SENSED moves nothing", !sensed_only);
-    bench.verdict("and the line reaches the converter through its EVENT enable and not its "
-                  "interrupt enable - the path the ADC's EXTI trigger takes too - while the "
-                  "line's own handler runs for the edge the converter ignored",
-                  by_event && !by_interrupt && exti_calls != 0u);
+    // Whether the line's INTERRUPT enable also reaches the converter is
+    // stated in neither chapter 9 nor 17 and the dies measured answer
+    // differently (not on the CH32V303VCT6, yes on the CH32V303CBT6, as
+    // test_vx03_adc's letter g finds of the ADC's line). Nothing in brio
+    // depends on it: the driver selects the trigger and the program arms
+    // the line's EVENT. Printed, not judged.
+    print(serial, "  FINDING: the line's INTERRUPT enable ", by_interrupt ? "ALSO moves" : "does NOT move",
+          " the datum", crlf);
+    bench.verdict("and the line reaches the converter through its EVENT enable - the path the "
+                  "ADC's EXTI trigger takes too - while the line's own handler runs under its "
+                  "interrupt enable; whether that enable moves the datum as well is the finding "
+                  "above, not a verdict: the dies measured differ",
+                  by_event && exti_calls != 0u);
     all_off();
 }
 

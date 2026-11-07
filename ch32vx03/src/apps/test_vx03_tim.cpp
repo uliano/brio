@@ -23,8 +23,10 @@
 // for it first (a plain output on one pad read on the other, both
 // levels) and says "no jumper" and passes when it is not there.
 //
-// THE CH32V303's TIMERS (letters k..s, compiled where the part has
-// them): TIM8, TIM9 and TIM10 with TIM1's shape and four vectors each,
+// THE CH32V303RC'S AND VC'S TIMERS (letters k..p and s, compiled where
+// the part has TIM8 - TIM5..TIM10 come with it on every part of this
+// stratum, the static_assert below - and q where the class has the
+// dual-edge capture, the whole CH32V303 class): TIM8, TIM9 and TIM10 with TIM1's shape and four vectors each,
 // TIM5 sixteen bits wide on that class, the two basic timers TIM6 and
 // TIM7, the dual-edge capture register, TIM3's external trigger on PD2
 // and the internal-trigger links the class adds.
@@ -92,20 +94,20 @@
 //      them - and the wave itself, the same in all three, captured by TIM2
 //      over the PA6-PA1 jumper and, on the CH32V303, TIM8's by TIM4 over
 //      the PC6-PB8 one
-//   k  (the CH32V303) TIM8's PWM on PC6 CAPTURED BY TIM4 over the
+//   k  (the CH32V303RC, VC) TIM8's PWM on PC6 CAPTURED BY TIM4 over the
 //      PC6-PB8 jumper: period and high time at five duties and four
 //      frequencies, rising and falling edges on two channels of one input
-//   l  (the CH32V303) TIM8's COMPLEMENTARY PAIR, PC6 and PA7: the dead
+//   l  (the CH32V303RC, VC) TIM8's COMPLEMENTARY PAIR, PC6 and PA7: the dead
 //      time's ladder read back and the band timed as the gap it is
-//   m  (the CH32V303) TIM8's FOUR VECTORS: update and compare counted
+//   m  (the CH32V303RC, VC) TIM8's FOUR VECTORS: update and compare counted
 //      on two lines, the trigger and a commutation on the third, and the
 //      break raised by BKIN - PA6 driven by the port - on the fourth
-//   n  (the CH32V303) TIM9 AND TIM10 with no wire: the time base against
+//   n  (the CH32V303RC, VC) TIM9 AND TIM10 with no wire: the time base against
 //      the core's counter, a PWM captured by its own timer, and the two
 //      vectors of each that the letter arms
-//   o  (the CH32V303) TIM5's WIDTH: a 32-bit value written raw into the
+//   o  (the CH32V303RC, VC) TIM5's WIDTH: a 32-bit value written raw into the
 //      counter and the auto-reload, and the counter run across 0xFFFF
-//   p  (the CH32V303) THE BASIC TIMERS: TIM6 and TIM7 against the core's
+//   p  (the CH32V303RC, VC) THE BASIC TIMERS: TIM6 and TIM7 against the core's
 //      counter, their vectors, and their TRGO counted by TIM9 over the
 //      internal triggers table 14-2 gives them
 //   q  (the CH32V303) THE DUAL-EDGE CAPTURE over the PA6-PA1 jumper:
@@ -114,7 +116,7 @@
 //   r  (a package with PD2) TIM3'S EXTERNAL TRIGGER on PD2, the pad
 //      driven by the port: external clock mode 2 counting its edges,
 //      inverted and prescaled
-//   s  (the CH32V303) THE INTERNAL TRIGGERS the class adds: every link
+//   s  (the CH32V303RC, VC) THE INTERNAL TRIGGERS the class adds: every link
 //      into TIM8, TIM9 and TIM10, TIM8 and TIM5 as masters of the others,
 //      and TIM2's ITR1 with its AFIO field both ways
 //
@@ -125,7 +127,7 @@
 // centre-aligned letter in the other. The CH32V203C8 and the CH32V303 build
 // it whole.
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abcdef,ghijtu
 // build: monitor_speed = 115200
 
@@ -1385,7 +1387,7 @@ void tj_jumper() {
 }
 
 // ===========================================================================
-// The CH32V303's timers. Every letter below is a TEMPLATE on the timer's
+// The CH32V303RC's and VC's timers. Every letter below is a TEMPLATE on the timer's
 // number, so that a part without the timer never forms the type: an
 // `if constexpr` outside a template still instantiates both branches.
 // ===========================================================================
@@ -1439,9 +1441,9 @@ void release_pad() {
     }
 }
 
-/// Everything the CH32V303's letters touch, back to reset.
+/// Everything the upper timers' letters touch, back to reset.
 template <uint8_t A = 8>
-void v303_off() {
+void upper_timers_off() {
     if constexpr (tim_present(A)) {
         release_if<A>();
         release_if<9>();
@@ -1463,7 +1465,7 @@ void v303_off() {
     }
 }
 
-/// What the CH32V303's vectors counted.
+/// What the upper timers' vectors counted.
 volatile uint32_t v8_up = 0;
 volatile uint32_t v8_cc = 0;
 volatile uint32_t v8_trg = 0;
@@ -1482,7 +1484,7 @@ volatile uint32_t v10_cc = 0;
 volatile uint32_t v6_up = 0;
 volatile uint32_t v7_up = 0;
 
-void clear_v303_counts() {
+void clear_upper_counts() {
     v8_up = 0;
     v8_cc = 0;
     v8_trg = 0;
@@ -1516,7 +1518,7 @@ void tk_tim8_capture() {
         using Out = TimPad<out_pad>;
         using In = TimPad<in_pad>;
         all_off();
-        v303_off<A>();
+        upper_timers_off<A>();
         const bool wired = strap_present<out_pad, in_pad>();
         print(serial, "  PC6 driven, PB8 read: the jumper is ", wired ? "THERE" : "absent", crlf);
         if (!wired) {
@@ -1586,7 +1588,7 @@ void tk_tim8_capture() {
                       "five duties and four frequencies up to 100 kHz",
                       exact == sizeof(cases) / sizeof(cases[0]));
         Quad::release();
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -1601,7 +1603,7 @@ void tl_tim8_pair() {
         using Out = TimPad<tim_channel_pad(A, 0, 0)>;          // PC6
         using OutN = TimPad<tim_complementary_pad(A, 0, 0)>;   // PA7
         all_off();
-        v303_off<A>();
+        upper_timers_off<A>();
         T8::init();
         (void)T8::remap(0);
 
@@ -1668,7 +1670,7 @@ void tl_tim8_pair() {
                       "them is the one the DTG code asks for, to a tenth of it",
                       both_high == 0u && high_a > samples / 8u && high_n > samples / 8u &&
                           gap_ns * 10u > dead_ns * 9u && gap_ns * 9u < dead_ns * 10u);
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -1683,8 +1685,8 @@ void tm_tim8_vectors() {
         constexpr Pad bkin = tim_break_pad(A, 0);   // PA6
         using Bkin = Pin<bkin.port, bkin.pin>;
         all_off();
-        v303_off<A>();
-        clear_v303_counts();
+        upper_timers_off<A>();
+        clear_upper_counts();
         T8::init();
         (void)T8::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
                              .period = 99});
@@ -1778,7 +1780,7 @@ void tm_tim8_vectors() {
                       "by the port - MOE set before the pulse and cleared by it",
                       brk_soft == 1u && soft_mask == tim_bif && !held && armed && pad_broke &&
                           brk_after_pad == brk_soft + 1u && !brk_flag_left);
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -1856,7 +1858,7 @@ template <uint8_t A = 8>
 void tn_tim9_tim10() {
     if constexpr (tim_present(A)) {
         all_off();
-        v303_off<A>();
+        upper_timers_off<A>();
         const bool nine = wireless_round<9>(v9_up, v9_cc);
         bench.verdict("TIM9's time base keeps the core's time, its channel 3 makes a PWM its "
                       "channel 4 captures to the microsecond, and its update and compare "
@@ -1864,7 +1866,7 @@ void tn_tim9_tim10() {
                       nine);
         const bool ten = wireless_round<10>(v10_up, v10_cc);
         bench.verdict("and TIM10's the same", ten);
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -1974,7 +1976,7 @@ template <uint8_t B6 = 6>
 void tp_basic() {
     if constexpr (tim_present(B6)) {
         all_off();
-        v303_off<8>();
+        upper_timers_off<8>();
         basic_round<B6>(v6_up);
         basic_round<7>(v7_up);
     }
@@ -2191,7 +2193,7 @@ template <uint8_t A = 8>
 void ts_links() {
     if constexpr (tim_present(A)) {
         all_off();
-        v303_off<A>();
+        upper_timers_off<A>();
         uint8_t good = 0;
         // Into the three extra advanced timers: table 14-2, whole.
         (void)link_line<A, 1>(good);
@@ -2232,7 +2234,7 @@ void ts_links() {
         bench.verdict("TIM2's ITR1 carries TIM8's TRGO with its AFIO field at the reset value, "
                       "which is the link the driver's table names",
                       at0 >= 199u && at0 <= 201u);
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -2416,7 +2418,7 @@ void tu_centre_tim8() {
         using Out = TimPad<out_pad>;
         using In = TimPad<in_pad>;
         all_off();
-        v303_off<A>();
+        upper_timers_off<A>();
         if (!strap_present<out_pad, in_pad>()) {
             print(serial, "  no jumper (PC6 to PB8): TIM8's centre-aligned wave is not captured", crlf);
             bench.verdict("TIM8's half is skipped and says so", true);
@@ -2460,7 +2462,7 @@ void tu_centre_tim8() {
         Out::release();
         In::release();
         Quad::release();
-        v303_off<A>();
+        upper_timers_off<A>();
     }
 }
 
@@ -2524,10 +2526,14 @@ void tu_centre() {
     tu_centre_tim8<>();
 }
 
-/// The CH32V303's letters, registered where the part has the timers - a
+/// The upper timers' letters, registered where the part has TIM8 - and with
+/// it TIM5, TIM6, TIM7, TIM9 and TIM10, on every part of this stratum - a
 /// template for the same reason as the letters.
+static_assert(!tim_present(8) ||
+                  (tim_present(5) && tim_present(6) && tim_present(7) && tim_present(9) && tim_present(10)),
+              "letters o and p ride TIM8's presence: TIM5..TIM10 come with TIM8 on every part");
 template <uint8_t A = 8>
-void register_v303_letters() {
+void register_upper_timer_letters() {
     if constexpr (tim_present(A)) {
         bench.letter('k', "TIM8's PWM captured by TIM4 over the PC6-PB8 jumper",
                      tk_tim8_capture<A>);
@@ -2711,7 +2717,7 @@ int main() {
     bench.letter('j', "the jumper, and what a plain output pad reaches", tj_jumper);
     bench.letter('t', "the repetition counter: one update in RPTCR + 1 periods", tt_repetition);
     bench.letter('u', "centre-aligned counting: the three flag policies, the wave over the jumpers", tu_centre);
-    register_v303_letters<>();
+    register_upper_timer_letters<>();
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

@@ -127,7 +127,7 @@
 // the letter prints; a host already pouring when a letter begins fills
 // the ring before the letter watches, and the letter says so.
 //
-// build: boards = v303vc
+// build: boards = v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

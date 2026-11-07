@@ -64,7 +64,7 @@
 //   t  (by name, WIPES THE DATA REGISTERS) the tamper input, driven
 //      from PC13's own port
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -554,23 +554,24 @@ void tf_alarm() {
     print(serial, "  the RTC's own vector: alarm armed at ", hex(target), ", the handler "
           "ran ", rtc_irqs, " time(s) after ", own_us, " us with CNT=", hex(rtc_irq_count),
           " and flags ", hex(rtc_irq_flags), crlf);
-    // Five ticks after the count was set to zero, on both parts: the
-    // event is raised as the counter LEAVES the armed value. What the
-    // handler then reads differs by part - the new count on the
-    // CH32V203C8T6, the old one on the CH32V303VCT6, where the flag
-    // reaches the bus before the count does, as the overflow's does on
-    // both (letter g).
-    constexpr uint32_t read_at_alarm = device::device_class == DeviceClass::v30x_d8 ? 0u : 1u;
-    bench.verdict(read_at_alarm == 1u
-                      ? "the alarm reaches the RTC's own vector, and the counter the handler "
-                        "reads is the armed value PLUS ONE: the event is raised as the counter "
-                        "LEAVES the number it was armed at, and this part's bus reads the new "
-                        "count by then"
-                      : "the alarm reaches the RTC's own vector, and the counter the handler "
-                        "reads is the armed value ITSELF: the event is raised as the counter "
-                        "LEAVES the number it was armed at (five ticks after a count of zero), "
-                        "and on this part the flag reaches the bus before the count does",
-                  armed && ints && rtc_irqs >= 1u && rtc_irq_count == target + read_at_alarm);
+    // Five ticks after the count was set to zero, on every die measured:
+    // the event is raised as the counter LEAVES the armed value. Which
+    // count the handler then reads - the armed value, or the one past it
+    // - is a question 6.2.3 leaves open (the count's copy on PB1 is "not
+    // necessarily real-time"), nothing in brio depends on (the sleep
+    // site resynchronizes before it reads), and the dies answer
+    // differently: the old count on the CH32V303VCT6, the new one on the
+    // CH32V203C8T6 and the CH32V303CBT6. It is printed, and the verdict
+    // asks only that the read lands on one of the two.
+    const bool read_armed = rtc_irq_count == target;
+    const bool read_next = rtc_irq_count == target + 1u;
+    print(serial, "  FINDING: the handler read ", read_armed ? "the ARMED value itself" : read_next ?
+                  "the armed value PLUS ONE" : "neither the armed value nor the one past it", crlf);
+    bench.verdict("the alarm reaches the RTC's own vector, and the counter the handler reads is "
+                  "the armed value or the one past it: the event is raised as the counter LEAVES "
+                  "the number it was armed at (five ticks after a count of zero); which of the two "
+                  "the bus reads by then is the die's, printed above",
+                  armed && ints && rtc_irqs >= 1u && (read_armed || read_next));
     bench.verdict("and RTC_CTLRH takes its write OUTSIDE the configuration window - "
                   "`interrupts()` waits for RTOFF and stores, with no CNF around it - "
                   "which is 6.2.2's list of the four backup-domain registers read for "

@@ -2,7 +2,9 @@
 // converters of the CH32V203 and the CH32V303: ch32vx03/adc.hpp over RM
 // ch. 12, and the two block engines ch32vx03/dma.hpp grew for the stream
 // this chapter is the first user of. Letters k..o are the CH32V303's: what
-// its device class adds to the chapter, and the DAC it has as a source.
+// its device class adds to the chapter, and the DAC it has as a source -
+// each registered on its own fact, so the CH32V303CB, which has no TIM8,
+// leaves letter m out.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -84,7 +86,7 @@
 //      CH32V303, the rail elsewhere) with both ends stamped, injected
 //      simultaneous, alternate trigger - and the alternation's turn that
 //      outlives the mode
-// and on the CH32V303 alone:
+// and on the CH32V303 alone (m on the CH32V303RC and VC, which have TIM8):
 //   k  THE SHORT SAMPLING TIMES: ADC_SMP_SEL asked of the die - the
 //      register is some lots' only, and a die without it keeps nothing
 //      written there - and the four short times where the die has them
@@ -103,7 +105,7 @@
 //      lot's too) and ADCDUTY each set in turn, the readings and the
 //      conversion time against the 50 % clock's
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = abcdefg,hijpqrs
 // build: monitor_speed = 115200
 
@@ -642,10 +644,15 @@ void tc_levels() {
                   "sample-and-hold through 40 kOhm",
                   ladder[0] + 200u < ladder[7]);
     if constexpr (device::device_class == DeviceClass::v30x_d8) {
-        // THE CH32V303 DOES NOT DO WHAT THE CH32V203C8 DID. The same polled
-        // read falls well short of full scale at 1.5 cycles here, and the
-        // time the multiplexer sits on the pad before the start is printed
-        // beside it: 0, 2, 20 and 200 us of it, after the grounded channel.
+        // THE CH32V303 DOES NOT DO WHAT THE CH32V203C8 DID, AND ITS DIES
+        // DIFFER AMONG THEMSELVES. The same polled read at 1.5 cycles, with
+        // the time the multiplexer sits on the pad before the start printed
+        // beside it - 0, 2, 20 and 200 us of it, after the grounded
+        // channel: a quarter of the scale however long the park on the
+        // CH32V303VCT6, nine tenths and more on the CH32V303CBT6. What the
+        // sample-and-hold does between conversions is stated in no chapter
+        // and nothing in brio depends on it, so it is a FINDING printed,
+        // not a verdict.
         constexpr uint32_t dwell_us[4] = {0, 2, 20, 200};
         uint16_t dwelt[4] = {};
         (void)Adc<1>::sample_time(ch_high, AdcSampleTime::cycles1_5);
@@ -659,11 +666,12 @@ void tc_levels() {
         print(serial, "  at 1.5 cycles with the multiplexer parked on the pad 0, 2, 20 and 200 us "
                       "before the start: ",
               dwelt[0], " ", dwelt[1], " ", dwelt[2], " ", dwelt[3], crlf);
-        bench.verdict("ON THIS PART A PARKED MULTIPLEXER IS NO HELP: a polled read at 1.5 "
-                      "cycles right after the grounded channel falls short of the longest "
-                      "sampling time's reading by more than 200 counts, where the CH32V203C8's "
-                      "reached full scale",
-                      parked[0] + 200u < parked[7] && dwelt[0] + 200u < parked[7]);
+        print(serial, "  FINDING: at 1.5 cycles a parked multiplexer ",
+              parked[0] > ladder[0] + 200u ? "HELPS" : "IS NO HELP", ": scanned ", ladder[0], ", parked ",
+              parked[0], ", the rail ", parked[7], crlf);
+        bench.verdict("what a parked multiplexer buys a 1.5-cycle read on this part is the finding "
+                      "above, not a verdict: the dies measured differ",
+                      true);
     } else {
         bench.verdict("THE SAMPLE-AND-HOLD TRACKS THE SELECTED CHANNEL BETWEEN CONVERSIONS: with "
                       "the mux parked on the pad the same source reads full scale at EVERY "
@@ -1066,9 +1074,18 @@ void tg_triggers() {
     bench.verdict("the EXTI line reaches the converter through its EVENT enable, and one "
                   "edge is one conversion",
                   with_event == edges);
-    bench.verdict("its INTERRUPT enable is the other path and does NOT feed the converter - "
-                  "the handler ran for every edge and not one conversion started",
-                  with_interrupt == 0u && exti_calls == edges);
+    // Whether the line's INTERRUPT enable also reaches the converter is
+    // stated in neither chapter 9 nor 12 and the dies measured answer
+    // differently (not one conversion on the CH32V203C8T6 and the
+    // CH32V303VCT6, one per edge on the CH32V303CBT6, where the pending
+    // flag's rising is the trigger). Nothing in brio depends on it: the
+    // driver selects the trigger and the program arms the line's EVENT.
+    // Printed, not judged.
+    print(serial, "  FINDING: the line's INTERRUPT enable ", with_interrupt == 0u ? "does NOT feed" :
+                  with_interrupt == edges ? "FEEDS" : "feeds, for some edges,", " the converter", crlf);
+    bench.verdict("its INTERRUPT enable runs the line's handler for every edge; whether it also "
+                  "feeds the converter is the finding above, not a verdict: the dies measured differ",
+                  exti_calls == edges);
 
     A::interrupts(A::converted_interrupt, false);
     all_off();
@@ -2361,14 +2378,29 @@ void register_two_converter_letters() {
     }
 }
 
+/// The CH32V303's letters, each registered on the fact its body is gated
+/// by: the class's short sampling, the DAC, TIM8's trigger column (the
+/// CH32V303RC's and VC's alone), ADC2's request on DMA2, the class's duty
+/// bits.
 template <bool on = device::device_class == DeviceClass::v30x_d8>
 void register_v303_letters() {
-    if constexpr (on) {
+    if constexpr (!on) {
+        return;
+    }
+    if constexpr (adc_has_short_sampling) {
         bench.letter('k', "ADC_SMP_SEL: the four short sampling times", tk_short_sampling<>);
+    }
+    if constexpr (device::has_dac) {
         bench.letter('l', "the DAC on PA4 through the sampler: linearity, and the PGA",
                      tl_dac_source<>);
+    }
+    if constexpr (adc_has_tim8_triggers) {
         bench.letter('m', "code 110 handed to TIM8 through AFIO", tm_tim8_remap<>);
+    }
+    if constexpr (dma_request_channel(DmaRequest::adc2).present()) {
         bench.letter('n', "ADC2's own request on DMA2's channel 5", tn_adc2_dma<>);
+    }
+    if constexpr (device::device_class == DeviceClass::v30x_d8) {
         bench.letter('o', "the ADC clock's two duty bits", to_duty<>);
     }
 }

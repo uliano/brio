@@ -4,7 +4,8 @@
 // ch32vx03/usart.hpp grew for them: the transmit engine and the receive
 // ring a transport takes, the ring over a channel that does not serve,
 // the priority rule beside an unpaced copy, an overrun at a message's
-// tail, and on the CH32V303 UART4's engines on the second controller.
+// tail, and where UART4 is the pair's link UART4's engines on the second
+// controller.
 //
 // One of three suites over the chapter: test_vx03_dma walks every channel
 // memory to memory, test_vx03_dma_paced takes the timers' requests. A
@@ -34,22 +35,25 @@
 // not and goes round it when it is; the transmit half needs no listener
 // and runs either way; neither desk board carries it.
 //
-// THE CH32V303'S PAIR LETTERS TAKE THE FAR CHIP. The evaluation board's
-// crossed pair is retired - UART4's default pads PC10/PC11 are the desk
-// pair's SPI link - so on that part letters n, q and r are the SECOND
-// KEY `y`'s (util/testbench.hpp's TwoKeyTestBench): UART4 on its second
-// column (PB0/PB1, DMA2's channels 5 and 3), the far CH32V203C8's
+// THE CH32V303RC'S AND VC'S PAIR LETTERS TAKE THE FAR CHIP. Their crossed
+// pair is retired - UART4's default pads PC10/PC11 are the desk pair's SPI
+// link (vx03_pair.hpp) - so where UART4 is the pair's link letters n, q and
+// r are the SECOND KEY `y`'s (util/testbench.hpp's TwoKeyTestBench): UART4
+// on its second column (PB0/PB1, DMA2's channels 5 and 3), the far chip's
 // usart_peer the sender and the echo, driven in band over the link
 // (vx03_link_dut.hpp); they fail loudly with nobody there, so `z` never
-// runs them. On the CH32V203 letters q and r stay in `z`, on the core
-// board's crossed pair.
+// runs them. Where the part has a fourth port and keeps the crossed pair
+// (the CH32V203C8) letters q and r stay in `z`, on the core board's
+// crossed pair. A part with neither - the CH32V303CB, whose link is USART3
+// on DMA1's channels 2 and 3 beside the copy engine's 3 - registers none
+// of the three.
 //
 // THE PADS. PA2 and PA3 in letters g and p (PA3 the banged line when the
 // strap is absent); on the CH32V203, in letters q and r, PA3 and the
 // fourth port's TX pad PB0, which the board's crossed pair wires to it
 // (each letter looks for that wire first, and says so when it is not
-// there); on the CH32V303, in letters n, q and r, PB0 and PB1 - the
-// pair's serial link. NEVER
+// there); where UART4 is the pair's link, in letters n, q and r, PB0 and
+// PB1 - that link. NEVER
 // TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12
 // (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203
 // board's KEY) - and PB2, the CH32V203 board's LED, left undriven, as in
@@ -90,10 +94,10 @@
 //      engine's default level: every byte in order, no overrun, no channel
 //      given up; the copy's rate against its rate alone; and the CONTROL,
 //      the same load against a ring told rx_priority = low, which overruns.
-//      ON THE CH32V303 (the second key): the far chip's counting blast into
-//      UART4's ring of 512 on DMA2's channel 3, the copy on DMA2's channel
-//      1, the far chip stating its rate and UART4's transmit engine timed
-//      into its sink
+//      WHERE UART4 IS THE LINK (the second key): the far chip's counting
+//      blast into UART4's ring of 512 on DMA2's channel 3, the copy on
+//      DMA2's channel 1, the far chip stating its rate and UART4's transmit
+//      engine timed into its sink
 //   r  AN OVERRUN AT A MESSAGE'S TAIL, both ends timed against the wire
 //      at 1 Mbaud first: a copy at the ring's own level on a
 //      lower channel starving the ring under a message's last frames, the
@@ -104,10 +108,10 @@
 //      and a frame the CPU reads from under a starved channel - what the
 //      overrun's clear would do to a frame landing between its two loads -
 //      followed to see what the channel does with the request it raised.
-//      ON THE CH32V303 (the second key): the far chip's messages into
-//      UART4's ring on DMA2, the copy on DMA2's channel 1 started when 28
-//      have landed, and the staged frame's copy started on its start bit's
-//      fall, seen on the pad
+//      WHERE UART4 IS THE LINK (the second key): the far chip's messages
+//      into UART4's ring on DMA2, the copy on DMA2's channel 1 started when
+//      28 have landed, and the staged frame's copy started on its start
+//      bit's fall, seen on the pad
 //   s  THE SAME OWNER OVER THE REQUEST ITS RELEASE LEFT STANDING
 //      (docs/design/dma.md's release contract): USART2's receive request
 //      raised over a banged frame with the ring's channel stopped, the
@@ -115,7 +119,7 @@
 //      with nothing before it; and TIM1's update request raised with
 //      channel 5 disabled, the timer released, its own paced block moving
 //      nothing before the pace
-// and on the CH32V303 alone, the second controller:
+// and where UART4 is the link, the second controller:
 //   n  UART4'S ENGINES ON DMA2 (the second key): a run out of the transmit
 //      engine on channel 5 round the far chip's echo and back through the
 //      receive engine on channel 3, byte for byte - table 11-3's slots
@@ -123,7 +127,7 @@
 //      wire into the far chip's sink, the port released at the end, since a
 //      receiver left running keeps its request on its channel
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: groups = gp,qrs
 // build: monitor_speed = 115200
 
@@ -1698,17 +1702,24 @@ void tr_overrun_tail() {
 }
 
 // ===========================================================================
-// THE PAIR'S LETTERS ON THE CH32V303 (the second key `y`): n, q and r with
-// the far chip's usart_peer as the sender
+// THE PAIR'S LETTERS WHERE UART4 IS THE LINK (the second key `y`): n, q and
+// r with the far chip's usart_peer as the sender
 // ===========================================================================
 //
-// The evaluation board's crossed pair is retired - UART4's default pads
-// PC10/PC11 are the desk pair's SPI link - so on the CH32V303 these three
-// letters take the pair's serial link instead (vx03_link_dut.hpp): UART4 on
+// The CH32V303RC's and VC's crossed pair is retired - UART4's default pads
+// PC10/PC11 are the desk pair's SPI link - so there these three letters
+// take the pair's serial link instead (vx03_link_dut.hpp): UART4 on
 // its SECOND column (PB0/PB1), whose requests are DMA2's channels 5 out
 // and 3 in (table 11-3), and the far chip's usart_peer the sender - its
 // blast a counting stream, gapless, on its crystal. They FAIL loudly when
 // nobody answers, so they run under `y` and never under `z`.
+
+/// Whether the far letters register: where the pair's link is UART4, whose
+/// two requests are DMA2's (vx03_link_dut.hpp).
+constexpr bool far_letters = vx03link::on_fourth_port;
+/// Whether the single-board q and r register: where the part has a fourth
+/// port and keeps the crossed pair (vx03_pair.hpp).
+constexpr bool crossed_pair_part = device::has_usart(4) && !vx03pair::fourth_default_on_spi_link;
 
 template <bool on>
 struct FarSide {
@@ -1885,7 +1896,7 @@ void print_far_cell(const char* what, const Cell& c) {
 // n - UART4's engines on DMA2 against the far chip
 // ---------------------------------------------------------------------------
 
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 void tn_far_uart4() {
     if constexpr (on) {
         using F = FarSide<on>;
@@ -1970,7 +1981,7 @@ void tn_far_uart4() {
 // q - the priority rule, the far chip pouring into UART4's ring
 // ---------------------------------------------------------------------------
 
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 void tq_far_priority() {
     if constexpr (on) {
         using F = FarSide<on>;
@@ -2112,7 +2123,7 @@ uint16_t far_arrived_since(uint16_t at) {
     return static_cast<uint16_t>((at - FarSide<on>::RxChannel::remaining()) & (fat_ring - 1u));
 }
 
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 void tr_far_overrun_tail() {
     if constexpr (on) {
         using F = FarSide<on>;
@@ -2316,7 +2327,7 @@ void tr_far_overrun_tail() {
 
 /// The link's vector body while a far letter owns UART4; true when it was
 /// theirs.
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 bool far_isr() {
     if constexpr (on) {
         const uint8_t m = far_mode;
@@ -2337,7 +2348,7 @@ bool far_isr() {
 }
 
 /// UART4's two DMA2 channels' body while a far letter owns the port.
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 bool far_dma_isr() {
     if constexpr (on) {
         const uint8_t m = far_mode;
@@ -2358,7 +2369,7 @@ bool far_dma_isr() {
 }
 
 /// DMA2's channel 1 while letter q's copies run on it.
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 bool far_copy_vector() {
     if constexpr (on) {
         if (far_copy_mode) {
@@ -2375,7 +2386,7 @@ bool far_copy_vector() {
 }
 
 /// The far letters, in the second set, on the CH32V303.
-template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+template <bool on = far_letters>
 void register_far_letters() {
     if constexpr (on) {
         bench.second_letter('n', "UART4'S ENGINES ON DMA2 against the far chip: a round trip, the rate", tn_far_uart4<>);
@@ -2591,9 +2602,10 @@ int main() {
     bench.letter('g', "the USART's two engines: the receive ring on a banged line, the jumper",
                  tg_engines);
     bench.letter('p', "the receive ring over a channel that never takes the frame", tp_dead_ring);
-    // Letters q and r on the CH32V203 board's crossed pair; on the CH32V303
-    // the pair is retired and they take the far chip in the second set.
-    if constexpr (device::dma_controller_count < 2u) {
+    // Letters q and r on the CH32V203 board's crossed pair; where UART4 is
+    // the pair's link the crossed pair is retired and they take the far chip
+    // in the second set.
+    if constexpr (crossed_pair_part) {
         bench.letter('q', "the priority rule: an unpaced copy beside the receive ring", tq_priority<>);
         bench.letter('r', "an overrun at a message's tail: no storm, counted once", tr_overrun_tail<>);
     }

@@ -70,7 +70,7 @@
 //      none behind - and the HSI (stopped under the crystal's PLL),
 //      whose restart raises no flag at all on this silicon
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -379,6 +379,33 @@
                 { "text": "set breakpoint always-inserted off" }
             ],
             "internalConsoleOptions": "openOnSessionStart"
+        },
+        {
+            // The WeAct CH32V303CBT6 board over its WCH-Link: the CH32V303VC
+            // entry above with the CB's preset - the active configurePreset
+            // must be ch32v303cb-debug, the V4F with the F extension and the
+            // ilp32f ABI. The same `adapter serial` note applies with two
+            // links attached. UNTESTED from the editor yet.
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Debug CH32V303CB (WCH OpenOCD, WCH-Link)",
+            "cwd": "${workspaceFolder}",
+            "program": "${command:cmake.launchTargetPath}",
+            "stopAtEntry": true,
+            "miMode": "gdb",
+            "miDebuggerPath": "/sw/riscv-gdb/bin/riscv32-wch-elf-gdb",
+            "debugServerPath": "/sw/wch-openocd/bin/openocd",
+            "debugServerArgs": "-f /sw/wch-openocd/bin/wch-riscv.cfg",
+            "serverLaunchTimeout": 10000,
+            "serverStarted": "Listening on port 3333",
+            "setupCommands": [
+                { "text": "file ${command:cmake.launchTargetPath}" },
+                { "text": "target remote localhost:3333" },
+                { "text": "monitor reset halt" },
+                { "text": "load" },
+                { "text": "set breakpoint always-inserted off" }
+            ],
+            "internalConsoleOptions": "openOnSessionStart"
         }
     ]
 }

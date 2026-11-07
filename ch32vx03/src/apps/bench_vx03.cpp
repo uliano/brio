@@ -15,8 +15,8 @@
 // 115200 8N1 (BRR = 1250 on the 144 MHz of PB2: the rate is exact), the
 // interrupt-driven transport with no DMA engine, bound as that suite
 // binds it. The same source builds for the CH32V203C6 (the 32 KB tier's
-// link guard) and for the CH32V303VC, whose V4F runs it under the ilp32f
-// ABI with the console wired the same way on WCH's evaluation board.
+// link guard) and for the CH32V303CB and VC, whose V4F runs it under the
+// ilp32f ABI with the console wired the same way on their boards.
 //
 // ON THE 32 KB TIER the app is three images (the groups line below): the
 // skeleton's four letters in one, the engines in the second and the SPI
@@ -65,10 +65,11 @@
 // transmit engines - the second armed for a transfer error alone; the SPI
 // host arms no interrupt of the block, so spi1_handler is unbound). SPI1's
 // pads are SCK PA5, MISO PA6 and MOSI PA7 - its NSS pad PA4 is left alone,
-// the host framing nothing with it. On the CH32V203 board MOSI and MISO
-// share a node through PA8 (the SPI suite's loopback strap, PA8 never
-// driven here), so MISO reads MOSI's own frames; on the CH32V303 board PA6
-// carries the jumper to PA1, an input nothing here drives.
+// the host framing nothing with it. On the WeAct boards (the CH32V203C8T6's,
+// the CH32V303CBT6's) MOSI and MISO share a node through PA8 (the SPI
+// suite's loopback strap, PA8 never driven here), so MISO reads MOSI's own
+// frames; on the CH32V303 evaluation board PA6 carries the jumper to PA1,
+// an input nothing here drives.
 // The hardware prologue's entry and exit (16 and 25 HCLK cycles with HPE,
 // docs/ch32vx03/platform.md) lie outside the stamps.
 //
@@ -171,8 +172,9 @@
 //                    included.
 //        spi.dma     SPI1's host on its two engines, a write of 16 and 256
 //                    frames of 8 and of 16 bits at SCK /4 (36 MHz) and /16
-//                    (9 MHz), MISO floating - no strap on this desk, so the
-//                    time is the wire's and the received data is not
+//                    (9 MHz), MISO not judged - the WeAct boards' loopback
+//                    node carries MOSI back - so the time is the wire's and
+//                    the received data is not
 //                    judged here (test_vx03_spi's letters c and d judge it
 //                    on the strap and against the peer; the transmitted is,
 //                    below). Each point warmed by a ONE-frame
@@ -203,11 +205,11 @@
 //        spi.req        THE PRICE OF A DCS COMMAND: a polled request of 1, 3
 //                       and 16 bytes (cmd_len 1, len 0, 2 and 15 - the D/C
 //                       scripted low then high, no in buffer) at /16, the
-//                       select on PB0 and the D/C on PB1 - on the CH32V203
-//                       board strapped to USART2's two pads, inputs here,
-//                       and on the CH32V303 the pair's serial wires to the
-//                       far board, which runs its dark console meanwhile
-//                       (it must not drive them); the note line: wall less the
+//                       select on PB0 and the D/C on PB1 - on the WeAct
+//                       boards strapped to USART2's two pads, inputs here,
+//                       and on the CH32V303VC the pair's serial wires to
+//                       the far board, which runs its dark console
+//                       meanwhile (it must not drive them); the note line: wall less the
 //                       wire's cycles = the fixed cost of the round, the
 //                       best of 4.
 //        spi.frame      THE RECEIVE LOOP'S FRAME AGAINST THE WIRE, the table
@@ -307,7 +309,7 @@
 //      branch taken and not, and taken to an aligned and to a straddling
 //      32-bit instruction - what tells the two dies' handlers apart.
 //
-// build: boards = v203c6,v203c8,v303vc
+// build: boards = v203c6,v203c8,v303cb,v303vc
 // On the CH32V203C8 letters u and i sit in different images: USART2's
 // engines and I2C1's ride DMA1's channels 6 and 7 both, and a channel has
 // one owner in an image (docs/design/dma.md, "The ownership rule").
@@ -339,6 +341,9 @@
 
 // Letter i's far end speaks the TWI suites' protocol: shared, not copied.
 #include "../../../avrxt/src/apps/twi_link.hpp"
+// The desk pair's links as the part's facts place them (letter u's crossed
+// pair is retired where it would land on the SPI link).
+#include "vx03_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;
@@ -1723,14 +1728,14 @@ using LoopDmaOf = Uart<on ? 2 : 2, Plat, loop_ring, loop_ring, UartFormat{}, Loo
 using LoopRes = Usart<2>;
 
 /// Whether the part has the fourth port the pair needs and a board that
-/// keeps the pair: UART4 is the CH32V203C8's, RB's and the CH32V303's, and
-/// not the 32 KB tier's (parts/<part>.hpp); the CH32V303 board's crossed
-/// pair is retired - its UART4 default pads PC10/PC11 are the SPI link of
-/// the desk pair (docs/boards/ch32v303-evt.md) - and the serial transport's
-/// cost there is the two-board key's (test_vx03_serial). A part without it
-/// declines the letter by name.
-constexpr bool v303_bench = device::device_class == DeviceClass::v30x_d8;
-constexpr bool uart_pair_part = device::has_usart(4u) && !v303_bench;
+/// keeps the pair: UART4 is the CH32V203C8's and RB's and the CH32V303RC's
+/// and VC's, and not the 32 KB tier's or the CH32V303CB's and RB's
+/// (parts/<part>.hpp); where its default pads are the desk pair's SPI link
+/// - PC10/PC11 on the CH32V303RC and VC (vx03_pair.hpp) - the crossed pair
+/// is retired, and the serial transport's cost there is the two-board
+/// key's (test_vx03_serial). A part without it declines the letter by name.
+constexpr bool pair_retired = vx03pair::fourth_default_on_spi_link;
+constexpr bool uart_pair_part = device::has_usart(4u) && !pair_retired;
 /// Letter u is formed only in an image that carries it, on a part with the
 /// pair: elsewhere no loop shape with an engine is referenced and its rings
 /// - three kilobytes and a half - are not in the image.
@@ -2021,7 +2026,7 @@ void tu_uart() {
         }
         bench.verdict("the pair came up at every rate", all_up);
     } else {
-        if constexpr (v303_bench) {
+        if constexpr (pair_retired) {
             print(serial, "  letter u declined on the CH32V303: the board's crossed pair is retired - UART4's "
                           "default pads PC10/PC11 are the SPI link of the desk pair",
                   crlf);
@@ -2906,7 +2911,8 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 BRIO_CH32_LEAF_VECTOR(usart2_handler) { loop_usart_vector(); }
 
 /// The stimulus's slot on the CH32V303, where letter u declines and the
-/// body is empty: bound LEAF (the vector guard's candidate); nothing in the
+/// body is empty - the RC and VC retire the pair, the CB and RB have no
+/// UART4: bound LEAF (the vector guard's candidate); nothing in the
 /// CH32V203's vector table names it.
 BRIO_CH32_LEAF_VECTOR(dma2_channel5_handler) { (void)stim_dma_vector<2, 5>(); }
 
