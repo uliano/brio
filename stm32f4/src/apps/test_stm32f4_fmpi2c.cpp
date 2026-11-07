@@ -4205,6 +4205,11 @@ void ts_stream_proof_fm() {
     if (!need_twi_peer()) {
         return;
     }
+    // Letter u's loads below time their beats on the cycle counter
+    // (paced_beats()) and the vector's body is stamped on it; the second
+    // set runs without letter u, so this letter starts the counter
+    // itself - a stopped counter spins paced_beats() forever.
+    (void)CycleCounter::init();
     Dma<1>::init();
     const FmpI2cSpeed v = FmpI2cSpeed::fast_plus_1m;
     constexpr uint8_t seed = 0x40;

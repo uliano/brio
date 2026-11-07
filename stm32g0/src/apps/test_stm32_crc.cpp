@@ -365,6 +365,10 @@ void ta_block() {
 // b - the check values, and the block verb
 // =============================================================================
 void tb_standards() {
+    // Each letter brings the unit up itself: letter f ends with release(),
+    // which closes the clock gate that configure() never reopens, so a
+    // letter run by name after f (or after a whole z) would read DR as 0.
+    Crc::init();
     struct Standard {
         const char* name;
         CrcConfig cfg;
@@ -460,6 +464,7 @@ void tb_standards() {
 // c - what it costs
 // =============================================================================
 void tc_cost() {
+    Crc::init();   // letter b says why
     fill_blob();
     constexpr uint32_t words = 256;
     console_drain();
@@ -528,6 +533,7 @@ void tc_cost() {
 // d - DMA-fed, no CPU in the loop
 // =============================================================================
 void td_dma() {
+    Crc::init();   // letter b says why
     Dma1::bus_clock(true);
     Dma1::reset();
     // REV_IN = word is what makes a LITTLE-ENDIAN word stream compute

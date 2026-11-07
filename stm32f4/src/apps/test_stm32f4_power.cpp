@@ -473,6 +473,9 @@ void tb_sleep() {
     }
     const uint32_t w1 = wall();
     const uint32_t k1 = Ticker::millis();
+    // Read while the site is still armed: disarm() itself arms the
+    // shallow mode, so a read after it would judge disarm()'s store.
+    const bool deep_while_armed = Pwr::deep_sleep();
     Site::disarm();
 
     const uint32_t wall_span = wall_ms(wall_delta(w0, w1));
@@ -482,8 +485,8 @@ void tb_sleep() {
                   within(k1 - k0, 95u, 110u));
     bench.verdict("and the wall agrees with it - nothing stood still",
                   within(wall_span, 95u, 110u));
-    bench.verdict("the mode really was Sleep: SLEEPDEEP was never set",
-                  !Pwr::deep_sleep());
+    bench.verdict("the mode really was Sleep: SLEEPDEEP was clear while the site was armed",
+                  !deep_while_armed);
 
     // The wake cost, differenced against a control that does not sleep.
     (void)Site::arm(SleepDepth::light);

@@ -1173,19 +1173,27 @@ void th_delay() {
     static const char* const names[3] = {"64 MHz", "16 MHz", "2 MHz"};
     bool never_early = true;
     bool bounded = true;
+    constexpr uint8_t n_spans = sizeof(spans) / sizeof(spans[0]);
     for (uint8_t r = 0; r < 3; ++r) {
         feed();
-        (void)go(rungs[r]);
-        print(serial, "  at ", names[r], ":");
-        for (uint8_t i = 0; i < sizeof(spans) / sizeof(spans[0]); ++i) {
+        (void)go(rungs[r]);   // drains the console first
+        // MEASURED FIRST AND PRINTED AFTER: a console line leaving beside a
+        // span puts the USART's handler inside it, about 100 us at 2 MHz -
+        // more than the bound below, and it is the handler, not delay_us.
+        uint32_t took[n_spans] = {};
+        bool ok[n_spans] = {};
+        for (uint8_t i = 0; i < n_spans; ++i) {
             const uint32_t t0 = t2();
-            const bool ok = delay_us(clock, spans[i]);
-            const uint32_t took = t2_us(t2() - t0);
-            print(serial, " ", spans[i], "->", took);
+            ok[i] = delay_us(clock, spans[i]);
+            took[i] = t2_us(t2() - t0);
+        }
+        print(serial, "  at ", names[r], ":");
+        for (uint8_t i = 0; i < n_spans; ++i) {
+            print(serial, " ", spans[i], "->", took[i]);
             // The wall's quantum is 4 us; the loop's own overhead grows
             // 32-fold at 2 MHz (a poll is ~20 cycles).
-            if (!ok || took + 4u < spans[i]) never_early = false;
-            if (took > spans[i] + (rungs[r] == r_slow ? 60u : 16u)) bounded = false;
+            if (!ok[i] || took[i] + 4u < spans[i]) never_early = false;
+            if (took[i] > spans[i] + (rungs[r] == r_slow ? 60u : 16u)) bounded = false;
         }
         print(serial, " us", crlf);
         const bool refused = !delay_us(clock, 1000u);

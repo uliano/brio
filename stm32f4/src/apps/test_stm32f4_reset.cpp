@@ -311,8 +311,7 @@ void ta_boot() {
           "core is HALTED)", crlf);
     bench.verdict("the DBGMCU answers with no bus-clock enable of its own - "
                   "its IDCODE names this part",
-                  (DBGMCU->IDCODE & 0xFFFu) == (DBGMCU->IDCODE & 0xFFFu) &&
-                      (DBGMCU->IDCODE & 0xFFFu) != 0u);
+                  (DBGMCU->IDCODE & 0xFFFu) != 0u);
 }
 
 // =============================================================================

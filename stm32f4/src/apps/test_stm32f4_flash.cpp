@@ -329,8 +329,17 @@ void ta_array() {
     print(serial, "  DEV_ID ", hex(id.dev_id), " flash ", flash_size_kbytes(), " KB, ",
           Flash::bank_count(), " bank(s) of ", Flash::bank_bytes() / 1024u, " KB, ",
           Flash::sector_count(), " sectors, image ends at ", hex(image_end()), crlf);
-    bench.verdict("the size register and the array agree",
-                  Flash::size_bytes() == static_cast<uint32_t>(flash_size_kbytes()) * 1024u);
+    // The size register against the chapter's sector map: the sectors of
+    // one bank, summed, times the banks, must be the size the register
+    // states (size_bytes() is that register times 1024, so comparing the
+    // two would compare a value with itself).
+    uint32_t mapped = 0;
+    for (uint8_t i = 0; i < Flash::sectors_per_bank(); ++i) {
+        mapped += Flash::sector_size_in_bank(i);
+    }
+    mapped *= Flash::bank_count();
+    bench.verdict("the size register and the sector map agree",
+                  mapped != 0u && mapped == Flash::size_bytes());
     bench.verdict("this part class's chapter 3 was read, so there is a sector map",
                   Flash::geometry_known && Flash::sector_count() > 0u);
 

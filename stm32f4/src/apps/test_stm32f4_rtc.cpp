@@ -1246,8 +1246,8 @@ void tm_output() {
     const int32_t quiet_ppm = quiet ? ppm_of(quiet_cycles, 2ULL * SysClock::hz) : 0;
 
     RtcPad::input();
-    bench.verdict("RTC_AF1 reads its pad through the GPIO's input register either way",
-                  RtcPad::read() || !RtcPad::read());
+    print(serial, "  RTC_AF1 through the GPIO's input register reads ", RtcPad::read() ? 1u : 0u,
+          crlf);
 
     bench.verdict("the 512 Hz output is refused unless PREDIV_A is 127",
                   Rtc::prescalers().async != 127u ||

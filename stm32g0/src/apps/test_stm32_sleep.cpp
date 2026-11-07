@@ -565,8 +565,10 @@ void tc_stop_freezes() {
     // of the silicon.
     const uint32_t with_tick = wall_ms(one_sleep(PwrMode::stop1, counts, false));
     const uint32_t k0 = Ticker::millis();
+    const uint32_t rtc0 = rtc_wakes;   // the count is cumulative: this sleep's own
     const uint32_t slept = one_sleep(PwrMode::stop1, counts);
     const uint32_t kernel_ms = Ticker::millis() - k0;
+    const uint32_t rtc_ended = rtc_wakes - rtc0;
     const uint32_t slept_ms = wall_ms(slept);
     const bool dbg_stop = Pwr::debug_in_stop();
     print(serial, "  a 250 ms Stop 1 with the kernel tick STILL ARMED lasted ",
@@ -591,7 +593,7 @@ void tc_stop_freezes() {
                   "HCLK and HCLK is one of the clocks that stopped (5.3)",
                   kernel_ms < 20u);
     bench.verdict("and the RTC's own vector is what ended it",
-                  rtc_wakes > 0u);
+                  rtc_ended > 0u);
 
     // WHAT COMES BACK IS HSISYS (4.3.6), and the reading was taken
     // inside the very sleep judged above - see one_sleep().

@@ -1044,6 +1044,9 @@ void tf_alarms() {
 // g - the wake-up timer, weighed on TIM16
 // =============================================================================
 void tg_wakeup() {
+    // The vector's count is cumulative over the power-on; the verdict
+    // below is about this letter's assertions, so it takes a difference.
+    const uint32_t irq0 = rtc_interrupts;
     Rtc::bypass_shadow(true);
     (void)set_time(RtcDateTime{.hour = 9, .minute = 0, .second = 0, .day = 1,
                                .month = 6, .year = 24, .weekday = 6});
@@ -1125,11 +1128,11 @@ void tg_wakeup() {
     bench.verdict("and the FIRST one is shorter, exactly as 30.6.6 warns",
                   first_span <= span + 50u);
 
-    print(serial, "  the RTC's vector ran ", rtc_interrupts,
+    print(serial, "  the RTC's vector ran ", rtc_interrupts - irq0,
           " times during this letter - which is what keeps the wake-up "
           "LINE falling between assertions (25.6.18)", crlf);
     bench.verdict("the RTC's own vector serviced every assertion",
-                  rtc_interrupts > 20u);
+                  rtc_interrupts - irq0 > 20u);
 
     // THE WRITE WINDOW AND THE TWO REFUSALS.
     bench.verdict("WUTWF stands while the timer is stopped (30.6.4)",
@@ -1400,9 +1403,14 @@ void tj_backup() {
     // The tamper half is decoded and nothing is armed.
     print(serial, "  TAMP: CR1=", hex(Tamp::config1()), " IER=",
           hex(Tamp::interrupts()), " SR=", hex(Tamp::status()), crlf);
-    bench.verdict("no tamper input is armed on this board, so nothing is "
-                  "waiting to erase these five words",
+    // any_armed() asks about the external inputs alone. The internal
+    // tampers come out of a domain reset ARMED (ITAMP3E..6E, letter m),
+    // so whether anything at all would erase these words is
+    // erase_source_armed()'s question - printed here, not claimed.
+    bench.verdict("no external tamper input is armed on this board",
                   !Tamp::any_armed());
+    print(serial, "  an internal tamper armed (would erase these words): ",
+          Tamp::any_internal_armed() ? "yes" : "no", crlf);
 }
 
 // =============================================================================

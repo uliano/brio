@@ -917,9 +917,14 @@ void tq_modes_and_lock() {
     bench.verdict("and a centred counter updates twice a period, at the top and at "
                   "the bottom",
                   about(c1.updates, 20) && about(c2.updates, 20) && about(c3.updates, 20));
+    // The window is `within(t0, 20)` with t0 read somewhere inside a tick,
+    // so it lasts L in (19, 20] ms; a period of 1001 us puts between
+    // floor(19 / 1.001) = 18 and ceil(20 / 1.001) = 20 events of each kind
+    // in it, whatever the phase - 18 is a short window, not a lost update.
+    auto in_down_window = [](uint32_t v) { return v >= 18u && v <= 20u; };
     bench.verdict("THE DOWN-COUNTER (DIR = 1): every match seen counting down, one "
                   "update a period of ARR + 1",
-                  dn.up == 0u && about(dn.down, 20) && about(dn.updates, 20));
+                  dn.up == 0u && in_down_window(dn.down) && in_down_window(dn.updates));
 
     // --- the armed one-pulse: letter i's pulse, waiting in trigger mode on
     // ITR1 for TIM2's update - TIM2 one-pulse itself, 1000 counts of 1 MHz.

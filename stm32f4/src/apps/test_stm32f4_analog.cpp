@@ -2050,6 +2050,19 @@ void tr_dac_dma() {
         Adc1::select(In4{});
 
         static const uint32_t table[8] = {200, 700, 1200, 1700, 2200, 2700, 3200, 3700};
+        // THE TRIGGER PATH FIRST, before the channel listens to it: the pad
+        // driven low, line 9 moved to port C, its rising edge and its event
+        // enabled. Done after the channel was enabled, this setup itself
+        // raised a trigger in about half the runs that followed letter q
+        // (DOR 0 -> 200 and one beat taken across these five calls, measured
+        // with the count read before and after them), a beat the spurious
+        // count below, read before them, could not see - and the table
+        // played one entry ahead.
+        TrigPad9::output(false);
+        (void)Exti::steal(dac_line, 'C');
+        (void)Exti::sense(dac_line, ExtiSense::rising);
+        (void)Exti::event(dac_line, true);
+        (void)Exti::clear(dac_line);
         Dac::init();
         Dac::claim_pad<Pa4>();
         DacChannelConfig cfg{};
@@ -2083,12 +2096,6 @@ void tr_dac_dma() {
         // where the stream really is, rather than assumed to be zero.
         (void)delay_us(clock, 10);
         const uint16_t spurious = DacStream::progress().done;
-
-        TrigPad9::output(false);
-        (void)Exti::steal(dac_line, 'C');
-        (void)Exti::sense(dac_line, ExtiSense::rising);
-        (void)Exti::event(dac_line, true);
-        (void)Exti::clear(dac_line);
 
         const uint8_t edges = static_cast<uint8_t>(8u - spurious);
         uint16_t played[8] = {0, 0, 0, 0, 0, 0, 0, 0};

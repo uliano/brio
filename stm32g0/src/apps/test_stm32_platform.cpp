@@ -349,10 +349,13 @@ void tb_critical() {
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  5 ms with interrupts masked advanced the tick by ",
           through_mask, " ms", crlf);
+    // A SysTick that lost nothing would advance 5 here. With one pending
+    // bit: the tick delivered at the unmask, plus at most one landing in
+    // the few cycles between t0's read and the mask - so 1 or 2.
     bench.verdict("a masked window LOSES ticks (SysTick's interrupt is a "
                   "pending bit, not a counter - one tick is delivered, the "
                   "rest are coalesced)",
-                  through_mask <= 5u);
+                  through_mask >= 1u && through_mask <= 2u);
 
     // idle(): WFI, then unmask. ANY enabled interrupt wakes it, so the
     // console has to be silent first or the USART's own transmit

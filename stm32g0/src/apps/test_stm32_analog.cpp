@@ -1542,9 +1542,6 @@ void tg_oversampler() {
         print(serial, "  the base spread is ", base_span, " counts, too small "
               "to judge a reduction - DECLINED in print rather than dressed up",
               crlf);
-        bench.verdict("the reduction verdict is DECLINED, and the declining is "
-                      "itself the check: the measured floor really is under "
-                      "four counts", base_span < 4u);
     }
 
     // The other half of table 79: no shift at all widens the datum.
