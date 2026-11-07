@@ -57,7 +57,7 @@
 //      Refused in a session letter w armed the IWDG in (it runs on in a
 //      Standby).
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = abcde,wl
 // (on the CH32V003 the suite is two images, test_ch32_sleep-1 and -2:
 // whole it leaves the part's 15 KB under 2 per cent)

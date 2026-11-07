@@ -54,17 +54,24 @@ foreach(lang C CXX)
 endforeach()
 
 # --- Which part this configure targets: the part number in lower case,
-#     without the package and temperature suffix (ch32v006k8, ch32v003f4).
-#     It picks the linker script ld/<part>.ld, the part DEFINITION the
-#     stratum's device.hpp asks (CH32V006 / CH32V003: the family has no
-#     vendor header, so the build states the part) and, unless overridden,
-#     the ISA: the CH32V006's QingKe V2C has the multiplier, the
-#     CH32V003's V2A has not.
-set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part: ch32v006k8 or ch32v003f4")
+#     with its package letter and memory code and without the package
+#     type and temperature suffix (ch32v006k8, ch32v006f8, ch32v003f4).
+#     It picks the linker script ld/<part>.ld, two DEFINITIONS the
+#     stratum's device.hpp asks - the chip (CH32V006 / CH32V003: the
+#     family has no vendor header, so the build states the part) and the
+#     package (CH32V006F8 and the like: the pads it bonds, parts/<chip>.hpp)
+#     - and, unless overridden, the ISA: the CH32V006's QingKe V2C has the
+#     multiplier, the CH32V003's V2A has not. A part number whose letter
+#     the chip's table does not know is refused by device.hpp.
+set(CH32V00X_MCU "ch32v006k8" CACHE STRING "target CH32V00x part: ch32v006k8, ch32v006f8 or ch32v003f4")
 string(SUBSTRING "${CH32V00X_MCU}" 0 8 _ch32_part)
 string(TOUPPER "${_ch32_part}" CH32V00X_PART_DEFINE)                  # CH32V006 / CH32V003
+string(TOUPPER "${CH32V00X_MCU}" CH32V00X_PACKAGE_DEFINE)             # CH32V006K8 / CH32V006F8 / CH32V003F4
 if(NOT CH32V00X_PART_DEFINE MATCHES "^CH32V00[36]$")
     message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part must be a CH32V006 or a CH32V003")
+endif()
+if(NOT CH32V00X_PACKAGE_DEFINE MATCHES "^CH32V00[36][A-Z][0-9]$")
+    message(FATAL_ERROR "CH32V00X_MCU '${CH32V00X_MCU}': the part number must carry its package letter and memory code (ch32v006f8)")
 endif()
 if(CH32V00X_PART_DEFINE STREQUAL "CH32V003")
     set(_ch32_arch_default "rv32ec_xw")
@@ -121,6 +128,7 @@ set(BRIO_COMMON_FLAGS
     -march=${_ch32_arch}
     -mabi=${_ch32_abi}
     -D${CH32V00X_PART_DEFINE}
+    -D${CH32V00X_PACKAGE_DEFINE}
     ${CH32V00X_HPE_DEFINE}
     -Wall -Wextra -Werror
     -ffunction-sections -fdata-sections

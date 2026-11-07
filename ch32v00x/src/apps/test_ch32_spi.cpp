@@ -13,17 +13,20 @@
 // THE PEER is the desk's CH32X035 running `spi_peer` (kind 0x07),
 // commanded IN BAND over the bus under test through
 // avrxt/src/apps/spi_link.hpp, included by relative path: one source of
-// truth for the wire format on every architecture. SPI1's column 0 to the
-// CH32X035's SPI1 column 0:
+// truth for the wire format on every architecture. SPI1 on the pair's
+// column (ch32_pair.hpp: 1 on the WeAct board, NSS PC0; 0 on the
+// CH32V006K8U6 module, NSS PC1) to the CH32X035's SPI1 column 0:
 //
 //   PC5 (SCK)   - PA5        PC6 (MOSI) - PA7
-//   PC7 (MISO)  - PA6        PC1 (NSS)  - PA4, the select wire
+//   PC7 (MISO)  - PA6        NSS        - PA4, the select wire
 //
-// PC1 is this end's GPIO select for every letter that talks to the peer,
+// NSS is this end's GPIO select for every letter that talks to the peer,
 // its HARDWARE NSS input for the two that need one (r, the client; m,
 // MODF), and held HIGH through the single-board letters - which select
 // PC3, a pad with no wire, so the peer's dark listener is never selected
 // by them and what goes out on SCK and MOSI reaches a deselected client.
+// Letter i's D/C line is a second pad with no wire: PC4 on the module,
+// PD0 on the WeAct board, whose PC4 carries the LED (ch32_board.hpp).
 // The peer FAILS loudly when it does not answer. That peer answers its
 // windows in spi_link's mode 0 (its client answers in every mode MSb
 // first) and serves the EXTENDED EXCHANGE - 16-bit frames, the CRC with
@@ -109,7 +112,7 @@
 //   q  THE KERNEL against the peer: four transactions queued from one
 //      dispatch in ONE select window, read back by the second chip
 //   r  THE ROLES INVERT: this chip as the CLIENT on its HARDWARE NSS
-//      (PC1) under the peer's host_burst - the answering client in modes
+//      under the peer's host_burst - the answering client in modes
 //      2 and 3 judged both ways, MSb and LSb first, a first answer bit of
 //      0 and of 1, 16-bit frames; modes 0 and 1 refused by the driver as
 //      an answering client (spi_client_may_answer)
@@ -118,9 +121,10 @@
 //      sequence
 //   x  (outside z) the slip statistics: each mode ten times
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = a,b,c,d,g,e,f,h,k,n,o,p,q,r,m,x,s,v,t,w,i,j,l
 // build: groups.v006k8 = abcdhi,gefv,knopqrmxs,twl,j
+// build: groups.v006f8 = abcdhi,gefv,knopqrmxs,twl,j
 // (on the CH32V006 the suite whole passes the 40 KB of program flash, so it
 // builds as five images there: the block, the engines against the peer, the
 // polled path and the stalled exit; the rate on the wire with the host's
@@ -157,6 +161,9 @@
 
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -169,28 +176,29 @@ using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 
 using S = Spi<1>;
-using Host = SpiHost<1>;
+using Host = SpiHost<1, ch32pair::spi_pins>;
 // The engines at DATAR's width: 8- and 16-bit frames both on them.
 using DmaTx = DmaTxEngine<3, uint16_t>;
 using DmaRx = DmaRxEngine<2, uint16_t>;
-using DmaHost = SpiHost<1, spi1_default_pins, DmaTx, DmaRx>;
+using DmaHost = SpiHost<1, ch32pair::spi_pins, DmaTx, DmaRx>;
 /// The same engined host with its polled loops in SRAM (util/placement.hpp's
 /// InRam): letter g's second placement.
-using RamDmaHost = SpiHost<1, spi1_default_pins, DmaTx, DmaRx, InRam>;
+using RamDmaHost = SpiHost<1, ch32pair::spi_pins, DmaTx, DmaRx, InRam>;
 static_assert(!Host::has_dma && DmaHost::has_dma, "the suite's two hosts, without and with engines");
 using SckPin = Pin<'C', 5>;
 using MosiPin = Pin<'C', 6>;
 using MisoPin = Pin<'C', 7>;
-/// The select wire to the peer (SPI1's NSS pad of column 0).
-using CsPin = Pin<'C', 1>;
+/// The select wire to the peer (the NSS pad of the pair's column).
+using CsPin = Pin<ch32pair::spi_pins.nss.port, ch32pair::spi_pins.nss.pin>;
 /// The single-board letters' select: a pad with no wire.
 using LoneCs = Pin<'C', 3>;
-/// The D/C line of letter i's command rule: a pad with no wire either.
-using DcPin = Pin<'C', 4>;
+/// The D/C line of letter i's command rule: a pad with no wire either -
+/// PD0 where PC4 carries the board's LED (the header).
+using DcPin = std::conditional_t<ch32board::weact, Pin<'D', 0>, Pin<'C', 4>>;
 
-static_assert(spi1_default_pins.nss == Pad{'C', 1} && spi1_default_pins.sck == Pad{'C', 5} &&
-                  spi1_default_pins.mosi == Pad{'C', 6} && spi1_default_pins.miso == Pad{'C', 7},
-              "SPI1's column 0: NSS PC1, SCK PC5, MOSI PC6, MISO PC7");
+static_assert(ch32pair::spi_pins.sck == Pad{'C', 5} && ch32pair::spi_pins.mosi == Pad{'C', 6} &&
+                  ch32pair::spi_pins.miso == Pad{'C', 7},
+              "SPI1's columns 0 and 1: SCK PC5, MOSI PC6, MISO PC7");
 
 TestBench<Serial> bench;
 
@@ -512,7 +520,7 @@ bool link_quiet = false;
 /// each side, for the client's loop to turn the edge around.
 void link_hold() { (void)delay_us(clock, 30); }
 
-/// SPI1 as the command channel's host, PC1 as its GPIO chip select.
+/// SPI1 as the command channel's host, NSS as its GPIO chip select.
 bool link_command_mode() {
     dma_host_live = false;
     ram_host_live = false;
@@ -1312,7 +1320,7 @@ void tl_release_reinit() {
 // its type's).
 
 void tj_byte_engines() {
-    using ByteHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
+    using ByteHost = SpiHost<1, ch32pair::spi_pins, DmaTxEngine<3, uint8_t>, DmaRxEngine<2, uint8_t>>;
     (void)ByteHost::init(clock);
     const bool on_bytes = refused<ByteHost>(nullptr, 0, tx_buf, rx_buf, 8, SpiDataSize::bits16);
     ByteHost::release();
@@ -2280,7 +2288,7 @@ void tf_kernel() {
 // the whole transaction (take_budget(): twice the wire's time for the frames,
 // in polls of at least four cycles, and 256 polls). The host releases the
 // D/C and the select and puts the block back itself, so the next request needs
-// no recover(); every request here carries the D/C (PC4), read after each
+// no recover(); every request here carries the D/C line, read after each
 // failure. Staged two ways a reset
 // cures: SPI1 HELD IN RESET, its registers ignoring every write and RXNE never
 // rising, the host's own pulse being what lets the line go; and SPE TAKEN DOWN
@@ -3523,11 +3531,11 @@ void tt_next_after_failure() {
 // ===========================================================================
 
 /// SPI1's own pads carry the wire, so the client role is the SAME four:
-/// MISO driven, SCK and MOSI inputs, and NSS - PC1 - the HARDWARE select
+/// MISO driven, SCK and MOSI inputs, and NSS - the pair's - the HARDWARE select
 /// (SSM clear), which the peer drives low for its whole burst: a frame is
 /// shifted only while the pad is low, so the peer's pads changing hands
 /// during its lead-in are no clock edge here.
-using LinkClient = SpiClient<1>;
+using LinkClient = SpiClient<1, ch32pair::spi_pins>;
 
 uint8_t crx[64];
 
@@ -3933,8 +3941,11 @@ void tx_peer_slips() {
 void banner() {
     print(serial, crlf, "test_ch32_spi - ", device::part_name, " SPI (RM ch. 16) against the CH32X035's spi_peer",
           crlf);
-    print(serial, "  PC5 SCK, PC6 MOSI, PC7 MISO, PC1 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
-                  "single-board letters' select (no wire)",
+    print(serial,
+          ch32board::weact ? "  PC5 SCK, PC6 MOSI, PC7 MISO, PC0 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
+                             "single-board letters' select (no wire)"
+                           : "  PC5 SCK, PC6 MOSI, PC7 MISO, PC1 the select to the peer's PA5, PA7, PA6, PA4; PC3 the "
+                             "single-board letters' select (no wire)",
           crlf);
     bench.menu();
 }
@@ -4016,7 +4027,7 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
-    host_ready();   // PC1 high: the peer deselected from boot
+    host_ready();   // NSS high: the peer deselected from boot
 
     bench.letter('a', "the block, wireless: reset values, the control words, the refusals, "
                       "the enable protection measured", ta_block);

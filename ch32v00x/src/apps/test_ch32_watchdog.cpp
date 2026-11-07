@@ -35,7 +35,7 @@
 //      running down to 0x3F with no refresh (timed), then a refresh
 //      made ABOVE the window
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>

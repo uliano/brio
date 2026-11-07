@@ -10,7 +10,10 @@
 // under it.
 //
 // THE INSTRUMENT IS USART2 ON ITS COLUMN 3 (AFIO table 7-11): TX PD2,
-// RX PD3, CTS PA0, RTS PA1 - pads the module leaves free - while the
+// RX PD3, CTS PA0, RTS PA1 - pads the CH32V006K8U6 module leaves free; on
+// the WeAct board, which bonds no PA0 and so runs neither flow-control
+// letter (h, o), PD2 and PD3 are the pair's serial wires, the far board
+// dark on them between its actions - while the
 // console stays on USART1 (PD5/PD6, the WCH-Link's own serial). Two
 // facts and one jumper make the suite need almost no wire:
 //
@@ -30,6 +33,15 @@
 //    two frames is the stop length, a break is ten or thirteen bits,
 //    an IrDA pulse is 3/16 of a bit. The letters that need it decline
 //    with the reason when the jumper is missing.
+//    NOT ON THE WEACT BOARD: its PD4 hangs from PD5, the console's
+//    transmit pad, through the board's 1.5 kOhm USB resistor
+//    (ch32_board.hpp), so the probe and the ruler's letters - b, c, e,
+//    g, r, t - are not registered there, and they have nowhere to move:
+//    on the CH32V006's 20-pin package TIM2's channel 1 lands only on PD4,
+//    PD3 (a USB stub and a pair wire) and the pair's PC0, PC1, PC5, and
+//    USART2's TX alone on a free pad (column 2, PA2) has no RX pad bonded
+//    for the letters that receive as well. Implemented, not verified on
+//    that board.
 // 3. THERE IS NO LOOP-BACK. Half duplex (14.4) makes the receiver
 //    listen on the TX pad, but not to the instance's own frames
 //    (measured six ways - the driver header says so): so the single
@@ -120,15 +132,21 @@
 //      the idle level CPOL's; on the CH32V006 the verb refuses (the
 //      bits are reserved there)
 //
-// THE TWO-BOARD KEY `w`, letters 1 to 8, outside z: USART2 on its column
-// 4 (TX PB0, RX PB1) as the DUT, the desk's link to a CH32X035 running
+// THE TWO-BOARD KEY `w`, letters 1 to 8, outside z: USART2 on the pair's
+// column (ch32_pair.hpp: 3, TX PD2 and RX PD3, on the WeAct board - the
+// instrument's own pads, the far board dark between its actions; 4, TX
+// PB0 and RX PB1, on the CH32V006K8U6 module) as the DUT, the desk's link
+// to a CH32X035 running
 // usart_peer - driven in band over the link itself (usart_link.hpp), every
 // leg judged from what the far chip reports or from what this end
 // received, FAILING loudly when nobody answers; a leg the peer REFUSES is
 // SKIPPED with the reason. The far chip's only clock is an RC, so letter 1
 // calibrates it against this module's 24 MHz crystal, and every letter
 // calibrates it again first (its HSI wanders by a few hundred ppm in a
-// second):
+// second). A board with no crystal (ch32_board.hpp) is the reference all
+// the same, on its HSI's PLL: the peer adopts that clock, and a verdict
+// whose bound is a figure against a crystal is printed and not judged
+// there:
 //   1  the rendezvous - ping, IDENT (kind 0x07), a bad checksum, a desync,
 //      the refusals - and THE CALIBRATION: gapless runs at 1 Mbaud until
 //      the peer moves its trim to the step nearest 48 MHz and adopts the
@@ -147,7 +165,7 @@
 //      second at 1, 2 and 3 Mbaud, every byte in sequence; and a run of
 //      eight errored frames into the same ring (no transmit engine) counted
 //      every other one
-//   7  half duplex on PB0 hearing the peer's drive_rxd, and the wired AND
+//   7  half duplex on the TX pad hearing the peer's drive_rxd, and the wired AND
 //      of an open-drain wire under its collide
 //   8  mute by address mark and by idle line, IrDA between two WCH codecs
 //
@@ -161,9 +179,10 @@
 // USART is the console's, there being no second instance to be the
 // instrument, so every letter that names USART2 is compiled out there.
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = k
 // build: groups.v006k8 = abcdefgh,ijklqrstuymno,12345678
+// build: groups.v006f8 = abcdefgh,ijklqrstuymno,12345678
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -182,6 +201,9 @@
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 #include "held_request.hpp"
+
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 /// THE CLOCK BY THE LETTERS THE IMAGE CARRIES. The two-board key's
@@ -215,8 +237,13 @@ constexpr uint8_t column = 3;
 using U2 = Usart<2>;
 using TxPad = Pin<'D', 2>;
 using RxPad = Pin<'D', 3>;
-using CtsPad = Pin<'A', 0>;
-using RtsPad = Pin<'A', 1>;
+/// Column 3's flow-control pads, where the package bonds them: the
+/// CH32V006's 20-pin package has no PA0, so letters h and o, the two that
+/// use them, are not registered there and these name the TX pad, which
+/// every letter's all_off() releases anyway.
+constexpr bool flow_pads = pad_bonded(afio_usart2_pads(column).cts) && pad_can_drive(afio_usart2_pads(column).rts);
+using CtsPad = std::conditional_t<flow_pads, Pin<'A', 0>, TxPad>;
+using RtsPad = std::conditional_t<flow_pads, Pin<'A', 1>, TxPad>;
 using RulerPad = Pin<'D', 4>;   // TIM2_CH1, on the jumper from PD2
 using T2 = Tim<2>;
 
@@ -228,7 +255,7 @@ using DmaUart = Uart<2, P, 256, 256, DmaTxEngine<6>, DmaRxEngine<7>, column>;
 // letter that programs either channel by hand names them too.
 using U2Tx = DmaOwner<DmaPeriph::usart, 2, DmaSignal::tx>;
 using U2Rx = DmaOwner<DmaPeriph::usart, 2, DmaSignal::rx>;
-constexpr UartOptions flow_opts{.rts = true, .cts = true};
+constexpr UartOptions flow_opts{.rts = flow_pads, .cts = flow_pads};
 using FlowUart = Uart<2, P, 64, 64, NoDmaEngine, NoDmaEngine, column, flow_opts>;
 
 // Which transport owns the USART2 vector at the moment: the letters
@@ -661,7 +688,8 @@ void ta_facts() {
     U2::irda_off();
     bench.verdict("the modes exclude each other as 14.4 and 14.5 say: half duplex, LIN and IrDA, and IrDA's one stop bit",
                   exclusions);
-    print(serial, "  USART2 on column ", column, ": TX PD2, RX PD3, CTS PA0, RTS PA1", crlf);
+    print(serial, "  USART2 on column ", column, flow_pads ? ": TX PD2, RX PD3, CTS PA0, RTS PA1" : ": TX PD2, RX PD3",
+          crlf);
     all_off();
 }
 
@@ -2256,6 +2284,7 @@ void tl_release_reinit() {
 // read once the fill has ended. The control leaves DATAR to the channel.
 
 struct WindowCase {
+    uint32_t rxne_wait;   ///< the control's diagnostic: cycles until STATR showed RXNE inside the fill (printed)
     bool fill_ran_over;   ///< the fill still busy after the CPU's reads (the staging held)
     uint16_t status;      ///< what STATR showed the CPU
     uint8_t cpu_byte;     ///< what the CPU's DATAR read gave (the case)
@@ -2288,8 +2317,29 @@ WindowCase clear_window(bool cpu_reads) {
         (void)Starver::fill(starve_dst, &fill_cell, sizeof starve_dst);
         bang_frame({.data = 0xC6, .baud = storm_baud});
         if (cpu_reads) {
+            // RXNE FIRST: under the fill the banger's edges land late (the
+            // control below measures it: on the CH32V006F8's image RXNE
+            // shows some 160 cycles after bang_frame() returns, the edges
+            // waiting on the bus the fill holds), so the CPU waits for the
+            // flag - a STATR read takes nothing away - for at most one bit
+            // before it reads, and the question is asked of a frame that
+            // has arrived.
+            const uint32_t t0 = cycles_now();
+            while (!U2::flag(usart_rxne) && cycles_now() - t0 < SysClock::hz / storm_baud) {
+            }
             w.status = U2::status();
             w.cpu_byte = static_cast<uint8_t>(U2::read_word());
+        } else {
+            // The control watches STATR, which reads nothing away: how long
+            // after the banger's return RXNE shows, the fill still running.
+            const uint32_t t0 = cycles_now();
+            w.rxne_wait = 0xFFFFFFFFu;
+            while (Starver::busy()) {
+                if (U2::flag(usart_rxne)) {
+                    w.rxne_wait = cycles_now() - t0;
+                    break;
+                }
+            }
         }
         w.fill_ran_over = Starver::busy();
         for (uint32_t i = 0; i < 100'000u && Starver::busy(); ++i) {
@@ -2306,6 +2356,8 @@ WindowCase clear_window(bool cpu_reads) {
 
 void tn_clear_window() {
     const WindowCase control = clear_window(false);
+    print(serial, "  the control, the fill running: RXNE shown on STATR ", control.rxne_wait,
+          " cycles after the banger's return (0xFFFFFFFF: not before the fill ended)", crlf);
     const WindowCase caught = clear_window(true);
     print(serial, "  the control (no CPU read): the fill over the frame ", control.fill_ran_over, ", channel 7 moved ",
           control.moved, " (", hex(control.ring_byte), ")", crlf, "  the CPU's STATR ", hex(caught.status),
@@ -2402,8 +2454,9 @@ void to_flow_port() {
 // THE TWO-BOARD KEY: the desk's link to the CH32X035's usart_peer
 // ===========================================================================
 //
-// USART2 on its column 4 (AFIO table 7-11): TX PB0, RX PB1, wired crossed to
-// the CH32X035's USART4 on PB1/PB0, HCLK on this module's 24 MHz crystal.
+// USART2 on the pair's column (ch32_pair.hpp, AFIO table 7-11), wired
+// crossed to the CH32X035's USART4 on PB1/PB0, HCLK on this module's 24
+// MHz crystal - or on the HSI's PLL where the board has none.
 // The peer is driven in band over the link itself (usart_link.hpp) and
 // every leg is judged from what it reports or from what this end received;
 // a leg the peer REFUSES (a capability its silicon has not got) is
@@ -2415,11 +2468,10 @@ void to_flow_port() {
 
 namespace two {
 
-constexpr uint8_t wire_column = 4;
-using WTx = Pin<'B', 0>;
-using WRx = Pin<'B', 1>;
-static_assert(afio_usart2_pads(wire_column).tx == WTx::pad && afio_usart2_pads(wire_column).rx == WRx::pad,
-              "table 7-11: USART2's column 4 is TX PB0, RX PB1");
+constexpr uint8_t wire_column = ch32pair::serial_column;
+using WTx = Pin<afio_usart2_pads(wire_column).tx.port, afio_usart2_pads(wire_column).tx.pin>;
+using WRx = Pin<afio_usart2_pads(wire_column).rx.port, afio_usart2_pads(wire_column).rx.pin>;
+
 
 link::Decoder dec;
 const uint8_t no_payload[1] = {0};
@@ -2461,7 +2513,7 @@ void w_flush() {
     }
 }
 
-/// USART2 on column 4 with the frame and rate, its reset line pulsed
+/// USART2 on the pair's column with the frame and rate, its reset line pulsed
 /// first. The TX pad is parked as a GPIO output high across the reset: a
 /// USART in reset drives its alternate output low, an edge the far
 /// receiver takes for a start bit (measured on this block, the usart_peer's
@@ -2480,8 +2532,9 @@ bool w_open(const UartFormat& f, uint32_t rate) {
     return true;
 }
 
-/// Everything of column 4 let go: the instance reset and gated off, PB0
-/// and PB1 floating inputs (the far board's discipline is the same).
+/// Everything of the pair's column let go: the instance reset and gated
+/// off, its TX and RX floating inputs (the far board's discipline is the
+/// same).
 void w_release() {
     U2::reset();
     U2::bus_clock(false);
@@ -2803,7 +2856,7 @@ const char* num(uint32_t v) {
 /// The start of every letter: the peer found, and calibrated again against
 /// this crystal (the HSI wanders; usart_peer.cpp's TIME).
 bool ready() {
-    if (!crystal_ok) {
+    if (!crystal_ok && ch32board::has_crystal) {
         print(serial, "  this module's crystal did not start: the two-board key needs it as the reference", crlf);
         bench.verdict("HCLK on the 24 MHz crystal", false);
         return false;
@@ -2829,9 +2882,16 @@ bool ready() {
 // 1 - the rendezvous, and the calibration
 // ---------------------------------------------------------------------------
 void t1_link() {
-    bench.verdict("HCLK runs on the module's 24 MHz crystal (the reference of this key)", crystal_ok);
+    if constexpr (ch32board::has_crystal) {
+        bench.verdict("HCLK runs on the module's 24 MHz crystal (the reference of this key)", crystal_ok);
+    } else {
+        print(serial, "  this board has no crystal: the reference of this key is its HSI's PLL, and a figure "
+                      "against a crystal is printed, not judged", crlf);
+    }
     const bool found = ensure_link();
-    bench.verdict("command mode on USART2's column 4 (8N1, 115200) and the peer answers a ping", found);
+    bench.verdict(ch32board::weact ? "command mode on USART2's column 3 (8N1, 115200) and the peer answers a ping"
+                                   : "command mode on USART2's column 4 (8N1, 115200) and the peer answers a ping",
+                  found);
     if (!found) {
         w_release();
         return;
@@ -2904,8 +2964,12 @@ void t1_link() {
     print_ppm(-first);
     print(serial, " (the peer's console 'c' names the trim)", crlf);
     bench.verdict("the peer timed a gapless run of 4000 frames at 1 Mbaud", first_ok);
-    bench.verdict("its HSI, as found, lies inside table 3-9's -1.7 % to +1.6 % (0 to 70 C)",
-                  first_ok && -first >= -17'000 && -first <= 16'000);
+    if constexpr (ch32board::has_crystal) {
+        bench.verdict("its HSI, as found, lies inside table 3-9's -1.7 % to +1.6 % (0 to 70 C)",
+                      first_ok && -first >= -17'000 && -first <= 16'000);
+    } else {
+        print(serial, "  (against this board's HSI, not a crystal: printed, not judged)", crlf);
+    }
     bench.verdict("the peer ADOPTS this crystal - trim moved to its nearest step, the rate kept - within four "
                   "runs, and says so (xtal 2)", adopted);
     // After the adoption: three more runs read this crystal against the
@@ -2919,8 +2983,13 @@ void t1_link() {
     }
     print(serial, "  after the adoption, run to run: ", after_ppm[0], ", ", after_ppm[1], ", ", after_ppm[2],
           " ppm (the HSI's wander)", crlf);
-    bench.verdict("each run after the adoption reads this crystal within 1000 ppm of the adopted clock", all &&
-                  near(after_ppm[0], 0, 1000) && near(after_ppm[1], 0, 1000) && near(after_ppm[2], 0, 1000));
+    if constexpr (ch32board::has_crystal) {
+        bench.verdict("each run after the adoption reads this crystal within 1000 ppm of the adopted clock", all &&
+                      near(after_ppm[0], 0, 1000) && near(after_ppm[1], 0, 1000) && near(after_ppm[2], 0, 1000));
+    } else {
+        bench.verdict("three runs after the adoption, each timed (the figures two RCs' wander: printed, not judged)",
+                      all);
+    }
     (void)link_command_mode();
     w_release();
 }
@@ -2982,7 +3051,10 @@ void t2_rates() {
         // adopted clock, against a 1 Mbaud run back to back (the HSI wanders
         // between the two by far less than the bound). Half the smallest
         // divisor step on this ladder (1/417, 2400 ppm) is far above it: a
-        // wrong divisor cannot hide.
+        // wrong divisor cannot hide. ON A BOARD WITH NO CRYSTAL this end's
+        // clock is an HSI too, wandering on its own between the two runs:
+        // the 500 ppm that held one HSI's wander against a crystal is spent
+        // twice, 1000 ppm - still under the 1200 ppm half-step.
         link::Cfg ref{};
         ref.rate = calib_rate;
         const Timed r0 = timed_run(link::Op::sink, ref, 2000);
@@ -2991,8 +3063,12 @@ void t2_rates() {
         print(serial, "  ", rate, ": BRR ", usart_divisor(SysClock::pclk_hz, rate), ", the far chip times ");
         print_ppm(k.ppm - r0.ppm);
         print(serial, " against the divisor's ", expect, " ppm", crlf);
-        judge(num(rate), " baud: the rate on the wire is HCLK / BRR within 500 ppm, timed by the far chip",
-              r0.ok && k.ok && near(k.ppm - r0.ppm, expect, 500));
+        constexpr int32_t span_bound_ppm = ch32board::has_crystal ? 500 : 1000;
+        judge(num(rate),
+              ch32board::has_crystal ? " baud: the rate on the wire is HCLK / BRR within 500 ppm, timed by the far chip"
+                                     : " baud: the rate on the wire is HCLK / BRR within 1000 ppm (two HSIs), timed "
+                                       "by the far chip",
+              r0.ok && k.ok && near(k.ppm - r0.ppm, expect, span_bound_ppm));
     }
     // The peer's own rate, stated in its blast's report once it adopted a
     // crystal: its HCLK over its divisor against the rate asked.
@@ -3077,9 +3153,14 @@ void t3_frames() {
               link::frame_half_bits(8, 0, stop), " half bits: ");
         print_ppm(k.ppm - r0.ppm);
         print(serial, crlf);
+        // The same two runs back to back as the ladder's: 1000 ppm where
+        // this end's clock is an HSI too (the ladder's comment); half a bit
+        // of a 19-half-bit frame is 2.6 %, far above either bound.
+        constexpr int32_t stop_bound_ppm = ch32board::has_crystal ? 500 : 1000;
         judge(stop == link::stop_half ? "half a stop bit" : "one and a half stop bits",
-              ": the frame on the wire is that long, within 500 ppm of an 8N1 run's",
-              r0.ok && k.ok && near(k.ppm - r0.ppm, 0, 500));
+              ch32board::has_crystal ? ": the frame on the wire is that long, within 500 ppm of an 8N1 run's"
+                                     : ": the frame on the wire is that long, within 1000 ppm of an 8N1 run's (two HSIs)",
+              r0.ok && k.ok && near(k.ppm - r0.ppm, 0, stop_bound_ppm));
     }
     // What neither chip has: 5- and 6-bit words, nine data bits with a
     // parity bit - the peer refuses each, and this end's vocabulary too.
@@ -3289,7 +3370,7 @@ Drain bitbang_run(uint8_t value, uint16_t frames, int8_t cell, int8_t pct, uint1
     return d;
 }
 
-/// THIS END'S PULL-BANGER on PB1, the receive pad of column 4: the pad's
+/// THIS END'S PULL-BANGER on the pair column's receive pad: the pad's
 /// pull moved by OUTDR at absolute offsets on the cycle count, the far pad
 /// floating while the peer stands off. One 8N1 frame of `value` at 9600,
 /// cell `cell` stretched by `pct` per cent.
@@ -3503,7 +3584,7 @@ void t6_engine() {
 }
 
 // ---------------------------------------------------------------------------
-// 7 - half duplex on PB0: a second chip's frames, and the wired AND
+// 7 - half duplex on the TX pad: a second chip's frames, and the wired AND
 // ---------------------------------------------------------------------------
 void t7_half_duplex() {
     if (!ready()) {
@@ -3530,12 +3611,14 @@ void t7_half_duplex() {
         (void)U2::half_duplex(false);
         link::Report r{};
         (void)peer_report(r, 0);
-        print(serial, "  HDSEL on PB0 at ", rate, ": ", d.frames, " frames, last ", hex(d.last), ", fe ", d.fe,
+        print(serial, ch32board::weact ? "  HDSEL on PD2 at " : "  HDSEL on PB0 at ", rate, ": ", d.frames, " frames, last ", hex(d.last), ", fe ", d.fe,
               "; the peer drove ", r.count, crlf);
         heard_all = heard_all && up && d.frames == 4u && d.fe == 0u && d.last == 0x5Au;
         (void)link_command_mode();
     }
-    judge("HDSEL on PB0 hears the four frames a second chip drives onto that wire, at 9600 and 115200", heard_all);
+    judge(ch32board::weact ? "HDSEL on PD2 hears the four frames a second chip drives onto that wire, at 9600 and 115200"
+                           : "HDSEL on PB0 hears the four frames a second chip drives onto that wire, at 9600 and 115200",
+          heard_all);
 
     // collide: this end sends 0xA5 then 0xF0 back to back, its pad an open
     // drain; the peer, once 0xA5 is in, pulls 0x3C into the next frame as
@@ -3829,8 +3912,12 @@ void tk_synchronous() {
 void banner() {
     print(serial, crlf, "test_ch32_serial - ", device::part_name, " USART (RM ch. 14)", crlf);
 #if BRIO_CH32_HAS_USART2
-    print(serial, "  USART2 on column 3 as the instrument; the jumper for b, c, e and g: PD2 (USART2_TX) <-> PD4 "
-                  "(TIM2_CH1): ", jumper_present ? "PRESENT" : "ABSENT", crlf);
+    print(serial,
+          ch32board::pd4_free ? "  USART2 on column 3 as the instrument; the jumper for b, c, e and g: PD2 (USART2_TX) <-> PD4 "
+                                "(TIM2_CH1): "
+                              : "  USART2 on column 3 as the instrument; no jumper on this board (PD4 is no free pad), "
+                                "the ruler's letters not registered: ",
+          jumper_present ? "PRESENT" : "ABSENT", crlf);
 #else
     print(serial, "  one USART, the console's: the synchronous mode measured on its CK pad PD4 by TIM2, no wire", crlf);
 #endif
@@ -3884,7 +3971,7 @@ BRIO_CH32_VECTOR(usart2_handler) {
 }
 BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)DmaUart::dma_isr(); }
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
-    if (two::ring_active) {   // the two-board key's ring on column 4
+    if (two::ring_active) {   // the two-board key's ring on the pair's column
         (void)two::LinkRing::dma_isr();
         return;
     }
@@ -3896,7 +3983,7 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
 #endif   // BRIO_CH32_HAS_USART2
 
 int main() {
-    if constexpr (two_board_image) {
+    if constexpr (two_board_image && ch32board::has_crystal) {
         crystal_ok = SysClock::init();
     }
     const bool clock_ok = crystal_ok || HsiClock::init();
@@ -3904,29 +3991,48 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 #if BRIO_CH32_HAS_USART2
-    jumper_present = probe_jumper();
+    if constexpr (ch32board::pd4_free) {
+        jumper_present = probe_jumper();
+    }
 
     bench.letter('a', "the instance and the facts: reset values, the reserved bits, the refusals, the exclusions", ta_facts);
-    bench.letter('b', "every frame format both ways, and the single wire as a bus", tb_formats);
-    bench.letter('c', "the baud generator: a start bit to the cycle at eight rates, the floor", tc_baud);
+    // THE RULER'S LETTERS (b, c, e, g, r, t) are not registered where PD4
+    // is no free pad (the header): they read the ruler on PD4 or drive its
+    // pull.
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('b', "every frame format both ways, and the single wire as a bus", tb_formats);
+        bench.letter('c', "the baud generator: a start bit to the cycle at eight rates, the floor", tc_baud);
+    }
     bench.letter('d', "the bit-banged line: clean, parity, framing, noise, the tolerance", td_banged);
-    bench.letter('e', "LIN: the break timed on the jumper, detected at ten and eleven bits", te_lin);
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('e', "LIN: the break timed on the jumper, detected at ten and eleven bits", te_lin);
+    }
     bench.letter('f', "mute mode: the idle-line wake and the address mark", tf_mute);
-    bench.letter('g', "IrDA: the pulse on the jumper, normal and low power; the decoder", tg_irda);
-    bench.letter('h', "hardware flow control: CTS holds, RTS follows the receiver", th_flow);
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('g', "IrDA: the pulse on the jumper, normal and low power; the decoder", tg_irda);
+    }
+    if constexpr (flow_pads) {
+        bench.letter('h', "hardware flow control: CTS holds, RTS follows the receiver", th_flow);
+    }
     bench.letter('i', "the DMA engines on USART2's channels 6 and 7: fed, then timed", ti_dma);
     bench.letter('j', "the flags and the vector: TXE, TC, RXNE, IDLE, PE, one interrupt each", tj_flags);
     bench.letter('q', "errors under the receive engine: breaks in a stream, nothing stolen", tq_errors);
-    bench.letter('r', "tx_idle() against the last stop bit on the jumper", tr_tx_idle);
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('r', "tx_idle() against the last stop bit on the jumper", tr_tx_idle);
+    }
     bench.letter('s', "the burst edge from the vector, nothing polled", ts_edge);
-    bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
+    }
     bench.letter('u', "an overrun at a burst's tail under the receive engine: no storm", tu_overrun_tail);
     bench.letter('m', "the released request: USART2's own on channels 6 and 7; the ring over a dead channel",
                  tm_released_request);
     bench.letter('l', "the release contract on the same owner: released with a request standing, then "
                       "initialized again", tl_release_reinit);
     bench.letter('n', "the overrun clear's window: a frame's request against the CPU's read", tn_clear_window);
-    bench.letter('o', "the flow-control options as a port: rts and cts", to_flow_port);
+    if constexpr (flow_pads) {
+        bench.letter('o', "the flow-control options as a port: rts and cts", to_flow_port);
+    }
     bench.letter('y', "host-assisted (brio stress): the console's own error counters", ty_host, false);
     bench.second_letter('1', "the CH32X035 peer: the rendezvous, its HSI calibrated against this crystal", two::t1_link);
     bench.second_letter('2', "the echo ladder 9600..3 Mbaud, each rate timed by the far chip", two::t2_rates);
@@ -3935,7 +4041,10 @@ int main() {
     bench.second_letter('5', "the peer's engine shapes against this end's pull-banger", two::t5_shapes);
     bench.second_letter('6', "the receive engine on channel 7 under the peer's blast; a run of errored frames",
                         two::t6_engine);
-    bench.second_letter('7', "half duplex on PB0: drive_rxd heard, the wired AND", two::t7_half_duplex);
+    bench.second_letter('7',
+                        ch32board::weact ? "half duplex on PD2: drive_rxd heard, the wired AND"
+                                         : "half duplex on PB0: drive_rxd heard, the wired AND",
+                        two::t7_half_duplex);
     bench.second_letter('8', "mute by address and by idle line, IrDA between two WCH codecs", two::t8_modes);
 #endif
     bench.letter('k', "THE SYNCHRONOUS MODE on the console's USART1: CK counted by TIM2 off PD4, no wire", tk_synchronous);

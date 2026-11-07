@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006e8 ch32v006f8 ch32v003f4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // AFIO family smoke TU: ch32v00x/afio.hpp's tables and verbs, and the
 // drivers taking their pads from them - instantiation only, no main(),
 // no hardware. The tables' corners are pinned in the header; what this
@@ -49,11 +52,13 @@ constexpr bool all_valid() {
 static_assert(all_valid());
 
 // Column 3 of USART1 and TIM1 is PC0 and PC4 on both parts; the SPI
-// and I2C columns are each part's.
+// and I2C columns are each part's - and on the CH32V006's 20-pin
+// packages, which bond no port B, SPI1's column 1 (NSS on PC0) stands in
+// for column 2 (MISO on PB3).
 #if BRIO_CH32_PART_V006
-using SpiRemapped = SpiHost<1, spi1_pins_for(2)>;
+using SpiRemapped = SpiHost<1, spi1_pins_for(device::package == Ch32Package::pins20 ? 1 : 2)>;
 using I2cRemapped = I2cHost<1, i2c1_pins_for(1)>;
-static_assert(SpiRemapped::pin_pads.sck == Pad{'D', 2});
+static_assert(SpiRemapped::pin_pads.sck == (device::package == Ch32Package::pins20 ? Pad{'C', 5} : Pad{'D', 2}));
 static_assert(I2cRemapped::pin_pads.scl == Pad{'D', 1});
 #else
 using SpiRemapped = SpiHost<1, spi1_pins_for(1)>;

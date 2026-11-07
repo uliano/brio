@@ -34,7 +34,12 @@
 //      a host that time-stamps them: the root's rate against the host's
 //      clock
 //
-// build: boards = v006k8,v003f4
+// A BOARD WITH NO CRYSTAL (ch32_board.hpp: WeAct's) roots the same suite
+// on the HSI's PLL, and the two letters about the crystal - g and h - are
+// not registered there: on that board they are implemented and not
+// verified on the bench.
+//
+// build: boards = v006k8,v006f8,v003f4
 // build: groups.v006k8 = abcgdefk,hk
 // build: monitor_speed = 115200
 
@@ -52,6 +57,8 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "ch32_board.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 
 namespace {
@@ -63,15 +70,20 @@ constexpr Serial serial;
 
 // The dynamic clock: the PLL's 48 MHz as the root, the ticker and the
 // console as the users it rebases. The root's source is the 24 MHz
-// crystal both bench boards carry on PA1/PA2 (docs/boards/), so every
+// crystal the module and the CH32V003 board carry on PA1/PA2 (docs/boards/;
+// the HSI on a board with none, the header), so every
 // letter runs on the HSE through the PLL and the console alive at
 // 115200 is the crystal clock's first proof; the other apps of the
 // project stay on the HSI, which every board has. AN IMAGE THAT CARRIES
 // LETTER h AND NOT a boots on the crystal ITSELF, 24 MHz with no PLL -
 // the root letter h is about; every other image on the PLL.
-constexpr bool hse_image = brio::test_letters != nullptr && brio::selection_carries(brio::test_letters, 'h') &&
+constexpr bool hse_image = ch32board::has_crystal && brio::test_letters != nullptr &&
+                           brio::selection_carries(brio::test_letters, 'h') &&
                            !brio::selection_carries(brio::test_letters, 'a');
-using PllBoot = Clock<ClockSource::pll, 48'000'000, 24'000'000>;
+/// On a board with no crystal the root is the HSI through the PLL (the
+/// header).
+using PllBoot = std::conditional_t<ch32board::has_crystal, Clock<ClockSource::pll, 48'000'000, 24'000'000>,
+                                   Clock<ClockSource::pll, 48'000'000>>;
 using HseBoot = Clock<ClockSource::crystal, 24'000'000, 24'000'000>;
 using Boot = std::conditional_t<hse_image, HseBoot, PllBoot>;
 using SysClock = DynamicClock<Boot, Ticker, Serial>;
@@ -151,7 +163,10 @@ void tc_trim() {
     Rcc::hsi_trim(static_cast<uint8_t>(centre + 1u));
     const uint8_t up = Rcc::hsi_trim();
     console_drain();
-    print(serial, "  trim ", centre, " -> ", up, ": this line was sent at the same rate - the root is the crystal", crlf);
+    print(serial, "  trim ", centre, " -> ", up,
+          Boot::uses_hse ? ": this line was sent at the same rate - the root is the crystal"
+                         : ": this line was sent a step off - the root is the HSI itself, within the UART's tolerance",
+          crlf);
     console_drain();
     Rcc::hsi_trim(static_cast<uint8_t>(centre - 1u));
     const uint8_t down = Rcc::hsi_trim();
@@ -306,8 +321,9 @@ void tk_bracket() {
 
 void banner() {
     print(serial, crlf, "test_ch32_clock - ", device::part_name,
-          hse_image ? " (the 24 MHz crystal as SYSCLK, no PLL, DynamicClock over HPRE)"
-                    : " (PLL 48 MHz root from the 24 MHz crystal, DynamicClock over HPRE)",
+          hse_image             ? " (the 24 MHz crystal as SYSCLK, no PLL, DynamicClock over HPRE)"
+          : Boot::uses_hse      ? " (PLL 48 MHz root from the 24 MHz crystal, DynamicClock over HPRE)"
+                                : " (PLL 48 MHz root from the HSI - this board has no crystal - DynamicClock over HPRE)",
           crlf);
     bench.menu();
 }
@@ -326,11 +342,15 @@ int main() {
     bench.letter('a', "the tree at boot", ta_tree);
     bench.letter('b', "the LSI", tb_lsi);
     bench.letter('c', "the HSI trim", tc_trim);
-    bench.letter('g', "the HSE: the crystal as the PLL's source, the clock security system on it", tg_hse);
+    if constexpr (ch32board::has_crystal) {
+        bench.letter('g', "the HSE: the crystal as the PLL's source, the clock security system on it", tg_hse);
+    }
     bench.letter('d', "the DynamicClock ladder", td_ladder);
     bench.letter('e', "the system clock monitor and the MCO", te_monitor);
     bench.letter('f', "the peripheral gates", tf_gates);
-    bench.letter('h', "the crystal as SYSCLK itself, no PLL (its own image)", th_hse_sysclk);
+    if constexpr (ch32board::has_crystal) {
+        bench.letter('h', "the crystal as SYSCLK itself, no PLL (its own image)", th_hse_sysclk);
+    }
     bench.letter('k', "a bracket of 30 000 ticks for a host to time (by name)", tk_bracket, false);
 
     if (serial_ok) {

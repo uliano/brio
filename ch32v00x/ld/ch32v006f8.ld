@@ -1,0 +1,113 @@
+/* ============================================================================
+ * ch32v006f8.ld - hand-written linker script for the CH32V006F8
+ * (62 KB flash at 0x0000_0000 and 8 KB SRAM at 0x2000_0000 - CH32V006
+ * datasheet V2.0, table 1-1: the same memories as the CH32V006K8, the
+ * same die in the QFN20 package).
+ *
+ * FLASH AT ZERO, AND WHY THE FIRST WORD IS AN INSTRUCTION. This core
+ * fetches its first instruction from address 0, so the image starts
+ * with the vector table and the table's first word is a JUMP, not a
+ * pointer (the words after it ARE pointers - QingKe V2 vectored mode,
+ * RM 6.3). That is the opposite of the ARM convention, where word 0 is
+ * the initial stack pointer, and it is why .vectors must be KEPT first
+ * in .text and why the crt sets the stack pointer itself.
+ *
+ * THE LINKER GETS 40 K OF THE 62. The array is one, and the storage
+ * classes (brio/ch32v00x/nvm_flash.hpp: the NvHeap's 16 KB and the
+ * NvJournal's 6 KB attic) live in its top 22 KB as a CONSTANT
+ * partition - so `rom` stops at 0xA000 and nothing the compiler emits
+ * can land above it. `__brio_rom_end` below is that boundary read back
+ * as a value: the media compare it with their floor and refuse to open
+ * if this script is ever edited past it. 62 K and not 64 because the
+ * top two kilobytes of the flash array are the boot loader's.
+ *
+ * .noinit is NOLOAD and the crt neither loads nor zeroes it, which is
+ * what lets the kernel's PanicRecord breadcrumb survive a warm reset.
+ * ==========================================================================*/
+
+MEMORY
+{
+    rom (rx)  : ORIGIN = 0x00000000, LENGTH = 40K
+    ram (rwx) : ORIGIN = 0x20000000, LENGTH = 8K
+}
+
+ENTRY(reset_handler)
+
+SECTIONS
+{
+    .text :
+    {
+        KEEP(*(.vectors))
+        *(.text .text.*)
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+
+        . = ALIGN(4);
+        __preinit_array_start = .;
+        KEEP(*(.preinit_array))
+        __preinit_array_end = .;
+        __init_array_start = .;
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array))
+        __init_array_end = .;
+        . = ALIGN(4);
+    } > rom
+
+    .data :
+    {
+        . = ALIGN(4);
+        __data_start = .;
+        /* Code that runs from SRAM, copied by the crt with the data -
+           two names, two meanings. `.fast_text` is code that MAY run
+           from SRAM, for speed: what a program opts into,
+           util/placement.hpp's Hot<InRam> and a program's own placed
+           function; what it buys is the fetch, the code flash answering
+           behind two wait states at 48 MHz (RM 18.3.1) and the SRAM
+           without them (docs/ch32v00x/platform.md, "A handler in SRAM").
+           `.ram_text` is code that MUST, for correctness - nothing on
+           this part, whose sleep entry runs from the flash; the name
+           kept for what the family's own pieces may need. */
+        *(.fast_text .fast_text.*)
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
+        *(.data .data.*)
+        . = ALIGN(8);
+        /* The global pointer addresses 4 KB around itself, so it is
+           placed 2 KB into the small-data area: every .sdata and .sbss
+           object is then one gp-relative instruction away. */
+        __global_pointer$ = . + 0x800;
+        *(.sdata .sdata.*)
+        . = ALIGN(4);
+        __data_end = .;
+    } > ram AT > rom
+    __data_load_start = LOADADDR(.data);
+
+    .bss (NOLOAD) :
+    {
+        . = ALIGN(4);
+        __bss_start = .;
+        *(.sbss .sbss.*)
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(4);
+        __bss_end = .;
+    } > ram
+
+    /* Survives reset: the crt neither loads nor zeroes it (PanicRecord). */
+    .noinit (NOLOAD) :
+    {
+        . = ALIGN(4);
+        *(.noinit .noinit.*)
+        . = ALIGN(4);
+        /* One past the last RAM byte the linker placed: the stack may
+           grow down to here and no further. The crt paints the gap up
+           to the stack top; brio/ch32v00x/platform.hpp measures it. */
+        __stack_floor = .;
+    } > ram
+
+    __stack_top = ORIGIN(ram) + LENGTH(ram);
+
+    /* One past the last byte the linker may place: the storage floor.
+       brio/ch32v00x/nvm_flash.hpp reads it as a value. */
+    __brio_rom_end = ORIGIN(rom) + LENGTH(rom);
+}

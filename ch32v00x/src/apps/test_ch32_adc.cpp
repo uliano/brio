@@ -11,8 +11,10 @@
 // (util/testbench.hpp). It is a REFERENCE test.
 //
 // NOTHING TO WIRE. PD2 (ADC_IN3) and PC4 (ADC_IN2) are read through
-// their internal pulls; PD5/PD6 are the console's and are never claimed;
-// PC0 is the LED.
+// their internal pulls - PA2 (ADC_IN0) instead of PC4 on the WeAct board,
+// whose PC4 carries the LED and its 10 kOhm (ch32_board.hpp); PD5/PD6 are
+// the console's and are never claimed; the LED is the board's, PC0 on
+// the other boards.
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: the reset values, the prescaler's two-level
@@ -40,15 +42,16 @@
 //   x  (outside z, CH32V006) the probe that found the scan's semantics
 //   y  (outside z) THE STALL hunted: a triggered, DMA-served run that
 //      stops converting, in six arrangements of a hundred runs
-//   g  THE PADS through their pulls: IN3 (PD2) and IN2 (PC4) pulled up
-//      read near full scale, pulled down near zero
+//   g  THE PADS through their pulls: IN3 (PD2) and IN2 (PC4; IN0, PA2,
+//      on the WeAct board) pulled up read near full scale, pulled down near
+//      zero
 //   h  THE SAMPLER: util/analog_sampler.hpp's AnalogSampler walking
 //      VREFINT and IN3, its AnalogSample events counted per input
 //   r  (CH32V006) THE WATCHDOG RESET (reboots the board): watchdog 0
 //      armed with AWD0_RST_EN and VREFINT out of its window; the next
 //      boot reads ADCRSTF
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = abgef,cd,hy
 // build: monitor_speed = 115200
 
@@ -74,6 +77,8 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "ch32_board.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -97,10 +102,13 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
+using Led = ch32board::Led;
 
 using In3 = AnalogIn<Pin<'D', 2>>;
-using In2 = AnalogIn<Pin<'C', 4>>;
+/// The second pad read through its pull: PC4 (IN2), or PA2 (IN0) on the
+/// WeAct board (the header).
+using PulledPin = ch32board::PulledPad;
+using In2 = AnalogIn<PulledPin>;
 using T1 = Tim<1>;
 using T2 = Tim<2>;
 using Reader = DmaChannel<1>;
@@ -718,9 +726,9 @@ void tf_watchdogs() {
     // rule sequence - watchdog 0 on the first conversion, 1 on the
     // second, 2 on the third, each with its own thresholds (the vendor's
     // own example's arrangement; 9.3.15's "watchdog channel 1" is that
-    // rank). VREFINT then PC4 pulled up twice: ranks 2 and 3 at 4095.
+    // rank). VREFINT then the pulled pad pulled up twice: ranks 2 and 3 at 4095.
     (void)adc_ready(code_div8, {.scan = true});
-    Pin<'C', 4>::input(PinPull::up);
+    PulledPin::input(PinPull::up);
     (void)delay_us(clock, 100);
     const uint8_t seq[3] = {Adc::vrefint_channel, In2::channel, In2::channel};
     (void)Adc::sequence(seq, 3);
@@ -753,13 +761,13 @@ void tf_watchdogs() {
         const bool r1 = Adc::watchdog_result(1);
         const bool r2 = Adc::watchdog_result(2);
         const bool ok = r0 == r.expect0 && r1 == r.expect1 && r2 == r.expect2;
-        print(serial, "  scan VREFINT,PC4,PC4 with ", r.name, ": results ", r0, r1, r2, ok ? "  as expected" : "  OFF",
+        print(serial, ch32board::weact ? "  scan VREFINT,PA2,PA2 with " : "  scan VREFINT,PC4,PC4 with ", r.name, ": results ", r0, r1, r2, ok ? "  as expected" : "  OFF",
               crlf);
         if (ok) {
             ++right;
         }
     }
-    Pin<'C', 4>::release();
+    PulledPin::release();
     bench.verdict("under AWD_SCAN the three watchdogs guard the first three RANKS of the rule sequence, each "
                   "with its own thresholds, the results in CTLR3 cleared by writing zero",
                   right == 4u);
@@ -780,7 +788,8 @@ void tg_pads() {
     };
     const PadCase pads[] = {
         {"PD2 (IN3)", In3::channel, [] { Pin<'D', 2>::input(PinPull::up); }, [] { Pin<'D', 2>::input(PinPull::down); }},
-        {"PC4 (IN2)", In2::channel, [] { Pin<'C', 4>::input(PinPull::up); }, [] { Pin<'C', 4>::input(PinPull::down); }},
+        {ch32board::weact ? "PA2 (IN0)" : "PC4 (IN2)", In2::channel, [] { PulledPin::input(PinPull::up); },
+         [] { PulledPin::input(PinPull::down); }},
     };
     uint8_t good = 0;
     for (const PadCase& p : pads) {
@@ -793,7 +802,7 @@ void tg_pads() {
         (void)delay_us(clock, 100);
         const uint16_t down = Adc::read_settled(4);
         Pin<'D', 2>::release();
-        Pin<'C', 4>::release();
+        PulledPin::release();
         const bool ok = up >= scaled(3900) && down <= scaled(200);
         print(serial, "  ", p.name, ": pulled up ", up, ", pulled down ", down, ok ? "  as expected" : "  OFF", crlf);
         if (ok) {

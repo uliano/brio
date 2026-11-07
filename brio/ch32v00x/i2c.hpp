@@ -422,6 +422,12 @@ constexpr bool i2c_pins_valid(const I2cPins& p) {
     return p.scl.valid() && p.sda.valid() && !(p.scl == p.sda) && p.remap < 8u;
 }
 
+/// Does THIS package let the bus drive both pads - bonded, and neither
+/// sharing its package pin with another (pin.hpp's pad_can_drive)? A
+/// column the package leaves a pad of out is refused at compile time by
+/// the host and the client.
+constexpr bool i2c_pins_bonded(const I2cPins& p) { return pad_can_drive(p.scl) && pad_can_drive(p.sda); }
+
 /// A target's addresses (15.4): one 7- or 10-bit own address, an
 /// optional second 7-bit one (ENDUAL), the general call.
 struct I2cAddressConfig {
@@ -674,6 +680,9 @@ class I2cHost {
     static_assert(i2c_pins_valid(pins),
                   "brio I2cHost: these I2C pads are not a bus - SCL and SDA must both be "
                   "named and distinct");
+    static_assert(i2c_pins_bonded(pins),
+                  "brio I2cHost: this part's package does not bring out both pads of that "
+                  "column alone on their pins (parts/<part>.hpp's port_pins and port_twinned)");
 
     using SclPin = Pin<pins.scl.port, pins.scl.pin>;
     using SdaPin = Pin<pins.sda.port, pins.sda.pin>;
@@ -1745,6 +1754,9 @@ class I2cClient {
     static_assert(i2c_pins_valid(pins),
                   "brio I2cClient: these I2C pads are not a bus - SCL and SDA must both "
                   "be named and distinct");
+    static_assert(i2c_pins_bonded(pins),
+                  "brio I2cClient: this part's package does not bring out both pads of that "
+                  "column alone on their pins (parts/<part>.hpp's port_pins and port_twinned)");
 
     using SclPin = Pin<pins.scl.port, pins.scl.pin>;
     using SdaPin = Pin<pins.sda.port, pins.sda.pin>;

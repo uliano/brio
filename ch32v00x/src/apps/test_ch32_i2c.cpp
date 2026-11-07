@@ -16,16 +16,16 @@
 // architecture. The peer's command-mode client answers ONE address
 // (0x6B) with no general call and no second address.
 //
-// THE BUS IS I2C1 ON ITS COLUMN 3 on the CH32V006 (AFIO table 7-13-1,
-// code 011), which leaves SPI1's column 0 whole; the CH32V003, whose
-// remap table has no such column and which is off the desk, keeps its
-// default pads (PC2 SCL, PC1 SDA). On the CH32V006:
+// THE BUS IS I2C1 ON THE PAIR'S COLUMN (ch32_pair.hpp, AFIO table
+// 7-13-1): its default column on the WeAct board and on the CH32V003 (off
+// the desk), column 3 (code 011) on the CH32V006K8U6 module, which leaves
+// that board's SPI1 column 0 whole:
 //
-//   SCL   PB5  <->  the CH32X035's PC16
-//   SDA   PB6  <->  the CH32X035's PC17
+//   SCL   PC2 (WeAct) or PB5 (module)  <->  the CH32X035's PC16
+//   SDA   PC1 (WeAct) or PB6 (module)  <->  the CH32X035's PC17
 //   GND   <->  GND, both boards at 3.3 V
 //
-// THE PULL-UPS ARE THE PEER'S: this module carries none, an
+// THE PULL-UPS ARE THE PEER'S: this board carries none, an
 // alternate-function open-drain pad has no internal pull on this
 // family, and the CH32X035 hangs a 1.5 kOhm resistor from each line to
 // its PB3, which its I2C images drive high for their whole run and
@@ -141,9 +141,10 @@
 // peer's command windows are hundreds of milliseconds each): pass
 // `--timeout 400`.
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = ai,bcw,d,e,fk,g,q,r,l
 // build: groups.v006k8 = abcdefgikrwv,hjpq,nlut,y
+// build: groups.v006f8 = abcdefgikrwv,hjpq,nlut,y
 // (the kernel letter h, the two-host letters j and v, the dead-channel
 // letter p, the engine letter n, the standing BUSY's letter u, the bounds'
 // letter t and the starved channels' letter y are in no group of the CH32V003
@@ -186,6 +187,8 @@
 #include "../../../avrxt/src/apps/twi_link.hpp"
 #include "held_request.hpp"
 
+#include "ch32_pair.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -197,13 +200,8 @@ using namespace brio;
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 
-/// THE BUS'S COLUMN (the header): column 3 on the CH32V006, the default
-/// pads on the CH32V003.
-constexpr I2cPins bus_pins =
-    device::part == Ch32Part::v006 ? i2c1_pins_for(3) : i2c1_default_pins;
-static_assert(device::part != Ch32Part::v006 ||
-                  (bus_pins.scl == Pad{'B', 5} && bus_pins.sda == Pad{'B', 6}),
-              "AFIO table 7-13-1: I2C1's code 011 is SCL PB5, SDA PB6");
+/// THE BUS'S COLUMN (the header): the pair's.
+constexpr I2cPins bus_pins = ch32pair::i2c_pins;
 
 using H = I2c<1>;
 using Host = I2cHost<1, bus_pins>;

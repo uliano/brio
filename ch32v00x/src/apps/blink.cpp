@@ -11,12 +11,13 @@
 // Only the glue lines are this target's - the clock type, the pin, the
 // platform, the vector binding.
 //
-// Wiring: the module's LED has no pin of its own - it is jumpered to
-// one. PC0 is the pin every app of this project drives: bonded on all
-// five packages of the family, no bus and no analog function on it,
-// TIM2_CH3 as its alternate function (a dimmable LED, one day).
+// Wiring: the LED's pad is the board's (ch32_board.hpp). The CH32V006K8U6
+// module's LED has no pin of its own - it is jumpered to PC0, the pad the
+// apps drive on that board and on the CH32V003's: no bus and no analog
+// function on it, TIM2_CH3 as its alternate function (a dimmable LED,
+// one day). WeAct's core board carries its LED on PC4, active high.
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 
 #include <stdint.h>
 
@@ -31,6 +32,8 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 
+#include "ch32_board.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 
 // The clock: the ONE truth about HCLK for every driver of this target
@@ -41,7 +44,7 @@ constexpr SysClock clock;
 
 namespace {
 
-using Led = brio::Pin<'C', 0>;   // the jumpered LED (see the header)
+using Led = ch32board::Led;   // the board's LED (see the header)
 
 // ---- events -----------------------------------------------------------------
 struct Toggle {};                      // Blinker's own heartbeat

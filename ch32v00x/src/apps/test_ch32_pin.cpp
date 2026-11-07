@@ -11,10 +11,18 @@
 //
 // THE JUMPER, for letters c, d and f:
 //
-//   PD2  <->  PD4
+//   PD2  <->  PD4      (PA2 <-> PA1 on the WeAct board, whose PD4 is not a
+//                       free pad: ch32_board.hpp's JumperDrive/JumperSense)
+//
+// On the WeAct board PD4 hangs from PD5, the console's transmit pad,
+// through the board's 1.5 kOhm USB resistor (ch32_board.hpp), so letter b
+// reads PA1 there instead of PD4, and the jumper letters drive PA2 and
+// sense PA1 - EXTI line 1 instead of line 4. Written PD2, PD4 and line 4
+// below, the module's spelling.
 //
 // main() probes it and the three letters decline with the reason when
-// it is missing. PC0 is the LED; PD5/PD6 the console's, never claimed.
+// it is missing. The LED is the board's (ch32_board.hpp: PC0, or PC4 on
+// the WeAct board), never claimed; PD5/PD6 the console's, never claimed.
 //
 // What is exercised, letter by letter:
 //   a  the ports, WIRELESS: the clock gates, the reset nibbles, every
@@ -38,7 +46,7 @@
 //      TIM1's channel 1 forced high and low on its default pad and on
 //      column 3's (PC4), the pads read on INDR
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -61,6 +69,8 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "ch32_board.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -72,9 +82,9 @@ using namespace brio;
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 
-using Driver = Pin<'D', 2>;
-using Sensor = Pin<'D', 4>;
-using Line = ExtInt<'D', 4>;
+using Driver = ch32board::JumperDrive;
+using Sensor = ch32board::JumperSense;
+using Line = ExtInt<Sensor::port_letter, Sensor::pin_number>;
 
 TestBench<Serial> bench;
 
@@ -104,7 +114,9 @@ bool need_jumper() {
     }
     jumper_present = probe_jumper();
     if (!jumper_present) {
-        print(serial, "  SKIPPED, no verdict claimed: no jumper between PD2 and PD4", crlf);
+        print(serial, ch32board::weact ? "  SKIPPED, no verdict claimed: no jumper between PA2 and PA1"
+                                       : "  SKIPPED, no verdict claimed: no jumper between PD2 and PD4",
+              crlf);
     }
     return jumper_present;
 }
@@ -124,15 +136,15 @@ void all_off() {
 // a - the ports, wireless
 // ===========================================================================
 
-void ta_ports() {
-    all_off();
-    // A port's clock gate: PB2PCENR's bit, opened by the first configuring
-    // verb - port B on the CH32V006 (seven pins bonded, the eighth nibble
-    // reading zero), port C on the CH32V003, which has no port B.
-#if BRIO_CH32_PART_V006
+/// The gate and reset half of letter a on port B, where the package
+/// bonds it (the CH32V006's QFN32: seven pins, the eighth nibble reading
+/// zero) - a template only so that a package with no port B pad, which
+/// names it in a discarded branch, never instantiates it.
+template <char B = 'B'>
+void gate_and_reset_port_b() {
     rcc()->PB2PCENR &= ~rcc_pb2_gpiob;
     const bool closed = (rcc()->PB2PCENR & rcc_pb2_gpiob) == 0u;
-    Pin<'B', 0>::input();
+    Pin<B, 0>::input();
     const bool opened = (rcc()->PB2PCENR & rcc_pb2_gpiob) != 0u;
     bench.verdict("a configuring verb opens the port's clock gate (GPIOB, closed, then PB0 configured)",
                   closed && opened);
@@ -141,21 +153,26 @@ void ta_ports() {
     // level's store, a store behind a shut gate being lost (measured,
     // pin.hpp's header), so OUTDR's bit and the pad read 1.
     rcc()->PB2PCENR &= ~rcc_pb2_gpiob;
-    Pin<'B', 0>::output(true);
-    const bool level_landed = (Port<'B'>::out() & (1UL << 0)) != 0u && Pin<'B', 0>::read();
-    Pin<'B', 0>::input();
+    Pin<B, 0>::output(true);
+    const bool level_landed = (Port<B>::out() & (1UL << 0)) != 0u && Pin<B, 0>::read();
+    Pin<B, 0>::input();
     bench.verdict("a level asked as a port's first configuration lands (the gate opened before the store: "
                   "OUTDR's bit and PB0 high)",
                   level_landed);
     // The reset nibble is 0x4 (floating input) on every pin of a reset port.
     rcc()->PB2PRSTR |= rcc_pb2_gpiob;
     rcc()->PB2PRSTR &= ~rcc_pb2_gpiob;
-    print(serial, "  GPIOB after its reset pulse: CFGLR=", hex(Port<'B'>::regs().CFGLR), " OUTDR=",
-          hex(Port<'B'>::regs().OUTDR), " (port B bonds PB0..PB6: seven nibbles)", crlf);
+    print(serial, "  GPIOB after its reset pulse: CFGLR=", hex(Port<B>::regs().CFGLR), " OUTDR=",
+          hex(Port<B>::regs().OUTDR), " (port B bonds PB0..PB6: seven nibbles)", crlf);
     bench.verdict("a reset port holds 0x4 in every nibble it has (floating input, RM 7.3.1.1) - seven on "
                   "port B, whose eighth reads zero",
-                  (Port<'B'>::regs().CFGLR & 0x0FFFFFFFu) == 0x04444444u);
-#else
+                  (Port<B>::regs().CFGLR & 0x0FFFFFFFu) == 0x04444444u);
+}
+
+/// The same on port C, on every other package (the CH32V003 has no port B,
+/// the CH32V006's 20-pin package bonds none of it).
+template <int = 0>
+void gate_and_reset_port_c() {
     rcc()->PB2PCENR &= ~rcc_pb2_gpioc;
     const bool closed = (rcc()->PB2PCENR & rcc_pb2_gpioc) == 0u;
     Pin<'C', 3>::input();
@@ -175,7 +192,17 @@ void ta_ports() {
           hex(Port<'C'>::regs().OUTDR), " (port C bonds PC0..PC7: eight nibbles)", crlf);
     bench.verdict("a reset port holds 0x4 in every nibble it has (floating input, RM 7.3.1.1) - eight on port C",
                   Port<'C'>::regs().CFGLR == 0x44444444u);
-#endif
+}
+
+void ta_ports() {
+    all_off();
+    // A port's clock gate: PB2PCENR's bit, opened by the first configuring
+    // verb - port B where the package bonds it, port C where it does not.
+    if constexpr (device::port_pins('B') != 0u) {
+        gate_and_reset_port_b();
+    } else {
+        gate_and_reset_port_c();
+    }
     // Every nibble pin_nibble() spells, written to PD2 and read back.
     struct Case {
         const char* name;
@@ -205,12 +232,12 @@ void ta_ports() {
     // BSHR sets from its low half and clears from its high half; BCR
     // clears; the toggle is one BSHR store.
     Driver::output(false);
-    Port<'D'>::out_set(Driver::mask);
+    Driver::P::out_set(Driver::mask);
     const bool set = Driver::read_out();
-    Port<'D'>::regs().BSHR = Driver::mask << 16;
+    Driver::P::regs().BSHR = Driver::mask << 16;
     const bool cleared_high = !Driver::read_out();
     Driver::set();
-    Port<'D'>::out_clear(Driver::mask);
+    Driver::P::out_clear(Driver::mask);
     const bool cleared_bcr = !Driver::read_out();
     Driver::toggle();
     const bool toggled = Driver::read_out();
@@ -219,7 +246,8 @@ void ta_ports() {
     Driver::release();
     bench.verdict("BSHR sets from its low half and clears from its high half, BCR clears, toggle() flips",
                   set && cleared_high && cleared_bcr && toggled && back);
-    print(serial, "  jumper PD2-PD4: ", jumper_present ? "present" : "ABSENT", crlf);
+    print(serial, ch32board::weact ? "  jumper PA2-PA1: " : "  jumper PD2-PD4: ", jumper_present ? "present" : "ABSENT",
+          crlf);
 }
 
 // ===========================================================================
@@ -227,6 +255,7 @@ void ta_ports() {
 // ===========================================================================
 
 void tb_pulls() {
+    using PP = ch32board::PulledPad;
     all_off();
     struct PadCase {
         const char* name;
@@ -236,10 +265,15 @@ void tb_pulls() {
     const PadCase pads[] = {
         {"PD2", [] { Pin<'D', 2>::input(PinPull::up); (void)delay_us(clock, 20); const bool r = Pin<'D', 2>::read(); Pin<'D', 2>::release(); return r; },
                 [] { Pin<'D', 2>::input(PinPull::down); (void)delay_us(clock, 20); const bool r = Pin<'D', 2>::read(); Pin<'D', 2>::release(); return r; }},
-        {"PD4", [] { Pin<'D', 4>::input(PinPull::up); (void)delay_us(clock, 20); const bool r = Pin<'D', 4>::read(); Pin<'D', 4>::release(); return r; },
-                [] { Pin<'D', 4>::input(PinPull::down); (void)delay_us(clock, 20); const bool r = Pin<'D', 4>::read(); Pin<'D', 4>::release(); return r; }},
-        {"PC4", [] { Pin<'C', 4>::input(PinPull::up); (void)delay_us(clock, 20); const bool r = Pin<'C', 4>::read(); Pin<'C', 4>::release(); return r; },
-                [] { Pin<'C', 4>::input(PinPull::down); (void)delay_us(clock, 20); const bool r = Pin<'C', 4>::read(); Pin<'C', 4>::release(); return r; }},
+        // PD4, or PA1 where PD4 is not a free pad (the header).
+        {ch32board::weact ? "PA1" : "PD4",
+                [] { Sensor::input(PinPull::up); (void)delay_us(clock, 20); const bool r = Sensor::read(); Sensor::release(); return r; },
+                [] { Sensor::input(PinPull::down); (void)delay_us(clock, 20); const bool r = Sensor::read(); Sensor::release(); return r; }},
+        // PC4, or PA2 where PC4 carries the board's LED and its 10 kOhm
+        // (ch32_board.hpp's PulledPad).
+        {ch32board::weact ? "PA2" : "PC4",
+                [] { PP::input(PinPull::up); (void)delay_us(clock, 20); const bool r = PP::read(); PP::release(); return r; },
+                [] { PP::input(PinPull::down); (void)delay_us(clock, 20); const bool r = PP::read(); PP::release(); return r; }},
         {"PC3", [] { Pin<'C', 3>::input(PinPull::up); (void)delay_us(clock, 20); const bool r = Pin<'C', 3>::read(); Pin<'C', 3>::release(); return r; },
                 [] { Pin<'C', 3>::input(PinPull::down); (void)delay_us(clock, 20); const bool r = Pin<'C', 3>::read(); Pin<'C', 3>::release(); return r; }},
     };
@@ -260,7 +294,7 @@ void tb_pulls() {
     const bool odr_up = Driver::read_out();
     Driver::input(PinPull::down);
     const bool odr_down = !Driver::read_out();
-    const uint32_t nibble = (Port<'D'>::regs().CFGLR >> 8) & 0xFu;
+    const uint32_t nibble = (Driver::P::regs().CFGLR >> (4u * Driver::pin_number)) & 0xFu;
     Driver::release();
     bench.verdict("the pull's direction is OUTDR's bit under CNF 10 (nibble 0x8)",
                   odr_up && odr_down && nibble == 0x8u);
@@ -345,9 +379,10 @@ void td_edges() {
     const uint32_t r = edges_of(true, false, 10);
     const uint32_t f = edges_of(false, true, 10);
     const uint32_t b = edges_of(true, true, 10);
-    print(serial, "  ten toggles of PD2 on PD4's line 4: rising ", r, ", falling ", f, ", both ", b, " interrupts",
-          crlf);
-    bench.verdict("line 4 counts five rising, five falling and ten of both edges, one interrupt each",
+    print(serial, ch32board::weact ? "  ten toggles of PA2 on PA1's line 1: rising " : "  ten toggles of PD2 on PD4's line 4: rising ",
+          r, ", falling ", f, ", both ", b, " interrupts", crlf);
+    bench.verdict(ch32board::weact ? "line 1 counts five rising, five falling and ten of both edges, one interrupt each"
+                                   : "line 4 counts five rising, five falling and ten of both edges, one interrupt each",
                   r == 5u && f == 5u && b == 10u);
     // The flag as a poll. A line enabled nowhere raises no flag on an
     // edge - the software trigger's rule (exti.hpp) holds for the pad's
@@ -378,7 +413,7 @@ void td_edges() {
                   flag_up && flag_down);
     // The other port on the same line number: PC4 selected instead of
     // PD4, PD2's toggles reach nothing.
-    Exti::port(4, 2);   // port C
+    Exti::port(Line::line, 2);   // port C
     Line::clear();
     Line::interrupt(true);
     line_interrupts = 0;
@@ -389,8 +424,10 @@ void td_edges() {
     }
     Pfic::disable(Irq::exti7_0);
     Line::interrupt(false);
-    print(serial, "  line 4 routed to PC4 instead: ", line_interrupts, " interrupts from PD2's toggles", crlf);
-    bench.verdict("a line is ONE pin number of ONE port (AFIO_EXTICR): routed to PC4 it hears nothing of PD4",
+    print(serial, ch32board::weact ? "  line 1 routed to PC1 instead: " : "  line 4 routed to PC4 instead: ",
+          line_interrupts, ch32board::weact ? " interrupts from PA2's toggles" : " interrupts from PD2's toggles", crlf);
+    bench.verdict(ch32board::weact ? "a line is ONE pin number of ONE port (AFIO_EXTICR): routed to PC1 it hears nothing of PA1"
+                                   : "a line is ONE pin number of ONE port (AFIO_EXTICR): routed to PC4 it hears nothing of PD4",
                   line_interrupts == 0u);
     all_off();
 }
@@ -424,7 +461,8 @@ void te_soft_and_event() {
     (void)delay_us(clock, 20);
     Pfic::disable(Irq::exti7_0);
     Line::interrupt(false);
-    print(serial, "  SWIEVR on line 4: flag with the line enabled nowhere ", flag_unarmed, ", enabled in INTENR ",
+    print(serial, ch32board::weact ? "  SWIEVR on line 1: flag with the line enabled nowhere " : "  SWIEVR on line 4: flag with the line enabled nowhere ",
+          flag_unarmed, ", enabled in INTENR ",
           flag_armed, "; then ", line_interrupts, " interrupts from two triggers", crlf);
     bench.verdict("the software trigger raises the flag of a line enabled in INTENR - and nothing on a line "
                   "enabled nowhere - and, with the PFIC line open, one interrupt per trigger",
@@ -647,7 +685,8 @@ void tg_remaps() {
 
 void banner() {
     print(serial, crlf, "test_ch32_pin - ", device::part_name, " GPIO (RM ch. 7) and EXTI (6.4)", crlf);
-    print(serial, "  the jumper for c, d and f: PD2 <-> PD4; ", jumper_present ? "PRESENT" : "ABSENT", crlf);
+    print(serial, ch32board::weact ? "  the jumper for c, d and f: PA2 <-> PA1; " : "  the jumper for c, d and f: PD2 <-> PD4; ",
+          jumper_present ? "PRESENT" : "ABSENT", crlf);
     bench.menu();
 }
 
@@ -678,7 +717,9 @@ int main() {
     bench.letter('c', "THE LEVELS on the jumper: push-pull, open-drain, an analog pad", tc_levels);
     bench.letter('d', "THE EDGES on the jumper: rising, falling, both; the flag; the port select", td_edges);
     bench.letter('e', "the software trigger and the EVENT mode ending a WFE, wireless", te_soft_and_event);
-    bench.letter('f', "THE SCANNER on the jumper: InputScanner over PD4 driven by PD2", tf_scanner);
+    bench.letter('f', ch32board::weact ? "THE SCANNER on the jumper: InputScanner over PA1 driven by PA2"
+                                       : "THE SCANNER on the jumper: InputScanner over PD4 driven by PD2",
+                 tf_scanner);
     bench.letter('g', "THE REMAPS, wireless: PCFR1's fields, TIM1_CH1 moved from PD2 to PC4", tg_remaps);
 
     if (serial_ok) {

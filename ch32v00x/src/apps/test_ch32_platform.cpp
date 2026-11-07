@@ -82,7 +82,7 @@
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = abcdeiw,ktu
 // (on the CH32V003 the suite is two images, test_ch32_platform-1 and -2:
 // whole it is over the part's 15 KB; `i` runs as

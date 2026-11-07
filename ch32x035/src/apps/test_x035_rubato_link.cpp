@@ -922,10 +922,19 @@ static_assert(lead_bound_ppm == 38, "the file header's arithmetic");
 /// THE PREMISE of the echo legs: this end's rate against the far crystal,
 /// timed by the peer (x035_link_dut.hpp's calibrate leg at 1 Mbaud, a
 /// divisor of 48 exact), and the far peer's identity; false (judged) when
-/// either is missing.
+/// either is missing, and false with no verdict (skipped) when the peer
+/// runs no crystal.
 bool echo_premise() {
     link::Ident d{};
     const bool got = x035link::peer_ident(d);
+    // A peer with no crystal (its board fits none) times nothing: the lead
+    // cannot be measured, so the echo legs are skipped, no verdict claimed.
+    if (got && d.sanity == link::ident_sanity && d.xtal == 0u) {
+        print(serial, "  SKIPPED, no verdict claimed: the peer runs no crystal - its board fits none - so this "
+                      "end's lead over the far echo cannot be timed on this pair", crlf);
+        (void)x035link::link_command_mode();
+        return false;
+    }
     bench.verdict("the peer is the CH32V006's usart_peer on its crystal",
                   got && d.sanity == link::ident_sanity && link::peer_kind(d.version) == link::peer_ch32v00x &&
                       d.xtal == 1u);

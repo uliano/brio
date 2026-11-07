@@ -8,9 +8,10 @@
 // architecture. What this silicon makes of it - the STM32F1's SPI under
 // WCH's register names, RM ch. 16:
 //
-//  - THE BUS IS SPI1 ON ITS COLUMN 0 (AFIO table 7-12, code 000) WITH THE
-//    HARDWARE SELECT: SCK PC5, MOSI PC6, MISO PC7, NSS PC1 - the desk's
-//    SPI column, whole since the I2C moved to column 3. The client frames
+//  - THE BUS IS SPI1 ON THE PAIR'S COLUMN (ch32_pair.hpp: 1 on the WeAct
+//    board, NSS PC0; 0 on the CH32V006K8U6 module, NSS PC1; AFIO table
+//    7-12) WITH THE HARDWARE SELECT: SCK PC5, MOSI PC6, MISO PC7 and the
+//    column's NSS (written NSS below). The client frames
 //    on the NSS PAD (SSM clear): a host's settling edge with the select
 //    still high is not counted into the first frame, and the runs below
 //    read the same pad for the window's close.
@@ -93,9 +94,9 @@
 // kOhm) whenever this end is a client.
 //
 // THE ROLES INVERT for Op::host_burst: SPI1 becomes the bus HOST on the
-// same pads, PC1 a GPIO chip select this end drives low for the whole
+// same pads, NSS a GPIO chip select this end drives low for the whole
 // burst - one transaction, which a hardware select cannot frame - and
-// ss_pulse drives PC1 low from GPIO for its microseconds, the SPI released
+// ss_pulse drives NSS low from GPIO for its microseconds, the SPI released
 // first: the far host's MODF from a second chip.
 //
 // THE SUPPLY at boot (the desk's rule for a board that drives a link pad):
@@ -108,7 +109,8 @@
 //
 // The ident label is the part number after its CH32 prefix ("V006");
 // ident.xtal says whether the 24 MHz crystal started (the PLL doubles it
-// to 48 MHz, the HSI's PLL the fallback at the same rate).
+// to 48 MHz, the HSI's PLL the fallback at the same rate); a board with no
+// crystal (ch32_board.hpp) never starts one and says xtal 0.
 //
 // NOTHING PLACED IN SRAM (util/placement.hpp, docs/ch32v00x/platform.md,
 // "A handler in SRAM"): the host of Op::host_burst keeps the default
@@ -118,7 +120,7 @@
 // flash too: from SRAM it would take the 8-bit exchange a rung higher (12
 // MHz, measured), above the 6 MHz every suite of the pair judges.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v006f8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -142,6 +144,9 @@
 // register, and every architecture on this link compiles the same file.
 #include "../../../avrxt/src/apps/spi_link.hpp"
 
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
+
 namespace {
 
 using namespace brio;
@@ -157,19 +162,17 @@ static_assert(SysClock::hz == HsiClock::hz, "the fallback must run every divisor
 using Console = Uart<1, P>;
 constexpr Console console;
 
-/// SPI1's column 0, every signal (the header).
-constexpr SpiPins link_pins = spi1_pins_for(0);
-static_assert(link_pins.sck == Pad{'C', 5} && link_pins.mosi == Pad{'C', 6} && link_pins.miso == Pad{'C', 7} &&
-                  link_pins.nss == Pad{'C', 1},
-              "AFIO table 7-12: SPI1's code 000 is SCK PC5, MOSI PC6, MISO PC7, NSS PC1");
+/// SPI1 on the pair's column, every signal (the header).
+constexpr SpiPins link_pins = ch32pair::spi_pins;
 
 using Client = SpiClient<1, link_pins>;
 using Host = SpiHost<1, link_pins>;
 using Raw = Spi<1>;
-using SckPin = Pin<'C', 5>;
-using MosiPin = Pin<'C', 6>;
-using MisoPin = Pin<'C', 7>;
-using NssPin = Pin<'C', 1>;
+using SckPin = Pin<link_pins.sck.port, link_pins.sck.pin>;
+using MosiPin = Pin<link_pins.mosi.port, link_pins.mosi.pin>;
+using MisoPin = Pin<link_pins.miso.port, link_pins.miso.pin>;
+using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
+
 
 constexpr uint16_t firmware_version =
     static_cast<uint16_t>((spilink::peer_ch32v00x << 8) | 0x03u);   ///< spi_link.hpp's Ident
@@ -551,7 +554,7 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
     return r;
 }
 
-/// The second driver on the shared select wire: PC1 low from GPIO for
+/// The second driver on the shared select wire: NSS low from GPIO for
 /// aux16 microseconds (1000 by default), the SPI handed back first, so
 /// nothing of this board is on the other three wires.
 spilink::Report run_ss_pulse(const spilink::Params& a) {
@@ -569,7 +572,7 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
 
 /// THE ROLES INVERT: this end becomes the bus HOST for a bounded burst.
 /// The ack is already served, both boards count the same lead-in, and at
-/// its end the DUT is a client with its first answer preloaded. PC1 is a
+/// its end the DUT is a client with its first answer preloaded. NSS is a
 /// GPIO driven LOW for the whole burst, SpiHost never claiming that pad.
 /// aux16 is "the instrument's SCK division of its own clock": the BR code
 /// producing AT MOST HCLK/aux16.
@@ -732,8 +735,10 @@ void help() {
 }
 
 void status() {
-    print(console, "  client SPI1 column 0, enabled=", Raw::enabled(), " STATR=", hex(Raw::status()), crlf);
-    print(console, "  NSS PC1 reads ", NssPin::read() ? "high" : "LOW", ", selected=", Client::selected(),
+    print(console, ch32board::weact ? "  client SPI1 column 1, enabled=" : "  client SPI1 column 0, enabled=",
+          Raw::enabled(), " STATR=", hex(Raw::status()), crlf);
+    print(console, ch32board::weact ? "  NSS PC0 reads " : "  NSS PC1 reads ", NssPin::read() ? "high" : "LOW",
+          ", selected=", Client::selected(),
           ", supply ", supply_mv, " mV", crlf);
     print(console, "  commands=", commands, " actions=", actions, " naks=", naks, " served=", serves,
           engaged() ? "  (ENGAGED)" : "  (dark, mute)", crlf);
@@ -762,7 +767,7 @@ BRIO_CH32_VECTOR(dma1_channel2_handler) { (void)PeerRx::service(); }
 BRIO_CH32_VECTOR(dma1_channel3_handler) { (void)PeerTx::service(); }
 
 int main() {
-    crystal_ok = SysClock::init();
+    crystal_ok = ch32board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = Ticker::init(clock);
@@ -787,8 +792,12 @@ int main() {
 
     print(console, crlf, "spi_peer - SPI instrument client (", device::part_name, ", label '", label,
           "', fw ", hex(firmware_version), ", VDD ", supply_mv, " mV)", crlf);
-    print(console, "client SPI1 column 0: NSS PC1 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
-                   "MISO PC7; command mode = SPI mode 0, MSb first", crlf);
+    print(console,
+          ch32board::weact ? "client SPI1 column 1: NSS PC0 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
+                             "MISO PC7; command mode = SPI mode 0, MSb first"
+                           : "client SPI1 column 0: NSS PC1 (the hardware select, pulled up), SCK PC5, MOSI PC6, "
+                             "MISO PC7; command mode = SPI mode 0, MSb first",
+          crlf);
     print(console, "DARK by default: MISO is driven only for one answer window, after a frame that "
                    "checked out", crlf);
     print(console, "boot: clk=", crystal_ok ? "HSE 24 MHz x2" : (clock_ok ? "HSI x2 (NO CRYSTAL)" : "FAILED"),

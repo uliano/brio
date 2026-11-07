@@ -66,20 +66,23 @@
  * is the CH32V006's alone: a Pin on it does not compile for the
  * CH32V003 (device::has_port_b through gpio_base_for).
  *
- * The bonding shows in the registers: port B of the CH32V006 has seven
- * pins (PB0..PB6, DS 2.1), and its eighth configuration nibble reads
- * zero after a reset where the seven read 0x4 (measured). The pin-level
- * table of which pins each package brings out is still the datasheet's.
+ * The bonding is the package's, and so are the shorts. A package brings
+ * out some of each port's pads - `device::port_pins()`, read off the
+ * datasheet's pin table per package (parts/<part>.hpp) - and a Pin on a
+ * pad the package does not bond does not compile: PB0 on the CH32V006's
+ * QFN20, PA0 on any CH32V003. The die shows the same in its registers:
+ * port B of the CH32V006 has seven pins (PB0..PB6), and its eighth
+ * configuration nibble reads zero after a reset where the seven read 0x4
+ * (measured on the QFN32). And on some packages two pads share one
+ * package pin (PA4 with PD7 on the CH32V006's 20- and 12-pin packages,
+ * PA1 with PA6 on its QSOP24, two pins of the CH32V003's SOP8), which
+ * the datasheet forbids as outputs: `device::port_twinned()` names
+ * them, and output() and function() on one of them are refused at
+ * compile time; input and analog stay open.
  *
- * Not covered yet: the pin-level bonding table (which pins a package
- * actually brings out). The part tables state ports, not pins, so a Pin
- * on a pin of a bonded port that the package leaves out (PB7 on the
- * CH32V006, PA0 on the CH32V003) compiles; the datasheet's pinout is
- * the record, and the build names one package per part
- * (docs/ch32v00x/pin.md). The alternate-function
- * remaps (AFIO_PCFR1), which move a peripheral's pads to another column
- * of the chapter's tables, are ch32v00x/afio.hpp's; the external
- * interrupt lines are exti.hpp's.
+ * The alternate-function remaps (AFIO_PCFR1), which move a peripheral's
+ * pads to another column of the chapter's tables, are ch32v00x/afio.hpp's;
+ * the external interrupt lines are exti.hpp's.
  */
 
 #pragma once
@@ -111,6 +114,20 @@ struct Pad {
     constexpr bool valid() const { return port != 0; }
     constexpr bool operator==(const Pad&) const = default;
 };
+
+/// Does THIS package bring that pad out (device::port_pins)?
+constexpr bool pad_bonded(Pad pad) {
+    return pad.valid() && pad.pin < 8u && (device::port_pins(pad.port) & (1UL << pad.pin)) != 0u;
+}
+
+/// Does that pad share its package pin with another (device::port_twinned)?
+/// Such a pad may be an input and never an output.
+constexpr bool pad_twinned(Pad pad) {
+    return pad.valid() && pad.pin < 8u && (device::port_twinned(pad.port) & (1UL << pad.pin)) != 0u;
+}
+
+/// May a program drive that pad - bonded, and alone on its pin?
+constexpr bool pad_can_drive(Pad pad) { return pad_bonded(pad) && !pad_twinned(pad); }
 
 /// A pin as a runtime value: the port's registers and the mask. What a
 /// bus request carries for its chip select, so the bus's active object
@@ -225,6 +242,9 @@ struct Port {
 template <char L, uint8_t N>
 struct Pin {
     static_assert(N < 8u, "brio Pin: a port of this family has eight pins, 0..7");
+    static_assert(N >= 8u || gpio_base_for(L) == 0 || (device::port_pins(L) & (1UL << N)) != 0u,
+                  "brio Pin: this part's package does not bond that pad (the datasheet's pin "
+                  "table; parts/<part>.hpp's port_pins)");
 
     Pin() = delete;
 
@@ -234,6 +254,10 @@ struct Pin {
     static constexpr uint8_t pin_number = N;
     static constexpr uint32_t mask = 1UL << N;
     static constexpr Pad pad{L, N};
+
+    /// Whether this pad may be driven: false where it shares its package
+    /// pin with another (the file header).
+    static constexpr bool can_drive = pad_can_drive(pad);
 
     /// The runtime descriptor (see PinRef).
     static PinRef ref() { return {&P::regs(), mask}; }
@@ -255,6 +279,9 @@ struct Pin {
     /// The pin as an output, push-pull or open-drain, driving whatever
     /// OUTDR holds for it; the port's clock opened first.
     static void output(PinDrive drive = PinDrive::push_pull) {
+        static_assert(can_drive,
+                      "brio Pin: this pad shares its package pin with another, and the "
+                      "datasheet forbids both as outputs (parts/<part>.hpp's port_twinned)");
         P::configure(N, pin_nibble(PinMode::output, drive));
     }
 
@@ -294,6 +321,9 @@ struct Pin {
     /// pin table), and the remaps that would move it are AFIO's
     /// (ch32v00x/afio.hpp), a verb of the resource that owns the pad.
     static void function(PinDrive drive = PinDrive::push_pull) {
+        static_assert(can_drive,
+                      "brio Pin: this pad shares its package pin with another, and the "
+                      "datasheet forbids both as outputs (parts/<part>.hpp's port_twinned)");
         P::configure(N, pin_nibble(PinMode::alternate, drive));
     }
 

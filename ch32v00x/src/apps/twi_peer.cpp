@@ -8,9 +8,10 @@
 // architecture. What this silicon makes of it - the STM32F1's I2C under
 // WCH's register names, the event machine of RM ch. 15:
 //
-//  - THE BUS IS I2C1 ON ITS COLUMN 3 (AFIO table 7-13-1, code 011): SCL
-//    PB5, SDA PB6 - the desk's I2C column, which leaves SPI1's column 0
-//    whole. Open drain; the pull-ups are the far board's (below).
+//  - THE BUS IS I2C1 ON THE PAIR'S COLUMN (ch32_pair.hpp, AFIO table
+//    7-13-1): column 0, SCL PC2 and SDA PC1, on the WeAct board; column 3,
+//    SCL PB5 and SDA PB6, on the CH32V006K8U6 module, leaving its SPI1
+//    column 0 whole. Open drain; the pull-ups are the far board's (below).
 //  - ONE I2C IS HOST *OR* TARGET HERE. `I2cHost::init()` and
 //    `I2cClient::init()` both begin with the instance's RCC reset, which
 //    takes the other face's own address and ACK with it, so the `arb`
@@ -102,7 +103,7 @@
 // the wire stretched while an entry runs, and SRAM would buy core share
 // this peer has no use for.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v006f8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -124,6 +125,9 @@
 // register, and every architecture on this link compiles the same file.
 #include "../../../avrxt/src/apps/twi_link.hpp"
 
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
+
 namespace {
 
 using namespace brio;
@@ -139,15 +143,14 @@ static_assert(SysClock::hz == HsiClock::hz, "the fallback must run every divisor
 using Console = Uart<1, P>;
 constexpr Console console;
 
-/// I2C1's column 3 (the header).
-constexpr I2cPins bus_pins = i2c1_pins_for(3);
-static_assert(bus_pins.scl == Pad{'B', 5} && bus_pins.sda == Pad{'B', 6},
-              "AFIO table 7-13-1: I2C1's code 011 is SCL PB5, SDA PB6");
+/// I2C1 on the pair's column (the header).
+constexpr I2cPins bus_pins = ch32pair::i2c_pins;
+
 using Client = I2cClient<1, bus_pins>;
 using Host = I2cHost<1, bus_pins>;
 using Raw = I2c<1>;
-using SclPin = Pin<'B', 5>;
-using SdaPin = Pin<'B', 6>;
+using SclPin = Pin<bus_pins.scl.port, bus_pins.scl.pin>;
+using SdaPin = Pin<bus_pins.sda.port, bus_pins.sda.pin>;
 
 constexpr uint16_t firmware_version =
     static_cast<uint16_t>((twilink::peer_ch32v00x << 8) | 0x02u);   ///< twi_link.hpp's Ident
@@ -846,7 +849,8 @@ void help() {
 /// address match that rises between the loop's last look at STAR1 and it
 /// (15.10.7). Typed between tenures, as a human does, it costs nothing.
 void status() {
-    print(console, "  I2C1 PB5/PB6, enabled=", Raw::enabled(), " STAR1=", hex(Raw::status1()),
+    print(console, ch32board::weact ? "  I2C1 PC2/PC1, enabled=" : "  I2C1 PB5/PB6, enabled=", Raw::enabled(),
+          " STAR1=", hex(Raw::status1()),
           " own address=", hex(own_addr_), crlf);
     print(console, "  SDA reads ", SdaPin::read() ? "high" : "LOW", ", SCL reads ",
           SclPin::read() ? "high" : "LOW", ", bus busy=", Raw::busy(), crlf);
@@ -895,7 +899,7 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
 }
 
 int main() {
-    crystal_ok = SysClock::init();
+    crystal_ok = ch32board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     const bool console_ok = Console::init(clock, 115200);
     const bool tick_ok = Ticker::init(clock);
@@ -910,8 +914,11 @@ int main() {
 
     print(console, crlf, "twi_peer - I2C instrument target (", device::part_name, ", label '",
           label, "', fw ", hex(firmware_version), ", VDD ", supply_mv, " mV)", crlf);
-    print(console, "target I2C1 column 3: SCL PB5, SDA PB6, open drain with NO pull of this "
-                   "board's own - the far board's resistors hold the bus; command address ",
+    print(console,
+          ch32board::weact ? "target I2C1 column 0: SCL PC2, SDA PC1, open drain with NO pull of this "
+                             "board's own - the far board's resistors hold the bus; command address "
+                           : "target I2C1 column 3: SCL PB5, SDA PB6, open drain with NO pull of this "
+                             "board's own - the far board's resistors hold the bus; command address ",
           hex(twilink::command_addr), " exactly - no general call, no second address; FREQ ",
           SysClock::hz / 1'000'000u, " MHz", crlf);
     print(console, "boot: clk=", crystal_ok ? "HSE 24 MHz x2" : (clock_ok ? "HSI x2 (NO CRYSTAL)" : "FAILED"),

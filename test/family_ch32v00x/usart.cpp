@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006e8 ch32v006f8 ch32v003f4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // USART family smoke TU: both instances, their pads and columns, the
 // divisor arithmetic (BRR = pclk / baud, whole), the chapter's
 // vocabulary, every verb of the resource, the transport's options and

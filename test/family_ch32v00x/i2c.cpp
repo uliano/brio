@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006e8 ch32v006f8 ch32v003f4 ch32v003a4 ch32v003j4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // I2C family smoke TU, both parts (the block is the same register
 // description on each): ch32v00x/i2c.hpp's resource, host and client
 // instantiated, the host in both engine arrangements and under the

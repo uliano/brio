@@ -731,7 +731,16 @@ void tj_link() {
     }
     bench.verdict("the peer is the CH32V006's usart_peer", got && d.sanity == link::ident_sanity &&
                                                                 link::peer_kind(d.version) == link::peer_ch32v00x);
-    bench.verdict("its time base is crystal-referenced", got && d.xtal == 1u);
+    // A PEER WITH NO CRYSTAL (its board fits none) offers no time base: it
+    // refuses every timed leg, so the HSI against the crystal and the trim
+    // walk measured against it are skipped below, no verdict claimed.
+    const bool peer_crystal = got && d.xtal == 1u;
+    if (got && d.xtal == 0u) {
+        print(serial, "  SKIPPED, no verdict claimed: the peer runs no crystal - its board fits none - so this "
+                      "letter's HSI against the crystal is not measured on this pair", crlf);
+    } else {
+        bench.verdict("its time base is crystal-referenced", peer_crystal);
+    }
 
     u4_flush();
     put4(link::magic);
@@ -794,6 +803,10 @@ void tj_link() {
                   standby_acked && back_after >= standoff_ms && back_after <= standoff_ms + 20u);
     (void)link_command_mode();
 
+    if (got && d.xtal == 0u) {
+        (void)link_command_mode();
+        return;
+    }
     // THE HSI, three times at its factory calibration.
     link::Cfg c{};
     c.rate = calib_rate;

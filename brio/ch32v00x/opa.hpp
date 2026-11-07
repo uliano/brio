@@ -195,14 +195,69 @@ struct OpaConfig {
     OpaCmp2Reference cmp2_reference = OpaCmp2Reference::off;
 };
 
+/// The pads of each input and output, for a program that claims them.
+constexpr Pad opa_positive_pad(OpaPositive p) {
+    switch (p) {
+        case OpaPositive::pa2: return {'A', 2};
+        case OpaPositive::pd7: return {'D', 7};
+        case OpaPositive::pd3: return {'D', 3};
+        default: return {'D', 1};
+    }
+}
+inline constexpr Pad opa_differential_negative_pad{'A', 4};
+constexpr Pad opa_negative_pad(OpaNegative n) {
+    return n == OpaNegative::pa1 ? Pad{'A', 1} : n == OpaNegative::pd0 ? Pad{'D', 0} : Pad{};
+}
+constexpr Pad opa_output_pad(OpaOutput o) {
+    return o == OpaOutput::pd4 ? Pad{'D', 4} : o == OpaOutput::pa5 ? Pad{'A', 5} : Pad{};
+}
+
+/// Does THIS package carry every pad a config names - the positive
+/// input, a negative pad, the differential side's PA4, each bonded
+/// (pin.hpp's pad_bonded), and an output pad bonded and alone on its
+/// package pin (pad_can_drive: the output drives it)?
+constexpr bool opa_pads_bonded(const OpaConfig& c) {
+    // A package that carries every pad the part's block can name (the
+    // CH32V006's QFN32; the CH32V003's TSSOP20, whose OPA names five) has
+    // nothing to ask at run time.
+    constexpr bool core_pads_carried =
+        pad_bonded(opa_positive_pad(OpaPositive::pa2)) && pad_bonded(opa_positive_pad(OpaPositive::pd7)) &&
+        pad_bonded(opa_negative_pad(OpaNegative::pa1)) && pad_bonded(opa_negative_pad(OpaNegative::pd0)) &&
+        pad_can_drive(opa_output_pad(OpaOutput::pd4));
+    constexpr bool every_pad_carried =
+        core_pads_carried &&
+        (!device::has_opa_block ||
+         (pad_bonded(opa_positive_pad(OpaPositive::pd3)) && pad_bonded(opa_positive_pad(OpaPositive::pd1)) &&
+          pad_bonded(opa_differential_negative_pad) && pad_can_drive(opa_output_pad(OpaOutput::pa5))));
+    if constexpr (every_pad_carried) {
+        return true;
+    }
+    if (!pad_bonded(opa_positive_pad(c.positive))) {
+        return false;
+    }
+    const Pad n = opa_negative_pad(c.negative);
+    if (n.valid() && !pad_bonded(n)) {
+        return false;
+    }
+    if (c.differential && !pad_bonded(opa_differential_negative_pad)) {
+        return false;
+    }
+    const Pad o = opa_output_pad(c.output);
+    return !o.valid() || pad_can_drive(o);
+}
+
 /// The refusals the chapter states: a PGA gain wants the feedback
 /// switched in, the differential PGA has no gain 32, a bias reference
 /// only under a PGA gain. On the CH32V003 everything its three bits
 /// cannot spell is refused: a positive pad beyond the two, a gain or
 /// `off` on the negative side, an output that is not PD4, the
 /// feedback switch, the differential mode, a bias, the high-speed
-/// mode, a CMP2 reference.
+/// mode, a CMP2 reference. On both, a config naming a pad the package
+/// does not carry (opa_pads_bonded()).
 constexpr bool opa_config_valid(const OpaConfig& c) {
+    if (!opa_pads_bonded(c)) {
+        return false;
+    }
     if constexpr (!device::has_opa_block) {
         return (c.positive == OpaPositive::pa2 || c.positive == OpaPositive::pd7) &&
                (c.negative == OpaNegative::pa1 || c.negative == OpaNegative::pd0) &&
@@ -248,23 +303,6 @@ constexpr uint32_t opa_exten_of(const OpaConfig& c) {
     if (c.positive == OpaPositive::pd7) { v |= opa_exten_psel; }
     if (c.negative == OpaNegative::pd0) { v |= opa_exten_nsel; }
     return v;
-}
-
-/// The pads of each input and output, for a program that claims them.
-constexpr Pad opa_positive_pad(OpaPositive p) {
-    switch (p) {
-        case OpaPositive::pa2: return {'A', 2};
-        case OpaPositive::pd7: return {'D', 7};
-        case OpaPositive::pd3: return {'D', 3};
-        default: return {'D', 1};
-    }
-}
-inline constexpr Pad opa_differential_negative_pad{'A', 4};
-constexpr Pad opa_negative_pad(OpaNegative n) {
-    return n == OpaNegative::pa1 ? Pad{'A', 1} : n == OpaNegative::pd0 ? Pad{'D', 0} : Pad{};
-}
-constexpr Pad opa_output_pad(OpaOutput o) {
-    return o == OpaOutput::pd4 ? Pad{'D', 4} : o == OpaOutput::pa5 ? Pad{'A', 5} : Pad{};
 }
 
 /**
@@ -430,8 +468,16 @@ constexpr bool opa_refusals_pinned() {
                opa_exten_of(OpaConfig{}) == 0u && Opa::adc_channel == 7u;
     }
 }
-static_assert(opa_config_valid(OpaConfig{}));
-static_assert(opa_config_valid(OpaConfig{.positive = OpaPositive::pd7, .negative = OpaNegative::pd0}));
+// The defaults and the two-pad config, valid exactly where the package
+// carries their pads (the CH32V003's SOP8 shares PD4 and has no PD7 or
+// PD0; its SOP16 has no PD0).
+constexpr bool opa_default_output_carried() {
+    const Pad o = opa_output_pad(OpaConfig{}.output);
+    return !o.valid() || pad_can_drive(o);
+}
+static_assert(opa_config_valid(OpaConfig{}) == opa_default_output_carried());
+static_assert(opa_config_valid(OpaConfig{.positive = OpaPositive::pd7, .negative = OpaNegative::pd0}) ==
+              (pad_bonded(Pad{'D', 7}) && pad_bonded(Pad{'D', 0}) && opa_default_output_carried()));
 static_assert(opa_refusals_pinned());
 static_assert(opa_gain_of(OpaNegative::gain32) == 32u && opa_gain_of(OpaNegative::pa1) == 1u);
 static_assert(opa_positive_pad(OpaPositive::pd7) == Pad{'D', 7} && opa_output_pad(OpaOutput::internal) == Pad{});

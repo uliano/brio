@@ -3,12 +3,14 @@
 # definition of done, the RISC-V twin of cli/checks/check_stm32g0.sh).
 #
 # Positive: every test/family_ch32v00x/*.cpp must COMPILE for every part
-# in PARTS with the project's own flags - the part's definition
-# (CH32V006 / CH32V003, what device.hpp asks for its table) and the
-# part's ISA (the CH32V003's core has no multiplier) - or, when the TU
-# carries a "// mcu: <list>" line, for those parts alone: the chapters
-# not yet tiered for the CH32V003 are closed on it by an #error in
-# their header, and their fixtures say so. What the sweep also proves
+# in PARTS - each package of the two chips the datasheets list - with the
+# project's own flags: the chip's definition (CH32V006 / CH32V003, what
+# device.hpp asks for its table), the package's (the part number
+# upper-cased, what the chip's table asks for the pads it bonds) and the
+# chip's ISA (the CH32V003's core has no multiplier) - or, when the TU
+# carries a "// mcu: <list>" line, for those parts alone: a fixture that
+# names the bench packages' pads lists the packages that bond them
+# (test/family_ch32v00x/README.md). What the sweep also proves
 # is that WCH's gcc 15.2 accepts every construct brio is written with
 # (util_all.cpp).
 # Every positive is compiled BOTH WAYS the project can build an image:
@@ -34,16 +36,19 @@ CXX=/sw/wch-riscv/bin/riscv32-wch-elf-g++
 # for a reason that is not the code's. Say so and stop.
 [ -x "$CXX" ] || { echo "$(basename "$0"): the compiler $CXX is not installed - nothing checked" >&2; exit 2; }
 COMMON="-mabi=ilp32e -std=gnu++23 -Os -Wall -Wextra -Werror -fno-exceptions -fno-rtti -c -Ibrio"
-PARTS="ch32v006k8 ch32v003f4"
+PARTS="ch32v006k8 ch32v006e8 ch32v006f8 ch32v006d8 ch32v003f4 ch32v003a4 ch32v003j4"
 FILTER="${1:-}"
 fail=0
 
-# The part's own flags: the same two facts ch32v00x/CMakeLists.txt derives
-# from CH32V00X_MCU.
+# The part's own flags: the same three facts ch32v00x/CMakeLists.txt
+# derives from CH32V00X_MCU - the chip's definition, the package's (the
+# part number upper-cased) and the chip's ISA.
 part_flags() {
+    local pkg
+    pkg="$(echo "$1" | tr a-z A-Z)"
     case "$1" in
-        ch32v006k8) echo "-march=rv32ec_zmmul_xw -DCH32V006 $COMMON" ;;
-        ch32v003f4) echo "-march=rv32ec_xw -DCH32V003 $COMMON" ;;
+        ch32v006k8|ch32v006e8|ch32v006f8|ch32v006d8) echo "-march=rv32ec_zmmul_xw -DCH32V006 -D$pkg $COMMON" ;;
+        ch32v003f4|ch32v003a4|ch32v003j4) echo "-march=rv32ec_xw -DCH32V003 -D$pkg $COMMON" ;;
         *) echo "unknown part $1" >&2; exit 2 ;;
     esac
 }

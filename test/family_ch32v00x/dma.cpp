@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006e8 ch32v006f8 ch32v003f4 ch32v003a4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // DMA family smoke TU: ch32v00x/dma.hpp instantiated for every one of
 // the seven channels, the two transfer engines at the three widest
 // beats with every narrower beat a start() takes, the copy engine, and

@@ -333,6 +333,15 @@ constexpr bool usart_remap_valid(uint8_t instance, uint8_t remap) {
     return false;
 }
 
+/// Does THIS package carry the column's two data pads - TX bonded and
+/// alone on its package pin (it drives), RX bonded (pin.hpp's
+/// pad_can_drive and pad_bonded)? The flow-control pads are asked by
+/// Uart only when its options name them, and RX not in half duplex.
+constexpr bool usart_pads_bonded(uint8_t instance, uint8_t remap) {
+    const UsartPadSet c = usart_column_for(instance, remap);
+    return pad_can_drive(c.tx) && pad_bonded(c.rx);
+}
+
 // =============================================================================
 // The chapter's vocabulary
 // =============================================================================
@@ -832,6 +841,14 @@ struct Uart {
                   "brio Uart: no such remap code for this instance (afio.hpp's tables 7-10 and "
                   "7-11) - and USART2's default column is refused on the CH32V006K8, whose PA7 "
                   "is the reset pin: it takes codes 1..6");
+    static_assert(pad_can_drive(usart_column_for(instance, remap).tx) &&
+                      (opts.half_duplex || pad_bonded(usart_column_for(instance, remap).rx)),
+                  "brio Uart: this part's package does not bring out that column's TX alone on "
+                  "its pin, or its RX (parts/<part>.hpp's port_pins and port_twinned)");
+    static_assert((!opts.rts || pad_can_drive(usart_column_for(instance, remap).rts)) &&
+                      (!opts.cts || pad_bonded(usart_column_for(instance, remap).cts)),
+                  "brio Uart: this part's package does not bring out the column's flow-control "
+                  "pad the options name (parts/<part>.hpp's port_pins and port_twinned)");
     // An engine is checked where it is named: sizeof demands a complete
     // type, so an engine's own static_asserts fire on the application's
     // line.

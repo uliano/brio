@@ -15,9 +15,21 @@
 //   PD2 (TIM1_CH1, the PWM out)  <->  PD4 (TIM2_CH1, the capture in)
 //
 // main() probes it (PD2 driven both ways as a GPIO, PD4 read) and the
-// two letters decline with the reason when it is missing. PC2
+// two letters decline with the reason when it is missing. NOT ON THE
+// WEACT BOARD: there PD4 hangs from PD5, the console's transmit pad,
+// through the board's 1.5 kOhm USB resistor (ch32_board.hpp), so the probe
+// and letters f and g are not registered - and they have nowhere to move:
+// on the CH32V006's 20-pin package TIM2's channel-1 input (the period
+// meter's TI1) lands only on PD4, on PD3 (a USB stub and a pair wire) and on
+// PC0, PC1 and PC5 (the pair's wires), and TIM1's channel 1 only on PD2,
+// PC4 and PC6 - no remap column offers the two a free pad. Implemented, not
+// verified on that board. PC2
 // (TIM1_BKIN) stays unwired: letter i stages the break from the pad's
-// internal pull. PC0 is the LED.
+// internal pull. On the WeAct board PC2 is the pair's I2C clock wire, its
+// 1.5 kOhm pull-up hung from the far board's PB3: letter i wants that pad
+// floating - the far board on an image that leaves PB3 alone - or the
+// resistor outweighs the internal pull. The LED is the board's
+// (ch32_board.hpp), never claimed here.
 //
 // What is exercised, letter by letter:
 //   a  the blocks, WIRELESS: the reset values of the three, the facts
@@ -47,7 +59,7 @@
 //   i  THE BREAK, wireless: PC2 pulled up with BKP active-high drops
 //      MOE and raises BIF; pulled down, the outputs come back under AOE
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups.v003f4 = abcd,efgix
 // (on the CH32V003 the suite whole comes within the 5 % of the 15 KB the
 // part leaves an image, so it builds as two images there: the blocks, the
@@ -68,6 +80,8 @@
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "ch32_board.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -215,7 +229,8 @@ void ta_blocks() {
                       !T1::flag(T1::update_flag));
     bench.verdict("the dead-time arithmetic: 130 ticks asks code 0x81 (129 -> 130), the top is 1008",
                   tim_dead_time_code(130) == 0x81u && tim_dead_time_ticks(0xFF) == 1008u);
-    print(serial, "  jumper PD2-PD4: ", jumper_present ? "present" : "ABSENT", crlf);
+    print(serial, ch32board::pd4_free ? "  jumper PD2-PD4: " : "  jumper PD2-PD4: not on this board (PD4 is no free pad): ",
+          jumper_present ? "present" : "ABSENT", crlf);
     all_off();
 }
 
@@ -918,7 +933,9 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
-    jumper_present = probe_jumper();
+    if constexpr (ch32board::pd4_free) {
+        jumper_present = probe_jumper();
+    }
 
     bench.letter('a', "the blocks, wireless: reset values, the facts as refusals, the arithmetic", ta_blocks);
     bench.letter('b', "the time base against the STK, and a 1 kHz tick counted", tb_timebase);
@@ -927,8 +944,11 @@ int main() {
 #if BRIO_CH32_HAS_TIM3
     bench.letter('e', "TIM3: clocked by TIM1, on CK_INT, its match pacing a DMA channel", te_tim3);
 #endif
-    bench.letter('f', "THE CAPTURES on the jumper: period meter at three duties, interval meter", tf_capture);
-    bench.letter('g', "ONE PULSE on the jumper, fired by software and captured", tg_one_pulse);
+    // Not on a board whose PD4 is no free pad (the header).
+    if constexpr (ch32board::pd4_free) {
+        bench.letter('f', "THE CAPTURES on the jumper: period meter at three duties, interval meter", tf_capture);
+        bench.letter('g', "ONE PULSE on the jumper, fired by software and captured", tg_one_pulse);
+    }
     bench.letter('i', "the break, wireless: the pad's pull as BKIN, MOE dropped, AOE", ti_break);
 #if BRIO_CH32_HAS_TIM3
     bench.letter('x', "TIM3's DMA request probed five ways (no verdict)", tx_tim3_dma_probe, false);

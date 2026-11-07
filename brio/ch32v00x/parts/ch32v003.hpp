@@ -52,12 +52,73 @@ inline constexpr uint32_t flash_program_bytes = 15u * 1024u;
 inline constexpr uint32_t flash_journal_pages = 16;
 inline constexpr bool has_flash_heap = false;
 
-/// The instances and the bonding: ports A (PA1, PA2), C and D; one
+/// The instances: ports A (PA1, PA2 on every package), C and D; one
 /// timer pair, one USART, the OPA as three bits of EXTEN_CTR.
 inline constexpr bool has_port_b = false;
 inline constexpr bool has_tim3 = false;
 inline constexpr bool has_usart2 = false;
 inline constexpr bool has_opa_block = false;
+
+// ---- the package (DS V1.6: the model table, 2.1's pinouts, table 2-1) ----
+// THE PADS EACH PACKAGE BONDS, read off table 2-1's four columns (the
+// pinouts of 2.1 agree):
+//
+//  - F, the TSSOP20 (CH32V003F4P6) and the QFN20 (CH32V003F4U6), the
+//    same pads in two columns: PA1, PA2, PC0..PC7, PD0..PD7 - 18 pads,
+//    none shared.
+//  - A, the SOP16 (CH32V003A4M6): PA1, PA2, PC0..PC4, PC6, PC7, PD1,
+//    PD4..PD7 - 14 pads (no PC5, PD0, PD2, PD3).
+//  - J, the SOP8 (CH32V003J4M6): PA1, PA2, PC1, PC2, PC4, PD1, PD4, PD5,
+//    PD6 - 9 pads on 6 pins: PD6 shares pin 1 with PA1, and PD1 (the
+//    debug pad), PD4 and PD5 share pin 8.
+//
+// Each count is the model table's GPIO column (18, 14, 6). The SOP8's
+// shared pins carry no note in this datasheet; two pads on one pin are
+// two drivers on one wire all the same, so they are TWINNED here as the
+// CH32V006's notes 3 and 4 twin theirs: pin.hpp refuses output() and
+// function() on either, and input and analog stay open.
+#if defined(CH32V003F4)
+inline constexpr Ch32Package package = Ch32Package::pins20;
+inline constexpr const char* package_name = "TSSOP20/QFN20";
+#elif defined(CH32V003A4)
+inline constexpr Ch32Package package = Ch32Package::pins16;
+inline constexpr const char* package_name = "SOP16";
+#elif defined(CH32V003J4)
+inline constexpr Ch32Package package = Ch32Package::pins8;
+inline constexpr const char* package_name = "SOP8";
+#else
+#error "brio ch32v00x: the build must name the CH32V003's package - CH32V003F4, A4 or J4 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#endif
+
+/// Which pins of each port the package brings out, as a mask (bit n =
+/// Pxn).
+constexpr uint32_t port_pins(char port) {
+    switch (package) {
+        case Ch32Package::pins20:
+            return port == 'A' ? 0x06UL : port == 'C' ? 0xFFUL : port == 'D' ? 0xFFUL : 0UL;
+        case Ch32Package::pins16:
+            return port == 'A' ? 0x06UL : port == 'C' ? 0xDFUL : port == 'D' ? 0xF2UL : 0UL;
+        case Ch32Package::pins8:
+            return port == 'A' ? 0x06UL : port == 'C' ? 0x16UL : port == 'D' ? 0x72UL : 0UL;
+        default:
+            return 0UL;
+    }
+}
+
+/// The bonded pads that share their package pin with another (the
+/// SOP8's pins 1 and 8), which may be inputs and never outputs.
+constexpr uint32_t port_twinned(char port) {
+    if constexpr (package == Ch32Package::pins8) {
+        return port == 'A' ? 0x02UL : port == 'D' ? 0x72UL : 0UL;   // PA1 with PD6; PD1, PD4, PD5
+    } else {
+        (void)port;
+        return 0UL;
+    }
+}
+
+/// The model table's GPIO count: the package's pins that carry a pad.
+inline constexpr uint8_t gpio_count = package == Ch32Package::pins20 ? 18
+                                    : package == Ch32Package::pins16 ? 14 : 6;
 
 /// GPIO: MODE is TWO bits, the F1's - 00 input, 01 output at 10 MHz,
 /// 10 at 2 MHz, 11 at 30 MHz. The stratum drives its outputs at the

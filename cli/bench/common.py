@@ -86,6 +86,8 @@ BOARD_TYPES = {
     # wch_openocd_args) and its own path in the manifest (WCH_OPENOCD).
     "v006k8": {"project": "ch32v00x", "preset": "ch32v006k8-release",
                "mcu": "ch32v006k8", "flash": "wch_openocd"},
+    "v006f8": {"project": "ch32v00x", "preset": "ch32v006f8-release",
+               "mcu": "ch32v006f8", "flash": "wch_openocd"},
     "v003f4": {"project": "ch32v00x", "preset": "ch32v003f4-release",
                "mcu": "ch32v003f4", "flash": "wch_openocd"},
     # The CH32V203, the second WCH family and a bigger core (QingKe V4B,

@@ -48,7 +48,7 @@
 //      virgin flash. Run it when a letter's expectations depend on an
 //      empty heap.
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>

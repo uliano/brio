@@ -47,7 +47,7 @@
 //      very_high - which one the arbiter serves read off the counts in
 //      quiet windows - and the control, one level, the lower number first
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: groups = abcefg,dhi
 // (on the CH32V003 the suite is two images, test_ch32_dma-1 and -2: whole
 // it overflows the part's 15 KB)

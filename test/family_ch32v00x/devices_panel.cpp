@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006f8 ch32v003f4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // The panel driver over this family's SpiHost: every part must
 // compile it (instantiation only - the function below is never
 // called).

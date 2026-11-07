@@ -504,6 +504,8 @@ template <Pad pad>
 struct TimPad {
     TimPad() = delete;
     static_assert(pad.valid(), "brio TimPad: a pad must be named");
+    static_assert(pad_bonded(pad), "brio TimPad: this part's package does not bond that pad "
+                                   "(parts/<part>.hpp's port_pins)");
 
     using pin = Pin<pad.port, pad.pin>;
     static constexpr Pad selection = pad;

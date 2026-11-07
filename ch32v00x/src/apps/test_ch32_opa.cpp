@@ -30,10 +30,12 @@
 //      CH32V006 - the comparators are the CH32V007's; on the CH32V003
 //      there is no comparator and the verbs say so
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "ch32v00x/adc.hpp"
 #include "ch32v00x/clock.hpp"
@@ -58,7 +60,11 @@ using namespace brio;
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 using PosPad = Pin<'A', 2>;
-using NegPad = Pin<'A', 4>;        ///< the differential PGA's (CH32V006)
+/// The differential PGA's negative pad (CH32V006). The CH32V003 bonds no
+/// PA4 and has no differential PGA: its letter is not registered there,
+/// and the alias names a pad that part has so the unregistered body
+/// still compiles.
+using NegPad = std::conditional_t<device::has_opa_block, Pin<'A', 4>, PosPad>;
 using NegPadV003 = Pin<'D', 0>;    ///< OPN1 (CH32V003)
 using OutPad = Pin<'D', 4>;        ///< the CH32V003's output, read as ADC channel 7
 
@@ -68,6 +74,11 @@ constexpr uint16_t scaled(uint16_t counts12) {
 }
 
 TestBench<Serial> bench;
+
+/// OPA_LOCK as the boot found it, sampled in main() before any letter: the
+/// lock is one-way until a system reset, so a second run of letter a in
+/// the same boot meets the block its first run unlocked.
+bool opa_locked_at_boot = false;
 
 void console_drain() {
     for (uint32_t i = 0; i < 8'000'000UL && !Serial::tx_idle(); ++i) {
@@ -98,19 +109,31 @@ void ta_block() {
     if constexpr (Opa::has_block) {
         print(serial, "  as found: CTLR1=", hex(Opa::control()), " CTLR2=", hex(Opa::regs().CTLR2), " locked=",
               Opa::locked(), crlf);
-        // The lock stands at reset: a configuration is refused, and takes
-        // after the key pair.
-        const bool refused_locked = Opa::locked() && !Opa::configure({});
+        // The lock stands at reset (sampled at boot): a configuration is
+        // refused while it stands, and takes after the key pair. A run after
+        // the first in one boot finds the block unlocked, and says so.
+        const bool locked_now = Opa::locked();
+        const bool refused_locked = !locked_now || !Opa::configure({});
+        if (!locked_now) {
+            print(serial, "  (the lock was lifted by an earlier run of this letter in this boot: the refusal is "
+                          "the first run's)", crlf);
+        }
         Opa::unlock();
         const bool unlocked = !Opa::locked();
+        // The output: PA5 where the package bonds it - configure() refuses a
+        // pad the package has not got - and the internal route where it does
+        // not (the CH32V006's 20-pin package, whose PD4 on the WeAct board
+        // is no free pad: ch32_board.hpp).
+        constexpr OpaOutput out =
+            pad_can_drive(opa_output_pad(OpaOutput::pa5)) ? OpaOutput::pa5 : OpaOutput::internal;
         const bool took = Opa::configure({.positive = OpaPositive::pd3, .negative = OpaNegative::gain16,
-                                          .output = OpaOutput::pa5, .bias = OpaBias::vdd_over_4, .high_speed = true});
-        const uint32_t expected = (1UL << 1) | (2UL << 4) | (5UL << 8) | opa_fb_en1 | opa_vben | opa_vbsel |
-                                  (3UL << 18) | opa_hs1;
+                                          .output = out, .bias = OpaBias::vdd_over_4, .high_speed = true});
+        const uint32_t expected = (static_cast<uint32_t>(out) << 1) | (2UL << 4) | (5UL << 8) | opa_fb_en1 | opa_vben |
+                                  opa_vbsel | (3UL << 18) | opa_hs1;
         print(serial, "  after the keys: locked=", Opa::locked(), " CTLR1=", hex(Opa::control()), " (", hex(expected),
               " spelled)", crlf);
         bench.verdict("OPA_LOCK stands at reset and refuses a configuration; the key pair lifts it",
-                      refused_locked && unlocked);
+                      opa_locked_at_boot && refused_locked && unlocked);
         bench.verdict("a configuration lands as spelled (PSEL, NSEL, MODE, FB, VBEN/VBSEL, HS)",
                       took && (Opa::control() & ~opa_lock & ~opa_en1) == expected);
         bench.verdict("the refusals: a PGA gain without the feedback, gain 32 differential, a bias without a gain",
@@ -229,7 +252,23 @@ void tc_bias() {
     // rows are printed as what they read and not judged (measured: both
     // pulled up reads near zero, both pulled down near 0.77 VDD, neither
     // the bias); the opposite-rail rows still tell the sign.
+    // THE STIMULUS IS CHECKED FIRST: a rail row is judged only where its
+    // negative pad follows its pull. On the CH32V006's 20-pin package PA4
+    // shares its package pin with PD7, the reset pad, and a pull-down there
+    // does not take (measured: PA4 and PD7 both pulled down, the pin reads
+    // high; PD7 driven low as an output, it reads low and nothing resets):
+    // the row that asks N down is printed there and not judged.
+    NegPad::input(PinPull::down);
+    (void)delay_us(clock, 2000);
+    const bool n_pulls_down = !NegPad::read();
+    NegPad::input(PinPull::up);
+    (void)delay_us(clock, 2000);
+    const bool n_pulls_up = NegPad::read();
+    NegPad::release();
+    print(serial, "  the negative pad alone, the OPA off: pulled down reads ", n_pulls_down ? "low" : "HIGH",
+          ", pulled up reads ", n_pulls_up ? "high" : "LOW", crlf);
     uint8_t rails_right = 0;
+    uint8_t rails_judged = 0;
     for (const Case& c : cases) {
         (void)Opa::configure({.positive = OpaPositive::pa2, .negative = OpaNegative::gain4,
                               .output = OpaOutput::internal, .differential = true, .bias = c.bias});
@@ -239,12 +278,17 @@ void tc_bias() {
         console_drain();
         const uint16_t v = read_opa();
         Opa::enable(false);
-        const bool rail_row = c.pos != c.neg;
+        const bool stimulus = c.neg == PinPull::down ? n_pulls_down : n_pulls_up;
+        const bool rail_row = c.pos != c.neg && stimulus;
         const bool ok = rail_row && v >= (c.expect > 100u ? c.expect - 100u : 0u) && v <= c.expect + 100u;
         print(serial, "  differential PGA x4, ", c.name, ": ", v,
               rail_row ? (ok ? "  (a rail, as expected)" : "  (a rail expected: OFF)")
-                       : "  (the bias if the pulls held the inputs - they do not, see the source)",
+              : c.pos != c.neg ? "  (the negative pad does not follow that pull: printed, not judged)"
+                               : "  (the bias if the pulls held the inputs - they do not, see the source)",
               crlf);
+        if (rail_row) {
+            ++rails_judged;
+        }
         if (ok) {
             ++rails_right;
         }
@@ -253,7 +297,7 @@ void tc_bias() {
     NegPad::release();
     print(serial, "  (VREFINT read ", vref, " counts: the supply is ", Adc::supply_mv(vref), " mV)", crlf);
     bench.verdict("the differential PGA's sign: P above N saturates high, N above P saturates low, on channel 9",
-                  rails_right == 2u);
+                  rails_judged != 0u && rails_right == rails_judged);
     print(serial, "  -> the bias reference needs a SOURCE on the inputs (3.2 kOhm input network): not measured here",
           crlf);
     Adc::release();
@@ -295,6 +339,7 @@ BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 int main() {
+    opa_locked_at_boot = Opa::locked();   // before any letter can unlock it
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

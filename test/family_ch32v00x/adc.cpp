@@ -1,3 +1,6 @@
+// mcu: ch32v006k8 ch32v006e8 ch32v006f8 ch32v003f4
+// (the packages that bond every pad this TU names; packages.cpp compiles the
+// drivers over the pads each other package carries)
 // ADC family smoke TU, both parts: ch32v00x/adc.hpp's converter and
 // every pad it takes, under util/analog_sampler.hpp's AnalogSampler -
 // instantiation only, no main(), no hardware. Each part's arithmetic

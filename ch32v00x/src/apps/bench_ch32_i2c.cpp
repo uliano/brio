@@ -15,12 +15,13 @@
 // is false when the peer did not answer or its count of the bytes moved
 // disagrees with this side's.
 //
-// THE BOARD AND THE WIRE. The CH32V006K8U6 at 48 MHz (the HSI doubled by
+// THE BOARD AND THE WIRE. The CH32V006 at 48 MHz (the HSI doubled by
 // the PLL), the console USART1 on PD5/PD6 through the WCH-Link at 115200.
-// I2C1 on its column 3 (AFIO table 7-13-1, code 011), PB5 SCL and PB6
-// SDA, to the desk's CH32X035 running `twi_peer` on its PC16/PC17, the
-// wire's pull-ups 1.5 kOhm from each line to that board's PB3 (the module
-// carries none), commanded in band over the same two wires through
+// I2C1 on the pair's column (ch32_pair.hpp, AFIO table 7-13-1): PC2 SCL
+// and PC1 SDA on the WeAct board, PB5 SCL and PB6 SDA (code 011) on the
+// CH32V006K8U6 module, to the desk's CH32X035 running `twi_peer` on its
+// PC16/PC17, the wire's pull-ups 1.5 kOhm from each line to that board's
+// PB3 (this board carries none), commanded in band over the same two wires through
 // avrxt/src/apps/twi_link.hpp: the peer SERVES at 0x2C for a bounded
 // window, counting the bytes it takes and gives and summing those it
 // takes, its answers the protocol's counting pattern; after the window its
@@ -64,7 +65,7 @@
 // (letter r prints both); the hardware prologue's entry and exit lie
 // outside the stamps (docs/ch32v00x/platform.md).
 //
-// build: boards = v006k8
+// build: boards = v006k8,v006f8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -88,6 +89,9 @@
 // The peer protocol: the wire format every twi_peer speaks, shared by
 // relative path, not copied.
 #include "../../../avrxt/src/apps/twi_link.hpp"
+
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
@@ -172,10 +176,8 @@ uint8_t ram[512];
 // i - the I2C host against the peer board (ch32v00x/i2c.hpp over
 //     design/i2c-bus.md)
 // ---------------------------------------------------------------------------
-/// I2C1's column 3 (the header).
-constexpr I2cPins i2c_pins = i2c1_pins_for(3);
-static_assert(i2c_pins.scl == Pad{'B', 5} && i2c_pins.sda == Pad{'B', 6},
-              "AFIO table 7-13-1: I2C1's code 011 is SCL PB5, SDA PB6");
+/// I2C1 on the pair's column (the header).
+constexpr I2cPins i2c_pins = ch32pair::i2c_pins;
 using I2cPump = I2cHost<1, i2c_pins>;
 using I2cDma = I2cHost<1, i2c_pins, DmaTxEngine<6>, DmaRxEngine<7>>;
 using I2cSclPin = Pin<i2c_pins.scl.port, i2c_pins.scl.pin>;
@@ -526,9 +528,13 @@ void engine_arithmetic(const char* what, const uint32_t pump[6], const uint32_t 
 }
 
 void ti_i2c() {
-    print(serial, "  I2C1 the host on PB5 SCL / PB6 SDA, column 3 (the pump, and DmaTxEngine<6> + "
-                  "DmaRxEngine<7>), the PEER BOARD's twi_peer serving at 0x2C, the wire's "
-                  "pull-ups the peer's",
+    print(serial,
+          ch32board::weact ? "  I2C1 the host on PC2 SCL / PC1 SDA, column 0 (the pump, and DmaTxEngine<6> + "
+                             "DmaRxEngine<7>), the PEER BOARD's twi_peer serving at 0x2C, the wire's "
+                             "pull-ups the peer's"
+                           : "  I2C1 the host on PB5 SCL / PB6 SDA, column 3 (the pump, and DmaTxEngine<6> + "
+                             "DmaRxEngine<7>), the PEER BOARD's twi_peer serving at 0x2C, the wire's "
+                             "pull-ups the peer's",
           crlf);
     I2cSclPin::input();
     I2cSdaPin::input();

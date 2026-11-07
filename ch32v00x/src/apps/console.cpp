@@ -32,7 +32,7 @@
 // this core, ch32v00x/platform.hpp), woken by the system counter or the
 // USART. No polling anywhere.
 //
-// build: boards = v006k8,v003f4
+// build: boards = v006k8,v006f8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -52,6 +52,8 @@
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 
+#include "ch32_board.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 
 // The clock: HSI 24 MHz through the PLL, which on this family only
@@ -67,7 +69,7 @@ constexpr Serial serial;           // tag for print(serial, ...)
 
 constexpr uint32_t console_baud = 115200;
 
-using Led = brio::Pin<'C', 0>;     // the jumpered LED
+using Led = ch32board::Led;        // the board's LED (ch32_board.hpp)
 
 // ---- events -----------------------------------------------------------------
 struct Beat {};                                    // Console's own heartbeat
@@ -78,7 +80,9 @@ struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
     static void init() {
-        Led::output(true);  // high first: a jumpered LED hangs from 3.3 V
+        // Dark first: a jumpered LED hangs from 3.3 V, WeAct's hangs from
+        // its pad to ground (ch32_board.hpp).
+        Led::output(!ch32board::led_active_high);
         start(&steady);
     }
 

@@ -53,11 +53,92 @@ inline constexpr uint32_t flash_program_bytes = 40u * 1024u;
 inline constexpr uint32_t flash_journal_pages = 24;
 inline constexpr bool has_flash_heap = true;
 
-/// The instances and the bonding this part has that the CH32V003 has not.
+/// The instances this part's die has that the CH32V003's has not -
+/// port B among them, whatever the package brings out of it (below).
 inline constexpr bool has_port_b = true;
 inline constexpr bool has_tim3 = true;
 inline constexpr bool has_usart2 = true;
 inline constexpr bool has_opa_block = true;   ///< the key-locked OPA/CMP block (RM ch. 17)
+
+// ---- the package (DS V2.0: the model table, table 2-1-1 and its notes) ----
+// THE PADS EACH PACKAGE BONDS, read off table 2-1-1's five columns (the
+// pinouts of 2.1.1 agree). The CH32V006F4U6 is not in this table: the
+// model table gives it 16 KB of flash, 4 KB of SRAM, one serial port and
+// no OPA - another die's memories and instances under this part's name,
+// with a pin table of its own (2-1-2) - so it is not this part, and a
+// build that names it is refused below. The temperature grade (6 or 7,
+// the last digit) changes nothing here (the model table's note).
+//
+//  - K, the QFN32 (CH32V006K8U7): PA0..PA7, PB0..PB6, PC0..PC7, PD0..PD7,
+//    31 pads, none shared. PA7 is the reset pin (note 5).
+//  - E, the QSOP24 (CH32V006E8R6/R7): PA0..PA6, PB0, PB1, PB3, PC0..PC2,
+//    PC4, PC5, PD0..PD7 - 23 pads on 22 pins: PA1 and PA6 share pin 17
+//    (note 3). PC5 is the reset pin (note 5).
+//  - F, the QFN20 (CH32V006F8U7) and the TSSOP20 (CH32V006F8P7), the
+//    same pads in two columns: PA1, PA2, PA4, PC0..PC7, PD0..PD7 - 19
+//    pads on 18 pins: PA4 and PD7 share pin 1 of the QFN20, pin 4 of the
+//    TSSOP20 (note 4). PD7 is the reset pin (note 5).
+//  - D, the QFN12 (CH32V006D8U7): PA1, PA2, PA4, PC0, PC3, PC4, PC6,
+//    PC7, PD0, PD1, PD4, PD7 - 12 pads on 11 pins, PA4 and PD7 shared
+//    (note 4), PD7 the reset pin.
+//
+// Each count is the model table's GPIO column (31, 22, 18, 11). A pad
+// that shares its pin with another is TWINNED: notes 3 and 4 forbid the
+// two to be outputs, and pin.hpp refuses output() and function() on
+// either while input and analog stay open. Which pad is the reset pin
+// is not a bonding fact: the user option byte's RST_MODE (RM 18.5)
+// decides whether that pad resets the chip or is a plain pad.
+#if defined(CH32V006K8)
+inline constexpr Ch32Package package = Ch32Package::pins32;
+inline constexpr const char* package_name = "QFN32";
+#elif defined(CH32V006E8)
+inline constexpr Ch32Package package = Ch32Package::pins24;
+inline constexpr const char* package_name = "QSOP24";
+#elif defined(CH32V006F8)
+inline constexpr Ch32Package package = Ch32Package::pins20;
+inline constexpr const char* package_name = "QFN20/TSSOP20";
+#elif defined(CH32V006D8)
+inline constexpr Ch32Package package = Ch32Package::pins12;
+inline constexpr const char* package_name = "QFN12";
+#else
+#error "brio ch32v00x: the build must name the CH32V006's package - CH32V006K8, E8, F8 or D8 (ch32v00x/CMakeLists.txt derives it from CH32V00X_MCU)"
+#endif
+
+/// Which pins of each port the package brings out, as a mask (bit n =
+/// Pxn).
+constexpr uint32_t port_pins(char port) {
+    switch (package) {
+        case Ch32Package::pins32:
+            return port == 'A' ? 0xFFUL : port == 'B' ? 0x7FUL : port == 'C' ? 0xFFUL : port == 'D' ? 0xFFUL : 0UL;
+        case Ch32Package::pins24:
+            return port == 'A' ? 0x7FUL : port == 'B' ? 0x0BUL : port == 'C' ? 0x37UL : port == 'D' ? 0xFFUL : 0UL;
+        case Ch32Package::pins20:
+            return port == 'A' ? 0x16UL : port == 'C' ? 0xFFUL : port == 'D' ? 0xFFUL : 0UL;
+        case Ch32Package::pins12:
+            return port == 'A' ? 0x16UL : port == 'C' ? 0xD9UL : port == 'D' ? 0x93UL : 0UL;
+        default:
+            return 0UL;
+    }
+}
+
+/// The bonded pads that share their package pin with another (notes 3
+/// and 4), which may be inputs and never outputs.
+constexpr uint32_t port_twinned(char port) {
+    switch (package) {
+        case Ch32Package::pins24:
+            return port == 'A' ? 0x42UL : 0UL;                          // PA1 with PA6
+        case Ch32Package::pins20:
+        case Ch32Package::pins12:
+            return port == 'A' ? 0x10UL : port == 'D' ? 0x80UL : 0UL;   // PA4 with PD7
+        default:
+            return 0UL;
+    }
+}
+
+/// The model table's GPIO count: the package's pins that carry a pad.
+inline constexpr uint8_t gpio_count = package == Ch32Package::pins32 ? 31
+                                    : package == Ch32Package::pins24 ? 22
+                                    : package == Ch32Package::pins20 ? 18 : 11;
 
 /// GPIO (RM 7.3.1.1): MODE is ONE bit - input, or output at the port's
 /// only speed - and the nibble's second MODE bit is reserved.

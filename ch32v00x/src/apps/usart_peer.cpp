@@ -11,7 +11,9 @@
 // clean UART could never be - and restores command mode BY ITSELF when
 // the action's frame count or deadline runs out.
 //
-// THE LINK IS USART2 ON ITS COLUMN 4 (AFIO table 7-11): TX PB0, RX PB1,
+// THE LINK IS USART2 ON THE PAIR'S COLUMN (ch32_pair.hpp, AFIO table
+// 7-11): column 3, TX PD2 and RX PD3, on the WeAct board; column 4, TX PB0
+// and RX PB1, on the CH32V006K8U6 module. Written TX and RX below. It is
 // polled through the resource - no interrupt, no ring: an instrument's
 // loop owns the instance. The desk wires it crossed, full duplex, to the
 // far board's USART; the peer serves full duplex alone and refuses
@@ -22,27 +24,36 @@
 //
 // THE DARK DISCIPLINE (usart_link.hpp): while SEARCHING - no frame has
 // checked out, or the channel has been quiet for rediscover_ms, or a
-// stand-off is running - PB0 and PB1 are floating inputs: the transmitter
+// stand-off is running - TX and RX are floating inputs: the transmitter
 // reaches no wire and nothing is pulled, so the far board's single-board
 // letters walk those wires with their own pulls. A frame that checks out
-// PROVES the wiring: PB0 goes to the USART (idling high) and PB1 takes its
+// PROVES the wiring: TX goes to the USART (idling high) and RX takes its
 // pull-up. A bad checksum is nak'ed only while ENGAGED.
 //
 // TIME (usart_link.hpp, TIME IN THE PAYLOAD). HCLK is the module's 24 MHz
 // crystal doubled by the PLL, 48 MHz (Ident::xtal = 1 when the crystal
-// started; without it the HSI's PLL runs the same 48 MHz nominal, xtal =
-// 0, and calibrate is refused - this peer has no adoption to offer). The
+// started; without it - and on a board that has none, ch32_board.hpp,
+// where it is never started - the HSI's PLL runs the same 48 MHz
+// nominal, xtal = 0, and calibrate is refused - this peer has no adoption
+// to offer). The
 // protocol's 24 MHz tick is TWO HCLK cycles: the Report's span is read on
 // the STK's cycle count (ch32v00x/ticker.hpp) and halved; the waveform
 // engine's TIM1 runs at PSC 1, so its count IS the tick, or at an exact
 // multiple of it where an interval would pass half the counter.
 //
 // THE WAVEFORM ENGINE (bitbang, drive_rxd, brk, autobaud_tx's break):
-// TIM1 under its remap 0110 (table 7-8) puts CH2 on PB0 and CH3 on PB1,
-// the two link pads, and keeps every other TIM1 signal off the debug port
-// (code 0100 puts CH4 on PD1, SWIO). A frame's edges are ABSOLUTE compare
-// values computed before the action, streamed by DMA - CH2's request on
-// channel 3, CH3's on 6 (table 8-2) - into the channel's compare register
+// TIM1, a channel on each link pad - a LANE: the remap code that puts a
+// channel there (table 7-8), the channel, the DMA channel of its compare
+// request (table 8-2). On the CH32V006K8U6 module one code serves both:
+// 0110 puts CH2 on PB0 and CH3 on PB1, requests on channels 3 and 6, and
+// keeps every other TIM1 signal off the debug port (code 0100 puts CH4 on
+// PD1, SWIO). On the WeAct board no code puts channels on both PD2 and
+// PD3, so each tenure writes its lane's code: 0000 puts CH1 on PD2
+// (request on channel 2), 0010 CH4 on PD3 (channel 4); both put CH3N on
+// PD1, the debug pad, a complementary output this engine never enables.
+// A frame's edges are ABSOLUTE compare
+// values computed before the action, streamed by DMA - each lane's
+// request on its channel - into the channel's compare register
 // on the channel's own match, the channel in toggle mode: no CPU between
 // edges, nothing masked. The list ends with a value half the counter away,
 // which the last edge's request moves into the compare register and no
@@ -52,9 +63,9 @@
 // 1, the counter at HCLK): exact to 21 ns. These chips have no per-pin AF
 // selector (8.2.4), so a pad passes between the USART and the timer as
 // GPIO high, then the other function, each step one configuration-nibble
-// store with the line idle high throughout - and while the timer owns PB0
-// USART2 is remapped to its column 6, whose pads (PA6, PA5) stay inputs,
-// so no second alternate output reaches PB0.
+// store with the line idle high throughout - and while the timer owns TX
+// USART2 is remapped to its column 6, whose pads (PA6, PA5) stay inputs or
+// are not bonded at all, so no second alternate output reaches TX.
 //
 // THE PER-OP NOTES. onewire is refused (above); collide is an emulated
 // open drain on the RX pad (an output low, or the input's pull-up),
@@ -74,7 +85,7 @@
 // measured from the flash at every rate the suites ask, and the console is
 // the default Uart, which has no transmit engine to place.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v006f8
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -96,6 +107,9 @@
 
 #include "../../../avrxt/src/apps/usart_link.hpp"
 
+#include "ch32_board.hpp"
+#include "ch32_pair.hpp"
+
 using P = brio::Ch32v00xPlatform<>;
 
 /// The crystal's 24 MHz doubled; the HSI's PLL the fallback at the same rate.
@@ -114,22 +128,31 @@ using link::Op;
 using Console = Uart<1, P>;
 constexpr Console console;
 
-constexpr uint8_t link_column = 4;          ///< USART2: TX PB0, RX PB1
-constexpr uint8_t parked_column = 6;        ///< USART2: TX PA6, RX PA5 - pads left inputs
+constexpr uint8_t link_column = ch32pair::serial_column;   ///< the pair's (ch32_pair.hpp)
+constexpr uint8_t parked_column = 6;        ///< USART2: TX PA6, RX PA5 - pads left inputs, or not bonded
 using L = Usart<2>;
-using TxPin = Pin<'B', 0>;
-using RxPin = Pin<'B', 1>;
-static_assert(afio_usart2_pads(link_column).tx == TxPin::pad && afio_usart2_pads(link_column).rx == RxPin::pad,
-              "table 7-11: column 4 is TX PB0, RX PB1");
+using TxPin = Pin<afio_usart2_pads(link_column).tx.port, afio_usart2_pads(link_column).tx.pin>;
+using RxPin = Pin<afio_usart2_pads(link_column).rx.port, afio_usart2_pads(link_column).rx.pin>;
+
+/// TIM1 channel `ch` (0-based) of remap code `code` (table 7-8).
+constexpr Pad tim1_channel_pad(uint8_t code, uint8_t ch) {
+    const Tim1Pads p = afio_tim1_pads(code);
+    return ch == 0u ? p.ch1 : ch == 1u ? p.ch2 : ch == 2u ? p.ch3 : p.ch4;
+}
 
 using T1 = Tim<1>;
-constexpr uint8_t tim1_column = 6;          ///< 0110: CH2 PB0, CH3 PB1, nothing on PD1
-constexpr uint8_t tx_ch = 1;                ///< CH2, 0-based
-constexpr uint8_t rx_ch = 2;                ///< CH3, 0-based
-static_assert(afio_tim1_pads(tim1_column).ch2 == TxPin::pad && afio_tim1_pads(tim1_column).ch3 == RxPin::pad,
-              "table 7-8: TIM1 code 0110 puts CH2 on PB0 and CH3 on PB1");
-using TxEdges = DmaTxEngine<3, uint32_t>;   ///< table 8-2: TIM1 CH2's request
-using RxEdges = DmaTxEngine<6, uint32_t>;   ///< table 8-2: TIM1 CH3's request
+/// THE TWO LANES (the header): the TX pad's and the RX pad's, each a TIM1
+/// code, a channel (0-based) and the DMA channel of that channel's
+/// compare request (table 8-2: CH1 on 2, CH2 on 3, CH3 on 6, CH4 on 4).
+constexpr uint8_t tx_column = ch32board::weact ? 0 : 6;   ///< 0000: CH1 PD2 | 0110: CH2 PB0
+constexpr uint8_t tx_ch = ch32board::weact ? 0 : 1;
+constexpr uint8_t rx_column = ch32board::weact ? 2 : 6;   ///< 0010: CH4 PD3 | 0110: CH3 PB1
+constexpr uint8_t rx_ch = ch32board::weact ? 3 : 2;
+static_assert(tim1_channel_pad(tx_column, tx_ch) == TxPin::pad && tim1_channel_pad(rx_column, rx_ch) == RxPin::pad,
+              "table 7-8: each lane's code puts its channel on its link pad");
+static_assert(tx_ch != rx_ch, "the two lanes ride two channels");
+using TxEdges = DmaTxEngine<ch32board::weact ? 2 : 3, uint32_t>;   ///< TIM1 CH1's request | CH2's
+using RxEdges = DmaTxEngine<ch32board::weact ? 4 : 6, uint32_t>;   ///< TIM1 CH4's request | CH3's
 
 constexpr uint16_t firmware_version = static_cast<uint16_t>((link::peer_ch32v00x << 8) | 0x02u);
 
@@ -177,7 +200,7 @@ void delay_us_now(uint32_t us) {
 // ---- the pads ------------------------------------------------------------------
 
 /// The two link pads as the state allows (the file header's dark
-/// discipline): proven and not standing off, PB0 the USART's and PB1
+/// discipline): proven and not standing off, TX the USART's and RX
 /// pulled up; otherwise both floating inputs.
 void hold_pads() {
     if (proven && !standing_off()) {
@@ -364,9 +387,11 @@ constexpr uint32_t engine_lead = 64;
 /// matched while the list's tail plays out.
 constexpr uint32_t engine_span = 30'000;
 
-/// The engine's tenure of a pad: GPIO high, the channel forced high and
-/// enabled, then the timer's function - and for PB0 USART2 parked on its
-/// column 6 first, so that no second alternate output reaches the pad.
+/// The engine's tenure of a pad: GPIO high, the lane's code (where the two
+/// lanes' codes differ; one code serving both is written once at boot), the channel
+/// forced high and enabled, then the timer's function - and for TX USART2
+/// parked on its column 6 first, so that no second alternate output
+/// reaches the pad.
 ///
 /// THE FORCED LEVEL NEEDS A RUNNING COUNTER: "the current output pin state
 /// is maintained when ... the counter is disabled (CEN=0)" (11.4.1, the
@@ -381,6 +406,9 @@ void tenure_begin(uint8_t ch) {
     Pad::output(true);
     if (ch == tx_ch) {
         L::remap(parked_column);
+    }
+    if constexpr (tx_column != rx_column) {
+        (void)T1::remap(ch == tx_ch ? tx_column : rx_column);   // the lane's code (the header)
     }
     (void)T1::configure(TimConfig{.prescaler = 1, .period = 0xFFFF});
     (void)T1::output_channel(ch, TimChannelConfig{.mode = TimOutputMode::force_active,
@@ -908,7 +936,8 @@ void help() {
 }
 
 void status() {
-    print(console, "  link USART2 column 4 (TX PB0, RX PB1) ", proven ? "PROVEN" : "searching (dark)",
+    print(console, ch32board::weact ? "  link USART2 column 3 (TX PD2, RX PD3) " : "  link USART2 column 4 (TX PB0, RX PB1) ",
+          proven ? "PROVEN" : "searching (dark)",
           standing_off() ? ", STAND-OFF" : "", crlf);
     print(console, "  BRR=", L::brr(), " commands=", commands, " actions=", actions, " naks=", naks, crlf);
     print(console, "  last report: op=", hex(last_report.op), " count=", last_report.count, " sum=",
@@ -942,7 +971,7 @@ BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_VECTOR(usart1_handler) { (void)Console::isr(); }
 
 int main() {
-    crystal_ok = SysClock::init();
+    crystal_ok = ch32board::has_crystal && SysClock::init();
     const bool clock_ok = crystal_ok || HsiClock::init();
     (void)Console::init(clock, 115200);
     (void)Ticker::init(clock);
@@ -957,10 +986,13 @@ int main() {
     if (!supply_ok) {
         print(console, "SUPPLY LOW (under ", supply_floor_mv, " mV): the link stays dark", crlf);
     }
-    print(console, "link USART2 column 4: TX PB0, RX PB1; command mode 8N1 @ ", link::command_baud, crlf);
+    print(console,
+          ch32board::weact ? "link USART2 column 3: TX PD2, RX PD3; command mode 8N1 @ "
+                           : "link USART2 column 4: TX PB0, RX PB1; command mode 8N1 @ ",
+          link::command_baud, crlf);
 
     T1::init();
-    (void)T1::remap(tim1_column);
+    (void)T1::remap(tx_column);
     TxEdges::arm(T1::ccr_address(tx_ch), 0u, DmaPriority::very_high);
     RxEdges::arm(T1::ccr_address(rx_ch), 0u, DmaPriority::very_high);
     if (supply_ok) {

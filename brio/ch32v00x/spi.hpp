@@ -367,6 +367,20 @@ constexpr SpiPins spi1_pins_for(uint8_t code) {
 /// PC6, MISO PC7, NSS PC1.
 inline constexpr SpiPins spi1_default_pins = spi1_pins_for(0);
 
+/// Does THIS package bring out every pad the link names (pin.hpp's
+/// pad_bonded)? A pad the program does not wire is not asked. Whether a
+/// pad the peripheral drives shares its package pin with another is
+/// Pin::function()'s refusal.
+constexpr bool spi_pins_bonded(const SpiPins& p) {
+    const Pad pads[] = {p.sck, p.mosi, p.miso, p.nss};
+    for (const Pad& pad : pads) {
+        if (pad.valid() && !pad_bonded(pad)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// A link needs SCK, no two signals on one pad, a remap code the table
 /// has.
 constexpr bool spi_pins_valid(const SpiPins& p) {
@@ -794,6 +808,9 @@ class SpiHost {
     static_assert(spi_pins_valid(pins),
                   "brio SpiHost: these SPI pads are not a link - SCK is required and no "
                   "two signals may name the same pad");
+    static_assert(spi_pins_bonded(pins),
+                  "brio SpiHost: this part's package does not bond a pad these SPI pins name "
+                  "(parts/<part>.hpp's port_pins)");
     static_assert(pins.mosi.valid(),
                   "brio SpiHost: a host needs SCK and MOSI; MISO is optional only for a "
                   "write-only bus, and the receive loop reads whatever comes back either way");
@@ -1713,6 +1730,9 @@ class SpiClient {
                   "brio SpiClient: these SPI pads are not a link - SCK is required and no "
                   "two signals may name the same pad");
     static_assert(pins.mosi.valid(), "brio SpiClient: a client listens on MOSI");
+    static_assert(spi_pins_bonded(pins),
+                  "brio SpiClient: this part's package does not bond a pad these SPI pins name "
+                  "(parts/<part>.hpp's port_pins)");
 
     using SckPin = Pin<pins.sck.port, pins.sck.pin>;
     using MosiPin = Pin<pins.mosi.port, pins.mosi.pin>;

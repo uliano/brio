@@ -126,6 +126,8 @@ struct Exti {
 template <char L, uint8_t N>
 struct ExtInt {
     static_assert(gpio_base_for(L) != 0 && N < 8u, "ExtInt: a pin of ports A..D, 0..7");
+    static_assert(N >= 8u || pad_bonded(Pad{L, N}),
+                  "ExtInt: this part's package does not bond that pad (parts/<part>.hpp's port_pins)");
 
     ExtInt() = delete;
 

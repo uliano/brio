@@ -25,12 +25,15 @@
  * What that costs. A stratum built on a vendor's device header asks it
  * which instances exist (`#if defined(TCB4)`); here there is nothing to
  * ask, so per-part variability has to be stated: the build names the
- * part (CH32V003 or CH32V006, from CH32V00X_MCU), this file asks that
- * definition once and includes the part's own table from parts/, and
- * every driver reads the facts as `device::` constexpr values - the
- * memories, the page, the bonded ports, the instances, the GPIO mode
- * width, AFIO's register order, what the USART has. Two parts are the
- * whole family brio builds for.
+ * part (CH32V003 or CH32V006, from CH32V00X_MCU) and its package (the
+ * part number with its package letter, CH32V006F8 and the like), this
+ * file asks the part's definition once and includes the part's own
+ * table from parts/, which asks the package's, and every driver reads
+ * the facts as `device::` constexpr values - the memories, the page,
+ * the pads each package bonds and the pads it shorts together, the
+ * instances, the GPIO mode width, AFIO's register order, what the USART
+ * has. Two chips are the whole family brio builds for, each in every
+ * package its datasheet lists with the same memories.
  *
  * Register structs mirror the chapter's own field names and order, so
  * a reader can hold the manual beside the code. Spelled here: the three
@@ -55,10 +58,22 @@ inline constexpr uint32_t pb1_base = 0x40000000UL;
 inline constexpr uint32_t pb2_base = 0x40010000UL;
 inline constexpr uint32_t hb_base  = 0x40020000UL;
 
+/// The packages of the two chips, by their pin count - the letter after
+/// the part number in WCH's model names (CH32V006 datasheet V2.0, the
+/// model table and table 2-1-1; CH32V003 datasheet V1.6, the model table
+/// and table 2-1): K is 32 pins, E 24, F 20, A 16, D 12, J 8. Where two
+/// packages share a count (the QFN20 and the TSSOP20 of either chip)
+/// their columns in the pin table bond the same pads, so one value names
+/// both. The part's table (parts/) says which one the build is for and
+/// what it bonds.
+enum class Ch32Package : uint8_t { pins32, pins24, pins20, pins16, pins12, pins8 };
+
 } // namespace brio
 
 // ---- the part -------------------------------------------------------------
-// The one place the build's part definition is asked (the file header).
+// The one place the build's part definition is asked (the file header);
+// the part's table asks the package's definition (CH32V006K8, CH32V003F4
+// and the like) the same way, once.
 #if defined(CH32V003)
 #include "ch32v00x/parts/ch32v003.hpp"
 #elif defined(CH32V006)
@@ -176,9 +191,10 @@ struct GpioRegs {
     volatile uint32_t LCKR;       ///< 0x18 configuration lock
 };
 
-/// The ports this part has, in letter order. A letter with no entry
-/// here is refused at compile time (pin.hpp); port B is the CH32V006's
-/// (device::has_port_b).
+/// The ports this part's die has, in letter order. A letter with no
+/// entry here is refused at compile time (pin.hpp); port B is the
+/// CH32V006's (device::has_port_b). Which pads of a port the package
+/// brings out is device::port_pins(), and pin.hpp refuses the rest.
 inline constexpr uint32_t gpio_base_for(char port) {
     return port == 'A' ? pb2_base + 0x0800 :
            port == 'B' ? (device::has_port_b ? pb2_base + 0x0c00 : 0) :
