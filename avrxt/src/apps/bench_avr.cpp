@@ -873,6 +873,10 @@ void print_run(const char* op, const char* bare_op, uint8_t mode, uint16_t n, ui
                const BenchSample& s, const Share& m0, const Share& m1, uint16_t entries) {
     if (mode == metered) {
         bench_line(serial, op, n, s, Ruler::hz(), wire_bps());
+        if (moved == 0u) {   // nothing arrived: no per-byte figure to divide out
+            print(serial, "  ", actual_baud(), " baud, metered: per byte irq=- isr=-");
+            return;
+        }
         print(serial, "  ", actual_baud(), " baud, metered: per byte irq=",
               (m1.irq - m0.irq + moved / 2u) / moved, " isr=",
               (m1.cycles - m0.cycles + moved / 2u) / moved);
@@ -949,10 +953,26 @@ void rx_lines() {
             uint16_t got = 0;
             uint16_t sum = 0;
             uint32_t turns = 0;
+            // The run's time-out is TIME on the ruler, not a count of
+            // turns: where a binding costs more than a frame (the metered
+            // one, about 220 cycles an entry, above 1 Mbaud) the receive
+            // vector runs back to back, the thread gets one instruction
+            // between two entries, and a turn takes a hundred entries -
+            // 100000 turns measured 132 s on the AVR64EA48 at 2 Mbaud,
+            // with nothing delivered (each overrun makes the ring skip).
+            // The stream lasts n frames; twice that, plus a millisecond for
+            // the first start bit and the thread's last turn, ends a run
+            // that will not deliver n. Looked at once every 256 turns, so
+            // the wall of a run that does deliver moves by at most one
+            // ruler read.
+            const uint32_t limit = 2u * static_cast<uint32_t>(n) * frame + SysClock::hz / 1000u;
             sw.start();
             Gen::enable();
-            while (got < n && turns < 100'000u) {
+            while (got < n) {
                 ++turns;
+                if ((turns & 0xFFu) == 0u && sw.elapsed() > limit) {
+                    break;
+                }
                 const auto run = Loop::read_span();
                 if (!run.empty()) {
                     for (const uint8_t b : run) {

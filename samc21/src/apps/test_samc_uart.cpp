@@ -4119,7 +4119,12 @@ void tN_waveforms() {
                 if (!taken && width > rejected_most) rejected_most = width;
                 if (taken && width < taken_least) taken_least = width;
             }
-            decided[w] = (rejected_most + taken_least) / 2u;
+            // The decision lies between the widest pulse ignored and the
+            // narrowest taken: with either side unseen there is no
+            // bracket, and 0 (outside every band below) says so - the
+            // mean of an unseen side's initial value would wrap.
+            const bool bracketed = rejected_most != 0u && taken_least != 0xFFFFFFFFu;
+            decided[w] = bracketed ? (rejected_most + taken_least) / 2u : 0u;
             print(plain, crlf, "    ignored up to ");
             print_millibits(rejected_most);
             print(plain, ", taken from ");
@@ -4134,7 +4139,8 @@ void tN_waveforms() {
         // sample early (31.6.3.10's note): the shift is four samples to
         // one either way.
         bench.verdict("SAMPA 2 decides four samples later, a quarter bit (to a sample)",
-                      decided[1] >= decided[0] + 188u && decided[1] <= decided[0] + 312u);
+                      decided[0] != 0u && decided[1] >= decided[0] + 188u &&
+                          decided[1] <= decided[0] + 312u);
     }
     link_end();
 }

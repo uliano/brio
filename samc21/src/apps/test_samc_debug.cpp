@@ -572,6 +572,16 @@ void tb_pac_map() {
     // THE WINDOW HAS TO BE CHARACTERIZED FIRST, because it turns out not
     // to be a plain mirror: four registers read through both buses.
     Pac::clear_all_flags();
+    // The DIR witness below needs a bit set in group B's DIR, and no app
+    // drives a pad of that group any more (the LED is dark at rest): the
+    // leg sets one itself - the LED's pad, PB23, an output at its dark
+    // level (OUT low, docs/boards/samc21j.md) - and hands it back as found
+    // at the leg's end.
+    constexpr uint32_t led_pad = 1UL << 23;
+    const bool led_was_output = (PORT_REGS->GROUP[1].PORT_DIR & led_pad) != 0u;
+    const bool led_was_high = (PORT_REGS->GROUP[1].PORT_OUT & led_pad) != 0u;
+    PORT_REGS->GROUP[1].PORT_OUTCLR = led_pad;
+    PORT_REGS->GROUP[1].PORT_DIRSET = led_pad;
     const uint32_t port_ctrl_original = PORT_REGS->GROUP[0].PORT_CTRL;
     PORT_REGS->GROUP[0].PORT_CTRL = 0xFFFFFFFFUL;
     const uint32_t ctrl_apb = PORT_REGS->GROUP[0].PORT_CTRL;
@@ -627,6 +637,8 @@ void tb_pac_map() {
     Pac::clear_all_flags();
     PORT_REGS->GROUP[1].PORT_DIR = dir_before;
     PORT_REGS->GROUP[1].PORT_DIRSET = dir_before;
+    if (!led_was_output) PORT_REGS->GROUP[1].PORT_DIRCLR = led_pad;
+    if (led_was_high) PORT_REGS->GROUP[1].PORT_OUTSET = led_pad;
     Pac::clear_all_flags();
 
     print(serial, "  with PORT protected, the same DIRTGL write: IOBUS ",
