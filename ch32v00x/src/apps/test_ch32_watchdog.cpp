@@ -30,7 +30,7 @@
 //   i  THE IWDG RESET (reboots the board): the feeding stops, the token
 //      keeps the last millisecond seen, the next boot judges the flag
 //      and the elapsed time against iwdg_timeout_ms at the LSI the
-//      sleep chapter measured
+//      letter measured on the AWU before letting the dog go
 //   w  THE WWDG RESET (reboots the board), two legs: the counter
 //      running down to 0x3F with no refresh (timed), then a refresh
 //      made ABOVE the window
@@ -46,6 +46,7 @@
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/reset.hpp"
+#include "ch32v00x/sleep.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/usart.hpp"
 #include "util/print.hpp"
@@ -54,10 +55,6 @@
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
 constexpr SysClock clock;
-
-/// The LSI this desk measured (sleep.md): what the IWDG's expected
-/// time-out is computed at.
-inline constexpr uint32_t lsi_measured_hz = 124'000;
 
 // ---------------------------------------------------------------------------
 // The token the reset letters leave for the next boot: .noinit, inline
@@ -123,6 +120,33 @@ void console_drain() {
 /// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
     return Ticker::cycles();
+}
+
+/// The LSI's rate on THIS die, measured where it is used: one die's figure
+/// is no other's (the datasheet allows 100 to 150 kHz, and the bench's
+/// parts measure from about 106 to 126 kHz). The AWU (ch32v00x/sleep.hpp)
+/// counts 8 periods of its /128 prescaler - 1024 LSI cycles, about 10 ms -
+/// timed on the ruler, the dog fed through the wait. Letter i reads its
+/// elapsed time on the tick, which counts the same HCLK, so the HSI's own
+/// error cancels between the two. 0 when the window never closed within
+/// 50 ms (1024 cycles at the datasheet's slowest 100 kHz are 10.2 ms).
+uint32_t measure_lsi_hz() {
+    if (!Awu::init()) {
+        return 0u;
+    }
+    Awu::arm(8, 7);
+    const uint32_t c0 = cycles_now();
+    const uint32_t t0 = Ticker::millis();
+    while (!Awu::fired() && Ticker::millis() - t0 < 50u) {
+        feed();
+    }
+    const uint32_t cycles = cycles_now() - c0;
+    const bool fired = Awu::fired();
+    Awu::disarm();
+    if (!fired || cycles == 0u) {
+        return 0u;
+    }
+    return static_cast<uint32_t>((static_cast<uint64_t>(SysClock::hz) * 1024u) / cycles);
 }
 
 /// The WWDG back to reset through the RCC pulse: WDGA cleared, the
@@ -250,7 +274,8 @@ void tj_iwdg_alive() {
         bench.verdict("the reset values are table 4-1's (RLDR 0x0FFF)", iwdg()->RLDR == 0x0FFFu);
     }
 
-    // /32 and 999: (999 + 1) x 32 / 124 kHz = 258 ms.
+    // /32 and 999: (999 + 1) x 32 / LSI - 258 ms at 124 kHz, 213 to 320 ms
+    // over the datasheet's 100 to 150 kHz.
     const IwdgConfig cfg{.prescaler = IwdgPrescaler::div32, .reload = 999};
     Iwdg::start();
     Iwdg::unlock();
@@ -274,8 +299,14 @@ void tj_iwdg_alive() {
     bench.verdict("the reload update likewise", synced2);
     bench.verdict("both fields read back as written once their flags are down",
                   Iwdg::prescaler() == IwdgPrescaler::div32 && Iwdg::reload() == 999u);
-    print(serial, "  time-out: ", iwdg_timeout_ms(cfg.prescaler, cfg.reload, lsi_measured_hz),
-          " ms at the measured LSI (", iwdg_timeout_ms(cfg.prescaler, cfg.reload), " nominal)", crlf);
+    const uint32_t lsi_hz = measure_lsi_hz();
+    if (lsi_hz != 0u) {
+        print(serial, "  time-out: ", iwdg_timeout_ms(cfg.prescaler, cfg.reload, lsi_hz), " ms at the LSI measured now (",
+              lsi_hz, " Hz; ", iwdg_timeout_ms(cfg.prescaler, cfg.reload), " nominal)", crlf);
+    } else {
+        print(serial, "  the LSI's window never closed: time-out ", iwdg_timeout_ms(cfg.prescaler, cfg.reload),
+              " ms nominal", crlf);
+    }
 
     // A second alive at a quarter of the period.
     const uint32_t t1 = Ticker::millis();
@@ -286,7 +317,8 @@ void tj_iwdg_alive() {
         while (Ticker::millis() - t2 < 60u) {
         }
     }
-    bench.verdict("fed every 60 ms against a 258 ms period, the board is still here after a second",
+    bench.verdict("fed every 60 ms, under a quarter of the shortest period the datasheet's LSI allows (213 ms at "
+                  "150 kHz), the board is still here after a second",
                   true);
     print(serial, "  the IWDG stays running: the loop feeds it from now on (letter i stops that)",
           crlf);
@@ -330,9 +362,17 @@ void ti_iwdg_reset() {
         (void)Iwdg::arm({.prescaler = IwdgPrescaler::div32, .reload = 999});
         iwdg_running = true;
     }
-    print(serial, "  the feeding stops now; expected bite in ",
-          iwdg_timeout_ms(IwdgPrescaler::div32, 999, lsi_measured_hz), " ms", crlf);
-    arm_token('i', 1, iwdg_timeout_ms(IwdgPrescaler::div32, 999, lsi_measured_hz));
+    // The LSI measured in the letter, a few milliseconds before the bite's
+    // stopwatch starts: what the expected time-out is computed at.
+    const uint32_t lsi_hz = measure_lsi_hz();
+    if (lsi_hz == 0u) {
+        bench.verdict("the LSI's rate measured on the AWU before the dog is let go", false);
+        return;
+    }
+    const uint32_t expected = iwdg_timeout_ms(IwdgPrescaler::div32, 999, lsi_hz);
+    print(serial, "  the LSI measured at ", lsi_hz, " Hz; the feeding stops now; expected bite in ", expected,
+          " ms", crlf);
+    arm_token('i', 1, expected);
     Iwdg::refresh();        // the last one: the stopwatch starts here
     iwdg_running = false;   // the loop must not feed it any more
     wait_for_the_bite(2000);
@@ -370,9 +410,18 @@ void resume_after_reset() {
         judge("the IWDG reset the board: IWDGRSTF stands, WWDGRSTF and SFTRSTF do not",
               (boot_flags & ResetFlag::independent_watchdog) != 0u &&
                   (boot_flags & (ResetFlag::window_watchdog | ResetFlag::software)) == 0u);
-        judge("it bit when the arithmetic said, within 5% at the measured LSI",
-              elapsed >= token.expected_ms - token.expected_ms / 20u &&
-                  elapsed <= token.expected_ms + token.expected_ms / 20u);
+        // THE BOUND. expected_ms is the time-out at the LSI measured in the
+        // letter, and elapsed is read on the tick, the same HCLK, so the
+        // HSI's error cancels. What is left: the LSI's wander between the
+        // window and the bite (the sleep suite's same window repeats to 0.2
+        // per cent run to run; 1 per cent allowed), the two millisecond
+        // reads' quantum (1 ms at each end), the time-out's rounding down to
+        // a whole millisecond (1 ms), and the refresh crossing into the LSI
+        // domain with the /32 prescaler's phase (one count, 0.32 ms at the
+        // slowest 100 kHz: 1 ms) - expected +- (expected / 100 + 4 ms).
+        const uint32_t slack = token.expected_ms / 100u + 4u;
+        judge("it bit when the arithmetic said at the LSI measured in the letter, within 1% and 4 ms",
+              elapsed + slack >= token.expected_ms && elapsed <= token.expected_ms + slack);
         judge("and a fresh boot finds the watchdog OFF again (the one thing that stops it)",
               !Iwdg::busy() && iwdg()->RLDR == 0x0FFFu);
         bench.end_letter();

@@ -296,8 +296,17 @@ void tc_bias() {
     PosPad::release();
     NegPad::release();
     print(serial, "  (VREFINT read ", vref, " counts: the supply is ", Adc::supply_mv(vref), " mV)", crlf);
-    bench.verdict("the differential PGA's sign: P above N saturates high, N above P saturates low, on channel 9",
-                  rails_judged != 0u && rails_right == rails_judged);
+    // The sign takes BOTH rows: one row alone (the other's stimulus not
+    // taking, as PA4's pull-down on the 20-pin package, where PA4 shares its
+    // pin with PD7) cannot tell a working PGA from an output stuck at that
+    // row's rail. Then the letter declines with the reason.
+    if (rails_judged < 2u) {
+        print(serial, "  SKIPPED, no verdict claimed: only ", rails_judged,
+              " of the two rail rows had its stimulus take, and one row cannot show a sign", crlf);
+    } else {
+        bench.verdict("the differential PGA's sign: P above N saturates high, N above P saturates low, on channel 9",
+                      rails_right == rails_judged);
+    }
     print(serial, "  -> the bias reference needs a SOURCE on the inputs (3.2 kOhm input network): not measured here",
           crlf);
     Adc::release();

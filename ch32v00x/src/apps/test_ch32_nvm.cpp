@@ -280,9 +280,13 @@ void tc_reprogram() {
     (void)engine_erase(page);
 
     // First program: the left half a pattern, the right half untouched.
+    // The halves are the part's own page's (256 bytes on the CH32V006, 64
+    // on the CH32V003): a split fixed at 128 bytes leaves the CH32V003's
+    // whole page in the "left half" and asks the second program for no bit.
+    constexpr uint32_t half = Flash::page_size / 2u;
     uint8_t first[Flash::page_size];
     for (uint32_t i = 0; i < Flash::page_size; ++i) {
-        first[i] = i < 128u ? static_cast<uint8_t>(0xA5u ^ i) : 0xFFu;
+        first[i] = i < half ? static_cast<uint8_t>(0xA5u ^ i) : 0xFFu;
     }
     const uint32_t err1 = engine_program(page, first);
     uint8_t got[Flash::page_size];
@@ -296,16 +300,16 @@ void tc_reprogram() {
     // going 1 -> 0 are asked for, the physics' own direction.
     uint8_t second[Flash::page_size];
     for (uint32_t i = 0; i < Flash::page_size; ++i) {
-        second[i] = i < 128u ? first[i] : static_cast<uint8_t>(0x3Cu ^ i);
+        second[i] = i < half ? first[i] : static_cast<uint8_t>(0x3Cu ^ i);
     }
     const uint32_t err2 = engine_program(page, second);
     Flash::read(page, got);
     const bool second_exact = memcmp(got, second, Flash::page_size) == 0;
     bool left_kept = true, right_written = true;
-    for (uint32_t i = 0; i < 128u; ++i) {
+    for (uint32_t i = 0; i < half; ++i) {
         left_kept = left_kept && got[i] == first[i];
     }
-    for (uint32_t i = 128u; i < Flash::page_size; ++i) {
+    for (uint32_t i = half; i < Flash::page_size; ++i) {
         right_written = right_written && got[i] == second[i];
     }
     print(serial, "  second program without an erase: err=", hex(err2),
@@ -320,10 +324,11 @@ void tc_reprogram() {
                       "page is the write cell for good", crlf);
     }
     // Judged only for consistency: whatever the silicon does, the engine
-    // reported it truthfully, and the page erases clean afterwards.
+    // reported it truthfully - a page not as asked comes with an error -
+    // and the page erases clean afterwards.
     bench.verdict("the engine's verdict and the readback agree (an error "
                   "reported, or the page as asked)",
-                  (err2 != 0u) || second_exact || !second_exact);
+                  (err2 != 0u) || second_exact);
     bench.verdict("the page erases clean afterwards",
                   engine_erase(page) == 0u && page_is(page, 0xFF));
 }

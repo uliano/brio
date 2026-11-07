@@ -1450,7 +1450,18 @@ void tm_errors() {
             (void)link_command_mode();
         }
         print(serial, "  FE onset: +", onset_pos, " %, ", onset_neg, " %", crlf);
-        judge("every rate within 3 % of the receiver's own is clean (14.3)", inside_clean);
+        // "Within 3 % of the receiver's own" needs the two clocks' ratio:
+        // the peer bangs on its own clock, so its rates are off by e only
+        // against a crystal this end has been calibrated to. A peer that
+        // refused the calibrate (no crystal on its board) leaves the ratio
+        // unknown - the two RC oscillators may differ by their tolerances
+        // added - and the verdict has no premise.
+        if (hsi_known) {
+            judge("every rate within 3 % of the receiver's own is clean (14.3)", inside_clean);
+        } else {
+            print(serial, "  SKIPPED, no verdict claimed: the peer's clock is not referenced to a crystal (it "
+                          "refused the calibrate), so no rate is known within 3 % of this receiver's", crlf);
+        }
         judge("and a rate far enough off does raise FE", onset_pos != 0 || onset_neg != 0);
     }
     // 3. Low pulses on the idle line: where a start bit starts being believed.

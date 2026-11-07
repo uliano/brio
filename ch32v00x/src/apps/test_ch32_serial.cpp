@@ -3771,27 +3771,28 @@ void ty_host() {
     // which an 8N1 receiver samples as its stop bit - a framing error,
     // the frame dropped; an odd count carries parity 1, a valid stop - a
     // byte pushed. A dropped frame tells the receive ring, whose next look
-    // skips everything queued before it (the transport's header), so the
-    // bytes taken are the valid ones AFTER the last framing error, and the
-    // valid ones before it are skipped by design, not lost silently.
+    // jumps its tail to its head - everything queued at that look is
+    // discarded (util/ring.hpp's SkipRing, the transport's header). This
+    // letter looks once, after the whole stream has arrived, so one framing
+    // error anywhere in it leaves nothing to take: the valid bytes before
+    // and after it alike were queued when the look came, and are skipped by
+    // design, not lost silently. Only a stream with no framing error at all
+    // would be taken whole.
     uint32_t x = 0x12345678u;
     uint32_t expect_fe = 0;
-    uint32_t expect_taken = 0;
     for (uint8_t i = 0; i < 64u; ++i) {
         const uint8_t sent = static_cast<uint8_t>(xorshift_step(x) & 0xFFu);
         if ((__builtin_popcount(sent) & 1) == 0) {
             ++expect_fe;
-            expect_taken = 0;
-        } else {
-            ++expect_taken;
         }
     }
+    const uint32_t expect_taken = expect_fe == 0u ? 64u : 0u;
     print(serial, "  64 bytes sent 8E1 into an 8N1 console: ", bytes, " bytes taken (", expect_taken,
           " expected), frame errors ", Serial::frame_errors(), " (", expect_fe, " expected), noise ",
           Serial::noise_errors(), ", parity ", Serial::parity_errors(), ", hw overruns ", Serial::hw_overruns(),
           crlf);
     bench.verdict("frames with an extra parity bit into an 8N1 console: every parity-0 frame a framing error, "
-                  "the bytes after the last one taken",
+                  "and the ring's look after them skipping everything queued",
                   Serial::frame_errors() == expect_fe && bytes == expect_taken && Serial::noise_errors() == 0u &&
                       Serial::parity_errors() == 0u && Serial::hw_overruns() == 0u);
     Serial::clear_errors();

@@ -914,6 +914,9 @@ void tr_watchdog_reset() {
     print(serial, "  NO RESET after 100 ms - the watchdog did not reset the board", crlf);
     token.leg = 0;
     Adc::watchdog0_off();
+    // Reached only when the reset never came: the letter's one claim
+    // failed, and it says so in the tally rather than ending with none.
+    bench.verdict("the watchdog's fault reset the board", false);
 }
 
 void judge(const char* what, bool ok) {

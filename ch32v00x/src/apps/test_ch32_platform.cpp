@@ -149,6 +149,10 @@ TestBench<Serial> bench;
 // disturb it.
 uint32_t boot_flags = 0;
 std::optional<PanicRecord> boot_record;
+// True when this boot is the one letter i's last leg ended in: the fault
+// vector's record is then pending at it by design, for every run of `z`
+// until the next reset.
+bool boot_after_fault_leg = false;
 
 // The STK counter as a cycle counter: it runs at HCLK and reloads every
 // tick, so two readings less than a tick apart are a cycle count with
@@ -202,9 +206,17 @@ void ta_boot() {
     bench.verdict("and leaves the register clean", after == 0u);
     bench.verdict("RMVF is back at zero afterwards (a plain bit, not a strobe)",
                   (rcc()->RSTSCKR & rstsckr_rmvf) == 0u);
-    bench.verdict("no panic record was pending at this boot (letter i "
-                  "is the one that leaves one)",
-                  !boot_record.has_value());
+    if (boot_after_fault_leg) {
+        bench.verdict("the record pending at this boot is the one letter i's "
+                      "last leg left (kernel_fault, context 0x51)",
+                      boot_record.has_value() &&
+                          boot_record->code == static_cast<uint8_t>(PanicCode::kernel_fault) &&
+                          boot_record->context == 0x51u);
+    } else {
+        bench.verdict("no panic record was pending at this boot (letter i "
+                      "is the one that leaves one)",
+                      !boot_record.has_value());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +824,7 @@ int main() {
     // record is fetch-and-clear and must be taken exactly once.
     boot_flags = brio::Reset::flags();
     boot_record = brio::take_panic_record<P>();
+    boot_after_fault_leg = token.magic == token_magic && token.leg == 3u;
 
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
