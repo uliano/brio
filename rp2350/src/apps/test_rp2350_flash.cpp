@@ -684,9 +684,8 @@ void tf_window_cost() {
     (void)Flash::status_register<1>();
     const uint32_t us1 = us_now() - t1;
     print(serial, "  ... and here it is, whole - the window took ", us1, " us", crlf);
-    bench.verdict("the console survived a window with no byte lost, the transport's ring being "
-                  "in SRAM and its interrupt merely late",
-                  us1 != 0u);
+    // Whether the line above arrived whole is the host's to see (brio run
+    // --strict counts a lost line): the device has nothing to judge it with.
 }
 
 // =============================================================================

@@ -460,14 +460,19 @@ void tf_coherence() {
     bench.verdict("READ() IS COHERENT ACROSS A DAY'S ROLLOVER: never the new time beside the old date, in 300 "
                   "rollovers read through",
                   seen[0] == rolls && bad[0] == 0u);
-    // The witness that the letter can see the fault: the single pair read
-    // incoherent in 87 to 110 rollovers of 300 in this loop, and in 29 of
-    // 500 (5.8 %) in a tighter one with nothing between the pairs; even at
-    // that lower rate 300 rollovers show none with a probability of
-    // 0.942^300 = 1.7e-8.
-    bench.verdict("and the single pair - RTC_0 then RTC_1 at once, 4.8.5.3's sequence - is not: the latch the "
-                  "first read makes is late for the second now and then",
-                  seen[1] == rolls && bad[1] != 0u);
+    // The single pair is PRINTED, not judged. Its incoherence is a race
+    // between the latch RTC_0's read makes and an RTC_1 read issued right
+    // after it - behaviour 4.8.5.3 does not describe and brio does not
+    // depend on (read() above never uses the single pair) - and its rate
+    // moves with the loop's shape and the image's layout: 87 to 110
+    // rollovers of 300 in one build of this loop, 29 of 500 in a tighter
+    // one, none in 300 in others. A verdict that wants the race to appear
+    // judges the layout, so the figure is a measurement; the pair is still
+    // judged to have crossed every rollover, which is what makes its count
+    // a reading of 300 tries.
+    bench.verdict("the single pair - RTC_0 then RTC_1 at once, 4.8.5.3's sequence - read across every rollover "
+                  "(how often it read incoherent is printed above: a race the layout moves, not a contract)",
+                  seen[1] == rolls);
 }
 
 // =============================================================================

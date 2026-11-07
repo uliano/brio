@@ -437,10 +437,11 @@ void td_rate() {
               level, " -> ", counted, " sps measured, ", adc_rate_hz(Adc::clock_hz(), pr.div),
               " by the driver's arithmetic, overflow=", over, crlf);
     }
-    bench.verdict("the dividers around the conversion's 96 cycles are measured above: a start that arrives while the "
-                  "converter is busy is ignored, so a divider period at or below the conversion's stretches to a "
-                  "multiple of itself",
-                  true);
+    // Printed, not judged: the rows above measure the dividers around the
+    // conversion's 96 cycles - a start that arrives while the converter is
+    // busy is ignored, so a divider period at or below the conversion's
+    // stretches to a multiple of itself.
+    print(serial, "  (the rows above measure the dividers around 96 cycles: printed, not judged)", crlf);
     (void)adc_up(AdcClock::crystal);
     Adc::select(AdcInput::temperature);
     Adc::divider({});

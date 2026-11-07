@@ -344,9 +344,12 @@ void tc_reads() {
         last1 = n;
     }
     bench.verdict("nor 2000 reads of TIMER1", monotonic1);
-    bench.verdict("both counters are still in their first 2^32 microseconds, so the low "
-                  "half alone is an honest span here",
-                  (Ruler::now() >> 32) == 0u && (Spare::now() >> 32) == 0u);
+    // Every span this suite takes is a difference of two low halves,
+    // honest across a wrap of the low word, so how long the counters have
+    // run since boot is printed and not judged (a verdict on it would fail
+    // after 71.6 minutes of uptime with nothing wrong).
+    print(serial, "  high halves now: TIMER0 ", static_cast<uint32_t>(Ruler::now() >> 32), ", TIMER1 ",
+          static_cast<uint32_t>(Spare::now() >> 32), crlf);
 }
 
 // =============================================================================
@@ -362,6 +365,15 @@ void one_alarm() {
     constexpr uint8_t slot = 4u * t + a;
     alarm_fires[slot] = 0;
     Timer<t>::template clear<a>();
+    // A clean start for the line as well as for the flag: a letter that
+    // forced this alarm's interrupt with the line disabled (the extras
+    // below, k's alias write) left it PENDING in the Cortex-M33's NVIC,
+    // which latches a pending line while it is disabled - and the next
+    // enable would enter the handler at once, a second fire counted on the
+    // next run of z. Hazard3's external interrupts are levels with no
+    // latch (the call there only withdraws a software force); it is the
+    // same call on both.
+    Irq::clear_pending(Timer<t>::template irq<a>());
     Timer<t>::template interrupt<a>(true);
     Irq::enable(Timer<t>::template irq<a>());
     // THE TARGET IS IN THE INSTANCE'S OWN TIME. The two counters started

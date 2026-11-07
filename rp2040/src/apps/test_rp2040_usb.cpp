@@ -343,6 +343,12 @@ void tx_two_ports() {
     // The block is touched only once it is out of reset: brought up here
     // when letter a has not run, the one-port device stopped when it has.
     if (usb_up) {
+        // A host letter's clean start, as y and v make theirs: port A is
+        // the same port object in both devices, so whatever a previous
+        // letter left in its rings (v's host stream outlasts v's count)
+        // would be echoed into this letter's count and keep its bulk OUT
+        // unarmed behind a full ring.
+        settle_port();
         Device::stop();
         Device2::stop();
     } else {

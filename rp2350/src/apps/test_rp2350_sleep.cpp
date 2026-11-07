@@ -382,10 +382,9 @@ void ta_as_found() {
                   boot_last_pwrup == pwrup_bit(PowerUpSource::chip_reset) ||
                       (boot_causes & ResetCause::swcore_powerdown) != 0u);
 
+    // The debug port's power-up request, printed whichever way it reads: a
+    // standing one blocks every power-down and the deep letters say so.
     report_debug_condition();
-    bench.verdict("the debug port's power-up request is READ, whichever way it reads: a "
-                  "standing one blocks every power-down and the deep letters say so",
-                  true);
 }
 
 // =============================================================================

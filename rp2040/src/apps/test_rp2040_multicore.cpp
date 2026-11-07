@@ -392,9 +392,11 @@ void tb_tickers() {
     print(serial, "  over 500 ms of the timer: core 0's ticker +", d0, ", core 1's +", d1, crlf);
     bench.verdict("core 1's ticker runs at 1000 Hz on its own SysTick, within 0.2 %",
                   d1 >= 499u && d1 <= 501u);
-    bench.verdict("and core 0's beside it", d0 >= 499u && d0 <= 501u);
-    bench.verdict("they are two counters (different values, both advancing)",
-                  CoreTicker<0>::ticks() != CoreTicker<1>::ticks() || d0 != d1 || true);
+    // That they are two counters is what the two verdicts above already
+    // judge: one counter fed by both SysTicks would advance 1000 over the
+    // window and fail both 499..501 bounds.
+    bench.verdict("and core 0's beside it - two counters, neither taking the other core's tick",
+                  d0 >= 499u && d0 <= 501u);
 }
 
 // -----------------------------------------------------------------------------

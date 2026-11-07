@@ -371,9 +371,11 @@ void td_rate() {
         print(serial, "  ", pr.us, " us at DIV ", pr.div.integer, " (", adc_rate_hz(Adc::clock_hz(), pr.div) / 1000u, " ksps, ", expected,
               " expected): the channel took ", got, ", the FIFO held ", level, ", overflow=", over, crlf);
     }
-    bench.verdict("DIV 95 - a trigger period of exactly the conversion's 96 cycles - halves the rate to 250 ksps, "
-                  "DIV 99 gives 480 ksps: the chapter's floor of 96 for n, measured",
-                  true);
+    // Printed, not judged: the rows above are the measurement of the
+    // chapter's floor of 96 for n (DIV 95 - a trigger period of exactly the
+    // conversion's 96 cycles - halving the rate to 250 ksps, DIV 99 giving
+    // 480 ksps); the rates the driver states are judged in letter a.
+    print(serial, "  (the rows above measure the floor of 96 cycles: printed, not judged)", crlf);
     (void)adc_up(AdcClock::crystal);
     Adc::select(AdcInput::temperature);
     Adc::divider({});

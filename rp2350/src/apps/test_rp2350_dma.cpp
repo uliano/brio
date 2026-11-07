@@ -2166,7 +2166,8 @@ int main() {
     bench.letter('t', "tx_idle() on the pad under the transmit engine", pair::guarded<bench, clock, tt_tx_idle>);
     bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", pair::guarded<bench, clock, tv_breaks>);
     bench.letter('o', "the overrun a stalled receive engine leaves: no storm", pair::guarded<bench, clock, to_stalled_overrun>);
-    bench.letter('r', "a released requester: the same owner initialized again", tr_released_requester);
+    bench.letter('r', "a released requester: the same owner initialized again",
+                 pair::guarded<bench, clock, tr_released_requester>);
     bench.letter('w', "the corners: sniffer modes, a write error, a chain aborted, the copy on a line, the round",
                  tw_corners);
     bench.letter('x', "a paced block's first transfer against the gap after arm() (diagnostic)", tx_paced_after_arm,

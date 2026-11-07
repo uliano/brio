@@ -323,7 +323,9 @@ void td_window() {
     bench.verdict("during a sector erase the ticker counts at most two ticks (one that fell before the window, the one "
                   "that pended in it) where the timer says five milliseconds: the window is masked and the tick pends once",
                   ok && ticks <= 2u && erase_us / 1000u > ticks + 1u);
-    bench.verdict("the console's bytes queued during the window come out after it (this line prints)", true);
+    // Whether the console's bytes queued during the window come out after
+    // it is the host's to see (brio run --strict counts a lost line); the
+    // device has nothing to judge it with.
 
     // The cache: a walk over one sector, cold then warm.
     Xip::flush();

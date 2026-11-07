@@ -272,8 +272,8 @@ void tb_critical() {
                   !after_inner);
     bench.verdict("leaving the outer scope unmasks", after_outer);
 
-    // The tick keeps counting through a masked window - the interrupt is
-    // pending, not lost - and the RULER sees the window's true length.
+    // A masked window: the tick's interrupt is held pending, once, and the
+    // RULER sees the window's true length.
     const uint32_t t0 = Ticker::ticks();
     const uint32_t u0 = us_now();
     {
@@ -286,9 +286,13 @@ void tb_critical() {
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  ", window_us, " us with interrupts masked advanced the tick by ",
           through_mask, " ms", crlf);
+    // The bound: SysTick's interrupt is a pending bit, so the window's five
+    // ticks coalesce into the one served at the unmask - 1, or 2 when a
+    // tick lands between the read of t0 and the mask. A tick that counted
+    // through the mask would read 5 or 6 and fail.
     bench.verdict("a masked window LOSES ticks (SysTick's interrupt is a pending "
                   "bit, not a counter - one tick is delivered, the rest coalesce)",
-                  window_us >= 5000u && through_mask <= 5u);
+                  window_us >= 5000u && through_mask >= 1u && through_mask <= 2u);
 
     // idle(): WFI, then unmask. Any enabled interrupt wakes it, so the
     // console has to be silent first.
@@ -485,6 +489,7 @@ void te_resets() {
     // The PWM block: nothing in this suite uses it, and it is held in
     // reset at power-up (2.14.1) - unless a previous life released it.
     const bool before = Resets::released(ResetBlock::pwm);
+    const bool adc_before = Resets::released(ResetBlock::adc);
     print(serial, "  PWM at entry: ", before ? "released" : "held", crlf);
 
     Resets::hold(ResetBlock::pwm);
@@ -502,7 +507,7 @@ void te_resets() {
     bench.verdict("cycle() takes a released block through reset and back",
                   Resets::cycle(ResetBlock::pwm) && Resets::released(ResetBlock::pwm));
     bench.verdict("a block that was never touched stays as it was: the ADC",
-                  !Resets::released(ResetBlock::adc) || Resets::released(ResetBlock::adc));
+                  Resets::released(ResetBlock::adc) == adc_before);
     // Left released: a chapter to come will find it ready.
 }
 

@@ -304,8 +304,15 @@ void tb_critical() {
     bench.verdict("leaving the outer scope unmasks", after_outer);
 
     // The ruler counts through a masked window - it is hardware, not an
-    // interrupt - and the kernel tick coalesces, because its interrupt is
-    // a pending bit and not a counter.
+    // interrupt. What the kernel tick does there differs by half
+    // (docs/rp2350/platform.md): SysTick's interrupt is a pending bit, so
+    // on the Cortex-M33 the window's ticks coalesce into the one served at
+    // the unmask - 1, or 2 when a tick lands between the read of t0 and the
+    // mask; Hazard3's tick is the platform timer's comparator, which tick()
+    // moves on from the LAST deadline, so the interrupt stands until it has
+    // caught up and every millisecond deadline inside the span from t0 to
+    // the read after the unmask is served - a span of 5000 us and under
+    // 6000 (the window measured 5000 to 5008) holds 5 or 6 of them.
     const uint32_t t0 = Ticker::ticks();
     const uint32_t u0 = us_now();
     {
@@ -318,9 +325,17 @@ void tb_critical() {
     const uint32_t through_mask = Ticker::ticks() - t0;
     print(serial, "  ", window_us, " us with interrupts masked advanced the tick by ",
           through_mask, " ms", crlf);
-    bench.verdict("the ruler counts through a masked window, and the kernel tick does "
-                  "not: five milliseconds of ruler, at most a handful of ticks",
-                  window_us >= 5000u && through_mask <= 6u);
+    bench.verdict("the ruler counts through a masked window (five milliseconds of it)",
+                  window_us >= 5000u && window_us < 6000u);
+    if constexpr (core_kind == CoreKind::hazard3) {
+        bench.verdict("and the kernel tick catches up at the unmask: every deadline of the "
+                      "span served, 5 or 6 ticks",
+                      through_mask >= 5u && through_mask <= 6u);
+    } else {
+        bench.verdict("and the kernel tick does not: the window's ticks coalesce into one "
+                      "pending SysTick, 1 or 2 ticks",
+                      through_mask >= 1u && through_mask <= 2u);
+    }
 }
 
 // =============================================================================
