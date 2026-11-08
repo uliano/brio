@@ -112,7 +112,8 @@ silicon does (the two channels and their pads, the holding register and
 the output register, the buffer, the triggers, the two generators, the
 DMA request, both channels at once, the reference and the gate); the
 types and verbs (the vocabulary, the pads, the converter); how to use
-it, one block per use; the bench findings, on the CH32V303VCT6; and
+it, one block per use; the bench findings, on the CH32V303CBT6 and the
+CH32V303VCT6; and
 what is not covered.
 
 Two 12-bit digital-to-analog channels in one block, each with its own
@@ -198,9 +199,12 @@ TIM4; the CH32V303RC and VC have TIM5 to TIM8 as well, and the 128 KB
 CH32V303CB and RB have none of the four (table 2-1-1). A trigger whose
 timer is absent is refused.
 
-EXTI line 9 reaches the converter through its event enable, and not its
-interrupt enable - the path the ADC's code 110 takes too ([adc.md](adc.md)),
-stated in neither chapter and measured on both blocks.
+EXTI line 9 reaches the converter through its event enable - the path
+the ADC's code 110 takes too ([adc.md](adc.md)), stated in neither
+chapter and measured on both blocks. Whether the line's interrupt
+enable reaches it as well differs between the dies measured (the bench
+findings), so a program that triggers the converter from the line arms
+its event.
 
 ### The two generators
 
@@ -388,12 +392,16 @@ A triangle of amplitude 1023 over 512, stepped by a timer:
 
 ## Bench findings
 
-`test_vx03_dac` on the CH32V303VCT6, with the PLL on the HSI at 96 MHz
+`test_vx03_dac` on the CH32V303CBT6, with the PLL on the HSI at 96 MHz
 so that the converter judging the pads is in specification (ADCCLK
-12 MHz) and nothing wired: **35 pass, 0 fail**. The judge is
-ratiometric - the DAC's output and the ADC's count are both against the
-same supply, measured at 3299 to 3303 mV through VREFINT - so a code and
-the count it reads back are compared directly.
+12 MHz) and nothing wired: **35 pass, 0 fail**, ten runs alike. The
+CH32V303VCT6 was not run with today's suite; the findings that name it
+were measured on it. The judge is ratiometric - the DAC's output and
+the ADC's count are both against the same supply, measured through
+VREFINT at 3240 to 3246 mV on the CH32V303CBT6 and 3299 to 3303 mV on
+the CH32V303VCT6 - so a code and the count it reads back are compared
+directly. Where a finding gives one set of figures they are both
+parts'.
 
 - **The six placements land in one register per channel.** 0xABCD and
   0x789F written left-aligned read back as 0xABC and 0x789, 0x5A and
@@ -407,14 +415,19 @@ the count it reads back are compared directly.
   software trigger and a five-bit amplitude were refused with nothing
   written.
 - **The pads, read by the converter.** Seven codes from 0 to 4095 on
-  each pad: buffered, every mid-scale code read within 13 counts of
-  itself (the worst PA5's 3597 for 3584), code 0 read 0 counts and 4095
-  read 4084 and 4088 - some 10 mV under the supply; unbuffered, within
-  10 counts, code 0 at 0 and 4095 at 4085 and 4086. Both well inside
-  table 4-45's offset of 12 mV, gain error of 0.4 % and rails, and the
-  buffered channel 2 running a few counts high through the middle of the
-  scale (1028, 2053, 3074 for 1024, 2048, 3072) where the unbuffered one
-  does not.
+  each pad. On the CH32V303CBT6, buffered, every mid-scale code read
+  within 10 to 13 counts of itself over ten runs (the worst PA4's 3594
+  to 3597 for 3584), code 0 read 1 to 3 counts and 4095 read 4092 to
+  4094; unbuffered, within 2 to 4 counts, code 0 at 1 to 4 and 4095 at
+  4092 to 4094. On the CH32V303VCT6, buffered, within 13 counts (the
+  worst PA5's 3597 for 3584), code 0 at 0 and 4095 at 4084 and 4088 -
+  some 10 mV under the supply; unbuffered, within 10 counts, code 0 at
+  0 and 4095 at 4085 and 4086. Both parts well inside table 4-45's
+  offset of 12 mV, gain error of 0.4 % and rails, and the buffered
+  channels running a few counts high through the middle of the scale
+  (on the CH32V303VCT6 channel 2's 1028, 2053, 3074 for 1024, 2048,
+  3072; on the CH32V303CBT6 both channels' 2050 to 2052 and 3074 to 3076
+  for 2048 and 3072) where the unbuffered ones do not.
 - **Every trigger holds the datum until it comes.** The software trigger:
   DOR still at the old value five microseconds after the write, and the
   new one right after SWTRIG1; channel 2's the same through SWTRIG2,
@@ -422,11 +435,16 @@ the count it reads back are compared directly.
   at once. The TRGO of all six timers table 17-1
   names - TIM2, TIM4, TIM5, TIM6, TIM7 and TIM8, codes 100, 101, 011,
   000, 010 and 001 - each held a datum written mid-period until its next
-  update, 499 us later for a 1 ms period.
+  update, 499 us later for a 1 ms period, on the CH32V303VCT6; on the
+  CH32V303CBT6, which has TIM2 and TIM4 alone of the six, those two the
+  same way.
 - **EXTI line 9 from a pad of our own**: an edge on the line merely
-  sensed moved nothing, the same edge with the line's EVENT enable moved
-  the datum, and with its INTERRUPT enable instead it did not - while the
-  line's own handler ran for it.
+  sensed moved nothing, and the same edge with the line's EVENT enable
+  moved the datum. With its INTERRUPT enable instead, while the line's
+  own handler ran for it, the datum did not move on the CH32V303VCT6 and
+  did on the CH32V303CBT6, ten runs of ten - the same split as the
+  converter's EXTI trigger on the two dies ([adc.md](adc.md)); the suite
+  prints that answer as a finding.
 - **The noise is figure 17-5's register.** The first trigger added the
   masked preload - 0x00A with MAMP 3, 0x8AA over a holding register of
   0x800 with MAMP 7, 0xAAA with MAMP 11 - and the twelve-bit run went on
@@ -440,22 +458,27 @@ the count it reads back are compared directly.
   holding register itself, and every step one count - the same walk on
   channel 2.
 - **The stream: DMA2's channel 3 playing a table into DAC1.** Eight
-  levels, one a TIM6 update at 1 kHz, for 20 ms: the channel's own
-  handler counted two laps and no fault, and 3738 conversions of PA4 in
-  those 20 ms found all eight levels, nine in ten of them on a level of
-  the table - the rest caught mid-step. DAC2 on ITS OWN request, DMA2's
-  channel 4 (DMAEN2 alone), the same: two laps, no fault, all eight
-  levels on PA5, 3404 to 3410 of some 3740 conversions on a level, in
-  ten runs.
+  levels, one a TIM6 update at 1 kHz (TIM2's on the CH32V303CBT6), for
+  20 ms: the channel's own
+  handler counted two laps and no fault, and 3738 to 3742 conversions of
+  PA4 in those 20 ms found all eight levels, nine in ten of them (3401
+  to 3405) on a level of the table - the rest caught mid-step. DAC2 on
+  ITS OWN request, DMA2's channel 4 (DMAEN2 alone), the same: two laps,
+  no fault, all eight levels on PA5, 3407 to 3411 of 3740 to 3743
+  conversions on a level, in ten runs on the CH32V303CBT6 (3404 to 3410
+  of some 3740 on the CH32V303VCT6).
 - **The dual stream: one request, both channels.** DAC1's request alone
   (DMAEN1 set, DMAEN2 clear) feeding the dual holding register a word a
-  TIM6 update: 1053 pairs of DOR1 and DOR2 read back to back were all
-  1053 a pair of the table, and 1049 of 1053 pairs of conversions of the
-  two pads summed to full scale as every pair of the table does.
+  TIM6 update (TIM2's on the CH32V303CBT6): 1076 to 1077 pairs of DOR1 and DOR2 read back to back
+  were all a pair of the table, and 1070 to 1075 of 1076 to 1077 pairs
+  of conversions of the two pads summed to full scale as every pair of
+  the table does, on the CH32V303CBT6 (1053 pairs, and 1049 of 1053
+  summing, on the CH32V303VCT6).
 - **Each channel follows its own configuration.** Both enabled, a
   triangle on channel 1 stepped 700 times and a fixed 3072 on channel 2:
-  PA4 read 1207 against DOR1's 1211 and PA5 3067 against 3072 - and
-  each channel alone drove its own pad the same way. V2.3's two-channel
+  PA4 read 1212 to 1213 against DOR1's 1211 and PA5 3074 to 3076
+  against 3072 on the CH32V303CBT6 (1207 and 3067 on the CH32V303VCT6) -
+  and each channel alone drove its own pad the same way. V2.3's two-channel
   note does not hold on this silicon.
 
 ## Not covered yet
@@ -468,6 +491,7 @@ Implemented but not bench-verified, each with what would measure it:
   HELD until the trigger and taken by the time the core looks, not the
   latency between; a logic analyser on the timer's TRGO and the pad
   would.
-- **The 128 KB CH32V303CB and RB**, whose DAC takes only TIM2's and
-  TIM4's TRGO, EXTI line 9 and the software trigger: compiled for both
-  and asserted at compile time; what would measure them is a board.
+- **The CH32V303RB**, whose DAC, like the CH32V303CB's, takes only
+  TIM2's and TIM4's TRGO, EXTI line 9 and the software trigger: compiled
+  and asserted at compile time, the same trigger set measured on the
+  CH32V303CBT6; what would measure the part itself is a board.

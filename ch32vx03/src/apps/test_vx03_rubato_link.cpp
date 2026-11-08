@@ -231,9 +231,11 @@ constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 static_assert(SysClock::pclk1_hz == 72'000'000u, "the pair's PB1 at 72 MHz");
 
 /// The composed cycle count: monotone across the ticker's restart, a
-/// difference exact under 2^32 cycles (29.8 s at 144 MHz).
+/// difference exact under 2^32 cycles (29.8 s at 144 MHz); the ruler of
+/// util/test_wait.hpp's verbs too (vx03_link_dut.hpp's command path).
 struct Ruler {
     static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// The STK counter's period: it counts HCLK and restarts at the ticker's
@@ -854,7 +856,13 @@ void ti_dark() {
                       !pad_is_output<ul::D::WRx>() && !LinkRxChannel::enabled() && !LinkTxChannel::enabled() &&
                       !link_live);
     bench.verdict("the LED's pad PB2 is not an output", !pad_is_output<Pin<'B', 2>>());
-    bench.verdict("HCLK from the 8 MHz crystal, the UART letters' premise", clock_ok);
+    // THE UART LETTERS' PREMISE, not a verdict of this letter: printed
+    // when it holds, a skip when it does not.
+    if (clock_ok) {
+        print(serial, "  HCLK from the 8 MHz crystal: the UART letters' premise holds", crlf);
+    } else {
+        bench.skip("HCLK is not on the 8 MHz crystal: the UART letters' premise is absent");
+    }
     bench.verdict("the ceiling is the Console's and interrupts are enabled",
                   P::ceiling == console_index && P::interrupts_enabled());
     if constexpr (device::has_fpu) {

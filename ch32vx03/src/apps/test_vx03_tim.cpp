@@ -145,6 +145,7 @@
 #include "ch32vx03/usart.hpp"
 #include "util/meter_sampler.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -228,45 +229,17 @@ using Period = TimPeriodMeter<Quad>;          ///< TIM4 channels 1 and 2, over t
 volatile bool interval_arm = false;
 volatile bool period_arm = false;
 
-/**
- * THE RULER OF THIS SUITE: the core's own STK counter, read as a
- * stopwatch. It counts up to its reload - one tick period, a
- * millisecond here - and starts again, so a span is accumulated poll by
- * poll with one period folded in across each wrap, exactly as
- * ch32vx03/delay.hpp's own wait does. That is also why this file does
- * not use delay_us(): it refuses a tick period and above, and several
- * letters here measure milliseconds.
- */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp). Right while the tick handler
+/// runs at least once a period: no span below is measured with interrupts
+/// masked for longer than a tick, or with the tick paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-/// Spin for that many microseconds on the same ruler, with no ceiling.
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
+/// Microseconds on a stopwatch over the ruler.
+uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
 /// Every timer and pad this suite touches, back to reset. Called at the
 /// top of each letter, so no letter inherits another's state.
@@ -311,14 +284,14 @@ bool measure_jumper() {
     using Dst = Pin<meas_ch2.port, meas_ch2.pin>;
     Src::output(false);
     Dst::input(PinPull::up);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_seen = !Dst::read();
     Src::set();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high_seen = Dst::read();
     Dst::input(PinPull::down);
     Src::clear();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_again = !Dst::read();
     Src::release();
     Dst::release();
@@ -358,9 +331,10 @@ void ta_time_base() {
     (void)Wave::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
                            .period = 0xFFFF});
     Wave::enable(true);
-    Stopwatch hundred;
+    Stopwatch<Ruler> hundred;
+    hundred.start();
     const uint32_t c0 = Wave::count();
-    while (hundred.us() < 100u * 1000u) {
+    while (hundred.elapsed() < us_cycles<Ruler>(100'000u)) {
     }
     const uint32_t c1 = Wave::count();
     const uint32_t counted = (c1 - c0) & 0xFFFFu;
@@ -380,8 +354,9 @@ void ta_time_base() {
     Wave::clear_flags(Wave::all_flags);
     Wave::enable(true);
     uint32_t updates = 0;
-    Stopwatch fifty;
-    while (fifty.us() < 50u * 1000u) {
+    Stopwatch<Ruler> fifty;
+    fifty.start();
+    while (fifty.elapsed() < us_cycles<Ruler>(50'000u)) {
         if (Wave::flag(Wave::update_flag)) {
             Wave::clear_flags(Wave::update_flag);
             ++updates;
@@ -394,35 +369,50 @@ void ta_time_base() {
                   updates >= 49u && updates <= 51u);
 
     // THE SHADOW REGISTERS. With ARPE set a new period is taken at the
-    // next update; without it, at once. The counter is the witness: a
-    // period shortened below the current count wraps immediately when
-    // the write lands at once, and only at the next update otherwise.
-    (void)Wave::configure({.prescaler = 0, .period = 0xFFFF, .auto_reload_preload = true});
-    Wave::enable(true);
-    wait_us(10);
-    (void)Wave::set_period(100);
+    // next update; without it, at once. The counter is the witness, at
+    // 1 MHz under a period of 2000: the period shortened to 1000 at a
+    // count near 200, then read 1300 us later - near 1500 where the old
+    // period still runs, near 500 where the new one took at once and the
+    // counter wrapped at 1000. (A period shortened BELOW the count does
+    // not tell them apart: either way the counter runs on to its top.)
+    const auto shortened_count = [](bool preload) {
+        (void)Wave::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+                               .period = 1999,
+                               .auto_reload_preload = preload});
+        Wave::enable(true);
+        spin_us<Ruler>(200);
+        (void)Wave::set_period(999);
+        spin_us<Ruler>(1300);
+        const uint32_t c = Wave::count();
+        Wave::enable(false);
+        return c;
+    };
+    const uint32_t count_after = shortened_count(true);
     const uint32_t reads_back = Wave::period();
-    wait_us(2);
-    const uint32_t count_after = Wave::count();
-    Wave::enable(false);
-    print(serial, "  ATRLR written 100 with ARPE set: reads back ", reads_back,
-          ", counter at ", count_after, " two microseconds later", crlf);
+    const uint32_t count_direct = shortened_count(false);
+    print(serial, "  ATRLR shortened from 1999 to 999 at a count near 200, read 1300 us "
+                  "later: with ARPE set it reads back ",
+          reads_back, " and the counter is at ", count_after, "; without ARPE at ",
+          count_direct, crlf);
     bench.verdict("a preloaded auto-reload reads back at once and does NOT take effect "
                   "until the update: the counter is still past the new period",
-                  reads_back == 100u && count_after > 100u);
+                  reads_back == 999u && count_after > 999u);
+    bench.verdict("and without ARPE the same write takes at once: the counter wrapped at "
+                  "the new period",
+                  count_direct < 999u);
 
     // And the prescaler, which is shadowed whatever ARPE says (14.2.3).
     (void)Wave::configure({.prescaler = 0, .period = 0xFFFF});
     Wave::enable(true);
     Wave::set_prescaler(static_cast<uint16_t>(ticks_per_us - 1u));
     const uint32_t before = Wave::count();
-    wait_us(5);
+    spin_us<Ruler>(5);
     const uint32_t after = Wave::count();
     const uint32_t moved = (after - before) & 0xFFFFu;
     Wave::update();
     Wave::clear_flags(Wave::update_flag);
     const uint32_t b2 = Wave::count();
-    wait_us(5);
+    spin_us<Ruler>(5);
     const uint32_t moved_after = (Wave::count() - b2) & 0xFFFFu;
     Wave::enable(false);
     print(serial, "  PSC written while running: ", moved, " counts in 5 us before the update, ",
@@ -463,7 +453,7 @@ bool wave_self_capture(uint16_t period, uint16_t compare) {
     // microseconds - the pad's switch, its node's charge and the input
     // synchronizer's few timer clocks with no filter, all well under one -
     // let that edge land before the flags are cleared below.
-    wait_us(2);
+    spin_us<Ruler>(2);
     // THE COMPARE IS PRELOADED: a value written into CHxCVR reaches the
     // shadow register at the next update event and not before, so
     // without this the first period of every new duty would be made
@@ -478,8 +468,9 @@ bool wave_self_capture(uint16_t period, uint16_t compare) {
 /// The falling-edge capture of the wave above: the high time in
 /// microseconds, nothing if no edge arrived.
 std::optional<uint32_t> wave_high_time_us() {
-    Stopwatch w;
-    while (w.us() < 50u * 1000u) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(50'000u)) {
         if (Wave::flag(Wave::compare_flag(1))) {
             return Wave::compare(1);
         }
@@ -532,15 +523,16 @@ void tb_pwm() {
         Wave::clear_flags(Wave::all_flags);
         Wave::enable(true);
         // Twenty periods, measured on the core's counter.
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         uint32_t seen = 0;
-        while (seen < 20u && w.us() < 200u * 1000u) {
+        while (seen < 20u && w.elapsed() < us_cycles<Ruler>(200'000u)) {
             if (Wave::flag(Wave::update_flag)) {
                 Wave::clear_flags(Wave::update_flag);
                 ++seen;
             }
         }
-        const uint32_t span = w.us();
+        const uint32_t span = elapsed_us(w);
         Wave::enable(false);
         const uint32_t want = 20u * (static_cast<uint32_t>(p) + 1u);
         const bool ok = seen == 20u && span + want / 100u > want && span < want + want / 100u;
@@ -561,9 +553,7 @@ void tb_pwm() {
     // (IC1 on TI2) taking the falling edge.
     need_jumper();
     if (!jumper) {
-        print(serial, "  no jumper (PA6 to PA1): the second timer's measurement is skipped",
-              crlf);
-        bench.verdict("the jumper's letters are skipped and say so", true);
+        bench.skip("the second timer's measurement wants the jumper PA6 to PA1, absent");
     } else {
         // The jumper's test released every timer of this suite, TIM3's
         // gate with it: the wave is brought up again before it is made.
@@ -582,7 +572,7 @@ void tb_pwm() {
         MeasPad::claim_input();
         Meas::clear_flags(Meas::all_flags);
         Meas::enable(true);
-        wait_us(5000);
+        spin_us<Ruler>(5000);
         const uint32_t measured_period = Meas::compare(1);
         const uint32_t measured_width = Meas::compare(0);
         print(serial, "  over the jumper: period ", measured_period, " us, high ",
@@ -642,23 +632,20 @@ void tc_pair() {
     // then until the other rises. What that measures is one edge of the
     // band; the high times of the two outputs are measured the same
     // way, and together they say what the pair is doing.
+    // The cycles until the pad reads `level`, zero on the time-out.
     const auto wait_for = [](auto read, bool level, uint32_t limit_us) -> uint32_t {
-        Stopwatch w;
-        while (read() != level) {
-            if (w.us() > limit_us) {
-                return 0;
-            }
-        }
-        return w.cycles();
+        return cycles_until<Ruler>([&read, level] { return read() == level; }, limit_us)
+            .value_or(0u);
     };
     // Start from a falling edge of the main output, so the band that
     // follows is the one being timed.
     (void)wait_for([] { return AdvPad::read(); }, true, 4000);
     (void)wait_for([] { return AdvPad::read(); }, false, 4000);
-    Stopwatch band;
-    while (!AdvPadN::read() && band.us() < 4000u) {
+    Stopwatch<Ruler> band;
+    band.start();
+    while (!AdvPadN::read() && band.elapsed() < us_cycles<Ruler>(4000u)) {
     }
-    const uint32_t gap_ns = band.cycles() * 1000u / ticks_per_us;
+    const uint32_t gap_ns = band.elapsed() * 1000u / ticks_per_us;
     // And the two high times: a pad is timed from its RISING edge, so
     // each measurement waits the pad low, then high, then times the
     // fall.
@@ -760,9 +747,9 @@ void td_meters() {
     Wave::enable(true);
     for (uint8_t i = 0; i < 6u; ++i) {
         (void)Wave::output_mode(0, TimOutputMode::force_active);
-        wait_us(200);
+        spin_us<Ruler>(200);
         (void)Wave::output_mode(0, TimOutputMode::force_inactive);
-        wait_us(800);
+        spin_us<Ruler>(800);
     }
     Wave::interrupts(Wave::compare_interrupt(1), false);
     Pfic::disable(Irq::tim3);
@@ -809,9 +796,9 @@ void td_meters() {
     // Five square waves of 1000 us, 300 of them high, written by hand.
     for (uint8_t i = 0; i < 5u; ++i) {
         (void)Quad::output_mode(2, TimOutputMode::force_active);
-        wait_us(300);
+        spin_us<Ruler>(300);
         (void)Quad::output_mode(2, TimOutputMode::force_inactive);
-        wait_us(700);
+        spin_us<Ruler>(700);
     }
     Quad::interrupts(Quad::compare_interrupt(0) | Quad::compare_interrupt(1), false);
     Pfic::disable(Irq::tim4);
@@ -852,7 +839,7 @@ void te_counters() {
                            .period = 99});   // 10 kHz of updates
     (void)Wave::master(TimMasterMode::update);
     Wave::enable(true);
-    wait_us(20000);
+    spin_us<Ruler>(20000);
     Wave::enable(false);
     const uint32_t counted = TimEventCounter<Meas>::count();
     print(serial, "  20 ms of a 10 kHz update on TRGO: the slave counted ", counted, crlf);
@@ -884,8 +871,9 @@ void te_counters() {
     // a window measured in microseconds would cut the last high phase
     // in half and read a whole period short, measured.
     uint32_t periods = 0;
-    Stopwatch window;
-    while (periods < 20u && window.us() < 100u * 1000u) {
+    Stopwatch<Ruler> window;
+    window.start();
+    while (periods < 20u && window.elapsed() < us_cycles<Ruler>(100'000u)) {
         if (Wave::flag(Wave::update_flag)) {
             Wave::clear_flags(Wave::update_flag);
             ++periods;
@@ -912,8 +900,9 @@ void tf_tasks() {
     (void)TimPeriodicTick<Wave>::setup(static_cast<uint16_t>(ticks_per_us - 1u), 499, false);
     Wave::clear_flags(Wave::all_flags);
     uint32_t ticks = 0;
-    Stopwatch w;
-    while (w.us() < 50u * 1000u) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(50'000u)) {
         if (Wave::flag(Wave::update_flag)) {
             Wave::clear_flags(Wave::update_flag);
             ++ticks;
@@ -938,14 +927,15 @@ void tf_tasks() {
     (void)TimOnePulse<Wave, 0>::setup(static_cast<uint16_t>(ticks_per_us - 1u),
                                       delay_us_asked, width_asked);
     WavePad::claim();
-    Stopwatch pulse;
+    Stopwatch<Ruler> pulse;
+    pulse.start();
     TimOnePulse<Wave, 0>::fire();
-    while (!WavePad::read() && pulse.us() < 5000u) {
+    while (!WavePad::read() && pulse.elapsed() < us_cycles<Ruler>(5000u)) {
     }
-    const uint32_t rose = pulse.cycles();
-    while (WavePad::read() && pulse.us() < 5000u) {
+    const uint32_t rose = pulse.elapsed();
+    while (WavePad::read() && pulse.elapsed() < us_cycles<Ruler>(5000u)) {
     }
-    const uint32_t fell = pulse.cycles();
+    const uint32_t fell = pulse.elapsed();
     const uint32_t start_us = rose / ticks_per_us;
     const uint32_t width_us = (fell - rose) / ticks_per_us;
     print(serial, "  the pulse rose ", start_us, " us after the trigger and lasted ",
@@ -972,7 +962,7 @@ void tf_tasks() {
     // is then asked the other way round: whether the stage can pull the
     // pad OFF its resting level.
     QuadA::claim_input(PinPull::down);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool rests_high = QuadA::read();
     QuadA::claim();
     const TimOutputMode away = rests_high ? TimOutputMode::force_inactive
@@ -987,10 +977,10 @@ void tf_tasks() {
                                    .preload = false});
     Quad::enable(true);
     (void)Quad::output_mode(0, TimOutputMode::force_active);
-    wait_us(2);
+    spin_us<Ruler>(2);
     const bool plain_high = QuadA::read();
     (void)Quad::output_mode(0, TimOutputMode::force_inactive);
-    wait_us(2);
+    spin_us<Ruler>(2);
     const bool plain_low = !QuadA::read();
     print(serial, "  PB6 rests ", rests_high ? "HIGH (a pull-up outside the chip)" : "low",
           "; outside encoder mode, the forced output stage drives it: ",
@@ -1014,9 +1004,9 @@ void tf_tasks() {
     (void)Quad::output_channel(0, {.mode = home, .preload = false});
     (void)Quad::output_channel(1, {.mode = TimOutputMode::force_inactive,
                                    .preload = false});
-    wait_us(2);
+    spin_us<Ruler>(2);
     (void)Quad::output_mode(0, away);
-    wait_us(2);
+    spin_us<Ruler>(2);
     const bool moved = QuadA::read() != rests_high;
     (void)Quad::output_mode(0, home);
     print(serial, "  in encoder mode the same forced output leaves PB6 ",
@@ -1035,14 +1025,14 @@ void tf_tasks() {
     using PadB = Pin<quad_b.port, quad_b.pin>;
     PadA::output(false);
     PadB::output(false);
-    wait_us(2);
+    spin_us<Ruler>(2);
     Quad::set_count(0x8000);
     // EACH EDGE IS HELD: two stores in a row are one bus cycle (the
     // trap this stratum's README names), so the quadrature is written
     // at a rate an encoder could actually turn at.
     const auto edge = [](auto pad, bool level) {
         pad(level);
-        wait_us(2);
+        spin_us<Ruler>(2);
     };
     const auto set_a = [](bool level) {
         if (level) { PadA::set(); } else { PadA::clear(); }
@@ -1095,14 +1085,14 @@ void tg_break() {
     (void)Adv::break_dead_time({.main_output_enable = true});
     AdvPad::claim();
     Adv::enable(true);
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const bool driving = Adv::main_output();
 
     // The software break: SWEVGR.BG is the one a board with no wire can
     // raise, and what it does is exactly what a pad would.
     Adv::clear_flags(Adv::all_flags);
     (void)Adv::break_event();
-    wait_us(10);
+    spin_us<Ruler>(10);
     const bool moe_cleared = !Adv::main_output();
     const bool bif = Adv::flag(Adv::break_flag);
     print(serial, "  the software break: MOE ", driving ? "was set" : "was NOT set",
@@ -1117,7 +1107,7 @@ void tg_break() {
     Adv::clear_flags(Adv::all_flags);
     (void)Adv::break_event();
     const bool cleared_again = !Adv::main_output();
-    wait_us(3000);   // three update periods
+    spin_us<Ruler>(3000);   // three update periods
     const bool came_back = Adv::main_output();
     print(serial, "  with AOE: MOE ", cleared_again ? "cleared" : "NOT cleared",
           " by the break and ", came_back ? "back" : "STILL clear", " three periods later",
@@ -1139,15 +1129,13 @@ void tg_break() {
     // is declined rather than claimed.
     using BkinProbe = Pin<adv_bkin.port, adv_bkin.pin>;
     BkinProbe::input(PinPull::down);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool bkin_held = BkinProbe::read();
     BkinProbe::release();
     if (bkin_held) {
-        print(serial, "  SKIPPED, no verdict claimed: the break pad PB12 reads HIGH against "
-                      "its own pull-down, so something outside this board holds it - a "
-                      "link's select line, today. The software break above is what this "
-                      "board can measure alone.",
-              crlf);
+        bench.skip("the break pad: PB12 reads HIGH against its own pull-down, so something "
+                   "outside this board holds it - a link's select line, today; the software "
+                   "break above is what this board can measure alone");
         all_off();
         return;
     }
@@ -1155,14 +1143,14 @@ void tg_break() {
                                 .break_enable = true,
                                 .break_active_high = true});
     // BKE and BKP need one bus period before they read back (14.4.18).
-    wait_us(2);
+    spin_us<Ruler>(2);
     const uint16_t bdtr_before = Adv::regs().BDTR;
     using BkinPin = Pin<adv_bkin.port, adv_bkin.pin>;
     BkinPin::output(false);
-    wait_us(10);
+    spin_us<Ruler>(10);
     const bool armed = Adv::main_output();
     BkinPin::set();
-    wait_us(50);
+    spin_us<Ruler>(50);
     const bool pad_broke = !Adv::main_output();
     BkinPin::clear();
     BkinPin::release();
@@ -1197,7 +1185,7 @@ void th_chains() {
                            .period = 199});
     (void)Wave::master(TimMasterMode::update);
     Wave::enable(true);
-    wait_us(5000);
+    spin_us<Ruler>(5000);
     const uint32_t held = Meas::count();
     const bool triggered = Meas::flag(Meas::trigger_flag);
     Wave::enable(false);
@@ -1221,7 +1209,7 @@ void th_chains() {
                            .period = 999});
     (void)Wave::master(TimMasterMode::update);
     Wave::enable(true);
-    wait_us(3000);
+    spin_us<Ruler>(3000);
     Wave::enable(false);
     const bool running = Meas::enabled();
     const uint32_t ran = Meas::count();
@@ -1244,10 +1232,10 @@ void th_chains() {
     (void)Wave::master(TimMasterMode::enable);
     const uint32_t before = Meas::count();
     Wave::enable(true);
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     Wave::enable(false);
     const uint32_t after = Wave::enabled() ? 0u : Meas::count();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t later = Meas::count();
     print(serial, "  gated on the master's enable: the slave counted ", after - before,
           " us while the master ran and ", later - after, " us after it stopped", crlf);
@@ -1280,12 +1268,12 @@ void ti_vectors() {
     Pfic::enable(Irq::tim1_brk);
     Pfic::enable(Irq::tim1_trg_com);
     Adv::enable(true);
-    wait_us(2000);            // twenty periods of 100 us
+    spin_us<Ruler>(2000);            // twenty periods of 100 us
     Adv::enable(false);
     (void)Adv::trigger_event();
-    wait_us(10);
+    spin_us<Ruler>(10);
     (void)Adv::break_event();
-    wait_us(10);
+    spin_us<Ruler>(10);
     Adv::interrupts(Adv::update_interrupt | Adv::compare_interrupt(0) |
                         Adv::trigger_interrupt | Adv::break_interrupt,
                     false);
@@ -1315,7 +1303,7 @@ void ti_vectors() {
     Wave::interrupts(Wave::update_interrupt | Wave::compare_interrupt(0), true);
     Pfic::enable(Irq::tim3);
     Wave::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     Wave::enable(false);
     Wave::interrupts(Wave::update_interrupt | Wave::compare_interrupt(0), false);
     Pfic::disable(Irq::tim3);
@@ -1329,7 +1317,7 @@ void ti_vectors() {
     // polled measurement in this suite possible.
     Wave::clear_flags(Wave::all_flags);
     Wave::enable(true);
-    wait_us(300);
+    spin_us<Ruler>(300);
     Wave::enable(false);
     const bool standing = Wave::flag(Wave::update_flag);
     const uint16_t served = Wave::isr();
@@ -1345,9 +1333,8 @@ void ti_vectors() {
 void tj_jumper() {
     jumper = measure_jumper();
     jumper_known = true;
-    print(serial, "  PA6 driven, PA1 read: the jumper is ", jumper ? "THERE" : "absent", crlf);
-    bench.verdict("the strap between TIM3's channel 1 and TIM2's channel 2 was tested for "
-                  "(present or absent, both legal)", true);
+    print(serial, "  PA6 driven, PA1 read: the jumper is ", jumper ? "THERE" : "absent",
+          " (present or absent, both legal)", crlf);
 
     // Does a pad in PLAIN OUTPUT mode reach a timer's capture input?
     // On the STM32F4 it does not - the alternate-function input
@@ -1367,9 +1354,9 @@ void tj_jumper() {
     uint32_t captures = 0;
     for (uint8_t i = 0; i < 16u; ++i) {
         SrcPin::set();
-        wait_us(5);
+        spin_us<Ruler>(5);
         SrcPin::clear();
-        wait_us(5);
+        spin_us<Ruler>(5);
         if (Wave::flag(Wave::compare_flag(0))) {
             ++captures;
             Wave::clear_flags(Wave::compare_flag(0));
@@ -1401,11 +1388,11 @@ bool strap_present() {
     using Dst = Pin<to.port, to.pin>;
     Src::output(false);
     Dst::input(PinPull::up);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_seen = !Dst::read();
     Src::set();
     Dst::input(PinPull::down);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high_seen = Dst::read();
     Src::release();
     Dst::release();
@@ -1415,13 +1402,7 @@ bool strap_present() {
 /// Wait for a flag with a bound, and say whether it came.
 template <class T>
 bool wait_flag(uint16_t flag, uint32_t limit_us) {
-    Stopwatch w;
-    while (!T::flag(flag)) {
-        if (w.us() > limit_us) {
-            return false;
-        }
-    }
-    return true;
+    return wait_until<Ruler>([flag] { return T::flag(flag); }, limit_us);
 }
 
 /// One timer back to reset, where the part has it - a template on the
@@ -1556,7 +1537,7 @@ void tk_tim8_capture() {
             Quad::clear_flags(Quad::all_flags);
             Quad::enable(true);
             T8::enable(true);
-            wait_us(3000);
+            spin_us<Ruler>(3000);
 
             // A rising edge, the falling edge after it, the next rising.
             Quad::clear_flags(Quad::all_flags);
@@ -1630,21 +1611,18 @@ void tl_tim8_pair() {
         OutN::claim();
         T8::update();
         T8::enable(true);
+        // The cycles until the pad reads `level`, zero on the time-out.
         const auto wait_for = [](auto read, bool level, uint32_t limit_us) -> uint32_t {
-            Stopwatch w;
-            while (read() != level) {
-                if (w.us() > limit_us) {
-                    return 0;
-                }
-            }
-            return w.cycles();
+            return cycles_until<Ruler>([&read, level] { return read() == level; }, limit_us)
+                .value_or(0u);
         };
         (void)wait_for([] { return Out::read(); }, true, 4000);
         (void)wait_for([] { return Out::read(); }, false, 4000);
-        Stopwatch band;
-        while (!OutN::read() && band.us() < 4000u) {
+        Stopwatch<Ruler> band;
+        band.start();
+        while (!OutN::read() && band.elapsed() < us_cycles<Ruler>(4000u)) {
         }
-        const uint32_t gap_ns = band.cycles() * 1000u / ticks_per_us;
+        const uint32_t gap_ns = band.elapsed() * 1000u / ticks_per_us;
         uint32_t both_high = 0;
         uint32_t high_a = 0;
         uint32_t high_n = 0;
@@ -1702,15 +1680,15 @@ void tm_tim8_vectors() {
             Pfic::enable(line);
         }
         T8::enable(true);
-        wait_us(2000);            // twenty periods of 100 us
+        spin_us<Ruler>(2000);            // twenty periods of 100 us
         T8::enable(false);
         // The third line: a trigger event, then a COMMUTATION - the
         // preloaded channel configuration moved by SWEVGR.COMG.
         (void)T8::trigger_event();
-        wait_us(10);
+        spin_us<Ruler>(10);
         (void)T8::preload_channels(true, false);
         (void)T8::commutation_event();
-        wait_us(10);
+        spin_us<Ruler>(10);
         const uint32_t trg_calls = v8_trg;
         // The fourth: a break by software first - one flag, one call -
         // then the BREAK INPUT, PA6 in column 0, driven by the PORT for a
@@ -1719,11 +1697,11 @@ void tm_tim8_vectors() {
         // high). Declined if something outside holds the pad high.
         (void)T8::break_dead_time({.main_output_enable = true});
         (void)T8::break_event();
-        wait_us(10);
+        spin_us<Ruler>(10);
         const uint32_t brk_soft = v8_brk;
         const uint16_t soft_mask = v8_brk_mask;
         Bkin::input(PinPull::down);
-        wait_us(20);
+        spin_us<Ruler>(20);
         const bool held = Bkin::read();
         bool pad_broke = false;
         bool armed = false;
@@ -1731,9 +1709,9 @@ void tm_tim8_vectors() {
         if (!held) {
             (void)T8::break_dead_time({.main_output_enable = true, .break_enable = true,
                                        .break_active_high = true});
-            wait_us(2);
+            spin_us<Ruler>(2);
             Bkin::output(false);
-            wait_us(10);
+            spin_us<Ruler>(10);
             armed = T8::main_output();
             // THE LEVEL IS THE BREAK: while BKIN stands active BIF cannot
             // be cleared, so a vector that only acknowledges would run
@@ -1742,10 +1720,10 @@ void tm_tim8_vectors() {
             // its own interrupt for this pulse.
             v8_brk_self_mask = true;
             Bkin::set();
-            wait_us(10);
+            spin_us<Ruler>(10);
             pad_broke = !T8::main_output();
             Bkin::clear();
-            wait_us(10);
+            spin_us<Ruler>(10);
             v8_brk_self_mask = false;
             // BIF could not be cleared while the pad was high; with the
             // pad low it can.
@@ -1755,7 +1733,7 @@ void tm_tim8_vectors() {
             // released pad floats, and a break input that reads it active
             // holds BIF for ever.
             (void)T8::break_dead_time({});
-            wait_us(2);
+            spin_us<Ruler>(2);
             Bkin::release();
         }
         const uint32_t brk_after_pad = v8_brk;
@@ -1801,8 +1779,9 @@ bool wireless_round(volatile uint32_t& up_calls, volatile uint32_t& cc_calls) {
     T::clear_flags(T::all_flags);
     T::enable(true);
     uint32_t updates = 0;
-    Stopwatch fifty;
-    while (fifty.us() < 50u * 1000u) {
+    Stopwatch<Ruler> fifty;
+    fifty.start();
+    while (fifty.elapsed() < us_cycles<Ruler>(50'000u)) {
         if (T::flag(T::update_flag)) {
             T::clear_flags(T::update_flag);
             ++updates;
@@ -1840,7 +1819,7 @@ bool wireless_round(volatile uint32_t& up_calls, volatile uint32_t& cc_calls) {
     Pfic::enable(T::irq());
     Pfic::enable(T::cc_irq());
     T::enable(true);
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     T::enable(false);
     T::interrupts(T::update_interrupt | T::compare_interrupt(0), false);
     Pfic::disable(T::irq());
@@ -1894,7 +1873,7 @@ void to_tim5_width() {
         T5::regs().ATRLR = 0xFFFFFFFFu;
         T5::regs().CNT = 0x0000FFF0u;
         T5::enable(true);
-        wait_us(10);
+        spin_us<Ruler>(10);
         T5::enable(false);
         const uint32_t after = T5::regs().CNT;
         const bool wrapped = after < 0xFFF0u;
@@ -1927,14 +1906,15 @@ void basic_round(volatile uint32_t& calls) {
     T::clear_flags(T::all_flags);
     T::enable(true);
     uint32_t seen = 0;
-    Stopwatch w;
-    while (seen < 20u && w.us() < 100u * 1000u) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (seen < 20u && w.elapsed() < us_cycles<Ruler>(100'000u)) {
         if (T::flag(T::update_flag)) {
             T::clear_flags(T::update_flag);
             ++seen;
         }
     }
-    const uint32_t span = w.us();
+    const uint32_t span = elapsed_us(w);
     T::enable(false);
 
     calls = 0;
@@ -1943,7 +1923,7 @@ void basic_round(volatile uint32_t& calls) {
     Pfic::clear_pending(T::irq());
     Pfic::enable(T::irq());
     T::enable(true);
-    wait_us(5000);
+    spin_us<Ruler>(5000);
     T::enable(false);
     T::interrupts(T::update_interrupt, false);
     Pfic::disable(T::irq());
@@ -1956,7 +1936,7 @@ void basic_round(volatile uint32_t& calls) {
     (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 99});
     (void)T::master(TimMasterMode::update);
     T::enable(true);
-    wait_us(20000);
+    spin_us<Ruler>(20000);
     T::enable(false);
     const uint32_t counted = TimEventCounter<Slave>::count();
     Slave::release();
@@ -1992,8 +1972,7 @@ void tq_dual_edge() {
         all_off();
         need_jumper();
         if (!jumper) {
-            print(serial, "  no jumper (PA6 to PA1): the dual-edge capture is not measured", crlf);
-            bench.verdict("the jumper was tested for (no jumper: nothing captured)", true);
+            bench.skip("the dual-edge capture wants the jumper PA6 to PA1, absent");
             return;
         }
         // FIRST, WHETHER THIS DIE HAS THE REGISTER: the class has it only
@@ -2055,7 +2034,7 @@ void tq_dual_edge() {
             MeasPad::claim_input();
             Meas::clear_flags(Meas::all_flags);
             Meas::enable(true);
-            wait_us(5000);
+            spin_us<Ruler>(5000);
             const uint32_t two_ch = Meas::compare(0);
             Meas::enable(false);
             Wave::enable(false);
@@ -2093,9 +2072,9 @@ void tr_etr() {
         const auto burst = [](uint8_t rising) {
             for (uint8_t i = 0; i < rising; ++i) {
                 Etr::set();
-                wait_us(2);
+                spin_us<Ruler>(2);
                 Etr::clear();
-                wait_us(2);
+                spin_us<Ruler>(2);
             }
         };
         struct Case {
@@ -2112,14 +2091,14 @@ void tr_etr() {
         uint8_t right = 0;
         for (const Case& c : cases) {
             Etr::output(false);
-            wait_us(5);
+            spin_us<Ruler>(5);
             (void)Wave::external_trigger(c.cfg);
             Wave::set_count(0);
             Wave::enable(true);
-            wait_us(5);
+            spin_us<Ruler>(5);
             const uint32_t before = Wave::count();
             burst(40);
-            wait_us(5);
+            spin_us<Ruler>(5);
             const uint32_t counted = Wave::count() - before;
             Wave::enable(false);
             if (counted == c.want) {
@@ -2134,9 +2113,9 @@ void tr_etr() {
         (void)Wave::slave({.mode = TimSlaveMode::external_clock1, .trigger = TimTrigger::etr});
         Wave::set_count(0);
         Wave::enable(true);
-        wait_us(5);
+        spin_us<Ruler>(5);
         burst(40);
-        wait_us(5);
+        spin_us<Ruler>(5);
         const uint32_t mode1 = Wave::count();
         Wave::enable(false);
         Etr::release();
@@ -2166,9 +2145,10 @@ uint32_t link_count() {
     TimEventCounter<Sl>::restart();
     (void)Ma::configure({.prescaler = 0, .period = 1439});
     (void)Ma::master(TimMasterMode::update);
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     Ma::enable(true);
-    while (w.us() < 2000u) {
+    while (w.elapsed() < us_cycles<Ruler>(2000u)) {
     }
     Ma::enable(false);
     const uint32_t counted = TimEventCounter<Sl>::count();
@@ -2242,37 +2222,44 @@ void ts_links() {
 // t - the repetition counter, and u - centre-aligned counting
 // ---------------------------------------------------------------------------
 
-/// THE BOUND OF EVERY INTERVAL BELOW. The timers count HCLK, the STK
+/// THE BOUND OF EVERY INTERVAL BELOW. The timers count HCLK, the ruler
 /// counts HCLK: an interval between two flags is an exact number of
 /// counter clocks, and what a stamp adds is its poll's lateness - one turn
-/// of the loop (some twenty cycles) and at most one handler between the
-/// flag and its stamp (the tick's, this image's only live vector, well
-/// under the 200 cycles this family's images are counted at, spi.md's
-/// hold-off) - so an interval read on the STK is good to 2 x 220 cycles:
-/// 500 at 144 MHz, three and a half microseconds.
+/// of the loop (a flag read and a ruler read, some forty cycles) and at
+/// most one handler between the flag and its stamp (the tick's - the
+/// console is drained before each window, so its vector is quiet and the
+/// tick's is the only live one - well under the 200 cycles this family's
+/// images are counted at, spi.md's hold-off) - so an interval is good to
+/// 2 x 240 cycles: 500 at 144 MHz, three and a half microseconds.
 constexpr uint32_t stamp_slack_cycles = 500;
 
 /// `n` consecutive intervals, in core cycles, between rises of `flag` on
-/// timer T - each rise stamped on the STK and the flag cleared - and the
+/// timer T - each rise stamped on the ruler and the flag cleared - and the
 /// counting direction read at each rise; false when a rise did not come
-/// within its bound.
+/// within its bound, or when the console did not go quiet before the
+/// window (its vector would then be live inside it).
 template <class T, uint8_t n>
 bool flag_intervals(uint16_t flag, uint32_t (&gaps)[n], TimDirection (&dir)[n + 1u], uint32_t limit_us) {
+    if (!brio::console_drain<Ruler, Serial>()) {
+        return false;
+    }
     T::clear_flags(flag);
     if (!wait_flag<T>(flag, limit_us)) {
         return false;
     }
-    Stopwatch w;
+    const uint32_t limit_cycles = us_cycles<Ruler>(limit_us);
+    Stopwatch<Ruler> w;
+    w.start();
     dir[0] = T::direction();
     T::clear_flags(flag);
     uint32_t last = 0;
     for (uint8_t i = 0; i < n; ++i) {
         while (!T::flag(flag)) {
-            if (w.us() > (i + 2u) * limit_us) {
+            if (w.elapsed() > (i + 2u) * limit_cycles) {
                 return false;
             }
         }
-        const uint32_t now = w.cycles();
+        const uint32_t now = w.elapsed();
         dir[i + 1u] = T::direction();
         T::clear_flags(flag);
         gaps[i] = now - last;
@@ -2420,8 +2407,7 @@ void tu_centre_tim8() {
         all_off();
         upper_timers_off<A>();
         if (!strap_present<out_pad, in_pad>()) {
-            print(serial, "  no jumper (PC6 to PB8): TIM8's centre-aligned wave is not captured", crlf);
-            bench.verdict("TIM8's half is skipped and says so", true);
+            bench.skip("TIM8's centre-aligned wave wants the jumper PC6 to PB8, absent");
             return;
         }
         T8::init();
@@ -2441,7 +2427,7 @@ void tu_centre_tim8() {
         Quad::clear_flags(Quad::all_flags);
         Quad::enable(true);
         T8::enable(true);
-        wait_us(5000);
+        spin_us<Ruler>(5000);
         Quad::clear_flags(Quad::all_flags);
         bool ok = wait_flag<Quad>(Quad::compare_flag(2), 20000);
         const uint32_t r1 = Quad::compare(2);
@@ -2484,8 +2470,7 @@ void tu_centre() {
     // the compare: 2 x 200 us around each underflow, in a period of 2 x 500.
     need_jumper();
     if (!jumper) {
-        print(serial, "  no jumper (PA6 to PA1): the centre-aligned waveform is not captured", crlf);
-        bench.verdict("the jumper's half is skipped and says so", true);
+        bench.skip("the centre-aligned waveform wants the jumper PA6 to PA1, absent");
     } else {
         uint8_t exact = 0;
         for (const TimAlignment mode : {TimAlignment::center_down, TimAlignment::center_up, TimAlignment::center_both}) {
@@ -2508,7 +2493,7 @@ void tu_centre() {
             MeasPad::claim_input();
             Meas::clear_flags(Meas::all_flags);
             Meas::enable(true);
-            wait_us(5000);
+            spin_us<Ruler>(5000);
             const uint32_t period = Meas::compare(1);
             const uint32_t high = Meas::compare(0);
             const bool ok = period >= 999u && period <= 1001u && high >= 399u && high <= 401u;

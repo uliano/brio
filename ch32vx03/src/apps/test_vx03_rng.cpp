@@ -73,6 +73,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -120,7 +121,13 @@ bool running() {
     return Rng::init();
 }
 
-/// The STK's period, for folding a span across one reload.
+/// The STK's period, for folding a span across one reload. The word times
+/// below are read on STK itself, not on a ruler over Ticker::cycles():
+/// they are taken with interrupts masked and at four clock rates, where a
+/// constant-rate ruler (util/test_wait.hpp) does not hold, and each is far
+/// shorter than one period (8000 cycles at the slowest rate). For the same
+/// reasons the waits for DRDY inside a masked section stay bounded by a
+/// count of status reads: the tick cannot advance there.
 uint32_t stk_period() { return stk()->CMPLR + 1u; }
 
 uint32_t stk_span(uint32_t from, uint32_t to) {
@@ -245,10 +252,10 @@ void ta_block() {
                   started && Rng::enabled() &&
                       (sr & (rng_secs | rng_cecs | rng_seis | rng_ceis)) == 0u);
 
+    static_assert(static_cast<uint32_t>(Rng::irq) == 63u,
+                  "the block's vector is line 63 of the CH32V30x_D8's table");
     print(serial, "  the vector: line ", static_cast<uint32_t>(Rng::irq),
           " of the CH32V30x_D8's table", crlf);
-    bench.verdict("the block's vector is line 63 of this class's table",
-                  static_cast<uint32_t>(Rng::irq) == 63u);
 }
 
 // ===========================================================================
@@ -776,8 +783,9 @@ void ti_vector() {
     Rng::interrupt(true);
     Pfic::enable(Rng::irq);
     const uint32_t start = Ticker::millis();
-    while (rng_irqs < 1000u && Ticker::millis() - start < 50u) {
-    }
+    // On the tick: the rate this letter runs at is whatever the clock is.
+    // The count reached is what the verdict below judges.
+    (void)wait_ticks<P>([] { return rng_irqs >= 1000u; }, 50u);
     const uint32_t ms = Ticker::millis() - start;
     Rng::interrupt(false);
     Pfic::clear_pending(Rng::irq);
@@ -799,9 +807,8 @@ void ti_vector() {
     Rng::regs().SR = Rng::status() | rng_seis;
     const bool raised = Rng::seed_error_flag();
     Rng::interrupt(true);
-    const uint32_t start2 = Ticker::millis();
-    while (rng_irqs < 4u && Ticker::millis() - start2 < 5u) {
-    }
+    // The events the vector counted are what the verdicts below judge.
+    (void)wait_ticks<P>([] { return rng_irqs >= 4u; }, 5u);
     Rng::interrupt(false);
     Pfic::disable(Rng::irq);
     Pfic::clear_pending(Rng::irq);
@@ -836,12 +843,12 @@ void tj_recover() {
     // on to make the enable's zero the first word.
     uint32_t late = 0;
     uint32_t late_empty = 0;
+    uint32_t standing = 0;
     for (uint32_t i = 0; i < 256u; ++i) {
         (void)Rng::read_blocking();
-        uint32_t wait = 0;
-        while (wait < 2'000u) {
-            ++wait;
-        }
+        // The next word left to stand (tens of cycles after the read,
+        // letter b); the same premise is read again under the guard.
+        standing += wait_ticks<P>([] { return Rng::ready(); }, 2u) ? 1u : 0u;
         bool landed = false;
         {
             InterruptGuard guard;
@@ -873,10 +880,10 @@ void tj_recover() {
     (void)Rng::init();
     print(serial, "  RNGEN cleared and RNG_DR read, 256 times over a standing word and 256 over "
           "one being computed: a word landed after the read ", late, " and ", late_empty,
-          " times", crlf);
+          " times (a word stood before the first disable ", standing, " times of 256)", crlf);
     bench.verdict("RNGEN cleared freezes the generator: no word lands after the read that "
                   "follows the disable, whether a word stood or was being computed",
-                  late == 0u && late_empty == 0u);
+                  standing == 256u && late == 0u && late_empty == 0u);
 
     // 29.2.2's sequence on a healthy generator, over and over: harmless,
     // and the only form of it a program can stage.
@@ -906,10 +913,9 @@ void tj_recover() {
     uint32_t first_zero = 0;
     for (uint32_t i = 0; i < 64u; ++i) {
         (void)Rng::read_blocking();
-        uint32_t polls = 0;
-        while (!Rng::ready() && polls < Rng::spins) {
-            ++polls;
-        }
+        // The next word left to stand; whether it did is read and judged
+        // right after the disable.
+        (void)wait_ticks<P>([] { return Rng::ready(); }, 2u);
         Rng::enable(false);
         stale += Rng::ready() ? 1u : 0u;
         restarted += Rng::init() ? 1u : 0u;
@@ -928,10 +934,8 @@ void tj_recover() {
 
     // A word computed before the disable.
     (void)Rng::read_blocking();
-    uint32_t polls = 0;
-    while (!Rng::ready() && polls < Rng::spins) {
-        ++polls;
-    }
+    // Whether the word came is read and judged right after the disable.
+    (void)wait_ticks<P>([] { return Rng::ready(); }, 2u);
     Rng::enable(false);
     const bool stood = Rng::ready();
     const uint32_t kept = Rng::value();

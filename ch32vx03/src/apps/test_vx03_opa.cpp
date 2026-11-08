@@ -40,8 +40,10 @@
 // ground. The CH32V303CB's LQFP48 bonds none of port E and of port C only
 // PC13..PC15: each amplifier there has its CH0 pair and its first output
 // alone (OPA1 and OPA2 both pairs), and the letters judge what it bonds.
-// On the WeAct boards (the CH32V203C8T6's, the CH32V303CBT6's) PA2 and PB0
-// are strapped to PB1 and PA3 (the crossed serial pair) and PA6 and PA7
+// On the WeAct CH32V203C8T6's board PA2 and PB0 are strapped to PB1 and PA3
+// (the crossed serial pair, which the CH32V303CBT6's board has not got:
+// that part has no fourth port), so letter c looks for the PB0-PA3 strap
+// before it lets PA3 answer for OPA1; on both WeAct boards PA6 and PA7
 // share a node with PA8, never driven; and on the bench pair PB10..PB15
 // there, PB0 and PB1 on the CH32V303VC, are wires to the other board, which
 // runs its dark console while this suite does. OPA3's CH0 negative input
@@ -83,6 +85,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -121,16 +124,21 @@ using O1b = OpaOut<1, OpaPin::out1>;       // PB1, channel 9
 /// every letter so the millivolt figures are not a guess.
 uint16_t vdda_mv = 3300;
 
-void wait_us(uint32_t us) {
-    const uint32_t per_us = SysClock::hz / 1'000'000u;
-    const uint32_t period = stk()->CMPLR + 1u;
-    uint32_t last = stk()->CNTL;
-    uint32_t acc = 0;
-    while (acc / per_us < us) {
-        const uint32_t now = stk()->CNTL;
-        acc += (now >= last) ? (now - last) : (now + period - last);
-        last = now;
-    }
+/// The amplifiers' fields as main() found them, before anything wrote
+/// OPA_CTLR: the reset state letter d judges (a letter run later finds
+/// whatever the letters before it left, and all_off() zeroes the fields).
+uint8_t boot_field1 = 0xFFu;
+uint8_t boot_field2 = 0xFFu;
+
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
 }
 
 /// The converter up, the supply measured, every pad this suite owns
@@ -188,7 +196,7 @@ uint16_t millivolts(uint16_t counts) { return Adc<1>::millivolts(counts, vdda_mv
 template <class Out>
 bool digital_level(bool expect_high) {
     Out::pin::input(expect_high ? PinPull::down : PinPull::up);
-    wait_us(200);
+    spin_us<Ruler>(200);
     const bool level = Out::pin::read();
     Out::claim();
     return level;
@@ -213,23 +221,23 @@ void ta_comparator() {
 
     const uint16_t idle = read_channel(O2a::adc_channel);
     Opa<2>::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t high = read_channel(O2a::adc_channel);
 
     // The inputs swapped: the same amplifier, the other rail.
     P2b::pin::clear();
     N2b::pin::set();
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t low = read_channel(O2a::adc_channel);
 
     // And back, so the verdict is about the inputs and not about time.
     P2b::pin::set();
     N2b::pin::clear();
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t high_again = read_channel(O2a::adc_channel);
 
     Opa<2>::enable(false);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t off = read_channel(O2a::adc_channel);
 
     print(serial, "  OPA2, positive PA7 negative PA5, output PA2 (channel ",
@@ -263,11 +271,11 @@ template <class Driver, class Reader>
 bool pad_strapped() {
     Reader::input(PinPull::down);
     Driver::output(true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high = Reader::read();
     Reader::input(PinPull::up);
     Driver::clear();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low = !Reader::read();
     Driver::release();
     Reader::release();
@@ -308,12 +316,12 @@ void tb_selections() {
                              .negative = OpaPin::negative0,
                              .output = OpaPin::out0});
     Opa<2>::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t pair0 = read_channel(O2a::adc_channel);
 
     (void)Opa<2>::positive(OpaPin::positive1);
     (void)Opa<2>::negative(OpaPin::negative1);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t pair1 = read_channel(O2a::adc_channel);
 
     if constexpr (!out1) {
@@ -333,21 +341,25 @@ void tb_selections() {
         return;
     }
     if (out1_strapped) {
-        print(serial, "  SKIPPED, no verdict claimed for the output move: PA4 (OPA2's OUT1) "
-                      "is strapped to PA5, which this letter drives - a wire beats an "
-                      "amplifier, and the pad would answer for the strap and not for the "
-                      "selection.",
-              crlf);
+        bench.skip("the output move: PA4 (OPA2's OUT1) is strapped to PA5, which this letter "
+                   "drives - the pad would answer for the strap, not for the selection");
         bench.verdict("the driver says which channel the selected output lands on",
                       Opa<2>::adc_channel() == O2a::adc_channel);
         all_off();
         return;
     }
     if constexpr (Ob::reaches_adc) {
-        const uint16_t other_before = read_channel(Ob::adc_channel);
+        // OUT1 before the move, with the CH1 pair saying low: its own
+        // pull-up takes it unless something drives it. Read as a level:
+        // the converter's reading of a pad nobody drives is whatever charge
+        // it holds, and PA4 floats low, which is also what the move should
+        // give - only a pull the amplifier must beat tells the two apart.
+        const bool other_free = digital_level<Ob>(false);
         (void)Opa<2>::output(OpaPin::out1);
-        wait_us(1000);
+        spin_us<Ruler>(1000);
         const uint16_t other_after = read_channel(Ob::adc_channel);
+        // After the move, against the same pull-up: the amplifier's drive.
+        const bool other_driven_low = !digital_level<Ob>(false);
         const uint16_t first_after = read_channel(O2a::adc_channel);
         const uint8_t routed = Opa<2>::adc_channel();
         // OUT0, left behind, is no longer driven - and a pad nobody drives
@@ -357,15 +369,16 @@ void tb_selections() {
         // hundred time constants of the pull's tens of kiloohms against a
         // pad and its wire.
         O2a::pin::input(PinPull::up);
-        wait_us(200);
+        spin_us<Ruler>(200);
         const bool first_released = O2a::pin::read();
 
         print(serial, "  the CH0 pair (PB14 high, PB10 low) puts the output at ", pair0,
               " counts; the CH1 pair (PA7 low, PA5 high) at ", pair1, crlf);
         print(serial, "  moved to OUT1 (PA4, channel ", Ob::adc_channel, "): that pad read ",
-              other_before, " counts before and ", other_after, " after; OUT0 left behind read ",
-              first_after, " counts, then ", first_released ? "its pull-up" : "LOW",
-              " as an input", crlf);
+              other_free ? "its pull-up" : "LOW", " before, and after it ", other_after,
+              " counts, ", other_driven_low ? "LOW" : "its pull-up",
+              " against the pull-up; OUT0 left behind read ", first_after, " counts, then ",
+              first_released ? "its pull-up" : "LOW", " as an input", crlf);
         bench.verdict("the positive input is a choice of two pads, and the choice is what the "
                       "output follows",
                       pair0 >= 3900u);
@@ -373,8 +386,8 @@ void tb_selections() {
                       "other rail",
                       pair1 <= 100u);
         bench.verdict("the output is a choice of two pads too: the one just selected carries the "
-                      "level",
-                      other_after <= 100u && other_before != other_after);
+                      "level, driving it against the pull-up that took it before the move",
+                      other_after <= 100u && other_free && other_driven_low);
         bench.verdict("and the one it left stops being driven: its own pull-up takes it",
                       first_released);
         bench.verdict("the driver says which channel the selected output lands on",
@@ -383,11 +396,11 @@ void tb_selections() {
         // OUT1 is PE14 here, which no converter channel reads: the CH1
         // pair says LOW, taken against the pad's pull-up.
         (void)Opa<2>::output(OpaPin::out1);
-        wait_us(1000);
+        spin_us<Ruler>(1000);
         const bool other_low = !digital_level<Ob>(false);
         // OUT0, left behind, is no longer driven: its own pull wins.
         O2a::pin::input(PinPull::up);
-        wait_us(200);
+        spin_us<Ruler>(200);
         const bool first_released = O2a::pin::read();
         const uint8_t routed = Opa<2>::adc_channel();
 
@@ -424,6 +437,12 @@ void tc_first_amplifier() {
     all_off();
     bring_up();
 
+    // A STRAP FROM PB0 TO PA3 - the WeAct CH32V203C8T6 board's crossed
+    // serial pair - puts the port's level for the CH1 pair's positive
+    // input on the very pad OUT0 is read on, the same level the amplifier
+    // should give: looked for before anything is driven, never cached.
+    const bool pb0_strapped = pad_strapped<P1b::pin, O1a::pin>();
+
     P1b::pin::output(true);    // PB0 high
     N1b::pin::output(false);   // PA6 low
     O1a::claim();
@@ -431,12 +450,12 @@ void tc_first_amplifier() {
                              .negative = OpaPin::negative1,
                              .output = OpaPin::out0});
     Opa<1>::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t high = read_channel(O1a::adc_channel);
 
     P1b::pin::clear();
     N1b::pin::set();
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t low = read_channel(O1a::adc_channel);
 
     // Its other input pair and its other output - the first output again
@@ -454,7 +473,7 @@ void tc_first_amplifier() {
     (void)Opa<1>::configure({.positive = OpaPin::positive0,
                              .negative = OpaPin::negative0,
                              .output = out1 ? OpaPin::out1 : OpaPin::out0});
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     uint16_t other = 0;
     if constexpr (!out1) {
         other = read_channel(O1a::adc_channel);
@@ -466,7 +485,8 @@ void tc_first_amplifier() {
     }
 
     print(serial, "  OPA1, positive PB0 negative PA6, output PA3 (channel ",
-          O1a::adc_channel, "): ", high, " counts one way, ", low, " the other", crlf);
+          O1a::adc_channel, "): ", high, " counts one way, ", low, " the other",
+          pb0_strapped ? " - PB0 IS STRAPPED TO PA3" : "", crlf);
     if constexpr (!out1) {
         print(serial, "  its CH0 pair (PB15 high, PB11 low) on OUT0, this package bonding no "
                       "second output: ",
@@ -479,10 +499,15 @@ void tc_first_amplifier() {
                       "channel): ",
               other != 0u ? "HIGH" : "low", " against its pull-down", crlf);
     }
-    bench.verdict("the first amplifier saturates high with its positive input above its "
-                  "negative one",
-                  high >= 3900u);
-    bench.verdict("and low with them swapped", low <= 100u);
+    if (pb0_strapped) {
+        bench.skip("OPA1 from its CH1 pair: PB0 is strapped to PA3, its output - the wire, not "
+                   "the amplifier, would set the level read");
+    } else {
+        bench.verdict("the first amplifier saturates high with its positive input above its "
+                      "negative one",
+                      high >= 3900u);
+        bench.verdict("and low with them swapped", low <= 100u);
+    }
     bench.verdict(out1 ? "its other input pair and its other output work the same way, on four more "
                          "pads"
                        : "its other input pair works the same way, on two more pads",
@@ -496,10 +521,10 @@ void tc_first_amplifier() {
 // ===========================================================================
 void td_register() {
     all_off();
-    Opa<1>::release();
-    Opa<2>::release();
-    const uint8_t reset1 = Opa<1>::field();
-    const uint8_t reset2 = Opa<2>::field();
+    // The reset state is the one main() read before anything wrote the
+    // register: all_off() has just zeroed both fields.
+    const uint8_t reset1 = boot_field1;
+    const uint8_t reset2 = boot_field2;
 
     // Every one of the eight selections of one amplifier, read back.
     bool all_read_back = true;
@@ -540,7 +565,7 @@ void td_register() {
     // A configuration with a pad in the wrong role is refused.
     const bool wrong_role = !Opa<2>::configure(OpaConfig{.positive = OpaPin::out0});
 
-    print(serial, "  the reset field of each amplifier: ", reset1, " and ", reset2,
+    print(serial, "  the field of each amplifier at boot: ", reset1, " and ", reset2,
           "; OPA2 configured reads ", two_before, ", and still ", two_after,
           " after OPA1 was configured beside it (OPA1's own field ", one_field, ")", crlf);
     bench.verdict("both amplifiers are at zero out of reset - no enable, both selections the "
@@ -572,11 +597,11 @@ void te_output() {
                              .negative = OpaPin::negative1,
                              .output = OpaPin::out0});
     Opa<2>::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t voh = read_channel(O2a::adc_channel);
     P2b::pin::clear();
     N2b::pin::set();
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t vol = read_channel(O2a::adc_channel);
     const uint16_t voh_mv = millivolts(voh);
     const uint16_t vol_mv = millivolts(vol);
@@ -587,12 +612,12 @@ void te_output() {
     // amplifier is asked for the opposite rail.
     Opa<2>::enable(false);
     O2a::pin::input(PinPull::down);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t pulled_only = read_channel(O2a::adc_channel);
     P2b::pin::set();
     N2b::pin::clear();
     Opa<2>::enable(true);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const uint16_t pulled_and_driven = read_channel(O2a::adc_channel);
 
     print(serial, "  saturated: ", voh, " counts = ", voh_mv, " mV high (", drop,
@@ -666,11 +691,11 @@ void upper_amplifier() {
                                        .negative = OpaPin::negative0,
                                        .output = OpaPin::out0});
         A::enable(true);
-        wait_us(1000);
+        spin_us<Ruler>(1000);
         const uint16_t high0 = read_channel(Oa::adc_channel);
         Pa::pin::clear();
         Na::pin::set();
-        wait_us(1000);
+        spin_us<Ruler>(1000);
         const uint16_t low0 = read_channel(Oa::adc_channel);
 
         print(serial, "  OPA", n, " on OUT0 (channel ", Oa::adc_channel, "): CH0 pair ", high0,
@@ -687,7 +712,7 @@ void upper_amplifier() {
             Nb::pin::output(false);
             (void)A::positive(OpaPin::positive1);
             (void)A::negative(OpaPin::negative1);
-            wait_us(1000);
+            spin_us<Ruler>(1000);
             const uint16_t high1 = read_channel(Oa::adc_channel);
 
             // OUT1, on port E: read as a level, both ways.
@@ -696,11 +721,11 @@ void upper_amplifier() {
             const bool out1_high = digital_level<Ob>(true);
             Pb::pin::clear();
             Nb::pin::set();
-            wait_us(1000);
+            spin_us<Ruler>(1000);
             const bool out1_low = !digital_level<Ob>(false);
             // And OUT0, left behind, is no longer driven: its own pull wins.
             Oa::pin::input(PinPull::up);
-            wait_us(200);
+            spin_us<Ruler>(200);
             const bool out0_released = Oa::pin::read();
 
             print(serial, ", CH1 pair ", high1, crlf);
@@ -744,8 +769,20 @@ void tg_opa4() {
 /// full rail-to-rail step of their difference either way. (A step to EQUAL
 /// inputs would time the input offset, not the amplifier.) The output pad
 /// is a floating digital input for the duration.
+///
+/// What one step measured: its cycles, or `followed` false when the output
+/// did not sit at the other rail before the step or did not reach the new
+/// level within the budget (a dead output never reads as a fast one); and
+/// whether a kernel tick landed inside the span, which lengthens it by the
+/// handler and leaves it out of the bound's judgement (`quiet`).
+struct Step {
+    uint32_t cycles = 0;
+    bool followed = false;
+    bool quiet = false;
+};
+
 template <class Pos, class Neg, class Out>
-uint32_t step_cycles(bool rising) {
+Step step_cycles(bool rising) {
     static_assert(Pos::pad.port == 'B' && Neg::pad.port == 'B',
                   "every CH0 pair of the four amplifiers is on port B");
     using B = Port<'B'>;
@@ -754,20 +791,23 @@ uint32_t step_cycles(bool rising) {
     Out::pin::input();
     const uint32_t others = B::out() & ~(p | m);
     B::out_write(others | (rising ? m : p));   // the output at the other rail
-    wait_us(200);
-    const uint32_t period = stk()->CMPLR + 1u;
-    const uint32_t start = stk()->CNTL;
+    spin_us<Ruler>(200);
+    Step r;
+    const bool at_start = Out::pin::read() != rising;
+    const TickWitness<P> witness;
     B::out_write(others | (rising ? p : m));
-    uint32_t spins = 100'000UL;
-    while (Out::pin::read() != rising && spins-- != 0u) {
-    }
-    const uint32_t end = stk()->CNTL;
+    // 1 ms: two hundred times the 5 us the letter's bound allows.
+    const auto took =
+        cycles_until<Ruler>([rising] { return Out::pin::read() == rising; }, 1'000u);
+    r.quiet = witness.quiet();
     Out::claim();
-    return end >= start ? end - start : end + period - start;
+    r.followed = at_start && took.has_value();
+    r.cycles = took.value_or(0u);
+    return r;
 }
 
 template <uint8_t n>
-void response(uint32_t (&normal)[2], uint32_t (&fast)[2], bool& fast_taken) {
+void response(Step (&normal)[2], Step (&fast)[2], bool& fast_taken) {
     using A = Opa<n>;
     using Pos = OpaIn<n, OpaPin::positive0>;
     using Neg = OpaIn<n, OpaPin::negative0>;
@@ -779,12 +819,12 @@ void response(uint32_t (&normal)[2], uint32_t (&fast)[2], bool& fast_taken) {
                         .output = OpaPin::out0});
     A::enable(true);
     (void)A::high_speed(false);
-    wait_us(100);
+    spin_us<Ruler>(100);
     normal[0] = step_cycles<Pos, Neg, Out>(true);
     normal[1] = step_cycles<Pos, Neg, Out>(false);
     fast_taken = A::high_speed(true);
     if (fast_taken) {
-        wait_us(100);
+        spin_us<Ruler>(100);
         fast[0] = step_cycles<Pos, Neg, Out>(true);
         fast[1] = step_cycles<Pos, Neg, Out>(false);
     }
@@ -865,9 +905,10 @@ void th_high_speed() {
         bench.verdict("and nothing of that touches OPA_CTLR", Opa<1>::regs().CTLR == ctlr_before);
 
         // THE RESPONSE: a differential rail-to-rail step on the inputs,
-        // timed to the output pad's digital input.
-        uint32_t normal[4][2] = {};
-        uint32_t fast[4][2] = {};
+        // timed to the output pad's digital input, the console quiet first.
+        console_drain();
+        Step normal[4][2] = {};
+        Step fast[4][2] = {};
         bool fast_taken[4] = {};
         response<1>(normal[0], fast[0], fast_taken[0]);
         response<2>(normal[1], fast[1], fast_taken[1]);
@@ -875,25 +916,53 @@ void th_high_speed() {
         response<4>(normal[3], fast[3], fast_taken[3]);
         constexpr uint32_t per_us = SysClock::hz / 1'000'000u;
         bool all_followed = true;
+        bool quiet_in_bound = true;
+        uint32_t lengthened = 0;
+        // One step judged: it must follow at all; its span is held to the
+        // bound only where no tick landed inside it.
+        auto judge = [&](const Step& st) {
+            if (!st.followed) {
+                all_followed = false;
+            } else if (!st.quiet) {
+                ++lengthened;
+            } else if (st.cycles > 5u * per_us) {
+                quiet_in_bound = false;
+            }
+        };
+        auto show = [](const Step& st) {
+            if (!st.followed) {
+                print(serial, "NOT FOLLOWED");
+            } else {
+                print(serial, st.cycles, st.quiet ? "" : " (a tick inside)");
+            }
+        };
         for (uint8_t i = 0; i < 4u; ++i) {
-            print(serial, "  OPA", static_cast<uint8_t>(i + 1u), ": rise ", normal[i][0],
-                  " and fall ", normal[i][1], " core cycles");
+            print(serial, "  OPA", static_cast<uint8_t>(i + 1u), ": rise ");
+            show(normal[i][0]);
+            print(serial, " and fall ");
+            show(normal[i][1]);
+            print(serial, " core cycles");
+            judge(normal[i][0]);
+            judge(normal[i][1]);
             if (fast_taken[i]) {
-                print(serial, "; high-speed ", fast[i][0], " and ", fast[i][1]);
+                print(serial, "; high-speed ");
+                show(fast[i][0]);
+                print(serial, " and ");
+                show(fast[i][1]);
+                judge(fast[i][0]);
+                judge(fast[i][1]);
             }
             print(serial, crlf);
-            for (uint8_t k = 0; k < 2u; ++k) {
-                if (normal[i][k] > 5u * per_us || (fast_taken[i] && fast[i][k] > 5u * per_us)) {
-                    all_followed = false;
-                }
-            }
         }
         print(serial, "  (the datasheet rates the slew at 8 V/us, and 16 in high-speed mode; the "
-                      "counts include the pads' own synchronizers and the poll)",
-              crlf);
-        bench.verdict("every amplifier's output follows a rail-to-rail step of its inputs' "
-                      "difference within 5 us, in each mode the die has",
+                      "counts include the pads' own synchronizers and the poll; ",
+              lengthened, " span(s) a tick lengthened, left out of the bound)", crlf);
+        bench.verdict("every amplifier's output sits at one rail and reaches the other within "
+                      "1 ms of a rail-to-rail step of its inputs' difference, in each mode the "
+                      "die has",
                       all_followed);
+        bench.verdict("and does so within 5 us, every span no tick lengthened",
+                      all_followed && quiet_in_bound);
         all_off();
     }
 }
@@ -932,6 +1001,8 @@ BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 int main() {
+    boot_field1 = brio::Opa<1>::field();
+    boot_field2 = brio::Opa<2>::field();
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);

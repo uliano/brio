@@ -22,12 +22,17 @@
 //
 // THE LOOP IS THE ORDINARY ONE, AND IT DOES NOT SLEEP HERE - which is
 // no longer a rule this program keeps but a fact of the machine it runs
-// on. With the core stopped the USB controller cannot reach its packet
-// memory (measured: an armed bulk endpoint receives nothing, the
-// packet-memory overflow counts up, and an enumeration never gets past
-// its first control transfer), so an attached controller counts itself
-// a bus master and the platform's idle path does not sleep while the
-// count stands (ch32vx03/bus_activity.hpp). The kernel therefore runs
+// on. With the core stopped neither controller is served whole. The
+// CH32V203's device controller cannot reach its packet memory (measured:
+// an armed bulk endpoint receives nothing, the packet-memory overflow
+// counts up, and an enumeration never gets past its first control
+// transfer). The CH32V303's host/device controller still takes the
+// host's OUT packets whole, but the IN packets it reads out of RAM carry
+// zeros and an enumeration stops at the descriptor reads after
+// SET_ADDRESS (docs/ch32vx03/usbfs.md, "The core must not sleep while
+// the controller works"). So an attached controller counts itself a bus
+// master and the platform's idle path does not sleep while the count
+// stands (ch32vx03/bus_activity.hpp). The kernel therefore runs
 // its normal loop, idle path and all, and the silicon's own state is
 // what decides.
 //

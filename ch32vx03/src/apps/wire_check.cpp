@@ -33,7 +33,12 @@
 // in the list so that their absence is measured too. On the evaluation
 // board the console's own two (PA9/PA10), the debug port, the USB pads,
 // the LED, the KEY and the two crystals are not here and are never
-// touched.
+// touched. On the WeAct board the console's two (PA9/PA10), the debug
+// port, the two crystals (the 8 MHz one on PD0/PD1, the 32.768 kHz one
+// on PC14/PC15) and the LED on PB2 (also the BOOT1 strap) are not here
+// either: a crystal's pad carries no wire to measure, and a level driven
+// onto it fights the crystal (this image runs from the HSI, so its own
+// clock is not at stake).
 //
 // build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
@@ -87,11 +92,11 @@ constexpr Pad pads[] = {
     pad<'A', 0>("PA0"), pad<'A', 1>("PA1"), pad<'A', 2>("PA2"), pad<'A', 3>("PA3"),
     pad<'A', 4>("PA4"), pad<'A', 5>("PA5"), pad<'A', 6>("PA6"), pad<'A', 7>("PA7"),
     pad<'A', 8>("PA8"), pad<'A', 11>("PA11"), pad<'A', 12>("PA12"), pad<'A', 15>("PA15"),
-    pad<'B', 0>("PB0"), pad<'B', 1>("PB1"), pad<'B', 2>("PB2"), pad<'B', 3>("PB3"),
+    pad<'B', 0>("PB0"), pad<'B', 1>("PB1"), pad<'B', 3>("PB3"),
     pad<'B', 4>("PB4"), pad<'B', 5>("PB5"), pad<'B', 6>("PB6"), pad<'B', 7>("PB7"),
     pad<'B', 8>("PB8"), pad<'B', 9>("PB9"), pad<'B', 10>("PB10"), pad<'B', 11>("PB11"),
     pad<'B', 12>("PB12"), pad<'B', 13>("PB13"), pad<'B', 14>("PB14"), pad<'B', 15>("PB15"),
-    pad<'C', 13>("PC13"), pad<'D', 0>("PD0"), pad<'D', 1>("PD1"),
+    pad<'C', 13>("PC13"),
 };
 #endif
 constexpr uint8_t pad_count = sizeof(pads) / sizeof(pads[0]);

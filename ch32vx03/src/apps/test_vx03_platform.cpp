@@ -166,6 +166,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
@@ -206,10 +207,23 @@ TestBench<Serial> bench;
 uint32_t boot_flags = 0;
 std::optional<PanicRecord> boot_record;
 
+/// The ruler of the suite's waits: the core's cycle count through the
+/// ticker (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
 // The STK counter as a cycle counter: it runs at HCLK and reloads every
 // tick, so two readings less than a tick apart are a cycle count with
 // the reload folded in. Only the low half is read - the reload puts the
-// counter back to zero long before the high half could move.
+// counter back to zero long before the high half could move. The
+// letters' measurements read it RAW rather than through the ruler
+// above, because the counter and its tick are this suite's subject:
+// letter b spans 5 ms with interrupts masked (the ruler needs the tick's
+// handler once a period), letters m and w rewrite the counter itself,
+// and the round trips of e and l want two loads, not the ruler's retry
+// loop, at each end.
 uint32_t cycles_now() { return stk()->CNTL; }
 uint32_t cycles_between(uint32_t from, uint32_t to) {
     const uint32_t period = stk()->CMPLR + 1u;
@@ -218,9 +232,26 @@ uint32_t cycles_between(uint32_t from, uint32_t to) {
 uint32_t cycles_per_us() { return SysClock::hz / 1'000'000u; }
 
 void console_drain() {
-    while (!Serial::tx_idle()) {
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
+}
+
+/// The drain before a timed window, acted on: a console still sending
+/// would put its transmit interrupt inside the window (and wake an
+/// idle() early), so a drain that runs out is a failed verdict and the
+/// letter stops.
+bool drained_for_window() {
+    if (brio::console_drain<Ruler, Serial>()) {
+        return true;
     }
-    (void)delay_us(clock, 200);   // the last byte's own time on the wire
+    bench.verdict("the console drained within 200 ms before the timed window", false);
+    return false;
+}
+
+/// Wait for a fresh tick edge, bounded at two tick periods: true when
+/// the tick moved.
+bool fresh_tick() {
+    const uint32_t t = Ticker::ticks();
+    return brio::wait_until<Ruler>([t] { return Ticker::ticks() != t; }, 2'000u);
 }
 
 void print_flags(uint32_t flags) {
@@ -236,6 +267,10 @@ void print_flags(uint32_t flags) {
 // a - the boot story
 // ---------------------------------------------------------------------------
 void ta_boot() {
+    // The LSI's two bits share RSTSCKR with the flags: started here, so
+    // the verdict below has set bits to keep (left as found at the end).
+    const bool lsi_was = Rcc::lsi_enabled();
+    const bool lsi_up = Rcc::lsi_start();
     print(serial, "  RSTSCKR flags at boot: ", hex(boot_flags), crlf);
     print_flags(boot_flags);
     bench.verdict("some reset flag stood at this boot (they accumulate "
@@ -254,10 +289,15 @@ void ta_boot() {
     bench.verdict("and leaves the register clean", after == 0u);
     bench.verdict("RMVF is back at zero afterwards (a plain bit, not a strobe)",
                   (rcc()->RSTSCKR & rstsckr_rmvf) == 0u);
+    const uint32_t lsi_bits = rcc()->RSTSCKR & (rcc_lsion | rcc_lsirdy);
     bench.verdict("clearing the flags left the LSI bits of the same register "
-                  "alone",
-                  (rcc()->RSTSCKR & ~(ResetFlag::all | rstsckr_rmvf |
-                                      rcc_lsion | rcc_lsirdy)) == 0u);
+                  "alone (the LSI running: LSION and LSIRDY still set, nothing else)",
+                  lsi_up && lsi_bits == (rcc_lsion | rcc_lsirdy) &&
+                      (rcc()->RSTSCKR & ~(ResetFlag::all | rstsckr_rmvf |
+                                          rcc_lsion | rcc_lsirdy)) == 0u);
+    if (!lsi_was) {
+        Rcc::lsi_stop();
+    }
     bench.verdict("no panic record was pending at this boot (letter i "
                   "is the one that leaves one)",
                   !boot_record.has_value());
@@ -319,7 +359,9 @@ void tb_critical() {
     // idle(): unmask, then a WFE on this core. Any enabled interrupt
     // wakes it, so the console must be silent first or the USART's own
     // transmit interrupt returns it in microseconds.
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
     const uint32_t t1 = Ticker::ticks();
     const uint32_t c1 = cycles_now();
     uint8_t calls = 0;
@@ -382,8 +424,9 @@ void tc_ticker() {
     // instead of that phase.
     const uint32_t target = 200;
     const uint32_t period = cmp + 1u;
-    const uint32_t edge = Ticker::ticks();
-    while (Ticker::ticks() == edge) {
+    if (!fresh_tick()) {
+        bench.verdict("a tick edge came within two periods", false);
+        return;
     }
     uint32_t last = cycles_now();
     uint32_t accumulated = 0;
@@ -470,16 +513,19 @@ void te_latency() {
     uint32_t worst_entry = 0, worst_trip = 0;
     const uint32_t rounds = 64;
     uint32_t seen = 0;
+    if (!drained_for_window()) {
+        Pfic::disable(Irq::software);
+        return;
+    }
     for (uint32_t r = 0; r < rounds; ++r) {
-        console_drain();
         const uint32_t before = sw_hits;
         sw_entry_cycles = 0;
         sw_exit_cycles = 0;
         // A tick landing inside the window would add its own handler to
         // the measurement: wait for a fresh tick, then there is a whole
         // millisecond of quiet.
-        const uint32_t t = Ticker::ticks();
-        while (Ticker::ticks() == t) {
+        if (!fresh_tick()) {
+            break;
         }
         const uint32_t c0 = cycles_now();
         Pfic::set_pending(Irq::software);
@@ -487,7 +533,12 @@ void te_latency() {
         // line is taken: the raiser has to WAIT for the handler, and the
         // reading after the wait carries one spin iteration of its own.
         // The bound is what turns a line this core will not raise into a
-        // verdict instead of a hang.
+        // verdict instead of a hang. It stays a turn count, not a wait on
+        // the ruler: the spin's last turn is inside the exit and trip
+        // figures, and a turn of brio::wait_until() reads the ruler (a
+        // retry loop of five loads) where this one is a load and a
+        // compare. 100000 turns are some 3 ms at 144 MHz, reached only by
+        // a line never taken.
         uint32_t spin = 0;
         while (sw_hits == before && spin < 100'000u) {
             ++spin;
@@ -1055,15 +1106,15 @@ struct TripResult {
 TripResult measure_trip(Irq line, Trip& t) {
     TripResult r;
     Pfic::enable(line);
+    console_drain();   // the caller acted on the first drain
     for (uint32_t round = 0; round < 32u; ++round) {
-        console_drain();
         const uint32_t before = t.hits;
-        const uint32_t tick = Ticker::ticks();
-        while (Ticker::ticks() == tick) {
+        if (!fresh_tick()) {
+            break;
         }
         const uint32_t c0 = cycles_now();
         Pfic::set_pending(line);
-        uint32_t spin = 0;
+        uint32_t spin = 0;   // a turn count, inside the figure: letter e says why
         while (t.hits == before && spin < 100'000u) {
             ++spin;
         }
@@ -1089,16 +1140,18 @@ void tl_fpu_trip() {
         // The first handler is letter e's own: the software interrupt,
         // which touches no f-register.
         TripResult r0;
+        if (!drained_for_window()) {
+            return;
+        }
         Pfic::enable(Irq::software);
         for (uint32_t round = 0; round < 32u; ++round) {
-            console_drain();
             const uint32_t before = sw_hits;
-            const uint32_t tick = Ticker::ticks();
-            while (Ticker::ticks() == tick) {
+            if (!fresh_tick()) {
+                break;
             }
             const uint32_t c0 = cycles_now();
             Pfic::set_pending(Irq::software);
-            uint32_t spin = 0;
+            uint32_t spin = 0;   // a turn count, inside the figure: letter e says why
             while (sw_hits == before && spin < 100'000u) {
                 ++spin;
             }
@@ -1131,10 +1184,9 @@ void tl_fpu_trip() {
             uint32_t after;
             __asm__ volatile("fscsr %0" ::"r"(set) : "memory");
             Pfic::set_pending(Irq::tim6);
-            uint32_t spin = 0;
-            while (trip_fp.hits == before && spin < 100'000u) {
-                ++spin;
-            }
+            // Not timed: the ruler's wait, 3 ms (a hundred times the trip).
+            (void)brio::wait_until<Ruler>([before] { return trip_fp.hits != before; },
+                                          3'000u);   // judged below through `taken`
             __asm__ volatile("frcsr %0" : "=r"(after) :: "memory");
             __asm__ volatile("fscsr zero" ::: "memory");
             taken += trip_fp.hits - before;
@@ -1198,9 +1250,11 @@ void tm_bus_in_sleep() {
     const uint32_t saved_cmp = stk()->CMPLR;
 
     // AWAKE: the same block over the same span, the core spinning.
+    if (!drained_for_window()) {
+        return;
+    }
     SleepDma::stop();
     (void)SleepDma::prepare(sleep_block());
-    console_drain();
     uint16_t awake_left = 0;
     {
         P::CriticalSection cs;
@@ -1239,9 +1293,12 @@ void tm_bus_in_sleep() {
     uint16_t at_sleep = 0, at_wake = 0;
     uint32_t slept = 0;
     uint8_t calls = 0;
-    const uint32_t ticks0 = Ticker::ticks();
+    uint32_t ticks0 = 0;
     {
         P::CriticalSection cs;
+        // Read under the mask: a tick between this read and the mask
+        // would end the loop below with no idle() called.
+        ticks0 = Ticker::ticks();
         stk()->CTLR = 0;
         stk()->SR = 0;
         stk()->CNTL = 0;
@@ -1302,9 +1359,6 @@ void tm_bus_in_sleep() {
                   masters == 1u && returned_in < per_ms / 10u);
     bench.verdict("with the count set aside idle() slept until the one-shot wake",
                   slept >= span / 2u && woke_ticks == 1u && calls <= 2u);
-    bench.verdict(moves ? "the bus serves the DMA while the core sleeps"
-                        : "the bus serves the core alone in Sleep (no master moves)",
-                  true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,9 +1481,9 @@ using ShadowTrial = ShadowMarks (*)(volatile uint32_t*, volatile uint32_t*, vola
     for (uint32_t r = 0; r < shadow_reps; ++r) {
         const uint32_t before = shadow.hits;
         const ShadowMarks m = trial(ipsr, irer, ienr, bit);
-        for (uint32_t spin = 0; spin < 1000u && shadow.hits == before; ++spin) {
-        }
-        if (shadow.hits == before) {
+        // Restored, the mask lets a pending line in within a few
+        // instructions; 30 us is a thousand of them and more.
+        if (!brio::wait_until<Ruler>([before] { return shadow.hits != before; }, 30u)) {
             ++t.lost;
             Pfic::clear_pending(shadow_line);
             continue;
@@ -1505,7 +1559,9 @@ void tn_shadow() {
 #else
     print(serial, "  built with gcc's own prologue/epilogue (CH32VX03_HPE=OFF)", crlf);
 #endif
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
     Pfic::clear_pending(shadow_line);
     Pfic::enable(shadow_line);
     const auto seq = std::make_integer_sequence<unsigned, shadow_nops>{};
@@ -1534,8 +1590,7 @@ void tn_shadow() {
                   straddles(csr) && straddles(csr_fence) && straddles(irer) &&
                       straddles(irer_fence));
     // The count inside is the finding, whichever it is: no threshold is
-    // the right one to judge it by.
-    bench.verdict("the shadow counted for each variant (the numbers above are the finding)", true);
+    // the right one to judge it by, so it is printed above and not judged.
 }
 
 // ---------------------------------------------------------------------------
@@ -1609,6 +1664,9 @@ EdgeTry edge_try(uint32_t d, uint32_t edges, bool latched) {
 }
 
 void tw_edge() {
+    if (!drained_for_window()) {
+        return;
+    }
     Rescue::init();
     (void)Rescue::configure(
         TimConfig{.prescaler = static_cast<uint16_t>(Rescue::clock_hz(clock) / 1'000'000u - 1u),
@@ -1618,7 +1676,6 @@ void tw_edge() {
     Pfic::clear_pending(Rescue::irq());
     Pfic::enable(Rescue::irq());
     Rescue::enable(true);
-    console_drain();
     tick_probe = true;
 
     constexpr uint32_t positions = 600;
@@ -1728,7 +1785,9 @@ using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
 }
 
 void to_turns() {
-    console_drain();
+    if (!drained_for_window()) {
+        return;
+    }
     QuietKernel::init_all();
 
     // Turns over 100 quiet ticks: the tick is the only interrupt (the

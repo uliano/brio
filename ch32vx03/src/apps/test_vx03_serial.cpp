@@ -215,6 +215,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // The DUT's half of the desk pair's serial link (and usart_link.hpp under
@@ -323,6 +324,10 @@ volatile bool u2_plain = false;
 volatile uint32_t u2_edges = 0;
 volatile uint32_t u2_edge_entries = 0;
 
+/// The console vector's entries: what a timing letter reads around its
+/// span beside the tick (the lengtheners rule).
+volatile uint32_t console_entries = 0;
+
 /// What the two vectors counted (letter j).
 volatile uint32_t u2_interrupts = 0;
 volatile uint32_t u2_rxne = 0;
@@ -338,56 +343,26 @@ volatile uint32_t u4_interrupts = 0;
 // ---- time ------------------------------------------------------------------
 
 /**
- * THE RULER FOR SOFTWARE: the core's own STK counter read as a
- * stopwatch, the shape every suite of this stratum uses. It counts up
- * to its reload - one tick period - and starts again, so a span is
- * accumulated poll by poll with one period folded in across each wrap.
+ * THE RULER FOR SOFTWARE: the composed cycle count (util/test_wait.hpp's
+ * ruler) - the kernel tick count and the STK counter's position, so a span
+ * of any length reads whole, polled or not, while the tick handler runs:
+ * nothing in this suite masks interrupts or pauses the tick.
  */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
+/// A stopwatch's reading in whole microseconds.
+uint32_t us_of(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
 void console_drain() {
-    Stopwatch w;
-    while (!Serial::tx_idle() && w.us() < 200'000UL) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
 }
 
 /// Wait for a flag of the instrument, bounded. False on the time-out.
 bool wait_flag(uint16_t mask, uint32_t us = 200'000) {
-    Stopwatch w;
-    while (!U2::flag(mask)) {
-        if (w.us() > us) {
-            return false;
-        }
-    }
-    return true;
+    return wait_until<Ruler>([mask] { return U2::flag(mask); }, us);
 }
 
 /// Both of the transmitter's idle flags.
@@ -416,24 +391,25 @@ uint32_t usart_permille(uint32_t baud, uint32_t bits, uint32_t frames) {
     // say so, a write that followed no STATR read leaving it standing from
     // the frame before (measured: a whole frame inside the reading).
     const uint32_t frame = bits * SysClock::hz / baud;
-    Stopwatch w;
-    while (!U::tx_empty() && w.cycles() < budget) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (!U::tx_empty() && w.elapsed() < budget) {
     }
     w.start();
-    while (w.cycles() < 2u * frame) {
+    while (w.elapsed() < 2u * frame) {
     }
     w.start();
-    for (uint32_t i = 0; i < frames && w.cycles() < budget; ++i) {
-        while (!U::tx_empty() && w.cycles() < budget) {
+    for (uint32_t i = 0; i < frames && w.elapsed() < budget; ++i) {
+        while (!U::tx_empty() && w.elapsed() < budget) {
         }
         U::write_data(static_cast<uint8_t>(i * 37u + 11u));
         if (i == 0u) {
             U::clear_flags(usart_tc);   // TC stood for the idle line before the run
         }
     }
-    while (!U::tx_complete() && w.cycles() < budget) {
+    while (!U::tx_complete() && w.elapsed() < budget) {
     }
-    const uint32_t took = w.cycles();
+    const uint32_t took = w.elapsed();
     return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * took / wire);
 }
 
@@ -452,20 +428,21 @@ uint32_t wire_permille(uint32_t baud, uint32_t frames) {
     const uint64_t budget = 2u * wire + SysClock::hz / 100u;
     uint8_t b = 0;
     uint32_t queued = 0;
-    Stopwatch w;
-    while (queued < frames && w.cycles() < budget) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (queued < frames && w.elapsed() < budget) {
         const uint32_t want = frames - queued;
         queued += T::write_bulk(
             std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
         while (T::read_byte(b)) {
         }
     }
-    while (!T::tx_idle() && w.cycles() < budget) {
+    while (!T::tx_idle() && w.elapsed() < budget) {
         while (T::read_byte(b)) {
         }
     }
-    const uint32_t took = w.cycles();
-    wait_us(64u * 10u * 1'000'000u / baud + 1000u);
+    const uint32_t took = w.elapsed();
+    spin_us<Ruler>(64u * 10u * 1'000'000u / baud + 1000u);
     while (T::read_byte(b)) {
     }
     T::clear_errors();
@@ -522,13 +499,7 @@ uint32_t ruler_width() {
 
 /// Wait until both captures have landed, bounded.
 bool ruler_wait(uint32_t us = 100'000) {
-    Stopwatch w;
-    while (!T2::flag(T2::compare_flag(2)) || !T2::flag(T2::compare_flag(3))) {
-        if (w.us() > us) {
-            return false;
-        }
-    }
-    return true;
+    return wait_until<Ruler>([] { return T2::flag(T2::compare_flag(2)) && T2::flag(T2::compare_flag(3)); }, us);
 }
 
 void ruler_stop() {
@@ -538,13 +509,7 @@ void ruler_stop() {
 
 /// Wait for one of the ruler's flags, bounded.
 bool ruler_flag(uint16_t mask, uint32_t us = 100'000) {
-    Stopwatch w;
-    while (!T2::flag(mask)) {
-        if (w.us() > us) {
-            return false;
-        }
-    }
-    return true;
+    return wait_until<Ruler>([mask] { return T2::flag(mask); }, us);
 }
 
 /**
@@ -643,26 +608,27 @@ struct Frame {
 /// the start so that a late store cannot accumulate.
 void bang_frame(const Frame& fr) {
     const uint32_t bit = SysClock::hz / fr.baud;
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     uint32_t n = 0;
     line(false);   // the start bit
     ++n;
     for (uint8_t i = 0; i < fr.bits; ++i) {
-        while (w.cycles() < n * bit) {
+        while (w.elapsed() < n * bit) {
         }
         line(((fr.data >> i) & 1u) != 0u);
         ++n;
     }
     if (fr.parity) {
-        while (w.cycles() < n * bit) {
+        while (w.elapsed() < n * bit) {
         }
         line(fr.parity_value);
         ++n;
     }
-    while (w.cycles() < n * bit) {
+    while (w.elapsed() < n * bit) {
     }
     line(!fr.bad_stop);
-    while (w.cycles() < (n + fr.stop_bits) * bit) {
+    while (w.elapsed() < (n + fr.stop_bits) * bit) {
     }
     line(true);
 }
@@ -693,12 +659,13 @@ void bang_word(uint16_t v, const UartFormat& f, uint32_t baud = 9600) {
 /// followed by one stop bit.
 void bang_break(uint8_t bits, uint32_t baud = 9600) {
     const uint32_t bit = SysClock::hz / baud;
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     line(false);
-    while (w.cycles() < static_cast<uint32_t>(bits) * bit) {
+    while (w.elapsed() < static_cast<uint32_t>(bits) * bit) {
     }
     line(true);
-    while (w.cycles() < (static_cast<uint32_t>(bits) + 2u) * bit) {
+    while (w.elapsed() < (static_cast<uint32_t>(bits) + 2u) * bit) {
     }
 }
 
@@ -715,26 +682,27 @@ void bang_rzi(uint8_t word, bool pulse_high, uint32_t baud = 9600) {
     const uint32_t pulse = 3u * bit / 16u;
     const bool idle = !pulse_high;
     line(idle);
-    wait_us(2000);
-    Stopwatch w;
+    spin_us<Ruler>(2000);
+    Stopwatch<Ruler> w;
+    w.start();
     uint32_t n = 0;
     line(pulse_high);            // the start bit is a zero: a pulse
-    while (w.cycles() < pulse) {
+    while (w.elapsed() < pulse) {
     }
     line(idle);
     ++n;
     for (uint8_t i = 0; i < 8; ++i) {
-        while (w.cycles() < n * bit) {
+        while (w.elapsed() < n * bit) {
         }
         if (((word >> i) & 1u) == 0u) {
             line(pulse_high);
-            while (w.cycles() < n * bit + pulse) {
+            while (w.elapsed() < n * bit + pulse) {
             }
             line(idle);
         }
         ++n;
     }
-    while (w.cycles() < (n + 1u) * bit) {
+    while (w.elapsed() < (n + 1u) * bit) {
     }
 }
 
@@ -742,9 +710,10 @@ void bang_rzi(uint8_t word, bool pulse_high, uint32_t baud = 9600) {
 /// receiver under the idle-line rule.
 void bang_idle(uint8_t bits, uint32_t baud = 9600) {
     const uint32_t bit = SysClock::hz / baud;
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     line(true);
-    while (w.cycles() < static_cast<uint32_t>(bits) * bit) {
+    while (w.elapsed() < static_cast<uint32_t>(bits) * bit) {
     }
 }
 
@@ -813,7 +782,7 @@ bool u2_up(const UartFormat& f, uint32_t baud) {
     U2::enable(true);
     U2::transmitter(true);
     U2::receiver(true);
-    wait_us(3000);   // TE's idle frame out before anything is timed
+    spin_us<Ruler>(3000);   // TE's idle frame out before anything is timed
     return true;
 }
 
@@ -841,11 +810,11 @@ bool pads_linked() {
     Driver::output();
     Reader::input(PinPull::down);
     Driver::set();
-    wait_us(200);
+    spin_us<Ruler>(200);
     const bool high = Reader::read();
     Reader::input(PinPull::up);
     Driver::clear();
-    wait_us(200);
+    spin_us<Ruler>(200);
     const bool low = Reader::read();
     Driver::release();
     Reader::release();
@@ -1083,10 +1052,13 @@ void tb_frame() {
         // Two zero words back to back: the high run between them is the
         // stop bits and nothing else.
         U2::write_data(0);
-        while (!U2::tx_empty()) {
+        // The first frame in the shifter within a frame time (1.04 ms at
+        // 9600; 5 ms allowed): a port that never frees DATAR measures no gap.
+        const bool second = wait_until<Ruler>([] { return U2::tx_empty(); }, 5'000);
+        if (second) {
+            U2::write_data(0);
         }
-        U2::write_data(0);
-        const uint32_t got = ruler_gap(psc);
+        const uint32_t got = second ? ruler_gap(psc) : 0u;
         const uint32_t want = stop_halves[i] * bit_cycles / 2u;
         print(serial, "  the ", stop_names[i], " stop code: the gap is ", got,
               " timer clocks, ", bit_cycles == 0u ? 0u : (2u * got + bit_cycles) / (2u * bit_cycles),
@@ -1129,29 +1101,30 @@ void tb_frame() {
     (void)U2::configure(UartFormat{}, usart_divisor(pclk1, baud));
     U2::enable(true);
     U2::transmitter(true);
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     U2::write_data(0x55);
-    while (!U2::tx_empty() && w.us() < 20'000UL) {
+    while (!U2::tx_empty() && us_of(w) < 20'000UL) {
     }
-    const uint32_t first_us = w.us();
+    const uint32_t first_us = us_of(w);
     // A second byte written while the first is still in the shift
     // register: TXE cannot come back before the wire is free.
     w.start();
     U2::write_data(0x55);
-    while (!U2::tx_empty() && w.us() < 20'000UL) {
+    while (!U2::tx_empty() && us_of(w) < 20'000UL) {
     }
-    const uint32_t busy_us = w.us();
+    const uint32_t busy_us = us_of(w);
     // And one written with the transmitter idle, TC already up.
     (void)tx_settled();
     w.start();
     U2::write_data(0x55);
-    while (!U2::tx_empty() && w.us() < 20'000UL) {
+    while (!U2::tx_empty() && us_of(w) < 20'000UL) {
     }
-    const uint32_t idle_us = w.us();
-    const uint32_t tc_start = w.us();
-    while (!U2::tx_complete() && w.us() < 20'000UL) {
+    const uint32_t idle_us = us_of(w);
+    const uint32_t tc_start = us_of(w);
+    while (!U2::tx_complete() && us_of(w) < 20'000UL) {
     }
-    const uint32_t tc_us = w.us() - tc_start;
+    const uint32_t tc_us = us_of(w) - tc_start;
     print(serial, "  TXE comes back ", first_us, " us after the FIRST write, ", busy_us,
           " us after one to a busy transmitter and ", idle_us,
           " us after one to an idle one; TC then ", tc_us,
@@ -1188,8 +1161,11 @@ void tc_receive() {
         U2::clear_by_read();
         bang_word(words[i], formats[i]);
         const bool ready = wait_flag(usart_rxne, 5000);
-        const uint16_t got = static_cast<uint16_t>(U2::read_word() & uart_data_mask(formats[i]));
+        // The flags BEFORE the data read: STATR then DATAR is the pair
+        // that clears them (18.10.1), so a status read after it would say
+        // "no flag" whatever the frame raised.
         const uint16_t errors = U2::status() & (usart_pe | usart_fe | usart_ne | usart_ore);
+        const uint16_t got = static_cast<uint16_t>(U2::read_word() & uart_data_mask(formats[i]));
         print(serial, "  ", names[i], ": sent ", words[i], ", read ", got, ", flags ", errors,
               crlf);
         if (ready && got == words[i] && errors == 0u) {
@@ -1381,26 +1357,26 @@ void te_lin() {
 
         u2_lbd = 0;
         bang_break(10);
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         ten = u2_lbd;
         U2::clear_by_read();
 
         u2_lbd = 0;
         bang_break(9);
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         nine = u2_lbd;
         U2::clear_by_read();
 
         (void)U2::lin({.break_11bit = true, .break_interrupt = true});
         u2_lbd = 0;
         bang_break(11);
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         eleven = u2_lbd;
         U2::clear_by_read();
 
         u2_lbd = 0;
         bang_break(10);
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         ten_under_eleven = u2_lbd;
         Pfic::disable(Irq::usart2);
         U2::bus_clock(false);
@@ -1441,14 +1417,14 @@ void tf_half_duplex() {
     U2::enable(true);
     U2::transmitter(true);
     U2::receiver(true);
-    wait_us(3000);
+    spin_us<Ruler>(3000);
 
     // IS THE IDLE LINE HELD? The ruler's two channels are both on this
     // pad, so an edge on a line nobody is driving raises one of their
     // flags. Twenty milliseconds of an idle bus, with nothing written.
     ruler_start(psc, true);
     ruler_rearm();
-    wait_us(20'000);
+    spin_us<Ruler>(20'000);
     const bool idle_edges =
         T2::flag(T2::compare_flag(2)) || T2::flag(T2::compare_flag(3));
 
@@ -1463,7 +1439,7 @@ void tf_half_duplex() {
     const uint16_t word = heard ? static_cast<uint16_t>(U2::read_word() & 0xFFu) : 0xFFFFu;
 
     TxPad::function(PinDrive::open_drain);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     ruler_rearm();
     U2::clear_by_read();
     U2::write_data(0x00);
@@ -1493,11 +1469,10 @@ void tf_half_duplex() {
     // with it. The numbers above are this run's and the letter says so
     // rather than judging them.
     (void)idle_edges;
-    bench.verdict("the single wire wants a pull-up this board has not got: the frame's timing "
-                  "on the pad and what the instance's own receiver hears of it are printed "
-                  "above and not judged - a resistor to the supply on PA2 is what would "
-                  "decide them",
-                  true);
+    bench.skip("the single wire wants a pull-up this board has not got: the frame's timing "
+               "on the pad and what the instance's own receiver hears of it are printed "
+               "above and not judged - a resistor to the supply on PA2 is what would "
+               "decide them");
     all_off();
 }
 
@@ -1651,33 +1626,42 @@ void ck_counter_stop() {
     T3::release();
 }
 
+/// Eight bytes of 0x5A out of the clocked port and the last one off the
+/// wire, every wait bounded: a frame at 9600 is 1.04 ms, each wait allowed
+/// 5 ms. False on a bound - a port that stopped shifting.
+bool uc_eight() {
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (!wait_until<Ruler>([] { return Uc::flag(usart_txe); }, 5'000)) {
+            return false;
+        }
+        Uc::write_data(0x5A);
+    }
+    return wait_until<Ruler>([] { return Uc::flag(usart_tc); }, 5'000);
+}
+
+// The instance's own fact, where the letter registers: on this part the
+// fourth serial port is a USART4 and not a UART4 - the chapter's own
+// exception, and what makes a clock pad exist at all.
+static_assert(!has_full_fourth || (Uc::is_full && device::usart_full(4)),
+              "letters h and i run on a full USART4");
+
 void th_synchronous() {
     all_off();
     if (!has_fourth) {
-        print(serial, "  this part has no fourth serial port: the synchronous mode has no "
-                      "instrument here", crlf);
-        bench.verdict("the letter declines where the part has no fourth serial port, and says "
-                      "so", true);
+        bench.skip("this part has no fourth serial port: the synchronous mode has no instrument here");
         return;
     }
     if constexpr (!has_full_fourth) {
-        print(serial, "  the fourth port of this part is a UART4 - TX and RX, no CK pad - so "
-                      "the synchronous mode has no instrument here", crlf);
-        bench.verdict("the letter declines where the fourth serial port is a UART, and says so",
-                      true);
+        bench.skip("the fourth port of this part is a UART4 - TX and RX, no CK pad - so the synchronous "
+                   "mode has no instrument here");
         return;
     }
     constexpr uint32_t baud = 9600;
 
-    // The instance's own fact first: on this part the fourth serial port
-    // is a USART4 and not a UART4.
-    bench.verdict("the fourth serial port of this part is a full USART - the chapter's own "
-                  "exception, and what makes a clock pad exist at all",
-                  Uc::is_full && device::usart_full(4));
-
     uint32_t without_lbcl = 0;
     uint32_t with_lbcl = 0;
     uint32_t with_cpha = 0;
+    bool sent = true;
     bool idle_low = false;
     bool idle_high = false;
     bool armed = false;
@@ -1698,17 +1682,11 @@ void th_synchronous() {
         if (keeper) {
             CkKeeper::input(PinPull::up);
         }
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         idle_low = !CkPad::read();
         CkKeeper::release();
         ck_counter_start();
-        for (uint8_t i = 0; i < 8; ++i) {
-            while (!Uc::flag(usart_txe)) {
-            }
-            Uc::write_data(0x5A);
-        }
-        while (!Uc::flag(usart_tc)) {
-        }
+        sent = uc_eight() && sent;
         without_lbcl = ck_transitions();
         ck_counter_stop();
 
@@ -1721,17 +1699,11 @@ void th_synchronous() {
         if (keeper) {
             CkKeeper::input(PinPull::down);
         }
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         idle_high = CkPad::read();
         CkKeeper::release();
         ck_counter_start();
-        for (uint8_t i = 0; i < 8; ++i) {
-            while (!Uc::flag(usart_txe)) {
-            }
-            Uc::write_data(0x5A);
-        }
-        while (!Uc::flag(usart_tc)) {
-        }
+        sent = uc_eight() && sent;
         with_lbcl = ck_transitions();
         ck_counter_stop();
 
@@ -1742,16 +1714,10 @@ void th_synchronous() {
         const bool phased = Uc::synchronous({.capture_second_edge = true});
         Uc::transmitter(true);
         ck_counter_start();
-        for (uint8_t i = 0; i < 8; ++i) {
-            while (!Uc::flag(usart_txe)) {
-            }
-            Uc::write_data(0x5A);
-        }
-        while (!Uc::flag(usart_tc)) {
-        }
+        sent = uc_eight() && sent;
         with_cpha = ck_transitions();
         ck_counter_stop();
-        armed = armed && moved && phased;
+        armed = armed && moved && phased && sent;
     }
     print(serial, "  eight bytes give ", without_lbcl, " transitions with LBCL clear and ",
           with_lbcl, " with it set (", without_lbcl / 16u, " and ", with_lbcl / 16u,
@@ -1803,9 +1769,9 @@ void th_synchronous() {
         Uc::receiver(true);
         Uc::clear_by_read();
         Uc::write_data(0x33);
-        Stopwatch w;
-        while (!Uc::flag(usart_rxne) && w.us() < 5000u) {
-        }
+        // A frame at 9600 is 1.04 ms; the verdict reads RXNE itself, so
+        // the time-out is the outcome it judges.
+        (void)wait_until<Ruler>([] { return Uc::flag(usart_rxne); }, 5'000);
         status = Uc::status();
         empty = (status & usart_rxne) == 0u && U4RxPad::read();
         print(serial, "  a clocked byte with nothing on RX left the receiver ",
@@ -1826,22 +1792,22 @@ void th_synchronous() {
 void ti_smartcard() {
     all_off();
     if (!has_fourth) {
-        print(serial, "  this part has two usarts and no fourth: the smartcard has no "
-                      "instrument here", crlf);
-        bench.verdict("the letter declines where the part has no fourth serial port, and says "
-                      "so", true);
+        bench.skip("this part has two usarts and no fourth: the smartcard has no instrument here");
         return;
     }
     if constexpr (!has_full_fourth) {
-        print(serial, "  the fourth port of this part is a UART4 - no CK pad for a card's "
-                      "clock - so the smartcard has no instrument here", crlf);
-        bench.verdict("the letter declines where the fourth serial port is a UART, and says so",
-                      true);
+        bench.skip("the fourth port of this part is a UART4 - no CK pad for a card's clock - so the "
+                   "smartcard has no instrument here");
         return;
     }
     constexpr uint32_t baud = 9600;
     constexpr uint8_t card_prescaler = 6;   // the clock is PCLK1 / (2 x PSC)
     constexpr uint8_t guard = 16;
+    // The timed window: under the kernel tick's period, and a whole
+    // divisor of half a second, so the rate is the count times a constant.
+    constexpr uint32_t card_window_us = 800;
+    static_assert(card_window_us < 1000u && 500'000u % card_window_us == 0u,
+                  "the card-clock window fits between two ticks and divides half a second");
     const bool keeper = ck_keeper_strapped();
     print(serial, "  the CK node's keeper PA8 ", keeper ? "reaches PA6 (the board's strap)" : "is not strapped to PA6",
           crlf);
@@ -1852,6 +1818,7 @@ void ti_smartcard() {
     uint32_t transitions = 0;
     uint32_t armed_transitions = 0;
     uint32_t sending_transitions = 0;
+    bool window_quiet = false;
     if (u4_up(UartFormat{UartBits::eight, UartParity::even}, baud)) {
         armed = Uc::smartcard({.nack = true, .guard_time = guard,
                                .clock_prescaler = card_prescaler}) &&
@@ -1877,17 +1844,41 @@ void ti_smartcard() {
             CkKeeper::input(PinPull::down);
         }
         ck_counter_start();
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         transitions = ck_transitions();
         ck_counter_stop();
         CkKeeper::release();
 
         Uc::transmitter(true);
-        wait_us(1000);
-        ck_counter_start();
-        wait_us(2000);
-        armed_transitions = ck_transitions();
-        ck_counter_stop();
+        spin_us<Ruler>(1000);
+        // THE TIMED WINDOW, the rate's verdict: the console drained first,
+        // then the window opened right after a kernel tick and closed
+        // before the next - card_window_us under the tick's 1000 us, so a
+        // quiet window is the rule and not luck (a window of 2 ms always
+        // holds a tick). The tick and the console's vector are still
+        // counted around it; a window either moved is taken again (up to
+        // four times) and printed, not judged (the bound below).
+        for (uint8_t attempt = 0; attempt < 4u; ++attempt) {
+            if (!brio::console_drain<Ruler, Serial>()) {
+                break;
+            }
+            const uint32_t edge = P::now();
+            if (!wait_ticks<P>([edge] { return P::now() != edge; }, 2u)) {
+                break;
+            }
+            const uint32_t console0 = console_entries;
+            const TickWitness<P> tick;
+            ck_counter_start();
+            spin_us<Ruler>(card_window_us);
+            armed_transitions = ck_transitions();
+            ck_counter_stop();
+            window_quiet = tick.quiet() && console_entries == console0;
+            if (window_quiet) {
+                break;
+            }
+            print(serial, "  a card-clock window of ", armed_transitions,
+                  " transitions lengthened by an interrupt entry - not judged, taken again", crlf);
+        }
 
         ck_counter_start();
         Uc::write_data(0x5A);
@@ -1895,32 +1886,38 @@ void ti_smartcard() {
         sending_transitions = ck_transitions();
         ck_counter_stop();
     }
-    // Two transitions a period, over the two milliseconds each window
-    // lasted.
+    // Two transitions a period, over the timed window's card_window_us.
     const uint32_t want_hz = pclk1 / (2u * card_prescaler);
-    const uint32_t got_hz = armed_transitions / 2u * 500u;
+    const uint32_t got_hz = armed_transitions * (500'000u / card_window_us);
     print(serial, "  the card clock counted ", transitions,
           " transitions in 2 ms with the transmitter off, ", armed_transitions,
-          " with it on (", got_hz, " Hz for ", want_hz, " asked) and ", sending_transitions,
-          " while a frame went out", crlf);
+          " in ", card_window_us, " us with it on (", got_hz, " Hz for ", want_hz, " asked) and ",
+          sending_transitions, " while a frame went out", crlf);
     bench.verdict("the smartcard's own verb writes SCEN with its NACK, the guard time and the "
                   "prescaler, and sets the 1.5 stop bits 18.6 asks for",
                   armed && stops && guarded);
-    // THE BOUND: two transitions a period over a window of 2 ms on the
-    // stopwatch, which ends up to one poll late (under 0.1 us) plus a
-    // vector that lands between its end and the count's read (the tick's,
-    // under 1 us): 1 us in 2000, half a per mille, with one transition of
-    // 24000 quantization - judged at one per mille.
+    // THE BOUND: two transitions a period over a window of 800 us on the
+    // ruler, which the counter overruns at both ends - it is enabled before
+    // the ruler's first composed read takes its sample, and read after the
+    // turn whose composed read saw the end, with its compare, the return
+    // and the count's load over the peripheral bus: about eighty cycles in
+    // all at 144 MHz, 0.55 us, 0.7 per mille of 800 us - and no handler
+    // inside it, the window judged being a quiet one, no tick and no
+    // console entry (the window above). With one transition of the 9600 a
+    // 6 MHz card clock makes in it (a tenth of a per mille), 0.8 per mille
+    // - judged at one per mille; measured 9606 (0.6 per mille over) on the
+    // CH32V203C8T6. Both ends count the same crystal, so the clocks add no
+    // error of their own.
     bench.verdict("the card clock is the peripheral clock divided by TWICE the prescaler and it "
                   "runs free, whether or not anything is being sent",
-                  near(got_hz, want_hz, 1));
+                  window_quiet && near(got_hz, want_hz, 1));
     if (keeper) {
         bench.verdict("but only with the TRANSMITTER enabled: with TE clear the pad stays still, the "
                       "node's keeper holding it - no transition in 2 ms",
                       transitions == 0u);
     } else {
-        print(serial, "  SKIP  the TE-clear window: nothing holds the CK node on this board, and a "
-                      "floating pad counts its own noise", crlf);
+        bench.skip("the TE-clear window: nothing holds the CK node on this board, and a floating pad "
+                   "counts its own noise");
     }
 
     // The refusals. The clock has to come off first: LIN and the clock
@@ -1965,7 +1962,7 @@ void tj_flags() {
     u2_tc = 0;
     U2::write_data(0x55);
     (void)tx_settled();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t txe = u2_txe;
     const uint32_t tc = u2_tc;
     U2::interrupts(usart_txeie | usart_tcie, false);
@@ -1981,9 +1978,9 @@ void tj_flags() {
     u2_idle = 0;
     U2::clear_by_read();
     bang_word(0x5A, UartFormat{});
-    wait_us(4000);
+    spin_us<Ruler>(4000);
     bang_idle(12);
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t rxne = u2_rxne;
     const uint32_t idle = u2_idle;
     const uint16_t word = u2_last_word;
@@ -2006,7 +2003,7 @@ void tj_flags() {
         Frame fr{.data = 0x3C, .bits = 8, .parity = true,
                  .parity_value = !even_parity(0x3C, 8), .baud = baud};
         bang_frame(fr);
-        wait_us(4000);
+        spin_us<Ruler>(4000);
         parity_vector = u2_pe >= 1u;
         U2::parity_interrupt(false);
         U2::rxne_interrupt(false);
@@ -2015,8 +2012,7 @@ void tj_flags() {
 
     // The fourth port's own vector, which is the device class's tail.
     if (!has_fourth) {
-        bench.verdict("the fourth serial port's vector is not this part's to reach: it has no "
-                      "fourth serial port", true);
+        bench.skip("the fourth serial port's vector is not this part's to reach: it has no fourth serial port");
         all_off();
         return;
     }
@@ -2030,7 +2026,7 @@ void tj_flags() {
     u4_interrupts = 0;
     U4::clear_flags(usart_tc);
     U4::write_data(0x11);
-    wait_us(4000);
+    spin_us<Ruler>(4000);
     const uint32_t fourth = u4_interrupts;
     print(serial, "  the fourth port's vector ran ", fourth, " times", crlf);
     if constexpr (v30x_vectors) {
@@ -2065,12 +2061,12 @@ void tk_flow() {
     U2::enable(true);
     U2::transmitter(true);
     U2::receiver(true);
-    wait_us(3000);
+    spin_us<Ruler>(3000);
 
     // CTS high holds the frame back: TC does not come.
     U2::clear_flags(usart_tc);
     U2::write_data(0xA5);
-    wait_us(4000);
+    spin_us<Ruler>(4000);
     const bool held = !U2::flag(usart_tc);
     CtsPad::clear();                     // low: clear to send
     const bool released = wait_flag(usart_tc, 20'000);
@@ -2083,14 +2079,14 @@ void tk_flow() {
     // RTS: low while the receiver can take a frame, high while a byte
     // waits unread.
     U2::clear_by_read();
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     const bool ready_low = !RtsPad::read();
     bang_word(0x7E, UartFormat{});
     (void)wait_flag(usart_rxne, 5000);
-    wait_us(500);
+    spin_us<Ruler>(500);
     const bool busy_high = RtsPad::read();
     (void)U2::read_word();
-    wait_us(500);
+    spin_us<Ruler>(500);
     const bool free_again = !RtsPad::read();
     print(serial, "  RTS reads ", ready_low ? "low" : "HIGH", " with the receiver free, ",
           busy_high ? "high" : "LOW", " with a byte waiting, ", free_again ? "low" : "HIGH",
@@ -2107,12 +2103,12 @@ void tk_flow() {
     u2_cts = 0;
     U2::cts_interrupt(true);
     CtsPad::set();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t on_high = u2_cts;
     U2::clear_flags(usart_cts);
     U2::cts_interrupt(true);
     CtsPad::clear();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t on_low = u2_cts;
     U2::cts_interrupt(false);
     Pfic::disable(Irq::usart2);
@@ -2142,9 +2138,7 @@ uint32_t xorshift(uint32_t& state) {
 void tl_loopback() {
     all_off();
     if (!need_loop_wire()) {
-        print(serial, "  the strap PA2 to PA3 is ABSENT: the loopback letter measures nothing",
-              crlf);
-        bench.verdict("the loopback letter declines without its wire, and says so", true);
+        bench.skip("the strap PA2 to PA3 is ABSENT: the loopback letter measures nothing");
         return;
     }
     print(serial, "  the strap PA2 to PA3 is in place", crlf);
@@ -2183,10 +2177,11 @@ void tl_loopback() {
     constexpr uint8_t length = sizeof(message) - 1u;
     Loop::clear_errors();
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     uint8_t got = 0;
     uint8_t back[length] = {};
-    while (got < length && w.us() < 50'000UL) {
+    while (got < length && us_of(w) < 50'000UL) {
         uint8_t b = 0;
         while (got < length && Loop::read_byte(b)) {
             back[got++] = b;
@@ -2196,7 +2191,7 @@ void tl_loopback() {
     for (uint8_t i = 0; i < length && same; ++i) {
         same = back[i] == message[i];
     }
-    print(serial, "  the engines carried ", got, " of ", length, " bytes in ", w.us(),
+    print(serial, "  the engines carried ", got, " of ", length, " bytes in ", us_of(w),
           " us, faults ", Loop::dma_faults(), ", overruns ", Loop::rx_overruns(), crlf);
     bench.verdict("the transmit engine drains the ring by whole blocks and the receive engine "
                   "fills it, read as it lands and identical byte for byte",
@@ -2212,8 +2207,9 @@ void tl_loopback() {
     uint32_t sent = 0;
     uint32_t received = 0;
     uint32_t wrong = 0;
-    Stopwatch run;
-    while (received < run_bytes && run.us() < 2'000'000UL) {
+    Stopwatch<Ruler> run;
+    run.start();
+    while (received < run_bytes && us_of(run) < 2'000'000UL) {
         while (sent < run_bytes && sent - received < 128u) {
             if (!Loop::write_byte(static_cast<uint8_t>(xorshift(tx_state) & 0xFFu))) {
                 break;
@@ -2228,7 +2224,7 @@ void tl_loopback() {
             ++received;
         }
     }
-    const uint32_t run_us = run.us();
+    const uint32_t run_us = us_of(run);
     print(serial, "  ", received, " of ", run_bytes, " bytes at ", fast_baud, " baud in ",
           run_us, " us, ", wrong, " wrong, overruns ", Loop::rx_overruns(), "/",
           Loop::hw_overruns(), ", frame errors ", Loop::frame_errors(), crlf);
@@ -2253,42 +2249,48 @@ void tl_loopback() {
 // m - the crossed pair
 // ===========================================================================
 
+/// The receiver's error flags a polled read can see.
+constexpr uint16_t rx_error_flags = usart_pe | usart_fe | usart_ne | usart_ore;
+
+/// One port's half of a crossed exchange: `byte` written when its
+/// transmitter takes it (20 ms allowed - a frame at 19200 is 0.6 ms) and
+/// the frame awaited at the other port (20 ms), the receiver's flags taken
+/// BEFORE the data read - STATR then DATAR is the pair that clears them
+/// (18.10.1) - and OR-ed into `flags`. The word read, or nothing on a
+/// bound.
+template <typename From, typename To>
+std::optional<uint16_t> cross_one(uint8_t byte, uint16_t& flags) {
+    if (!wait_until<Ruler>([] { return From::tx_empty(); }, 20'000)) {
+        return std::nullopt;
+    }
+    From::write_data(byte);
+    if (!wait_until<Ruler>([] { return To::rx_ready(); }, 20'000)) {
+        return std::nullopt;
+    }
+    flags = static_cast<uint16_t>(flags | (To::status() & rx_error_flags));
+    return To::read_word();
+}
+
 /// One direction of the crossed pair, polled: `count` xorshift bytes out
-/// of `from` and into `to`, with the flags counted.
-uint32_t cross_run(uint32_t count, bool from_u2) {
+/// of `from` and into `to`, the receiving end's flags gathered into
+/// `flags` frame by frame. The wrong bytes, or 0xFFFF when the run stopped
+/// short.
+uint32_t cross_run(uint32_t count, bool from_u2, uint16_t& flags) {
     uint32_t state = 0x2468'1357UL;
     uint32_t check = 0x2468'1357UL;
     uint32_t wrong = 0;
     uint32_t got = 0;
-    Stopwatch w;
-    for (uint32_t i = 0; i < count && w.us() < 2'000'000UL; ++i) {
+    Stopwatch<Ruler> w;
+    w.start();
+    for (uint32_t i = 0; i < count && us_of(w) < 2'000'000UL; ++i) {
         const uint8_t byte = static_cast<uint8_t>(xorshift(state) & 0xFFu);
-        if (from_u2) {
-            while (!U2::tx_empty()) {
-            }
-            U2::write_data(byte);
-            Stopwatch f;
-            while (!U4::rx_ready() && f.us() < 20'000UL) {
-            }
-            if (!U4::rx_ready()) {
-                break;
-            }
-            if ((U4::read_word() & 0xFFu) != (xorshift(check) & 0xFFu)) {
-                ++wrong;
-            }
-        } else {
-            while (!U4::tx_empty()) {
-            }
-            U4::write_data(byte);
-            Stopwatch f;
-            while (!U2::rx_ready() && f.us() < 20'000UL) {
-            }
-            if (!U2::rx_ready()) {
-                break;
-            }
-            if ((U2::read_word() & 0xFFu) != (xorshift(check) & 0xFFu)) {
-                ++wrong;
-            }
+        const std::optional<uint16_t> word = from_u2 ? cross_one<U2, U4>(byte, flags)
+                                                     : cross_one<U4, U2>(byte, flags);
+        if (!word) {
+            break;
+        }
+        if ((*word & 0xFFu) != (xorshift(check) & 0xFFu)) {
+            ++wrong;
         }
         ++got;
     }
@@ -2298,21 +2300,15 @@ uint32_t cross_run(uint32_t count, bool from_u2) {
 void tm_cross() {
     all_off();
     if (!has_fourth) {
-        print(serial, "  this part has no fourth serial port: the crossed pair has no peer "
-                      "here", crlf);
-        bench.verdict("the letter declines where the part has no fourth serial port, and says "
-                      "so", true);
+        bench.skip("this part has no fourth serial port: the crossed pair has no peer here");
         return;
     }
     if (!need_cross_wires()) {
         if constexpr (pair_retired) {
-            print(serial, "  the wires PA2-PC11 and PC10-PA3 are ABSENT: the crossed pair "
-                  "measures nothing", crlf);
+            bench.skip("the wires PA2-PC11 and PC10-PA3 are ABSENT: the crossed pair measures nothing");
         } else {
-            print(serial, "  the straps PA2-PB1 and PB0-PA3 are ABSENT: the crossed pair measures "
-                  "nothing", crlf);
+            bench.skip("the straps PA2-PB1 and PB0-PA3 are ABSENT: the crossed pair measures nothing");
         }
-        bench.verdict("the crossed-pair letter declines without its wires, and says so", true);
         return;
     }
     if constexpr (pair_retired) {
@@ -2340,14 +2336,16 @@ void tm_cross() {
         U4::enable(true);
         U4::transmitter(true);
         U4::receiver(true);
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         U2::clear_by_read();
         U4::clear_by_read();
 
-        const uint32_t out = cross_run(64, true);
-        const uint32_t back = cross_run(64, false);
-        const uint16_t u2_errors = U2::status() & (usart_pe | usart_fe | usart_ne | usart_ore);
-        const uint16_t u4_errors = U4::status() & (usart_pe | usart_fe | usart_ne | usart_ore);
+        // Each receiver's flags gathered frame by frame, before the read
+        // that clears them (cross_one()).
+        uint16_t u4_errors = 0;
+        uint16_t u2_errors = 0;
+        const uint32_t out = cross_run(64, true, u4_errors);
+        const uint32_t back = cross_run(64, false, u2_errors);
         // Both ends divide PB1 by one arithmetic, so the pair cannot tell a
         // wrong bus rate: each transmitter's run timed on the core's counter
         // at the rate asked - a start bit, the data, the parity, the stops.
@@ -2355,7 +2353,7 @@ void tm_cross() {
         const uint32_t frames = r == 0u ? 256u : 32u;
         const uint32_t pm2 = usart_permille<U2>(bauds[r], bits, frames);
         const uint32_t pm4 = usart_permille<U4>(bauds[r], bits, frames);
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         U2::clear_by_read();
         U4::clear_by_read();
         print(serial, "  ", names[r], ": 64 bytes out with ", out, " wrong, 64 back with ",
@@ -2408,12 +2406,25 @@ struct V303State {
 
 /// The rate cross_break() times its low run at.
 uint32_t cross_baud = 115200;
+/// Raised when a wait of the stimulus on its own transmitter ran out - a
+/// sender that stopped shifting; cleared by cross_sender_up(), and folded
+/// into the verdicts of the letters that send through it.
+bool cross_stalled = false;
+
+/// The sender's last frame off the wire (TC), bounded: 20 ms against a
+/// frame of 87 us at the slowest rate the letters use.
+void cross_drain() {
+    if (!wait_until<Ruler>([] { return U4::tx_complete(); }, 20'000)) {
+        cross_stalled = true;
+    }
+}
 
 /// The fourth port bare on its default column - the crossed pair's - as
 /// the stimulus: TE alone, written by the CPU. Its own STATR is polled,
 /// which is a different instance's and arms no clear of USART2's.
 bool cross_sender_up(uint32_t baud) {
     cross_baud = baud;
+    cross_stalled = false;
     U4::bus_clock(true);
     U4::reset();
     CrossTxPad::function();
@@ -2422,14 +2433,18 @@ bool cross_sender_up(uint32_t baud) {
     }
     U4::enable(true);
     U4::transmitter(true);
-    wait_us(3000);
+    spin_us<Ruler>(3000);
     return true;
 }
 
 /// A byte into the stream: written as soon as the data register is free,
-/// so bytes follow back to back with no idle frame between them.
+/// so bytes follow back to back with no idle frame between them. The wait
+/// bounded at 20 ms (a frame is 87 us at 115200); on the bound the byte is
+/// not written and the stall is raised.
 void cross_byte(uint8_t b) {
-    while (!U4::tx_empty()) {
+    if (!wait_until<Ruler>([] { return U4::tx_empty(); }, 20'000)) {
+        cross_stalled = true;
+        return;
     }
     U4::write_data(b);
 }
@@ -2441,16 +2456,16 @@ void cross_byte(uint8_t b) {
 /// an SBK break, so every SBK put a repeated byte into the stream - a
 /// fact of the sender, not of the receiver this letter judges.
 void cross_break() {
-    while (!U4::tx_complete()) {
-    }
+    cross_drain();
     const uint32_t bit = SysClock::hz / cross_baud;
     CrossTxPad::output();
     CrossTxPad::clear();
-    Stopwatch w;
-    while (w.cycles() < 12u * bit) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < 12u * bit) {
     }
     CrossTxPad::set();
-    while (w.cycles() < 13u * bit) {
+    while (w.elapsed() < 13u * bit) {
     }
     CrossTxPad::function();
 }
@@ -2466,7 +2481,7 @@ bool transport_up(bool plain, uint32_t baud) {
     u2_plain = plain;
     u2_transport = true;
     const bool ok = T::init(clock, baud);
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     uint8_t b = 0;
     while (T::read_byte(b)) {
     }
@@ -2481,9 +2496,7 @@ constexpr uint8_t stream_byte(uint32_t i) { return static_cast<uint8_t>(i * 151u
 void tq_errors() {
     all_off();
     if (!has_fourth || !need_cross_wires()) {
-        print(serial, "  the crossed pair is absent: the errors under the engine measure "
-                      "nothing", crlf);
-        bench.verdict("the letter declines without its wires, and says so", true);
+        bench.skip("the crossed pair is absent: the errors under the engine measure nothing");
         return;
     }
     constexpr uint32_t n = 120;
@@ -2507,9 +2520,8 @@ void tq_errors() {
             ++breaks;
         }
     }
-    while (!U4::tx_complete()) {
-    }
-    wait_us(2000);
+    cross_drain();
+    spin_us<Ruler>(2000);
     uint32_t data = 0;
     uint32_t zeros = 0;
     uint32_t got = 0;
@@ -2534,9 +2546,10 @@ void tq_errors() {
     const uint16_t fe = Loop::frame_errors();
     print(serial, "  ", n, " data bytes and ", breaks, " breaks through the receive engine: ", data,
           " data bytes in order, ", zeros, " break frames, ", got, " stored; FE ", fe, ", ORE ",
-          Loop::hw_overruns(), ", laps missed ", Loop::rx_overruns(), crlf);
+          Loop::hw_overruns(), ", laps missed ", Loop::rx_overruns(), cross_stalled ? "; THE SENDER STALLED" : "",
+          crlf);
     bench.verdict("every data byte delivered, intact and in order: no byte taken by a clear",
-                  up && data == n && in_order);
+                  up && !cross_stalled && data == n && in_order);
     bench.verdict("each break stored as the frame it is (0x00)", zeros == breaks);
     bench.verdict("the frame errors counted one a break", fe == breaks);
 
@@ -2551,7 +2564,7 @@ void tq_errors() {
         }
         cross_byte(0x22);
         cross_byte(0x23);
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         counts[k] = Loop::frame_errors();
     }
     print(serial, "  back to back: two breaks count ", counts[0], ", three count ", counts[1], crlf);
@@ -2568,9 +2581,8 @@ void tq_errors() {
     bool ok = true;
     uint8_t b = 0;
     auto read_all = [&] {
-        while (!U4::tx_complete()) {
-        }
-        wait_us(100);   // the last frame's stop bit and its entry
+        cross_drain();
+        spin_us<Ruler>(100);   // the last frame's stop bit and its entry
         while (Plain::read_byte(b)) {
             if (b != stream_byte(back)) {
                 ok = false;
@@ -2593,7 +2605,7 @@ void tq_errors() {
           back, " delivered, FE ", Plain::frame_errors(), ", skips ", skips, crlf);
     bench.verdict("the interrupt receiver drops each break's frame, counts it and skips it: "
                   "a reader that looks between the breaks is handed every data byte",
-                  back == 40u && ok && Plain::frame_errors() == breaks && skips == breaks);
+                  !cross_stalled && back == 40u && ok && Plain::frame_errors() == breaks && skips == breaks);
     // ... and read after, nothing the ring held with a break behind it:
     // no run joins the two sides.
     const uint32_t skips1 = Plain::rx_skips();
@@ -2603,7 +2615,7 @@ void tq_errors() {
             cross_break();
         }
     }
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     uint32_t joined = 0;
     while (Plain::read_byte(b)) {
         ++joined;
@@ -2617,11 +2629,42 @@ void tq_errors() {
     all_off();
 }
 
-/// Four 0x55 frames (bit 7 low: the stop bit starts with a rising edge)
-/// through `T`, TIM2's channel 3 latching PA2's last rising edge; the
-/// timer clocks from that edge to tx_idle()'s first true.
+/// One reading of letter r: the timer clocks from the last stop bit's
+/// rising edge to tx_idle()'s first true; whether tx_idle() came at all;
+/// and whether nothing but the poll ran meanwhile (the lengtheners rule:
+/// no tick, no entry of the console's vector).
+struct IdleReading {
+    int32_t clocks = 0;
+    bool seen = false;
+    bool quiet = false;
+};
+
+/**
+ * Four 0x55 frames (bit 7 low: the stop bit starts with a rising edge)
+ * through `T`, TIM2's channel 3 latching PA2's last rising edge, and the
+ * timer's count read at tx_idle()'s first true.
+ *
+ * THE POLL'S COST, from the code: the stamp is read AFTER the true answer
+ * - the flag stood when STATR was read, so the count is never early - and
+ * it is late by what lies between TC rising and that count's read: at most
+ * one turn of the wait (tx_idle() - the ring's two indices, the transmit
+ * engine's busy() for the engine, the STATR load - then one read of the
+ * composed cycle count with its compare: some thirty to forty
+ * instructions with two or three peripheral loads), then the T2 count's
+ * own load. The derived ceiling is the stop bit plus that turn: 144 clocks
+ * plus under 144 at 1 Mbaud, the 2 x bit the verdict allows (the turn's
+ * figure is the code's count, not yet a measurement). A handler served in
+ * the window - the tick, a console line going out - adds its own length,
+ * which the ceiling does not count, so the console is drained first (the
+ * reading is not taken when it does not go idle), the console's vector
+ * entries are counted around the reading, and the tick count is read at
+ * every turn of the wait: a reading is lengthened when a tick landed
+ * between the start of the turn before the one that saw TC and the
+ * count's read - the stretch the reading measures - and not when one
+ * landed earlier, while the frames were still going out.
+ */
 template <typename T>
-int32_t idle_after_stop(bool plain, uint32_t baud) {
+IdleReading idle_after_stop(bool plain, uint32_t baud) {
     static const uint8_t frames[4] = {0x55, 0x55, 0x55, 0x55};
     (void)transport_up<T>(plain, baud);
     T2::init();
@@ -2630,25 +2673,53 @@ int32_t idle_after_stop(bool plain, uint32_t baud) {
                                   .polarity = TimCapturePolarity::rising});
     T2::clear_flags(T2::all_flags);
     T2::enable(true);
-    (void)T::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
-    uint32_t t_idle = 0;
-    Stopwatch w;
-    // The stamp is taken AFTER the true answer: the flag stood when STATR
-    // was read, so the count read after it is never early - late by a
-    // poll's few cycles at most.
-    for (;;) {
-        if (T::tx_idle()) {
-            t_idle = T2::count();
-            break;
-        }
-        if (w.us() > 20'000u) {
-            break;
-        }
+    IdleReading out{};
+    if (brio::console_drain<Ruler, Serial>()) {
+        const uint32_t console0 = console_entries;
+        // The tick count at the start of the turn before the current one:
+        // TC rose after that turn's STATR load, so a tick read moved from
+        // there to the count's read landed inside the stretch the reading
+        // measures; one earlier in the frames does not, and a witness over
+        // the whole 0.35 ms would call a third of those at 115200 lengthened.
+        uint32_t turn_before = P::now();
+        bool tick_inside = false;
+        (void)T::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
+        uint32_t t_idle = 0;
+        // Four frames at 115200 are 0.35 ms; 20 ms allowed.
+        out.seen = wait_until<Ruler>(
+            [&t_idle, &turn_before, &tick_inside] {
+                const uint32_t turn = P::now();
+                if (T::tx_idle()) {
+                    t_idle = T2::count();
+                    tick_inside = P::now() != turn_before;
+                    return true;
+                }
+                turn_before = turn;
+                return false;
+            },
+            20'000);
+        out.quiet = !tick_inside && console_entries == console0;
+        out.clocks = static_cast<int32_t>((t_idle - T2::compare(2)) & 0xFFFFu);
     }
-    const uint32_t edge = T2::compare(2);
     ruler_stop();
     T::release();
-    return static_cast<int32_t>((t_idle - edge) & 0xFFFFu);
+    return out;
+}
+
+/// Letter r's reading taken again until one is quiet, up to four times;
+/// each lengthened one is printed with its figure and not judged.
+template <typename T>
+IdleReading quiet_idle_after_stop(bool plain, uint32_t baud, const char* name) {
+    IdleReading r{};
+    for (uint8_t attempt = 0; attempt < 4u; ++attempt) {
+        r = idle_after_stop<T>(plain, baud);
+        if (r.quiet || !r.seen) {
+            return r;
+        }
+        print(serial, "  ", name, " at ", baud, ": a reading of ", r.clocks,
+              " clocks lengthened by an interrupt entry - not judged, taken again", crlf);
+    }
+    return r;
 }
 
 /// A transport's transmit run at `baud`, brought up and released around
@@ -2674,16 +2745,21 @@ void tr_tx_idle() {
         bench.verdict("both transmitters run at the rate asked, -1 % to +3 % of the wire: ",
                       baud == 115200 ? "115200" : "1 Mbaud", wire_ok(pm_plain) && wire_ok(pm_dma));
         const uint32_t bit = timclk1 / baud;
-        const int32_t d_plain = idle_after_stop<Plain>(true, baud);
-        const int32_t d_dma = idle_after_stop<Loop>(false, baud);
+        const IdleReading r_plain = quiet_idle_after_stop<Plain>(true, baud, "the interrupt transmitter");
+        const IdleReading r_dma = quiet_idle_after_stop<Loop>(false, baud, "the transmit engine");
+        const int32_t d_plain = r_plain.clocks;
+        const int32_t d_dma = r_dma.clocks;
         print(serial, "  ", baud, " baud, a bit ", bit, " timer clocks: tx_idle() true ", d_plain,
-              " clocks after the stop bit's rising edge (interrupt transmitter), ", d_dma,
-              " (transmit engine)", crlf);
+              " clocks after the stop bit's rising edge (interrupt transmitter", r_plain.quiet ? "" : ", NOT QUIET",
+              "), ", d_dma, " (transmit engine", r_dma.quiet ? "" : ", NOT QUIET", ")", crlf);
         const int32_t lo = static_cast<int32_t>(bit);
         const int32_t hi = static_cast<int32_t>(2u * bit);
+        // Judged on quiet readings alone (idle_after_stop()); four
+        // lengthened in a row is no luck, and fails.
         bench.verdict("tx_idle() never before the last stop bit is out, within a bit after it: ",
                       baud == 115200 ? "115200" : "1 Mbaud",
-                      d_plain >= lo && d_plain <= hi && d_dma >= lo && d_dma <= hi);
+                      r_plain.seen && r_plain.quiet && r_dma.seen && r_dma.quiet && d_plain >= lo &&
+                          d_plain <= hi && d_dma >= lo && d_dma <= hi);
     }
     all_off();
 }
@@ -2710,8 +2786,7 @@ uint32_t loop_read(uint32_t from, bool& in_order) {
 void ts_edge() {
     all_off();
     if (!has_fourth || !need_cross_wires()) {
-        print(serial, "  the crossed pair is absent: the edge measures nothing", crlf);
-        bench.verdict("the letter declines without its wires, and says so", true);
+        bench.skip("the crossed pair is absent: the edge measures nothing");
         return;
     }
     const bool up = transport_up<Loop>(false, 1'000'000) && cross_sender_up(1'000'000);
@@ -2730,7 +2805,7 @@ void ts_edge() {
         (void)loop_read(0, ok);
         const uint32_t e0 = u2_edges;
         cross_byte(0x42);
-        wait_us(200);
+        spin_us<Ruler>(200);
         const uint32_t e1 = u2_edges;
         const uint32_t got = loop_read(0, ok);
         print(serial, "  a burst of one frame: ", e1 - e0, " edge(s), ", got, " byte read", crlf);
@@ -2745,32 +2820,42 @@ void ts_edge() {
     // own, a different instance's STATR).
     bool ok = true;
     (void)loop_read(0, ok);
-    wait_us(200);
+    spin_us<Ruler>(200);
     u2_edge_entries = 0;
     const uint32_t e0 = u2_edges;
     uint32_t got = 0;
     for (uint32_t i = 0; i < 16u; ++i) {
+        if (i == 15u) {
+            // TC CLEARED BEFORE THE LAST WRITE, with the frame before it
+            // still in the shifter (TXE just seen): it cannot rise for that
+            // frame, DATAR being full when it ends, and rises at the last
+            // frame's stop bit. Cleared after the write instead, it would
+            // stay down for good whenever the last frame had already ended.
+            if (!wait_until<Ruler>([] { return U4::tx_empty(); }, 20'000)) {
+                cross_stalled = true;
+            }
+            U4::clear_flags(usart_tc);
+        }
         cross_byte(stream_byte(i));
         if (u2_edges != e0) {
             got += loop_read(got, ok);   // a first frame's edge: the consumer drains, as it would
         }
     }
-    U4::clear_flags(usart_tc);   // the last byte is still in flight: TC falls and rises again
-    while (!U4::tx_complete()) {
-    }
-    Stopwatch since;
+    // The last stop bit, two frames at most away (20 us at 1 Mbaud; 1 ms
+    // allowed).
+    const bool last_out = wait_until<Ruler>([] { return U4::tx_complete(); }, 1'000);
     const uint32_t before = u2_edges;
-    while (u2_edges == before && since.us() < 2000u) {
-    }
-    const uint32_t late = since.cycles();
-    wait_us(200);
+    const std::optional<uint32_t> told = cycles_until<Ruler>([before] { return u2_edges != before; }, 2'000);
+    const uint32_t late = told.value_or(us_cycles<Ruler>(2'000));
+    spin_us<Ruler>(200);
     got += loop_read(got, ok);
     print(serial, "  16 frames: ", u2_edges - e0, " edge(s), the last about ", late,
           " cycles after the last stop bit (", late * 10u / frame, " tenths of a frame); ",
-          u2_edge_entries, " USART interrupt(s); ", got, " read", crlf);
+          u2_edge_entries, " USART interrupt(s); ", got, " read",
+          last_out && !cross_stalled ? "" : "; THE SENDER STALLED", crlf);
     bench.verdict("the burst read whole, nothing polled", got == 16u && ok);
     bench.verdict("its edge within two frame times of the last stop bit",
-                  u2_edges != before && late <= 2u * frame);
+                  last_out && !cross_stalled && told.has_value() && late <= 2u * frame);
     bench.verdict("at most two USART interrupts a burst, none a byte",
                   u2_edge_entries >= 1u && u2_edge_entries <= 2u);
 
@@ -2787,8 +2872,9 @@ void ts_edge() {
             read += loop_read(read, ok);
         }
     }
-    Stopwatch tail;
-    while (read < 1024u && tail.us() < 5000u) {
+    Stopwatch<Ruler> tail;
+    tail.start();
+    while (read < 1024u && us_of(tail) < 5000u) {
         if (u2_edges != seen) {
             seen = u2_edges;
             read += loop_read(read, ok);
@@ -2848,17 +2934,18 @@ constexpr uint32_t hclk = D::hclk;
 constexpr uint32_t calib_rate = D::calib_rate;
 constexpr uint16_t calib_frames = D::calib_frames;
 
-/// A verdict, unless the peer refused the leg: then SKIP, counting nothing.
+/// A verdict, unless the peer refused the leg: then a SKIP (report() has
+/// said which op it refused), counted apart from passes and fails.
 void judge(const char* name, bool ok) {
     if (D::leg_refused) {
-        print(serial, "  SKIP  ", name, " (the peer refused the leg)", crlf);
+        bench.skip(name, " (the peer refused the leg)");
         return;
     }
     bench.verdict(name, ok);
 }
 void judge(const char* name, const char* suffix, bool ok) {
     if (D::leg_refused) {
-        print(serial, "  SKIP  ", name, suffix, " (the peer refused the leg)", crlf);
+        bench.skip(name, suffix);
         return;
     }
     bench.verdict(name, suffix, ok);
@@ -2938,12 +3025,15 @@ void t1_link() {
     D::put(link::byte_of(link::Op::ping));
     D::put(0);
     D::put(0x00);   // not the checksum
-    D::wait_tc();
+    const bool bad_out = D::wait_tc();
     link::Frame bad;
-    bench.verdict("a bad checksum comes back as a NAK", D::recv_frame(bad, 120) && bad.op == link::Op::nak);
+    bench.verdict("a bad checksum comes back as a NAK",
+                  bad_out && D::recv_frame(bad, 120) && bad.op == link::Op::nak);
     for (uint8_t i = 0; i < 12u; ++i) D::put(static_cast<uint8_t>(0x11u * i));
-    D::wait_tc();
-    D::wait_ms(120);
+    // The desync's bytes are noise by design; a port that did not shift
+    // them fails the recovery verdict below all the same.
+    (void)D::wait_tc();
+    spin_us<Ruler>(120'000);
     (void)D::command_mode();
     bench.verdict("the link recovers after a desync", D::command(link::Op::ping));
 
@@ -3027,7 +3117,11 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
     D::wait_for_window();
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t v = static_cast<uint16_t>((0x5Au + i * 37u) & mask);
-        while (!W::tx_empty()) {
+        // A frame at the slowest rung, 9600, is 1 ms; 20 ms allowed, and a
+        // byte that could not be sent is a mismatch.
+        if (!wait_until<Ruler>([] { return W::tx_empty(); }, 20'000)) {
+            ++bad;
+            continue;
         }
         W::write_word(v);
         bool ok = false;
@@ -3448,7 +3542,7 @@ void t4_errors() {
         a.pattern = link::pattern_fixed;
         const bool acted = D::act(link::Op::blast, a);
         const bool up = acted && D::configure(pc);
-        D::wait_ms(6 + 2);   // the window, and the run, unread
+        spin_us<Ruler>(8'000);   // the window, and the run, unread
         const uint16_t st = W::status();
         const uint16_t kept = W::read_word();
         const Drain d = D::collect(5);
@@ -3581,7 +3675,7 @@ void t5_shapes() {
         if (!off) break;
         (void)D::open(UartFormat{}, 9600);
         WRx::input(PinPull::up);
-        D::wait_ms(1);
+        spin_us<Ruler>(1'000);
         D::flush();
         // DATAR holds one frame: each is read before the next is banged.
         uint8_t frames = 0, fe = 0;
@@ -3594,7 +3688,7 @@ void t5_shapes() {
         if ((fe != 0u || frames != 4u) && onset_pull == 0) onset_pull = p;
     }
     WRx::release();
-    D::wait_ms(2000);   // the stand-off runs out; the peer's search resumes
+    spin_us<Ruler>(2'000'000);   // the stand-off runs out; the peer's search resumes
     print(serial, "  one stretched cell breaks the frame from +", onset_engine, " % (the peer's engine), +", onset_pull,
           " % (this end's pull-banger)", crlf);
     judge("one stretched cell survives far past the rate tolerance (30 % and more) from the peer's engine",
@@ -3754,7 +3848,7 @@ void t7_half_duplex() {
         if (up) {
             D::put(0xA5);
             D::put(0xF0);
-            D::wait_tc();
+            up = D::wait_tc();
         }
         (void)W::half_duplex(false);
         link::Report r{};
@@ -3938,7 +4032,7 @@ void t9_ring() {
         a.ms = D::bound_ms(115'200, n);
         const bool acted = D::act(link::Op::send, a);
         const bool up = acted && (shape == 0u ? link_up<LinkRing>(1, 115'200) : link_up<LinkPlain>(3, 115'200));
-        D::wait_ms(20);
+        spin_us<Ruler>(20'000);
         uint32_t p0 = 0;
         uint32_t p1 = 0;
         uint32_t p2 = 0;
@@ -3997,7 +4091,7 @@ void t9_ring() {
         const uint8_t first = static_cast<uint8_t>(0x60u + 0x10u * k);
         const bool acted = D::act(link::Op::stage, broken_train(first, train, idle16));
         const bool up = acted && link_up<LinkRing>(1, 115'200);
-        D::wait_ms(20);
+        spin_us<Ruler>(20'000);
         bool in_order = false;
         const uint16_t got = ring_take(first, in_order);
         const uint16_t fe = LinkRing::frame_errors();
@@ -4026,7 +4120,11 @@ void t9_ring() {
     // byte there. A burst of sixteen: the last byte's landing stamped on
     // the channel's count, the edge on the vector's counter - the idle line
     // a frame after the last stop bit, so within two frames - and at most
-    // two USART entries for the burst, none a byte.
+    // two USART entries for the burst, none a byte. THE EDGE TIMED IS THE
+    // ONE AFTER THE LANDING: the burst's first frame is told on its own
+    // (its RXNE entry), so the edge count is read at the landing and the
+    // told stamp waits for it to move from there; the console drained
+    // before the window.
     constexpr uint32_t frame = 10u * (SysClock::hz / 1'000'000u);
     bool one_ok = true;
     for (uint8_t k = 0; k < 3u; ++k) {
@@ -4038,7 +4136,7 @@ void t9_ring() {
         a.ms = 50;
         const bool acted = D::act(link::Op::blast, a);
         const bool up = acted && link_up<LinkRing>(1, 1'000'000);
-        D::wait_ms(10);
+        spin_us<Ruler>(10'000);
         bool in_order = false;
         const uint32_t edges = link_edges;
         const uint16_t got = ring_take(a.value, in_order);
@@ -4057,25 +4155,28 @@ void t9_ring() {
         a.value = 0x30;
         a.pattern = link::pattern_counting;
         a.ms = 50;
+        const bool drained = brio::console_drain<Ruler, Serial>();
         const bool acted = D::act(link::Op::blast, a);
         const bool up = acted && link_up<LinkRing>(1, 1'000'000);
         const uint32_t start = LinkRxEngine::remaining();
         const uint32_t t0 = Ticker::millis();
         uint32_t landed = 0;
         uint32_t told = 0;
+        uint32_t at_landing = 0;
         bool edge_seen = false;
         while (up && Ticker::millis() - t0 < 30u) {
             if (landed == 0u && start - LinkRxEngine::remaining() >= 16u) {
                 landed = Ticker::cycles();
-                edge_seen = link_edges != 0u;
+                at_landing = link_edges;
+                edge_seen = at_landing != 0u;
             }
-            if (landed != 0u && link_edges != 0u) {
+            if (landed != 0u && link_edges != at_landing) {
                 told = Ticker::cycles();
                 break;
             }
         }
         const uint32_t late = told - landed;
-        D::wait_ms(2);
+        spin_us<Ruler>(2'000);
         bool in_order = false;
         const uint16_t got = ring_take(0x30, in_order);
         const uint32_t entries = link_entries;
@@ -4087,10 +4188,11 @@ void t9_ring() {
         print(serial, "  16 frames at 1 Mbaud: ", edges, " edge(s), the edge ", late, " cycles after the last byte "
               "landed (", late * 10u / frame, " tenths of a frame), ", entries, " USART interrupt(s), ", got, " read",
               in_order ? " in order" : " NOT IN ORDER", edge_seen ? " (an edge was told before the last byte)" : "",
-              crlf);
+              drained ? "" : "; the console did not drain", crlf);
         judge("THE BURST EDGE ON THE LINK'S RING: sixteen frames read whole, told within two frames of the last "
               "byte's landing, with at most two USART interrupts and none a byte",
-              up && got == 16u && in_order && told != 0u && late <= 2u * frame && entries >= 1u && entries <= 2u);
+              drained && up && got == 16u && in_order && told != 0u && late <= 2u * frame && entries >= 1u &&
+                  entries <= 2u);
     }
     done();
 }
@@ -4123,21 +4225,22 @@ uint32_t engine_out(uint32_t rate, uint32_t n) {
     const uint64_t wire = 10ULL * n * SysClock::hz / rate;
     const uint64_t budget = 2u * wire + SysClock::hz / 100u;
     uint32_t queued = 0;
-    Stopwatch w;
-    while (queued < n && w.cycles() < budget) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (queued < n && w.elapsed() < budget) {
         const uint32_t want = n - queued < sizeof chunk ? n - queued : sizeof chunk;
         for (uint32_t i = 0; i < want; ++i) {
             chunk[i] = run_byte(queued + i);
         }
         uint32_t took = 0;
-        while (took < want && w.cycles() < budget) {
+        while (took < want && w.elapsed() < budget) {
             took += T::write_bulk(std::span<const uint8_t>(chunk + took, want - took));
         }
         queued += took;
     }
-    while (!T::tx_idle() && w.cycles() < budget) {
+    while (!T::tx_idle() && w.elapsed() < budget) {
     }
-    const uint32_t cycles = w.cycles();
+    const uint32_t cycles = w.elapsed();
     return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * cycles / wire);
 }
 
@@ -4210,23 +4313,38 @@ void tn_pair_engines() {
             link::Cfg ref{};
             ref.rate = calib_rate;
             const Timed r0 = D::timed_run(link::Op::sink, ref, 2000);
-            link::Params a{};
-            a.cfg.rate = fast;
-            a.count = kb4;
-            a.ms = D::bound_ms(fast, kb4);
-            const bool acted = D::act(link::Op::sink, a);
-            W::bus_clock(true);
-            W::reset();
-            link_owner = 2;
-            const bool up = acted && LinkDma::init(clock, fast);
-            WRx::input(PinPull::up);
-            D::wait_for_window();
-            const uint32_t pm = up ? engine_out<LinkDma>(fast, kb4) : 0u;
-            const uint16_t faults = LinkDma::dma_faults();
-            LinkDma::release();
-            link_owner = 0;
+            bool up = false;
+            bool have = false;
+            uint32_t pm = 0;
+            uint16_t faults = 0;
             link::Report r{};
-            const bool have = D::report(r, 5);
+            // A run counted whole whose span the peer reports not measured
+            // had a far stamp an interrupt entry lengthened
+            // (vx03_link_dut.hpp's header): printed and run again, up to
+            // the Dut's attempts.
+            for (uint8_t attempt = 0; attempt < D::timed_attempts; ++attempt) {
+                link::Params a{};
+                a.cfg.rate = fast;
+                a.count = kb4;
+                a.ms = D::bound_ms(fast, kb4);
+                const bool acted = D::quiet_console() && D::act(link::Op::sink, a);
+                W::bus_clock(true);
+                W::reset();
+                link_owner = 2;
+                up = acted && LinkDma::init(clock, fast);
+                WRx::input(PinPull::up);
+                D::wait_for_window();
+                pm = up ? engine_out<LinkDma>(fast, kb4) : 0u;
+                faults = LinkDma::dma_faults();
+                LinkDma::release();
+                link_owner = 0;
+                r = link::Report{};
+                have = D::report(r, 5);
+                if (!(have && r.count == kb4 && r.span == 0u)) {
+                    break;
+                }
+                print(serial, "    a 4 KB run whose far stamp an interrupt lengthened: not judged, run again", crlf);
+            }
             const int32_t far =
                 link::calibrate_ppm(link::nominal_span(fast, 20, kb4), r.span) - (r0.ok ? r0.ppm : 0);
             const uint32_t bound = D::span_bound_ppm(fast, kb4) + D::span_bound_ppm(calib_rate, 2000);
@@ -4241,7 +4359,7 @@ void tn_pair_engines() {
                       r.sum == run_sum(kb4) && faults == 0u);
             judge("the engine's run in its wire time on this core's counter (-1 % to +3 %) and, timed by the far "
                   "chip, PCLK1 / BRR to the stamps' bound",
-                  wire_ok(pm) && r0.ok && D::within(far, D::divisor_ppm(fast), bound));
+                  wire_ok(pm) && r0.ok && r.span != 0u && D::within(far, D::divisor_ppm(fast), bound));
         }
         // 3. Four kilobytes IN at 921600: the far blast into the receive
         //    engine's ring, every byte in order and every counter read.
@@ -4340,7 +4458,7 @@ uint32_t raw_low_run(const UartFormat& f, uint16_t ctlr4, uint16_t m_ext) {
     U2::regs().CTLR4 = ctlr4;
     U2::regs().CTLR1 = static_cast<uint16_t>(U2::regs().CTLR1 | m_ext);
     port_on<U2>();
-    wait_us(3000);
+    spin_us<Ruler>(3000);
     const uint32_t bit_cycles = (timclk1 / pclk1) * usart_divisor(pclk1, baud);
     const uint16_t psc = ruler_prescaler_for(bit_cycles * 14u);
     ruler_start(psc, true);
@@ -4383,9 +4501,11 @@ link::Report far_judges(const link::Cfg& far, const UartFormat& f, uint16_t word
     D::wait_for_window();
     for (uint16_t i = 0; i < count; ++i) {
         D::put(static_cast<uint8_t>(word));
-        D::wait_tc();
+        if (!D::wait_tc()) {
+            break;   // a port that stopped shifting: the far count says so
+        }
         if (spaced) {
-            wait_us(10u * 1'000'000u / far.rate + 1u);   // one far 8N1 frame: ten bits
+            spin_us<Ruler>(10u * 1'000'000u / far.rate + 1u);   // one far 8N1 frame: ten bits
         }
     }
     W::enable(false);
@@ -4428,7 +4548,7 @@ void to_lot_registers() {
         // themselves cannot tell: USART2's run on its free pad, the link
         // port's into the far sink, eleven bits a frame at 9600.
         port_on<U2>();
-        wait_us(3000);
+        spin_us<Ruler>(3000);
         const uint32_t pm2 = usart_permille<U2>(baud, 11, 16);
         uint32_t pm4 = 0;
         {
@@ -4581,16 +4701,22 @@ void to_lot_registers() {
                 }
             }
             const bool came = W::rx_ready();
-            D::wait_ms(2);
+            spin_us<Ruler>(2'000);
             const bool busy_after = W::receiving();
             (void)W::read_word();
             link::Report r{};
             (void)D::report(r, 0);
             print(serial, "  RX_BUSY read set in ", busy_seen, " of ", polls, " polls while the far frame arrived, ",
                   busy_after ? "SET" : "clear", " after it", crlf);
+            // WHERE THE DIE HAS IT is the driver's own probe's answer, not
+            // the lot's: 18.10.1 and 18.10.8 give RX_BUSY to the dies that
+            // have CTLR4 and to no other (ch32vx03/usart.hpp, "The lot's
+            // registers"), so a die whose CTLR4 the probe found must show
+            // the bit set while the 8.3 ms frame arrives, and one whose
+            // CTLR4 it did not find must read it zero throughout.
             judge("RX_BUSY, where the die has it, stands while a frame arrives and falls after it; a die without it "
                   "reads zero throughout (the line above says which)",
-                  up4 && came && !busy_after && (present4 || busy_seen == 0u));
+                  up4 && came && !busy_after && (present4 ? busy_seen != 0u : busy_seen == 0u));
         }
         done();
     }
@@ -4609,23 +4735,21 @@ void to_lot_registers() {
 template <typename Pad>
 uint16_t sample_tx(uint32_t baud, uint32_t timeout_us) {
     const uint32_t bit = SysClock::hz / baud;
-    Stopwatch w;
-    while (Pad::read()) {
-        if (w.us() > timeout_us) {
-            return 0xFFFFu;
-        }
+    if (!wait_until<Ruler>([] { return !Pad::read(); }, timeout_us)) {
+        return 0xFFFFu;
     }
-    Stopwatch f;
+    Stopwatch<Ruler> f;
+    f.start();
     uint16_t v = 0;
     for (uint8_t i = 0; i < 8u; ++i) {
         const uint32_t at = bit + bit / 2u + static_cast<uint32_t>(i) * bit;
-        while (f.cycles() < at) {
+        while (f.elapsed() < at) {
         }
         if (Pad::read()) {
             v = static_cast<uint16_t>(v | (1u << i));
         }
     }
-    while (f.cycles() < 9u * bit + bit / 2u) {
+    while (f.elapsed() < 9u * bit + bit / 2u) {
     }
     return Pad::read() ? v : static_cast<uint16_t>(v | 0x100u);
 }
@@ -4635,12 +4759,13 @@ uint16_t sample_tx(uint32_t baud, uint32_t timeout_us) {
 template <typename Pad>
 void bang_on(uint8_t byte, uint32_t baud) {
     const uint32_t bit = SysClock::hz / baud;
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     uint32_t n = 0;
     Pad::clear();
     ++n;
     for (uint8_t i = 0; i < 8u; ++i) {
-        while (w.cycles() < n * bit) {
+        while (w.elapsed() < n * bit) {
         }
         if (((byte >> i) & 1u) != 0u) {
             Pad::set();
@@ -4649,10 +4774,10 @@ void bang_on(uint8_t byte, uint32_t baud) {
         }
         ++n;
     }
-    while (w.cycles() < n * bit) {
+    while (w.elapsed() < n * bit) {
     }
     Pad::set();
-    while (w.cycles() < (n + 1u) * bit) {
+    while (w.elapsed() < (n + 1u) * bit) {
     }
 }
 
@@ -4689,7 +4814,7 @@ bool upper_port() {
     const uint32_t brr = usart_divisor(pclk1, baud);
     const bool framed = U::configure(UartFormat{}, brr) && U::brr() == brr && !U::is_full;
     port_on<U>();
-    wait_us(3000);   // TE's idle frame out
+    spin_us<Ruler>(3000);   // TE's idle frame out
     // The rate on the pad, on the core's counter: no far end to share it.
     const uint32_t pm = usart_permille<U>(baud, 10, 16);
     S::upper_permille[n - 5u] = pm;
@@ -4697,16 +4822,14 @@ bool upper_port() {
     // Out: a byte read back off the transmit pad by software.
     U::write_data(0xA5);
     const uint16_t out = sample_tx<typename R::Tx>(baud, 5000);
-    Stopwatch w;
-    while (!U::tx_complete() && w.us() < 5000u) {
-    }
+    // The frame's end before the next step; a frame that never ends shows
+    // in `out` and in the vector's count below, which are judged.
+    (void)wait_until<Ruler>([] { return U::tx_complete(); }, 5'000);
 
     // In: a frame banged into the receive pad through its pull.
     U::clear_by_read();
     bang_on<typename R::Rx>(0x3C, baud);
-    Stopwatch r;
-    while (!U::rx_ready() && r.us() < 5000u) {
-    }
+    (void)wait_until<Ruler>([] { return U::rx_ready(); }, 5'000);   // `in` asks RXNE itself
     const uint16_t status = U::status();
     const uint16_t in = U::rx_ready() ? static_cast<uint16_t>(U::read_word() & 0xFFu) : 0xFFFFu;
 
@@ -4716,7 +4839,7 @@ bool upper_port() {
     U::interrupts(usart_tcie, true);
     Pfic::enable(U::irq);
     U::write_data(0x11);
-    wait_us(4000);
+    spin_us<Ruler>(4000);
     const uint32_t vec = S::upper_interrupts[n - 5u];
     U::interrupts(usart_tcie, false);
     Pfic::disable(U::irq);
@@ -4923,7 +5046,10 @@ void banner() {
 }  // namespace
 
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) {
+    (void)Serial::isr();
+    console_entries = console_entries + 1u;
+}
 
 /// USART2's vector: the transport's body while letter l runs, and the
 /// flag counter of every other letter.

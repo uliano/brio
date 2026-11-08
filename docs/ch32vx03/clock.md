@@ -359,8 +359,9 @@ brio::Rcc::clock_monitor(true);
 
 ## Bench findings
 
-The reference suite is `test_vx03_clock` (55 verdicts in `z` on the
-CH32V203C8T6 and 54 on the CH32V303VCT6 - both boards carry an 8 MHz
+The reference suite is `test_vx03_clock` (57 pass, 0 fail in `z` on the
+CH32V203C8T6 and on the CH32V303CBT6, ten runs alike on each; the
+CH32V303VCT6 was not run with today's suite - the boards carry an 8 MHz
 crystal and a 32.768 kHz one; the CH32V203C8T6's board straps PA8 to
 PA6, which counts the clock output, and nothing else is wired). Its rate pack is the ten trees those boards can
 make: the bare HSI, the PLL on the HSI at 48, 52, 96 and 144 MHz, the
@@ -371,9 +372,15 @@ HALVED input, which is what exercises the EXTEN bit.
 - **Every rate of the tree is reached, and the console survives all of
   them.** The suite's clock is dynamic and the console's own port is
   one of its users, so the verdict lines are printed through a divisor
-  computed for the rate they name. Twenty switches up and down the pack
-  leave the tick counting exactly the span asked at every step and
-  `delay_us` serving its wait at every one.
+  computed for the rate they name. Twenty switches up and down the pack,
+  each rate then measured against the RTC on the board's 32.768 kHz
+  crystal (ten runs on each desk board): HCLK 64 to 114 ppm over the
+  rate asked on every crystal-rooted rate (bound 19 in 10000) and
+  +0.42 to +0.62 % on every HSI-rooted one (bound 197 in 10000), the
+  kernel tick counting 125 or 126 ticks in 125 ms of the RTC (bound 2
+  on the crystal, 4 on the HSI), and `delay_us(500)` never early and 75
+  to 98 core cycles over the cycles asked at every rate, against the
+  sixteenth the verdict allows.
 - **The rates measured against the host's clock**, by bracketing 2000
   kernel ticks between two console lines: every HSI-rooted rate reads
   **+0.42 to +0.46 %** (8, 48, 52, 96 and 144 MHz) and every
@@ -393,17 +400,20 @@ HALVED input, which is what exercises the EXTEN bit.
   a tenth of a per cent there - the crystal exact within it, the HSI of
   that die a third of a per cent fast, and the halved input again
   indistinguishable from the whole one.
-- **The LSI takes about 3.1 ms to LSIRDY** from a cleared LSION (3100
-  to 3200 us over several runs, measured in 50 us steps), with the
-  backup domain untouched - between the datasheet's two figures, 230 us
-  with the LSE running and 5 ms without - and 4.35 to 4.40 ms on the
-  CH32V303VCT6. LSIRDY falls in under one 50 us step on both. Its RATE
-  is not measured here: nothing in this chapter can count it.
-- **The board's 8 MHz crystal reaches HSERDY in 1.7 ms** (repeatable to
-  the 50 us step), against the datasheet's 2.5 ms typical for an 8 MHz
-  crystal; the CH32V303 board's reaches it in 1.05 ms, against its
-  datasheet's 1.5 typical and 4 at most. HSERDY falls in under one step
-  on both.
+- **The LSI takes about 0.2 ms to LSIRDY** from a cleared LSION with
+  the LSE running, as it runs in the suite (the RTC letters start it and
+  the backup domain keeps it across a reset): 204 us on the
+  CH32V203C8T6 and 194 us on the CH32V303CBT6, ten runs each, timed in
+  core cycles at 144 MHz - the datasheet's 230 us with the LSE running,
+  where it gives 5 ms without. With the LSE stopped it took 3.1 ms on a
+  CH32V203C8T6 and 4.35 to 4.40 ms on the CH32V303VCT6, timed in 50 us
+  steps. LSIRDY reads down at the first poll after LSION is cleared. Its
+  RATE is not measured here: nothing in this chapter can count it.
+- **The board's 8 MHz crystal reaches HSERDY in 1024 or 1025 us** on
+  both desk boards (ten runs each, in core cycles) - 8192 periods of the
+  crystal - against the CH32V203 datasheet's 2.5 ms typical for an 8 MHz
+  crystal and the CH32V303's 1.5 typical and 4 at most. HSERDY reads
+  down at the first poll after HSEON is cleared.
 - **The ready interrupt reaches the RCC vector.** With HSERDYIE armed
   over that same ramp, the vector runs exactly once, its body finds
   HSERDYF - and only that flag - standing, and leaves none behind, so
@@ -415,15 +425,18 @@ HALVED input, which is what exercises the EXTEN bit.
   domain's door, stopped and restarted with LSERDYIE armed (LSERDYF
   alone, the crystal ready **754 to 755 ms** after LSEON on the
   CH32V203C8T6's board and **785 to 802 ms** on the CH32V303's).
-- **THE HSI'S RESTART RAISES NO READY FLAG**, against 3.3.2's and
-  3.4.3's text, on both parts: stopped under the crystal's PLL (HSIRDY
-  falls) and started again with HSIRDYIE armed, the vector never runs
-  in 50 ms; unarmed, HSIRDYF does not stand once HSIRDY has risen,
-  whether the oscillator was off for 100 us or for 20 ms; and RCC_INTR
-  read at the top of main() after a reset holds no flag either. Letter
-  `i` judges exactly that, ten runs on each part. A program that wants
-  to know the HSI is back polls HSIRDY - which is what `hsi_start()`
-  does.
+- **THE HSI'S RESTART MOSTLY RAISES NO READY FLAG**, against 3.3.2's
+  and 3.4.3's text: stopped under the crystal's PLL (HSIRDY falls) and
+  started again with HSIRDYIE armed, the vector ran in none of twenty
+  runs on the CH32V203C8T6 and in four of twenty on the CH32V303CBT6
+  (its body finding HSIRDYF alone), within 50 ms; unarmed, after 20 ms
+  off, HSIRDYF did not stand once HSIRDY had risen in any run on either
+  part; and RCC_INTR read at the top of main() after a reset holds no
+  flag either. The CH32V303VCT6 never ran the vector in ten runs. Letter
+  `i` judges the premises - the HSI stops and runs again after each
+  restart - and prints what the restart raised as a finding. A program
+  that wants to know the HSI is back polls HSIRDY - which is what
+  `hsi_start()` does.
 - **The HSI can be stopped.** With SYSCLK on the PLL fed by the
   crystal, clearing HSION drops HSIRDY and the program runs on -
   measured because the chapter recommends against stopping it and says

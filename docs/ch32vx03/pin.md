@@ -448,11 +448,14 @@ the same question.
 
 ## Bench findings
 
-The reference suite is `test_vx03_pin`: **35 pass, 0 fail** in `z` on
-the CH32V303VCT6. The CH32V203C8T6's numbers below are the same
-letters', but for the two that walk ports C, D and E and follow the
-PA6-PA1 strap, which were measured on the CH32V303VCT6 alone; the
-letter `k` is by name, since it needs a finger. The suite
+The reference suite is `test_vx03_pin`: **30 pass, 0 fail, 1 skipped**
+in `z` on the CH32V203C8T6 and on the CH32V303CBT6, ten runs alike on
+each - the skip the PA6-PA1 strap's letter, the strap absent on both
+boards, and their LQFP48 bonding no free pad of ports C, D or E for the
+letter that walks them. Those two letters were measured on the
+CH32V303VCT6 alone, which was not run with today's suite; the findings
+that name it were measured on it. The letter `k` is by name, since it
+needs a finger. The suite
 runs with NO WIRE but one optional strap: a pad reads its own level
 through the input register in every mode but analog, and that pad's own
 output feeds the EXTI line of its number, so senses, edges, flags and
@@ -468,7 +471,9 @@ already locked from the first.
   reset port holds 0x4 in the nibble of every pin it bonds, and on the
   CH32V203C8T6's LQFP48 ZERO in the others (GPIOC: CFGLR 0x00000000,
   CFGHR 0x44400000) where the CH32V303VCT6's LQFP100, bonding all
-  sixteen, reads 0x44444444 twice; all fifteen configurations of
+  sixteen, reads 0x44444444 twice - and so does the CH32V303CBT6's
+  LQFP48, which bonds PC13..PC15 alone: the zeros are the CH32V203's
+  die, not the package; all fifteen configurations of
   10.3.1.1 land as `pin_nibble()` spells them, 15 of 15 in the low
   register (PA1) and 15 of 15 in the high one (PB12), on both parts;
   BSHR's two halves, BCR and `toggle()` do what the chapter says.
@@ -514,10 +519,14 @@ already locked from the first.
   offers on this class; and USART1's code read across both registers
   as 0, its upper columns never written because each moves this
   console's TX off PA9.
-- **On both parts**: the debug port's field reads 0 through all of it,
+- **The remaps on the CH32V303CBT6**: ten columns written, read back and
+  restored and twenty-five refused as absent; USART3_RM written 01 and
+  TIM2ITR1_RM written 1 read back as written, as on the CH32V303VCT6,
+  and USART1's code read 0 across both registers.
+- **On every part**: the debug port's field reads 0 through all of it,
   and AFIO_ECR takes a port and a pin, reads them back and turns off
   again, ports A..D alone.
-- **The lines**, the same numbers on both parts: ten toggles of PA1 on
+- **The lines**, the same numbers on every part: ten toggles of PA1 on
   its own line 1 are five rising, five falling and ten of both edges,
   one interrupt each; a line with neither edge enabled is silent under
   a toggling pad; the flag of a line armed in INTENR with its vector
@@ -534,9 +543,11 @@ already locked from the first.
   core cycles after the store that made it, 64 of 64 - against 17 to 20
   for PA1 raising its own line.
 - **The event mode**: `idle()` with nothing armed waits one kernel tick;
-  with a line's event already latched it returns after 15 core cycles
-  on the CH32V203C8T6 and 34 on the CH32V303VCT6, and no tick at all,
-  with no flag raised and no pending interrupt.
+  with a line's event already latched it returns, with no tick at all,
+  no flag raised and no pending interrupt, after 67 core cycles on the
+  CH32V203C8T6 and the CH32V303CBT6 alike - timed by the kernel's cycle
+  count read on each side, the two reads included - and after 34 on the
+  CH32V303VCT6, timed by two raw reads of the core timer.
 - **The KEY's pad** (letter `k`, by name, on the CH32V203C8T6's board):
   a thousand samples at 10 ms with nobody pressing the button read low
   every time.

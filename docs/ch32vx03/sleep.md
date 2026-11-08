@@ -63,8 +63,10 @@ idle posts it `SleepRequested{depth, reply}` from its handler
 What decides correctness even there:
 
 - **No sleep while a bus master works.** In a sleep of any depth on
-  this family no bus master but the core gets a cycle (measured, "A
-  sleep of any depth starves every other bus master" below), so the
+  the CH32V203C8T6 and the CH32V303VCT6 no bus master but the core gets
+  a cycle (measured, "A sleep of any depth starves every other bus
+  master" below; a program cannot read whether its die is one of
+  those), so the
   site refuses every rung but `none` while `bus_masters_active()` is
   above zero, and the round is lost. A DMA channel holds one count from
   the verb that sets its EN to the verb that clears it - a channel whose
@@ -195,9 +197,13 @@ PORRSTF both standing at the boot.
 ### A sleep of any depth starves every other bus master
 
 This is the chapter's governing fact on this family, and it is not in
-the chapter: measured on the silicon of both parts and recorded in
-[README.md](README.md), in a sleep no bus master but the core gets a
-cycle. A memory-to-memory DMA started just before the sleep moves the
+the chapter: measured on the silicon of the CH32V203C8T6 and the
+CH32V303VCT6 and recorded in [README.md](README.md), in a sleep no bus
+master but the core gets a cycle. The CH32V303CBT6 moves a DMA block's
+pipeline across one sleep as the others do and the whole block across
+ten, which is not yet explained ([dma.md](dma.md)); a program cannot
+read which kind of die it runs on, so the mechanism below holds on every
+die. A memory-to-memory DMA started just before the sleep moves the
 handful of items already in its pipeline and then nothing until the core
 wakes; the CH32V203's USB device controller cannot reach its packet
 memory, so an armed endpoint loses the host's bytes and an enumeration
@@ -325,7 +331,8 @@ there and over the debug link, and they still act: so a read-modify-write
 of the register, any of them, writes them away, and a Standby entered
 after one keeps nothing - measured, every painted word lost in every
 bank, until the bits went into the store that sets PDDS. They read back
-on the CH32V203C8T6. The driver therefore keeps the program's choice of
+on the CH32V203C8T6, and on the CH32V303CBT6, where the four set
+together read 0xF0000. The driver therefore keeps the program's choice of
 them in RAM and every store to PWR_CTLR carries it - the RTC chapter's
 DBP included - and its readbacks of those five bits are that copy, the
 silicon's being unreadable where it matters. The copy starts at zero at
@@ -372,11 +379,13 @@ being read as the 2.4 V kind. So the millivolts are a run-time question
 here: the driver reads the die and answers, and the constexpr forms take
 the supply level as an argument for a program that knows it.
 
-And that validity test earns its keep. On both bench chips FEATURE_SIGN
-reads 0xE339E339 - this family's own erased pattern, the word never
-having been programmed - whose low byte is not the inverse of the next,
-so the driver falls back to the 2.4 V table as 33.2.3 prescribes. A
-reader that believed the bit would have taken the other one.
+And that validity test earns its keep. On the CH32V203C8T6 and the
+CH32V303VCT6 FEATURE_SIGN reads 0xE339E339 - this family's own erased
+pattern, the word never having been programmed - whose low byte is not
+the inverse of the next, so the driver falls back to the 2.4 V table as
+33.2.3 prescribes. A reader that believed the bit would have taken the
+other one. On the CH32V303CBT6 it reads 0xE33901FE, a word that passes
+the test with VLEVEL clear, and the driver takes the 1.8 V table there.
 
 The two datasheets do not quite agree with the manual about that table.
 Their tables 4-4 (the CH32V203's) and 4-4-1 (the CH32V303's, for VLEVEL
@@ -426,9 +435,9 @@ part on this silicon ([README.md](README.md)).
 
 The probes on this bench leave the three low-power bits clear, which is
 what makes every span below the silicon's own and not the debugger's -
-and it is the first thing the suite prints. The register reads 0x300 on
-the CH32V203C8T6 behind its WCH-LinkE - the two watchdog freeze bits set
-- and 0x0 on the CH32V303VCT6 behind a CH549 link - and 0x307 after an
+and it is the first thing the suite prints. The register reads 0x0 on
+the CH32V203C8T6 and the CH32V303CBT6 behind their WCH-LinkEs and on
+the CH32V303VCT6 behind a CH549 link - and 0x307 after an
   attach through a WCH-LinkE at firmware 2.10, which keeps the clocks
   running through Sleep, Stop and Standby until the word is cleared
   (measured; the probe's page says so).
@@ -590,33 +599,37 @@ that counter has been seen counting.
 ### On the CH32V203C8T6
 
 `test_vx03_sleep` at 96 MHz from the board's crystal, with the RTC on
-its 32.768 kHz one - letters a to h, `k`, `w` (which enters Standby
-three times, each ending in a reset, fifteen verdicts), `r` (five
-resets, five), `x` (one, three) and `g` (one, two).
+its 32.768 kHz one: **52 pass, 0 fail, 3 skipped** in `z`, ten runs
+alike - the skips the two halves of the pad letter that want an edge
+from outside the board, and the letter that wants a wire from PA6 to
+PA1. The by-name letters - `w`, which enters Standby three times, each
+ending in a reset, `r` (five resets), `x` (one) and `g` (one) - were
+measured on this part and not run with today's suite: the Standby, the
+retention and the watchdog findings below are theirs.
 
-**The debug module holds nothing up.** DBGMCU_CR reads 0x300 with the
-probe attached and its three low-power bits are clear, so every span
-below is the silicon's own.
+**The debug module holds nothing up.** DBGMCU_CR reads 0x0 with the
+probe attached, its three low-power bits clear, so every span below is
+the silicon's own.
 
 **A light sleep is the tick's.** With the shallow rung armed, two
-`idle()` calls covered the 808 us to the next tick, and the tick
+`idle()` calls covered the 4 to 937 us to the next tick, and the tick
 counted through them.
 
 **The count of bus masters, and what it saves.** At rest the count is
 zero. A memory-to-memory block of 65535 items raises it to one at the
-EN transition; across eight `idle()` calls - 225 HCLK cycles in all,
-some twenty-eight each, against the up-to-a-millisecond a tick-ended
+EN transition; across eight `idle()` calls - 185 HCLK cycles in all,
+some twenty-three each, against the up-to-a-millisecond a tick-ended
 sleep costs - the channel went on moving items, and the block completed
 in 4094 us with its data moved. A channel left enabled after its block
 still counts one, and `stop()` is what releases it. The USB pull-up
-raises the same count on its own (eight `idle()` calls, 212 cycles) and
+raises the same count on its own (eight `idle()` calls, 175 cycles) and
 the detach releases it. And the proof outside the suite: the CDC
 console runs the ordinary kernel loop, idle path and all, and
 enumerates, is configured and carries its bytes with no receive overrun
 and no controller error.
 
 **A Stop, and what the wake costs.** Asked for 205 counts (200 ms) on
-the main regulator, a Stop slept 200.8 ms and overshot the count its
+the main regulator, a Stop slept 200.8 to 201.1 ms and overshot the count its
 alarm named by 1068 us. OF THAT, 1007 us IS NOT THE SLEEP'S: the same
 alarm served with the core awake arrives that late too, so this block
 raises its event one count of the ruler after the value written. What
@@ -639,9 +652,9 @@ until the switch.
 **The timed site, under a real kernel.** A 500 ms time event, a
 `PowerManager` with one voter, the loop's own `idle_if_empty()`: the
 site placed the alarm 512 counts out, the Stop ran, the resync handed
-the ticker 502 ticks and the event matured 502 ms later BOTH on the
-wall and on the kernel's tick - late by two milliseconds and never
-early. The first event after the wake ended the round, the manager
+the ticker 502 ticks and the event matured 502 ms later on the wall
+and 502 to 503 ms later on the kernel's tick - late by two or three
+milliseconds and never early. The first event after the wake ended the round, the manager
 disarmed on its own, and the clock came back to the program's rate.
 
 **The vote round.** One not-ok ends it with nothing armed; a standing
@@ -675,12 +688,12 @@ asked for two seconds, it did not reset the board in the sleep: the
 Stop ran its full two seconds and the reset arrived 215 ms after the
 wake, with IWDGRSTF at the next boot. Twice, to a millisecond.
 
-**A Stop at every rate of a DynamicClock** (three runs). On the
+**A Stop at every rate of a DynamicClock** (ten runs). On the
 crystal's PLL at 96, 144 and 48 MHz and on the bare HSI: each Stop ended
 by the alarm on the HSI, the site's `disarm()` - the clock's own
 `restore()` - put back the rate in force, and the core's counter
-measured 96 006 to 96 007, 144 010, 48 001 to 48 007 and 8 039 to
-8 044 kHz against the RTC after it.
+measured 96 006 to 96 010, 144 006 to 144 016, 48 002 to 48 006 and
+8 041 to 8 044 kHz against the RTC after it.
 
 **What a Standby keeps** (three runs). 3328 words painted from just
 above the linker's sections, all of them in the one bank this class
@@ -704,19 +717,68 @@ on was proved with 9.5.1's software trigger instead, which reached the
 PVD's own vector in 1 us and left the flag cleared by the driver's
 handler body.
 
-**The alarm's own write window: 36 to 49 us** against a count of
+**The alarm's own write window: 33 to 60 us** against a count of
 976 us, which is what makes the timed site's floor of four counts a
 margin and not a guess.
 
-**Sizes.** The whole suite is 42860 bytes of text on the CH32V203C8; on
+**Sizes.** The whole suite is 44560 bytes of text on the CH32V203C8; on
 the 32 KB tier it builds as the two group images its header declares,
-21684 and 25004 bytes of the 28672 available.
+26556 and 26332 bytes of the 28672 available.
+
+### On the CH32V303CBT6
+
+`test_vx03_sleep` at 96 MHz from the board's crystal, the RTC on the
+board's 32.768 kHz crystal: **56 pass, 0 fail, 3 skipped** in `z`, ten
+runs alike, the skips the CH32V203C8T6's three. The by-name letters were
+not run on this part.
+
+**The debug module freezes nothing**: DBGMCU_CR reads 0x0.
+
+**The retention bits read back** - the four set together read 0xF0000,
+where the CH32V303VCT6's read zero - and the first bank covers 2048
+bytes of the part's 32 KB, the second bank the rest.
+
+**The same Sleep and the same count.** A light sleep ended by the tick
+after two `idle()` calls and 276 to 997 us; a memory-to-memory block of
+65535 items counted one, eight `idle()` calls cost 264 to 275 HCLK
+cycles and the channel ran on (the block done in 4093 us, EN still up
+counting one, `stop()` releasing it); the USB pull-up counted one, eight
+calls 255 to 260 cycles, the detach releasing it; DMA2's first channel
+counted one and was refused every rung while it ran.
+
+**A Stop.** The alarm served awake arrives 1007 us past the count it
+names, as on the CH32V203C8T6; a Stop asked for 205 counts slept 200.4
+to 201.3 ms and overshot that count by 1068 us, 61 us of it the wake;
+the first read owed 22 us of synchronization, and the tree came back in
+2118 to 2127 us of HSI time. Sixteen Stops of each: 560 periods of
+overshoot on the main regulator and 576 on the low-power one.
+
+**The timed site**: the alarm placed 512 counts out, the resync handing
+the ticker 502 ticks, a 500 ms event matured at 502 ms on the wall and
+503 ms on the kernel's tick.
+
+**The supply monitor: FEATURE_SIGN reads 0xE33901FE**, a valid word with
+VLEVEL clear, so the 1.8 V table (2190 to 2880 mV rising); never low up
+to 2880 mV; the software trigger on line 16 reached the PVD's vector in
+1 us.
+
+**A Stop at every rate of a DynamicClock**: the core's counter measured
+96 006 to 96 011, 144 010 to 144 016, 48 001 to 48 004 and 8 034 to
+8 043 kHz against the RTC after each.
+
+**The floating-point unit across a Stop**: a Stop of 51 counts ended by
+the alarm on the HSI, 32 of 32 f-registers and fcsr (0x75) back bit for
+bit, mstatus.FS still Dirty.
+
+**The alarm's own write window: 34 to 60 us** against the same 976 us.
+
+**Size.** 47432 bytes of text.
 
 ### On the CH32V303VCT6
 
 `test_vx03_sleep` at 96 MHz from the board's crystal, the RTC on the
-board's 32.768 kHz crystal: **57 pass, 0 fail** in `z`, fifteen more in
-letter `w`, nine in `r` (five resets), three in `x` and two in `g`.
+board's 32.768 kHz crystal, `z` and the by-name letters `w`, `r` (five
+resets), `x` and `g`; it was not run with today's suite.
 
 **The debug module holds nothing up**, and here it freezes nothing
 either: DBGMCU_CR reads 0x0.
@@ -748,8 +810,8 @@ one - 61 us more a wake.
 out, the resync handing the ticker 501 ticks, a 500 ms event matured at
 501 ms on the wall and on the kernel's tick.
 
-**The vote round**: the same nine verdicts as on the CH32V203C8T6, DMA2's
-channel among the refusals.
+**The vote round**: the CH32V203C8T6's verdicts and DMA2's channel
+among the refusals.
 
 **No pad's edge on PA0** reached a Stop - nothing drives the board's key
 - and the backstop ended it at 3072 ms; with EWUP set and the core
@@ -803,7 +865,7 @@ on line 16 reached the PVD's vector in 2 us.
 
 **The alarm's own write window: 39 to 56 us** against the same 976 us.
 
-**Size.** 46036 bytes of text; the painted array the retention letter
+**Size.** 47420 bytes of text; the painted array the retention letter
 counts is RAM the image leaves unloaded.
 
 ## Not covered yet
@@ -861,7 +923,8 @@ Implemented but not bench-verified, each with what would measure it:
 - **Letter j on the CH32V203C8T6** - a Sleep ended by TIM3's edge on
   the wire: it builds for that part and its 32 KB tier, and what would
   measure it is a wire from PA6 to PA1, which that board does not carry
-  (its PA6 is a pad of SPI1's loopback node).
+  (its PA6 is a pad of SPI1's loopback node); the CH32V303CBT6's board
+  has not got it either, and the letter skips there too.
 - **The retention banks and the write-only bits of the CH32V20x_D8.**
   The CH32V203RB's two banks fold through the part table like the
   CH32V303's, and the kept copy serves whether that die reads the bits

@@ -248,7 +248,9 @@ a program that wants random bits out of them folds several into one.
 
 `test_vx03_rng` measured the block on a CH32V303VCT6 with nothing wired;
 every letter costs the board nothing, so `z` carries all ten, and letter
-c moves the clock tree and puts it back.
+c moves the clock tree and puts it back. The CH32V303VCT6 was not run
+with today's suite, and the CH32V303CB of the other bench board has not
+got the block.
 
 - **The block** (letter `a`): the gate shut after `release()` and open
   after `clock(true)`; with RNGEN set the first word stood 62 to 70 core
@@ -296,9 +298,13 @@ c moves the clock tree and puts it back.
   clock event; a one written
   into SEIS latched nothing, so the seed-error path is not reachable
   from the program.
-- **The restarts** (letter `j`): RNGEN cleared and RNG_DR read, 256
-  times over a standing word and 256 over one being computed - no word
-  landed after the read; `recover()` 256 times and `init()` over a word
+- **The restarts** (letter `j`): RNGEN cleared and RNG_DR read 256
+  times right after a word was taken and 256 over one being computed -
+  no word landed after the read. That measurement did not establish
+  that a word stood at the first 256 disables; the suite's letter j
+  waits up to two ticks for DRDY before each of them and requires it
+  256 times of 256, and was not run with that requirement. `recover()`
+  256 times and `init()` over a word
   left standing by a disable 64 times, each followed by a first word
   that was never zero; with RNGEN cleared over a ready word, the word
   stayed readable and no new one came in 10000 polls; `release()` shut

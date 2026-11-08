@@ -275,12 +275,15 @@ if ((flags & brio::ResetFlag::independent_watchdog) != 0u) { ... }
 
 ## Bench findings
 
-`test_vx03_watchdog` at 144 MHz (PCLK1 72 MHz), nothing wired, on the
-CH32V203C8T6 and on the CH32V303VCT6 - the same verdicts on both:
-**16 pass, 0 fail** in `z`, plus **4 pass** in letter `w`, **8 pass**
-in letter `v` and **13 pass** in letter `p`, the three by-name letters
-that reboot the board thirteen times between them (`p` ten times on each
-part). Every number below is both parts' where one is given.
+`test_vx03_watchdog` at 144 MHz (PCLK1 72 MHz), nothing wired: **16
+pass, 0 fail** in `z` on the CH32V203C8T6 and on the CH32V303CBT6, ten
+runs alike on each, the same verdicts on both. The three by-name
+letters, which reboot the board thirteen times between them, gave **4
+pass** in letter `w`, **8 pass** in letter `v` and **13 pass** in
+letter `p` (`p` ten times on each part) on the CH32V203C8T6 and the
+CH32V303VCT6; they were not run with today's suite, and neither was the
+CH32V303VCT6's `z`. Where one number is given below it holds for every
+part that ran the letter.
 
 **The window watchdog's counter is frozen until it is armed.** With
 WDGA clear it read 127 and still read 127 twenty milliseconds later -
@@ -288,7 +291,7 @@ WDGA clear it read 127 and still read 127 twenty milliseconds later -
 millisecond later.
 
 **Its tick is PCLK1 / 4096 / 2^WDGTB, to the microsecond.** The fall
-from 0x7F to 0x50 (47 ticks) measured **2628 us at /1 (2673 nominal),
+from 0x7F to 0x50 (47 ticks) measured **2627 to 2628 us at /1 (2673 nominal),
 5346 and 5347 us at /2 (5347), 10694 us at /4 (10695) and 21389 us at
 /8 (21390)** - the refresh lands at any phase of the prescaler, so the
 fall is 46 to 47 whole ticks and the letter's three per cent covers

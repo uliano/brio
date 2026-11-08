@@ -578,27 +578,36 @@ BRIO_CH32_VECTOR(tim8_brk_handler) {
 
 ## Bench findings
 
-`test_vx03_tim` measures on both parts at 144 MHz. On the CH32V303VCT6
-all twenty-one letters run, both of the suite's optional jumpers in place
-(PA6 to PA1, PC6 to PB8): **56 pass, 0 fail**. On the CH32V203C8T6 the
-twelve letters that part has run with NOTHING WIRED: **39 pass, 0 fail**,
-the PA6-PA1 jumper absent and the letters that test for it saying so.
-The numbers below are both parts' where one number is given, and named
-where they differ.
+`test_vx03_tim` measures on both parts at 144 MHz. On the CH32V203C8T6
+the twelve letters that part has run with NOTHING WIRED: **37 pass, 0
+fail, 2 skipped**, ten runs alike. On the CH32V303CBT6, whose timers
+are TIM1 to TIM4, its thirteen letters the same way: **37 pass, 0 fail,
+3 skipped**, ten runs alike. Each skip is a letter's part that wants the
+PA6-PA1 jumper, absent on both boards, and says so on a SKIP line. The
+CH32V303VCT6 runs all twenty-one letters; it was not run with today's
+suite, and its findings below were measured with both of the suite's
+optional jumpers in place (PA6 to PA1, PC6 to PB8). The numbers below
+are the CH32V203C8T6's and the CH32V303CBT6's where one number is
+given, and named where they differ.
 
 **The time base against the core's counter.** A 1 MHz counter advanced
 34464 counts in 100 ms where 100000 modulo its sixteen bits is 34464 -
-exact; a 1 kHz update arrived fifty times in 50 ms; twenty periods of
+exact; a 1 kHz update arrived fifty times in 50 ms (forty-nine in one
+run of ten on the CH32V203C8T6); twenty periods of
 200, 1000 and 5000 us measured 4000, 20000 and 100000 us on the STK,
 each exact to its printed microsecond.
 
-**Both shadow registers, caught in the act.** An auto-reload of 100
-written with ARPE set reads back at once and leaves the counter at 1858
-(CH32V203C8T6) and 1852 (CH32V303VCT6) two microseconds later - past
-the new period, which is only in force at the update. A prescaler
-written while running moved the counter 770 and 774 counts in the next
-five microseconds and 5 in the five after a software update - the old
-rate, then the new one.
+**Both shadow registers, caught in the act.** At 1 MHz with a period
+of 1999, the auto-reload shortened to 999 at a count near 200 and the
+counter read 1300 us later: with ARPE set the register reads back 999
+at once and the counter stands at 1500 to 1501 - the old period still
+running, the new one in force only at the update - and without ARPE the
+same write takes at once and the counter stands at 500 to 501, having
+wrapped at the new period, which is what shows the reading tells the
+two apart. A prescaler written while running moved the counter 776
+counts (780 to 784 on the CH32V303CBT6, 774 on the CH32V303VCT6) in the
+next five microseconds and 5 in the five after a software update - the
+old rate, then the new one.
 
 **A timer capturing its own output.** Channel 1 making a 1000 us PWM and
 channel 2 reading the SAME input through the indirect mapping captured
@@ -612,13 +621,14 @@ setup, those four readings came back one case late.
 high time of **299 us** for 1000 and 300 asked.
 
 **The repetition counter: one update in RPTCR + 1 periods** (letter
-t, TIM1 on both parts and TIM8 on the CH32V303VCT6). Edge-aligned at a
+t, TIM1 on every part and TIM8 on the CH32V303VCT6). Edge-aligned at a
 100 us period with RPTCR 0, 1, 4 and 255, and centre-aligned with
 ATRLR 100 (100 us between an overflow and the next underflow) at 0, 1
-and 3: every interval between update flags within **42 cycles** of
-(RPTCR + 1) x the counts over ten runs a part, against a bound of 500
-(each stamp one poll turn and one tick handler late) - 3686400 cycles
-at 255 read as 3686377 to 3686420. Centre-aligned, the overflow and the
+and 3: every interval between update flags within **46 cycles** of
+(RPTCR + 1) x the counts over ten runs on the CH32V203C8T6 and **37**
+on the CH32V303CBT6, against a bound of 500 (each stamp up to one poll
+turn and one tick handler late) - 3686400 cycles at 255 read as 3686364
+to 3686424. Centre-aligned, the overflow and the
 underflow each count: at RPTCR 0 the updates alternate direction, at 1
 and 3 every update lands at an UNDERFLOW (the counter reads up after
 each), with the counter started from zero by configure()'s update.
@@ -628,8 +638,9 @@ TIM3 at 1 MHz, ATRLR 500, a compare of 200). Mode 1 raised CC1IF only
 counting down, mode 2 only counting up - seven rises of seven, 999 to
 1000 us apart - and mode 3 on both, the gaps alternating **600 and 400
 us** (599 to 600, 399 to 400), each the one its starting direction says,
-ten runs a part. The wave is the same in all three: over the PA6-PA1
-jumper TIM2 read a period of **999 us** and a high time of **399 us**
+ten runs a part. The wave is the same in all three: on the
+CH32V303VCT6, over the PA6-PA1 jumper, TIM2 read a period of **999 us**
+and a high time of **399 us**
 (1000 and 400 asked: PWM1 high for twice the compare around each
 underflow, in twice ATRLR) in every mode, and TIM8 centre-aligned with
 ATRLR 1000 and a compare of 300, over the PC6-PB8 jumper, a period of
@@ -637,23 +648,26 @@ ATRLR 1000 and a compare of 300, over the PC6-PB8 jumper, a period of
 
 **The dead band, measured as the gap it is.** TIM1 at half duty with DTG
 0xFF and CKD at four: the gap between channel 1 falling and its
-complement rising measures **27902 to 27909 ns across runs against the
-28000 ns** the code asks for, the two outputs are high for **471 us
-each** of a 1000 us period, and of 20000 samples of the two pads
+complement rising measures **27555 to 27854 ns over ten runs against
+the 28000 ns** the code asks for (27506 to 28013 on the CH32V303CBT6),
+each end of it found by a poll whose turn - a pad read and a read of
+the kernel's cycle count - is some forty cycles, 0.3 us at 144 MHz; the
+two outputs are high for **471 us each** of a 1000 us period, and of 20000 samples of the two pads
 **none** caught them both high. The DTG ladder reads back through all
 four of its ranges (32, 158, 376 and 1008 tDTS ticks for 0x20, 0x8F,
 0xCF and 0xFF). TIM8's pair on PC6 and PA7 (CH32V303VCT6), each read on
 its own pad: the same ladder, a gap of **27812 ns** for the same 28000,
-and none of 20000 samples both high.
+and none of 20000 samples both high, polled with a pad read a turn.
 
 **The meters.** Six rising edges 1000 us apart, made by the CPU through a
-channel's output stage, read as intervals of **1001 us**, with four
+channel's output stage, read as intervals of **1001 us** (1000 to 1001
+on the CH32V303CBT6), with four
 readings overwritten in the latch before the loop took one - and a
 second `take()` with no new capture answers nothing, which is
 design/meters.md's discard-stale rule. PWM input mode over the TI1 XOR,
-with the CPU making a 300-of-1000 us wave, measured **1001 us of period
-and 301 us of high time** on the CH32V203C8T6 and **1000 and 301** on
-the CH32V303VCT6.
+with the CPU making a 300-of-1000 us wave, measured **1001 to 1002 us
+of period and 300 to 301 us of high time** on both the CH32V203C8T6 and
+the CH32V303CBT6, and **1000 and 301** on the CH32V303VCT6.
 
 **Two timers, no pad.** Twenty milliseconds of a 10 kHz update on TRGO
 counted **201** on the slave in external clock mode 1; twenty periods of
@@ -666,7 +680,7 @@ and **0** after it stopped.
 
 **The tasks.** A 500 us periodic tick arrived 100 times in 50 ms. A one
 pulse asked for 200 us of delay and 500 us of width rose **200 us** after
-its trigger and lasted **501 us** on the pad, and the counter stopped
+its trigger and lasted **500 to 501 us** on the pad, and the counter stopped
 itself at the update that ended it. The encoder, its two tracks written
 by the PORT, counted **40** for ten quadrature cycles forward and
 **-40** for ten back, with CTLR1.DIR following.
@@ -689,8 +703,9 @@ the suite rests on.
 not reach a pad in encoder mode.** Sixteen edges written on PA6 in
 output mode: **16 captures**. The same channel's forced output mode
 drives its pad while SMS is zero and leaves it where it rests while SMS
-names an encoder mode - low on the CH32V203C8T6's board, high on the
-CH32V303VCT6's, whose PB6 carries an external pull-up.
+names an encoder mode - high on both WeAct boards, where PB6 carries
+the bench pair's I2C pull-up, and on the CH32V303VCT6's board, whose
+PB6 carries an external pull-up of its own.
 
 **The CH32V303VCT6's own timers.**
 
@@ -776,7 +791,8 @@ Implemented but not bench-verified:
 
 - **The dual-edge capture on a die that has it.** The verb writes
   CAP_ED_CHy, reads it back and configures the channel only when the
-  bit stayed; on the CH32V303VCT6 of the bench it did not. A CH32V303
+  bit stayed; on the CH32V303VCT6 it did not, and on the CH32V303CBT6's
+  board, which has not got the jumper, the letter skips. A CH32V303
   from a lot whose penultimate sixth digit is not zero, measuring a
   pulse on TIM2's channel 2 over the PA6-PA1 jumper against the
   two-channel method, would measure it - and say which width the
@@ -796,10 +812,10 @@ Implemented but not bench-verified:
 - **The TI1 XOR as a Hall interface**: used here as a wireless path from
   one channel's output to TI1, which is not what it is for. Three
   sensors on three pads are.
-- **The parts other than the CH32V203C8 and the CH32V303VC.** Which
-  timers a part has, their width and their pads fold through its own
-  table, and the whole stratum compiles for all thirteen both ways the
-  hardware prologue can be built (`brio check ch32vx03`): the
-  CH32V303RC's four advanced timers on the LQFP64's pads, and the
-  CH32V303CB's and RB's TIM1..TIM4 alone, are asserted at compile time
-  and measured on none of them. What would measure them is a board.
+- **The parts other than the CH32V203C8, the CH32V303CB and the
+  CH32V303VC.** Which timers a part has, their width and their pads fold
+  through its own table, and the whole stratum compiles for all thirteen
+  both ways the hardware prologue can be built (`brio check ch32vx03`):
+  the CH32V303RC's four advanced timers on the LQFP64's pads are
+  asserted at compile time and measured on no board. What would measure
+  them is a board.

@@ -127,6 +127,7 @@
 #include "kernel/panic.hpp"
 #include "util/nv_heap.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -134,14 +135,15 @@ using P = brio::Ch32vx03Platform<>;
 // ---------------------------------------------------------------------------
 // The token the three rebooting letters live in.
 // ---------------------------------------------------------------------------
-inline constexpr uint16_t token_magic = 0x5B41;
+inline constexpr uint16_t token_magic = 0x5B42;
 
 struct Token {
     uint16_t magic;
     char letter;
     uint8_t leg;
-    uint16_t pass;
+    uint16_t pass;    ///< the letter's tally before the reset, banked
     uint16_t fail;
+    uint8_t skipped;
     uint32_t mark;    ///< what the leg wrote before the reset
 };
 [[gnu::section(".noinit")]] inline Token token;
@@ -175,6 +177,14 @@ static_assert(FlashMedia<Store>);
 
 TestBench<Serial> bench;
 
+/// The letter's tally so far into the token, so a verdict taken before
+/// a reset reaches the letter's closing line after it.
+void bank_tally() {
+    token.pass = bench.passed();
+    token.fail = bench.failed();
+    token.skipped = bench.skipped();
+}
+
 uint32_t boot_flags = 0;
 
 /// What the last run left if it ended in a trap (the vectors are bound
@@ -187,53 +197,41 @@ std::optional<PanicRecord> boot_record;
 volatile uint32_t flash_irqs = 0;
 volatile uint32_t flash_irq_flags = 0;
 
-/// The core's counter as a stopwatch, the ruler every duration here is
-/// weighed against.
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / (SysClock::hz() / 1'000'000u); }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The core's ruler for the short spans and the waits: HCLK cycles, the
+/// kernel tick and STK's position composed (ch32vx03/ticker.hpp). Its
+/// rate is the WORKING rate's, the one the suite boots at and returns
+/// to: a wait in microseconds on it is right there and nowhere else, so
+/// a wait at another rate of the pack goes on the kernel tick (the
+/// ticker is rebased with the clock, a tick stays a millisecond). A span
+/// in cycles taken wholly inside one rate is right at any rate (the
+/// cycles of the rate standing), so letter f's spans at 48 MHz use it.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return Work::hz; }
 };
 
 /// THE RULER FOR A MILLISECOND-LONG OPERATION, and the reason there are
-/// two of them in this file. The core's counter reloads at every tick of
-/// the kernel's timebase, so a span nobody polls across can lose whole
-/// periods - and an erase is sixteen of them. A timer counting
-/// microseconds on the peripheral bus has no such bound below 65
-/// milliseconds, and it keeps counting while the core waits for the
+/// two of them in this file. The core's ruler composes the kernel tick
+/// with STK's position, so it is right only while the tick handler runs
+/// once a period; an erase is sixteen periods, and whether the core runs
+/// at all while the engine works is one of the things measured. A timer
+/// counting microseconds on the peripheral bus has no such bound below
+/// 65 milliseconds, and it keeps counting while the core waits for the
 /// flash: that independence is exactly what makes it the instrument for
 /// this measurement.
-using Ruler = Tim<2>;
-constexpr uint32_t ruler_prescaler = Work::timclk1_hz / 1'000'000u - 1u;
+using UsTimer = Tim<2>;
+constexpr uint32_t us_timer_prescaler = Work::timclk1_hz / 1'000'000u - 1u;
 
-void ruler_init() {
-    Ruler::init();
-    (void)Ruler::configure({.prescaler = static_cast<uint16_t>(ruler_prescaler),
-                            .period = 0xFFFFu});
-    Ruler::enable(true);
+void us_timer_init() {
+    UsTimer::init();
+    (void)UsTimer::configure({.prescaler = static_cast<uint16_t>(us_timer_prescaler),
+                              .period = 0xFFFFu});
+    UsTimer::enable(true);
 }
 
-uint16_t ruler_now() { return static_cast<uint16_t>(Ruler::count()); }
+uint16_t us_timer_now() { return static_cast<uint16_t>(UsTimer::count()); }
 
-uint16_t ruler_since(uint16_t mark) { return static_cast<uint16_t>(ruler_now() - mark); }
+uint16_t us_timer_since(uint16_t mark) { return static_cast<uint16_t>(us_timer_now() - mark); }
 
 /// Where the letters that write work: the LAST page of the medium's
 /// zone, which is the last page of the zero-wait window. One page, so
@@ -481,9 +479,7 @@ void td_refusals() {
     Flash::interrupts(true, true);
     const bool armed = Flash::end_interrupt() && Flash::error_interrupt();
     Pfic::enable(Irq::flash);
-    Stopwatch quiet_watch;
-    while (quiet_watch.us() < 1000u) {
-    }
+    brio::spin_us<Ruler>(1'000u);   // at the working rate, where the ruler's rate is right
     const uint32_t quiet = flash_irqs;
     Flash::interrupts(false, false);
     const bool disarmed = !Flash::end_interrupt() && !Flash::error_interrupt();
@@ -515,10 +511,11 @@ void te_geometry() {
                   MainFlashPartition::geometry_matches_silicon() &&
                       zones[0].floor == MainFlashPartition::storage_base &&
                       zones[0].ceiling == device::flash_bytes && rom_end <= zones[0].floor);
-    bench.verdict("the cell IS the page: 256 bytes to erase and 256 to program, which is "
-                  "the only grain the fast method has",
-                  Store::erase_size == 256u && Store::write_cell == 256u &&
-                      Store::zone_count == 1u);
+    // The cell IS the page: 256 bytes to erase and 256 to program, which
+    // is the only grain the fast method has - constants of the medium.
+    static_assert(Store::erase_size == 256u && Store::write_cell == 256u &&
+                      Store::zone_count == 1u,
+                  "the medium's cell is one 256-byte page in one zone");
 
     // What the zone holds now: printed and not judged, because it is
     // whatever the last write letter left - the erased pattern on a
@@ -526,10 +523,11 @@ void te_geometry() {
     // afterwards.
     print_first_words(zones[0].floor, 4);
     print_first_words(test_page, 4);
-    const bool readable = Store::erased_word == Flash::erased_word;
-    bench.verdict("the medium publishes the erased pattern of THIS array, which is not the "
-                  "all-ones every other flash in this project leaves",
-                  readable && Store::erased_word == 0xE339E339u);
+    // The medium publishes the erased pattern of THIS array, which is not
+    // the all-ones every other flash in this project leaves - constants;
+    // letter w reads the pattern off an erased page.
+    static_assert(Store::erased_word == Flash::erased_word && Store::erased_word == 0xE339E339u,
+                  "the medium publishes this array's erased pattern");
 }
 
 // ===========================================================================
@@ -611,36 +609,35 @@ void tf_sckmod() {
     const bool half_reads = !Flash::access_clock_whole();
     const uint32_t ctlr_half = Flash::regs().CTLR;
     Flash::lock();
-    Stopwatch fetch_half_watch;
+    // Spans in cycles of the 48 MHz standing now, on the ruler (its rate
+    // is not used: nothing here converts to microseconds).
+    brio::Stopwatch<Ruler> watch;
+    watch.start();
     for (uint32_t i = 0; i < 200u; ++i) {
         sink += fetch_run(1);
-        (void)fetch_half_watch.cycles();
     }
-    const uint32_t fetch_half = fetch_half_watch.cycles();
-    Stopwatch read_half_watch;
+    const uint32_t fetch_half = watch.elapsed();
+    watch.start();
     for (uint32_t i = 0; i < 40u; ++i) {
         sink += read_run(1);
-        (void)read_half_watch.cycles();
     }
-    const uint32_t read_half = read_half_watch.cycles();
+    const uint32_t read_half = watch.elapsed();
 
     (void)Flash::unlock();
     const bool whole = Flash::access_clock_whole(clock, true);
     const bool whole_reads = Flash::access_clock_whole();
     const uint32_t ctlr_whole = Flash::regs().CTLR;
     Flash::lock();
-    Stopwatch fetch_whole_watch;
+    watch.start();
     for (uint32_t i = 0; i < 200u; ++i) {
         sink += fetch_run(1);
-        (void)fetch_whole_watch.cycles();
     }
-    const uint32_t fetch_whole = fetch_whole_watch.cycles();
-    Stopwatch read_whole_watch;
+    const uint32_t fetch_whole = watch.elapsed();
+    watch.start();
     for (uint32_t i = 0; i < 40u; ++i) {
         sink += read_run(1);
-        (void)read_whole_watch.cycles();
     }
-    const uint32_t read_whole = read_whole_watch.cycles();
+    const uint32_t read_whole = watch.elapsed();
 
     // Leave the array as the reset value has it, whatever the answer.
     (void)Flash::unlock();
@@ -725,11 +722,11 @@ void tw_page_cycle() {
     // THE ERASE, timed on the ruler - and the kernel's timebase watched
     // across it, because whether the core can run at all while the
     // engine works is a fact a program has to know.
-    ruler_init();
+    us_timer_init();
     const uint32_t ms_before = Ticker::millis();
-    const uint16_t erase_mark = ruler_now();
+    const uint16_t erase_mark = us_timer_now();
     const uint32_t erase_err = Flash::erase_page(clock, test_page);
-    const uint32_t erase_us = ruler_since(erase_mark);
+    const uint32_t erase_us = us_timer_since(erase_mark);
     const uint32_t ms_after = Ticker::millis();
     const bool erased = Flash::erased(test_page, MainFlashPartition::page);
     print(serial, "  erase_page: ", hex(erase_err), " in ", erase_us,
@@ -745,10 +742,10 @@ void tw_page_cycle() {
     // with WRBSY watched between them, then PGSTRT.
     fill_pattern(page_buffer, 0xB2103u);
     const uint32_t pms_before = Ticker::millis();
-    const uint16_t program_mark = ruler_now();
+    const uint16_t program_mark = us_timer_now();
     const uint32_t program_err =
         Flash::program_page(clock, test_page, {page_buffer, MainFlashPartition::page});
-    const uint32_t program_us = ruler_since(program_mark);
+    const uint32_t program_us = us_timer_since(program_mark);
     const uint32_t pms_after = Ticker::millis();
     Flash::read(test_page, {read_back, MainFlashPartition::page});
     const bool exact = memcmp(page_buffer, read_back, MainFlashPartition::page) == 0;
@@ -832,10 +829,10 @@ void tv_half_word() {
 
     // The standard method: two bytes, the store IS the operation - and
     // it is the SLOW one, which is the first surprise of this letter.
-    ruler_init();
-    const uint16_t mark = ruler_now();
+    us_timer_init();
+    const uint16_t mark = us_timer_now();
     const uint32_t err = Flash::program_half_word(clock, second_page, 0xF0F0u);
-    const uint32_t us = ruler_since(mark);
+    const uint32_t us = us_timer_since(mark);
     uint16_t back = 0;
     Flash::read(second_page, {reinterpret_cast<uint8_t*>(&back), 2u});
     print(serial, "  program_half_word 0xF0F0: ", hex(err), " in ", us,
@@ -923,8 +920,7 @@ void tq_second_pass() {
     token.magic = token_magic;
     token.letter = 'q';
     token.leg = 1;
-    token.pass = 0;
-    token.fail = 0;
+    bank_tally();
     token.mark = now;
     print(serial, "  rebooting...", crlf);
     Reset::software();
@@ -965,19 +961,28 @@ uint32_t program_page_without_address(uint32_t addr, const uint8_t* src) {
         return Flash::refused;
     }
     Flash::clear_flags();
+    bool timed_out = false;
     Flash::regs().CTLR = (Flash::regs().CTLR & ~flash_ctlr_write_once) | flash_ftpg;
     volatile uint32_t* cell = reinterpret_cast<volatile uint32_t*>(Flash::alias_of(addr));
     for (uint32_t i = 0; i < MainFlashPartition::page / 4u; ++i) {
         uint32_t word;
         memcpy(&word, src + i * 4u, 4u);
         cell[i] = word;
-        while (Flash::write_busy()) {
+        // A word into the page buffer is a few bus cycles; 1 ms is past
+        // every doubt, and a stuck WRBSY is reported, not hung on.
+        if (!brio::wait_until<Ruler>([] { return !Flash::write_busy(); }, 1'000u)) {
+            timed_out = true;
+            break;
         }
     }
-    Flash::regs().CTLR = (Flash::regs().CTLR & ~flash_ctlr_write_once) | flash_pgstrt;
-    while (Flash::busy()) {
+    if (!timed_out) {
+        Flash::regs().CTLR = (Flash::regs().CTLR & ~flash_ctlr_write_once) | flash_pgstrt;
+        // The page program: 2 ms typical (datasheet table 4-18); ten times
+        // that before BSY is called stuck.
+        timed_out = !brio::wait_until<Ruler>([] { return !Flash::busy(); }, 20'000u);
     }
-    const uint32_t err = Flash::errors();
+    // A stuck engine answers all ones, a value no STATR flag set makes.
+    const uint32_t err = timed_out ? 0xFFFF'FFFFu : Flash::errors();
     Flash::clear_flags();
     Flash::regs().CTLR = Flash::regs().CTLR & ~(flash_ctlr_write_once | flash_ftpg);
     Flash::lock();
@@ -1075,8 +1080,7 @@ void tx_media() {
     token.magic = token_magic;
     token.letter = 'x';
     token.leg = 1;
-    token.pass = 0;
-    token.fail = 0;
+    bank_tally();
     token.mark = mark;
     print(serial, "  the cell's first word is ", hex(mark), ", rebooting...", crlf);
     Reset::software();
@@ -1109,8 +1113,7 @@ void ty_wrong_key() {
     token.magic = token_magic;
     token.letter = 'y';
     token.leg = 1;
-    token.pass = 0;
-    token.fail = 0;
+    bank_tally();
     token.mark = 0;
 
     // The engine locked, then a key pair that is not the key pair.
@@ -1132,13 +1135,14 @@ void ty_wrong_key() {
           still_locked ? 1 : 0, ", a correct key pair ", reopen ? "OPENED it" : "was IGNORED",
           ", an erase answered ", hex(erase), crlf);
     token.mark = reopen ? 3 : 4;
-    bench.verdict("a wrong key sequence does not fault the core here: the store is taken "
-                  "and the engine simply does not open",
-                  true);
-    bench.verdict("and the lock HOLDS UNTIL THE NEXT SYSTEM RESET - a correct key pair "
+    // Reaching this line is the answer to "does a wrong key fault the
+    // core?": no. The next boot judges it, by the absence of a trap record.
+    print(serial, "  the wrong key pair's stores were taken without a fault", crlf);
+    bench.verdict("the lock HOLDS UNTIL THE NEXT SYSTEM RESET - a correct key pair "
                   "written afterwards does not open it, so a program that mistypes a key "
                   "has no way back but a reboot",
                   !reopen && erase != 0u);
+    bank_tally();
     print(serial, "  rebooting to prove the way back...", crlf);
     Reset::software();
 }
@@ -1152,9 +1156,11 @@ void ty_resume() {
     bench.verdict("the system reset is the way back: after it the engine is locked as at "
                   "any boot and the correct key pairs open it again",
                   locked && opens);
-    bench.verdict("the core never took a fault for the wrong key - the reset flags at this "
-                  "boot are the software reset's alone",
-                  (boot_flags & ResetFlag::software) != 0u);
+    // SFTRSTF alone does not tell the letter's own reset from a trap's:
+    // fault_reset() resets by software too, after leaving its record.
+    bench.verdict("the core never took a fault for the wrong key - the reset at this boot is "
+                  "a software reset and no trap left a record",
+                  (boot_flags & ResetFlag::software) != 0u && !boot_record);
     bench.end_letter();
 }
 
@@ -1215,15 +1221,16 @@ struct ReadRun {
 
 [[gnu::noinline]] ReadRun timed_read(uint32_t address) {
     const volatile uint32_t* p = reinterpret_cast<const volatile uint32_t*>(address);
+    // Masked, and shorter than one tick period: the ruler's pending flag
+    // carries the one restart such a span can hold.
     InterruptGuard guard;
-    const uint32_t t0 = stk()->CNTL;
+    brio::Stopwatch<Ruler> watch;
+    watch.start();
     uint32_t acc = 0;
     for (uint32_t i = 0; i < 1024u; ++i) {
         acc += p[i];
     }
-    const uint32_t t1 = stk()->CNTL;
-    const uint32_t period = stk()->CMPLR + 1u;
-    return ReadRun{t1 >= t0 ? t1 - t0 : t1 + period - t0, acc};
+    return ReadRun{watch.elapsed(), acc};
 }
 
 void print_run(const char* label, const ReadRun& r) {
@@ -1383,11 +1390,11 @@ void tt_tail_standard() {
         }
         const bool fast_shut = Flash::fast_locked();
 
-        ruler_init();
+        us_timer_init();
         const uint32_t ms_before = Ticker::millis();
-        const uint16_t mark = ruler_now();
+        const uint16_t mark = us_timer_now();
         const uint32_t erase_err = Flash::erase_sector(clock, sector);
-        const uint32_t erase_us = ruler_since(mark);
+        const uint32_t erase_us = us_timer_since(mark);
         const uint32_t ms_after = Ticker::millis();
         const bool erased = tail_erased(clock, sector, Flash::sector_size);
         print(serial, "  erase_sector at ", hex(sector), " (the tail's last): ", hex(erase_err),
@@ -1408,9 +1415,9 @@ void tt_tail_standard() {
         uint16_t words[32];
         memcpy(words, page_buffer, sizeof words);
         uint32_t errors = 0;
-        const uint16_t first_mark = ruler_now();
+        const uint16_t first_mark = us_timer_now();
         errors |= Flash::program_half_word(clock, sector, words[0]);
-        const uint32_t first_us = ruler_since(first_mark);
+        const uint32_t first_us = us_timer_since(first_mark);
         const uint32_t run_before = Ticker::millis();
         for (uint32_t i = 1; i < 32u; ++i) {
             errors |= Flash::program_half_word(clock, sector + 2u * i, words[i]);
@@ -1477,7 +1484,7 @@ void ts_tail_fast() {
             bench.verdict("the engine unlocks", false);
             return;
         }
-        ruler_init();
+        us_timer_init();
 
         // THE 32 KB ERASE, made visible: a page of the block programmed
         // first, whatever it held - over an erased page it lands, over a
@@ -1487,9 +1494,9 @@ void ts_tail_fast() {
         const uint32_t marked =
             Flash::program_page(clock, page, {page_buffer, MainFlashPartition::page});
         const bool dirty = !tail_erased(clock, page, MainFlashPartition::page);
-        uint16_t mark = ruler_now();
+        uint16_t mark = us_timer_now();
         const uint32_t block_err = Flash::erase_block32(clock, block);
-        const uint32_t block_us = ruler_since(mark);
+        const uint32_t block_us = us_timer_since(mark);
         const bool block_clean = tail_erased(clock, block, Flash::block_size);
         print(serial, "  erase_block32 at ", hex(block), " (the tail's last 32 KB), over a page ",
               dirty ? "that was not erased" : "that WAS erased", ": ", hex(block_err), " in ",
@@ -1500,15 +1507,15 @@ void ts_tail_fast() {
 
         // THE PAGE PROGRAM AND THE PAGE ERASE, with the driver's verbs.
         fill_pattern(page_buffer, tail_pattern_seed);
-        mark = ruler_now();
+        mark = us_timer_now();
         const uint32_t program_err =
             Flash::program_page(clock, page, {page_buffer, MainFlashPartition::page});
-        const uint32_t program_us = ruler_since(mark);
+        const uint32_t program_us = us_timer_since(mark);
         (void)Flash::read_tail(clock, page, {read_back, MainFlashPartition::page});
         const bool landed = memcmp(read_back, page_buffer, MainFlashPartition::page) == 0;
-        mark = ruler_now();
+        mark = us_timer_now();
         const uint32_t erase_err = Flash::erase_page(clock, page);
-        const uint32_t erase_us = ruler_since(mark);
+        const uint32_t erase_us = us_timer_since(mark);
         const bool erased_now = tail_erased(clock, page, MainFlashPartition::page);
         print(serial, "  program_page at ", hex(page), ": ", hex(program_err), " in ", program_us,
               " us, the page ", landed ? "holds the data" : "does NOT hold the data",
@@ -1670,7 +1677,7 @@ int main() {
             const char letter = token.letter;
             token.letter = '\0';
             bench.reset_tally();
-            bench.resume_tally(token.pass, token.fail);
+            bench.resume_tally(token.pass, token.fail, token.skipped);
             if (letter == 'x') {
                 tx_resume();
             } else if (letter == 'q') {

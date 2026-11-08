@@ -7,7 +7,9 @@
 //
 // NOT A TEST. TestBench frames it (the menu, the ALL: line bin/brio
 // waits for); every letter ends with one verdict "ran", and letter r's
-// two verdicts on the ruler are the only ones that judge anything.
+// two verdicts on the ruler are the only ones that judge anything. A
+// letter whose premise the part or the desk does not give - u without the
+// crossed pair, i without the far end - ends with a SKIP instead.
 //
 // THE BOARD AND THE RATES. The WeAct CH32V203C8T6 core board at 144 MHz
 // (the HSI times eighteen through the PLL), the rate test_vx03_platform
@@ -337,6 +339,7 @@
 #include "kernel/borrowed.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // Letter i's far end speaks the TWI suites' protocol: shared, not copied.
@@ -369,6 +372,15 @@ struct TickRuler {
 };
 static_assert(CycleRuler<TickRuler>);
 
+/// The ruler of the time-outs (util/test_wait.hpp): the same count, read
+/// through one out-of-line function. A time-out needs no precision, and
+/// Ruler's forced inlining would spell the whole read twice into every
+/// wait the compiler forms.
+struct WaitRuler {
+    [[gnu::noinline]] static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
 using Plat = BenchIdle<Ch32vx03Platform<>, Ruler>;
 using Meter = IsrMeter<Ruler, Plat>;
 using TickMeter = IsrMeter<TickRuler, Plat>;
@@ -391,10 +403,11 @@ TickMeter probe_tick_meter;    // bound to nothing: letter r's stamp.tick line
 BenchCounters counters() { return bench_counters<Plat>(tick_meter, usart_meter); }
 
 /// The console silent: the transport's own verb, the ring empty and the
-/// last frame out of the shifter (TC) in one.
+/// last frame out of the shifter (TC) in one, bounded. The answer is not
+/// acted on: every line's counters hold USART1's vector, so a console
+/// still talking inside a measurement shows in that line's irq.
 void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
+    (void)brio::console_drain<WaitRuler, Serial>();   // a wedged console shows as missing lines
 }
 
 /// Spin to the start of a tick period: a whole millisecond of quiet
@@ -928,8 +941,11 @@ BenchSample copy_once(uint32_t n, bool fill, uint32_t& launch) {
         sw.start();
         const bool ok = copy_start(dst, src, n, fill);
         const uint32_t l = sw.elapsed();
-        uint32_t spins = 1'000'000UL;
-        while (ok && !copy_done && spins-- != 0u) {
+        if (ok) {
+            // On the tick, whose count is one load: a poll turn of two
+            // loads keeps the wall's end a few cycles behind the flag. 4096
+            // bytes are 1024 words at about six cycles: two ticks are ample.
+            (void)wait_ticks<Plat>([] { return copy_done; }, 2u);   // copy_done is judged below
         }
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, before, dma_counters());
@@ -1006,8 +1022,10 @@ void paced_report() {
     const bool ok = paced_start(paced_table, paced_items);
     const uint32_t launch = sw.elapsed();
     pacer_start();
-    uint32_t spins = 10'000'000UL;
-    while (ok && !paced_done && spins-- != 0u) {
+    if (ok) {
+        // 256 periods of 1440 cycles are 2.56 ms: ten ticks are ample, and
+        // the tick's one-load poll keeps the wall's end close to the flag.
+        (void)wait_ticks<Plat>([] { return paced_done; }, 10u);   // a missed end shows as the wall
     }
     const uint32_t wall = sw.elapsed();
     const BenchSample s = bench_sample(wall, before, dma_counters());
@@ -1036,7 +1054,11 @@ void paced_report() {
         InterruptGuard masked;
         pacer_start();
         uint16_t last = PacedCh::remaining();
-        spins = 40'000'000UL;
+        // A loop count, the one bound that holds here: the span is masked
+        // for about 2.6 ms, longer than the tick's period, so no ruler
+        // built on the tick can time it. Forty million turns of a few
+        // cycles each are many times the 368640 cycles due.
+        uint32_t spins = 40'000'000UL;
         while (seen < paced_items && spins-- != 0u) {
             const uint16_t now = PacedCh::remaining();
             if (now != last) {
@@ -1045,9 +1067,8 @@ void paced_report() {
             }
         }
     }
-    uint32_t spins2 = 1'000'000UL;
-    while (!paced_done && spins2-- != 0u) {
-    }
+    // The completion was pending under the mask and is served now.
+    (void)wait_ticks<Plat>([] { return paced_done; }, 2u);   // the stamps above are the measurement
     pacer_stop();
     constexpr uint32_t tick_period = Ruler::hz() / 1000u;
     uint32_t lo = 0xFFFF'FFFFu;
@@ -1086,8 +1107,10 @@ BenchSample spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, uint32_t&
         sw.start();
         const bool sync = SpiDma::start(r);
         const uint32_t l = sw.elapsed();
-        uint32_t spins = 1'000'000UL;
-        while (!sync && !spi_done && spins-- != 0u) {
+        if (!sync) {
+            // 256 16-bit frames at /16 are 455 us: two ticks are ample, on
+            // the tick's one-load poll as copy_once() waits.
+            (void)wait_ticks<Plat>([] { return spi_done; }, 2u);   // spi_done is judged below
         }
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, before, dma_counters());
@@ -1171,9 +1194,10 @@ bool spi_crc_judge(SpiDataSize bits, uint16_t frames) {
     r.clock = SpiClock::div16;
     r.bits = bits;
     spi_done = false;
-    if (!SpiDma::start(r)) {
-        while (!spi_done) {
-        }
+    // One frame at /16, under 2 us: a millisecond is ample.
+    if (!SpiDma::start(r) && !wait_until<WaitRuler>([] { return spi_done; }, 1'000)) {
+        print(serial, "  spi.dma: the configuring frame never completed", crlf);
+        return false;
     }
     (void)Spi<1>::disable();
     Spi<1>::crc_polynomial(poly);
@@ -1181,13 +1205,10 @@ bool spi_crc_judge(SpiDataSize bits, uint16_t frames) {
     Spi<1>::enable();
     r.len = frames;
     spi_done = false;
-    if (!SpiDma::start(r)) {
-        uint32_t spins = 1'000'000UL;
-        while (!spi_done && spins-- != 0u) {
-        }
-    }
-    for (uint32_t spins = 100'000UL; Spi<1>::busy() && spins != 0u; --spins) {
-    }
+    // 256 16-bit frames at /16 are 455 us, the CRC frame after them under
+    // 2 us: 5 ms and 1 ms are ample.
+    const bool ended = SpiDma::start(r) || wait_until<WaitRuler>([] { return spi_done; }, 5'000);
+    const bool idle = wait_until<WaitRuler>([] { return !Spi<1>::busy(); }, 1'000);
     const uint16_t got = Spi<1>::tx_crc();
     const bool crc_frame = Spi<1>::rxne();   // the CRC frame the hardware appended
     Spi<1>::flush_rx();
@@ -1197,8 +1218,9 @@ bool spi_crc_judge(SpiDataSize bits, uint16_t frames) {
     const uint16_t want = crc_frames(poly, wide ? 16u : 8u, buffer_a, frames);
     print(serial, "  spi.dma ", wide ? 16 : 8, "-bit frames x ", frames, ", the data judged by ",
           "the transmit CRC: TCRCR ", hex(got), ", software ", hex(want), want == got ? "" : " - DIFFER",
-          crc_frame ? "; the CRC frame followed the block on the wire" : "; no CRC frame followed", crlf);
-    return want == got;
+          crc_frame ? "; the CRC frame followed the block on the wire" : "; no CRC frame followed",
+          ended && idle ? "" : "; THE BLOCK DID NOT END", crlf);
+    return want == got && ended && idle;
 }
 
 /// The width and EN in ONE store (DmaBinding): three blocks back to back,
@@ -1210,16 +1232,15 @@ bool beats_check() {
         buffer_b[k] = 0;
     }
     static constexpr uint16_t half_cell = 0xBEEF;
+    // Each block is a handful of items at about six cycles: 100 us is ample.
+    const auto idle = [] { return wait_until<WaitRuler>([] { return !Copier::busy(); }, 100); };
     bool ok = Copier::copy(reinterpret_cast<uint32_t*>(buffer_b),
                            reinterpret_cast<const uint32_t*>(buffer_a), 4u);   // words
-    while (Copier::busy()) {
-    }
+    ok = idle() && ok;
     ok = ok && Copier::copy(buffer_b + 17, buffer_a + 2, 15u);   // bytes
-    while (Copier::busy()) {
-    }
+    ok = idle() && ok;
     ok = ok && Copier::fill(reinterpret_cast<uint16_t*>(buffer_b + 34), &half_cell, 7u);
-    while (Copier::busy()) {
-    }
+    ok = idle() && ok;
     for (uint32_t k = 0; k < 16u; ++k) {
         ok = ok && buffer_b[k] == buffer_a[k];
     }
@@ -1417,6 +1438,10 @@ bool ahead_loop_overran(uint16_t frames) {
     auto& regs = Spi<n>::regs();
     uint16_t i = 0;
     uint16_t j = 0;
+    // A loop count, on purpose: the loop is the measured object, and a
+    // ruler read in each turn would lengthen the turn whose gaps the
+    // letter counts. Eight million turns of about ten cycles are far past
+    // the slowest run, 1024 16-bit frames at /256 of PB1 (58 ms).
     uint32_t budget = 8'000'000UL;
     while ((i < frames || j < frames) && budget-- != 0u) {
         if (i < frames && (regs.STATR & spi_txe) != 0u) {
@@ -1623,11 +1648,14 @@ RxneEdge rxne_probe(SpiMode m) {
     auto& regs = Spi<1>::regs();
     RxneEdge e{};
     bool bsy_seen = false;
+    // Masked, the STK's restart off: its position is the ruler, and the
+    // bound is ten frames of 2048 cycles on it.
+    constexpr uint32_t probe_budget = 10u * 2048u;
     const uint32_t t0 = stk()->CNTL;
     regs.DATAR = 0xFFu;
-    for (uint32_t spins = 0; spins < 2000u && e.bsy_down == 0u; ++spins) {
+    for (uint32_t now = 0; now < probe_budget && e.bsy_down == 0u;) {
         const uint16_t st = regs.STATR;
-        const uint32_t now = stk()->CNTL - t0;
+        now = stk()->CNTL - t0;
         if (e.rxne == 0u && (st & spi_rxne) != 0u) {
             e.rxne = now;
         }
@@ -1793,12 +1821,6 @@ void loop_down() {
     }
 }
 
-void loop_wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 <= ms) {
-    }
-}
-
 template <typename Port, bool on = uart_pair_part>
 bool loop_up(uint8_t owner, uint32_t baud, bool with_stim) {
     using Stim = typename StimSide<on>::Port;
@@ -1809,7 +1831,7 @@ bool loop_up(uint8_t owner, uint32_t baud, bool with_stim) {
         up = Stim::init(clock, baud) && up;
         stim_up = true;
     }
-    loop_wait_ms(2);
+    spin_us<WaitRuler>(2'000);
     loop_edge = false;
     return up;
 }
@@ -1934,19 +1956,23 @@ BenchSample loop_edge_after(uint32_t& late) {
     loop_edge = false;
     (void)Stim::write_bulk(std::span<const uint8_t>(loop_pattern(), 16));
     uint32_t got = 0;
-    while (!StimRes::tx_complete()) {
-        if constexpr (!poll) {
-            if (loop_edge) {
-                loop_edge = false;
-                got += loop_drain<Port>(got, scrap);
+    // Sixteen frames at the slowest rate, 115200 baud, are 1.4 ms.
+    const bool sent = wait_until<WaitRuler>(
+        [&] {
+            if constexpr (!poll) {
+                if (loop_edge) {
+                    loop_edge = false;
+                    got += loop_drain<Port>(got, scrap);
+                }
             }
-        }
-    }
+            return StimRes::tx_complete();
+        },
+        10'000);
     const uint32_t t_tc = Ruler::now();
     const BenchCounters c0 = loop_counters();
     uint32_t tick = Ticker::ticks();
     uint32_t at = 0;
-    late = 0;
+    late = sent ? 0u : 1u;
     for (;;) {
         if (loop_edge) {
             at = loop_edge_at;
@@ -2025,18 +2051,15 @@ void tu_uart() {
             loop_down();
         }
         bench.verdict("the pair came up at every rate", all_up);
+        bench.verdict("ran", true);
     } else {
         if constexpr (pair_retired) {
-            print(serial, "  letter u declined on the CH32V303: the board's crossed pair is retired - UART4's "
-                          "default pads PC10/PC11 are the SPI link of the desk pair",
-                  crlf);
+            bench.skip("letter u on the CH32V303: the board's crossed pair is retired - UART4's default pads "
+                       "PC10/PC11 are the SPI link of the desk pair");
         } else {
-            print(serial, "  letter u declined on this part: no UART4, so no crossed pair to measure the "
-                          "transport against",
-                  crlf);
+            bench.skip("letter u on this part: no UART4, so no crossed pair to measure the transport against");
         }
     }
-    bench.verdict("ran", true);
 }
 
 // =============================================================================
@@ -2182,6 +2205,14 @@ struct I2cLetter {
     using Engined = I2cHost<on ? 1 : 1, i2c_default_pins<1>, DmaTxEngine<1, 6>, DmaRxEngine<1, 7>>;
     using Scl = Pin<'B', on ? 6 : 6>;
     using EdgeTim = Tim<on ? 4 : 4>;
+
+    /// The console drained at the letter's 120 MHz: on the tick, which the
+    /// ticker's init at that rate keeps a millisecond, where WaitRuler's
+    /// constant rate is the app's 144 MHz. The answer is not acted on, as
+    /// console_drain()'s is not.
+    static void drain() {
+        (void)wait_ticks<Plat>([] { return Serial::tx_idle(); }, 200u);   // a wedged console shows as missing lines
+    }
 
     // ---- the far end's command channel (twi_link.hpp), on the pump ----
 
@@ -2407,7 +2438,7 @@ struct I2cLetter {
                   static_cast<int32_t>(best.s.wall - wire), " start=", best.start, " status=",
                   i2c_status_name(worst), crlf);
             rows[row++] = best.s;
-            console_drain();
+            drain();
         }
         if (!engines) {
             print(serial, "  per byte: written ",
@@ -2491,7 +2522,7 @@ struct I2cLetter {
             print(serial, " ", i2c_trace_who[i], "@", i2c_trace_at[i], "(", hex(i2c_trace_s1[i]), ")");
         }
         print(serial, crlf);
-        console_drain();
+        drain();
     }
 
     /// Every operation once with the host vectors' longest entry watched
@@ -2522,7 +2553,7 @@ struct I2cLetter {
         i2c_ev_max = kept > longest ? kept : longest;
         print(serial, crlf, "  the longest: ", longest, " cycles, in ", whose->name, " ", whose->tx, "+",
               whose->rx, crlf);
-        console_drain();
+        drain();
     }
 
     static void stop_drain(I2cSpeed speed) {
@@ -2552,7 +2583,7 @@ struct I2cLetter {
             print(serial, "bench i2c.stop after a ", op.name, " n=", static_cast<uint32_t>(op.tx) + op.rx,
                   ": start() ", best, " cycles right behind its completion, ", calm,
                   " on a quiet bus - the drain ", best - calm, " cycles", crlf);
-            console_drain();
+            drain();
         }
     }
 
@@ -2665,7 +2696,8 @@ struct I2cLetter {
               add_turn * 100u / 1024u, ", multiplied ", mul_turn * 100u / 1024u, crlf);
     }
 
-    static void run() {
+    /// The letter at 120 MHz; true when at least one speed's lines ran.
+    static bool run() {
         // The core to 120 MHz: the console drained first, then re-made at
         // the new rate, the tick likewise.
         console_drain();
@@ -2678,12 +2710,15 @@ struct I2cLetter {
         i2c_ev_max = 0;
         i2c_er_max = 0;
         i2c_dma_max = 0;
+        bool ran = false;
         for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
             if (!serve(serve_ms)) {
-                print(serial, "  letter i declined: no far end answered the serve command on 0x",
-                      hex(twilink::command_addr), " (a board running twi_peer on PB6/PB7)", crlf);
+                print(serial, "  no far end answered the serve command on 0x", hex(twilink::command_addr),
+                      crlf);
+                bench.skip("letter i: the far end, a board running twi_peer on PB6/PB7, did not answer");
                 break;
             }
+            ran = true;
             const uint32_t s0 = Ticker::ticks();
             print(serial, "  I2C1 the host on PB6/PB7, the far end serving at ", hex(i2c_target),
                   " for ", serve_ms, " ms", crlf);
@@ -2696,7 +2731,7 @@ struct I2cLetter {
             if (t == 0u) {
                 continue;
             }
-            console_drain();
+            drain();
             ops<Pump>("", speed, t, false);
             ops<Engined>(".dma", speed, t, true);
             guidance();
@@ -2712,7 +2747,7 @@ struct I2cLetter {
         }
         print(serial, "  the longest entry of each host vector: events ", i2c_ev_max, " cycles, errors ",
               i2c_er_max, ", the channels ", i2c_dma_max, crlf);
-        console_drain();
+        drain();
         i2c_owner = 0;
         Pump::release();
         // Back to the app's 144 MHz.
@@ -2720,6 +2755,7 @@ struct I2cLetter {
         (void)Serial::init(clock, console_baud);
         (void)Ticker::init(clock);
         print(serial, "  the core back at 144 MHz (", back ? "PLL" : "FAILED", ")", crlf);
+        return ran;
     }
 };
 
@@ -2729,9 +2765,12 @@ constexpr bool i2c_carried = test_letter_carried('i');
 template <bool on = i2c_carried>
 void ti_i2c() {
     if constexpr (on) {
-        I2cLetter<on>::run();
+        if (I2cLetter<on>::run()) {
+            bench.verdict("ran", true);
+        }
+    } else {
+        bench.verdict("ran", true);
     }
-    bench.verdict("ran", true);
 }
 
 /// The vectors' bodies, empty in an image without letter i.

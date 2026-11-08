@@ -22,14 +22,30 @@
 // THE STAMP BOUND, every span's. A span is the first-to-last of a gapless
 // run, stamped by a polled loop at each end of it - the far peer's
 // run_receive, timed_blast() here - each stamp up to ONE TURN of its loop
-// late (the release listings: the peer's idle turn is 12 instructions with
-// one APB load, timed_blast()'s 9 with one - some 30 core cycles at most,
-// bounded at 64) and a Report's span quantized to the 24 MHz tick (six
-// cycles). So a span of S core cycles is good to (2 x 64 + 6) / S:
-// span_bound_ppm().
+// late (the release listings: the peer's idle turn 17 instructions with
+// one APB load and four loads from SRAM, the stack's among them,
+// timed_blast()'s 14 with one APB load and three from SRAM - some 30 core
+// cycles at most, bounded at 64)
+// and a Report's span quantized to the 24 MHz tick (six cycles). So a span
+// of S core cycles is good to (2 x 64 + 6) / S: span_bound_ppm().
+//
+// THE BOUND DESCRIBES THE LOOPS ALONE (the lengtheners rule): an interrupt
+// handler served between the turn that last saw the receiver empty and a
+// stamp makes that stamp late by the handler's length, which no bound
+// above counts. So each end witnesses its two stamps: the peer counts the
+// entries of every vector its image binds (the tick and its console) and
+// reports a run whose stamp an entry lengthened as NOT MEASURED (span 0,
+// usart_link.hpp's own meaning); timed_blast() here drains the console
+// first, so that no transmit interrupt of it is live, and reads the tick
+// count each turn - a stamp after a turn whose tick count moved is
+// lengthened. The suites that include this file serve no other vector
+// while a span is stamped. A lengthened run is printed with its figure and
+// run again, up to timed_attempts times; only a quiet run is returned for
+// judgement.
 //
 // `Dut<Out, Clk>`: Out the suite's console (the print sink every message
-// goes to), Clk its clock type. Monostate, as every suite's state is.
+// goes to, whose tx_idle() the drain waits on), Clk its clock type.
+// Monostate, as every suite's state is.
 
 #pragma once
 
@@ -40,6 +56,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "vx03_pair.hpp"
 
 // THE LINK PROTOCOL IS SHARED, NOT COPIED: pure encoding, not one register.
@@ -94,19 +111,21 @@ struct Dut {
 
     // ---- time ----------------------------------------------------------
 
-    /// Whole milliseconds on the tick count.
-    static void wait_ms(uint32_t ms) {
-        const uint32_t t0 = brio::Ticker::millis();
-        while (brio::Ticker::millis() - t0 < ms + 1u) {
-        }
-    }
-
-    /// Exactly `n` core cycles from the composed counter.
-    static void wait_cycles(uint32_t n) {
-        const uint32_t c0 = brio::Ticker::cycles();
-        while (brio::Ticker::cycles() - c0 < n) {
-        }
-    }
+    /// The composed cycle count (util/test_wait.hpp's ruler): the tick
+    /// count and STK's position, right while the tick handler runs, which
+    /// it does everywhere this file is used (nothing here masks).
+    struct Ruler {
+        static uint32_t now() { return brio::Ticker::cycles(); }
+        static constexpr uint32_t hz() { return Clk::hz; }
+    };
+    /// The stamps' witness reads the tick count, and the polled loops take
+    /// their deadline in milliseconds off the same read.
+    static_assert(brio::Ticker::ticks_per_second == 1000u, "a tick is a millisecond");
+    /// A lengthened span is run again up to this many times in all (the
+    /// header's lengtheners): a tick lands in a stamp's window about once
+    /// in a few hundred stamps, so three lengthened runs in a row would be
+    /// a defect of the image, not luck.
+    static constexpr uint8_t timed_attempts = 3;
 
     // ---- the port ------------------------------------------------------
 
@@ -114,17 +133,16 @@ struct Dut {
     /// port a leg left disabled never empties it (the command path brings
     /// the port to command mode first; this bound is what a slip costs).
     static void put(uint8_t b) {
-        const uint32_t t0 = brio::Ticker::millis();
-        while (!W::tx_empty() && brio::Ticker::millis() - t0 < 20u) {
-        }
+        // On the bound the byte is written anyway: the frame it belongs to
+        // then fails its checksum, and the command path's retry is the
+        // answer.
+        (void)brio::wait_until<Ruler>([] { return W::tx_empty(); }, 20'000);
         W::write_data(b);
     }
 
-    static void wait_tc() {
-        const uint32_t t0 = brio::Ticker::millis();
-        while (!W::tx_complete() && brio::Ticker::millis() - t0 < 50u) {
-        }
-    }
+    /// The last frame off the wire (TC), within 50 ms - the slowest frame
+    /// any caller writes is a few milliseconds long. False on the bound.
+    [[nodiscard]] static bool wait_tc() { return brio::wait_until<Ruler>([] { return W::tx_complete(); }, 50'000); }
 
     /// STATR then DATAR, four times: what the receiver holds and its flags
     /// gone (18.10.1's clear).
@@ -232,7 +250,9 @@ struct Dut {
     static bool command_once(link::Op op, const uint8_t* p, uint8_t len, uint16_t ms) {
         flush();
         link::write_frame(put, op, p, len);
-        wait_tc();
+        // A frame still in the shifter after the bound is a wedged port:
+        // the answer then never comes and recv_frame() says so.
+        (void)wait_tc();
         link::Frame f;
         if (!recv_frame(f, ms)) {
             return false;
@@ -248,7 +268,7 @@ struct Dut {
                 return true;
             }
             (void)command_mode();
-            wait_ms(70);
+            brio::spin_us<Ruler>(70'000);
         }
         if (!link_quiet) {
             brio::print(Out{}, "    LINK FAILURE op ", brio::hex(link::byte_of(op)),
@@ -297,9 +317,7 @@ struct Dut {
     /// A refusal raises leg_refused and says so once.
     static bool report(link::Report& r, uint16_t after_ms) {
         (void)command_mode();
-        if (after_ms != 0u) {
-            wait_ms(after_ms);
-        }
+        brio::spin_us<Ruler>(static_cast<uint32_t>(after_ms) * 1000u);
         for (uint8_t k = 0; k < 4u; ++k) {
             link::Frame f;
             const bool answered = query(link::Op::report, f) && f.op == link::Op::report_data;
@@ -317,7 +335,7 @@ struct Dut {
                 }
                 return true;
             }
-            wait_ms(40);
+            brio::spin_us<Ruler>(40'000);
         }
         return false;
     }
@@ -337,7 +355,7 @@ struct Dut {
         if (!command(op, p, static_cast<uint8_t>(link::params_size + n))) {
             return false;
         }
-        wait_cycles(static_cast<uint32_t>(link::settle_ms) * (hclk / 1000u));
+        brio::spin_us<Ruler>(static_cast<uint32_t>(link::settle_ms) * 1000u);
         return true;
     }
 
@@ -350,19 +368,23 @@ struct Dut {
 
     /// The peer opens its window link::settle_ms + 2 ms after its ack and
     /// flushes what this end's reconfiguration left on the line.
-    static void wait_for_window() { wait_ms(6); }
+    static void wait_for_window() { brio::spin_us<Ruler>(6'000); }
 
     // ---- the drains and the runs -----------------------------------------
 
     /// `n` frames back to back: DATAR written on TXE, a frame ahead of the
-    /// shifter, so the line never idles.
-    static void blast(uint16_t n, uint16_t mask) {
+    /// shifter, so the line never idles. Each TXE wait bounded at 20 ms -
+    /// a frame of thirteen bits at the slowest rate any caller asks, 1200
+    /// baud, is 10.8 ms -, the last frame's TC too. False on a bound: a port
+    /// that stopped shifting.
+    static bool blast(uint16_t n, uint16_t mask) {
         for (uint16_t i = 0; i < n; ++i) {
-            while (!W::tx_empty()) {
+            if (!brio::wait_until<Ruler>([] { return W::tx_empty(); }, 20'000)) {
+                return false;
             }
             W::write_word(static_cast<uint16_t>((0x55u + i) & mask));
         }
-        wait_tc();
+        return wait_tc();
     }
 
     /// What this end's receiver made of a run, polled.
@@ -409,42 +431,70 @@ struct Dut {
         return span == 0u ? 1'000'000u : static_cast<uint32_t>(((2u * poll_cycles + 6u) * 1'000'000u) / span + 1u);
     }
 
-    /// One timed run.
+    /// One timed run: `ok` when a run came back counted whole and clean
+    /// with both stamps quiet (the header's lengtheners), `lengthened` the
+    /// runs before it that an interrupt entry lengthened and that were
+    /// printed and run again.
     struct Timed {
         bool ok = false;
         int32_t ppm = 0;
         uint32_t span = 0;
+        uint8_t lengthened = 0;
     };
+
+    /// The console drained before a timed run: no transmit interrupt of it
+    /// live inside the span. False when it did not go idle in 200 ms - a
+    /// wedged console, said so.
+    static bool quiet_console() {
+        if (brio::console_drain<Ruler, Out>()) {
+            return true;
+        }
+        brio::print(Out{}, "    the console did not drain: no run timed with its interrupt live", brio::crlf);
+        return false;
+    }
 
     /// This end sends `n` gapless frames of `c`; the peer counts them (`op`
     /// calibrate - a crystal peer adopts nothing and reports this end's
     /// rate against its crystal - or sink) and reports the span on its
     /// clock; the answer is this end's rate against the peer's clock in ppm
-    /// (calibrate_ppm over the frame's own half bits).
+    /// (calibrate_ppm over the frame's own half bits). A run counted whole
+    /// and clean whose span the peer reports NOT MEASURED had a stamp an
+    /// interrupt entry lengthened (the header): printed, and run again.
     static Timed timed_run(link::Op op, const link::Cfg& c, uint16_t n) {
         Timed k{};
-        link::Params a{};
-        a.cfg = c;
-        a.count = n;
-        a.ms = bound_ms(c.rate, n);
-        if (!act(op, a) || !configure(c)) {
+        for (uint8_t attempt = 0; attempt < timed_attempts; ++attempt) {
+            link::Params a{};
+            a.cfg = c;
+            a.count = n;
+            a.ms = bound_ms(c.rate, n);
+            if (!quiet_console() || !act(op, a) || !configure(c)) {
+                return k;
+            }
+            wait_for_window();
+            const bool sent = blast(n, mask_of(c));
+            link::Report r{};
+            if (!report(r, 5) || leg_refused) {
+                return k;
+            }
+            const bool whole = sent && r.count == n && r.ferr == 0u && r.perr == 0u && r.ovf == 0u;
+            if (whole && r.span == 0u) {
+                ++k.lengthened;
+                brio::print(Out{}, "    a run of ", n, " at ", c.rate,
+                            " whose far stamp an interrupt lengthened: not judged, run again", brio::crlf);
+                continue;
+            }
+            k.ok = whole;
+            if (!k.ok) {
+                brio::print(Out{}, "    the peer counted ", r.count, " of ", n, " at ", c.rate, ", ferr ", r.ferr,
+                            " perr ", r.perr, " ovf ", r.ovf, " span ", r.span, " flags ", brio::hex(r.flags),
+                            sent ? "" : "; this end's port stopped shifting", brio::crlf);
+            }
+            k.span = r.span;
+            k.ppm = link::calibrate_ppm(
+                link::nominal_span(c.rate, link::frame_half_bits(c.bits, c.parity, c.stop), n), r.span);
             return k;
         }
-        wait_for_window();
-        blast(n, mask_of(c));
-        link::Report r{};
-        if (!report(r, 5) || leg_refused) {
-            return k;
-        }
-        k.ok = r.count == n && r.span != 0u && r.ferr == 0u && r.perr == 0u && r.ovf == 0u;
-        if (!k.ok) {
-            brio::print(Out{}, "    the peer counted ", r.count, " of ", n, " at ", c.rate, ", ferr ", r.ferr,
-                        " perr ", r.perr, " ovf ", r.ovf, " span ", r.span, " flags ", brio::hex(r.flags),
-                        brio::crlf);
-        }
-        k.span = r.span;
-        k.ppm = link::calibrate_ppm(
-            link::nominal_span(c.rate, link::frame_half_bits(c.bits, c.parity, c.stop), n), r.span);
+        brio::print(Out{}, "    every run of ", n, " at ", c.rate, " was lengthened: nothing to judge", brio::crlf);
         return k;
     }
 
@@ -452,53 +502,80 @@ struct Dut {
     /// THIS end stamps the first and the last on its composed cycle count -
     /// DATAR read first and the stamp after, as the peer does - the answer
     /// the peer's rate against this crystal in ppm (positive: the peer
-    /// fast).
+    /// fast). The console drained first; each turn of the loop reads the
+    /// tick count once, which is both its deadline and the stamps' witness:
+    /// a stamp taken after a turn whose tick count then moved is lengthened,
+    /// and the run is printed - after the window - and run again.
     static Timed timed_blast(uint32_t rate, uint16_t n) {
         Timed k{};
-        link::Params a{};
-        a.cfg.rate = rate;
-        a.count = n;
-        a.ms = bound_ms(rate, n);
-        a.pattern = link::pattern_counting;
-        if (!act(link::Op::blast, a)) {
-            return k;
-        }
-        link::Cfg c{};
-        c.rate = rate;
-        if (!configure(c)) {
-            return k;
-        }
-        uint16_t got = 0;
-        bool clean = true;
-        uint32_t first = 0, last = 0;
-        const uint32_t t0 = brio::Ticker::millis();
-        while (got < n && brio::Ticker::millis() - t0 < a.ms) {
-            const uint16_t st = W::status();
-            if ((st & brio::usart_rxne) == 0u) {
+        for (uint8_t attempt = 0; attempt < timed_attempts; ++attempt) {
+            link::Params a{};
+            a.cfg.rate = rate;
+            a.count = n;
+            a.ms = bound_ms(rate, n);
+            a.pattern = link::pattern_counting;
+            if (!quiet_console() || !act(link::Op::blast, a)) {
+                return k;
+            }
+            link::Cfg c{};
+            c.rate = rate;
+            if (!configure(c)) {
+                return k;
+            }
+            uint16_t got = 0;
+            bool clean = true;
+            bool quiet = true;
+            uint32_t first = 0, last = 0;
+            const uint32_t t0 = brio::Ticker::ticks();
+            uint32_t seen = t0;
+            while (got < n) {
+                // The tick count of the turn before: the window in which a
+                // handler could have made THIS turn's stamp late opens at
+                // that turn's status read.
+                const uint32_t before = seen;
+                seen = brio::Ticker::ticks();
+                if (seen - t0 >= a.ms) {
+                    break;
+                }
+                const uint16_t st = W::status();
+                if ((st & brio::usart_rxne) == 0u) {
+                    continue;
+                }
+                (void)W::read_word();
+                if (got == 0u) {
+                    first = brio::Ticker::cycles();
+                    quiet = quiet && brio::Ticker::ticks() == before;
+                } else if (got + 1u == n) {
+                    last = brio::Ticker::cycles();
+                    quiet = quiet && brio::Ticker::ticks() == before;
+                }
+                clean = clean && (st & (brio::usart_fe | brio::usart_pe | brio::usart_ne | brio::usart_ore)) == 0u;
+                ++got;
+            }
+            link::Report r{};
+            (void)report(r, 2);   // the peer's own account of the blast is not judged here
+            if (got != n || !clean) {
+                brio::print(Out{}, "    this end took ", got, " of the peer's ", n, " at ", rate,
+                            clean ? "" : " with an error", brio::crlf);
+                return k;
+            }
+            const uint64_t nominal = (static_cast<uint64_t>(n - 1u) * 10u * hclk + rate / 2u) / rate;
+            const uint32_t measured = last - first;
+            const int32_t ppm = static_cast<int32_t>(
+                (static_cast<int64_t>(nominal) - static_cast<int64_t>(measured)) * 1'000'000 /
+                static_cast<int64_t>(measured));
+            if (!quiet) {
+                ++k.lengthened;
+                brio::print(Out{}, "    a blast of ", n, " at ", rate, " whose stamp here a tick lengthened: ",
+                            measured, " cycles, ", ppm, " ppm, not judged, run again", brio::crlf);
                 continue;
             }
-            (void)W::read_word();
-            if (got == 0u) {
-                first = brio::Ticker::cycles();
-            } else if (got + 1u == n) {
-                last = brio::Ticker::cycles();
-            }
-            clean = clean && (st & (brio::usart_fe | brio::usart_pe | brio::usart_ne | brio::usart_ore)) == 0u;
-            ++got;
-        }
-        link::Report r{};
-        (void)report(r, 2);
-        k.ok = got == n && clean;
-        if (!k.ok) {
-            brio::print(Out{}, "    this end took ", got, " of the peer's ", n, " at ", rate,
-                        clean ? "" : " with an error", brio::crlf);
+            k.ok = true;
+            k.span = measured;
+            k.ppm = ppm;
             return k;
         }
-        const uint64_t nominal = (static_cast<uint64_t>(n - 1u) * 10u * hclk + rate / 2u) / rate;
-        const uint32_t measured = last - first;
-        k.span = measured;
-        k.ppm = static_cast<int32_t>((static_cast<int64_t>(nominal) - static_cast<int64_t>(measured)) * 1'000'000 /
-                                     static_cast<int64_t>(measured));
+        brio::print(Out{}, "    every blast of ", n, " at ", rate, " was lengthened: nothing to judge", brio::crlf);
         return k;
     }
 

@@ -431,17 +431,24 @@ The oscillator on the pad, for a calibration run:
 
 ## Bench findings
 
-`test_vx03_rtc` measured the chapter on a CH32V203C8T6 with the board's
-two crystals and no wire. THE CORE'S COUNTER IS THE RULER HERE, so the
+`test_vx03_rtc` measures the chapter on the CH32V203C8T6 and the
+CH32V303CBT6 with each board's two crystals and no wire. THE CORE'S COUNTER IS THE RULER HERE, so the
 system clock is rooted in the 8 MHz crystal (96 MHz through the PLL):
 a ruler half a per cent off would swamp a measurement of a 32.768 kHz
 oscillator, and the clock chapter puts a crystal-rooted rate inside a
-twentieth of a per mille. Thirty-three verdicts in `z`; three letters
-by name, two of which wipe the domain and one of which reboots the
-board.
+twentieth of a per mille. In `z`: **30 pass, 0 fail** on the
+CH32V203C8T6 and **33 pass, 0 fail** on the CH32V303CBT6, whose second
+block of data registers is one more letter, ten runs alike on each.
+Three letters run by name, two of which wipe the domain and one of
+which reboots the board; they were measured on the CH32V203C8T6 and the
+CH32V303VCT6 and not run with today's suite, and neither was the
+CH32V303VCT6's `z`. Where one number is given below it is the
+CH32V203C8T6's unless a CH32V303 part is named.
 
-- **The three gates.** Both bus clocks shut and DBP clear at every
-  boot, including after a software reset; with DBP clear a data
+- **The three gates.** Both bus clocks shut and DBP clear at the boot
+  after a flash, on both parts - DBP read with PWR's bus clock opened
+  for that one read and shut again; after a software reset it is letter
+  `v` that reads them (below). With DBP clear a data
   register keeps its value and RCC_BDCTLR's own bits do not move; the
   same store lands the moment DBP is set.
 - **The crystal.** It runs, and on a board that has already started it
@@ -453,32 +460,37 @@ board.
   behind it; `select()` on a DIFFERENT source is refused with nothing
   written, re-selecting the one that stands costs nothing, and the way
   out is a domain reset.
-- **The counter.** `synchronize()` came back in 14 us, inside the
+- **The counter.** `synchronize()` came back in 7 to 27 us, inside the
   thirty microseconds one period of the crystal would cost. One window
   set the prescaler and the counter together and closed itself with
   RTOFF back; the thirty-two bits read back through two sixteen-bit
   registers as written. RTC_DIV moves and stays inside the reload; the
-  counter advanced four counts in sixty milliseconds at sixty-four
-  ticks a second. Hammered at 32768 ticks a second - 4.08 million reads
+  counter advanced five counts in sixty milliseconds at sixty-four
+  ticks a second. Hammered at 32768 ticks a second - 3.76 million reads
   in four seconds, across a roll-over of the low half - the driver's
-  re-read never fired and nothing was ever torn, while the count
-  stepped BACK 689 times, the worst by three ticks.
+  re-read fired at most once in a run and nothing was ever torn, while
+  the count stepped BACK 629 to 679 times, the worst by three ticks, and
+  forward by at most four. On the CH32V303CBT6, 4.08 million reads, the
+  count never stepped back and never forward by more than one.
 - **RTC_CTLRH takes its write outside the configuration window.** The
   three interrupt enables are not among 6.2.2's four backup-domain
   registers: `interrupts()` waits for RTOFF, stores, and the enable
   reads back with CNF never set - and the alarm that follows fires.
 - **THE CRYSTAL'S RATE.** Ten second-events against the core's
-  crystal-rooted counter: 10 000 632 us for ten ticks, one tick
-  1 000 063 us - which puts the low-speed crystal at **32 765.9 Hz,
-  63 parts per million slow** of its nominal 32.768 kHz.
+  crystal-rooted counter: 10 000 898 to 10 000 899 us for ten ticks, one
+  tick 1 000 089 us - which puts the low-speed crystal at **32 765.1 Hz,
+  89 parts per million slow** of its nominal 32.768 kHz; on the
+  CH32V303CBT6's board 1 000 090 us a tick, 32 765.05 Hz, 90 parts per
+  million slow.
 - **The alarm, on both paths.** On the RTC's own vector the handler
   ran 78 ms after a count of zero with the alarm at four - five ticks
-  of a 64 Hz counter, the arm falling inside a tick - on both parts,
-  and read CNT = ALR + 1 on the CH32V203C8T6, CNT = ALR on the
-  CH32V303VCT6 (78091 us and the armed value, five runs of five, with
-  the second flag standing beside the alarm's). On EXTI line 17 the
-  handler ran with ALRIE CLEAR, 71 ms after arming.
-- **The second block, on the CH32V303VCT6** (letter `k`): the thirty-two
+  of a 64 Hz counter, the arm falling inside a tick - on every part,
+  and read CNT = ALR + 1 on the CH32V203C8T6 and the CH32V303CBT6
+  (78131 to 78132 us, ten runs of ten), CNT = ALR on the CH32V303VCT6
+  (78091 us and the armed value, five runs of five), with the second
+  flag standing beside the alarm's. On EXTI line 17 the handler ran with
+  ALRIE CLEAR, 71 ms after arming.
+- **The second block, on the CH32V303** (letter `k`, both parts): the thirty-two
   registers BKP_DATAR11..42 hold sixteen bits each under two patterns,
   read back through their own numbers; writing them leaves the first
   block's ten as they were - two sets of registers and not one numbered
@@ -513,7 +525,10 @@ board.
 - **Across a system reset** (letter `v`, reboots): the ten data
   registers read exactly what was written, the crystal, RTCSEL, RTCEN
   and the counter all came through, and only the interrupt enables were
-  gone - while the two bus clocks and DBP came up shut.
+  gone - while the two bus clocks came up shut. DBP's state at that boot
+  is not part of that measurement: the letter as it stands reads it
+  with PWR's clock opened for the read, and was not run with today's
+  suite.
 - **The tamper input cannot be raised from this board's own side**
   (letter `t`): with TPE set the pad reads zero, and neither its output
   stage nor its pull raises the event; the data registers were

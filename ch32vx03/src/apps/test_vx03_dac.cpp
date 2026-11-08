@@ -76,6 +76,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -122,45 +123,14 @@ static_assert(dac_trigger_timer(pacer_trigger) == Pacer::instance && dac_trigger
 
 constexpr uint32_t ticks_per_us = SysClock::hz / 1'000'000u;
 
-// ---------------------------------------------------------------------------
-// The ruler
-// ---------------------------------------------------------------------------
-
-/**
- * The core's own STK counter read as a stopwatch: it counts to its
- * reload - one tick period, a millisecond here - and starts again, so a
- * span is accumulated poll by poll with one period folded in across
- * each wrap.
- */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp). Right while the tick handler
+/// runs at least once a period: no span below is measured with interrupts
+/// masked for longer than a tick, or with the tick paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
-
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The judge, and the state the handlers share
@@ -280,7 +250,7 @@ void ta_registers() {
     (void)Dac::configure(2, DacChannelConfig{});
     (void)Dac::enable(1, true);
     (void)Dac::enable(2, true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     uint8_t right = 0;
 
     (void)Dac::write(1, 0x123);
@@ -356,12 +326,12 @@ void tb_pads() {
         (void)Dac::configure(2, DacChannelConfig{.buffered = buffered});
         (void)Dac::enable(1, true);
         (void)Dac::enable(2, true);
-        wait_us(20);   // tWAKEUP, 10 us at most (table 4-45)
+        spin_us<Ruler>(20);   // tWAKEUP, 10 us at most (table 4-45)
         print(serial, buffered ? "  buffered:" : "  unbuffered:", crlf);
         for (uint8_t i = 0; i < count; ++i) {
             (void)Dac::write(1, codes[i]);
             (void)Dac::write(2, codes[i]);
-            wait_us(50);   // tSETTLING, 4 us at most
+            spin_us<Ruler>(50);   // tSETTLING, 4 us at most
             const uint16_t c1 = pad_counts(1);
             const uint16_t c2 = pad_counts(2);
             print(serial, "    code ", codes[i], ": PA4 ", c1, " counts = ",
@@ -420,15 +390,14 @@ void timer_trigger(uint8_t& passed, uint8_t& tried) {
         (void)Dac::enable(1, true);
         (void)Dac::write(1, 0x100);
         T::enable(true);
-        wait_us(2500);   // two updates: 0x100 is in DOR
+        spin_us<Ruler>(2500);   // two updates: 0x100 is in DOR
         const uint16_t base = Dac::output(1);
         (void)Dac::write(1, 0xE00);
         const uint16_t held = Dac::output(1);
-        Stopwatch w;
-        while (Dac::output(1) != 0xE00u && w.us() < 3000UL) {
-        }
-        const uint32_t took = w.us();
-        const bool moved = Dac::output(1) == 0xE00u;
+        // 3 ms: three updates of the millisecond timer.
+        const auto came = cycles_until<Ruler>([] { return Dac::output(1) == 0xE00u; }, 3000u);
+        const bool moved = came.has_value();
+        const uint32_t took = came.value_or(us_cycles<Ruler>(3000u)) / ticks_per_us;
         T::enable(false);
         T::release();
         print(serial, "  TIM", n, "'s TRGO (code ", static_cast<uint8_t>(t), "): DOR ", hex(base),
@@ -450,9 +419,9 @@ bool edge_takes(uint16_t value) {
     (void)Dac::write(1, value);
     const bool held = Dac::output(1) != value;
     ExtiPin::set();
-    wait_us(50);
+    spin_us<Ruler>(50);
     ExtiPin::clear();
-    wait_us(50);
+    spin_us<Ruler>(50);
     return held && Dac::output(1) == value;
 }
 
@@ -466,10 +435,10 @@ void tc_triggers() {
     (void)Dac::enable(1, true);
     (void)Dac::write(1, 0x0F0);
     (void)Dac::software_trigger(1);
-    wait_us(5);
+    spin_us<Ruler>(5);
     const uint16_t base = Dac::output(1);
     (void)Dac::write(1, 0x0E1);
-    wait_us(5);
+    spin_us<Ruler>(5);
     const uint16_t held = Dac::output(1);
     (void)Dac::software_trigger(1);
     const uint16_t taken = Dac::output(1);
@@ -489,7 +458,7 @@ void tc_triggers() {
     const uint16_t two_base = Dac::output(2);
     (void)Dac::write(1, 0x1B6);
     (void)Dac::write(2, 0x2C7);
-    wait_us(5);
+    spin_us<Ruler>(5);
     const uint16_t two_held = Dac::output(2);
     (void)Dac::software_trigger(2);
     const uint16_t two_taken = Dac::output(2);
@@ -588,13 +557,13 @@ uint8_t noise_run(uint8_t ch, uint8_t mamp, uint16_t base, uint8_t count, uint16
                                               .amplitude = mamp});
     (void)Dac::write(ch, base);
     (void)Dac::enable(ch, true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const uint16_t mask = dac_wave_amplitude(mamp);
     uint16_t model = dac_lfsr_preload;
     uint8_t matched = 0;
     for (uint8_t i = 0; i < count; ++i) {
         (void)Dac::software_trigger(ch);
-        wait_us(2);
+        spin_us<Ruler>(2);
         const uint16_t got = Dac::output(ch);
         const uint16_t want = static_cast<uint16_t>((base + (model & mask)) & 0x0FFFu);
         if (i == 0u) {
@@ -665,11 +634,11 @@ void triangle_channel(uint8_t ch) {
                                               .amplitude = mamp});
     (void)Dac::write(ch, base);
     (void)Dac::enable(ch, true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     uint16_t seen[count] = {};
     for (uint8_t i = 0; i < count; ++i) {
         (void)Dac::software_trigger(ch);
-        wait_us(2);
+        spin_us<Ruler>(2);
         seen[i] = Dac::output(ch);
     }
     bool in_band = true;
@@ -757,8 +726,9 @@ void tf_stream() {
     uint16_t samples = 0;
     uint16_t on_level = 0;
     uint16_t levels_seen = 0;
-    Stopwatch w;
-    while (w.us() < 20'000UL) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(20'000UL)) {
         const uint8_t l = level_of(pad_once(1));
         ++samples;
         if (l < levels) {
@@ -804,8 +774,9 @@ void tf_stream() {
     uint16_t samples2 = 0;
     uint16_t on_level2 = 0;
     uint16_t levels_seen2 = 0;
-    Stopwatch w2;
-    while (w2.us() < 20'000UL) {
+    Stopwatch<Ruler> w2;
+    w2.start();
+    while (w2.elapsed() < us_cycles<Ruler>(20'000UL)) {
         const uint8_t l = level_of(pad_once(2));
         ++samples2;
         if (l < levels) {
@@ -857,7 +828,7 @@ void tg_dual() {
     (void)Dac::enable(1, true);
     (void)Dac::enable(2, true);
     Pacer::enable(true);
-    wait_us(3000);
+    spin_us<Ruler>(3000);
 
     // The registers: DOR1 and DOR2 read back to back, a pair of the table
     // unless an update fell between the two reads.
@@ -865,8 +836,9 @@ void tg_dual() {
     uint16_t consistent = 0;
     uint16_t sums_right = 0;
     uint16_t conversions = 0;
-    Stopwatch w;
-    while (w.us() < 10'000UL) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(10'000UL)) {
         const uint16_t d1 = Dac::output(1);
         const uint16_t d2 = Dac::output(2);
         ++reads;
@@ -920,11 +892,11 @@ void th_both() {
     (void)Dac::write(2, 3072);
     (void)Dac::enable(1, true);
     (void)Dac::enable(2, true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     for (uint16_t i = 0; i < 700u; ++i) {
         (void)Dac::software_trigger(1);
     }
-    wait_us(50);
+    spin_us<Ruler>(50);
     const uint16_t dor1 = Dac::output(1);
     const uint16_t dor2 = Dac::output(2);
     const uint16_t pa4 = pad_counts(1);
@@ -932,11 +904,11 @@ void th_both() {
 
     // Each channel alone.
     (void)Dac::enable(1, false);
-    wait_us(50);
+    spin_us<Ruler>(50);
     const uint16_t pa5_alone = pad_counts(2);
     (void)Dac::enable(2, false);
     (void)Dac::enable(1, true);
-    wait_us(50);
+    spin_us<Ruler>(50);
     const uint16_t pa4_alone = pad_counts(1);
     (void)Dac::wave(1, DacWave::none);
 

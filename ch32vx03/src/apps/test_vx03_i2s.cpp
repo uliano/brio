@@ -74,6 +74,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -123,43 +124,15 @@ volatile uint32_t vec3_flags = 0;
 
 // ---- time ------------------------------------------------------------------
 
-/// The core's STK read as a stopwatch, the shape every suite of this
-/// stratum uses: accumulated poll by poll, one period folded in across
-/// each wrap.
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
-
 void console_drain() {
-    Stopwatch w;
-    while (!Serial::tx_idle() && w.us() < 200'000UL) {
-    }
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
 }
 
 // ---- the wires -------------------------------------------------------------
@@ -170,11 +143,11 @@ template <typename Driver, typename Reader>
 bool pads_linked() {
     Reader::input(PinPull::down);
     Driver::output(true);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high = Reader::read();
     Reader::input(PinPull::up);
     Driver::clear();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low = !Reader::read();
     Driver::release();
     Reader::release();
@@ -263,8 +236,9 @@ template <typename Tx, typename Rx>
 uint16_t stream(uint16_t n, uint32_t budget_us) {
     uint32_t oi = 0;
     uint16_t ii = 0;
-    Stopwatch w;
-    while (ii < n && w.us() < budget_us) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (ii < n && w.elapsed() < us_cycles<Ruler>(budget_us)) {
         if (Tx::tx_empty()) {
             Tx::data(pattern(oi++));
         }
@@ -283,8 +257,9 @@ template <typename Tx, typename Rx>
 uint32_t word_rate(uint32_t window_us) {
     uint32_t oi = 0;
     uint32_t words = 0;
-    Stopwatch w;
-    while (w.us() < window_us) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(window_us)) {
         if (Tx::tx_empty()) {
             Tx::data(pattern(oi++));
         }
@@ -387,7 +362,7 @@ void ta_face() {
                                   .odd = pre_face.odd});
     const bool txe_before = I2::tx_empty();
     I2::enable();
-    wait_us(100);
+    spin_us<Ruler>(100);
     const bool txe_after = I2::tx_empty();
     (void)I2::disable();
     const bool txe_disabled_again = I2::tx_empty();
@@ -551,7 +526,7 @@ bool shape_run(const Shape& s, I2sDataLength data, I2sChannelLength channel, boo
 void tb_standards() {
     all_off();
     if (!wired()) {
-        bench.verdict("the standards want the three wires, and say so", true);
+        bench.skip("the standards want the three wires, not all in place");
         return;
     }
     const Shape shapes[5] = {{I2sStandard::philips, false}, {I2sStandard::msb_justified, false},
@@ -606,7 +581,7 @@ void tb_standards() {
 void tc_widths() {
     all_off();
     if (!wired()) {
-        bench.verdict("the widths want the three wires, and say so", true);
+        bench.skip("the widths want the three wires, not all in place");
         return;
     }
     const Shape philips{I2sStandard::philips, false};
@@ -631,7 +606,7 @@ void tc_widths() {
 void td_swapped() {
     all_off();
     if (!wired()) {
-        bench.verdict("the swapped roles want the three wires, and say so", true);
+        bench.skip("the swapped roles want the three wires, not all in place");
         return;
     }
     const bool philips = shape_run<I3, I2, pins3, pins2>({I2sStandard::philips, false},
@@ -653,7 +628,7 @@ void td_swapped() {
 void te_host_receive() {
     all_off();
     if (!wired()) {
-        bench.verdict("a host receiving wants the three wires, and says so", true);
+        bench.skip("a host receiving wants the three wires, not all in place");
         return;
     }
     const I2sConfig host_cfg{.mode = I2sMode::host_receive, .div = pre16.div, .odd = pre16.odd};
@@ -666,8 +641,9 @@ void te_host_receive() {
     I2::enable();
     uint16_t ii = 0;
     uint32_t busy_seen = 0;
-    Stopwatch w;
-    while (ii < stream_words && w.us() < 200'000UL) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (ii < stream_words && w.elapsed() < us_cycles<Ruler>(200'000UL)) {
         if (I3::tx_empty()) {
             I3::data(pattern(oi++));
         }
@@ -685,7 +661,7 @@ void te_host_receive() {
                 const I2sReceiveStop stop = i2s_receive_stop(host_cfg);
                 const uint32_t period_us =
                     1'000'000UL / i2s_bit_clock_hz(i2s_hz, host_cfg) + 1u;
-                wait_us(period_us * stop.clock_periods);
+                spin_us<Ruler>(period_us * stop.clock_periods);
                 (void)I2::disable();
             }
         }
@@ -712,7 +688,7 @@ void te_host_receive() {
 void tf_flags() {
     all_off();
     if (!wired()) {
-        bench.verdict("the flags want the three wires, and say so", true);
+        bench.skip("the flags want the three wires, not all in place");
         return;
     }
 
@@ -723,8 +699,9 @@ void tf_flags() {
     I3::error_interrupt(true);
     Pfic::enable(I3::irq);
     I2::enable();
-    Stopwatch w;
-    while (w.us() < 5000u) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (w.elapsed() < us_cycles<Ruler>(5000u)) {
         if (I2::tx_empty()) {
             I2::data(0x5555u);
         }
@@ -749,7 +726,7 @@ void tf_flags() {
     Pfic::enable(I3::irq);
     I2::enable();
     w.start();
-    while (w.us() < 5000u) {
+    while (w.elapsed() < us_cycles<Ruler>(5000u)) {
         if (I2::rx_ready()) {
             (void)I2::data();
         }
@@ -771,7 +748,7 @@ void tf_flags() {
     Pfic::enable(I2::irq);
     Pfic::enable(I3::irq);
     I2::enable();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t tx_vec = vec2;
     const uint32_t rx_vec = vec3;
     print(serial, "  2 ms of a 16 kHz stream: I2S2's vector ran ", tx_vec, " times on TXE, "
@@ -801,7 +778,7 @@ uint16_t dma_in[dma_words];
 void tg_dma() {
     all_off();
     if (!wired()) {
-        bench.verdict("the DMA requests want the three wires, and say so", true);
+        bench.skip("the DMA requests want the three wires, not all in place");
         return;
     }
     using Out = DmaChannel<I2::dma_tx_slot.controller, I2::dma_tx_slot.channel>;
@@ -826,12 +803,13 @@ void tg_dma() {
     const bool up = pair_up<I2, I3, pins2, pins3>(host_cfg, client_cfg);
     const bool loaded_out = Out::load({.peripheral = I2::data_address(), .memory = dma_out,
                                        .count = dma_words, .config = from_block});
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     I2::enable();
-    while (!In::flag(DmaFlag::complete) && w.us() < 50'000UL) {
-    }
-    const uint32_t us = w.us();
-    const bool done = In::flag(DmaFlag::complete);
+    // 256 half-words at 48 kHz, two a frame: 2.7 ms; the budget is the
+    // block's span many times over.
+    const bool done = wait_until<Ruler>([] { return In::flag(DmaFlag::complete); }, 50'000UL);
+    const uint32_t us = w.elapsed() / ticks_per_us;
     Out::stop();
     In::stop();
     pair_down();

@@ -64,6 +64,7 @@
 #include "ch32vx03/usart.hpp"
 #include "util/crc.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -100,30 +101,17 @@ uint32_t boot_flags = 0;
 
 constexpr uint32_t ticks_per_us = SysClock::hz / 1'000'000u;
 
-/// The core's counter as a stopwatch: STK counts to its reload (one
-/// tick of the kernel's timebase) and starts again, so a span is
-/// accumulated poll by poll with one period folded in across each wrap.
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: Ticker::cycles(), the tick count and STK's position
+/// composed, in HCLK cycles. Right across any span while the tick handler
+/// runs at least once a period - no letter here masks interrupts.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
+
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
+}
 
 /// The message every length letter is cut from: a run with no symmetry,
 /// so a byte order swapped anywhere shows.
@@ -373,23 +361,30 @@ void tf_cost() {
     (void)Crc::init();
 
     constexpr uint32_t laps = 16;   // 16 x 64 = 1024 words
+    // The two spans are tens of thousands of cycles, a tick period each or
+    // more: the composed ruler counts across the restarts, and the console
+    // is quiet so its interrupt is not inside them (a tick handler may be;
+    // the verdict is a ratio an order of magnitude wide).
+    console_drain();
     (void)Crc::reset();
-    Stopwatch hw_watch;
+    Stopwatch<Ruler> hw_watch;
+    hw_watch.start();
     for (uint32_t lap = 0; lap < laps; ++lap) {
         Crc::feed(message, 64);
     }
-    const uint32_t hw_cycles = hw_watch.cycles();
+    const uint32_t hw_cycles = hw_watch.elapsed();
     const uint32_t hw_value = Crc::value();
 
     volatile uint32_t sink = 0;
-    Stopwatch sw_watch;
+    Stopwatch<Ruler> sw_watch;
+    sw_watch.start();
     uint32_t sw = crc32_ethernet_init;
     for (uint32_t lap = 0; lap < laps; ++lap) {
         for (uint32_t i = 0; i < 64u; ++i) {
             sw = crc32_ethernet_word(sw, message[i]);
         }
     }
-    const uint32_t sw_cycles = sw_watch.cycles();
+    const uint32_t sw_cycles = sw_watch.elapsed();
     sink = sw;
 
     const uint32_t words = laps * 64u;

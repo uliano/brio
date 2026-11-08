@@ -142,7 +142,9 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "ch32vx03/usbfs.hpp"
+#include "kernel/time.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -222,11 +224,46 @@ constexpr uint16_t pool_configured = usbfs_ep0_bytes + usbfs_half_bytes + 2u * u
 // The rulers
 // ---------------------------------------------------------------------------
 
-uint32_t wait_ms(uint32_t ms) {
+/// The suite's ruler at its own 96 MHz: HCLK cycles, the kernel tick and
+/// STK's position composed (ch32vx03/ticker.hpp). Right at 96 MHz only:
+/// letters e, h and q move HCLK under the PLL and letter k rebuilds the
+/// tree at 48, and every wait of theirs is on the kernel tick instead,
+/// which the ticker's rebase keeps a millisecond long at every rate.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+/// The same ruler while letter k holds the tree at 48 MHz.
+struct Ruler48 {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return Clock48::hz; }
+};
+
+/// Every byte of the console off the wire, bounded (a wedged console
+/// shows as missing lines).
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();
+}
+
+/// A pause of `ms` milliseconds on the kernel tick, at any rate of the
+/// ladders: between ms - 1 and ms whole tick periods, as a loop on
+/// millis() gives (wait_ticks() ends one period after its budget).
+void pause_ms(uint32_t ms) {
+    const uint32_t ticks = brio::ticks_from_ms<P>(ms);
+    // Nothing to wait for: the budget running out is the pause.
+    (void)brio::wait_ticks<P>([] { return false; }, ticks == 0u ? 0u : ticks - 1u);
+}
+
+/// Wait on the kernel tick until `done` holds; the milliseconds it took,
+/// at least one, or zero when the budget ran out.
+template <typename F>
+uint32_t wait_ms_until(F&& done, uint32_t budget_ms) {
     const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
+    if (!brio::wait_ticks<P>(done, brio::ticks_from_ms<P>(budget_ms))) {
+        return 0;
     }
-    return ms;
+    const uint32_t took = Ticker::millis() - t0;
+    return took == 0u ? 1u : took;
 }
 
 const char* state_name(UsbDeviceState s) {
@@ -242,26 +279,23 @@ const char* state_name(UsbDeviceState s) {
 /// Wait for the host to configure the device; the milliseconds it took,
 /// or zero when the budget ran out.
 uint32_t wait_configured(uint32_t budget_ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (!Device::configured()) {
-        if (Ticker::millis() - t0 > budget_ms) {
-            return 0;
-        }
-    }
-    const uint32_t took = Ticker::millis() - t0;
-    return took == 0u ? 1u : took;
+    return wait_ms_until([] { return Device::configured(); }, budget_ms);
 }
 
 /// A host letter's clean start: whatever a previous letter left in the
-/// rings is dropped, so the counts belong to this letter alone.
-void settle_port() {
+/// rings is dropped, so the counts belong to this letter alone. False
+/// when the receive side never went quiet in half a second - a host
+/// already pouring - and the letter then skips (the file header).
+[[nodiscard]] bool settle_port() {
     uint8_t b = 0;
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 500u) {
-        if (!Port::read_byte(b) && Port::tx_idle()) {
-            break;
-        }
-    }
+    return brio::wait_ticks<P>([&] { return !Port::read_byte(b) && Port::tx_idle(); },
+                               brio::ticks_from_ms<P>(500u));
+}
+
+/// The skip a letter takes when settle_port() answered false.
+void skip_pouring() {
+    bench.skip("the host was already pouring when the letter began: start the letter first, "
+               "then the script");
 }
 
 /// Is there a host at all? Every host-assisted letter asks first.
@@ -269,10 +303,8 @@ bool need_host() {
     if (Device::configured()) {
         return true;
     }
-    print(serial, "  SKIPPED, and it passes as a skip: the device is not configured, so no host "
-                  "is answering on the connector. Plug P14 into the host and run letter a first.",
-          crlf);
-    bench.verdict("the host letter is skipped and says so", true);
+    bench.skip("the device is not configured, so no host is answering on the connector; plug "
+               "P14 into the host and run letter a first");
     return false;
 }
 
@@ -280,13 +312,11 @@ bool need_host() {
 /// bytes it sent, or zero.
 uint32_t wait_for_traffic(uint32_t budget_ms) {
     const uint32_t rx0 = Port::rx_bytes();
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < budget_ms) {
-        if (Port::rx_bytes() != rx0) {
-            return Port::rx_bytes() - rx0;
-        }
+    if (!brio::wait_ticks<P>([&] { return Port::rx_bytes() != rx0; },
+                             brio::ticks_from_ms<P>(budget_ms))) {
+        return 0;
     }
-    return 0;
+    return Port::rx_bytes() - rx0;
 }
 
 /// Wait for the host to OPEN the port - DTR raised - before the device
@@ -296,15 +326,11 @@ uint32_t wait_for_traffic(uint32_t budget_ms) {
 /// starts before the open fills the other direction with the host's
 /// echo. The milliseconds it took, or zero.
 uint32_t wait_for_open(uint32_t budget_ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (!Port::dtr()) {
-        if (Ticker::millis() - t0 > budget_ms) {
-            return 0;
-        }
+    const uint32_t took = wait_ms_until([] { return Port::dtr(); }, budget_ms);
+    if (took != 0u) {
+        pause_ms(50);
     }
-    const uint32_t took = Ticker::millis() - t0;
-    wait_ms(50);
-    return took == 0u ? 1u : took;
+    return took;
 }
 
 /// A host letter that needs the script pouring: the port settled, the
@@ -314,14 +340,15 @@ bool need_pour(const char* mode, uint32_t budget_ms) {
     if (!need_host()) {
         return false;
     }
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return false;
+    }
     print(serial, "  run the script's ", mode, " now (this letter waits ", budget_ms / 1000u,
           " s for the first byte)", crlf);
     if (wait_for_traffic(budget_ms) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host sent nothing - the host end is "
-                      "the bench's USB script, started in the window above.",
-              crlf);
-        bench.verdict("the host letter is skipped and says so", true);
+        bench.skip("the host sent nothing - the host end is the bench's USB script, started in "
+                   "the window above");
         return false;
     }
     return true;
@@ -400,7 +427,7 @@ void ta_enumerate() {
     Device::stop();
     fresh_port();
     Usb::release();
-    wait_ms(20);
+    pause_ms(20);
 
     const bool up = Usb::init(clock);
     print(serial, "  init: ", up ? "ok" : "FAILED", "; the tree feeds the controller ", SysClock::usb_hz,
@@ -479,14 +506,14 @@ void ta_enumerate() {
 // =============================================================================
 void tp_pads() {
     Device::stop();
-    wait_ms(50);
+    pause_ms(50);
     const bool dp_port_down = PadDp::read();
     const bool dp_block_down = Usb::dp_high();
     const bool dm_port_down = PadDm::read();
     const bool other_down = OtherDp::read();
 
     Device::start();
-    wait_ms(5);   // before the host's debounce ends and its bus reset drives SE0
+    pause_ms(5);   // before the host's debounce ends and its bus reset drives SE0
     const bool dp_port_up = PadDp::read();
     const bool dp_block_up = Usb::dp_high();
     const bool dm_port_up = PadDm::read();
@@ -505,9 +532,11 @@ void tp_pads() {
                   "high, as the block sees its own pad - which on this board only the cabled "
                   "pair can do",
                   !dp_block_down && dp_block_up);
-    bench.verdict("and the part table's D+ pad, read through its port, follows the same two "
-                  "levels while D- stays low",
-                  !dp_port_down && dp_port_up && !dm_port_down && !dm_port_up);
+    const bool port_follows = !dp_port_down && dp_port_up && !dm_port_down && !dm_port_up;
+    print(serial, "  FINDING: the part table's D+ pad, read through its port, ",
+          port_follows ? "follows the same two levels while D- stays low"
+                       : "does NOT follow the block's two levels (the lines above)",
+          crlf);
 
     const uint32_t took = wait_configured(2000u);
     print(serial, "  re-enumerated in ", took, " ms", crlf);
@@ -519,10 +548,8 @@ void tp_pads() {
     // vendor's sequence for this block never opens the port. The console
     // is silent across the window: USART1's pads are port A's too.
     Device::stop();
-    wait_ms(300);
-    while (!Serial::tx_idle()) {
-    }
-    wait_ms(2);
+    pause_ms(300);
+    console_drain();
     Rcc::disable(Bus::pb2, gpio_clock_for(device::usbfs_dp_port));
     const bool shut = !Rcc::enabled(Bus::pb2, gpio_clock_for(device::usbfs_dp_port));
     Device::start();
@@ -537,7 +564,7 @@ void tp_pads() {
                   shut && took_shut != 0u);
     if (!Device::configured()) {
         Device::stop();
-        wait_ms(300);
+        pause_ms(300);
         Device::start();
         (void)wait_configured(2000u);
     }
@@ -548,10 +575,8 @@ void tp_pads() {
 // =============================================================================
 void tu_reconnect() {
     if (!Device::configured()) {
-        print(serial, "  SKIPPED, and it passes as a skip: the device is not configured, so "
-                      "there is nothing to detach. Run letter a first.",
-              crlf);
-        bench.verdict("the reconnect is skipped and says so", true);
+        bench.skip("the device is not configured, so there is nothing to detach; run letter a "
+                   "first");
         return;
     }
     const uint32_t resets = Device::resets();
@@ -562,7 +587,7 @@ void tu_reconnect() {
     // pull-up - and a block whose transceiver is still on could take that
     // for a bus reset. Read again after the time a host takes to call an
     // SE0 a disconnect, so a reset reported meanwhile shows.
-    wait_ms(100);
+    pause_ms(100);
     print(serial, "  stopped, 100 ms later: pulled up=", Usb::pulled_up() ? 1 : 0, " state=",
           state_name(Device::state()), " resets ", resets, " -> ", Device::resets(),
           " bus masters=", P::bus_masters_active(), crlf);
@@ -571,7 +596,7 @@ void tu_reconnect() {
                   !Usb::pulled_up() && P::bus_masters_active() == 0u &&
                       Device::state() == UsbDeviceState::detached && Device::resets() == resets);
 
-    wait_ms(500);
+    pause_ms(500);
     fresh_port();
     Device::start();
     const uint32_t took = wait_configured(2000u);
@@ -595,7 +620,7 @@ void te_ladder_enumeration() {
         switch_hclk(ladder[i]);
         const uint16_t ov0 = Usb::overruns();
         Device::stop();
-        wait_ms(300);
+        pause_ms(300);
         Device::start();
         took[i] = wait_configured(2000u);
         overflows[i] = static_cast<uint16_t>(Usb::overruns() - ov0);
@@ -609,7 +634,7 @@ void te_ladder_enumeration() {
     }
     if (!Device::configured()) {
         Device::stop();
-        wait_ms(300);
+        pause_ms(300);
         Device::start();
         (void)wait_configured(2000u);
     }
@@ -635,18 +660,15 @@ void te_ladder_enumeration() {
 // =============================================================================
 void tf_frames() {
     if (!Device::configured()) {
-        print(serial, "  SKIPPED, and it passes as a skip: with no host there are no frames. Run "
-                      "letter a first.",
-              crlf);
-        bench.verdict("the frame letter is skipped and says so", true);
+        bench.skip("with no host there are no frames; run letter a first");
         return;
     }
     const uint32_t f0 = Usb::frames();
     Usb::count_frames(true);
-    wait_ms(100);
+    pause_ms(100);
     Usb::count_frames(false);
     const uint32_t counted = Usb::frames() - f0;
-    wait_ms(10);
+    pause_ms(10);
     const uint32_t after = Usb::frames() - f0;
     print(serial, "  frames counted in 100 ms: ", counted, "; ten more milliseconds with the bit "
           "clear added ", after - counted, crlf);
@@ -663,7 +685,7 @@ void td_overflow() {
     const uint16_t standing = Usb::overruns();
     print(serial, "  FIFO overflows=", standing, " errors=", Usb::errors(), " bus masters=",
           P::bus_masters_active(), crlf);
-    wait_ms(100);
+    pause_ms(100);
     bench.verdict("the FIFO overflow counter does not move on a device the core stays awake for",
                   Usb::overruns() == standing);
 
@@ -743,16 +765,16 @@ void ty_echo() {
     if (!need_host()) {
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return;
+    }
     print(serial, "  10 s of echo: run the script's y now", crlf);
     const uint32_t rx0 = Port::rx_bytes();
     const uint32_t tx0 = Port::tx_bytes();
     const uint8_t overruns = Port::rx_overruns();
     if (wait_for_traffic(10000u) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host sent nothing in ten "
-                      "seconds.",
-              crlf);
-        bench.verdict("the echo is skipped and says so", true);
+        bench.skip("the host sent nothing in ten seconds");
         return;
     }
     uint32_t echoed = 0;
@@ -790,20 +812,15 @@ void tw_line() {
     const uint32_t codings = Port::coding_changes();
     const uint32_t states = Port::line_state_changes();
     print(serial, "  15 s for the host to open the port at another frame and raise DTR", crlf);
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 15000u) {
-        if (Port::coding_changes() != codings && Port::line_state_changes() != states) {
-            break;
-        }
-    }
+    (void)wait_ms_until([&] { return Port::coding_changes() != codings &&
+                                     Port::line_state_changes() != states; },
+                        15000u);   // judged below on the counters themselves
     const UsbLineCoding after = Port::line_coding();
     print(serial, "  then: ", after.baud, "/", after.data_bits, "/", after.parity, "/",
           after.stop_bits, " dtr=", Port::dtr() ? 1 : 0, " rts=", Port::rts() ? 1 : 0, crlf);
     if (Port::coding_changes() == codings && Port::line_state_changes() == states) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host neither set a line coding "
-                      "nor moved a control line in fifteen seconds.",
-              crlf);
-        bench.verdict("the line coding letter is skipped and says so", true);
+        bench.skip("the host neither set a line coding nor moved a control line in fifteen "
+                   "seconds");
         return;
     }
     bench.verdict("the host's SET_LINE_CODING arrives through endpoint zero's OUT data stage - "
@@ -830,13 +847,15 @@ void tn_asleep() {
     // between them, so the block's DMA reads every packet out of RAM with
     // the core asleep. The host end counts what arrives against the
     // counting stream the device loads.
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return;
+    }
     print(serial, "  2 s of the device pouring with the core in wfi between packets, once the "
                   "host opens the port: run the script's r now",
           crlf);
     if (wait_for_open(10000u) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host never opened the port.", crlf);
-        bench.verdict("the asleep letter is skipped and says so", true);
+        bench.skip("the host never opened the port");
         return;
     }
     const uint32_t tx0 = Port::tx_bytes();
@@ -867,15 +886,18 @@ void tn_asleep() {
                   sent >= 8192u && in_wakes > 0u);
     while (!Port::tx_idle() && Ticker::millis() - t1 < 3000u) {
     }
-    wait_ms(2500);   // the host end's read, over
-    settle_port();
+    pause_ms(2500);   // the host end's read, over
+    // Whatever the host left in the receive ring is dropped; the
+    // enumeration below judges nothing of it, so a ring that stays busy
+    // is not a reason to skip.
+    (void)settle_port();
 
     // AN ENUMERATION THE CORE SLEEPS THROUGH: the pull-up dropped and
     // raised, and from the raise on nothing but interrupts wakes the core -
     // every IN stage of the host's control transfers read out of RAM by the
     // block with the core in wfi.
     Device::stop();
-    wait_ms(300);
+    pause_ms(300);
     const uint16_t ov0 = Usb::overruns();
     const uint32_t setups0 = Device::setups();
     uint32_t wakes = 0;
@@ -912,7 +934,7 @@ void tn_asleep() {
                   Device::setups() != setups0);
     if (took == 0u) {
         Device::stop();
-        wait_ms(300);
+        pause_ms(300);
         Device::start();
         (void)wait_configured(2000u);
     }
@@ -926,13 +948,15 @@ void tv_throughput() {
     if (!need_host()) {
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return;
+    }
     print(serial, "  3 s of the device pouring once the host opens the port: run the script's v "
                   "now",
           crlf);
     if (wait_for_open(10000u) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host never opened the port.", crlf);
-        bench.verdict("the throughput letter is skipped and says so", true);
+        bench.skip("the host never opened the port");
         return;
     }
     uint8_t pattern[64];
@@ -953,10 +977,7 @@ void tv_throughput() {
     const uint32_t sent = Port::tx_bytes() - tx0;
     print(serial, "  the device sent ", sent, " bytes in 3 s = ", sent / 3000u, " KB/s", crlf);
     if (sent < 8192u) {
-        print(serial, "  SKIPPED, and it passes as a skip: with no host reading the port the "
-                      "transmit ring fills and stays full.",
-              crlf);
-        bench.verdict("the throughput letter is skipped and says so", true);
+        bench.skip("no host read the port: the transmit ring filled and stayed full");
         return;
     }
     bench.verdict("the device pours into a host that is reading, one packet per IN token and no "
@@ -965,8 +986,7 @@ void tv_throughput() {
 
     print(serial, "  now the other way: the two seconds count from the host's first byte", crlf);
     if (wait_for_traffic(5000u) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host poured nothing back.", crlf);
-        bench.verdict("the second half of the throughput letter is skipped and says so", true);
+        bench.skip("the host poured nothing back: the second half is not measured");
         return;
     }
     StreamCheck check;
@@ -1000,7 +1020,10 @@ void tl_lengths() {
     if (!need_host()) {
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return;
+    }
     print(serial, "  10 s of echo with the lengths counted: run the script's y now (its opening "
                   "of the port sets a line coding too)",
           crlf);
@@ -1009,8 +1032,7 @@ void tl_lengths() {
     const uint32_t port = Port::rx_bytes();
     const uint32_t codings = Port::coding_changes();
     if (wait_for_traffic(10000u) == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host sent nothing.", crlf);
-        bench.verdict("the length letter is skipped and says so", true);
+        bench.skip("the host sent nothing");
         return;
     }
     uint8_t buf[64];
@@ -1055,8 +1077,16 @@ void tt_toggle() {
     // THE STAGED LOSS: the PID the bulk OUT expects, flipped. The host's
     // next packet then carries the other PID - the silicon acknowledges
     // it, the driver drops it as a repeat - and the one after it matches.
-    const bool pid = Usb::out_toggle(data_endpoint);
-    (void)Usb::set_out_toggle(data_endpoint, !pid);
+    // Read and written under ONE guard: the vector flips the toggle at
+    // every packet it takes, and a packet landing between a read outside
+    // the guard and the write would make the "flip" write back the value
+    // the vector had just set - no mismatch staged at all.
+    bool pid = false;
+    {
+        InterruptGuard guard;
+        pid = Usb::out_toggle(data_endpoint);
+        (void)Usb::set_out_toggle(data_endpoint, !pid);
+    }
     const uint32_t taken = drain(check, 200);
     const uint16_t mismatches = static_cast<uint16_t>(Usb::toggle_errors() - mismatches_before);
     const uint32_t jumps = check.jumps - jumps_before;
@@ -1217,9 +1247,8 @@ void tk_divider() {
     Device::stop();
     fresh_port();
     Usb::release();
-    wait_ms(20);
-    while (!Serial::tx_idle()) {
-    }
+    pause_ms(20);
+    console_drain();   // the console is rebuilt on the new tree below
     const uint8_t code96 = Rcc::usb_prescaler();
     const bool tree = Clock48::init();
     (void)Serial::init(Clock48{}, 115200);
@@ -1235,9 +1264,8 @@ void tk_divider() {
           " ms, FIFO overflows ", overruns, crlf);
     Device::stop();
     Usb::release();
-    wait_ms(20);
-    while (!Serial::tx_idle()) {
-    }
+    pause_ms(20);
+    (void)brio::console_drain<Ruler48, Serial>();   // at 48 MHz; a wedged console shows as missing lines
     (void)SysClock::init();
     (void)Serial::init(clock, 115200);
     (void)Ticker::init(clock);
@@ -1283,7 +1311,10 @@ void tg_halt() {
     if (!need_host()) {
         return;
     }
-    settle_port();
+    if (!settle_port()) {
+        skip_pouring();
+        return;
+    }
     constexpr uint8_t out_ep = usb_ep_out(data_endpoint);
     constexpr uint8_t in_ep = usb_ep_in(data_endpoint);
     const EpView before = ep_view();
@@ -1328,9 +1359,8 @@ void tg_halt() {
           res_name(at_clear.res_tx), ", toggles RX ", at_clear.tog_rx ? 1 : 0, " TX ",
           at_clear.tog_tx ? 1 : 0, "; ", after_clear, " bytes arrived after it", crlf);
     if (halted_at == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host halted nothing - the host end "
-                      "is the bench's USB script, started in the window above.", crlf);
-        bench.verdict("the host letter is skipped and says so", true);
+        bench.skip("the host halted nothing - the host end is the bench's USB script, started "
+                   "in the window above");
     } else {
         bench.verdict("the host's SET_FEATURE(ENDPOINT_HALT) halts each bulk direction: the "
                       "stack hands it to stall() and both responses read STALL",
@@ -1344,7 +1374,7 @@ void tg_halt() {
     }
     const EpView left = ep_view();
     Device::stop();
-    wait_ms(500);
+    pause_ms(500);
     Device::start();
     const uint32_t back = wait_configured(2000u);
     const EpView fresh = ep_view();
@@ -1372,7 +1402,7 @@ void tr_pool() {
     // other claims between, an IN half moved up by its own OUT, and a
     // move refused because the half it would move is armed.
     Device::stop();
-    wait_ms(20);
+    pause_ms(20);
     Usb::deconfigure_endpoints();
     const uint16_t free0 = Usb::buffer_free();
     bool ok = Usb::configure_endpoint(usb_ep_in(2), UsbEndpointType::bulk, 64);   // 2 IN at 64
@@ -1414,7 +1444,7 @@ void tr_pool() {
     // THE POOL THAT FITS EXACTLY: a device of the same descriptors on
     // Usbfs<256>, enumerated, every byte of the pool spent, and an echo.
     Usb::release();
-    wait_ms(300);
+    pause_ms(300);
     small_pool = true;
     const bool up = Usb256::init(clock);
     // The baseline before the pull-up, the port's rings emptied: a host
@@ -1422,10 +1452,7 @@ void tr_pool() {
     Port256::discard();
     const uint32_t rx0 = Port256::rx_bytes();
     Device256::start();
-    const uint32_t t0 = Ticker::millis();
-    while (!Device256::configured() && Ticker::millis() - t0 < 2000u) {
-    }
-    const bool conf = Device256::configured();
+    const bool conf = wait_ms_until([] { return Device256::configured(); }, 2000u) != 0u;
     print(serial, "  Usbfs<256>: ", conf ? "configured" : "NOT configured", ", ",
           Usb256::buffer_used(), " of ", Usb256::pool_size, " bytes spent; run the script's y "
           "now (an echo for 9 s)", crlf);
@@ -1455,8 +1482,7 @@ void tr_pool() {
     print(serial, "  echoed ", echoed, " of ", Port256::rx_bytes() - rx0, " bytes, ring overruns ",
           Port256::rx_overruns(), ", FIFO overflows ", Usb256::overruns(), crlf);
     if (echoed == 0u) {
-        print(serial, "  SKIPPED, and it passes as a skip: the host sent nothing", crlf);
-        bench.verdict("the host letter is skipped and says so", true);
+        bench.skip("the host sent nothing");
     } else {
         bench.verdict("and it carries the echo: every byte received went back, no overrun, no "
                       "overflow (the host judges the bytes)",
@@ -1465,7 +1491,7 @@ void tr_pool() {
     }
     Device256::stop();
     Usb256::release();
-    wait_ms(300);
+    pause_ms(300);
     small_pool = false;
     (void)Usb::init(clock);
     Device::start();
@@ -1662,13 +1688,8 @@ void ts_suspend() {
     const uint32_t wake_own = Usb::wakeups();
     const uint32_t wake_other = other_hits;
     print(serial, "  20 s for the host to let the port suspend (the script's s)", crlf);
-    uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 20000u && Device::suspends() == suspends) {
-    }
-    if (Device::suspends() == suspends) {
-        print(serial, "  SKIPPED, and it passes as a skip: this host did not let the bus go idle.",
-              crlf);
-        bench.verdict("the suspend letter is skipped and says so", true);
+    if (wait_ms_until([&] { return Device::suspends() != suspends; }, 20000u) == 0u) {
+        bench.skip("this host did not let the bus go idle");
     } else {
         const uint8_t masters = P::bus_masters_active();
         const uint32_t own_at_suspend = Usb::wakeups() - wake_own;
@@ -1681,10 +1702,9 @@ void ts_suspend() {
                       Usb::suspended());
         bench.verdict("a suspended controller still holds its bus-master count, deliberately",
                       masters == 1u);
-        t0 = Ticker::millis();
-        while (Ticker::millis() - t0 < 20000u && Device::resumes() == resumes) {
-        }
-        wait_ms(200);
+        // Judged below on the counter itself.
+        (void)wait_ms_until([&] { return Device::resumes() != resumes; }, 20000u);
+        pause_ms(200);
         const uint32_t hits_own = Usb::wakeups() - wake_own;
         const uint32_t hits_other = other_hits - wake_other;
         print(serial, "  then: resumes=", Device::resumes(), " resets=", Device::resets(),
@@ -1692,10 +1712,8 @@ void ts_suspend() {
               Usb::wakeup_line, " fired ", hits_own, " times, line ", other_wakeup_line, " ",
               hits_other, crlf);
         if (Device::resumes() == resumes) {
-            print(serial, "  the resume did not come in twenty seconds; the port may need "
-                          "touching at the host end",
-                  crlf);
-            bench.verdict("the resume is not claimed and says so", true);
+            bench.skip("the resume did not come in twenty seconds; the port may need touching "
+                       "at the host end");
         } else {
             bench.verdict("the resume is reported and the port is configured as it was",
                           Device::configured() && Port::configured());

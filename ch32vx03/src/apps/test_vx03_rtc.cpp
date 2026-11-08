@@ -69,6 +69,8 @@
 
 #include <stdint.h>
 
+#include <optional>
+
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/exti.hpp"
 #include "ch32vx03/pfic.hpp"
@@ -79,6 +81,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -130,43 +133,21 @@ constexpr uint32_t lse_hz = 32'768;
 volatile uint32_t rtc_irqs = 0;
 volatile uint16_t rtc_irq_flags = 0;
 volatile uint32_t rtc_irq_count = 0;
-volatile uint32_t rtc_irq_stamp = 0;
 volatile uint32_t alarm_irqs = 0;
 volatile uint32_t alarm_irq_count = 0;
-volatile uint32_t alarm_irq_stamp = 0;
 volatile uint32_t tamper_irqs = 0;
 
-/// The core's counter as a stopwatch: STK counts to its reload and
-/// starts again, so a span is accumulated poll by poll with one period
-/// folded in across each wrap.
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's one ruler: HCLK cycles, the kernel tick and STK's
+/// position composed (ch32vx03/ticker.hpp) - right over any span under
+/// 2^32 cycles (44 s at 96 MHz) while interrupts are enabled, which they
+/// are wherever this suite times something.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-/// A free-running stamp both handlers and the loop can compare: the
-/// tick count in the high half and the counter in the low, which is
-/// enough to tell two events microseconds apart.
-uint32_t stamp() { return stk()->CNTL; }
+/// A span of the ruler in microseconds.
+uint32_t us_of(uint32_t cycles) { return cycles / ticks_per_us; }
 
 /// The domain as every letter but the destructive ones wants it: the
 /// crystal running and RTCCLK on it. False when the board has no
@@ -202,13 +183,9 @@ bool set_tick(uint32_t hz, uint32_t count) {
 /// watched. The microseconds it took, or zero if it never came.
 uint32_t wait_tick(uint32_t bound_us) {
     Rtc::clear(rtc_secf);
-    Stopwatch w;
-    while (!Rtc::second()) {
-        if (w.us() > bound_us) {
-            return 0;
-        }
-    }
-    return w.us();
+    const std::optional<uint32_t> took =
+        brio::cycles_until<Ruler>([] { return Rtc::second(); }, bound_us);
+    return took ? us_of(*took) : 0u;
 }
 
 // ===========================================================================
@@ -280,9 +257,13 @@ void tb_crystal() {
     uint32_t start_us = 0;
     if (!was_running) {
         RtcDomain::lse_enable(true);
-        Stopwatch w;
+        // The start is up to seconds and the driver's wait is not polled
+        // from here: the ruler, unlike a fold of STK's position per poll,
+        // holds a span of any length under 44 s.
+        brio::Stopwatch<Ruler> w;
+        w.start();
         const bool ready = RtcDomain::lse_wait_ready();
-        start_us = w.us();
+        start_us = us_of(w.elapsed());
         print(serial, "  the crystal was stopped: LSERDY ", ready ? "after " : "NEVER, ",
               start_us, " us", crlf);
         bench.verdict("the 32.768 kHz crystal on this board starts: LSEON set and LSERDY "
@@ -307,9 +288,8 @@ void tb_crystal() {
                   "of writing a bit the hardware ignores",
                   refused && !RtcDomain::lse_bypass());
 
-    bench.verdict("this package brings out the two oscillator pads, which is what makes a "
-                  "crystal possible at all here",
-                  RtcDomain::has_lse_pins);
+    static_assert(RtcDomain::has_lse_pins,
+                  "this suite's board types bond the two 32 kHz oscillator pads (PC14/PC15)");
 }
 
 // ===========================================================================
@@ -342,17 +322,14 @@ void tc_select() {
           " Hz nominal, the HSE over ", device::rtc_hse_div[0], " = ",
           rtc_hse_clock_hz(xtal_hz, 0), " Hz or over ", device::rtc_hse_div[1], " = ",
           rtc_hse_clock_hz(xtal_hz, 1), " Hz", crlf);
-    if constexpr (rtc_hse_divider_known) {
-        bench.verdict("the HSE division is ONE number on this part - 3.4.9 names every "
-                      "CH32V303 among the parts that divide by 128, with no lot rule - so "
-                      "the part table states it twice and the driver knows it",
-                      device::rtc_hse_div[0] == 128u && device::rtc_hse_div[1] == 128u);
-    } else {
-        bench.verdict("the HSE division is not a single number on this device class - 3.4.9 "
-                      "gives 512 or 128 BY LOT NUMBER - so the part table states the pair "
-                      "and a program that needs the rate measures which it has",
-                      device::rtc_hse_div[0] == 512u && device::rtc_hse_div[1] == 128u);
-    }
+    // The part table's facts, checked by the compiler: one number on a
+    // part 3.4.9 names among those that divide by 128 with no lot rule
+    // (every CH32V303), the pair 512 or 128 BY LOT NUMBER elsewhere - and
+    // there a program that needs the rate measures it (letter w).
+    static_assert(rtc_hse_divider_known
+                      ? device::rtc_hse_div[0] == 128u && device::rtc_hse_div[1] == 128u
+                      : device::rtc_hse_div[0] == 512u && device::rtc_hse_div[1] == 128u,
+                  "the HSE division: 128 where it is known, 512 or 128 where the lot keys it");
 }
 
 // ===========================================================================
@@ -366,9 +343,10 @@ void td_counter() {
 
     // The read discipline: RSF cleared and waited for. It costs up to
     // one RTCCLK period, which on the crystal is thirty microseconds.
-    Stopwatch sync_watch;
+    brio::Stopwatch<Ruler> sync_watch;
+    sync_watch.start();
     const bool synced = Rtc::synchronize();
-    const uint32_t sync_us = sync_watch.us();
+    const uint32_t sync_us = us_of(sync_watch.elapsed());
     print(serial, "  synchronize(): ", synced ? "RSF back" : "TIMED OUT", " in ", sync_us,
           " us (one RTCCLK period is 30 us)", crlf);
     bench.verdict("the read synchronization costs at most one period of the RTC's own "
@@ -402,9 +380,7 @@ void td_counter() {
     // The live divider: the fraction of the current tick, counting DOWN
     // towards the next one.
     const uint32_t d1 = Rtc::divider();
-    Stopwatch w;
-    while (w.us() < 3000u) {
-    }
+    brio::spin_us<Ruler>(3'000u);
     const uint32_t d2 = Rtc::divider();
     print(serial, "  RTC_DIV ", d1, " then ", d2, " three milliseconds later (the reload "
           "is ", rtc_prescaler_for(lse_hz, 64), ")", crlf);
@@ -425,8 +401,9 @@ void td_counter() {
     uint32_t worst_back = 0;
     uint32_t worst_forward = 0;
     uint32_t last = Rtc::count();
-    Stopwatch fast;
-    while (fast.us() < 4'000'000u) {
+    brio::Stopwatch<Ruler> fast;
+    fast.start();
+    while (fast.elapsed() < brio::us_cycles<Ruler>(4'000'000u)) {
         const uint16_t high = Rtc::regs().CNTH;
         (void)Rtc::regs().CNTL;
         if (Rtc::regs().CNTH != high) {
@@ -463,8 +440,7 @@ void td_counter() {
     // has to do.
     (void)set_tick(64, 0x12345678u);
     const uint32_t c1 = Rtc::count();
-    while (w.us() < 60000u) {
-    }
+    brio::spin_us<Ruler>(60'000u);
     const uint32_t c2 = Rtc::count();
     print(serial, "  CNT ", hex(c1), " then ", hex(c2), " some sixty milliseconds later at "
           "64 ticks a second", crlf);
@@ -490,18 +466,19 @@ void te_rate() {
     // because the loop joined the tick wherever it happened to be.
     (void)wait_tick(2'000'000u);
     Rtc::clear(rtc_secf);
-    Stopwatch w;
+    brio::Stopwatch<Ruler> w;
+    w.start();
     uint32_t ticks = 0;
     while (ticks < 10u) {
         if (Rtc::second()) {
             Rtc::clear(rtc_secf);
             ++ticks;
         }
-        if (w.us() > 15'000'000u) {
+        if (w.elapsed() > brio::us_cycles<Ruler>(15'000'000u)) {
             break;
         }
     }
-    const uint32_t span_us = w.us();
+    const uint32_t span_us = us_of(w.elapsed());
     const uint32_t period_us = span_us / (ticks == 0u ? 1u : ticks);
     // RTCCLK = (reload + 1) / period. In hundredths of a hertz, so the
     // number has two digits after the point without floating point.
@@ -545,10 +522,9 @@ void tf_alarm() {
     const bool ints_read = Rtc::interrupts() == rtc_alrie;
     const bool outside_window = !Rtc::in_config();
     Pfic::enable(Irq::rtc);
-    Stopwatch w;
-    while (rtc_irqs == 0u && w.us() < 500'000u) {
-    }
-    const uint32_t own_us = w.us();
+    const std::optional<uint32_t> own =
+        brio::cycles_until<Ruler>([] { return rtc_irqs != 0u; }, 500'000u);
+    const uint32_t own_us = own ? us_of(*own) : 500'000u;
     Pfic::disable(Irq::rtc);
     (void)Rtc::interrupts(0);
     print(serial, "  the RTC's own vector: alarm armed at ", hex(target), ", the handler "
@@ -592,11 +568,10 @@ void tf_alarm() {
     Pfic::enable(Irq::rtc_alarm);
     const uint32_t t2 = Rtc::count() + 4u;
     (void)Rtc::alarm(t2);
-    Stopwatch w2;
-    while (alarm_irqs == 0u && w2.us() < 500'000u) {
-    }
+    const std::optional<uint32_t> line =
+        brio::cycles_until<Ruler>([] { return alarm_irqs != 0u; }, 500'000u);
     const uint32_t without_ie = alarm_irqs;
-    const uint32_t line_us = w2.us();
+    const uint32_t line_us = line ? us_of(*line) : 500'000u;
 
     // Then WITH it, if the line stayed quiet.
     uint32_t with_ie = 0;
@@ -608,11 +583,10 @@ void tf_alarm() {
         (void)Rtc::interrupts(rtc_alrie);
         const uint32_t t3 = Rtc::count() + 4u;
         (void)Rtc::alarm(t3);
-        Stopwatch w3;
-        while (alarm_irqs == 0u && w3.us() < 500'000u) {
-        }
+        const std::optional<uint32_t> took =
+            brio::cycles_until<Ruler>([] { return alarm_irqs != 0u; }, 500'000u);
         with_ie = alarm_irqs;
-        with_ie_us = w3.us();
+        with_ie_us = took ? us_of(*took) : 500'000u;
     }
     Pfic::disable(Irq::rtc_alarm);
     (void)Rtc::arm_wake(false);
@@ -628,11 +602,9 @@ void tf_alarm() {
                   line_armed && without_ie >= 1u);
 
     // The alarm register cannot be read back at all, which is a fact a
-    // program has to hold rather than discover.
-    bench.verdict("RTC_ALRM is write-only (6.3.9, 6.3.10): a program that wants to know "
-                  "what it armed keeps the number itself, and this driver invents no "
-                  "shadow for it",
-                  true);
+    // program has to hold rather than discover - stated, not measured.
+    print(serial, "  RTC_ALRM is write-only (6.3.9, 6.3.10): a program that wants to know what "
+          "it armed keeps the number itself, and this driver invents no shadow for it", crlf);
 }
 
 // ===========================================================================
@@ -648,14 +620,11 @@ void tg_overflow() {
     // milliseconds to the wrap.
     (void)set_tick(64, 0xFFFFFFFEu);
     Rtc::clear(rtc_secf | rtc_alrf | rtc_owf);
-    Stopwatch w;
-    while (!Rtc::overflowed() && w.us() < 500'000u) {
-    }
-    const uint32_t us = w.us();
+    const std::optional<uint32_t> took =
+        brio::cycles_until<Ruler>([] { return Rtc::overflowed(); }, 500'000u);
+    const uint32_t us = took ? us_of(*took) : 500'000u;
     const uint32_t at_flag = Rtc::count();
-    Stopwatch settle;
-    while (settle.us() < 2000u) {
-    }
+    brio::spin_us<Ruler>(2'000u);
     const uint32_t after = Rtc::count();
     print(serial, "  set two ticks short of 0xFFFFFFFF: OWF after ", us,
           " us, CNT read at the flag ", hex(at_flag), " and two milliseconds later ",
@@ -684,10 +653,10 @@ void th_backup() {
     const bool opened = Bkp::open();
     print(serial, "  this device class carries ", Bkp::count, " backup data registers, and "
           "the tamper pad is ", Bkp::has_tamper_pad ? "bonded" : "not bonded", crlf);
-    bench.verdict("the block opens with both bus clocks and DBP, and the count is the "
-                  "device class's: ten on the CH32V20x_D6, forty-two on the other two",
-                  opened &&
-                      Bkp::count == (device::device_class == DeviceClass::v20x_d6 ? 10u : 42u));
+    static_assert(Bkp::count == (device::device_class == DeviceClass::v20x_d6 ? 10u : 42u),
+                  "the data register count is the device class's: ten on the CH32V20x_D6, "
+                  "forty-two on the other two");
+    bench.verdict("the block opens with both bus clocks and DBP", opened);
 
     // Every register of this class, written and read back.
     bool all = true;
@@ -885,15 +854,16 @@ void tw_domain_reset() {
         Rtc::configure(RtcConfig{.prescaler = lsi_reload, .count = 0, .set_count = true});
     (void)wait_tick(3'000'000u);
     Rtc::clear(rtc_secf);
-    Stopwatch lw;
+    brio::Stopwatch<Ruler> lw;
+    lw.start();
     uint32_t lsi_ticks = 0;
-    while (lsi_ticks < 5u && lw.us() < 10'000'000u) {
+    while (lsi_ticks < 5u && lw.elapsed() < brio::us_cycles<Ruler>(10'000'000u)) {
         if (Rtc::second()) {
             Rtc::clear(rtc_secf);
             ++lsi_ticks;
         }
     }
-    const uint32_t lsi_span = lw.us();
+    const uint32_t lsi_span = us_of(lw.elapsed());
     const uint32_t lsi_count = Rtc::count();
     const uint32_t lsi_rate =
         lsi_ticks == 0u ? 0u
@@ -1006,10 +976,9 @@ uint32_t tamper_attempt(const char* how, bool active_low, bool use_pull) {
     } else {
         TamperPad::output(!active_low);
     }
-    Stopwatch w;
-    while (!Bkp::tamper_event() && w.us() < 50'000u) {
-    }
-    const uint32_t us = Bkp::tamper_event() ? w.us() : 0u;
+    const std::optional<uint32_t> took =
+        brio::cycles_until<Ruler>([] { return Bkp::tamper_event(); }, 50'000u);
+    const uint32_t us = took ? us_of(*took) : 0u;
     print(serial, "  ", how, ": armed=", armed ? 1 : 0, " quiet=", quiet ? 1 : 0,
           ", the pad reads ", TamperPad::read() ? 1 : 0, ", TEF ",
           us != 0u ? "after " : "NEVER, ", us, " us, the handler ran ", tamper_irqs,
@@ -1052,17 +1021,26 @@ void tt_tamper() {
 
     if (driven != 0u || pulled != 0u) {
         // A write while TEF stands is dropped, which is the one thing
-        // that makes this flag worth reading outside a handler.
+        // that makes this flag worth reading outside a handler. The
+        // vector's body writes CTE, so TEF may already be down here: it
+        // is read right before the write, and the drop is judged only
+        // when it stood.
+        const bool tef_stood = Bkp::tamper_event();
         (void)Bkp::data(1, 0x1234u);
         const auto still = Bkp::data(1);
-        print(serial, "  a write into a data register while TEF stands: reads ",
-              hex(still.value_or(0)), crlf);
+        print(serial, "  a write into a data register with TEF ", tef_stood ? "standing" : "DOWN",
+              ": reads ", hex(still.value_or(0)), crlf);
         bench.verdict("the tamper event is raised from the pad's own side, the data "
                       "registers are wiped by the hardware and the vector runs",
                       kept.value_or(0xFFFFu) == 0u && irqs >= 1u);
-        bench.verdict("and while TEF stands every write into a data register is DROPPED "
-                      "(4.3.4) - the flag is a state and not only a report",
-                      still.value_or(0xFFFFu) == 0u);
+        if (tef_stood) {
+            bench.verdict("and while TEF stands every write into a data register is DROPPED "
+                          "(4.3.4) - the flag is a state and not only a report",
+                          still.value_or(0xFFFFu) == 0u);
+        } else {
+            bench.skip("TEF was already down at the write (the vector's CTE): the drop "
+                       "while it stands is not judged");
+        }
     } else {
         print(serial, "  the registers still read ", hex(kept.value_or(0)), " (they held ",
               hex(before.value_or(0)), ")", crlf);
@@ -1108,7 +1086,6 @@ BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 /// The RTC's own vector: the second, the alarm and the overflow all
 /// arrive here.
 BRIO_CH32_VECTOR(rtc_handler) {
-    rtc_irq_stamp = stamp();
     rtc_irq_count = brio::Rtc::count();
     rtc_irq_flags = brio::Rtc::isr();
     rtc_irqs = rtc_irqs + 1u;
@@ -1117,7 +1094,6 @@ BRIO_CH32_VECTOR(rtc_handler) {
 /// The ALARM's second vector, behind EXTI line 17 - the path that
 /// survives a low-power mode.
 BRIO_CH32_VECTOR(rtc_alarm_handler) {
-    alarm_irq_stamp = stamp();
     alarm_irq_count = brio::Rtc::count();
     (void)brio::Rtc::alarm_isr();
     alarm_irqs = alarm_irqs + 1u;
@@ -1136,10 +1112,20 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 
-    // BEFORE the domain is opened: what the reset left.
+    // BEFORE the domain is opened: what the reset left. DBP reads as
+    // zero with PWR's bus clock shut, so the clock is opened for the one
+    // read - after the RCC read-back that orders the enable before it -
+    // and shut again as the reset left it.
     boot_pwr_clock = brio::RtcDomain::pwr_bus_clock();
     boot_bkp_clock = brio::Bkp::clock();
-    boot_dbp = boot_pwr_clock && brio::RtcDomain::unlocked();
+    if (!boot_pwr_clock) {
+        brio::RtcDomain::pwr_bus_clock(true);
+        (void)brio::RtcDomain::pwr_bus_clock();
+    }
+    boot_dbp = brio::RtcDomain::unlocked();
+    if (!boot_pwr_clock) {
+        brio::RtcDomain::pwr_bus_clock(false);
+    }
 
     domain_ready = open_domain();
 

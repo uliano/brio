@@ -105,6 +105,7 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <type_traits>
 
 #include "ch32vx03/clock.hpp"
@@ -131,6 +132,7 @@
 #include "kernel/time_event.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -147,14 +149,15 @@ constexpr SysClock clock;
 // neither loads nor zeroes - and which a Standby keeps only as far as
 // the retention bit says, one of the things letter w measures.
 // ---------------------------------------------------------------------------
-inline constexpr uint16_t token_magic = 0x5B71;
+inline constexpr uint16_t token_magic = 0x5B74;
 
 struct Token {
     uint16_t magic;
     char letter;
     uint8_t leg;
-    uint16_t pass;
+    uint16_t pass;          ///< the letter's tally before the reset, banked
     uint16_t fail;
+    uint8_t skipped;
     uint32_t rtc_at_arm;    ///< the RTC count before a sleep that may end in a reset
     uint32_t rtc_at_wake;   ///< and at a wake that did not
     uint32_t pattern;       ///< what the SRAM held before a Standby
@@ -186,6 +189,14 @@ using KeyPad = Pin<'A', 0>;      ///< the WKUP pad, and EXTI line 0
 using KeyInt = ExtInt<KeyPad>;
 
 TestBench<Serial> bench;
+
+/// The letter's tally so far into the token, so a verdict taken before
+/// a reset reaches the letter's closing line after it.
+void bank_tally() {
+    token.pass = bench.passed();
+    token.fail = bench.failed();
+    token.skipped = bench.skipped();
+}
 
 using Plain = Ch32vx03SleepSite<SysClock>;
 using Timed = Ch32vx03TimedSleepSite<P, SysClock>;
@@ -225,13 +236,30 @@ volatile uint32_t pvd_hits = 0;
 // Rulers
 // ---------------------------------------------------------------------------
 
-/// The core's counter as a stopwatch: STK counts to its reload and
-/// starts again, so a span is accumulated poll by poll with one period
-/// folded in across each wrap. It STOPS with HCLK in a Stop, which is
-/// the whole reason the RTC is the other ruler here.
-class Stopwatch {
+/// The suite's ruler for the spans of a RUNNING core: HCLK cycles, the
+/// kernel tick and STK's position composed (ch32vx03/ticker.hpp), at the
+/// suite's 96 MHz. It is right only while the tick handler runs once a
+/// period, so it measures no span that a Stop stops, that the tick is
+/// paused across, or that a clock task re-run crosses - StkWatch below
+/// takes those - and its microseconds are right at 96 MHz alone (letter
+/// k's spans at the other rates of its DynamicClock are cycles of the
+/// rate standing, never converted with it).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
+
+/// STK's own counter as a stopwatch, for the spans the ruler cannot
+/// take: right after a Stop (the core back on the HSI, the timebase not
+/// yet resynchronized), across the clock task's re-run, and with the tick
+/// paused (letter j). STK counts to its reload and starts again, so a span
+/// is accumulated poll by poll with one period folded in across each wrap
+/// - right for a span polled at least once a period, which each of these
+/// is (each is shorter than one).
+class StkWatch {
 public:
-    Stopwatch() { start(); }
+    StkWatch() { start(); }
 
     void start() {
         last_ = stk()->CNTL;
@@ -262,31 +290,51 @@ constexpr uint32_t fine_ms(uint32_t fine) { return fine / (rtcclk_hz / 1000u); }
 
 /// Let the console finish before the clocks stop: a Stop would freeze
 /// the transmitter mid-character, and the wake comes back with a
-/// divisor meant for twelve times the HSI.
+/// divisor meant for twelve times the HSI. tx_idle() answers for the
+/// shift register too (STATR.TC), so nothing follows the wait; a wedged
+/// console shows as missing lines.
 void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 400);
+    (void)brio::console_drain<Ruler, Serial>();
 }
 
 /// Wait, awake, for a predicate - bounded, so a wedge ends a letter and
-/// not the session. Microseconds waited, or zero if it never came.
+/// not the session. Microseconds waited, at least one, or zero if it
+/// never came: the shared wait, in the units this suite prints.
 template <class F>
-uint32_t wait_for(F ready, uint32_t bound_us, uint32_t hz = SysClock::hz) {
-    Stopwatch w;
-    for (;;) {
-        if (ready()) {
-            return w.us(hz) + 1u;
+uint32_t us_until(F ready, uint32_t bound_us) {
+    const std::optional<uint32_t> took = brio::cycles_until<Ruler>(ready, bound_us);
+    return took ? *took / cycles_per_us + 1u : 0u;
+}
+
+/// RTC counts since `since`, never negative: count() can return a stale
+/// copy up to three counts below the read before it (ch32vx03/rtc.hpp),
+/// and an unsigned difference across such a read is some four billion -
+/// a bounded wait ended at once, a span of ten counts closed after one.
+uint32_t rtc_since(uint32_t since) { return brio::since_clamped(Rtc::count(), since); }
+
+/// The count as it stands, read until two reads in a row agree: a single
+/// read can be one of the stale copies count() returns now and then, up
+/// to three counts below the count (ch32vx03/rtc.hpp). Bounded at eight
+/// further reads, a microsecond each against a count of almost a
+/// millisecond; past that the last read is taken.
+uint32_t settled_count() {
+    uint32_t last = Rtc::count();
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const uint32_t now = Rtc::count();
+        if (now == last) {
+            return now;
         }
-        if (w.us(hz) > bound_us) {
-            return 0;
-        }
+        last = now;
     }
+    return last;
 }
 
 /// Place the alarm `counts` ahead of now, with the two flags and the
 /// pending bit cleared first. The count it was placed at, or zero if
-/// the block refused the write.
+/// the block refused the write. "Now" is a settled read: an alarm placed
+/// three counts past a read three counts stale would name the count
+/// already standing, and the event is raised as the counter LEAVES the
+/// value armed - it would never come.
 uint32_t place_alarm(uint32_t counts) {
     Rtc::clear(rtc_alrf);
     (void)Exti::clear(Rtc::wake_line);
@@ -294,17 +342,8 @@ uint32_t place_alarm(uint32_t counts) {
     if (!Rtc::synchronize()) {
         return 0;
     }
-    const uint32_t at = Rtc::count() + counts;
+    const uint32_t at = settled_count() + counts;
     return Rtc::alarm(at) ? at : 0u;
-}
-
-/// RTC counts since `since`, never negative: count() can return a stale
-/// copy up to three counts below the read before it (ch32vx03/rtc.hpp),
-/// and an unsigned difference across such a read is some four billion -
-/// a bounded wait ended at once, a span of ten counts closed after one.
-uint32_t rtc_since(uint32_t since) {
-    const int32_t d = static_cast<int32_t>(Rtc::count() - since);
-    return d > 0 ? static_cast<uint32_t>(d) : 0u;
 }
 
 // ===========================================================================
@@ -415,7 +454,7 @@ void ta_found() {
         timed_round = false;
         alarm_hits = 0;
         const uint32_t at = place_alarm(3);
-        const uint32_t took = wait_for([] { return alarm_hits != 0u; }, 20'000u);
+        const uint32_t took = us_until([] { return alarm_hits != 0u; }, 20'000u);
         const bool raised = Pwr::wakeup_flag();
         (void)at;
         Rtc::clear(rtc_alrf);
@@ -434,9 +473,10 @@ void ta_found() {
 
         // The window the alarm's own write costs, against the count it
         // is placed in: what makes a floor of four counts a margin.
-        Stopwatch aw;
+        brio::Stopwatch<Ruler> aw;
+        aw.start();
         const bool wrote = Rtc::alarm(Rtc::count() + 1000u);
-        const uint32_t alarm_us = aw.us(SysClock::hz);
+        const uint32_t alarm_us = aw.elapsed() / cycles_per_us;
         print(serial, "  Rtc::alarm() takes ", alarm_us, " us to land, against a count of ",
               1'000'000u / tr_hz, " us", crlf);
         bench.verdict("the alarm's write window is a fraction of ONE count of the ruler it "
@@ -517,7 +557,7 @@ void tb_pvd() {
     (void)Pwr::arm_pvd(true);
     Pfic::enable(Irq::pvd);
     const bool triggered = Exti::trigger(Pwr::pvd_exti_line);
-    const uint32_t forced = wait_for([] { return pvd_hits != 0u; }, 10'000u);
+    const uint32_t forced = us_until([] { return pvd_hits != 0u; }, 10'000u);
     (void)Pwr::pvd(false);
     (void)Pwr::arm_pvd(false);
     Pfic::disable(Irq::pvd);
@@ -567,12 +607,13 @@ struct IdleCost {
 
 IdleCost eight_idles() {
     const uint32_t t0 = Ticker::ticks();
-    Stopwatch w;
+    brio::Stopwatch<Ruler> w;
+    w.start();
     for (uint8_t i = 0; i < 8u; ++i) {
         P::CriticalSection cs;
         P::idle();
     }
-    const uint32_t cycles = w.cycles();
+    const uint32_t cycles = w.elapsed();
     return IdleCost{cycles, Ticker::ticks() - t0};
 }
 
@@ -591,7 +632,8 @@ void tc_sleep() {
     console_drain();
     const uint32_t t1 = Ticker::ticks();
     uint8_t calls = 0;
-    Stopwatch w;
+    brio::Stopwatch<Ruler> w;
+    w.start();
     while (Ticker::ticks() == t1 && calls < 20u) {
         {
             P::CriticalSection cs;
@@ -599,7 +641,7 @@ void tc_sleep() {
         }
         ++calls;
     }
-    const uint32_t slept_us = w.us(SysClock::hz);
+    const uint32_t slept_us = w.elapsed() / cycles_per_us;
     Plain::disarm();
     print(serial, "  armed light: ", calls, " idle() call(s) and ", slept_us,
           " us to the next tick", crlf);
@@ -621,7 +663,7 @@ void tc_sleep() {
     const uint16_t left0 = Copier::remaining();
     const IdleCost dma_idle = eight_idles();
     const uint16_t left1 = Copier::remaining();
-    const uint32_t done_us = wait_for([] { return (Copier::flags() & DmaFlag::complete) != 0u; },
+    const uint32_t done_us = us_until([] { return (Copier::flags() & DmaFlag::complete) != 0u; },
                                       200'000u);
     const uint8_t moved = sink_cell;
     const uint16_t left2 = Copier::remaining();
@@ -747,15 +789,19 @@ StopRun one_stop(SleepDepth depth, uint32_t counts) {
         }
         ++r.turns;
     }
-    // Back, on the HSI, with the STK counting its cycles again.
-    Stopwatch w;
+    // Back, on the HSI, with the STK counting its cycles again - HSI
+    // cycles, the timebase not rebased: STK's own count, not the ruler.
+    StkWatch w;
     const bool synced = Rtc::synchronize();
     r.sync_us = w.us(brio::hsi_hz);
     const RtcNow at_wake = rtc_now();
     r.ticks = Ticker::ticks() - t0;
     r.sws = alarm_sws;
-    r.span = (at_wake.count - at_arm.count) * tr_div + at_wake.phase - at_arm.phase;
-    r.overshoot = (at_wake.count - at) * tr_div + at_wake.phase;
+    // The count differences clamped at zero (rtc_since()'s reason): a
+    // stale read at the wake is a short span, never four billion.
+    const uint32_t whole = brio::since_clamped(at_wake.count, at_arm.count) * tr_div + at_wake.phase;
+    r.span = whole > at_arm.phase ? whole - at_arm.phase : 0u;
+    r.overshoot = brio::since_clamped(at_wake.count, at) * tr_div + at_wake.phase;
     r.ok = synced && (alarm_hits != 0u || exti0_hits != 0u);
     return r;
 }
@@ -793,9 +839,11 @@ void td_stop() {
     const RtcNow before = rtc_now();
     const uint32_t awake_at = before.count + 4u;
     (void)Rtc::alarm(awake_at);
-    (void)wait_for([] { return alarm_hits != 0u; }, 20'000u);
+    // Judged below: an alarm that never came leaves no lag to measure
+    // and fails the bound.
+    (void)us_until([] { return alarm_hits != 0u; }, 20'000u);
     const RtcNow after = rtc_now();
-    const uint32_t awake_lag = (after.count - awake_at) * tr_div + after.phase;
+    const uint32_t awake_lag = brio::since_clamped(after.count, awake_at) * tr_div + after.phase;
     print(serial, "  an alarm served AWAKE arrives ", fine_us(awake_lag),
           " us past the count it names - ", awake_lag >= tr_div / 2u ? "one count" : "on the count",
           " of the ruler, which is this block's own lag and not a sleep's", crlf);
@@ -807,7 +855,7 @@ void td_stop() {
     console_drain();
     const StopRun main_run = one_stop(SleepDepth::standby, 205);
     const uint8_t sws_at_wake = main_run.sws;
-    Stopwatch rw;
+    StkWatch rw;       // across the clock task's re-run: STK's own count
     Plain::disarm();   // the clock task re-run: this is the restore
     const uint32_t restore_cycles = rw.cycles();
     const bool back = Rcc::sysclk_status() == SysClock::sysclk_source;
@@ -991,7 +1039,7 @@ void te_kernel() {
     pump_until_blip(3000u);
     Probe::deadline.disarm();
 
-    const uint32_t wall_ms = ((Probe::blip_count - c0) * 1000u) / tr_hz;
+    const uint32_t wall_ms = (brio::since_clamped(Probe::blip_count, c0) * 1000u) / tr_hz;
     const uint32_t kernel_ms = Probe::blip_tick - k0;
     const uint32_t advance = Timed::last_advance();
     const uint32_t placed = Timed::last_counts();
@@ -1034,7 +1082,8 @@ void second_controller_refused() {
     const uint8_t counted = P::bus_masters_active();
     const bool refused2 = !Timed::arm(SleepDepth::deep) && !Timed::arm(SleepDepth::standby) &&
                           !Timed::arm(SleepDepth::light);
-    (void)wait_for([] { return (Copier2::flags() & DmaFlag::complete) != 0u; }, 200'000u);
+    // The channel is stopped either way; its completion is not the verdict.
+    (void)us_until([] { return (Copier2::flags() & DmaFlag::complete) != 0u; }, 200'000u);
     Copier2::stop();
     const uint8_t released = P::bus_masters_active();
     print(serial, "  DMA2's first channel: the count ", quiet, " -> ", counted, " -> ",
@@ -1117,7 +1166,8 @@ void tf_votes() {
     for (uint8_t i = 0; i < 8u && Kernel::step(); ++i) {
     }
     const bool round_lost = !Probe::last_ok && Timed::armed() == SleepDepth::none;
-    (void)wait_for([] { return (Copier::flags() & DmaFlag::complete) != 0u; }, 200'000u);
+    // The channel is stopped either way; its completion is not the verdict.
+    (void)us_until([] { return (Copier::flags() & DmaFlag::complete) != 0u; }, 200'000u);
     Copier::stop();
     bench.verdict("AND THE ONE REFUSAL THAT IS THE SILICON'S: with a channel enabled the "
                   "site says no to every rung, so the round is lost with no voter having "
@@ -1186,9 +1236,8 @@ void th_edge() {
                       "makes a pin a wake source with the whole tree stopped",
                       fine_ms(r.span) < 2900u);
     } else {
-        print(serial, "  no edge arrived: nothing outside this board is driving PA0, so "
-              "the pad's half of this letter is SKIPPED and the backstop is what is "
-              "measured", crlf);
+        bench.skip("no edge arrived: nothing outside this board is driving PA0, so the pad's "
+                   "half of this letter is not measured and the backstop is");
         bench.verdict("with no instrument on the pad the RTC's backstop is what ended the "
                       "Stop, at the three seconds it was asked for",
                       alarms != 0u && fine_ms(r.span) >= 2900u);
@@ -1200,7 +1249,7 @@ void th_edge() {
     Pwr::clear_flags();
     const bool armed_pad = Pwr::wakeup_pin(true);
     exti0_hits = 0;
-    const uint32_t waited = wait_for([] { return Pwr::wakeup_flag(); }, 4'000'000u);
+    const uint32_t waited = us_until([] { return Pwr::wakeup_flag(); }, 4'000'000u);
     const bool raised = Pwr::wakeup_flag();
     const uint32_t pad_edges = exti0_hits;
     (void)Pwr::wakeup_pin(false);
@@ -1218,9 +1267,8 @@ void th_edge() {
                       "where the letter that enters one reads it",
                       !raised && waited == 0u);
     } else {
-        print(serial, "  no edge arrived on the pad either: the wake-up pad's half is "
-              "SKIPPED, and what an instrument driving PA0 would add is in the document",
-              crlf);
+        bench.skip("no edge arrived on the pad either: the wake-up pad's half is not measured "
+                   "(what an instrument driving PA0 would add is in the document)");
         bench.verdict("with nothing driving the pad WUF stays clear, which is all that can "
                       "be said without an edge",
                       !raised);
@@ -1306,11 +1354,10 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
           (flags & ResetFlag::power) != 0u ? 1 : 0, " PINRSTF=",
           (flags & ResetFlag::pin) != 0u ? 1 : 0, ")", crlf);
     if (!returned) {
-        bench.verdict("STANDBY'S EXIT IS A RESET, which is why it is off the ladder: the "
-                      "program did not resume after the instruction, it came back through "
-                      "the reset vector - and a sleep site that armed one would leave a "
-                      "manager waiting for a wake that arrives as a reboot",
-                      true);
+        // Reaching this branch is the observation: printed, not scored.
+        print(serial, "  STANDBY'S EXIT IS A RESET, which is why it is off the ladder: the "
+              "program did not resume after the instruction, it came back through the reset "
+              "vector", crlf);
         bench.verdict("and SBF is how the boot path knows where it came from: PWR_CSR "
                       "survives a Standby wake where every other bit of the block's "
                       "registers does not",
@@ -1323,9 +1370,8 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
                           "clear here where the alarm sets it",
                           (csr & pwr_wuf) == 0u);
         } else if (leg == 3u) {
-            print(serial, "  no edge reached the pad while the machine was stopped: the "
-                  "question this leg asks is SKIPPED, and the documented backstop is what "
-                  "is measured", crlf);
+            bench.skip("no edge reached the pad while the machine was stopped: the question "
+                       "this leg asks is not measured, the documented backstop is");
             bench.verdict("the documented alarm ended the Standby at the two seconds it "
                           "was placed and raised WUF, with nothing outside the board "
                           "driving the pad",
@@ -1344,21 +1390,22 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
         // the first of them falls two system clocks after the store -
         // which is measurable here and nowhere else, this being the one
         // place the flag really stands.
-        Stopwatch cw;
+        brio::Stopwatch<Ruler> cw;
+        cw.start();
         Pwr::clear_flags();
-        const uint32_t polls = wait_for([] { return !Pwr::wakeup_flag(); }, 1000u);
-        const uint32_t cycles = cw.cycles();
+        const bool polls = brio::wait_until<Ruler>([] { return !Pwr::wakeup_flag(); }, 1000u);
+        const uint32_t cycles = cw.elapsed();
         print(serial, "  the two clears put both flags down in ", cycles, " HCLK cycles",
               crlf);
         bench.verdict("and the two write-one clears put them down: the flags read clear "
                       "again within the handful of cycles 2.4.1's note on CWUF allows, "
                       "through a store that acknowledges nothing else",
-                      polls != 0u && !Pwr::wakeup_flag() && !Pwr::standby_flag());
+                      polls && !Pwr::wakeup_flag() && !Pwr::standby_flag());
     } else {
-        bench.verdict("TABLE 2-1'S NOTE IS TRUE HERE: a Standby with the wake armed as an "
-                      "EVENT returns to the instruction after it instead of resetting the "
-                      "part, which is why the driver's door to Standby is not [[noreturn]]",
-                      true);
+        // Reaching this branch is the observation: printed, not scored.
+        print(serial, "  TABLE 2-1'S NOTE IS TRUE HERE: a Standby with the wake armed as an "
+              "EVENT returned to the instruction after it instead of resetting the part, which "
+              "is why the driver's door to Standby is not [[noreturn]]", crlf);
         bench.verdict("and it came back on the HSI like a Stop, with the clock task put "
                       "back by the same verb",
                       Rcc::sysclk_status() == SysClock::sysclk_source);
@@ -1372,8 +1419,7 @@ void tw_judge(uint8_t leg, bool returned, uint32_t flags, uint32_t csr) {
 /// loop judges in place is only a leg that returned.
 void tw_run_from(uint8_t first) {
     for (uint8_t leg = first; leg <= 3u; ++leg) {
-        token.pass = bench.passed();
-        token.fail = bench.failed();
+        bank_tally();
         tw_enter(leg);
         tw_judge(leg, true, Reset::flags(), Pwr::csr());
     }
@@ -1414,8 +1460,7 @@ void tg_iwdg() {
     token.letter = 'g';
     token.leg = 1;
     token.returned = 0;
-    token.pass = 0;
-    token.fail = 0;
+    bank_tally();
     Reset::clear_flags();
     timed_round = false;
     (void)Rtc::arm_wake(true);
@@ -1443,8 +1488,13 @@ void tg_iwdg() {
     }
     token.turns = turns;
     // The Stop ended. Nothing refreshes the watchdog from here, so the
-    // reset is a moment away - awake, which is the other answer.
+    // reset is a moment away - awake, which is the other answer. The
+    // counter is synchronized first: after a Stop the reads are stale
+    // until an RTCCLK edge has passed (ch32vx03/rtc.hpp), and both reads
+    // below would be the count from before the Stop. The wait needs no
+    // bound of its own: the watchdog ends it.
     token.returned = 1;
+    (void)Rtc::synchronize();
     token.rtc_at_wake = Rtc::count();
     const uint32_t start = Rtc::count();
     while (rtc_since(start) < 2u * tr_hz) {
@@ -1505,6 +1555,9 @@ using DynSite = Ch32vx03SleepSite<Dyn>;
 /// what the tree really runs at, not what the driver believes.
 uint32_t hclk_by_rtc() {
     (void)Rtc::synchronize();
+    // Every wait below is bounded on the kernel tick, a millisecond at
+    // every rate of the pack, and a time-out answers zero - a rate the
+    // verdict refuses.
     // THE START IS AN EDGE OF THE COUNT, found as the first read above
     // every read before it - twice, because the first sample may itself
     // be one of the stale copies count() can return (up to three counts
@@ -1514,22 +1567,30 @@ uint32_t hclk_by_rtc() {
     uint32_t hi = Rtc::count();
     for (uint8_t edges = 0; edges < 2u; ++edges) {
         const uint32_t from = hi;
-        while (hi == from) {
+        // A count is under a millisecond; five ticks is past every doubt.
+        const bool moved = brio::wait_ticks<P>([&] {
             const uint32_t r = Rtc::count();
             if (static_cast<int32_t>(r - hi) > 0) {
                 hi = r;
             }
+            return hi != from;
+        }, 5u);
+        if (!moved) {
+            return 0;
         }
     }
-    Stopwatch w;
+    // Cycles of the rate standing, on the ruler: the ticker was rebased
+    // with the clock, and nothing here converts with the ruler's rate.
+    brio::Stopwatch<Ruler> w;
+    w.start();
     // AND THE END IS THE FIRST READ TEN COUNTS ON, never an unsigned
     // difference across a stale read: that one is four billion, and it
     // would end this window after one count of the ten - a 96 MHz tree
-    // read as 9.6 MHz.
-    while (rtc_since(hi) < 10u) {
-        (void)w.cycles();   // polled, so no wrap of the counter goes unseen
+    // read as 9.6 MHz. Ten counts are 9.77 ms; fifty ticks bound it.
+    if (!brio::wait_ticks<P>([&] { return rtc_since(hi) >= 10u; }, 50u)) {
+        return 0;
     }
-    const uint64_t cycles = w.cycles();
+    const uint64_t cycles = w.elapsed();
     return static_cast<uint32_t>((cycles * tr_hz) / 10u);
 }
 
@@ -1545,7 +1606,10 @@ void tk_dynamic() {
     bool all_near = true;
     for (uint8_t i = 0; i < Dyn::rate_count; ++i) {
         const bool switched = Dyn::set_index(i);
-        console_drain();
+        // The drain on the kernel tick: the ruler's rate is the boot
+        // rate's, and this one is the pack's rate i. A wedged console
+        // shows as missing lines.
+        (void)brio::wait_ticks<P>([] { return Serial::tx_idle(); }, 200u);
         alarm_hits = 0;
         alarm_sws = 0xFF;
         Rtc::clear(rtc_alrf);
@@ -1672,9 +1736,8 @@ template <bool with_fpu>
 
 void ti_fpu() {
     if constexpr (!device::has_fpu) {
-        bench.verdict("this part's core has no floating-point unit, so there is nothing to keep "
-                      "across a Stop",
-                      true);
+        bench.skip("this part's core has no floating-point unit, so there is nothing to keep "
+                   "across a Stop");
     } else {
         if (!site_ready) {
             bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
@@ -1711,9 +1774,10 @@ void ti_fpu() {
             fp_stop<device::has_fpu>(in, out, fcsr_in);
             Ticker::resume();
         }
-        (void)wait_for([] { return alarm_hits != 0u; }, 20'000u);
+        // Judged below on alarm_hits itself.
+        (void)us_until([] { return alarm_hits != 0u; }, 20'000u);
         (void)Rtc::synchronize();
-        const uint32_t slept = Rtc::count() - at_arm;
+        const uint32_t slept = brio::since_clamped(Rtc::count(), at_arm);
         Plain::disarm();
         uint8_t kept_regs = 0;
         uint8_t first_bad = 0xFF;
@@ -1774,8 +1838,7 @@ bool edge_wire() {
 
 void tj_edge() {
     if (!edge_wire()) {
-        print(serial, "  no wire from PA6 to PA1: the letter is SKIPPED", crlf);
-        bench.verdict("with no wire the edge letter is skipped and says so", true);
+        bench.skip("no wire from PA6 to PA1");
         return;
     }
     // TIM3's first channel on PA6 makes ONE rising edge 500 us after it is
@@ -1808,7 +1871,7 @@ void tj_edge() {
         Pfic::clear_pending(Irq::systick);
         TimOnePulse<EdgeTim, 0>::fire();
     }
-    Stopwatch slept;
+    StkWatch slept;   // the tick is paused: STK's own count (the span is under one period)
     while (exti1_hits == 0u && turns < 10u) {
         {
             P::CriticalSection cs;
@@ -1922,10 +1985,8 @@ bool standby_with_alarm_first() {
     // The way back is a COUNTER, so it is seen counting first: three
     // counts of it in some four milliseconds, or no Standby at all.
     const uint32_t c0 = Rtc::count();
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < 4u) {
-    }
-    if (Rtc::count() - c0 < 2u) {
+    brio::spin_us<Ruler>(4'000u);
+    if (rtc_since(c0) < 2u) {
         return false;
     }
     Pwr::clear_flags();
@@ -2042,7 +2103,7 @@ void tr_resume() {
     }
     Pwr::clear_flags();
     if (leg < r_leg_count) {
-        bench.resume_tally(bench.passed(), bench.failed());
+        bench.resume_tally(bench.passed(), bench.failed(), bench.skipped());
         tr_enter(static_cast<uint8_t>(leg + 1u));
         return;
     }
@@ -2232,12 +2293,12 @@ int main() {
             site_ready && brio::Bkp::open() ? brio::Bkp::data(r_bkp_magic).value_or(0) : 0u;
         if (brio::test_letter_carried('w') && token.magic == token_magic && token.letter == 'w') {
             bench.reset_tally();
-            bench.resume_tally(token.pass, token.fail);
+            bench.resume_tally(token.pass, token.fail, token.skipped);
             tw_resume();
         } else if (brio::test_letter_carried('g') && token.magic == token_magic &&
                    token.letter == 'g') {
             bench.reset_tally();
-            bench.resume_tally(token.pass, token.fail);
+            bench.resume_tally(token.pass, token.fail, token.skipped);
             tg_resume();
         } else if (brio::test_letter_carried('r') && bkp_magic == r_magic) {
             bench.reset_tally();

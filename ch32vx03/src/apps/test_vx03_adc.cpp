@@ -126,6 +126,7 @@
 #include "util/analog_sampler.hpp"
 #include "util/block_stream.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -168,45 +169,17 @@ using Pacer = Tim<3>;   ///< its TRGO paces the regular group in letter g
 constexpr uint32_t tim_hz = Pacer::clock_hz(clock);
 constexpr uint32_t ticks_per_us = SysClock::hz / 1'000'000u;
 
-// ---------------------------------------------------------------------------
-// The ruler
-// ---------------------------------------------------------------------------
-
-/**
- * The core's own STK counter read as a stopwatch: it counts to its
- * reload - one tick period, a millisecond here - and starts again, so a
- * span is accumulated poll by poll with one period folded in across
- * each wrap.
- */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp). Right while the tick handler
+/// runs at least once a period: no span below is measured with interrupts
+/// masked for longer than a tick, or with the tick paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
+/// Microseconds on a stopwatch over the ruler.
+uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
 // ---------------------------------------------------------------------------
 // The block stream, the sampler, and the kernel letters d and j share
@@ -436,9 +409,9 @@ uint16_t scan_pair(uint8_t first, uint8_t second, AdcSampleTime t) {
     (void)Adc<1>::dma(true);
     Adc<1>::clear_flags(AdcFlag::all);
     Adc<1>::start();
-    uint32_t spins = 1'000'000UL;
-    while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-    }
+    // Two conversions, 42 us at the longest sampling time. A time-out
+    // returns what the second slot holds, which the letters judge.
+    (void)wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 10'000u);
     Ch::stop();
     (void)Adc<1>::dma(false);
     return pair[1];
@@ -472,45 +445,44 @@ void ta_calibration() {
     // visible: RSTCAL first, then CAL, each cleared by the hardware.
     AdcRegs& r = Adc<1>::regs();
     r.CTLR2 = adc_exttrig | adc_extsel_mask;
-    Stopwatch power;
+    // Each step bounded at 1 ms: ADON reads back at once, and the
+    // calibration's two halves take microseconds (tCAL, 8 us at most).
+    Stopwatch<Ruler> power;
+    power.start();
     r.CTLR2 = r.CTLR2 | adc_adon;
-    while ((r.CTLR2 & adc_adon) == 0u) {
-    }
-    const uint32_t power_us = power.us();
-    wait_us(10);
+    const bool powered = wait_until<Ruler>([&r] { return (r.CTLR2 & adc_adon) != 0u; }, 1000u);
+    const uint32_t power_us = elapsed_us(power);
+    spin_us<Ruler>(10);
     const uint16_t before = static_cast<uint16_t>(r.RDATAR & 0xFFFFu);
 
-    Stopwatch cal;
+    Stopwatch<Ruler> cal;
+    cal.start();
     r.CTLR2 = r.CTLR2 | adc_rstcal;
-    uint32_t spins = 1'000'000UL;
-    while ((r.CTLR2 & adc_rstcal) != 0u && spins-- != 0u) {
-    }
-    const uint32_t rstcal_us = cal.us();
-    const bool rstcal_done = (r.CTLR2 & adc_rstcal) == 0u;
+    const bool rstcal_done =
+        wait_until<Ruler>([&r] { return (r.CTLR2 & adc_rstcal) == 0u; }, 1000u);
+    const uint32_t rstcal_us = elapsed_us(cal);
 
     cal.start();
     r.CTLR2 = r.CTLR2 | adc_cal;
-    spins = 1'000'000UL;
-    while ((r.CTLR2 & adc_cal) != 0u && spins-- != 0u) {
-    }
-    const uint32_t cal_us = cal.us();
-    const bool cal_done = (r.CTLR2 & adc_cal) == 0u;
+    const bool cal_done = wait_until<Ruler>([&r] { return (r.CTLR2 & adc_cal) == 0u; }, 1000u);
+    const uint32_t cal_us = elapsed_us(cal);
     const uint16_t code = static_cast<uint16_t>(r.RDATAR & 0xFFFFu);
 
-    print(serial, "  ADON ack in ", power_us, " us; RSTCAL ", rstcal_us, " us, CAL ", cal_us,
+    print(serial, "  ADON ", powered ? "acknowledged" : "NEVER ACKNOWLEDGED", " in ", power_us,
+          " us; RSTCAL ", rstcal_us, " us, CAL ", cal_us,
           device::device_class == DeviceClass::v30x_d8
               ? " us (the datasheet's tCAL is 40 ADCCLK = 3.3 us at 12 MHz)"
               : " us (the datasheet's tCAL is 100 ADCCLK = 8 us at 12 MHz)",
           crlf);
     print(serial, "  the data register: ", before, " before the calibration, ", code, " after",
           crlf);
-    bench.verdict("RSTCAL is cleared by the hardware when the calibration register is "
-                  "initialized",
-                  rstcal_done);
+    bench.verdict("ADON reads back set, and RSTCAL is cleared by the hardware when the "
+                  "calibration register is initialized",
+                  powered && rstcal_done);
     bench.verdict("CAL is cleared by the hardware when the calibration itself is done",
                   cal_done);
     bench.verdict("and it leaves its code in the regular data register (12.2.2), which is "
-                  "not what the register held before", code != before || code != 0u);
+                  "not what the register held before", code != before);
 
     // Now the driver's own init, which runs that order with the buffer
     // off and wakes the internal sources afterwards.
@@ -544,6 +516,8 @@ void tb_temperature() {
     Adc<1>::sample_time_all(adc_sample_longest);
     const uint32_t sample_ns = adc_conversion_ns(adc_sample_longest, SysClock::adc_hz);
 
+    Adc<1>::select(AdcInput::vrefint);
+    const uint16_t vref_counts = Adc<1>::read_settled(4);
     Adc<1>::select(AdcInput::temperature);
     const uint16_t counts = Adc<1>::read_settled(4);
     const uint16_t mv = Adc<1>::millivolts(counts, measured_vdda_mv);
@@ -551,7 +525,8 @@ void tb_temperature() {
 
     print(serial, "  channel 16 reads ", counts, " counts = ", mv, " mV at a conversion of ",
           sample_ns / 1000u, ".", (sample_ns % 1000u) / 100u,
-          " us (12.2.6 asks for 17.1 us of sampling)", crlf);
+          " us (12.2.6 asks for 17.1 us of sampling); VREFINT, just before, ", vref_counts,
+          " counts", crlf);
     print(serial, "  which the datasheet's typical slope makes ", centi / 100, ".",
           (centi < 0 ? -centi : centi) % 100, " degrees Celsius", crlf);
     print(serial, "  V25 is 1.34..1.46 V and the slope 3.8..4.7 mV/C, so an ABSOLUTE "
@@ -564,7 +539,7 @@ void tb_temperature() {
     bench.verdict("and the sensor reads ABOVE the reference, as the datasheet has it: 1.40 V "
                   "nominal against VREFINT's 1.20, which is how a reader tells the two "
                   "internal channels apart with no wire",
-                  counts > 1400u);
+                  counts > vref_counts);
 
     all_off();
 }
@@ -599,7 +574,7 @@ void tc_levels() {
     // The weak pull as a source. THE PAD STAYS A PULLED INPUT: analog
     // mode would take the pull away with the input driver (10.2.7).
     HighPin::input(PinPull::up);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     uint16_t ladder[8] = {};
     uint16_t parked[8] = {};
     for (uint8_t code = 0; code < 8u; ++code) {
@@ -660,7 +635,7 @@ void tc_levels() {
             Adc<1>::select_channel(ch_low);
             (void)Adc<1>::read();
             Adc<1>::select_channel(ch_high);
-            wait_us(dwell_us[i]);
+            spin_us<Ruler>(dwell_us[i]);
             dwelt[i] = Adc<1>::read();
         }
         print(serial, "  at 1.5 cycles with the multiplexer parked on the pad 0, 2, 20 and 200 us "
@@ -669,9 +644,9 @@ void tc_levels() {
         print(serial, "  FINDING: at 1.5 cycles a parked multiplexer ",
               parked[0] > ladder[0] + 200u ? "HELPS" : "IS NO HELP", ": scanned ", ladder[0], ", parked ",
               parked[0], ", the rail ", parked[7], crlf);
-        bench.verdict("what a parked multiplexer buys a 1.5-cycle read on this part is the finding "
-                      "above, not a verdict: the dies measured differ",
-                      true);
+        print(serial, "  (what a parked multiplexer buys a 1.5-cycle read on this part is a "
+                      "finding, not a verdict: the dies measured differ)",
+              crlf);
     } else {
         bench.verdict("THE SAMPLE-AND-HOLD TRACKS THE SELECTED CHANNEL BETWEEN CONVERSIONS: with "
                       "the mux parked on the pad the same source reads full scale at EVERY "
@@ -680,7 +655,7 @@ void tc_levels() {
     }
 
     HighPin::input(PinPull::down);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     (void)Adc<1>::sample_time(ch_high, adc_sample_longest);
     Adc<1>::select_channel(ch_high);
     (void)Adc<1>::read();
@@ -719,16 +694,18 @@ void td_stream() {
     Adc<1>::continuous(true);
     Adc<1>::start();
 
-    Stopwatch run;
-    while (blocks_seen < 4u && run.us() < 200'000UL) {
+    Stopwatch<Ruler> run;
+
+    run.start();
+    while (blocks_seen < 4u && run.elapsed() < us_cycles<Ruler>(200'000UL)) {
         System::step();
     }
-    const uint32_t elapsed_us = run.us();
+    const uint32_t took_us = elapsed_us(run);
     Adc<1>::continuous(false);
     (void)Adc<1>::dma(false);
 
     print(serial, "  ", blocks_seen, " blocks of ", block_elements, " samples lent in ",
-          elapsed_us, " us; the engine counted ", Source::laps(), " laps and ",
+          took_us, " us; the engine counted ", Source::laps(), " laps and ",
           Source::overruns(), " overruns", crlf);
     print(serial, "  the first block: ", block_first[0], " ", block_first[1], " ",
           block_first[2], " ", block_first[3], " ", block_first[4], " ", block_first[5], " ",
@@ -759,14 +736,11 @@ void td_stream() {
     (void)Source::start(block_a, block_b, block_elements);
     Adc<1>::continuous(true);
     Adc<1>::start();
-    run.start();
-    while (!Source::stalled() && run.us() < 100'000UL) {
-    }
-    const bool stalled = Source::stalled();
+    const bool stalled = wait_until<Ruler>([] { return Source::stalled(); }, 100'000u);
     const uint32_t overruns = Source::overruns();
     const uint8_t pending = Source::pending();
     const bool resumed_after_one = Source::release() && !Source::stalled();
-    wait_us(2000);
+    spin_us<Ruler>(2000);
     const uint32_t laps_after = Source::laps();
     Adc<1>::continuous(false);
 
@@ -806,9 +780,8 @@ void td_stream() {
                    .memory_width = DmaWidth::half,
                    .priority = DmaPriority::very_high},
     });
-    Stopwatch tear_run;
-    while (!tear_seen && tear_run.us() < 10'000UL) {
-    }
+    // tear_seen, judged below, is the answer.
+    (void)wait_until<Ruler>([] { return tear_seen; }, 10'000u);
     Pfic::disable(Tear::irq());
     const uint16_t half_items = tear_items / 2u;
     const uint16_t past =
@@ -845,8 +818,13 @@ void te_injected() {
     A::continuous(true);
     A::clear_flags(AdcFlag::all);
     A::start();
-    wait_us(500);
-    const bool regular_running = A::flag(AdcFlag::started);
+    spin_us<Ruler>(500);
+    // STRT is sticky - set at the start, cleared by software alone - so it
+    // says the group started once, not that it runs: a conversion that
+    // ends after EOC was cleared does (one takes 21 us here).
+    A::clear_flags(AdcFlag::converted);
+    const bool regular_running =
+        wait_until<Ruler>([] { return A::flag(AdcFlag::converted); }, 500u);
 
     // The injected group: two channels, one of them offset.
     const uint8_t injected[2] = {ch_high, ch_low};
@@ -860,15 +838,22 @@ void te_injected() {
     A::interrupts(A::injected_interrupt, true);
     reset_counters();
     A::injected_start();
-    uint32_t spins = 1'000'000UL;
-    while (jeoc_calls == 0u && spins-- != 0u) {
-    }
+    // The first JEOC; then the group's time again before the count and
+    // the results are read, so that a JEOC per conversion would have
+    // entered the handler twice by then (two conversions: 42 us).
+    const bool jeoc_came = wait_until<Ruler>([] { return jeoc_calls != 0u; }, 10'000u);
+    spin_us<Ruler>(200);
     const uint16_t jeoc_seen = jeoc_calls;
     const int16_t first = A::injected_result(0);
     const int16_t second = A::injected_result(1);
     const bool jstrt = A::flag(AdcFlag::injected_started);
-    wait_us(500);
-    const bool regular_still = A::flag(AdcFlag::started);
+    spin_us<Ruler>(500);
+    // Running again after the group: a regular conversion ends after EOC
+    // is cleared, the group long over (EOC may also mark the injected
+    // group's end).
+    A::clear_flags(AdcFlag::converted);
+    const bool regular_still =
+        wait_until<Ruler>([] { return A::flag(AdcFlag::converted); }, 500u);
 
     A::continuous(false);
     A::interrupts(A::injected_interrupt, false);
@@ -883,7 +868,7 @@ void te_injected() {
     bench.verdict("JSTRT says the injected group started", jstrt);
     bench.verdict("JEOC reaches its handler ONCE for the whole group, not once per "
                   "conversion (12.3.1: the flag is the group's)",
-                  jeoc_seen == 1u);
+                  jeoc_came && jeoc_seen == 1u);
     bench.verdict("the first conversion's result is the raw datum LESS the offset, and the "
                   "register carries the sign",
                   first > 1900 && first < 2200);
@@ -929,7 +914,7 @@ void tf_watchdog() {
     // The pad taken to ground by the port: now it is below the window.
     reset_counters();
     HighPin::output(false);
-    wait_us(1000);
+    spin_us<Ruler>(1000);
     (void)A::read();
     const bool flag_below = awd_calls != 0u;
     const uint16_t low_reading = A::result_counts();
@@ -1002,10 +987,11 @@ void tg_triggers() {
     reset_counters();
     A::clear_flags(AdcFlag::all);
     Pacer::enable(true);
-    Stopwatch span;
-    while (span.us() < 200'000UL) {
+    Stopwatch<Ruler> span;
+    span.start();
+    while (span.elapsed() < us_cycles<Ruler>(200'000UL)) {
     }
-    const uint32_t window_us = span.us();
+    const uint32_t window_us = elapsed_us(span);
     Pacer::enable(false);
     const uint16_t timed = eoc_calls;
     const uint32_t expected = (trigger_hz * window_us) / 1'000'000UL;
@@ -1034,9 +1020,9 @@ void tg_triggers() {
     reset_counters();
     for (uint16_t i = 0; i < edges; ++i) {
         ExtiPin::set();
-        wait_us(200);
+        spin_us<Ruler>(200);
         ExtiPin::clear();
-        wait_us(200);
+        spin_us<Ruler>(200);
     }
     with_nothing = eoc_calls;
 
@@ -1044,9 +1030,9 @@ void tg_triggers() {
     reset_counters();
     for (uint16_t i = 0; i < edges; ++i) {
         ExtiPin::set();
-        wait_us(200);
+        spin_us<Ruler>(200);
         ExtiPin::clear();
-        wait_us(200);
+        spin_us<Ruler>(200);
     }
     with_event = eoc_calls;
     (void)Exti::event(adc_regular_exti_line, false);
@@ -1056,9 +1042,9 @@ void tg_triggers() {
     reset_counters();
     for (uint16_t i = 0; i < edges; ++i) {
         ExtiPin::set();
-        wait_us(200);
+        spin_us<Ruler>(200);
         ExtiPin::clear();
-        wait_us(200);
+        spin_us<Ruler>(200);
     }
     with_interrupt = eoc_calls;
     (void)Exti::interrupt(adc_regular_exti_line, false);
@@ -1097,9 +1083,8 @@ void tg_triggers() {
 void th_dual() {
     all_off();
     if constexpr (device::adc_count < 2u) {
-        bench.verdict("this part has one converter, so there is no dual mode to measure "
-                      "(datasheet table 2-1)",
-                      true);
+        bench.skip("this part has one converter, so there is no dual mode to measure "
+                   "(datasheet table 2-1)");
         return;
     } else {
         drive_levels();
@@ -1109,30 +1094,33 @@ void th_dual() {
         Adc<2>::sample_time_all(adc_sample_longest);
 
         // Two DIFFERENT pads, which is what 12.2.7's note asks for: the
-        // master takes the rail, the follower ground.
-        Adc<1>::select_channel(ch_high);
-        Adc<2>::select_channel(ch_low);
+        // master takes ground, the follower the rail - the follower's half
+        // reads zero out of reset, so only a level it cannot hold by
+        // default proves its datum arrived. One conversion: 21 us.
+        Adc<1>::select_channel(ch_low);
+        Adc<2>::select_channel(ch_high);
         const bool mode = Adc<1>::dual(AdcDualMode::regular_simultaneous);
         const AdcDualMode read_back = Adc<1>::dual();
 
         Adc<1>::clear_flags(AdcFlag::all);
         Adc<1>::start();
-        uint32_t spins = 1'000'000UL;
-        while (!Adc<1>::ready() && spins-- != 0u) {
-        }
+        const bool converted = wait_until<Ruler>([] { return Adc<1>::ready(); }, 10'000u);
         const uint32_t both = Adc<1>::data();
         const uint16_t master = static_cast<uint16_t>(both & adc_max_count);
         const uint16_t follower = static_cast<uint16_t>((both >> 16) & adc_max_count);
 
         // The same again with the DMA bit dropped: 12.2.7's note 1 says
         // it must be enabled to read the slave's datum on the master's
-        // register, and this is what the silicon does about that.
+        // register, and this is what the silicon does about that. The
+        // pads swapped, so the follower's half must CHANGE - from the
+        // rail to ground - to say a new datum landed.
         (void)Adc<1>::dma(false);
+        Adc<1>::select_channel(ch_high);
+        Adc<2>::select_channel(ch_low);
         Adc<1>::clear_flags(AdcFlag::all);
         Adc<1>::start();
-        spins = 1'000'000UL;
-        while (!Adc<1>::ready() && spins-- != 0u) {
-        }
+        const bool converted_again =
+            wait_until<Ruler>([] { return Adc<1>::ready(); }, 10'000u);
         const uint32_t without_dma = Adc<1>::data();
         const uint16_t follower_without = static_cast<uint16_t>((without_dma >> 16) & adc_max_count);
 
@@ -1149,24 +1137,26 @@ void th_dual() {
         (void)Adc<1>::dual(AdcDualMode::independent);
 
         print(serial, "  regular simultaneous: the master's register reads ", hex(both),
-              " - the rail ", master, " in its low half, ground ", follower, " in its high one",
+              " - ground ", master, " in its low half, the rail ", follower, " in its high one",
               crlf);
-        print(serial, "  with the DMA bit dropped the high half still reads ", follower_without,
-              ", where 12.2.7's note 1 says the bit is what publishes the follower's datum",
+        print(serial, "  with the DMA bit dropped and the pads swapped the high half reads ",
+              follower_without, " (ground), where 12.2.7's note 1 says the bit is what "
+              "publishes the follower's datum",
               crlf);
         bench.verdict("both converters come up on one clock", up1 && up2);
         bench.verdict("the dual-mode field takes the regular simultaneous code and reads it "
                       "back",
                       mode && read_back == AdcDualMode::regular_simultaneous);
-        bench.verdict("one start converts BOTH: the master's own channel is the rail",
-                      master >= 4000u);
-        bench.verdict("and the follower's channel, ground, arrives in the upper half of the "
+        bench.verdict("one start converts BOTH: the master's own channel is ground",
+                      converted && master <= 40u);
+        bench.verdict("and the follower's channel, the rail, arrives in the upper half of the "
                       "master's data register",
-                      follower <= 40u);
-        bench.verdict("it arrives there with the DMA bit DROPPED too: 12.2.7's note about "
-                      "enabling the DMA is about getting the pair into memory, not about "
-                      "the register carrying both halves",
-                      follower_without <= 40u);
+                      converted && follower >= 4000u);
+        bench.verdict("it arrives there with the DMA bit DROPPED too - the high half moves "
+                      "from the rail to ground: 12.2.7's note about enabling the DMA is about "
+                      "getting the pair into memory, not about the register carrying both "
+                      "halves",
+                      converted_again && follower_without <= 40u);
         bench.verdict("every one of the ten modes is written and read back, and an eleventh "
                       "code is refused",
                       all_modes && tenth_refused);
@@ -1215,7 +1205,7 @@ void ti_discontinuous() {
     uint8_t landed[3] = {};
     for (uint8_t t = 0; t < 3u; ++t) {
         Adc<1>::start();
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         landed[t] = static_cast<uint8_t>(6u - Ch::remaining());
     }
     Ch::stop();
@@ -1249,7 +1239,7 @@ void ti_discontinuous() {
     for (uint8_t t = 0; t < 3u; ++t) {
         const uint16_t before = eoc_calls;
         Adc<1>::start();
-        wait_us(2000);
+        spin_us<Ruler>(2000);
         flags_per_trigger[t] = static_cast<uint8_t>(eoc_calls - before);
     }
     Adc<1>::interrupts(Adc<1>::converted_interrupt, false);
@@ -1282,14 +1272,15 @@ void tj_sampler() {
 
     System::init_all();
     Sampler::start_every(2);
-    Stopwatch run;
-    while (sample_slots < 3u && run.us() < 200'000UL) {
+    Stopwatch<Ruler> run;
+    run.start();
+    while (sample_slots < 3u && run.elapsed() < us_cycles<Ruler>(200'000UL)) {
         // The kernel's own loop, minus the idle: the sampler's pace is a
         // TimeEvent, and a step() alone would never mature it.
         TimeEvents<P>::process();
         System::step();
     }
-    const uint32_t elapsed = run.us();
+    const uint32_t elapsed = elapsed_us(run);
     Sampler::stop();
     adc_mode = AdcMode::counting;
     Adc<1>::interrupts(Adc<1>::converted_interrupt, false);
@@ -1349,16 +1340,13 @@ uint32_t time_conversions(uint8_t ch, uint16_t count) {
     A::select_channel(ch);
     A::continuous(true);
     A::clear_flags(AdcFlag::all);
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     A::start();
-    // The stopwatch folds one wrap of the tick counter per reading, so it
-    // is read on every pass: 64 of the longest conversions outlast a tick.
-    uint32_t cycles = 0;
-    uint32_t spins = 1'000'000UL;
-    while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-        cycles = w.cycles();
-    }
-    cycles = w.cycles();
+    // 64 conversions at the longest time take 1.4 ms; a time-out returns
+    // the budget's 50 ms as the span, which the letters' bounds refuse.
+    (void)wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 50'000u);
+    const uint32_t cycles = w.elapsed();
     A::continuous(false);
     Ch::stop();
     (void)A::dma(false);
@@ -1612,7 +1600,7 @@ uint8_t interleave_source_up() {
         (void)D::configure(ch, DacChannelConfig{});
         (void)D::enable(ch, true);
         (void)D::write(ch, 2048);
-        wait_us(20);
+        spin_us<Ruler>(20);
         return DacOut<ch>::adc_channel;
     } else {
         return ch_high;
@@ -1679,11 +1667,11 @@ void ts_dual_modes() {
             clean = false;
             for (uint8_t k = 0; k < entries && !clean; ++k) {
                 (void)A1::dual(AdcDualMode::independent);
-                wait_us(settle_us);
+                spin_us<Ruler>(settle_us);
                 A1::clear_flags(AdcFlag::all);
                 A2::clear_flags(AdcFlag::all);
                 (void)A1::dual(m);
-                wait_us(settle_us);
+                spin_us<Ruler>(settle_us);
                 clean = !A1::ready() && !A2::ready();
                 unbidden = static_cast<uint16_t>(unbidden + (clean ? 0u : 1u));
             }
@@ -1781,7 +1769,7 @@ void ts_dual_modes() {
             A1::clear_flags(AdcFlag::all);
             A2::clear_flags(AdcFlag::all);
             A1::injected_start();
-            wait_us(20);
+            spin_us<Ruler>(20);
             const bool f1 = A1::flag(AdcFlag::injected);
             const bool f2 = A2::flag(AdcFlag::injected);
             if (f1) {
@@ -1972,7 +1960,7 @@ void tl_dac_source() {
         Out::claim();
         (void)D::configure(ch, DacChannelConfig{});
         (void)D::enable(ch, true);
-        wait_us(20);
+        spin_us<Ruler>(20);
 
         Pfic::enable(A::irq());
         A::interrupts(A::converted_interrupt, true);
@@ -1980,8 +1968,9 @@ void tl_dac_source() {
         Kernel::init_all();
         Sampler::start_every(1);
         const auto serve_until = [](uint16_t samples) {
-            Stopwatch w;
-            while (Consumer::count < samples && w.us() < 50'000UL) {
+            Stopwatch<Ruler> w;
+            w.start();
+            while (Consumer::count < samples && w.elapsed() < us_cycles<Ruler>(50'000UL)) {
                 TimeEvents<P>::process();
                 (void)Kernel::step();
             }
@@ -1995,7 +1984,7 @@ void tl_dac_source() {
         for (uint8_t i = 0; i < steps; ++i) {
             const uint16_t code = static_cast<uint16_t>(128u + 128u * i);
             (void)D::write(ch, code);
-            wait_us(50);
+            spin_us<Ruler>(50);
             Consumer::reset();
             serve_until(1);
             Consumer::reset();
@@ -2076,11 +2065,11 @@ void tl_dac_source() {
         for (const GainStep& g : gains) {
             (void)D::write(ch, g.code);
             (void)A::gain(AdcGain::x1, true);
-            wait_us(100);
+            spin_us<Ruler>(100);
             (void)A::read();
             const uint16_t unity = A::read_settled(8);
             (void)A::gain(g.gain, true);
-            wait_us(100);
+            spin_us<Ruler>(100);
             (void)A::read();
             const uint16_t amplified = A::read_settled(8);
             const uint32_t ratio_x100 =
@@ -2121,7 +2110,7 @@ bool tim8_paced(uint16_t& conversions) {
         (void)T::master(TimMasterMode::update);
         reset_counters();
         T::enable(true);
-        wait_us(100'000);
+        spin_us<Ruler>(100'000);
         T::enable(false);
         conversions = eoc_calls;
         T::release();
@@ -2137,13 +2126,13 @@ bool tim8_paced(uint16_t& conversions) {
 inline uint16_t exti11_edges() {
     // Whatever the previous source started has ended before the count
     // begins: a conversion is a few microseconds at this clock.
-    wait_us(50);
+    spin_us<Ruler>(50);
     reset_counters();
     for (uint8_t i = 0; i < 20u; ++i) {
         ExtiPin::set();
-        wait_us(200);
+        spin_us<Ruler>(200);
         ExtiPin::clear();
-        wait_us(200);
+        spin_us<Ruler>(200);
     }
     return eoc_calls;
 }
@@ -2258,7 +2247,7 @@ void tn_adc2_dma() {
             });
             A::continuous(true);
             A::start();
-            wait_us(2000);
+            spin_us<Ruler>(2000);
             const uint16_t left = Ch::remaining();
             const bool converting = A::result_counts() >= 4000u;
             A::continuous(false);
@@ -2297,10 +2286,7 @@ void tn_adc2_dma() {
         A::continuous(true);
         A::clear_flags(AdcFlag::all);
         A::start();
-        Stopwatch w;
-        while (!Ch::flag(DmaFlag::complete) && w.us() < 20'000UL) {
-        }
-        const bool done = Ch::flag(DmaFlag::complete);
+        const bool done = wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 20'000u);
         const uint16_t left = Ch::remaining();
         A::continuous(false);
         Ch::stop();
@@ -2354,7 +2340,7 @@ void to_duty() {
                 sel_read_back = Rcc::adc_duty_75();
                 sel_answer = answer;
             }
-            wait_us(100);
+            spin_us<Ruler>(100);
             A::select_channel(ch_high);
             (void)A::read();
             high[i] = A::read_settled(4);
@@ -2373,9 +2359,10 @@ void to_duty() {
         Rcc::adc_duty_extended(false);
         print(serial, "  ADC_DUTY_SEL ", sel_read_back ? "read back as set" : "read back CLEAR",
               " - the bit 3.4.2's note gives to some lots of this class only", crlf);
-        bench.verdict("the verb answers what the die kept: true where ADC_DUTY_SEL reads back "
-                      "set, false where the lot has not got the bit",
-                      sel_answer == sel_read_back);
+        // The verb's answer IS a read-back of the same bit (clock.hpp), so
+        // comparing the two would judge nothing: both printed.
+        print(serial, "  adc_duty_75(true) answered ", sel_answer ? "true" : "false",
+              crlf);
         bool same_readings = true;
         bool same_length = true;
         for (uint8_t i = 1; i < 3u; ++i) {

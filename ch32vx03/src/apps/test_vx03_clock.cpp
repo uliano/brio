@@ -14,7 +14,9 @@
 //
 // NOTHING TO WIRE. Every clock this suite touches is inside the chip or
 // on the board's own crystals (both boards carry an 8 MHz one on
-// PD0/PD1 and a 32.768 kHz one on PC14/PC15), the console is the
+// PD0/PD1 and a 32.768 kHz one on PC14/PC15; letter c selects the
+// latter for the RTC when the backup domain stands on no other source,
+// a selection that lasts until the domain is reset), the console is the
 // probe's serial (USART1 on PA9/PA10), and the clock output's pad PA8
 // is counted where a strap to PA6 already exists (the CH32V203C8T6's
 // board: SPI1's loop-back node) and only read back elsewhere.
@@ -25,14 +27,16 @@
 // letter that failed: the PASS line you are reading came out of a
 // divisor computed for the rate it names.
 //
-// HOW A RATE IS MEASURED. Nothing inside the chip can judge its own
-// clock - every counter here is derived from the same HCLK - so the
-// letters that measure a rate BRACKET a span of kernel ticks between
-// two console lines and leave the judging to whoever timed those two
-// lines. The tick is exact by construction (ticker.hpp), so the ratio
-// between the span asked and the seconds that passed IS the rate's
-// deviation. The verdict is only that the tree switched and the console
-// survived; the number is in the log.
+// HOW A RATE IS MEASURED. Every counter of the core and the timers is
+// derived from HCLK, so none of them can judge HCLK. Two instruments do.
+// Letter b BRACKETS a span of kernel ticks between two console lines and
+// leaves the judging to whoever timed those two lines: the tick is exact
+// by construction (ticker.hpp), so the ratio between the span asked and
+// the seconds that passed IS the rate's deviation; its verdict is only
+// that the tree switched and the console survived, the number is in the
+// log. Letter c counts each rung against the RTC on the board's 32.768
+// kHz crystal, the one clock the pack does not derive from, and judges
+// the core's cycles and the kernel's ticks over that window.
 //
 // What is exercised, letter by letter:
 //   a  the tree as the registers hold it at boot: the root SYSCLK runs
@@ -46,8 +50,10 @@
 //      through the HALVED HSI, which is the EXTEN bit), the bare
 //      crystal and the PLL on the crystal at four more
 //   c  the dynamic regime through its whole pack, up and down: every
-//      switch taken, the tick still exact across it, delay_us following
-//      the rate by index, and the console rebased at each step
+//      switch taken, HCLK and the kernel tick counted against the RTC on
+//      the 32 kHz crystal at every rung, delay_us timed on the core's
+//      counter (never early, not past a sixteenth late), and the console
+//      rebased at each step
 //   d  the LSI: stopped, started, and the time to LSIRDY measured
 //   e  the HSE: the crystal's start-up time to HSERDY measured with the
 //      ready INTERRUPT armed over the same ramp, and the HSI stopped and
@@ -68,7 +74,8 @@
 //      (behind the backup domain's door, its crystal's start-up timed)
 //      each reaching the RCC vector with its own flag, the body leaving
 //      none behind - and the HSI (stopped under the crystal's PLL),
-//      whose restart raises no flag at all on this silicon
+//      whose restart mostly raises no flag on this silicon, against the
+//      manual: what it raised is printed, not judged
 //
 // build: boards = v203c6,v203c8,v303cb,v303vc
 // build: monitor_speed = 115200
@@ -85,6 +92,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -138,8 +146,23 @@ constexpr uint8_t boot_rate = 0;               ///< PllHsi144, what main() enter
 constexpr uint8_t xtal_144_rate = 5;           ///< PllXtal144, letter e's crystal tree
 constexpr uint8_t xtal_bare_rate = 9;          ///< XtalBare, the tree with the PLL off
 static_assert(sizeof(rate_names) / sizeof(rate_names[0]) == SysClock::rate_count);
+static_assert(SysClock::rate_count == 2u * xtal_144_rate);   // five HSI trees, five crystal ones
 
 TestBench<Serial> bench;
+
+/// The suite's ruler: the core's cycle count through the ticker. Its
+/// rate is the boot rate's - a ruler's rate is a compile-time constant
+/// (util/test_wait.hpp) and this clock is dynamic - so it converts
+/// microseconds right only at 144 MHz: the boot rate and the crystal's
+/// PLL at 144, the two trees the letters wait in. wait_us() below checks
+/// the rate in force before it trusts the conversion; the console's
+/// drain, which runs at every rate, waits on the tick instead, which the
+/// ticker keeps a millisecond at every rate.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return PllHsi144::hz; }
+};
+static_assert(PllXtal144::hz == Ruler::hz());
 
 /// The non-maskable interrupt's tally (letter f): the clock security
 /// system's own count, and anything else that took that vector.
@@ -154,10 +177,12 @@ volatile uint32_t rcc_flags = 0;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+/// Every queued byte off the wire (tx_idle() covers the shift register),
+/// bounded on the kernel tick because this runs at every rate of the
+/// pack: 200 ms, a 2 KB ring at 115200 baud and more.
 void console_drain() {
-    while (!Serial::tx_idle()) {
-    }
-    (void)delay_us(clock, 200);   // the last byte's own time on the wire
+    (void)brio::wait_ticks<P>([] { return Serial::tx_idle(); },
+                              200u);   // a wedged console shows as missing lines
 }
 
 const char* source_name(SysclkSource s) {
@@ -180,18 +205,20 @@ const char* mco_name(McoSource s) {
     return "?";
 }
 
-/// Step a poll in 50 us units until it answers, and say how long it
-/// took. The microsecond wait is the one instrument that follows the
-/// rate by itself (delay.hpp dispatches on the pack's index), so this
-/// reads the same at 8 MHz and at 144.
+/// Poll until `ready` answers or `limit_us` passes, and say how long it
+/// took in microseconds (`limit_us` on a time-out; the caller judges the
+/// condition itself afterwards). On the ruler at 144 MHz; at any other
+/// rate the ruler's conversion is wrong, so the wait goes on the kernel
+/// tick, in whole milliseconds.
 template <typename Fn>
 uint32_t wait_us(Fn ready, uint32_t limit_us) {
-    uint32_t spent = 0;
-    while (!ready() && spent < limit_us) {
-        (void)delay_us(clock, 50);
-        spent += 50;
+    if (SysClock::hz() != Ruler::hz()) {
+        const uint32_t t0 = Ticker::ticks();
+        (void)brio::wait_ticks<P>(ready, limit_us / 1000u + 1u);   // judged by the caller
+        return (Ticker::ticks() - t0) * 1000u;
     }
-    return spent;
+    const auto took = brio::cycles_until<Ruler>(ready, limit_us);
+    return took ? *took / (Ruler::hz() / 1'000'000u) : limit_us;
 }
 
 /// Move to one rate of the pack, with the console drained first so no
@@ -275,11 +302,14 @@ void ta_tree() {
                       Rcc::pll_multiplier() == 18u);
     bench.verdict("the HSI's trim is the reset value, the centre of the field",
                   Rcc::hsi_trim() == 16u);
+    // Two waits of 900 us on STK's own count, which runs whether or not
+    // the tick's handler does - not on the ruler, which is built on the
+    // tick being judged and would stall with it: 1.8 ms holds at least
+    // one tick of 1 ms.
     const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() == t0) {
-    }
+    const bool waited = delay_us(clock, 900) && delay_us(clock, 900);
     bench.verdict("the kernel tick is running on this tree",
-                  Ticker::ticks() != t0);
+                  waited && Ticker::ticks() != t0);
 }
 
 // ---------------------------------------------------------------------------
@@ -305,21 +335,196 @@ void tb_rates() {
 // ---------------------------------------------------------------------------
 // c - the pack up and down
 // ---------------------------------------------------------------------------
+
+/// THE INSTRUMENT: the RTC on the board's 32.768 kHz crystal, the one
+/// clock in the chip that no rate of the pack derives from. Its count
+/// runs at 1024 Hz (a divider of 32), and a rung is timed over 128 of
+/// its counts - 125 ms exactly on the crystal.
+constexpr uint32_t rtc_tr_hz = 1024u;
+constexpr uint32_t rtc_window = 128u;   ///< counts, 125 ms
+constexpr uint32_t rtc_window_us = rtc_window * 1'000'000u / rtc_tr_hz;
+static_assert(rtc_window_us == 125'000u);
+
+/// Bring the RTC up on the LSE, the backup domain left on its source:
+/// RTCSEL is one-way, and a domain that stands on another source is not
+/// wiped here (that would cost the backup registers) - the rung's rate
+/// is then not judged, and the letter says so.
+bool rtc_ruler_up() {
+    if (!RtcDomain::unlock(true)) {
+        return false;
+    }
+    RtcDomain::lse_enable(true);
+    // A 32 kHz crystal starts in hundreds of milliseconds to seconds
+    // (letter i times it): five seconds on the tick.
+    if (!brio::wait_ticks<P>([] { return RtcDomain::lse_ready(); }, 5000u)) {
+        return false;
+    }
+    if (!RtcDomain::open(RtcClockSource::lse)) {
+        return false;
+    }
+    return Rtc::synchronize() &&
+           Rtc::configure(RtcConfig{.prescaler = 32'768u / rtc_tr_hz - 1u});
+}
+
+/// One rung's reading against the RTC: HCLK as the core's counter
+/// measures it, and the kernel ticks that passed, over the same window.
+struct RungReading {
+    uint32_t hclk = 0;    ///< Hz
+    uint32_t ticks = 0;   ///< in rtc_window_us
+    bool ok = false;      ///< both edges seen within their bounds
+};
+
+RungReading rung_by_rtc() {
+    RungReading r;
+    if (!Rtc::synchronize()) {
+        return r;
+    }
+    // THE START IS AN EDGE OF THE COUNT, found as the first read above
+    // every read before it - twice, because the first sample may itself
+    // be one of the stale copies count() can return (up to three counts
+    // low, ch32vx03/rtc.hpp), and then its first "edge" is no edge. A
+    // stale read is never ABOVE the count, so the running maximum only
+    // moves at a real edge once one fresh read has been seen. An edge
+    // comes every 0.98 ms: five ticks bound each.
+    uint32_t hi = Rtc::count();
+    for (uint8_t edges = 0; edges < 2u; ++edges) {
+        const uint32_t from = hi;
+        const bool edge = brio::wait_ticks<P>(
+            [&] {
+                const uint32_t c = Rtc::count();
+                if (static_cast<int32_t>(c - hi) > 0) {
+                    hi = c;
+                }
+                return hi != from;
+            },
+            5u);
+        if (!edge) {
+            return r;
+        }
+    }
+    brio::Stopwatch<Ruler> w;   // cycles only: right at any rate, the period constant in the window
+    w.start();
+    const uint32_t t0 = Ticker::ticks();
+    // AND THE END IS THE FIRST READ 128 COUNTS ON, never an unsigned
+    // difference across a stale read (since_clamped). 125 ms, bounded at
+    // twice that on the tick.
+    const bool end = brio::wait_ticks<P>(
+        [&] { return brio::since_clamped(Rtc::count(), hi) >= rtc_window; }, 250u);
+    const uint32_t cycles = w.elapsed();
+    r.ticks = Ticker::ticks() - t0;
+    r.hclk = cycles * (rtc_tr_hz / rtc_window);   // cycles in 1/8 s
+    r.ok = end;
+    return r;
+}
+
+/// THE BOUND on a rung's measured HCLK, in parts per ten thousand. The
+/// instrument: each end of the window is an RTC edge seen through a read
+/// that may be a stale copy for up to three RTCCLK periods (92 us, the
+/// lag rtc.hpp measured), so each end can be that late - 2 x 92 us of
+/// 125 ms, 15 parts in ten thousand; the poll turn at each end (one
+/// count() and one cycles(), under 100 cycles at 8 MHz) adds under 2.
+/// Then the two clocks: a crystal rung is the HSE against the LSE, two
+/// crystals of +-100 ppm each at room temperature (2 more); an HSI rung
+/// is the HSI's own accuracy after calibration at 0..70 C (CH32V203
+/// table 4-13: -1.0 to +1.6 %, CH32V303 table 4-14: -1.8 to +1.8 %), the
+/// wider of the two (180).
+constexpr uint32_t bound_xtal_pptt = 15u + 2u + 2u;
+constexpr uint32_t bound_hsi_pptt = 15u + 2u + 180u;
+
+/// The tick's bound over the window, in ticks: the same rate error over
+/// 125 ticks, rounded up, plus the one tick of quantization the window's
+/// two ends carry against the tick's own phase.
+constexpr uint32_t tick_slack(uint32_t pptt) {
+    return 1u + (125u * pptt + 9'999u) / 10'000u;
+}
+
+/// delay_us(500) timed on the core's counter: never early (the cycles the
+/// rate in force asks), and on a run no tick lengthened, not more than a
+/// sixteenth over - under the closest pair of distinct rates in the pack
+/// (52 against 48 MHz, 8.3 %), so a factor taken for another rate fails;
+/// the wait's own lateness is some 40 cycles at 144 MHz
+/// (qingke/delay.hpp), cycles that do not grow at a slower rate (the
+/// image runs from the zero-wait window), and the ruler's two reads
+/// around it add some tens more, against the 250 a sixteenth allows at
+/// 8 MHz. Up to
+/// eight tries for a quiet run - a wait of half a tick period carries a
+/// tick one try in two, so eight leave one rung in 256 unjudged - the
+/// earliest bound judged on every try.
+struct DelayReading {
+    uint32_t cycles = 0;   ///< of the last try
+    bool early = false;    ///< any try under the asked cycles
+    bool quiet = false;    ///< the last try carried no tick
+    bool served = true;    ///< delay_us() never refused
+};
+
+DelayReading delay_by_counter(uint32_t rate_hz) {
+    DelayReading d;
+    const uint32_t asked = 500u * (rate_hz / 1'000'000u);
+    for (uint8_t t = 0; t < 8u && !d.quiet; ++t) {
+        const brio::TickWitness<P> witness;
+        brio::Stopwatch<Ruler> w;
+        w.start();
+        d.served = delay_us(clock, 500) && d.served;
+        d.cycles = w.elapsed();
+        d.quiet = witness.quiet();
+        d.early = d.early || d.cycles < asked;
+    }
+    return d;
+}
+
 void tc_dynamic() {
-    constexpr uint32_t span = 200;
+    const bool locked_before = !RtcDomain::unlocked();
+    const bool rtc_ok = rtc_ruler_up();
     bool up_ok = true;
+    bool hclk_ok = true;
     bool tick_ok = true;
-    bool delay_ok = true;
+    bool delay_never_early = true;
+    bool delay_near = true;
+    uint8_t delay_unjudged = 0;
+    bool readings_ok = true;
+
+    // One rung: measured first, printed after (a console line going out
+    // inside the window would put its handler there).
+    auto rung = [&](uint8_t i, const char* dir, bool in_force) {
+        const uint32_t asked = SysClock::rate_hz(i);
+        // The pack's first five rates are the HSI's trees, the last five
+        // the crystal's (rate_names).
+        const uint32_t pptt = i < xtal_144_rate ? bound_hsi_pptt : bound_xtal_pptt;
+        RungReading r;
+        if (rtc_ok) {
+            r = rung_by_rtc();
+        }
+        const DelayReading d = delay_by_counter(asked);
+        const uint32_t off = r.hclk > asked ? r.hclk - asked : asked - r.hclk;
+        const uint32_t toff = r.ticks > 125u ? r.ticks - 125u : 125u - r.ticks;
+        const bool near = off <= (asked / 10'000u) * pptt;
+        const bool tick_near = toff <= tick_slack(pptt);
+        const uint32_t asked_cycles = 500u * (asked / 1'000'000u);
+        if (rtc_ok) {
+            readings_ok = readings_ok && r.ok;
+            hclk_ok = hclk_ok && r.ok && near;
+            tick_ok = tick_ok && r.ok && tick_near;
+        }
+        delay_never_early = delay_never_early && d.served && !d.early;
+        if (!d.quiet) {
+            ++delay_unjudged;
+        }
+        delay_near = delay_near && (!d.quiet || d.cycles <= asked_cycles + asked_cycles / 16u);
+        print(serial, "  ", dir, " ", i, " -> ", SysClock::hz(), " Hz (", rate_names[i], "), ",
+              in_force ? "in force" : "NOT IN FORCE", crlf);
+        if (rtc_ok) {
+            print(serial, "      against the RTC: HCLK ", r.hclk, " Hz (bound ", pptt,
+                  " in 10000), ", r.ticks, " ticks in 125 ms (bound +-", tick_slack(pptt), ")",
+                  r.ok ? "" : ", AN EDGE NEVER CAME", crlf);
+        }
+        print(serial, "      delay_us(500): ", d.cycles, " cycles for ", asked_cycles, " asked",
+              d.quiet ? "" : " (a tick inside every try: not judged late)", crlf);
+    };
 
     for (uint8_t i = 0; i < SysClock::rate_count; ++i) {
-        up_ok = go_to(i) && rate_in_force(i) && up_ok;
-        const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < span) {
-        }
-        tick_ok = (Ticker::ticks() - t0 == span) && tick_ok;
-        delay_ok = delay_us(clock, 500) && delay_ok;
-        print(serial, "  up   ", i, " -> ", SysClock::hz(), " Hz (", rate_names[i],
-              "), PCLK1 ", SysClock::pclk1_hz(), " Hz", crlf);
+        const bool ok = go_to(i) && rate_in_force(i);
+        up_ok = ok && up_ok;
+        rung(i, "up  ", ok);
     }
     bench.verdict("every rate of the pack entered in order, upwards through "
                   "the list",
@@ -329,22 +534,31 @@ void tc_dynamic() {
     for (uint8_t k = SysClock::rate_count; k > 0; --k) {
         const uint8_t i = static_cast<uint8_t>(k - 1u);
         const bool ok = go_to(i) && rate_in_force(i);
-        const uint32_t t0 = Ticker::ticks();
-        while (Ticker::ticks() - t0 < span) {
-        }
-        tick_ok = (Ticker::ticks() - t0 == span) && tick_ok;
-        delay_ok = delay_us(clock, 500) && delay_ok;
-        print(serial, "  down ", i, " -> ", SysClock::hz(), " Hz, ",
-              ok ? "in force" : "NOT IN FORCE", crlf);
         down_ok = ok && down_ok;
+        rung(i, "down", ok);
     }
     bench.verdict("and back down through it, the console rebased at every step",
                   down_ok);
-    bench.verdict("the tick counted exactly the span asked at every rate",
-                  tick_ok);
-    bench.verdict("delay_us served its wait at every rate, dispatching on the "
+    if (rtc_ok) {
+        bench.verdict("the RTC's edges came at every rung (the window 128 counts of 1024 Hz)",
+                      readings_ok);
+        bench.verdict("HCLK counted against the RTC on the 32 kHz crystal is the rate asked at "
+                      "every rung: within 0.19 % on the crystal's rungs, 1.97 % on the HSI's",
+                      hclk_ok);
+        bench.verdict("the kernel tick kept its millisecond at every rung, counted against the "
+                      "RTC: 125 ticks in 125 ms within the rung's bound",
+                      tick_ok);
+    } else {
+        bench.skip("the rungs' rates against the RTC: the LSE did not start, or the backup "
+                   "domain stands on another source (not wiped here)");
+    }
+    bench.verdict("delay_us(500) was served and never early at any rate, dispatching on the "
                   "pack's index",
-                  delay_ok);
+                  delay_never_early);
+    print(serial, "  delay_us(500) rungs with a tick inside all eight tries, so not judged "
+                  "late: ", delay_unjudged, " of ", 2u * SysClock::rate_count, crlf);
+    bench.verdict("and not more than a sixteenth late on a run no tick lengthened",
+                  delay_near);
 
     bench.verdict("set() by rate refuses a rate the pack does not name",
                   !SysClock::set(37'000'000UL) && !SysClock::set_index(99));
@@ -353,6 +567,9 @@ void tc_dynamic() {
     bench.verdict("the boot rate is back", rate_in_force(boot_rate));
     bench.verdict("restore() is a readback when the rate is already in force",
                   SysClock::restore() && rate_in_force(boot_rate));
+    if (locked_before) {
+        (void)RtcDomain::unlock(false);   // the domain's door as it was found
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,17 +714,13 @@ bool mco_strapped() {
     return high && low;
 }
 
-/// The core's counter: HCLK cycles, wrapping once a tick at CMPLR + 1.
-uint32_t stk_span(uint32_t from, uint32_t to) {
-    const uint32_t period = stk()->CMPLR + 1u;
-    return to >= from ? to - from : to + period - from;
-}
-
 /// The pad's rate in Hz: TIM3 counting PA6's rising edges in external
-/// clock mode 1 over a gate of `gate_cycles` of HCLK. Each end reads the
+/// clock mode 1 over a gate of `gate_cycles` of HCLK, on the ruler (the
+/// caller runs it at 144 MHz, the crystal's PLL). Each end reads the
 /// counter and the core's clock as one masked pair, so an interrupt
-/// cannot fall between them; 16 bits of count is 65 ms at 1 MHz and the
-/// gate is sized under it by the caller.
+/// cannot fall between them (the mask is a few loads, far under the
+/// tick period whose pending flag the ruler's read carries); 16 bits of
+/// count is 65 ms at 1 MHz and the gate is sized under it by the caller.
 uint32_t mco_count_hz(uint32_t gate_cycles) {
     MeterTim::init();
     (void)MeterTim::remap(0);
@@ -526,24 +739,16 @@ uint32_t mco_count_hz(uint32_t gate_cycles) {
     {
         P::CriticalSection cs;
         c0 = MeterTim::count();
-        t0 = stk()->CNTL;
+        t0 = Ruler::now();
     }
-    // The counter wraps once a tick, so the gate is accumulated poll by
-    // poll, a period folded in across each wrap; the last poll's
-    // position is where the closing pair takes over.
-    uint32_t last = t0;
-    uint32_t cycles = 0;
-    while (cycles < gate_cycles) {
-        const uint32_t now = stk()->CNTL;
-        cycles += stk_span(last, now);
-        last = now;
+    while (Ruler::now() - t0 < gate_cycles) {
     }
     {
         P::CriticalSection cs;
         c1 = MeterTim::count();
-        t1 = stk()->CNTL;
+        t1 = Ruler::now();
     }
-    cycles += stk_span(last, t1);
+    const uint32_t cycles = t1 - t0;
     MeterTim::enable(false);
     MeterIn::release();
     const uint32_t edges = (c1 - c0) & 0xFFFFu;
@@ -552,10 +757,8 @@ uint32_t mco_count_hz(uint32_t gate_cycles) {
 
 void mco_frequency() {
     if (!mco_strapped()) {
-        print(serial, "  the pad's FREQUENCY: no strap from PA8 to PA6 on this board (driven "
-                      "both ways, PA6 did not follow) - not counted here; the CH32V203C8T6's "
-                      "board carries one", crlf);
-        bench.verdict("the frequency count is skipped and says why", true);
+        bench.skip("the pad's frequency: no strap from PA8 to PA6 on this board (driven both "
+                   "ways, PA6 did not follow); the CH32V203C8T6's board carries one");
         return;
     }
     // ON THE CRYSTAL'S TREE, so the core's counter is the crystal's too:
@@ -595,7 +798,10 @@ void mco_frequency() {
 }
 
 void tg_mco() {
-    bench.verdict("this package brings the output pad out", Mco::has_pad);
+    if constexpr (!Mco::has_pad) {
+        bench.skip("the clock output: this package does not bring PA8 out");
+        return;
+    }
 
     constexpr McoSource sources[] = {McoSource::sysclk, McoSource::hsi, McoSource::hse,
                                      McoSource::pll_div2};
@@ -666,16 +872,22 @@ void ti_ready() {
     Rcc::hsi_stop();
     (void)delay_us(clock, 100);
     const bool hsi_off = !Rcc::hsi_ready();
-    // AND THE HSI RAISES NO READY FLAG, against 3.4.3 and 3.3.2 - the
-    // one root of the five that does not. Measured both ways on both
-    // parts: with HSIRDYIE armed the vector never runs, and unarmed the
-    // flag never stands after HSIRDY has risen, whether the oscillator
-    // was off for 100 us or for 20 ms.
+    // WHETHER THE HSI RAISES ITS READY FLAG, which 3.4.3 and 3.3.2 say
+    // it does: on both parts it mostly does not - with HSIRDYIE armed
+    // the vector does not run, and unarmed the flag does not stand after
+    // HSIRDY has risen, the oscillator off for 100 us or for 20 ms - but
+    // the CH32V303CBT6 has also raised it at the armed restart, in some
+    // runs of the same image and not in others. brio depends on neither
+    // answer (hsi_start() polls HSIRDY), so what the restart raised is a
+    // printed finding, and the verdict judges the premises: the HSI was
+    // stopped and is running again.
     const uint32_t hsi_f = ready_through_vector(
         rcc_hsirdyie, [] { Rcc::hsi_enable(true); }, [] { return Rcc::hsi_ready(); }, 50, ms);
     const uint32_t armed_runs = rcc_events;
     Rcc::hsi_stop();
-    (void)delay_us(clock, 20'000);
+    // Twenty milliseconds off, on the tick: delay_us() refuses a wait of
+    // a tick period or more and would spend nothing.
+    (void)brio::wait_ticks<P>([] { return false; }, 20u);   // a fixed span: never true
     const bool hsi_off_long = !Rcc::hsi_ready();
     Rcc::clear_interrupt_flags(rcc_intr_flags);
     Rcc::hsi_enable(true);
@@ -687,11 +899,14 @@ void ti_ready() {
           " ms (body ", hex(hsi_f), "); off 20 ms (", hsi_off_long ? "HSIRDY fell" : "HSIRDY STOOD",
           ") and restarted unarmed: HSIRDY ", Rcc::hsi_ready() ? "set" : "CLEAR", ", the flags ",
           hex(unarmed_flags), crlf);
-    bench.verdict("the HSI's restart raises NO ready flag on this silicon, against 3.4.3: "
-                  "armed, the vector does not run; unarmed, HSIRDYF does not stand once HSIRDY "
-                  "has risen",
-                  moved && hsi_off && hsi_off_long && armed_runs == 0u &&
-                      Rcc::hsi_ready() && (unarmed_flags & rcc_hsirdyf) == 0u);
+    const bool raised = armed_runs != 0u || (unarmed_flags & rcc_hsirdyf) != 0u;
+    print(serial, "  FINDING: the HSI's restart ", raised ? "RAISED" : "raised no",
+          " ready flag in this run (3.4.3 says it raises one): armed ",
+          armed_runs != 0u ? "the vector ran" : "no vector", ", unarmed ",
+          (unarmed_flags & rcc_hsirdyf) != 0u ? "HSIRDYF stood" : "no HSIRDYF", crlf);
+    bench.verdict("the HSI stops under the crystal's PLL, for 100 us and for 20 ms, and runs "
+                  "again after each restart",
+                  moved && hsi_off && hsi_off_long && Rcc::hsi_ready());
 
     // THE PLL: off under the bare crystal, then started by the switch
     // back to the boot rate with PLLRDYIE armed - the switch polls

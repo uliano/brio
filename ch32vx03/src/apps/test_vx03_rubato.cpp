@@ -101,15 +101,17 @@
 //      dispatch has ended); from the Console (to Mid) and from Low's
 //      dispatch (to High), ten runs each, with the line's pending bit read
 //      inside the section and the cycles from the section's last statement
-//      to the receiver's first.
+//      to the receiver's first - judged on the runs no kernel tick
+//      lengthened, the others printed with their figure.
 //   j  (a part with the FPU) THE FLOATING-POINT UNIT ACROSS A PREEMPTION:
 //      Low's handler sums a float series under round-toward-zero with a
 //      mark inside the loop, where it clears fflags and the edge lands;
 //      High, started by it, sums another and raises NX (read at its end).
 //      Twenty runs, ten
 //      with the float handler (TIM3) computing over Low's live registers:
-//      every value bit-exact against the same functions run without
-//      preemption, Low's fflags still clear after the preemption and its
+//      High's dispatch beginning inside Low's spin on either edge (a flag
+//      set around the spin), every value bit-exact against the same
+//      functions run without preemption, Low's fflags still clear after the preemption and its
 //      fcsr at its series' end as without it, High finding FS Clean. Then
 //      the cost of the entry's save: road 1 over Low with its unit Dirty
 //      and Clean, the edge to High's first statement and High's last to
@@ -145,6 +147,7 @@
 #include "kernel/rubato.hpp"
 #include "kernel/time_event.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
@@ -169,6 +172,14 @@ static_assert(Tim<3>::clock_hz(clock) == SysClock::hz, "and so does letter j's T
 /// The STK counter read bare: HCLK cycles within the ticker's period.
 struct Ruler {
     [[gnu::always_inline]] static uint32_t now() { return stk()->CNTL; }
+};
+
+/// The ruler of the waits (util/test_wait.hpp): the ticker's composed
+/// cycles(), right across a period. Not `Ruler`, the bare counter above,
+/// which times the paths and folds one period at most.
+struct WaitRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// The cycles from `from` to `to`, two bare reads less than a period
@@ -383,16 +394,10 @@ void reset_scenario() {
     tracing = true;
 }
 
-/// Wait until `runs` moves past `before`, at most `cycles` (the ticker's
-/// composed cycles, so a wait may outlast a period): true when it did.
-bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t cycles) {
-    const uint32_t t0 = Ticker::cycles();
-    while (runs == before) {
-        if (Ticker::cycles() - t0 >= cycles) {
-            return false;
-        }
-    }
-    return true;
+/// Wait until `runs` moves past `before`, at most `us` microseconds on
+/// the composed ruler (so a wait may outlast a period): true when it did.
+bool wait_runs(const volatile uint32_t& runs, uint32_t before, uint32_t us) {
+    return brio::wait_until<WaitRuler>([&runs, before] { return runs != before; }, us);
 }
 
 /// A post from the Console to Low with nothing to do and nothing traced:
@@ -401,14 +406,11 @@ void flush() {
     post<Low>(Hit{0});
 }
 
-/// Let the console's transmitter fall silent (at most 50 ms; 230 bytes at
-/// 115200 are 20 ms) and its last byte leave the wire: its interrupt,
-/// landing in a measured path, would be measured.
+/// Let the console's transmitter fall silent, its last byte off the wire
+/// (tx_idle() covers the shift register): its interrupt, landing in a
+/// measured path, would be measured.
 void console_drain() {
-    const uint32_t t0 = Ticker::cycles();
-    while (!Serial::tx_idle() && Ticker::cycles() - t0 < SysClock::hz / 20u) {
-    }
-    spin(SysClock::hz / 10'000u);   // 100 us: the last byte's own 87 on the wire
+    (void)brio::console_drain<WaitRuler, Serial>();   // a wedged console shows as missing lines
 }
 
 uint32_t ruler_cost() {
@@ -423,8 +425,10 @@ uint32_t ruler_cost() {
     return best;
 }
 
-/// One millisecond of HCLK: the letters' wait for a dispatch that should
-/// have run within a few hundred cycles.
+/// One millisecond, in microseconds: the letters' wait for a dispatch
+/// that should have run within a few hundred cycles.
+constexpr uint32_t one_ms_us = 1000u;
+/// And in cycles of HCLK.
 constexpr uint32_t one_ms = SysClock::hz / 1000u;
 
 // =============================================================================
@@ -678,7 +682,7 @@ void tc_latency() {
             const uint32_t t0 = Ticker::ticks();
             edge_to = 1;
             edge_in(400u);
-            if (!wait_runs(High::runs, r, one_ms)) {
+            if (!wait_runs(High::runs, r, one_ms_us)) {
                 ++missed;
                 flush();
             }
@@ -729,7 +733,7 @@ void tc_latency() {
             edge_to = 1;
             const uint32_t c0 = Ticker::cycles();
             edge_in(400u);
-            const bool ran = wait_runs(High::runs, r, one_ms);
+            const bool ran = wait_runs(High::runs, r, one_ms_us);
             if (!ran) {
                 ++deferred;
                 flush();
@@ -940,7 +944,7 @@ void te_depth2() {
             } else {
                 edge_to = 1;     // the first edge starts High over the Console
                 edge_in(400u);
-                if (!wait_runs(High::runs, r, one_ms)) {
+                if (!wait_runs(High::runs, r, one_ms_us)) {
                     flush();
                 }
             }
@@ -1027,13 +1031,6 @@ void base_turn() {
     (void)activate_here();
 }
 
-/// Wait until the kernel tick has moved `ticks` on.
-void wait_ticks(uint32_t ticks) {
-    const uint32_t t0 = Ticker::ticks();
-    while (Ticker::ticks() - t0 < ticks) {
-    }
-}
-
 void tf_timers() {
     reset_scenario();
     TE::clear_all();
@@ -1111,7 +1108,7 @@ void tf_timers() {
     Low::action = [](uint8_t n) { ++fired[n]; };
     base_turn();                           // te_c and te_d: due at once
     const bool turn1 = fired[51] == 0u && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
-    wait_ticks(4u);                        // te_a's three ticks, and one more
+    (void)brio::wait_ticks<P>([] { return false; }, 4u);   // a fixed span: te_a's three ticks, and more
     base_turn();
     const bool turn2 = fired[51] == a_fires && fired[52] == 0u && fired[53] == 1u && fired[54] == 1u;
     base_turn();
@@ -1216,23 +1213,35 @@ void tg_mask() {
     uint8_t alike_console = 0;
     uint8_t alike_low = 0;
     uint32_t least = 0xFFFF'FFFFu;
-    uint32_t most = 0;
+    uint32_t most = 0;           ///< over the runs no tick lengthened
+    uint32_t span[10] = {};      ///< every run's figure
+    bool quiet[10] = {};         ///< and whether the kernel tick stayed out of it
     bool back = true;
     for (int run = 0; run < 10; ++run) {
         reset_scenario();
+        // THE LENGTHENERS: a kernel tick landing between the section's
+        // end and Mid's first statement adds its handler to the figure,
+        // which the bound below does not count; the witness says which
+        // runs it was, and only the others are judged.
+        const TickWitness<P> witness;
         post_in_section<Mid>('C');
+        quiet[run] = witness.quiet();
         if constexpr (!scheduler_in_thread_mode) {
             flush();
         }
         {
             const uint32_t d = between(section_last, Mid::entered);
-            least = d < least ? d : least;
-            most = d > most ? d : most;
+            span[run] = d;
+            if (quiet[run]) {
+                least = d < least ? d : least;
+                most = d > most ? d : most;
+            }
         }
         if (trace_is(want_console)) {
             ++alike_console;
         } else if (alike_console == run) {
             print_trace();
+            console_drain();   // the line out of the runs that follow
         }
         reset_scenario();
         Low::action = [](uint8_t) { post_in_section<High>('L'); };
@@ -1241,15 +1250,26 @@ void tg_mask() {
             ++alike_low;
         } else if (alike_low == run) {
             print_trace();
+            console_drain();
         }
         back = back && P::ceiling == console_index && P::interrupts_enabled();
     }
     reset_scenario();
+    uint8_t quiet_runs = 0;
+    for (const bool q : quiet) {
+        quiet_runs = static_cast<uint8_t>(quiet_runs + (q ? 1u : 0u));
+    }
     print(serial, "  from the Console to Mid: ", alike_console, " of 10 runs traced ",
           want_console, crlf);
     print(serial, "  from Low to High: ", alike_low, " of 10 runs traced ", want_low, crlf);
     print(serial, "  the section's last statement to Mid's first: ", least, "..", most,
-          " cycles", crlf);
+          " cycles over the ", quiet_runs, " runs no kernel tick lengthened", crlf);
+    for (uint8_t i = 0; i < 10u; ++i) {
+        if (!quiet[i]) {
+            print(serial, "  run ", i, ": a kernel tick inside, ", span[i],
+                  " cycles - reported, not judged", crlf);
+        }
+    }
     bench.verdict("the software interrupt stood pending inside every section, and no receiver "
                   "ran inside one",
                   pend_inside && !ran_inside);
@@ -1280,8 +1300,8 @@ void tg_mask() {
         constexpr uint32_t section_bound =
             hpe_build ? (fpu_part ? 221u : 215u) : (fpu_part ? 240u : 234u);
         bench.verdict("the section's end to the receiver's first statement under its bound "
-                      "(the arithmetic beside it)",
-                      most < section_bound);
+                      "(the arithmetic beside it), on every run no kernel tick lengthened",
+                      quiet_runs != 0u && most < section_bound);
     } else {
         bench.verdict("handler shape: the Console's post to Mid under the mask waits for the "
                       "Console's next request, the stage's limit (10 runs)",
@@ -1307,6 +1327,8 @@ volatile float dirt = 0.0f;              ///< what Low writes to dirty its unit
 volatile uint32_t high_left = 0;         ///< the ruler at High's action's last statement
 volatile uint32_t low_back = 0;          ///< and at Low's first after it resumed
 volatile bool dirty_run = false;         ///< letter j's timed half: Low dirties its unit
+volatile bool low_spinning = false;      ///< Low is inside its mark's spin, accumulators live
+volatile bool high_in_spin = false;      ///< High's dispatch began while Low was spinning
 
 [[gnu::always_inline]] inline uint32_t read_fflags() {
     uint32_t f;
@@ -1354,7 +1376,12 @@ template <bool fpu = device::has_fpu>
                 edge_to = 1;
                 edge_in(500u);
             }
+            // Where the edge must land: High's dispatch, started by it,
+            // records whether this flag stood - the preemption over Low's
+            // live registers the letter is about, for either edge.
+            low_spinning = true;
             spin(20000u);
+            low_spinning = false;
             if constexpr (fpu) {
                 low_mark_fflags = read_fflags();
             }
@@ -1403,6 +1430,7 @@ void tj_fpu() {
             low_sum = series_low(400u, 200u, low_float_edge);
         };
         High::action = [](uint8_t) {
+            high_in_spin = low_spinning;
             uint32_t st;
             __asm__ volatile("csrr %0, mstatus" : "=r"(st));
             high_fs = (st >> 13) & 3u;
@@ -1415,15 +1443,20 @@ void tj_fpu() {
         bool edge_exact = true;
         bool fs_clean = true;
         bool high_nx = true;
+        uint8_t landed[2] = {0, 0};   ///< runs whose High began inside Low's spin: TIM2, TIM3
         for (int run = 0; run < 20; ++run) {
             low_float_edge = run >= 10;
             float_edge_float = run >= 10;
             float_edge_acc = 2.0f;
             low_sum = 0.0f;
             high_sum = 0.0f;
+            high_in_spin = false;
             const uint32_t h = High::runs;
             post<Low>(Hit{1});
             const bool ran = High::runs == h + 1u;
+            if (ran && high_in_spin) {
+                ++landed[run >= 10 ? 1 : 0];
+            }
             const uint32_t got_low = std::bit_cast<uint32_t>(static_cast<float>(low_sum));
             const uint32_t got_high = std::bit_cast<uint32_t>(static_cast<float>(high_sum));
             exact = exact && ran && got_low == ref_low && got_high == ref_high;
@@ -1464,14 +1497,23 @@ void tj_fpu() {
             const uint32_t r = High::runs;
             edge_to = 1;
             edge_in(400u);
-            while (High::runs == r) {
+            // A turn count and not the ruler's wait: the loop's last turn
+            // is inside the figure "High's last to Low's first", and a
+            // turn of brio::wait_until() reads the composed ruler. 100000
+            // turns are some 3 ms at 144 MHz, reached only by an edge
+            // whose High never ran (counted below through High::runs).
+            uint32_t turns = 0;
+            while (High::runs == r && ++turns < 100'000u) {
             }
             low_back = Ruler::now();
         };
         High::action = [](uint8_t) { high_left = Ruler::now(); };
+        uint8_t timed_ran = 0;
         for (int run = 0; run < 32; ++run) {
             dirty_run = (run & 1) != 0;
+            const uint32_t h = High::runs;
             post<Low>(Hit{1});
+            timed_ran = static_cast<uint8_t>(timed_ran + (High::runs == h + 1u ? 1u : 0u));
             const uint32_t in = between(edge_last, High::entered);
             const uint32_t out = between(high_left, low_back);
             if (dirty_run) {
@@ -1487,6 +1529,8 @@ void tj_fpu() {
             }
         }
         reset_scenario();
+        print(serial, "  High began inside Low's spin in ", landed[0], " of 10 runs on TIM2's edge and ",
+              landed[1], " of 10 on TIM3's float edge", crlf);
         print(serial, "  road 1 over Low, the edge to High's first statement: FS Dirty ",
               in_dirty, "..", in_dirty_hi, ", Clean ", in_clean, "..", in_clean_hi,
               " cycles; High's last to Low's first: Dirty ", out_dirty, "..", out_dirty_hi,
@@ -1498,7 +1542,14 @@ void tj_fpu() {
         bench.verdict("Low's and High's sums bit-exact across 20 preemptions, ten of them with a "
                       "float handler over Low's live registers",
                       exact);
+        // Where road 1 is kept the edge preempts Low inside its spin; in
+        // the handler shape High waits for Low's end (the file header).
+        constexpr uint8_t want_landed = scheduler_in_thread_mode ? 10u : 0u;
+        bench.verdict("each edge's High preempted Low inside its spin, over its live registers "
+                      "(10 runs on TIM2's edge, 10 on TIM3's float edge)",
+                      landed[0] == want_landed && landed[1] == want_landed);
         bench.verdict("the float handler's own result exact (2 x 1.5 + 1)", edge_exact);
+        bench.verdict("every one of the 32 timed runs started High", timed_ran == 32u);
         bench.verdict("fcsr given back: Low's flags cleared before the preemption still clear "
                       "after it though High's series raised NX, its rounding mode and flags at "
                       "the end as without the preemption",

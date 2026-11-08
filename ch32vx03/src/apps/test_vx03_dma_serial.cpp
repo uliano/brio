@@ -143,6 +143,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 // The DUT's half of the desk pair's serial link: the CH32V303's letters n,
@@ -177,9 +178,9 @@ using LoopRxChannel = DmaChannel<1, DmaRequestOf<DmaRequest::usart2_rx>::channel
 /// USART2's receive pad, the bit-banged line of letter g.
 using RxPad = Pin<'A', 3>;
 
-using Ruler = Tim<3>;    ///< letter p's holder: its first compare's request, on channel 6
+using Holder = Tim<3>;   ///< letter p's holder: its first compare's request, on channel 6
 
-constexpr uint32_t tim_hz = Ruler::clock_hz(clock);
+constexpr uint32_t tim_hz = Holder::clock_hz(clock);
 constexpr uint32_t ticks_per_us = tim_hz / 1'000'000u;
 static_assert(tim_hz == SysClock::hz);
 
@@ -222,40 +223,46 @@ const uint8_t* source_first_bytes() { return reinterpret_cast<const uint8_t*>(&s
 // ---------------------------------------------------------------------------
 
 /**
- * THE RULER OF THIS SUITE: the core's own STK counter, read as a
- * stopwatch. It counts up to its reload - one tick period, a
- * millisecond here - and starts again, so a span is accumulated poll by
- * poll with one period folded in across each wrap.
+ * THE RULER OF THIS SUITE: the composed cycle count (util/test_wait.hpp's
+ * ruler) - the kernel tick count and the STK counter's position, so a span
+ * of any length reads whole, polled or not, while the tick handler runs:
+ * nothing in this suite masks interrupts or pauses the tick.
  */
-class Stopwatch {
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// A stopwatch's reading in whole microseconds.
+uint32_t us_of(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
+
+/**
+ * THE MASKED STOPWATCH, for the spans letter r times INSIDE a critical
+ * section, and for those alone: the composed cycle count above is right
+ * only while the tick handler runs, and under the mask it does not - past
+ * one tick period the count folds back, and a bound of a few milliseconds
+ * read on it would never come. This one reads the STK counter alone and
+ * folds one period in at each wrap it sees, which holds however long the
+ * mask lasts so long as it is polled at least once a period (every loop
+ * that polls it turns in well under a microsecond).
+ */
+class MaskedStopwatch {
 public:
-    Stopwatch() { start(); }
+    MaskedStopwatch() : last_(stk()->CNTL) {}
 
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
+    /// Microseconds since construction; one call a turn of the poll.
+    uint32_t us() {
         const uint32_t period = stk()->CMPLR + 1u;
         const uint32_t now = stk()->CNTL;
         acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
         last_ = now;
-        return acc_;
+        return acc_ / ticks_per_us;
     }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
 
 private:
-    uint32_t last_ = 0;
+    uint32_t last_;
     uint32_t acc_ = 0;
 };
-
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
 
 /**
  * THE RATE ON THE WIRE, which a loop alone cannot tell: a transmitter and
@@ -275,8 +282,9 @@ uint32_t wire_permille(uint32_t baud, uint32_t frames) {
     const uint64_t budget = 2u * wire + SysClock::hz / 100u;
     uint8_t b = 0;
     uint32_t queued = 0;
-    Stopwatch w;
-    while (queued < frames && w.cycles() < budget) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (queued < frames && w.elapsed() < budget) {
         const uint32_t want = frames - queued;
         queued += T::write_bulk(std::span<const uint8_t>(
             src + (queued & (source_bytes - 1u)),
@@ -286,12 +294,12 @@ uint32_t wire_permille(uint32_t baud, uint32_t frames) {
         while (T::read_byte(b)) {
         }
     }
-    while (!T::tx_idle() && w.cycles() < budget) {
+    while (!T::tx_idle() && w.elapsed() < budget) {
         while (T::read_byte(b)) {
         }
     }
-    const uint32_t took = w.cycles();
-    wait_us(64u * 10u * 1'000'000u / baud + 1000u);
+    const uint32_t took = w.elapsed();
+    spin_us<Ruler>(64u * 10u * 1'000'000u / baud + 1000u);
     while (T::read_byte(b)) {
     }
     T::clear_errors();
@@ -350,7 +358,7 @@ void all_off() {
         Pfic::disable(dma_channel_irq(1, ch));
         Pfic::clear_pending(dma_channel_irq(1, ch));
     }
-    Ruler::release();
+    Holder::release();
     uart_mode = false;
     for (uint8_t i = 0; i < 8u; ++i) {
         channel_calls[i] = 0;
@@ -375,11 +383,15 @@ bool word_write_faults(uint32_t target) {
     static_assert(dma_claim<DmaSlotId<1, 3>, DmaCopyOwner<1, 3>>);
     Ch::stop();
     (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, DmaWidth::word));
-    uint32_t spins = 200'000UL;
+    // Four words end in well under a microsecond, an error sooner; 1 ms
+    // allowed, and a channel that never ends reads as no fault.
     uint32_t f = 0;
-    while (spins-- != 0u && (f & (DmaFlag::error | DmaFlag::complete)) == 0u) {
-        f = Ch::flags();
-    }
+    (void)wait_until<Ruler>(
+        [&f] {
+            f = Ch::flags();
+            return (f & (DmaFlag::error | DmaFlag::complete)) != 0u;
+        },
+        1'000);
     Ch::stop();
     return (f & DmaFlag::error) != 0u;
 }
@@ -399,14 +411,14 @@ bool measure_jumper() {
     using Dst = Pin<'A', 3>;
     Src::output(false);
     Dst::input(PinPull::up);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_seen = !Dst::read();
     Src::set();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high_seen = Dst::read();
     Dst::input(PinPull::down);
     Src::clear();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_again = !Dst::read();
     Src::release();
     Dst::release();
@@ -430,17 +442,21 @@ void need_jumper() {
 /// `bytes` go out as 8N1 frames back to back, every edge at an ABSOLUTE
 /// offset from the run's start so a handler's delay never accumulates, and
 /// the line then idles for two bit times more: the last frame is received
-/// and stored by the time this returns.
+/// and stored by the time this returns. Each edge is placed up to one turn
+/// of the poll late - one read of the composed cycle count, some forty
+/// cycles, a thirtieth of the 1250-cycle bit - which a receiver sampling
+/// the bit's middle never sees.
 constexpr uint32_t bang_baud = 115200;
 
 void bang(const uint8_t* bytes, uint16_t n) {
     constexpr uint32_t bit = SysClock::hz / bang_baud;
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     uint32_t edge = 0;
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t frame = static_cast<uint16_t>((bytes[i] << 1) | 0x200u);   // start, 8 data, stop
         for (uint8_t b = 0; b < 10u; ++b) {
-            while (w.cycles() < edge) {
+            while (w.elapsed() < edge) {
             }
             if (((frame >> b) & 1u) != 0u) {
                 RxPad::set();
@@ -451,7 +467,7 @@ void bang(const uint8_t* bytes, uint16_t n) {
         }
     }
     edge += 2u * bit;
-    while (w.cycles() < edge) {
+    while (w.elapsed() < edge) {
     }
 }
 
@@ -559,9 +575,8 @@ void ring_on_a_banged_line() {
     // lands whole.
     const uint32_t te_target = word_write_faults(refused_address) ? refused_address : 0u;
     if (te_target == 0u) {
-        print(serial, "  the SRAM region's top raised no transfer error on a write: the ring's real error "
-                      "is not staged",
-              crlf);
+        bench.skip("the SRAM region's top raised no transfer error on a write: the ring's real error "
+                   "is not staged");
     } else {
         bool junk = true;
         (void)read_all(src, 0, junk);
@@ -578,7 +593,7 @@ void ring_on_a_banged_line() {
             r.CFGR = r.CFGR | dma_cfgr_en;
         }
         bang(src + 600, 1);
-        wait_us(200);
+        spin_us<Ruler>(200);
         const bool dropped = LoopRx::idle();
         const uint16_t faults1 = Loop::dma_faults();
         const uint32_t rx_faults1 = LoopRx::faults();
@@ -638,10 +653,11 @@ void tg_engines() {
     static const uint8_t message[] = "the channel is the request";
     constexpr uint16_t length = sizeof(message) - 1u;
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
-    Stopwatch w;
-    while (!Loop::tx_idle() && w.us() < 20'000UL) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (!Loop::tx_idle() && us_of(w) < 20'000UL) {
     }
-    const uint32_t drained_us = w.us();
+    const uint32_t drained_us = us_of(w);
     const bool drained = Loop::tx_idle();
     // 26 bytes of ten bits at 115200 baud are some 2260 us, and the
     // run left the ring in ONE block: the engine's own completion is
@@ -689,9 +705,8 @@ void tg_engines() {
 
     if (!jumper) {
         ring_on_a_banged_line();
-        bench.verdict("the round trip is skipped and says so: without the strap between "
-                      "USART2's two pads a transmit engine has no receive engine to reach",
-                      true);
+        bench.skip("the round trip: without the strap between USART2's two pads a transmit engine has "
+                   "no receive engine to reach");
         tg_rate();
         Loop::release();
         uart_mode = false;
@@ -704,8 +719,9 @@ void tg_engines() {
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     uint16_t got = 0;
     uint8_t seen[64] = {};
-    Stopwatch r;
-    while (got < length && r.us() < 50'000UL) {
+    Stopwatch<Ruler> r;
+    r.start();
+    while (got < length && us_of(r) < 50'000UL) {
         uint8_t b = 0;
         while (got < length && Loop::read_byte(b)) {
             seen[got++] = b;
@@ -753,14 +769,14 @@ void hold_channel6() {
                       DmaRequestOf<DmaRequest::usart2_rx>::channel,
                   "table 11-5: TIM3's channel 1 request and USART2's receive request share a "
                   "channel");
-    Ruler::init();
-    (void)Ruler::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
-    (void)Ruler::set_compare(0, 16);
-    Ruler::interrupts(Ruler::compare_dma(0), true);
-    Ruler::enable(true);
-    wait_us(20);
-    Ruler::enable(false);
-    Ruler::bus_clock(false);
+    Holder::init();
+    (void)Holder::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
+    (void)Holder::set_compare(0, 16);
+    Holder::interrupts(Holder::compare_dma(0), true);
+    Holder::enable(true);
+    spin_us<Ruler>(20);
+    Holder::enable(false);
+    Holder::bus_clock(false);
 }
 
 void tp_dead_ring() {
@@ -788,13 +804,14 @@ void tp_dead_ring() {
     ring_watch = true;
     if (jumper) {
         (void)Loop::write_bulk(std::span<const uint8_t>(src, 4));
-        Stopwatch w;
-        while (!Loop::tx_idle() && w.us() < 5'000UL) {
+        Stopwatch<Ruler> w;
+        w.start();
+        while (!Loop::tx_idle() && us_of(w) < 5'000UL) {
         }
     } else {
         bang(src, 4);
     }
-    wait_us(2'000);
+    spin_us<Ruler>(2'000);
     ring_watch = false;
     const uint32_t entries = ring_entries;
     const bool stormed = ring_stormed;
@@ -812,7 +829,7 @@ void tp_dead_ring() {
     // The held request let go by TIM3's reset line; the consumer's next
     // look starts the ring again and arms the wait for the end, and the
     // next burst arrives whole.
-    Ruler::reset();
+    Holder::reset();
     bool junk_in_order = true;
     (void)read_all(src, 0, junk_in_order);   // the look that restarts it, and what stood
     const uint16_t ctlr1 = Loop::Resource::regs().CTLR1;
@@ -821,10 +838,11 @@ void tp_dead_ring() {
     (void)read_all(src, 0, junk_in_order);
     if (jumper) {
         (void)Loop::write_bulk(std::span<const uint8_t>(src + 8, 10));
-        Stopwatch w;
-        while (!Loop::tx_idle() && w.us() < 5'000UL) {
+        Stopwatch<Ruler> w;
+        w.start();
+        while (!Loop::tx_idle() && us_of(w) < 5'000UL) {
         }
-        wait_us(500);
+        spin_us<Ruler>(500);
     } else {
         bang(src + 8, 10);
     }
@@ -881,23 +899,23 @@ struct Paced {
     uint16_t steps = 0;   ///< consecutive samples one period apart
 };
 
-/// SIXTEEN SAMPLES OF THE RULER (TIM3 at 1 MHz) on DMA `c`'s channel `ch`,
+/// SIXTEEN SAMPLES OF TIM3'S COUNT (Holder, at 1 MHz) on DMA `c`'s channel `ch`,
 /// paced by timer `tn` - its update (cc < 0), or its channel cc's compare
 /// - once every 500 us. A request held on the channel's OR moves one item
 /// at the enable: `early` is read 100 us after it, the pacer still
 /// stopped. A held level its gated owner never drops stalls the channel
 /// after that item: `left` is read after eighteen periods. A clean channel
 /// moves nothing early, ends at zero and takes fifteen steps of 500 +- 5
-/// (the pacer and the ruler divide one timer clock: a step is exact but
+/// (the pacer and TIM3 divide one timer clock: a step is exact but
 /// for the sample's own bus wait).
 template <uint8_t c, uint8_t ch, uint8_t tn, int8_t cc>
 Paced paced_block() {
     using Ch = DmaChannel<c, ch>;
     using T = Tim<tn>;
     Paced p{};
-    Ruler::init();
-    (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 0xFFFF});
-    Ruler::enable(true);
+    Holder::init();
+    (void)Holder::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 0xFFFF});
+    Holder::enable(true);
     T::init();
     (void)T::configure(TimConfig{.prescaler = static_cast<uint16_t>(T::clock_hz(clock) / 1'000'000u - 1u),
                                  .period = 499});
@@ -914,7 +932,7 @@ Paced paced_block() {
     }
     Ch::stop();
     p.armed = Ch::load(DmaTransfer{
-        .peripheral = Ruler::cnt_address(),
+        .peripheral = Holder::cnt_address(),
         .memory = work,
         .count = sample_count,
         .config = {.direction = DmaDirection::peripheral_to_memory,
@@ -926,10 +944,10 @@ Paced paced_block() {
                    .memory_width = DmaWidth::half,
                    .priority = DmaPriority::high},
     });
-    wait_us(100);
+    spin_us<Ruler>(100);
     p.early = static_cast<uint16_t>(sample_count - Ch::remaining());
     T::enable(true);
-    wait_us(18u * 500u);
+    spin_us<Ruler>(18u * 500u);
     p.left = Ch::remaining();
     T::enable(false);
     Ch::stop();
@@ -940,7 +958,7 @@ Paced paced_block() {
         }
     }
     T::release();
-    Ruler::release();
+    Holder::release();
     return p;
 }
 
@@ -956,9 +974,8 @@ void ts_same_owner() {
     all_off();
     need_jumper();
     if (jumper) {
-        print(serial, "  the jumper PA2-PA3 is in place: USART2's transmitter drives the pad this letter "
-                      "bangs, so its half is not staged",
-              crlf);
+        bench.skip("the jumper PA2-PA3 is in place: USART2's transmitter drives the pad this letter "
+                   "bangs, so its half is not staged");
     } else {
         // USART2'S RECEIVE REQUEST LEFT STANDING: the ring's channel stopped
         // and the port's vector masked, one frame banged into the receive
@@ -968,10 +985,10 @@ void ts_same_owner() {
         // before every burst, so the receiver frames no edge but the bangs'.
         uart_mode = true;
         RxPad::input(PinPull::up);
-        wait_us(pull_settle_us);
+        spin_us<Ruler>(pull_settle_us);
         const bool up = Loop::init(clock, bang_baud);
         RxPad::input(PinPull::up);
-        wait_us(pull_settle_us);
+        spin_us<Ruler>(pull_settle_us);
         bool junk = true;
         (void)read_all(source_first_bytes(), 0, junk);
         LoopRx::stop();
@@ -983,13 +1000,13 @@ void ts_same_owner() {
         const bool raised = (statr & usart_rxne) != 0u && (ctlr3 & usart_dmar) != 0u;
         Loop::release();
         RxPad::input(PinPull::up);
-        wait_us(pull_settle_us);
+        spin_us<Ruler>(pull_settle_us);
         // THE SAME OWNER AGAIN: init() pulses the reset first, then arms the
         // ring; a burst of sixteen banged after it is all the ring may hold,
         // nothing drained between.
         const bool again = Loop::init(clock, bang_baud);
         RxPad::input(PinPull::up);
-        wait_us(pull_settle_us);
+        spin_us<Ruler>(pull_settle_us);
         const uint32_t before = Loop::rx_pending();
         const uint8_t* src = source_first_bytes() + 300;
         bang(src, 16);
@@ -1022,7 +1039,7 @@ void ts_same_owner() {
         .prescaler = static_cast<uint16_t>(HeldPacer::clock_hz(clock) / 1'000'000u - 1u), .period = 99});
     HeldPacer::interrupts(tim_ude, true);
     HeldPacer::enable(true);
-    wait_us(500);
+    spin_us<Ruler>(500);
     HeldPacer::release();
     const Paced p = paced_block<HeldRow::controller, HeldRow::channel, 1, -1>();
     const bool clean = paced_line("TIM1's update left standing under UDE, released, then its own paced block", p);
@@ -1083,14 +1100,14 @@ template <typename Src, typename Dst>
 bool strapped() {
     Src::output(false);
     Dst::input(PinPull::up);
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_seen = !Dst::read();
     Src::set();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool high_seen = Dst::read();
     Dst::input(PinPull::down);
     Src::clear();
-    wait_us(20);
+    spin_us<Ruler>(20);
     const bool low_again = !Dst::read();
     Src::release();
     Dst::release();
@@ -1236,7 +1253,7 @@ Cell stream_cell(uint32_t baud, uint16_t blocks, bool load) {
     fat_mode = mode;
     const bool opened = Port::init(clock, baud) && F::open(baud);
     c.level = static_cast<uint8_t>(LoopRxChannel::configuration().priority);
-    wait_us(500);
+    spin_us<Ruler>(500);
     Sink junk{};
     take<Port>(junk);   // what the pad framed before the sender drove it
     Port::clear_errors();
@@ -1254,15 +1271,17 @@ Cell stream_cell(uint32_t baud, uint16_t blocks, bool load) {
     ring_watch = true;
     Sink s{};
     uint16_t started = 0;
-    Stopwatch w;
-    Stopwatch tail;
+    Stopwatch<Ruler> w;
+    w.start();
+    Stopwatch<Ruler> tail;
+    tail.start();
     bool tail_running = false;
     if (opened) {
         (void)F::Engine::start(std::span<const uint8_t>(src, source_bytes));
         started = 1;
     }
     const uint32_t budget_us = 40'000UL + (blocks * 4096UL * 10UL * 1000UL) / (baud / 1000UL);
-    while (opened && w.us() < budget_us) {
+    while (opened && us_of(w) < budget_us) {
         take<Port>(s);
         if (F::finished()) {
             if (started < blocks) {
@@ -1271,21 +1290,22 @@ Cell stream_cell(uint32_t baud, uint16_t blocks, bool load) {
             } else if (!tail_running) {
                 tail.start();
                 tail_running = true;
-            } else if (s.got >= static_cast<uint32_t>(blocks) * source_bytes || tail.us() > 3'000UL) {
+            } else if (s.got >= static_cast<uint32_t>(blocks) * source_bytes || us_of(tail) > 3'000UL) {
                 break;
             }
         }
     }
     copy_loop = false;
     {
-        Stopwatch q;
-        while (Copier::busy() && q.us() < 5'000UL) {
+        Stopwatch<Ruler> q;
+        q.start();
+        while (Copier::busy() && us_of(q) < 5'000UL) {
         }
     }
     ring_watch = false;
     ring_budget = ring_entry_budget;
     take<Port>(s);
-    c.us = w.us();
+    c.us = us_of(w);
     c.sent = static_cast<uint32_t>(started) * source_bytes;
     c.got = s.got;
     c.bad = s.bad;
@@ -1327,22 +1347,23 @@ EndRates end_rates(uint32_t baud) {
     // TE sends an idle frame after each open (18.2): out before the clock.
     const uint32_t frames_us = 20u * 1'000'000u / baud + 10u;
     if (F::open(baud)) {
-        wait_us(frames_us);
+        spin_us<Ruler>(frames_us);
         const uint64_t wire = 10ULL * source_bytes * SysClock::hz / baud;
         const uint64_t budget = 2u * wire + SysClock::hz / 100u;
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         (void)F::Engine::start(std::span<const uint8_t>(source_first_bytes(), source_bytes));
         F::Port::clear_flags(usart_tc);   // TC stood for the idle line before the block
-        while (!F::finished() && w.cycles() < budget) {
+        while (!F::finished() && w.elapsed() < budget) {
         }
-        while (!F::Port::tx_complete() && w.cycles() < budget) {
+        while (!F::Port::tx_complete() && w.elapsed() < budget) {
         }
-        r.sender = static_cast<uint32_t>(1000ULL * w.cycles() / wire);
+        r.sender = static_cast<uint32_t>(1000ULL * w.elapsed() / wire);
     }
     F::close();
     fat_mode = 1;
     (void)Fat::init(clock, baud);
-    wait_us(frames_us);
+    spin_us<Ruler>(frames_us);
     r.port = wire_permille<Fat>(baud, 1024);
     Fat::release();
     fat_mode = 0;
@@ -1364,18 +1385,14 @@ void tq_priority() {
     all_off();
     all_off2<2>();
     if constexpr (!device::has_usart(n)) {
-        bench.verdict("the priority letter is skipped and says so: this part has no fourth serial "
-                      "port to send with",
-                      true);
+        bench.skip("the priority letter: this part has no fourth serial port to send with");
     } else {
         using F = Feeder<n>;
         const bool wired = sender_wired<n>();
         print(serial, "  the wire: the fourth port's TX to PA3 ", wired ? "in place" : "ABSENT",
               crlf);
         if (!wired) {
-            bench.verdict("the priority letter is skipped and says so: it needs the fourth port's "
-                          "TX wired to USART2's RX",
-                          true);
+            bench.skip("the priority letter: it needs the fourth port's TX wired to USART2's RX");
             return;
         }
 
@@ -1388,8 +1405,9 @@ void tq_priority() {
         const DmaPriority ring_level = LoopRxChannel::configuration().priority;
         (void)Fat::write_byte('\n');
         {
-            Stopwatch w;
-            while (!Fat::tx_idle() && w.us() < 2'000UL) {
+            Stopwatch<Ruler> w;
+            w.start();
+            while (!Fat::tx_idle() && us_of(w) < 2'000UL) {
             }
         }
         const DmaPriority tx_level = FatTxChannel::configuration().priority;
@@ -1425,15 +1443,17 @@ void tq_priority() {
         copy_mode = true;
         copies_done = 0;
         copy_loop = true;
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         copy_once();
-        while (w.us() < 50'000UL) {
+        while (us_of(w) < 50'000UL) {
         }
         copy_loop = false;
-        while (Copier::busy()) {
-        }
+        // The last copy's end: 2 KB in some tens of microseconds; 5 ms, and
+        // the count read either way.
+        (void)wait_until<Ruler>([] { return !Copier::busy(); }, 5'000);
         const uint32_t alone = copies_done;
-        const uint32_t alone_us = w.us();
+        const uint32_t alone_us = us_of(w);
         Copier::stop();
         Pfic::disable(dma_channel_irq(1, 3));
         copy_mode = false;
@@ -1491,18 +1511,14 @@ void tr_overrun_tail() {
     all_off();
     all_off2<2>();
     if constexpr (!device::has_usart(n)) {
-        bench.verdict("the overrun letter is skipped and says so: this part has no fourth serial "
-                      "port to send with",
-                      true);
+        bench.skip("the overrun letter: this part has no fourth serial port to send with");
     } else {
         using F = Feeder<n>;
         const bool wired = sender_wired<n>();
         print(serial, "  the wire: the fourth port's TX to PA3 ", wired ? "in place" : "ABSENT",
               crlf);
         if (!wired) {
-            bench.verdict("the overrun letter is skipped and says so: it needs the fourth port's "
-                          "TX wired to USART2's RX",
-                          true);
+            bench.skip("the overrun letter: it needs the fourth port's TX wired to USART2's RX");
             return;
         }
         const uint8_t* src = source_first_bytes();
@@ -1517,7 +1533,7 @@ void tr_overrun_tail() {
                       wire_ok(rates.sender) && wire_ok(rates.port));
         fat_mode = 1;
         const bool opened = Fat::init(clock, 1'000'000UL) && F::open(1'000'000UL);
-        wait_us(500);
+        spin_us<Ruler>(500);
         Sink junk{};
         take<Fat>(junk);
         Fat::clear_errors();
@@ -1542,20 +1558,22 @@ void tr_overrun_tail() {
         {
             P::CriticalSection cs;
             (void)F::Engine::start(std::span<const uint8_t>(src + 64, msg));
-            Stopwatch w;
+            MaskedStopwatch w;
             while (arrived_since(at0) < lead && w.us() < 2'000UL) {
             }
             before_copy = arrived_since(at0);
             copied = Copier::copy(destination + copy_bytes, destination, copy_bytes);
-            while (Copier::busy()) {
+            // 2 KB a byte a beat ends in some tens of microseconds; 1 ms.
+            MaskedStopwatch c;
+            while (Copier::busy() && c.us() < 1'000UL) {
             }
-            Stopwatch t;
+            MaskedStopwatch t;
             while (t.us() < 300UL) {   // the tail sent and the line idle
             }
             ring_entries = 0;
             ring_watch = true;
         }
-        wait_us(3'000);
+        spin_us<Ruler>(3'000);
         ring_watch = false;
         (void)F::finished();
         const uint32_t entries = ring_entries;
@@ -1596,11 +1614,12 @@ void tr_overrun_tail() {
                             Fat::parity_errors();
         (void)F::Engine::start(std::span<const uint8_t>(src + 128, msg));
         {
-            Stopwatch w;
-            while (!F::finished() && w.us() < 2'000UL) {
+            Stopwatch<Ruler> w;
+            w.start();
+            while (!F::finished() && us_of(w) < 2'000UL) {
             }
         }
-        wait_us(500);
+        spin_us<Ruler>(500);
         bool second_in_order = true;
         uint16_t second = 0;
         {
@@ -1637,20 +1656,21 @@ void tr_overrun_tail() {
             c0 = LoopRxChannel::remaining();
             (void)Copier::copy(destination + copy_bytes, destination, copy_bytes);
             F::Port::write_data(0xA5);
-            Stopwatch w;
+            MaskedStopwatch w;
             while (!Fat::Resource::rx_ready() && w.us() < 200UL) {
             }
             st = Fat::Resource::status();
             cpu = Fat::Resource::read_data();
             c1 = LoopRxChannel::remaining();
-            while (Copier::busy()) {
+            MaskedStopwatch c;
+            while (Copier::busy() && c.us() < 1'000UL) {
             }
-            Stopwatch t;
+            MaskedStopwatch t;
             while (t.us() < 50UL) {
             }
             c2 = LoopRxChannel::remaining();
         }
-        wait_us(500);
+        spin_us<Ruler>(500);
         uint16_t ring_after = 0;
         uint8_t ring_byte = 0;
         {
@@ -1672,11 +1692,12 @@ void tr_overrun_tail() {
         // 4. And the port is whole after it.
         (void)F::Engine::start(std::span<const uint8_t>(src + 192, msg));
         {
-            Stopwatch w;
-            while (!F::finished() && w.us() < 2'000UL) {
+            Stopwatch<Ruler> w;
+            w.start();
+            while (!F::finished() && us_of(w) < 2'000UL) {
             }
         }
-        wait_us(500);
+        spin_us<Ruler>(500);
         bool third_in_order = true;
         uint16_t third = 0;
         {
@@ -1846,28 +1867,31 @@ Cell far_cell(uint32_t baud, uint16_t blocks, bool load) {
     SeqSink s{};
     const uint32_t total = static_cast<uint32_t>(blocks) * 4096u;
     const uint32_t budget_us = 40'000UL + (total * 10UL * 1000UL) / (baud / 1000UL);
-    Stopwatch w;
-    Stopwatch quiet;
+    Stopwatch<Ruler> w;
+    w.start();
+    Stopwatch<Ruler> quiet;
+    quiet.start();
     uint32_t last_got = 0;
-    while (opened && w.us() < budget_us && s.got < total) {
+    while (opened && us_of(w) < budget_us && s.got < total) {
         take_seq<T>(s);
         if (s.got != last_got) {
             last_got = s.got;
             quiet.start();
-        } else if (s.got != 0u && quiet.us() > 3'000UL) {
+        } else if (s.got != 0u && us_of(quiet) > 3'000UL) {
             break;
         }
     }
     far_copy_loop = false;
     {
-        Stopwatch q;
-        while (F::Copier::busy() && q.us() < 5'000UL) {
+        Stopwatch<Ruler> q;
+        q.start();
+        while (F::Copier::busy() && us_of(q) < 5'000UL) {
         }
     }
     ring_watch = false;
     ring_budget = ring_entry_budget;
     take_seq<T>(s);
-    c.us = w.us();
+    c.us = us_of(w);
     c.sent = total;
     c.got = s.got;
     c.bad = s.bad;
@@ -1929,8 +1953,9 @@ void tn_far_uart4() {
         (void)F::Port::write_bulk(std::span<const uint8_t>(msg, len));
         uint8_t seen[64] = {};
         uint16_t got = 0;
-        Stopwatch w;
-        while (got < len && w.us() < 50'000UL) {
+        Stopwatch<Ruler> w;
+        w.start();
+        while (got < len && us_of(w) < 50'000UL) {
             while (got < len && F::Port::read_byte(b)) {
                 seen[got++] = b;
             }
@@ -2026,8 +2051,9 @@ void tq_far_priority() {
             // ticks: the 64 frames awaited, bounded.
             SeqSink junk{};
             {
-                Stopwatch w;
-                while (junk.got < 64u && w.us() < 20'000UL) {
+                Stopwatch<Ruler> w;
+                w.start();
+                while (junk.got < 64u && us_of(w) < 20'000UL) {
                     take_seq<typename F::Port>(junk);
                 }
             }
@@ -2071,15 +2097,16 @@ void tq_far_priority() {
         far_copy_mode = true;
         far_copies_done = 0;
         far_copy_loop = true;
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         far_copy_once<on>();
-        while (w.us() < 50'000UL) {
+        while (us_of(w) < 50'000UL) {
         }
         far_copy_loop = false;
-        while (F::Copier::busy()) {
-        }
+        // The last copy's end, as letter q's own: 5 ms, the count read either way.
+        (void)wait_until<Ruler>([] { return !F::Copier::busy(); }, 5'000);
         const uint32_t alone = far_copies_done;
-        const uint32_t alone_us = w.us();
+        const uint32_t alone_us = us_of(w);
         F::Copier::stop();
         Pfic::disable(dma_channel_irq(2, 1));
         far_copy_mode = false;
@@ -2176,20 +2203,21 @@ void tr_far_overrun_tail() {
         bool copied = false;
         {
             P::CriticalSection cs;
-            Stopwatch w;
+            MaskedStopwatch w;
             while (far_arrived_since<on>(at0) < lead && w.us() < 20'000UL) {
             }
             before_copy = far_arrived_since<on>(at0);
             copied = F::Copier::copy(destination + copy_bytes, destination, copy_bytes);
-            while (F::Copier::busy()) {
+            MaskedStopwatch c;
+            while (F::Copier::busy() && c.us() < 1'000UL) {
             }
-            Stopwatch t;
+            MaskedStopwatch t;
             while (t.us() < 300UL) {   // the tail sent and the line idle
             }
             ring_entries = 0;
             ring_watch = true;
         }
-        wait_us(3'000);
+        spin_us<Ruler>(3'000);
         ring_watch = false;
         const uint32_t entries = ring_entries;
         const uint16_t hw = static_cast<uint16_t>(Port::hw_overruns() - hw0);
@@ -2226,7 +2254,7 @@ void tr_far_overrun_tail() {
 
         // 2. The next message, whole, on a ring opened again.
         const bool sent2 = message(0x80, msg) && ring_up();
-        wait_us(4'000);
+        spin_us<Ruler>(4'000);
         uint16_t second = 0;
         bool second_in_order = true;
         {
@@ -2261,25 +2289,26 @@ void tr_far_overrun_tail() {
         {
             P::CriticalSection cs;
             c0 = F::RxChannel::remaining();
-            Stopwatch w;
+            MaskedStopwatch w;
             while (D::WRx::read() && w.us() < 20'000UL) {
             }
             fell = !D::WRx::read();
             (void)F::Copier::copy(destination + copy_bytes, destination, copy_bytes);
-            Stopwatch f;
+            MaskedStopwatch f;
             while (!Port::Resource::rx_ready() && f.us() < 200UL) {
             }
             st = Port::Resource::status();
             cpu = Port::Resource::read_data();
             c1 = F::RxChannel::remaining();
-            while (F::Copier::busy()) {
+            MaskedStopwatch c;
+            while (F::Copier::busy() && c.us() < 1'000UL) {
             }
-            Stopwatch t;
+            MaskedStopwatch t;
             while (t.us() < 50UL) {
             }
             c2 = F::RxChannel::remaining();
         }
-        wait_us(500);
+        spin_us<Ruler>(500);
         uint16_t ring_after = 0;
         uint8_t ring_byte = 0;
         {
@@ -2305,7 +2334,7 @@ void tr_far_overrun_tail() {
 
         // 4. And the port is whole after it.
         const bool sent4 = message(0xC0, msg) && ring_up();
-        wait_us(4'000);
+        spin_us<Ruler>(4'000);
         uint16_t third = 0;
         bool third_in_order = true;
         {

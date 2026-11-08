@@ -157,6 +157,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "vx03_peer.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
@@ -268,30 +269,40 @@ constexpr uint32_t bit_q4(uint32_t rate) {
     return rate == 0u ? 16u * 5000u : static_cast<uint32_t>((16ULL * hclk + rate / 2u) / rate);
 }
 
+/// The composed cycle count (util/test_wait.hpp's ruler): right while the
+/// tick handler runs, which it always does here - nothing in this image
+/// masks interrupts or pauses the tick.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+
+/// Every interrupt entry this image serves - the tick's and the console's,
+/// the two vectors it binds (the bindings at the end of the file): the
+/// witness of run_receive()'s stamps (the lengtheners rule).
+volatile uint32_t entries = 0;
+
+/// Until link::settle_ms + 2 ms after the ack, on the tick count: the
+/// protocol's window, anchored at the ack and not at the call.
 void settle() {
     while (Ticker::millis() - ack_ms < static_cast<uint32_t>(link::settle_ms) + 2u) {
     }
 }
 
+/// `n` core cycles: the gaps and the hand-over pauses, some of them a
+/// fraction of a microsecond (two bit times at 4.5 Mbaud are 64 cycles),
+/// which brio::spin_us() cannot state.
 void wait_cycles(uint32_t n) {
     const uint32_t c0 = Ticker::cycles();
     while (Ticker::cycles() - c0 < n) {
     }
 }
 
-/// Any number of microseconds: the whole milliseconds on the tick count,
-/// the rest on the cycle count.
-void wait_us(uint32_t us) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < us / 1000u) {
-    }
-    wait_cycles((us % 1000u) * (hclk / 1'000'000u));
-}
-
+/// Whole milliseconds on the tick count, up to the 65 s a Params field
+/// asks (the ruler's half wrap is 14.9 s at 144 MHz): `ms` to `ms` + 1
+/// periods. The condition is never true; the wait is its time-out.
 void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
+    (void)brio::wait_ticks<P>([] { return false; }, ms);
 }
 
 // ---- the pads --------------------------------------------------------------
@@ -417,15 +428,33 @@ bool apply_cfg(const link::Cfg& c) {
     return f && open_link(*f);
 }
 
-void put_link(uint8_t b) {
-    while (!U::tx_empty()) {
+/// The waits on the link's transmitter that ran out, console
+/// observability: a port that stopped shifting shows here and as frames
+/// the DUT never received.
+uint32_t tx_timeouts = 0;
+
+/// The transmit buffer free within 20 ms - a frame of thirteen bits at 1200
+/// baud is 10.8 ms. False on the bound, counted.
+bool tx_ready() {
+    if (brio::wait_until<Ruler>([] { return U::tx_empty(); }, 20'000)) {
+        return true;
     }
+    ++tx_timeouts;
+    return false;
+}
+
+/// One byte of an answer; on the bound it is written anyway and the frame
+/// fails its checksum at the DUT, whose command path retries.
+void put_link(uint8_t b) {
+    (void)tx_ready();
     U::write_data(b);
 }
 
+/// The line idle (TC) within 50 ms, before a tenure takes the pad or an
+/// answer is done; on the bound the step goes on, the count says so.
 void wait_line_idle() {
-    const uint32_t t0 = Ticker::millis();
-    while (!U::tx_complete() && Ticker::millis() - t0 < 50u) {
+    if (!brio::wait_until<Ruler>([] { return U::tx_complete(); }, 50'000)) {
+        ++tx_timeouts;
     }
 }
 
@@ -659,6 +688,9 @@ void frame_edges(Edges& e, uint32_t nominal, uint8_t value, int8_t cell, int8_t 
 /// first-to-last span in cycles: console observability.
 uint32_t last_window_ms = 0, last_first_ms = 0, last_end_ms = 0, last_span_cycles = 0;
 uint16_t last_first_status = 0;
+/// The receives whose span was reported not measured because an interrupt
+/// entry lengthened a stamp.
+uint32_t lengthened_spans = 0;
 
 /// echo, sink and calibrate's receiving half: the frames counted and
 /// summed, the FIRST and the LAST of the commanded count stamped on the
@@ -669,6 +701,12 @@ uint16_t last_first_status = 0;
 /// Each stamp is a fixed data read late, which the span cancels; two
 /// calls a run, none a character. A run the deadline ends short reports
 /// no span (usart_link.hpp: 0 = not measured).
+///
+/// THE STAMPS' WITNESS (the lengtheners rule, vx03_link_dut.hpp's header):
+/// each turn reads the interrupt entry count once, before its status read;
+/// a stamp after which the count differs from the turn before's was taken
+/// late by a handler's length, which the stamp bound does not count - the
+/// run is then reported NOT MEASURED too, and the DUT runs it again.
 link::Report run_receive(const link::Params& a, bool echo, uint32_t& span_cycles) {
     link::Report r{};
     settle();
@@ -677,22 +715,30 @@ link::Report run_receive(const link::Params& a, bool echo, uint32_t& span_cycles
     const uint16_t count = a.count;
     const uint16_t mask = data_mask;
     uint32_t first = 0, last = 0;
+    bool quiet = true;
+    uint32_t seen = entries;
     const uint32_t t0 = Ticker::millis();
     span_cycles = 0;
     while (r.count < count) {
+        const uint32_t before = seen;
+        seen = entries;
         const uint16_t st = U::status();
         if ((st & usart_rxne) != 0u) {
             const uint16_t d = U::read_word();
             if (r.count == 0u) {
                 first = Ticker::cycles();
+                quiet = quiet && entries == before;
                 last_first_ms = Ticker::millis() - ack_ms;
                 last_first_status = st;
             } else if (r.count + 1u == count) {
                 last = Ticker::cycles();
+                quiet = quiet && entries == before;
             }
             account(r, st, d, mask);
             if (echo) {
-                while (!U::tx_empty()) {
+                if (!tx_ready()) {
+                    r.flags |= link::report_mismatch;   // the echo could not be sent
+                    break;
                 }
                 U::write_word(d);
             }
@@ -706,7 +752,8 @@ link::Report run_receive(const link::Params& a, bool echo, uint32_t& span_cycles
     last_end_ms = Ticker::millis() - ack_ms;
     if (r.count >= 2u && r.count == count) {
         span_cycles = last - first;
-        r.span = ticks_of(span_cycles);
+        r.span = quiet ? ticks_of(span_cycles) : 0u;
+        lengthened_spans += quiet ? 0u : 1u;
     }
     last_span_cycles = span_cycles;
     wait_line_idle();
@@ -736,7 +783,11 @@ void state_rate(link::Report& r, uint32_t rate) {
 /// FLATTENED: link::Stream::next() is the pattern's one source and -Os
 /// keeps it out of line, a call a frame in the loop that feeds DATAR at
 /// 4.5 Mbaud (320 core cycles a frame) - inlined here, the loop is the
-/// stream's few instructions, the TXE poll and the store.
+/// stream's few instructions, the TXE poll and the store. The poll's
+/// bound reads the composed cycle count once before its first turn and
+/// once a turn after: while DATAR still holds the frame ahead, so a turn
+/// of a few tens of cycles is the latency after TXE rises, against the
+/// frame time a line keeps shifting meanwhile.
 [[gnu::flatten]] link::Report run_send(const link::Params& a, bool blast) {
     link::Report r{};
     settle();
@@ -758,12 +809,14 @@ void state_rate(link::Report& r, uint32_t rate) {
             }
             if (repeat_gap_us != 0u) {
                 wait_line_idle();
-                wait_us(repeat_gap_us);
+                brio::spin_us<Ruler>(repeat_gap_us);
             }
         }
         for (uint16_t i = 0; i < a.count; ++i) {
             const uint16_t v = static_cast<uint16_t>(stream.next() & mask);
-            while (!U::tx_empty()) {
+            if (!tx_ready()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             U::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
@@ -785,14 +838,18 @@ link::Report run_send_mpcm(const link::Params& a, const uint8_t* pairs) {
     uint8_t seq = a.value;
     for (uint8_t g = 0; g < a.groups; ++g) {
         const uint16_t addr = static_cast<uint16_t>(0x100u | pairs[2u * g]);
-        while (!U::tx_empty()) {
+        if (!tx_ready()) {
+            r.flags |= link::report_timed_out;
+            break;
         }
         U::write_word(addr);
         r.sum = static_cast<uint16_t>(r.sum + addr);
         ++r.count;
         for (uint8_t k = 0; k < pairs[2u * g + 1u]; ++k) {
             const uint16_t v = seq++;
-            while (!U::tx_empty()) {
+            if (!tx_ready()) {
+                r.flags |= link::report_timed_out;
+                break;
             }
             U::write_word(v);
             r.sum = static_cast<uint16_t>(r.sum + v);
@@ -896,11 +953,15 @@ link::Report run_glitch(const link::Params& a) {
                                      .one_pulse = true});
     (void)T::set_compare(tx_ch, delay_counts);
     ok = ok && T::output_mode(tx_ch, TimOutputMode::pwm1);
-    for (uint16_t i = 0; ok && i < a.count; ++i) {
+    // One pulse is div x (delay_counts + counts) cycles, under 2^16 x 2^16:
+    // its bound in microseconds, plus a millisecond.
+    const uint32_t pulse_us = static_cast<uint32_t>(
+        (static_cast<uint64_t>(div) * (delay_counts + counts)) / (hclk / 1'000'000u) + 1000u);
+    bool stopped = true;
+    for (uint16_t i = 0; ok && stopped && i < a.count; ++i) {
         T::enable(true);
-        while (T::enabled()) {
-        }
-        wait_us(a.aux8 != 0u ? a.aux8 : 1u);
+        stopped = brio::wait_until<Ruler>([] { return !T::enabled(); }, pulse_us);   // OPM stops the counter
+        brio::spin_us<Ruler>(a.aux8 != 0u ? a.aux8 : 1u);
         ++r.count;
     }
     // Back to the free-running counter for the tenure's way out.
@@ -911,6 +972,7 @@ link::Report run_glitch(const link::Params& a) {
     tenure_end<TxPin>(tx_ch);
     r.aux16 = static_cast<uint16_t>(ticks);
     if (!ok) r.flags |= link::report_cfg_failed;
+    if (!stopped) r.flags |= link::report_mismatch;   // a pulse whose counter never stopped
     return r;
 }
 
@@ -1025,7 +1087,7 @@ link::Report run_collide(const link::Params& a) {
             continue;
         }
         account(r, st, U::read_word(), data_mask);
-        wait_us(a.aux16);
+        brio::spin_us<Ruler>(a.aux16);
         const uint16_t frame = static_cast<uint16_t>((static_cast<uint16_t>(a.value) << 1) | 0x200u);
         const uint32_t c0 = Ticker::cycles();
         for (uint8_t i = 0; i < 10u; ++i) {
@@ -1219,13 +1281,21 @@ void status() {
           " refused; the last list's prescaler ", last_div, crlf);
     print(console, "  the last receive: window at ", last_window_ms, " ms after the ack, first frame at ",
           last_first_ms, " (STATR ", hex(last_first_status), "), end at ", last_end_ms, ", span ", last_span_cycles,
-          " cycles", crlf);
+          " cycles; spans not measured for a lengthened stamp ", lengthened_spans, "; transmit waits run out ",
+          tx_timeouts, crlf);
 }
 
 }  // namespace
 
-BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Console::isr(); }
+// Each binding counts its entry: run_receive()'s witness.
+BRIO_CH32_LEAF_VECTOR(systick_handler) {
+    brio::Ticker::tick();
+    entries = entries + 1u;
+}
+BRIO_CH32_LEAF_VECTOR(usart1_handler) {
+    (void)Console::isr();
+    entries = entries + 1u;
+}
 
 int main() {
     const bool clock_ok = vx03peer::start_usart_clock(crystal_ok);

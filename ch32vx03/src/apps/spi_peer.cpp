@@ -116,7 +116,6 @@
 #include <span>
 
 #include "ch32vx03/clock.hpp"
-#include "ch32vx03/delay.hpp"
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/pfic.hpp"
 #include "ch32vx03/pin.hpp"
@@ -126,6 +125,7 @@
 #include "ch32vx03/usart.hpp"
 #include "kernel/borrowed.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "vx03_peer.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
@@ -206,28 +206,19 @@ bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; 
 
 // ---- waits ----------------------------------------------------------------
 
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
+/// The peer's ruler (util/test_wait.hpp): Ticker::cycles(), the tick count
+/// and STK's position composed, in HCLK cycles - the crystal's 144 MHz or
+/// the HSI's, the same rate either way (vx03_peer.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
-/// A microsecond hold of any length: delay_us is bounded below one tick by
-/// design, so a longer hold is spent in chunks it admits.
-void hold_us(uint32_t us) {
-    while (us >= 500u) {
-        (void)delay_us(clock, 500u);
-        us -= 500u;
-    }
-    if (us != 0u) {
-        (void)delay_us(clock, us);
-    }
-}
-
+/// The select pad high, or `ms` gone: what follows proceeds either way (a
+/// host still holding the select finds this end dark), so the answer is
+/// not needed.
 void wait_nss_high(uint16_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Client::selected() && Ticker::millis() - t0 < ms) {
-    }
+    (void)wait_ticks<P>([] { return !Client::selected(); }, ms);
 }
 
 // ---- the client's standing configurations ---------------------------------
@@ -629,9 +620,9 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
 spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
     Client::release();
-    if (a.aux8) wait_ms(a.aux8);
+    if (a.aux8) spin_us<Ruler>(1000u * a.aux8);
     NssPin::output(false);
-    hold_us(a.aux16 ? a.aux16 : 1000u);
+    spin_us<Ruler>(a.aux16 ? a.aux16 : 1000u);
     NssPin::input(PinPull::up);
     r.aux0 = 1;
     r.count = 1;
@@ -678,7 +669,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     // The mode is primed BEFORE the select falls: a CPOL flip inside an open
     // window is one extra edge and the selected client counts it.
     Host::prime(mode_of(a.cfg.mode), rate, bits);
-    hold_us(200);
+    spin_us<Ruler>(200);
 
     spilink::Stream out(a.pattern, a.seed_a);   // what THIS end sends
     uint8_t got[2 * exchange_cap];
@@ -686,7 +677,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     const uint16_t cap = a.count < exchange_cap ? a.count : exchange_cap;
 
     NssPin::clear();   // select, for the whole burst
-    hold_us(spilink::gap_us);
+    spin_us<Ruler>(spilink::gap_us);
     while (frames < cap && Ticker::millis() - t0 < lead + a.ms) {
         burst_tx[0] = out.next();
         burst_tx[1] = wide ? out.next() : 0u;
@@ -709,7 +700,7 @@ spilink::Report run_host_burst(const spilink::Params& a) {
             got[2u * frames + 1u] = burst_rx[1];
         }
         ++frames;
-        hold_us(spilink::gap_us);
+        spin_us<Ruler>(spilink::gap_us);
     }
     NssPin::set();
     // What came back is the DUT's seed_b stream: judged as a client's

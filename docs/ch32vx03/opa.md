@@ -267,54 +267,76 @@ handed over.
 [adc.md](adc.md)). NOTHING OUTSIDE THE CHIP: both inputs are pads driven
 by their own port and the output is read as an analog channel - or, on
 the CH32V303's port E, as a level. On the CH32V203C8T6 the five letters
-of that part: **21 verdicts in `z`**. On the CH32V303VCT6 all eight:
-**30 pass, 0 fail**, with the evaluation board's own wires on several of
+of that part: **19 pass, 0 fail, 1 skipped** in `z`, ten runs alike (the
+skip is OPA1's CH1 pair, below). On the CH32V303CBT6 all eight, over
+the pads its LQFP48 bonds: **25 pass, 0 fail**, ten runs alike. The
+CH32V303VCT6 was not run with today's suite; the findings that name it
+were measured on it, with the evaluation board's own wires on several of
 those pads (each to another pad left a floating input, which the driven
 pad drives with it). On the bench pair some of the suite's pads are the
 link's wires to the other board - PB10, PB11, PB14 and PB15 on the
 CH32V203C8T6, PB0 and PB1 on the CH32V303VCT6 - and the other board runs
 its dark console meanwhile, its ends of them floating inputs. Where one
-number is given below it is the CH32V203C8T6's unless the CH32V303VCT6
+number is given below it is the CH32V203C8T6's unless a CH32V303 part
 is named.
 
 - **The amplifier is a comparator with no wire, and it saturates.** With
   its positive input at the rail and its negative at ground the output
-  read 4095 counts = 3300 mV; with the two swapped, 9 counts = 7 mV; and
-  it followed them back. The high saturation is 1 mV under a supply
-  measured at 3303 mV, where the datasheet rates VOHSAT at VDDA-45 mV
-  into 4 kOhm and VDDA-10 mV into 20 kOhm - there is no load here but
-  the converter's own sampling. On the CH32V303VCT6: 4090 to 4091 counts,
-  4 mV under a supply of 3299 mV, and 0 counts the other way.
+  read 4095 counts, 3320 to 3325 mV; with the two swapped, 9 to 11
+  counts, 7 to 9 mV; and it followed them back. The high saturation is
+  1 mV under a supply measured at 3321 to 3326 mV, where the datasheet
+  rates VOHSAT at VDDA-45 mV into 4 kOhm and VDDA-10 mV into 20 kOhm -
+  there is no load here but the converter's own sampling. On the
+  CH32V303CBT6: 4092 to 4095 counts, 1 to 3 mV under a supply of 3240 to
+  3244 mV, and 1 to 4 counts the other way; on the CH32V303VCT6 4090 to
+  4091 counts, 4 mV under a supply of 3299 mV, and 0 counts the other
+  way.
 - **The output reaches the converter THROUGH THE PAD.** Both of OPA2's
   output pads and both of OPA1's were read on their own ADC channels;
   moving the selection from one output to the other moved the level with
-  it (the newly selected pad 10 or 11 counts with the CH1 pair holding
-  the output low), and the pad it left stopped being driven: floating, it
-  kept 3 to 109 counts of its last level, which says nothing, and its own
-  pull-up took it once it was made an input - ten runs of ten.
+  it. OPA2's second output PA4, read as an input against its own pull-up,
+  read high before the move and LOW after it with the CH1 pair holding
+  the output low, and 9 to 11 counts on its channel: the amplifier beats
+  the pull, which a pad left alone would not (PA4 floats low, so its
+  analog reading alone could not tell the two apart). The pad it left
+  stopped being driven: floating, it kept 2 to 88 counts of its last
+  level, which says nothing, and its own pull-up took it once it was
+  made an input - ten runs of ten. The CH32V303CB's LQFP48 bonds no
+  second output, and there the move has no pad to land on.
 - **Each selection is a pad and the output follows it.** OPA2 with its
   CH0 pair driven high-over-low read 4095 counts, and the same amplifier
-  switched to its CH1 pair, driven low-over-high, read 9 - one bit each,
-  with nothing else touched.
-- **The first amplifier behaves the same on its own six pads**: 4095 and
-  9 counts on channel 3 for its CH1 pair, 4095 on channel 9 for its CH0
-  pair through its other output - and on the CH32V303VCT6 4091 and 0 on
-  channel 3, its CH0 pair HIGH on PE15.
+  switched to its CH1 pair, driven low-over-high, read 9 to 11 - one bit
+  each, with nothing else touched (4092 to 4094 and 1 to 5 on the
+  CH32V303CBT6).
+- **The first amplifier behaves the same on its own six pads**: 4095
+  counts on channel 9 for its CH0 pair through its other output. Its CH1
+  pair is not judged on the CH32V203C8T6's board, where PB0, its positive
+  input, is strapped to PA3, its output
+  ([the board's jumpers](../boards/weact-ch32v203c8.md)): letter c looks
+  for the strap before it drives anything and skips the pair, since the
+  wire and not the amplifier would set the level PA3 reads. On the
+  CH32V303CBT6 4091 to 4094 and 1 to 3 counts on channel 3 for the CH1
+  pair, and 4091 to 4094 for the CH0 pair on that same output, the
+  package bonding no second; on the CH32V303VCT6 4091 and 0 on channel 3,
+  its CH0 pair HIGH on PE15.
 - **Four bits an amplifier, and they do not collide.** Both fields read
-  zero out of reset; all eight selections of one amplifier were written
+  zero at boot, read before the clock task or any letter has touched
+  them; all eight selections of one amplifier were written
   and read back; configuring and enabling one left the other's four bits
   exactly as they were, and releasing one left the other running.
 - **The amplifier drives its pad against that pad's own pull.** With the
   output pad left a pulled-DOWN input - a 40 kOhm source of its own - it
-  read 9 counts with the amplifier off and 4043 with it on (0 and 4039 on
-  the CH32V303VCT6). The
+  read 7 to 10 counts with the amplifier off and 4042 to 4044 with it on
+  (0 to 3 and 4045 to 4047 on the CH32V303CBT6, 0 and 4039 on the
+  CH32V303VCT6). The
   datasheet's 600 uA of drive against 40 kOhm is not a contest, and it
   says in passing that the output reaches the pad whatever the pad's
   digital mode is.
 - **A disabled amplifier drives nothing**, and its output pad then
-  floats: it read 943 counts before anything had driven it and held 4095
-  after being driven there, which is a floating pad's charge and not a
-  level (732 to 901 and 4093 on the CH32V303VCT6).
+  floats: it read 725 to 1758 counts before anything had driven it and
+  held 3948 to 4095 after being driven there, which is a floating pad's
+  charge and not a level (455 to 1803 and 3913 to 4093 on the
+  CH32V303CBT6, 732 to 901 and 4093 on the CH32V303VCT6).
 - **OPA3 and OPA4 on the CH32V303VCT6**: each saturated to both rails on
   its first output from its CH0 pair (4091 or 4092 and 0, on channels 1
   and 0), its CH1 pair moved the same output the other way, and its
@@ -331,13 +353,24 @@ is named.
   (CH32V303VCT6): both read 0xA50; each of the four high-speed verbs
   answered false and EXTEN_CTR read the same after all four; OPA_CTLR was
   untouched by any of it.
+- **THE CH32V303CBT6'S DIE HAS EXTEN_CTR2**: EXTEN_CTR reads 0xAD0 and
+  the EXTEN_CTR2 address 0x0, so the verbs take the register as there;
+  each of the four OPAn_HSMD bits was set, read back alone and cleared,
+  and OPA_CTLR was untouched - ten runs of ten.
 - **An output follows a rail-to-rail step of its inputs' difference in a
-  microsecond or so** (CH32V303VCT6): the two inputs of each CH0 pair
-  swapped in one store of port B's output register, and the output pad's
-  own digital input polled: 65 to 77 core cycles at 96 MHz to see a rise
-  and 122 to 131 to see a fall, on all four amplifiers - some 0.7 and 1.3
-  us with the pad's synchronizer and the poll included, against the
-  datasheet's slew of 8 V/us.
+  microsecond or so**: the two inputs of each CH0 pair swapped in one
+  store of port B's output register, and the output pad's own digital
+  input polled. On the CH32V303VCT6, polled with one pad read a turn and
+  the core timer read before and after: 65 to 77 core cycles at 96 MHz
+  to see a rise and 122 to 131 to see a fall, on all four amplifiers -
+  some 0.7 and 1.3 us with the pad's synchronizer and the poll included,
+  against the datasheet's slew of 8 V/us. On the CH32V303CBT6, each turn
+  of the poll a pad read and a read of the kernel's cycle count, with no
+  tick inside any span in ten runs: 67 to 75 cycles to see a rise and
+  103 to 118 to see a fall on all four, and in the high-speed mode 33 to
+  40 both ways, against a slew rated at 16 V/us. OPA1's normal-mode rise
+  read 36 cycles in three runs of ten, close to its high-speed figure;
+  why is not established.
 
 ## Not covered yet
 
@@ -369,15 +402,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The high-speed mode on a die that has EXTEN_CTR2.** The verbs ask the
-  die, and the CH32V303VCT6 has not got the register; each HSMD bit set
-  and read back alone, and each amplifier's step response in both modes,
-  are what `test_vx03_opa`'s letter h measures on a die of a lot whose
-  penultimate sixth digit is not zero.
-- **The parts other than the CH32V203C8 and the CH32V303VC.** Which
-  amplifiers a part has and which of its pads it bonds fold through its
-  own table, and the whole stratum compiles for all thirteen both ways
-  the hardware prologue can be built (`brio check ch32vx03`); the
-  twenty-pin part's single amplifier and the CH32V303CB's missing CH1
-  inputs of OPA3 and OPA4 are asserted at compile time and measured on
-  no board. What would measure them is a board.
+- **The parts other than the CH32V203C8, the CH32V303CB and the
+  CH32V303VC.** Which amplifiers a part has and which of its pads it
+  bonds fold through its own table, and the whole stratum compiles for
+  all thirteen both ways the hardware prologue can be built (`brio check
+  ch32vx03`); the twenty-pin part's single amplifier is asserted at
+  compile time and measured on no board. What would measure it is a
+  board.

@@ -716,7 +716,15 @@ struct Ch32vx03TimedSleepSite {
             last_advance_ = 0;
             return;   // an unknown span is not a span to guess at
         }
-        const uint32_t counts = Rtc::count() - count_at_arm_;          // wrap-safe
+        // The count can step back by up to three ticks (rtc.hpp, a read
+        // crossing out of the RTC's clock domain), so a sleep shorter
+        // than that can read below the arm-time count: a difference
+        // past half the counter's range is such a step back, and is no
+        // span at all rather than four billion counts; a real sleep
+        // would have to last half the counter's wrap, 24 days at the
+        // default 1024 Hz (the file header), to be mistaken for one.
+        const uint32_t raw = Rtc::count() - count_at_arm_;             // wrap-safe
+        const uint32_t counts = raw >= 0x8000'0000UL ? 0u : raw;
         const uint32_t span = ticks_for(counts);
         const uint32_t awake = P::Timebase::ticks() - tick_at_arm_;    // wrap-safe
         last_advance_ = span > awake ? span - awake : 0u;

@@ -87,6 +87,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -141,44 +142,20 @@ alignas(4) uint8_t destination[source_bytes];
 const volatile void* source_address() { return static_cast<const volatile void*>(source.word); }
 const uint8_t* source_first_bytes() { return reinterpret_cast<const uint8_t*>(&source.word[0]); }
 
-// ---------------------------------------------------------------------------
-// The ruler
-// ---------------------------------------------------------------------------
-
-/**
- * THE RULER OF THIS SUITE: the core's own STK counter, read as a
- * stopwatch. It counts up to its reload - one tick period, a
- * millisecond here - and starts again, so a span is accumulated poll by
- * poll with one period folded in across each wrap.
- */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp). Right while the tick handler
+/// runs at least once a period: no span below is measured with interrupts
+/// masked for longer than a tick, or with the tick paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
+/// Microseconds on a stopwatch over the ruler.
+uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
+
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
 }
 
 // ---------------------------------------------------------------------------
@@ -216,15 +193,12 @@ DmaTransfer copy(const volatile void* from, volatile void* to, uint16_t items, D
     };
 }
 
-/// Poll a channel's completion, bounded: a wedge must end the letter,
-/// not the session.
-bool wait_complete(uint32_t shift, uint32_t spins = 4'000'000UL) {
-    while (spins-- != 0u) {
-        if (((Dma<1>::flags() >> shift) & DmaFlag::complete) != 0u) {
-            return true;
-        }
-    }
-    return false;
+/// Poll a channel's completion for at most `budget_us`: a wedge must end
+/// the letter, not the session. The default, 200 ms, is a hundred times
+/// the longest block it waits for (4 KB of bytes, under 2 ms).
+bool wait_complete(uint32_t shift, uint32_t budget_us = 200'000u) {
+    return wait_until<Ruler>(
+        [shift] { return ((Dma<1>::flags() >> shift) & DmaFlag::complete) != 0u; }, budget_us);
 }
 
 bool verify(uint16_t bytes) {
@@ -288,10 +262,11 @@ void ta_memory() {
     for (const Run& r : runs) {
         scrub(source_bytes);
         Ch::stop();
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         const bool started = Ch::load(copy(source_address(), destination, r.items, r.width));
         const bool done = started && wait_complete(Ch::flag_shift);
-        const uint32_t cycles = w.cycles();
+        const uint32_t cycles = w.elapsed();
         const bool exact = done && verify(source_bytes) && Ch::remaining() == 0u;
         all_exact = all_exact && exact;
         print(serial, "  4096 B as ", r.name, "s: ", r.items, " items in ", cycles,
@@ -307,16 +282,16 @@ void ta_memory() {
     Ch::stop();
     (void)Ch::load(copy(source_address(), destination, 4096, DmaWidth::byte));
     uint32_t half_at = 0;
-    uint32_t spins = 4'000'000UL;
-    while (spins-- != 0u) {
-        const uint32_t f = Ch::flags();
-        if (half_at == 0u && (f & DmaFlag::half) != 0u) {
-            half_at = 4096u - Ch::remaining();
-        }
-        if ((f & DmaFlag::complete) != 0u) {
-            break;
-        }
-    }
+    // The flags at the end, read below, are what is judged.
+    (void)wait_until<Ruler>(
+        [&half_at] {
+            const uint32_t f = Ch::flags();
+            if (half_at == 0u && (f & DmaFlag::half) != 0u) {
+                half_at = 4096u - Ch::remaining();
+            }
+            return (f & DmaFlag::complete) != 0u;
+        },
+        200'000u);
     const uint32_t ending = Ch::flags();
     Ch::clear(DmaFlag::all);
     const uint32_t cleared = Ch::flags();
@@ -450,18 +425,16 @@ void sleep_on_dma2() {
         using Ch = DmaChannel<C, 1>;
         scrub(source_bytes);
         Ch::stop();
-        Stopwatch w;
+        Stopwatch<Ruler> w;
+        w.start();
         (void)Ch::load(copy(source_address(), destination, 4096, DmaWidth::byte));
-        uint32_t spins = 4'000'000UL;
-        while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        const bool awake_done = Ch::flag(DmaFlag::complete);
-        const uint32_t awake_us = w.us();
+        const bool awake_done =
+            wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 200'000u);
+        const uint32_t awake_us = elapsed_us(w);
         Ch::stop();
 
         scrub(source_bytes);
-        while (!Serial::tx_idle()) {
-        }
+        console_drain();
         (void)Ch::load(copy(source_address(), destination, 4096, DmaWidth::byte));
         BusActivity::left();
         disable_interrupts();
@@ -475,10 +448,9 @@ void sleep_on_dma2() {
         BusActivity::entered();
         const uint16_t moved_one = static_cast<uint16_t>(4096u - left_one);
         const uint16_t moved_ten = static_cast<uint16_t>(4096u - left_ten);
-        spins = 4'000'000UL;
-        while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        const bool exact = Ch::flag(DmaFlag::complete) && verify(source_bytes);
+        const bool exact =
+            wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 200'000u) &&
+            verify(source_bytes);
         Ch::stop();
         print(serial, "  DMA2: 4096 B awake: ", awake_us, " us; asleep: ", moved_one,
               " B across one idle(), ", moved_ten, " B across ten (", moved_ten / 10u,
@@ -506,17 +478,17 @@ void tc_sleep() {
     // The reference: the whole block, awake.
     scrub(source_bytes);
     Ch::stop();
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     (void)Ch::load(copy(source_address(), destination, 4096, DmaWidth::byte));
     const bool awake_done = wait_complete(Ch::flag_shift);
-    const uint32_t awake_us = w.us();
+    const uint32_t awake_us = elapsed_us(w);
     Ch::stop();
 
     // The same block, with the core asleep. The console must be quiet
     // first: a transmit interrupt would end the sleep before the tick.
     scrub(source_bytes);
-    while (!Serial::tx_idle()) {
-    }
+    console_drain();
     (void)Ch::load(copy(source_address(), destination, 4096, DmaWidth::byte));
     // The count of working bus masters set aside for the ten sleeps, as
     // test_vx03_platform does: over a working channel the platform's
@@ -607,14 +579,15 @@ void td_error() {
         scrub(16);
         (void)Ch::load(
             copy(reinterpret_cast<const volatile void*>(hole), destination, 4, DmaWidth::word));
-        uint32_t spins = 200'000UL;
         uint32_t f = 0;
-        while (spins-- != 0u) {
-            f = Ch::flags();
-            if ((f & (DmaFlag::error | DmaFlag::complete)) != 0u) {
-                break;
-            }
-        }
+        // Four words: the error or the completion within microseconds; f
+        // as the last poll left it is what is judged.
+        (void)wait_until<Ruler>(
+            [&f] {
+                f = Ch::flags();
+                return (f & (DmaFlag::error | DmaFlag::complete)) != 0u;
+            },
+            10'000u);
         const bool enabled_after = Ch::enabled();
         if ((f & DmaFlag::error) != 0u) {
             ++errors;
@@ -633,9 +606,13 @@ void td_error() {
     scrub(16);
     (void)Ch::load(copy(reinterpret_cast<const volatile void*>(refused_address), destination, 4, DmaWidth::word));
     uint32_t refused_read = 0;
-    for (uint32_t spins = 200'000UL; spins != 0u && (refused_read & (DmaFlag::error | DmaFlag::complete)) == 0u; --spins) {
-        refused_read = Ch::flags();
-    }
+    // The flags as the last poll left them are what is judged.
+    (void)wait_until<Ruler>(
+        [&refused_read] {
+            refused_read = Ch::flags();
+            return (refused_read & (DmaFlag::error | DmaFlag::complete)) != 0u;
+        },
+        10'000u);
     const bool refused_read_en = Ch::enabled();
     Ch::stop();
     print(serial, "  of five holes: ", errors, " raised a transfer error, ", completions,
@@ -646,9 +623,14 @@ void td_error() {
     bench.verdict("five addresses no window of the map answers at were each read by a "
                   "channel with its error interrupt armed, and every one of them ended",
                   static_cast<uint8_t>(errors + completions) == 5u);
-    bench.verdict("and wherever a transfer error IS raised the hardware clears EN by itself "
-                  "(11.3.3), so no channel was left enabled behind one",
-                  left_enabled == 0u);
+    if (errors != 0u) {
+        bench.verdict("and wherever a transfer error IS raised the hardware clears EN by itself "
+                      "(11.3.3), so no channel was left enabled behind one",
+                      left_enabled == 0u);
+    } else {
+        bench.skip("EN after a hole's transfer error: no hole raised one (the refused read "
+                   "above judges EN after its error)");
+    }
 
     // WRITES. 11.1 lists the flash among a channel's destinations, and with
     // the FPEC locked - as at every boot; no letter of this suite unlocks
@@ -677,15 +659,16 @@ void td_error() {
             channel_calls[2] = 0;
             channel_mask[2] = 0;
             (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, w));
-            uint32_t spins = 200'000UL;
             uint32_t f = 0;
-            while (spins-- != 0u) {
-                f = Ch::flags() | channel_mask[2];
-                if ((f & (DmaFlag::error | DmaFlag::complete)) != 0u) {
-                    break;
-                }
-            }
-            wait_us(50);
+            // The flags as the last poll left them, and the vector's, are
+            // what is judged.
+            (void)wait_until<Ruler>(
+                [&f] {
+                    f = Ch::flags() | channel_mask[2];
+                    return (f & (DmaFlag::error | DmaFlag::complete)) != 0u;
+                },
+                10'000u);
+            spin_us<Ruler>(50);
             f = f | channel_mask[2];
             const bool en = Ch::enabled();
             const uint16_t left = Ch::remaining();
@@ -738,9 +721,15 @@ void td_error() {
             Ch::arm(DmaFlag::error | DmaFlag::complete, false);
             (void)Ch::load(copy(destination, reinterpret_cast<volatile void*>(target), 4, w));
             uint32_t f = 0;
-            for (uint32_t spins = 200'000UL; spins != 0u && (f & (DmaFlag::error | DmaFlag::complete)) == 0u; --spins) {
-                f = Ch::flags();
-            }
+            // Masked: the budget stays under one tick period, where the
+            // ruler still holds (the pending flag carries one period). The
+            // flags as the last poll left them are what is judged.
+            (void)wait_until<Ruler>(
+                [&f] {
+                    f = Ch::flags();
+                    return (f & (DmaFlag::error | DmaFlag::complete)) != 0u;
+                },
+                500u);
             Ch::stop();
             refused = static_cast<uint8_t>(refused + ((f & DmaFlag::error) != 0u ? 1u : 0u));
             moved = static_cast<uint8_t>(moved + (sram_fold() != before ? 1u : 0u));
@@ -764,18 +753,15 @@ void td_error() {
         FaultCopier::clear_faults();
         const bool launched = FaultCopier::copy(reinterpret_cast<uint32_t*>(te_target),
                                                 reinterpret_cast<const uint32_t*>(destination), 4);
-        uint32_t spins = 200'000UL;
-        while (FaultCopier::busy() && spins-- != 0u) {
-        }
+        // Whether it ended is read and judged right below.
+        (void)wait_until<Ruler>([] { return !FaultCopier::busy(); }, 10'000u);
         const bool freed = !FaultCopier::busy();
         const uint32_t faults = FaultCopier::faults();
         const uint8_t masters_after = BusActivity::active();
         scrub(64);
         const bool relaunched = FaultCopier::copy(reinterpret_cast<uint32_t*>(destination),
                                                   reinterpret_cast<const uint32_t*>(source.word), 16);
-        spins = 200'000UL;
-        while (FaultCopier::busy() && spins-- != 0u) {
-        }
+        (void)wait_until<Ruler>([] { return !FaultCopier::busy(); }, 10'000u);
         const bool next_whole = relaunched && !FaultCopier::busy() && verify(64) && FaultCopier::faults() == 1u;
         FaultCopier::stop();
         print(serial, "  the copy engine into ", hex(te_target), ": ", launched ? "launched" : "REFUSED", ", ",
@@ -812,19 +798,22 @@ void tf_priority() {
     High::enable(true);
 
     uint8_t first = 0;
-    uint32_t spins = 4'000'000UL;
-    while (first == 0u && spins-- != 0u) {
-        const uint32_t f = Dma<1>::flags();
-        const bool low_done = ((f >> Low::flag_shift) & DmaFlag::complete) != 0u;
-        const bool high_done = ((f >> High::flag_shift) & DmaFlag::complete) != 0u;
-        if (low_done && high_done) {
-            first = 3;
-        } else if (high_done) {
-            first = 2;
-        } else if (low_done) {
-            first = 1;
-        }
-    }
+    // Which finished first is what is judged; 0 (neither) fails it.
+    (void)wait_until<Ruler>(
+        [&first] {
+            const uint32_t f = Dma<1>::flags();
+            const bool low_done = ((f >> Low::flag_shift) & DmaFlag::complete) != 0u;
+            const bool high_done = ((f >> High::flag_shift) & DmaFlag::complete) != 0u;
+            if (low_done && high_done) {
+                first = 3;
+            } else if (high_done) {
+                first = 2;
+            } else if (low_done) {
+                first = 1;
+            }
+            return first != 0u;
+        },
+        200'000u);
     (void)wait_complete(Low::flag_shift);
     print(serial, "  channel 1 (low) started first, channel 2 (very high) second: first to "
                   "complete was ",
@@ -847,19 +836,23 @@ void tf_priority() {
     High::enable(true);
     Low::enable(true);
 
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     uint32_t low_cycles = 0;
     uint32_t high_cycles = 0;
-    spins = 4'000'000UL;
-    while ((low_cycles == 0u || high_cycles == 0u) && spins-- != 0u) {
-        const uint32_t f = Dma<1>::flags();
-        if (low_cycles == 0u && ((f >> Low::flag_shift) & DmaFlag::complete) != 0u) {
-            low_cycles = w.cycles() + 1u;
-        }
-        if (high_cycles == 0u && ((f >> High::flag_shift) & DmaFlag::complete) != 0u) {
-            high_cycles = w.cycles() + 1u;
-        }
-    }
+    // Both times are judged; one left at zero fails the verdict.
+    (void)wait_until<Ruler>(
+        [&] {
+            const uint32_t f = Dma<1>::flags();
+            if (low_cycles == 0u && ((f >> Low::flag_shift) & DmaFlag::complete) != 0u) {
+                low_cycles = w.elapsed() + 1u;
+            }
+            if (high_cycles == 0u && ((f >> High::flag_shift) & DmaFlag::complete) != 0u) {
+                high_cycles = w.elapsed() + 1u;
+            }
+            return low_cycles != 0u && high_cycles != 0u;
+        },
+        200'000u);
     print(serial, "  equal priorities, channel 2 started first: channel 1 done at ",
           low_cycles, " cycles, channel 2 at ", high_cycles, crlf);
     bench.verdict("with the priorities equal the lower channel number wins, head start and "
@@ -881,9 +874,8 @@ void one_vector(uint8_t& ran, uint8_t& clean) {
         C::arm(DmaFlag::complete, true);
         Pfic::enable(C::irq());
         (void)C::load(copy(source_address(), destination, 16, DmaWidth::word));
-        Stopwatch w;
-        while (channel_calls[ch - 1u] == 0u && w.us() < 2000UL) {
-        }
+        // The body's count, read below, is what is judged.
+        (void)wait_until<Ruler>([] { return channel_calls[ch - 1u] != 0u; }, 2000u);
         if (channel_calls[ch - 1u] == 1u) {
             ++ran;
         }
@@ -978,13 +970,11 @@ bool dma2_copy(uint32_t& cycles, bool& in_place, uint32_t& intfr) {
     using Ch = DmaChannel<C, ch>;
     Ch::stop();
     scrub(1024);
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     const bool started = Ch::load(copy(source_address(), destination, 256, DmaWidth::word));
-    uint32_t spins = 4'000'000UL;
-    while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-    }
-    cycles = w.cycles();
-    const bool done = Ch::flag(DmaFlag::complete);
+    const bool done = wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 200'000u);
+    cycles = w.elapsed();
     // Where the flag stands: INTFR for channels 1..7, the extended
     // register for 8..11 - and INTFR as a whole, whose top nibble is
     // reserved on this controller.
@@ -1071,9 +1061,8 @@ void dma2_one_vector(uint8_t& ran, uint8_t& clean) {
     Ch::arm(DmaFlag::complete, true);
     Pfic::enable(Ch::irq());
     (void)Ch::load(copy(source_address(), destination, 16, DmaWidth::word));
-    Stopwatch w;
-    while (S::calls[ch - 1u] == 0u && w.us() < 2000UL) {
-    }
+    // The body's count, read below, is what is judged.
+    (void)wait_until<Ruler>([] { return S::calls[ch - 1u] != 0u; }, 2000u);
     if (S::calls[ch - 1u] == 1u) {
         ++ran;
     }
@@ -1141,10 +1130,7 @@ void tm_dma_64k() {
         Two::stop();
         scrub(64);
         const bool taken = Two::load(t);
-        uint32_t spins = 1'000'000UL;
-        while (!Two::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        bool same = Two::flag(DmaFlag::complete);
+        bool same = wait_until<Ruler>([] { return Two::flag(DmaFlag::complete); }, 50'000u);
         const volatile uint8_t* flash = reinterpret_cast<const volatile uint8_t*>(straddle);
         for (uint8_t i = 0; i < 32u && same; ++i) {
             same = destination[i] == flash[i];
@@ -1170,10 +1156,8 @@ void tm_dma_64k() {
             One::set_peripheral(reinterpret_cast<volatile void*>(straddle)) &&
             One::set_memory(destination) && One::set_count(32);
         One::enable(true);
-        spins = 1'000'000UL;
-        while (!One::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        const bool one_done = One::flag(DmaFlag::complete);
+        const bool one_done =
+            wait_until<Ruler>([] { return One::flag(DmaFlag::complete); }, 50'000u);
         One::stop();
         bool one_exact = one_done;
         for (uint8_t i = 0; i < 32u && one_exact; ++i) {

@@ -74,7 +74,9 @@
 //    has no per-byte decision point: ACK governs the byte whose ninth pulse
 //    has not yet come, so the refusal is a bit set IN ADVANCE, down once
 //    the byte before the refused one has been taken, and `report_nacked`
-//    says the acknowledge was held down for that byte (the DUT's
+//    says a byte ARRIVED while the acknowledge was held down - the refused
+//    byte reached this target, its RxNE raised with no acknowledge pulse,
+//    19.4 raising RxNE after every received byte (the DUT's
 //    `i2c_nack_data` is the other half of the measurement). ACK goes back
 //    up at every Stop - but 19.12.6 raises STOPF for a Stop "after the
 //    response", so after a refused byte it is the action's deadline, and
@@ -140,6 +142,7 @@
 #include "ch32vx03/usart.hpp"
 #include "kernel/borrowed.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "vx03_peer.hpp"
 
 // THE PROTOCOL HEADER IS SHARED, NOT COPIED: pure encoding, not one
@@ -204,12 +207,6 @@ volatile uint8_t host_status = i2c_ok;
 volatile uint32_t stray_vectors = 0;
 
 // ---- waits ----------------------------------------------------------------------
-
-void wait_ms(uint32_t ms) {
-    const uint32_t t0 = Ticker::millis();
-    while (Ticker::millis() - t0 < ms) {
-    }
-}
 
 /// A microsecond hold of any length: delay_us() is capped below one tick
 /// period BY DESIGN, and this instrument's commanded stretches
@@ -440,15 +437,16 @@ void prepare(const twilink::Frame& f) {
 /// The refusal, in this block's own terms: CTLR1.ACK governs the byte whose
 /// ninth pulse has not yet come, so it goes down once the byte BEFORE the
 /// refused one has been taken and stays down from there (the other peers
-/// refuse from `nack_at` onwards too).
-void arm_ack(twilink::Report& r, const twilink::Params& a, uint16_t received) {
+/// refuse from `nack_at` onwards too). `refusing` says the acknowledge is
+/// down now; the report's `report_nacked` is NOT set here but when a byte
+/// arrives under it (run_serve), so it says a refused byte reached this
+/// target, not merely that the refusal was armed.
+void arm_ack(const twilink::Params& a, uint16_t received, bool& refusing) {
     if (a.nack_at == 0u) {
         return;
     }
     const bool ack = static_cast<uint16_t>(received + 1u) < a.nack_at;
-    if (!ack) {
-        r.flags |= twilink::report_nacked;
-    }
+    refusing = !ack;
     Client::acknowledge(ack);
 }
 
@@ -463,6 +461,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
     }
     uint16_t rx = 0, tx = 0;
     bool first_taken = false;
+    bool refusing = false;   ///< CTLR1.ACK held down by arm_ack()
     // THE NACK THAT CLOSES A READ, wherever it is found: the flags sampled
     // AT it - a copy taken when the action ends carries whatever the last
     // tenure left behind - and the tally gives back the byte dropped.
@@ -506,13 +505,21 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
                 hold_us(a.hold_us);
             }
             const uint8_t v = Client::take();
+            // A byte received with the acknowledge already down is a
+            // refused byte: 19.4's slave receive mode raises RxNE "after
+            // every byte received", with no condition on the acknowledge.
+            // This is the report's evidence that the refusal reached the
+            // wire at this end.
+            if (refusing) {
+                r.flags |= twilink::report_nacked;
+            }
             if (!first_taken) {
                 r.first = v;
                 first_taken = true;
             }
             r.sum = static_cast<uint16_t>(r.sum + v);
             ++rx;
-            arm_ack(r, a, rx);
+            arm_ack(a, rx, refusing);
             continue;
         }
         if (Client::addressed()) {
@@ -531,7 +538,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // refuse the next address and report a NACK that never had a
             // byte to land on.
             if (!reads) {
-                arm_ack(r, a, rx);
+                arm_ack(a, rx, refusing);
             }
             continue;
         }
@@ -556,6 +563,7 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             // ACK BACK UP, or an address would be refused as well and the
             // instrument would go deaf for the rest of the action.
             Client::acknowledge(true);
+            refusing = false;
             continue;
         }
         const uint16_t errs = static_cast<uint16_t>(Raw::status1() & i2c_errors);
@@ -776,7 +784,7 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
 twilink::Report run_quiet(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();
-    wait_ms(a.ms);
+    (void)brio::wait_ticks<P>([] { return false; }, a.ms);   // a fixed span: never true
     r.count = 1;
     return r;
 }

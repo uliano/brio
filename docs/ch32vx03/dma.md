@@ -116,8 +116,10 @@ What decides correctness even there:
   all three stay untouched and in scope until `busy()` answers false;
   nothing checks it.
 - **No sleep while a block is in flight.** In a sleep of any depth on
-  this family no bus master but the core gets a cycle ("In Sleep the bus
-  matrix serves the core alone" below), so starting a block takes one
+  the CH32V203C8T6 and the CH32V303VCT6 no bus master but the core gets
+  a cycle ("In Sleep the bus matrix serves the core alone" below; the
+  CH32V303CBT6 gives a reading not yet explained, and a program cannot
+  read which kind of die it runs on), so starting a block takes one
   count of the bus-master count (how many masters other than the core
   are working, `ch32vx03/bus_activity.hpp`, [sleep.md](sleep.md)) and
   `service()` gives it back. While it stands
@@ -483,10 +485,14 @@ the Sleep of RM 2.4 - the core clock gated, "all peripherals still
 running" - no bus master but the core gets a cycle: a memory-to-memory
 block started right before the core sleeps moves the handful of items
 already in flight and then nothing, while the timers on the peripheral
-bus and the core's own counter count the whole sleep. The same starvation
-is what kills the USB controller's reach into its packet memory in Sleep
-([README.md](README.md)), and on the CH32V303 both of its controllers
-starve alike (the findings below).
+bus and the core's own counter count the whole sleep - measured on the
+CH32V203C8T6 and on the CH32V303VCT6, where both controllers starve
+alike. The same starvation is what kills the USB controller's reach
+into its packet memory in Sleep ([README.md](README.md)). The
+CH32V303CBT6 moves about as much across one sleep as the other two dies
+and then far more across ten (the findings below), which is not yet
+explained. A program cannot read which answer its die gives, so the
+mechanism below holds on every die.
 
 So on this family a DMA-fed transport does not sleep, and that is a
 mechanism and not a rule the programmer keeps: every verb that sets a
@@ -951,29 +957,43 @@ The three suites measure at 144 MHz, the source of every copy a
 four-kilobyte pattern in the image itself and the core's own counter the
 ruler; letters a, c, d, f, h, i, j and m are `test_vx03_dma`'s, b, e, o,
 k and l `test_vx03_dma_paced`'s, and g, p, q, r, s and n
-`test_vx03_dma_serial`'s. On the CH32V203C8T6 the letters of a part with
-one controller run with the board bare but for the core board's crossed
-pair to the fourth port (PB0 to PA3, which letters q and r take): **24,
-13 and 25 verdicts in `z`**. On the CH32V303VCT6 DMA2's single-board
-letters run beside DMA1's with the far board dark: **35, 18 and 16
-verdicts in `z`**; that board's crossed pair is retired (UART4's default
-pads PC10/PC11 are the desk pair's SPI link), and its letters n, q and r
-are the two-board key `y` against the far chip's usart_peer - UART4 on
-its second column, PB0/PB1, its engines DMA2's channels 5 and 3: **11
-verdicts**. Where one number is given below it is both parts'; where
-they differ each is named.
+`test_vx03_dma_serial`'s. In `z`, ten runs alike on each part: on the
+CH32V203C8T6, the letters of a part with one controller, **22 pass, 0
+fail, 1 skipped** in `test_vx03_dma` and **13 pass, 0 fail** in
+`test_vx03_dma_paced`; on the CH32V303CBT6, DMA2's single-board letters
+beside DMA1's, **33 pass, 0 fail, 1 skipped** and **13 pass, 0 fail** -
+the skip letter d's judgement of EN after a hole's transfer error,
+which no hole raised (below). `test_vx03_dma_serial` was not run with
+today's suite on either part; on the CH32V203C8T6 it runs with the
+board bare but for the core board's crossed pair to the fourth port
+(PB0 to PA3, which letters q and r take). The CH32V303VCT6 was not run
+with today's suite either; its findings below were measured with its
+single-board letters beside DMA1's and the far board dark, that board's
+crossed pair retired (UART4's default pads PC10/PC11 are the desk
+pair's SPI link) and its letters n, q and r the two-board key `y`
+against the far chip's usart_peer - UART4 on its second column,
+PB0/PB1, its engines DMA2's channels 5 and 3. Where one number is given
+below it is every part's that ran the letter; where they differ each is
+named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
-  kilobytes copied flash to RAM take 24809 to 24811 cycles as 4096 bytes,
-  12535 to 12536 as 2048 half-words and 6395 as 1024 words on the
-  CH32V203C8T6 - 6.05, 6.12 and 6.24 cycles an item - and 24917, 12635 to
-  12641 and 6491 to 6500 on the CH32V303VCT6's DMA1 - 6.08, 6.17 and 6.34.
-  At 144 MHz the first part's are 23.8, 47.1 and 92.2 megabytes a second,
-  and every byte of all three arrived.
-- **The half flag rose with 2050 of 4096 moved** on the CH32V203C8T6 and
-  2049 on the CH32V303VCT6, which is 11.2.1's own rule read back; INTFR
-  stood at 0x7 (the global, complete and half bits of the channel) and
-  one write to INTFCR took all four down.
+  kilobytes copied flash to RAM, timed by the kernel's cycle count with
+  its own two reads inside the span, take 24861 to 24879 cycles as 4096
+  bytes, 12597 to 12623 as 2048 half-words and 6451 as 1024 words on the
+  CH32V203C8T6 - 6.07, 6.16 and 6.29 cycles an item - 24948 to 24980,
+  12665 to 12707 and 6530 to 6545 on the CH32V303CBT6's DMA1 - 6.09,
+  6.20 and 6.39 - and 24917, 12635 to 12641 and 6491 to 6500 on the
+  CH32V303VCT6's - 6.08, 6.17 and 6.34. At 144 MHz the first part's are
+  23.7, 46.7 and 91.4 megabytes a second, and every byte of all three
+  arrived.
+- **The half flag rose at the half.** Watched by a poll whose turn is a
+  flag read and a read of the kernel's cycle count, it was seen with
+  2056 to 2057 of 4096 moved on the CH32V203C8T6 and 2051 to 2058 on the
+  CH32V303CBT6 - the 2048 of 11.2.1's own rule and the few items one
+  turn lets past - and with 2049 on the CH32V303VCT6, polled with a flag
+  read and a decrement a turn; INTFR stood at 0x7 (the global, complete
+  and half bits of the channel) and one write to INTFCR took all four
+  down.
 - **Unequal widths move as table 11-1 draws them** (letter a): the nine
   pairings of PSIZE and MSIZE, four items each from the image's pattern
   - each end stepping by its own width, a narrower value zero-extended
@@ -1023,8 +1043,9 @@ they differ each is named.
   the channel.
 - **A timer's update request needs no pad and no core**: sixteen samples
   of a free-running one-megahertz counter, taken 500 us apart, came out
-  503, 1003, 1503 ... 8003 on the CH32V203C8T6 and 504 ... 8004 on the
-  CH32V303VCT6 - a staircase whose step is the period.
+  503, 1003, 1503 ... 8003 on the CH32V203C8T6 and the CH32V303CBT6 and
+  504 ... 8004 on the CH32V303VCT6 - a staircase whose step is the
+  period.
 - **The burst engine walks four registers per request**: with DBA at
   CH1CVR and DBL at four, a run of four half-words written through the
   single address TIMx_DMAADR landed as 111, 222, 333, 444 in CH1CVR
@@ -1033,30 +1054,42 @@ they differ each is named.
   priorities equal the lower number takes the bus outright.** Two
   channels of equal work: the one that started SECOND and asked for the
   very-high priority completed first. With both at medium and the higher
-  channel given the head start, channel 1 finished at 3086 cycles and
-  channel 2 at 6107 on the CH32V203C8T6, and at 3054 and 6060 to 6061 on the
+  channel given the head start, channel 1 finished at 3081 cycles and
+  channel 2 at 6105 on the CH32V203C8T6, at 3097 to 3139 and 6120 to
+  6161 on the CH32V303CBT6, and at 3054 and 6060 to 6061 on the
   CH32V303VCT6 - channel 1 running at full rate and channel 2 getting
   what was left.
-- **THE SLEEP, MEASURED IN BRIO'S OWN CODE** (letter c, three runs a part,
-  identical). Four kilobytes that take 172 us awake moved 12 bytes across
-  one `idle()` and 131 across ten on the CH32V203C8T6, 13 a wake at the
-  1 kHz tick, and 18 and 145 on the CH32V303VCT6's DMA1, 14 a wake; then
-  each block finished, byte for byte, the moment the core stayed awake.
+- **THE SLEEP, MEASURED IN BRIO'S OWN CODE** (letter c). Four kilobytes
+  that take 172 us awake moved 13 bytes across one `idle()` and 131
+  across ten on the CH32V203C8T6, 13 a wake at the 1 kHz tick, ten runs
+  of ten, and 18 and 145 on the CH32V303VCT6's DMA1, 14 a wake, three
+  runs; then each block finished, byte for byte, the moment the core
+  stayed awake.
   The vendor's own library, in a rig no suite here reproduces, moved nine
   to twelve bytes at the entry and eleven a wake on the CH32V203. Both
   say the same: the clocks run and the bus matrix serves the core alone.
   What sets the bytes a wake is not measured ("Not covered yet").
-- **AND THE CH32V303's SECOND CONTROLLER STARVES THE SAME WAY**: the same
-  four kilobytes on DMA2's first channel took 172 us awake and moved 20
-  bytes across one `idle()` and 147 across ten, 14 a wake, then finished
-  awake byte for byte.
+- **AND THE CH32V303VCT6's SECOND CONTROLLER STARVES THE SAME WAY**: the
+  same four kilobytes on DMA2's first channel took 172 us awake and
+  moved 20 bytes across one `idle()` and 147 across ten, 14 a wake, then
+  finished awake byte for byte.
+- **THE CH32V303CBT6 MOVES THE WHOLE BLOCK ACROSS TEN SLEEPS.** The
+  same four kilobytes, 173 us awake, moved 18 to 19 bytes across one
+  `idle()` - the pipeline's handful, as on the other two dies - and the
+  whole block across ten, on DMA1 and on DMA2's first channel alike,
+  ten runs of ten. Across one sleep that die starves like the others;
+  what moves the rest across the next nine - wakes far longer than the
+  CH32V203C8T6's, or a sleep not entered - is not measured (the
+  suite's print calls it a channel moving in Sleep, which the one-sleep
+  figure does not support).
 - **All the vectors are the channels' own**: eight on the CH32V203C8T6,
-  the eighth on that device class's tail, and on the CH32V303VCT6 DMA1's
-  seven and DMA2's eleven - eighteen blocks, eighteen bodies, each
+  the eighth on that device class's tail, and on both CH32V303 parts
+  DMA1's seven and DMA2's eleven - eighteen blocks, eighteen bodies, each
   running exactly once and each seeing its own armed flag and nothing
   else, the four channels of the extended register included.
 - **DMA2's eleven channels copy out of flash as DMA1's do.** A kilobyte
-  memory to memory on each, byte for byte, in 1747 to 1802 cycles:
+  memory to memory on each, byte for byte, in 1747 to 1802 cycles (1767
+  to 1840 on the CH32V303CBT6):
   channels 1 to 7 reporting in DMA2_INTFR at 4 x (channel - 1), channels
   8 to 11 in DMA2_EXTEM_INTFR at 4 x (channel - 8), and INTFR's top
   nibble clear while those four ran.
@@ -1073,7 +1106,10 @@ they differ each is named.
 - **The 64 KB rule on the CH32V303VCT6**: DMA1 refused the span across
   0x0801 0000 and took its lower half; DMA2 moved the whole span byte for
   byte; and with the refusal bypassed DMA1 delivered the WRAP described
-  above.
+  above. On the CH32V303CBT6 DMA1 refused the same span and DMA2 moved
+  it, and with the refusal bypassed through the piecewise verbs DMA1
+  moved it byte for byte too: that die's lot is not one the note
+  restricts.
 - **The transmit engine needs no listener**: twenty-six bytes left the
   ring in one block at 115200 baud, `tx_idle()` true 2348 to 2349 us after the
   run was queued, with no fault counted, on a pad with nothing attached.
@@ -1124,18 +1160,24 @@ they differ each is named.
   copying TIM3's counter into a ring of 256 half-words, read behind the
   channel through `HardwareRing` with every element judged against the
   one before it. At one update every 288 cycles, 131072 elements across
-  512 laps in 231656 to 231657 looks, every step the pace's, nothing skipped,
+  512 laps in 195017 to 195018 looks, every step the pace's, nothing skipped,
   nothing torn - so no count ever ran ahead of its store - and the
-  producer's position from `laps()` and the count, 131072, equal to the
-  updates the pace made in the consumer's time. At one every 48 cycles,
-  three million a second, 131072 to 131074 elements in 22957 looks, the same. A
+  producer's position from `laps()` and the count, 131072 to 131073,
+  within one of the updates the pace made in the consumer's time. At one
+  every 48 cycles, three million a second, 131074 to 131079 elements in
+  19696 looks, the same. A
   consumer stalling a lap and a half every 4096 elements lost exactly
   that: seven stalls, seven overruns counted and skipped, every step
   between them the pace's; four runs held across a lap and a half were
   each refused at their release. Read in a tight loop across laps the
-  count reached 256 again at every wrap and never went above it, and at
-  the fast pace a read could land on zero, between a lap's last
-  decrement and the reload. On the CH32V303VCT6: 131072 elements in
+  count never went above 256, reading 256 at the slow pace and at most
+  255 at the fast one, and at the fast pace a read could land on zero,
+  between a lap's last decrement and the reload - 96 to 107 times in
+  100000 across 117 laps.
+  On the CH32V303CBT6: 131072 elements in 226909 to 226917 looks at the
+  slow pace and 131073 to 131076 in 24960 to 24971 at the fast one, the
+  same verdicts, and zero read 7 to 16 times in 100000 across 98 laps.
+  On the CH32V303VCT6: 131072 elements in
   247383 to 247825 looks at the slow pace and 131072 to 131073 in 27203 to
   27238 at the fast one, every step the pace's, nothing skipped or torn,
   the position within one of the 131072 updates; seven stalls and seven
@@ -1303,7 +1345,11 @@ Implemented but not bench-verified, each with what would measure it:
   CH32V203; the difference is not explained, and nothing here says how much
   of it is the wake handler's length, the wake latency or the item in
   flight. What would measure it is letter c with a wake handler of stated
-  lengths, beside the vendor's rig rebuilt on the same die.
+  lengths, beside the vendor's rig rebuilt on the same die. On the
+  CH32V303CBT6 the whole block moves across ten sleeps after a
+  pipeline's handful across one; letter c with each sleep's length and
+  the core cycles awake between them recorded would say whether those
+  wakes are long or the later sleeps are not entered.
 - **The reset at `init()` on the transports letter s does not stage**:
   the ADC's and the DAC's streams, and UART4's two requests on DMA2, keep
   the contract by reading, no run having left a request standing over

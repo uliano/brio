@@ -78,6 +78,7 @@
 #include "ch32vx03/usart.hpp"
 #include "ch32vx03/watchdog.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 using P = brio::Ch32vx03Platform<>;
@@ -106,6 +107,9 @@ struct Token {
     volatile uint32_t elapsed_ms;
     volatile uint32_t marks;        ///< how many marks the loop managed
     volatile uint32_t handler_calls;   ///< what the early-wake-up vector counted
+    /// Letter w: the refreshes the armed watchdog survived before it
+    /// was left to run out.
+    volatile uint8_t refreshes;
     /// Letter p: the LSI each prescaler's time-out implies, leg by leg.
     volatile uint32_t lsi_hz[7];
     /// Letter p's two force_reset() legs, which never return to a loop
@@ -136,38 +140,25 @@ volatile uint32_t ewi_calls = 0;
 constexpr uint32_t pclk1 = SysClock::pclk1_hz;
 constexpr uint32_t ticks_per_us = SysClock::hz / 1'000'000u;
 
-/// The core's counter as a stopwatch, the ruler both blocks are weighed
-/// against: STK counts to its reload (one tick) and starts again, so a
-/// span is accumulated poll by poll with one period folded in across
-/// each wrap.
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The ruler both blocks are weighed against: the core's cycle count
+/// through the ticker (util/test_wait.hpp). Every span below runs with
+/// interrupts enabled, so the tick's handler keeps it whole.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
+void console_drain() {
+    (void)brio::console_drain<Ruler, Serial>();   // a wedged console shows as missing lines
+}
+
+/// Poll the window watchdog's counter until `done`, for at most 200 ms:
+/// the microseconds it took, or 200 ms when it never came.
+template <typename F>
+uint32_t poll_us(F done) {
+    constexpr uint32_t budget_us = 200u * 1000u;
+    const auto took = brio::cycles_until<Ruler>(done, budget_us);
+    return took ? *took / ticks_per_us : budget_us;
 }
 
 /// The window watchdog back to the state a cold boot leaves, without
@@ -246,7 +237,7 @@ void ta_wwdg_block() {
     (void)Wwdg::configure({.prescaler = WwdgPrescaler::div1, .window = 0x7F});
     Wwdg::refresh(0x7F);
     const uint8_t first = Wwdg::counter();
-    wait_us(20000);
+    brio::spin_us<Ruler>(20000);
     const uint8_t later = Wwdg::counter();
     print(serial, "  with WDGA CLEAR: the counter read ", first, " then ", later,
           " twenty milliseconds later - ", 20000u / (4096u * 1000000u / pclk1),
@@ -268,10 +259,7 @@ void ta_wwdg_block() {
 uint32_t fall_us(WwdgPrescaler p, uint8_t down_to) {
     (void)Wwdg::configure({.prescaler = p, .window = 0x7F});
     Wwdg::refresh(0x7F);
-    Stopwatch w;
-    while (Wwdg::counter() > down_to && w.us() < 200u * 1000u) {
-    }
-    const uint32_t seen = w.us();
+    const uint32_t seen = poll_us([down_to] { return Wwdg::counter() <= down_to; });
     const bool safe = Wwdg::counter() > 0x40u;
     Wwdg::refresh(0x7F);
     return safe ? seen : 0u;
@@ -290,7 +278,7 @@ void tb_wwdg_armed() {
     Wwdg::start(0x7F);
     const bool armed = Wwdg::enabled();
     const uint8_t at_start = Wwdg::counter();
-    wait_us(500);
+    brio::spin_us<Ruler>(500);
     const uint8_t after = Wwdg::counter();
     Wwdg::refresh(0x7F);
 
@@ -315,9 +303,7 @@ void tb_wwdg_armed() {
     Wwdg::refresh(0x7F);
     (void)Wwdg::configure({.prescaler = WwdgPrescaler::div8, .window = 0x60});
     const bool too_early = !Wwdg::in_window();
-    Stopwatch t;
-    while (Wwdg::counter() > 0x60u && t.us() < 200u * 1000u) {
-    }
+    (void)poll_us([] { return Wwdg::counter() <= 0x60u; });   // judged below through in_window()
     const bool inside = Wwdg::in_window();
     const uint8_t at_window = Wwdg::counter();
     Wwdg::refresh(0x7F);
@@ -329,10 +315,7 @@ void tb_wwdg_armed() {
     (void)Wwdg::configure({.prescaler = WwdgPrescaler::div8, .window = 0x7F});
     Wwdg::clear_flag();
     Wwdg::refresh(0x7F);
-    Stopwatch e;
-    while (!Wwdg::flag() && e.us() < 200u * 1000u) {
-    }
-    const uint32_t to_flag = e.us();
+    const uint32_t to_flag = poll_us([] { return Wwdg::flag(); });
     const bool raised = Wwdg::flag();
     Wwdg::refresh(0x7F);              // the answer, well inside its one tick
     Wwdg::clear_flag();
@@ -343,7 +326,7 @@ void tb_wwdg_armed() {
     // The way back, which is what let this letter arm it at all.
     Wwdg::reset();
     const bool disarmed = !Wwdg::enabled();
-    wait_us(20000);
+    brio::spin_us<Ruler>(20000);
     const bool still_here = !Wwdg::enabled();
 
     // Now the console.
@@ -522,10 +505,10 @@ void mark_leg(char letter, uint8_t leg) {
     token.elapsed_ms = 0;
     token.marks = 0;
     token.handler_calls = 0;
+    token.refreshes = 0;
     // The console must be empty before the board goes: a byte still in
     // the transmit register is a byte lost.
-    while (!Serial::tx_idle()) {
-    }
+    console_drain();
 }
 
 void judge(const char* what, bool ok) {
@@ -704,18 +687,23 @@ void tw_iwdg_reset() {
     print(serial, "  leg 1: the independent watchdog armed for a fifth of a second, "
                   "refreshed ten times, then left", crlf);
     Reset::clear_flags();
+    // The token first, so a reset during the refreshes comes back to the
+    // resume with the count it reached.
+    mark_leg('w', 1);
     (void)Iwdg::arm({.prescaler = IwdgPrescaler::div32, .reload = 249});
     // Ten refreshes at a tenth of the nominal time-out, to prove the
-    // refresh is what keeps the board alive.
+    // refresh is what keeps the board alive; each one survived is
+    // counted in the token.
     for (uint8_t i = 0; i < 10u; ++i) {
-        wait_us(20000);
+        brio::spin_us<Ruler>(20000);
         Iwdg::refresh();
+        token.refreshes = static_cast<uint8_t>(token.refreshes + 1u);
     }
     print(serial, "  it survived ten refreshes; now nothing refreshes it", crlf);
     // THE LAST REFRESH GOES AFTER THE CONSOLE IS DRAINED: a line at
     // 115200 is seven milliseconds, and what is being measured is the
     // span from a refresh to the reset.
-    mark_leg('w', 1);
+    console_drain();
     Iwdg::refresh();
     spin_until_reset();
 }
@@ -723,7 +711,7 @@ void tw_iwdg_reset() {
 void tw_resume() {
     const uint32_t ms = token.elapsed_ms;
     print(serial, crlf, "-> back from the independent watchdog's reset after ", ms,
-          " ms (", token.marks, " marks)", crlf);
+          " ms (", token.marks, " marks, ", token.refreshes, " refreshes survived)", crlf);
     print_flags(boot_flags);
     judge("the independent watchdog reset the board, and IWDGRSTF says so at the next boot",
           (boot_flags & ResetFlag::independent_watchdog) != 0u);
@@ -738,7 +726,7 @@ void tw_resume() {
           "what the arithmetic promises and all it promises",
           ms >= fast && ms <= slow);
     judge("the board ran for ten refreshes before that, so a refreshed watchdog does not "
-          "reset anything", token.marks > 0u);
+          "reset anything", token.refreshes == 10u);
     bench.end_letter();
 }
 
@@ -755,7 +743,7 @@ void tv_wwdg_reset() {
     (void)Wwdg::configure({.prescaler = WwdgPrescaler::div8, .window = 0x7F});
     Wwdg::start(0x7F);
     for (uint8_t i = 0; i < 10u; ++i) {
-        wait_us(10000);
+        brio::spin_us<Ruler>(10000);
         Wwdg::refresh(0x7F);
     }
     print(serial, "  it survived ten refreshes; now nothing refreshes it", crlf);

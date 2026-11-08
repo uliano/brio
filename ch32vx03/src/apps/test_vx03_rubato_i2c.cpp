@@ -199,9 +199,11 @@ constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 static_assert(SysClock::pclk1_hz == 48'000'000u, "I2C1's PB1 at 48 MHz: CCR 240 and 40, 100 and 400 kHz exactly");
 
 /// The composed cycle count: monotone across the ticker's restart, a
-/// difference exact under 2^32 cycles (44.7 s at 96 MHz).
+/// difference exact under 2^32 cycles (44.7 s at 96 MHz). Its rate makes
+/// it the ruler util/test_wait.hpp's verbs take as well.
 struct Ruler {
     static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
 /// The STK counter's period: it counts HCLK and restarts at the ticker's

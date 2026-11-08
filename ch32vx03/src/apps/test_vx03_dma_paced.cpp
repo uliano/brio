@@ -23,7 +23,7 @@
 // WHAT IT MEASURES WITH. Nothing outside the chip. A channel that needs a
 // request takes it from a TIMER, whose update reaches the controller over
 // an internal line and no pad; a second timer free-running is the datum a
-// staircase samples; and the core's own STK counter is the ruler.
+// staircase samples; and the core's cycle count (the ticker's) is the ruler.
 //
 // THE PADS. None. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the
 // debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
@@ -70,6 +70,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/ring.hpp"
 #include "util/testbench.hpp"
 
@@ -87,7 +88,7 @@ constexpr SysClock clock;
 TestBench<Serial> bench;
 
 using Pacer = Tim<2>;    ///< the request source: its update drives channel 2
-using Ruler = Tim<3>;    ///< free-running, the datum the staircase samples
+using Datum = Tim<3>;    ///< free-running, the datum the staircase samples
 /// Channel 2 is TIM2's update's for the whole image - letters b and e
 /// program it by hand, letter o's receive engine rides it
 /// (docs/design/dma.md, "The ownership rule").
@@ -106,45 +107,17 @@ static_assert(tim_hz == SysClock::hz);
 alignas(4) uint16_t work[16];
 constexpr uint16_t sample_count = 16;
 
-// ---------------------------------------------------------------------------
-// The ruler
-// ---------------------------------------------------------------------------
-
-/**
- * THE RULER OF THIS SUITE: the core's own STK counter, read as a
- * stopwatch. It counts up to its reload - one tick period, a
- * millisecond here - and starts again, so a span is accumulated poll by
- * poll with one period folded in across each wrap.
- */
-class Stopwatch {
-public:
-    Stopwatch() { start(); }
-
-    void start() {
-        last_ = stk()->CNTL;
-        acc_ = 0;
-    }
-
-    uint32_t cycles() {
-        const uint32_t period = stk()->CMPLR + 1u;
-        const uint32_t now = stk()->CNTL;
-        acc_ += (now >= last_) ? (now - last_) : (now + period - last_);
-        last_ = now;
-        return acc_;
-    }
-
-    uint32_t us() { return cycles() / ticks_per_us; }
-
-private:
-    uint32_t last_ = 0;
-    uint32_t acc_ = 0;
+/// The suite's ruler: the ticker's cycle count, the kernel tick and STK's
+/// position composed (util/test_wait.hpp). Right while the tick handler
+/// runs at least once a period: no span below is measured with interrupts
+/// masked for longer than a tick, or with the tick paused.
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
 };
 
-void wait_us(uint32_t us) {
-    Stopwatch w;
-    while (w.us() < us) {
-    }
-}
+/// Microseconds on a stopwatch over the ruler.
+uint32_t elapsed_us(const Stopwatch<Ruler>& w) { return w.elapsed() / ticks_per_us; }
 
 // ---------------------------------------------------------------------------
 // The handlers' counters
@@ -164,15 +137,12 @@ void note(uint8_t index, uint32_t flags) {
 // Transfers, named once
 // ---------------------------------------------------------------------------
 
-/// Poll a channel's completion, bounded: a wedge must end the letter,
-/// not the session.
-bool wait_complete(uint32_t shift, uint32_t spins = 4'000'000UL) {
-    while (spins-- != 0u) {
-        if (((Dma<1>::flags() >> shift) & DmaFlag::complete) != 0u) {
-            return true;
-        }
-    }
-    return false;
+/// Poll a channel's completion for at most `budget_us`: a wedge must end
+/// the letter, not the session. The default, 200 ms, is twenty-five times
+/// the longest transfer it waits for (sixteen updates 500 us apart).
+bool wait_complete(uint32_t shift, uint32_t budget_us = 200'000u) {
+    return wait_until<Ruler>(
+        [shift] { return ((Dma<1>::flags() >> shift) & DmaFlag::complete) != 0u; }, budget_us);
 }
 
 /// Every channel, every line and both timers back to reset, at the top
@@ -185,7 +155,7 @@ void all_off() {
         Pfic::clear_pending(dma_channel_irq(1, ch));
     }
     Pacer::release();
-    Ruler::release();
+    Datum::release();
     for (uint8_t i = 0; i < 8u; ++i) {
         channel_calls[i] = 0;
         channel_mask[i] = 0;
@@ -239,8 +209,9 @@ void tb_circular() {
     uint16_t full_seen = 0;
     uint16_t walked_down = 0;
     uint16_t last_remaining = Ch::remaining();
-    Stopwatch w;
-    while (full_seen < 4u && w.us() < 20'000UL) {
+    Stopwatch<Ruler> w;
+    w.start();
+    while (full_seen < 4u && w.elapsed() < us_cycles<Ruler>(20'000UL)) {
         const uint32_t f = Ch::flags();
         if ((f & DmaFlag::half) != 0u) {
             ++half_seen;
@@ -256,7 +227,7 @@ void tb_circular() {
         }
         last_remaining = now;
     }
-    const uint32_t laps_us = w.us();
+    const uint32_t laps_us = elapsed_us(w);
     const bool still_enabled = Ch::enabled();
     const uint32_t landed = Pacer::compare(0);
 
@@ -282,12 +253,12 @@ void te_request() {
     all_off();
     using Ch = DmaChannel<1, DmaRequestOf<DmaRequest::tim2_up>::channel>;
 
-    // A free-running ruler at one megahertz, and a pacer whose update
+    // A free-running datum at one megahertz, and a pacer whose update
     // moves one sample of it into memory every 500 us.
-    Ruler::init();
-    (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+    Datum::init();
+    (void)Datum::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
                                      .period = 0xFFFF});
-    Ruler::enable(true);
+    Datum::enable(true);
 
     Pacer::init();
     (void)Pacer::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
@@ -298,7 +269,7 @@ void te_request() {
     }
     Ch::stop();
     const bool armed = Ch::load(DmaTransfer{
-        .peripheral = Ruler::cnt_address(),
+        .peripheral = Datum::cnt_address(),
         .memory = work,
         .count = sample_count,
         .config = {.direction = DmaDirection::peripheral_to_memory,
@@ -314,7 +285,7 @@ void te_request() {
     Pacer::enable(true);
     const bool sampled = wait_complete(Ch::flag_shift);
     Pacer::enable(false);
-    Ruler::enable(false);
+    Datum::enable(false);
 
     // The values are a staircase whose step is the pacer's period.
     uint16_t steps_right = 0;
@@ -429,7 +400,7 @@ struct Drink {
 /// judged against the one before it: a counter sampled every `period`
 /// cycles steps by `period`, give or take the controller's service. Every
 /// `stall_every` elements (0: never) the consumer first stands still for
-/// `stall` cycles - under one tick, so the stopwatch folds no period away.
+/// `stall` cycles.
 Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t stall = 0) {
     constexpr uint32_t slack = 16;
     Drink d;
@@ -437,13 +408,15 @@ Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t
     uint16_t last = 0;
     uint32_t next_stall = stall_every;
     uint32_t seen = RingView::overruns();
-    Stopwatch w;
+    Stopwatch<Ruler> w;
+    w.start();
     while (d.elements < target && d.cycles < 400'000'000UL) {
         if (stall_every != 0u && d.elements >= next_stall) {
             next_stall += stall_every;
             ++d.stalls;
-            Stopwatch s;
-            while (s.cycles() < stall) {
+            Stopwatch<Ruler> s;
+            s.start();
+            while (s.elapsed() < stall) {
             }
         }
         const std::span<const uint16_t> run = RingView::read_span();
@@ -469,7 +442,7 @@ Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t
             have_last = false;
         }
         d.elements += static_cast<uint32_t>(run.size());
-        d.cycles = w.cycles();
+        d.cycles = w.elapsed();
     }
     return d;
 }
@@ -500,9 +473,9 @@ void to_ring() {
         v = 0;
     }
 
-    Ruler::init();
-    (void)Ruler::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
-    Ruler::enable(true);
+    Datum::init();
+    (void)Datum::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
+    Datum::enable(true);
     Pacer::init();
     (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(slow - 1u)});
 
@@ -510,7 +483,7 @@ void to_ring() {
     // its length and one bus master counted.
     const uint8_t masters_before = BusActivity::active();
     ring_mode = true;
-    const bool armed = RingRx::arm(Ruler::cnt_address(), ring_storage, DmaPriority::high);
+    const bool armed = RingRx::arm(Datum::cnt_address(), ring_storage, DmaPriority::high);
     // arm() keeps the ring's word in the engine and leaves the channel
     // stopped; start() is the store that puts it in CFGR.
     const uint32_t before_start = RingRxChannel::regs().CFGR;
@@ -544,9 +517,21 @@ void to_ring() {
     const Drink a = drink(1UL << 17, slow);
     // Where the producer is by laps() and the count, read the moment the
     // consumer stops - the pace still running - against the updates the
-    // pace made in the consumer's time.
-    const uint32_t position =
-        RingRx::laps() * ring_length + ((ring_length - RingRx::remaining()) & (ring_length - 1u));
+    // pace made in the consumer's time. laps() is the channel handler's
+    // count and remaining() the controller's, so a wrap between the two
+    // reads is a whole lap (256) against the four judged: laps, the count,
+    // and laps again a microsecond later - long past the handler's entry,
+    // a lap lasting 512 us - taken again until laps held still.
+    uint32_t position = 0;
+    for (uint8_t tries = 0; tries < 8u; ++tries) {
+        const uint32_t laps0 = RingRx::laps();
+        const uint32_t count = RingRx::remaining();
+        spin_us<Ruler>(1);
+        position = laps0 * ring_length + ((ring_length - count) & (ring_length - 1u));
+        if (RingRx::laps() == laps0) {
+            break;
+        }
+    }
     const uint32_t due = a.cycles / slow;
     // The count read in a tight loop across laps: what the wrap looks like
     // from the core - the view takes zero and the length alike.
@@ -586,7 +571,7 @@ void to_ring() {
     // The probe above read no run for a score of laps: the drain counts
     // that lap missed, and the count starts again from zero.
     (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(fast - 1u)});
-    wait_us(5);
+    spin_us<Ruler>(5);
     drain_ring();
     RingView::clear_overruns();
     Pacer::enable(true);
@@ -619,7 +604,7 @@ void to_ring() {
     // stall a lap missed, counted once and skipped, and the steps between
     // the skips still the pace's.
     (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(slow - 1u)});
-    wait_us(5);
+    spin_us<Ruler>(5);
     drain_ring();
     RingView::clear_overruns();
     Pacer::enable(true);
@@ -641,12 +626,17 @@ void to_ring() {
     for (uint8_t i = 0; i < 4u; ++i) {
         drain_ring();
         std::span<const uint16_t> held{};
-        Stopwatch t;
-        while (held.empty() && t.us() < 1000UL) {
-            held = RingView::read_span();
-        }
-        Stopwatch s;
-        while (s.cycles() < lap_cycles + lap_cycles / 2u) {
+        // A run within a millisecond (an element every 2 us); an empty one
+        // is never counted as refused below.
+        (void)wait_until<Ruler>(
+            [&held] {
+                held = RingView::read_span();
+                return !held.empty();
+            },
+            1000u);
+        Stopwatch<Ruler> s;
+        s.start();
+        while (s.elapsed() < lap_cycles + lap_cycles / 2u) {
         }
         if (!held.empty() && !RingView::consume(static_cast<uint32_t>(held.size()))) {
             ++refused;
@@ -749,7 +739,7 @@ void all_off2() {
 // k - requests on DMA2: a timer's update, no pad
 // ===========================================================================
 /// The staircase of letter e on the second controller: timer `n`'s update
-/// request moving one sample of the free-running ruler a period. A
+/// request moving one sample of the free-running datum a period. A
 /// template on the timer, so that a timer this build's timer driver does
 /// not reach is a discarded branch and a line that says so.
 template <uint8_t n, DmaRequest request>
@@ -760,10 +750,10 @@ void dma2_staircase(const char* verdict) {
         using Ch = DmaChannel<Row::controller, Row::channel>;
         static_assert(dma_claim<DmaSlotId<Row::controller, Row::channel>,
                                 DmaOwner<DmaPeriph::tim, n, DmaSignal::update>>);
-        Ruler::init();
-        (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+        Datum::init();
+        (void)Datum::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
                                          .period = 0xFFFF});
-        Ruler::enable(true);
+        Datum::enable(true);
         Clocker::init();
         (void)Clocker::configure(TimConfig{
             .prescaler = static_cast<uint16_t>(Clocker::clock_hz(clock) / 1'000'000u - 1u),
@@ -773,7 +763,7 @@ void dma2_staircase(const char* verdict) {
         }
         Ch::stop();
         const bool armed = Ch::load(DmaTransfer{
-            .peripheral = Ruler::cnt_address(),
+            .peripheral = Datum::cnt_address(),
             .memory = work,
             .count = sample_count,
             .config = {.direction = DmaDirection::peripheral_to_memory,
@@ -787,12 +777,11 @@ void dma2_staircase(const char* verdict) {
         });
         Clocker::interrupts(tim_ude, true);
         Clocker::enable(true);
-        uint32_t spins = 4'000'000UL;
-        while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
-        }
-        const bool sampled = Ch::flag(DmaFlag::complete);
+        // Sixteen updates 500 us apart: 8 ms, the budget 200 ms.
+        const bool sampled =
+            wait_until<Ruler>([] { return Ch::flag(DmaFlag::complete); }, 200'000u);
         Clocker::enable(false);
-        Ruler::enable(false);
+        Datum::enable(false);
         Ch::stop();
         uint16_t steps_right = 0;
         for (uint16_t i = 1; i < sample_count; ++i) {
@@ -805,7 +794,7 @@ void dma2_staircase(const char* verdict) {
               ": ", work[0], " ", work[1], " ... ", work[sample_count - 1u], crlf);
         bench.verdict(verdict, armed && sampled && steps_right == sample_count - 1u);
         Clocker::release();
-        Ruler::release();
+        Datum::release();
     } else {
         print(serial, "  TIM", n, ": this build's timer driver does not reach it, so its "
                       "request is not driven here",
@@ -863,10 +852,11 @@ void tl_dma2_engines() {
         const bool playing = Player::start(work, 8);
         Paced::interrupts(tim_ude, true);
         Paced::enable(true);
-        Stopwatch w;
-        while (Player::laps() < 8u && w.us() < 50'000UL) {
-        }
-        const uint32_t laps_us = w.us();
+        Stopwatch<Ruler> w;
+        w.start();
+        // The laps reached and their time are what the verdict judges.
+        (void)wait_until<Ruler>([] { return Player::laps() >= 8u; }, 50'000u);
+        const uint32_t laps_us = elapsed_us(w);
         const uint32_t laps = Player::laps();
         const uint32_t landed = Paced::compare(0);
         const bool still_running = Player::running();
@@ -887,23 +877,24 @@ void tl_dma2_engines() {
         // caller-owned blocks with samples of a free-running counter - the
         // handler hands a full block over and starts the other, the loop
         // below reads one and releases it.
-        Ruler::init();
-        (void)Ruler::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+        Datum::init();
+        (void)Datum::configure(TimConfig{.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
                                          .period = 0xFFFF});
-        Ruler::enable(true);
+        Datum::enable(true);
         SourcePaced::init();
         (void)SourcePaced::configure(TimConfig{
             .prescaler = static_cast<uint16_t>(SourcePaced::clock_hz(clock) / 1'000'000u - 1u),
             .period = 199});
         S::role = Dma2Role::source;
-        Source::arm(Ruler::cnt_address(), DmaPriority::high);
+        Source::arm(Datum::cnt_address(), DmaPriority::high);
         const bool streaming = Source::start(S::block_a, S::block_b, 8);
         SourcePaced::interrupts(tim_ude, true);
         SourcePaced::enable(true);
         uint16_t blocks = 0;
         uint16_t first[8] = {};
-        Stopwatch s;
-        while (blocks < 4u && s.us() < 50'000UL) {
+        Stopwatch<Ruler> s;
+        s.start();
+        while (blocks < 4u && s.elapsed() < us_cycles<Ruler>(50'000UL)) {
             volatile uint16_t* full = Source::ready();
             if (full != nullptr) {
                 if (blocks == 0u) {
@@ -916,7 +907,7 @@ void tl_dma2_engines() {
             }
         }
         SourcePaced::enable(false);
-        Ruler::enable(false);
+        Datum::enable(false);
         uint8_t steps = 0;
         for (uint8_t i = 1; i < 8u; ++i) {
             const uint16_t step = static_cast<uint16_t>(first[i] - first[i - 1u]);
@@ -933,7 +924,7 @@ void tl_dma2_engines() {
                       streaming && blocks >= 4u && steps == 7u && Source::overruns() == 0u);
         Source::stop();
         SourcePaced::release();
-        Ruler::release();
+        Datum::release();
         all_off2<C>();
     }
 }

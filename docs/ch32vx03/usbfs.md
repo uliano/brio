@@ -554,12 +554,29 @@ attached controller holds one bus-master count and the platform's
 
 ## Bench findings
 
-`test_vx03_usbfs` on the CH32V303VCT6 at 96 MHz from the board's
-crystal, the board's connector P14 on a Linux host through a hub:
-**26 pass, 0 fail** in `z`, and every host-assisted letter green with
-the bench's host script at the other end - the host end judging the
-bytes in the echo and in the device's pours. The letters `k`, `g`, `r`
-and `q` ran ten times each, green every time.
+`test_vx03_usbfs` on the CH32V303CBT6 at 96 MHz from the board's 8 MHz
+crystal, the board's USB-C connector on a Linux host: **24 pass, 0
+fail, 1 skipped** in `z`, ten runs alike, the skip the FIFO-overflow
+letter's half that wants the bench's host script, which those runs did
+not start. The CH32V303VCT6 was not run with today's suite; the
+findings below are its unless the CH32V303CBT6 is named, measured at
+96 MHz from that board's crystal, its connector P14 on a Linux host
+through a hub, with every host-assisted letter green with the bench's
+host script at the other end - the host end judging the bytes in the
+echo and in the device's pours. The letters `k`, `g`, `r` and `q` ran
+ten times each there, green every time.
+
+**The CH32V303CBT6's `z`**, ten runs: configured in 606 to 649 ms from
+the pull-up, 256 of the 960 bytes spent, no error, no FIFO overflow and
+no PID mismatch, a thousand `idle()` calls in at most a millisecond;
+D+ following the pull-up through both the block's bit and port A's input
+register, D- low; an enumeration in 628 to 660 ms with port A's clock
+shut, and after a reconnect in 617 to 650 ms with the address the host
+gave the same; on the bus floor configured in 627 to 630 ms at 96, 48,
+24 and 12 MHz of HCLK, at 6 MHz in nine runs of ten (582 to 819 ms) and
+at 1.5 MHz never, with up to two FIFO overflows; 99 to 100 frames
+counted in 100 ms; and the divider at 1, the PLL at 48 MHz, configured
+in 622 to 623 ms.
 
 **The first enumeration, and the one change it forced.** As written
 against the manual the driver took a SETUP's endpoint from the status

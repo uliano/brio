@@ -48,6 +48,7 @@
 #include "util/line_reader.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
+#include "util/test_wait.hpp"
 #include "util/trace.hpp"
 #include "util/usb/cdc.hpp"
 #include "util/usb/device.hpp"
@@ -58,6 +59,12 @@ constexpr SysClock clock;
 
 using Serial = brio::Uart<1, P>;
 constexpr Serial serial;
+
+/// The ruler of the probe's one timed wait: HCLK cycles from the ticker.
+struct Ruler {
+    static uint32_t now() { return brio::Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 using Usb = brio::Usbd<>;
 using Cdc = brio::UsbCdcAcm<Usb, P, 0, 1, 2, 128, 128>;
@@ -201,9 +208,7 @@ private:
         // is a hundred microseconds of idle on the line, and ten
         // milliseconds is past every doubt.
         Usb::connect(false);
-        const uint32_t until = brio::Ticker::millis() + 10u;
-        while (brio::Ticker::millis() < until) {
-        }
+        brio::spin_us<Ruler>(10'000u);
         Usb::connect(true);
         brio::print(s, "re-attached", brio::crlf);
     }

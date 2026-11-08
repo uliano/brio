@@ -361,7 +361,7 @@ STATR's eight bits, and what each costs (20.2.7, 20.4.3):
 | TXE | a DATAR write |
 | OVR | a DATAR read followed by a STATR read, which still reads it up; the load after it reads it down (letter v) |
 | MODF | a STATR read followed by a CTLR1 write with nothing between them (measured below); the block's RCC reset pulse |
-| CRCERR | a zero into its bit and ones elsewhere (the one rc_w0 bit) |
+| CRCERR | a zero into its bit and ones elsewhere (the one rc_w0 bit), measured on a flag the hardware raised (letter e, below) |
 | BSY | hardware's, never software's |
 | UDR | the I2S face's: a read of STATR (20.3.7.1) |
 | CHSIDE | the I2S face's: refreshed by the hardware, never cleared |
@@ -1335,6 +1335,13 @@ other's `spi_peer` - in the one after it.
   and MSTR with it, a demoted host must be reconfigured anyway, and the
   block's RCC reset pulse, which puts the flag down on both parts, is
   the first step of that.
+- **CRCERR is the received CRC frame against RCRCR** (letter e, on the
+  resource with no wire, MISO held by its port, one data frame and then
+  CRCNEXT): with MISO held low the CRC frame read 0x00, which is the
+  receive CRC of a zero frame, and no error; held high, the frame read
+  0xFF against an RCRCR of 0xF3, the CRC of the one 0xFF frame received
+  under the polynomial 7, and CRCERR rose. A zero written into its bit with ones elsewhere put it
+  down, and a one written into it left it down.
 - **The one-wire line mode turns around on the same pad**: BIDIMODE with
   BIDIOE drives a frame out of MOSI, and clearing BIDIOE makes that same
   pad the receiver, with the clock running on either side of the turn.
@@ -1428,7 +1435,9 @@ valid 25 ns after its edge and the host's 5 ns of setup inside the half
 period), the far POLLED run at /16 and slower for 8-bit frames and at /8 and
 slower for 16-bit ones (two of its turns inside a frame). Ten runs of letters d, j, k, l
 and m each way, every verdict green in all twenty; ten runs of n and o
-each way, green; `y` whole at 52 verdicts, green each way, three runs.
+each way, green; `y` whole at 51 verdicts on the CH32V203C8T6's third
+image against the CH32V303CBT6's spi_peer, green in ten runs (the other
+direction was not run with today's suite).
 
 - **THE ENGINE A REQUEST NAMES, judged by the far client** (letter t, both
   ways, thirteen runs each): one frame named dma at /8, /16 and /32 of PB1,
@@ -1534,8 +1543,10 @@ each way, green; `y` whole at 52 verdicts, green each way, three runs.
   multi-host input, the far chip's ss_pulse pulling the shared select low
   - MODF set within the pulse (CTLR1 0x28 after it: MSTR and SPE gone,
   STATR 0x22), one entry of the instance's vector under ERRIE carrying
-  the mode-fault bit, and the RCC reset pulse clearing it on all three
-  parts.
+  the mode-fault bit, and `clear_mode_fault()` - 20.2.7's STATR read and
+  CTLR1 write with nothing between them - putting it down (the
+  CH32V203C8T6 as that host, the CH32V303CBT6's spi_peer pulling the
+  select).
 - **SSOE'S SELECT FALLS WITH THE FIRST FRAME, NOT WITH SPE**: a host with
   SSOE set keeps its NSS pad high under SPE until the first frame is
   written, drives it low from then to the disable, and the far client it

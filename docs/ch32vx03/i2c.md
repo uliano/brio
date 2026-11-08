@@ -722,10 +722,11 @@ against the other running `twi_peer` (the peer's PLL on its 8 MHz crystal): I2C1
 to I2C1 on PB6/PB7, a 2.2 kOhm pull-up on each line to the CH32V203C8T6 board's
 3.3 V, a shared ground
 ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md)). Every
-letter both ways, three runs of `z` in each direction with no failure (120
-verdicts on the CH32V303VCT6's one image, 57, 52 and 10 in the CH32V203C8T6's
-three, the one more being letter `g`'s write across 64 KB, a rule only the
-CH32V303 has). TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
+letter on the CH32V203C8T6's four images (53, 26, 26 and 10 verdicts) against
+the CH32V303CBT6's twi_peer, ten runs of `z` on each with no failure; the other
+direction, and the CH32V303VCT6's one image (120 verdicts, letter `g`'s write
+across 64 KB among them, a rule only the CH32V303 has), were not run with
+today's suite. TIM4's channel 1 is the second instrument: PB6 is I2C1's clock line
 and TIM4_CH1 on its default column at once, so SCL is measured on the pad
 that carries it, with no scope and no wire. The figures below are the
 CH32V203C8T6's where one is given, the CH32V303VCT6's beside it where
@@ -982,9 +983,11 @@ they differ. In this section a letter with no suite named is `test_vx03_i2c`'s.
   the channels costs a write or a read only time, but for that window; a copy
   at its default `low` lies below them (the controller's rule, not staged at
   `low`).
-- **Ten seconds of back-to-back tenures at fast mode**: 25346 tenures
-  (25354 on the CH32V303VCT6), 405 thousand bytes moved, not one failure
-  at either end and no byte mismatch.
+- **Ten seconds of back-to-back tenures at fast mode**: 25306 tenures
+  from the CH32V203C8T6, the same count in each of ten runs (25354 from
+  the CH32V303VCT6), 405 thousand bytes moved, not one failure at either
+  end, and every byte read checked against the far end's counting
+  sequence with none out of step.
 
 ### The two bounds of `start()` against their names (`test_vx03_i2c` letter t)
 
@@ -1258,9 +1261,9 @@ the suite's table of shapes for letter `o` and `dma` for the rest - the core at
 object of the pack (the suite's active objects under the kernel) every 97,
 193 or 389 us and its dispatch spins 300 or 3000 cycles - at 97 us x
 3000, 32 % of the core. Every letter runs once with TIM2 silent (the control)
-and six times under it (the pressure passes); **202 verdicts on each image, green on every run:
-three runs of `z` on each image, every letter (`n`, `o`, `p`, `q`, `w`,
-`h` and `i`) in each**. The pack, the command channel through the arbiter
+and six times under it (the pressure passes); **202 verdicts, green on every run: ten runs
+of `z` on the CH32V203C8T6 against the CH32V303CBT6's twi_peer, every letter (`n`, `o`,
+`p`, `q`, `w`, `h` and `i`) in each** (the other direction not run with today's suite). The pack, the command channel through the arbiter
 and the letters are the I2C suites' shared body
 (`avrxt/src/apps/rubato_i2c.hpp`, whose header describes them), and
 [platform.md](platform.md) places the suite among the preemptive

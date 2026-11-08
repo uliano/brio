@@ -344,8 +344,11 @@ a..l and r run on both parts.
   Its own verb writes SCEN, the NACK, the guard time, the prescaler, 1.5
   stop bits and CLKEN - the clock is the card's and belongs to the mode.
   On the pad it is the peripheral clock divided by twice the prescaler
-  (measured 6001500 Hz for the 6 MHz a prescaler of 6 asks of a 72 MHz
-  bus) and it keeps running while nothing is being sent; with the
+  (9606 or 9607 transitions counted in a window of 800 us placed between
+  two kernel ticks, 6003750 Hz, for the 6 MHz a prescaler of 6 asks of a
+  72 MHz bus - the 0.6 per mille over is the window's own overrun, some
+  eighty core cycles between the counter's enable and its read) and it
+  keeps running while nothing is being sent; with the
   transmitter disabled the pad stays still. The prescaler is the low
   five bits: one to thirty-one, and zero is reserved.
 - **Half duplex needs a pull-up the pads cannot give.** With HDSEL the
@@ -694,7 +697,7 @@ The offer, used or declined for the instrument:
 
 | offer | answer |
 |---|---|
-| DATAR, one level, polled | the peer's loops: no interrupt, nothing masked; the receive turn 14 instructions with two APB loads (STATR, DATAR), the echo's 22 with four, an idle turn 12 with one; DATAR read before the first and the last frame's stamp, which is a call (a frame completing between the status read and the data read is lost with ORE cleared unseen, 18.10.1's pair) |
+| DATAR, one level, polled | the peer's loops: no interrupt, nothing masked; the receive turn 14 instructions with two APB loads (STATR, DATAR), the echo's 22 with four, an idle turn 17 with one (the interrupt entry count read for the stamps' witness, and the spills it costs); a stamp a handler made late reported as a span not measured, which the measuring end runs again; DATAR read before the first and the last frame's stamp, which is a call (a frame completing between the status read and the data read is lost with ORE cleared unseen, 18.10.1's pair) |
 | the timer's toggle mode with CCxDE (15.4.7) | the waveform engine: an edge list as absolute compare values streamed by DMA into CHxCVR on each match - one beat an edge, no CPU between edges; the counter free over its sixteen bits, an edge's value modulo the counter, so a list is bounded by its table (640 edges) and not by the counter, its prescaler the smallest that keeps its longest interval under 0xF000 counts (one core cycle a count for every frame a UART sends); the floor 16 cycles between two edges |
 | OPM with PWM mode 1 (15.3.10) | the glitch: one pulse exact to a count |
 | a timer's update request writing BSHR | declined: a fixed sample rate is one table entry a sample, some hundred a bit for a 1 % pulse, where the toggle list costs one entry an edge |
@@ -913,12 +916,15 @@ U::enable(true);
 
 The reference suite is `test_vx03_serial`, at 144 MHz on each board's
 crystal - PCLK2 144, PCLK1 72 - with USART2 as the instrument on its
-default pads and the console untouched on USART1: 64 verdicts in `z` on
-the CH32V203C8T6 with the crossed pair strapped and 44 on the
-CH32V303VCT6 (its letter p that series' own), the far board dark; and the
-two-board key `y` against the far chip's usart_peer (the pair's section
-above): 72 verdicts on the CH32V203C8T6, 85 on the CH32V303VCT6 with its
-letters n and o. Almost every
+default pads and the console untouched on USART1: 60 pass and 2 skipped
+in `z` on the CH32V203C8T6's first image with the crossed pair strapped,
+ten runs alike, the far board dark; and the two-board key `y` on its
+second image against the CH32V303CBT6's usart_peer (the pair's section
+above): 72 pass, nine runs alike - four of their timed runs had a far
+stamp an interrupt lengthened, which the far end reported as a span not
+measured, and each was run again quiet. The CH32V303VCT6 (44 verdicts
+in `z`, its letter p that series' own, and 85 in `y` with its letters n
+and o) was not run with today's suite. Almost every
 letter needs no wire, and three facts of this silicon are why: the
 receive pad is a bit-banged transmitter (an input follows its own pull,
 which the output data register moves in a few cycles), a pad driven by a
@@ -1007,12 +1013,16 @@ the desk pair's SPI link, and that part's letters m, q and s with it.
   every stream it broke - a fact of the sender worth knowing, not of the
   receiver.
 - **`tx_idle()` is the wire's** (letter r, TIM2's channel 3 latching
-  PA2's last rising edge): its first true lands 1263 to 1295 timer clocks
-  after the last stop bit starts at 115200 (a bit is 1250) and 151 to
-  186 at 1 Mbaud (a bit is 144), on the interrupt transmitter and the
-  transmit engine alike - TC at the stop bit's end, a poll's few clocks
-  late. Before this round the engined transport could answer from a TC
-  the frame before its block had left.
+  PA2's last rising edge): its first true lands 1261 to 1344 timer clocks
+  after the last stop bit starts at 115200 (a bit is 1250) and 171 to
+  223 at 1 Mbaud (a bit is 144), on the interrupt transmitter and the
+  transmit engine alike, over ten runs on the CH32V203C8T6 - TC at the
+  stop bit's end, and the reading up to one turn of the wait late (the
+  transport's tx_idle(), one composed read of the cycle count and its
+  compare, then the timer's load: some forty to eighty clocks). A
+  reading a kernel tick or the console's vector landed inside is printed
+  and taken again, not judged. The engined transport answers from the
+  TC of its own block's last frame, never from the frame before it.
 - **The burst edge from the vector** (letter s, nothing polled): every
   burst of one frame told; a burst of 16 at 1 Mbaud told about 1711
   cycles after its last stop bit (1.1 frames) with two USART interrupts

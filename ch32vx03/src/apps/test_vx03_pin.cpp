@@ -91,6 +91,7 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/test_wait.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -106,6 +107,13 @@ using SysClock = Clock<ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;
 
 TestBench<Serial> bench;
+
+/// The suite's one ruler: HCLK cycles, the tick count and STK's position
+/// composed (ch32vx03/ticker.hpp).
+struct Ruler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
 
 // The pads, once.
 using PadA = Pin<'A', 1>;     ///< the low configuration register, EXTI line 1
@@ -142,7 +150,18 @@ volatile uint32_t edges_line12 = 0;
 volatile uint32_t edges_line13 = 0;
 volatile uint32_t shared_entries = 0;
 
-uint32_t cycles_now() { return stk()->CNTL; }
+/// STK's own count, read raw: letter j's latency is a span from a store
+/// in main to the handler's first statement, which must be one load (a
+/// Ticker::cycles() there would be a retry loop in the measured path);
+/// each run starts on a fresh tick, so both reads fall in one period and
+/// the difference needs no fold.
+uint32_t stk_count() { return stk()->CNTL; }
+
+/// Every byte of the console off the wire, bounded (a wedged console
+/// shows as missing lines).
+bool console_drain() {
+    return brio::console_drain<Ruler, Serial>();
+}
 
 /// Every line and pad this suite touches, back to reset. Called at the
 /// top of each letter, so no letter inherits another's state.
@@ -531,8 +550,12 @@ void tf_remaps() {
     all_off();
     // The tree must not be running off the crystal: one of the columns
     // below hands its pads to GPIO.
-    const bool on_hsi = Rcc::sysclk_status() != SysclkSource::hse;
-    print(serial, "  SYSCLK's root is ", on_hsi ? "the HSI's PLL" : "THE CRYSTAL", crlf);
+    // The PLL fed by the HSE runs off the crystal too: SWS alone does not
+    // say where the tree's root is, PLLSRC does when SWS names the PLL.
+    const SysclkSource sws = Rcc::sysclk_status();
+    const bool on_hsi = sws == SysclkSource::hsi ||
+                        (sws == SysclkSource::pll && !Rcc::pll_from_hse());
+    print(serial, "  SYSCLK's root is ", on_hsi ? "the HSI (or its PLL)" : "THE CRYSTAL", crlf);
 
     uint8_t taken = 0;
     uint8_t refused = 0;
@@ -599,13 +622,15 @@ void tf_remaps() {
               crlf);
     }
 
-    // USART1's second column exists on this package - and is never
-    // selected here, because PB6 is not where the probe listens.
-    bench.verdict("USART1's remapped column exists on this part (and is left alone: its TX is "
-                  "this console's)",
-                  afio_remap_has_code(Remap::usart1, 1) == pad_bonded(Pad{'B', 6}));
+    // USART1's second column exists exactly where the package bonds PB6
+    // - a fact of the driver's tables, checked by the compiler - and is
+    // never selected here, because PB6 is not where the probe listens.
+    static_assert(afio_remap_has_code(Remap::usart1, 1) == pad_bonded(Pad{'B', 6}),
+                  "USART1's remapped column offered exactly where PB6 is bonded");
 
-    // The debug port's field: read, reported, never written.
+    // The debug port's field: read, reported, never written. SW_CFG is
+    // read-write on this family (RM 10.3.2.2), so a verb above that wrote
+    // into it would read back here.
     print(serial, "  SW_CFG reads ", Afio::debug_config(), ": the two-wire debug port is ",
           Afio::debug_port_enabled() ? "alive" : "GONE", crlf);
     bench.verdict("the debug port's own field is untouched by every verb above",
@@ -832,9 +857,10 @@ void th_event() {
     // wait, and so would an event left latched by anything earlier - a
     // WFE consumes the latch, so the first idle() below is the drain and
     // not a measurement.
-    for (uint32_t i = 0; i < 1'000'000UL && !Serial::tx_idle(); ++i) {
+    if (!console_drain()) {
+        bench.skip("the console did not drain within 200 ms: idle() cannot be timed");
+        return;
     }
-    (void)delay_us(clock, 200);
     Pfic::clear_pending(Irq::usart1);
     P::idle();
 
@@ -852,11 +878,15 @@ void th_event() {
     (void)LineA::configure(ExtiSense::rising);
     (void)LineA::clear();
     (void)LineA::event(true);
+    // The control's idle() ended on a tick a few hundred cycles ago, so
+    // this window opens near the start of a period and the next tick is
+    // a whole period away.
     PadA::set();
     const uint32_t tick1 = Ticker::ticks();
-    const uint32_t c0 = cycles_now();
+    brio::Stopwatch<Ruler> event_watch;
+    event_watch.start();
     P::idle();
-    const uint32_t event_cycles = cycles_now() - c0;
+    const uint32_t event_cycles = event_watch.elapsed();
     const uint32_t ticks_in_event = Ticker::ticks() - tick1;
     const bool flag_down = !LineA::pending();
     const bool pfic_quiet = !Pfic::pending(Irq::exti1);
@@ -1025,7 +1055,6 @@ void ti_ports() {
     }
     if (walked == 0u) {
         print(serial, "  this package bonds no free pad of ports C, D or E: nothing to walk", crlf);
-        bench.verdict("the ports this package bonds were asked (none free here)", true);
     }
 
     // A LINE OF PORT E: the multiplexer's fifth code (0100, 10.3.2.3),
@@ -1067,8 +1096,7 @@ void tj_wire() {
     const bool wired = wire_present();
     print(serial, "  PA6 driven, PA1 read: the wire is ", wired ? "THERE" : "absent", crlf);
     if (!wired) {
-        bench.verdict("the wire PA6 to PA1 was tested for (no wire: the edge over it is not "
-                      "measured)", true);
+        bench.skip("no wire PA6 to PA1: the edge over it is not measured");
         all_off();
         return;
     }
@@ -1104,13 +1132,14 @@ void tj_wire() {
         Pfic::clear_pending(Irq::exti1);
         const uint32_t before = edges_line1;
         const uint32_t t = Ticker::ticks();
-        while (Ticker::ticks() == t) {
+        if (!brio::wait_ticks<P>([&] { return Ticker::ticks() != t; }, 2u)) {
+            continue;
         }
-        const uint32_t c0 = cycles_now();
+        const uint32_t c0 = stk_count();
         WireSrc::set();
-        for (uint32_t spin = 0; spin < 10000u && edges_line1 == before; ++spin) {
-        }
-        if (edges_line1 == before) {
+        // 100 us: a hundred times the bound the verdict below holds the
+        // latency to, so a slow edge is measured and not lost.
+        if (!brio::wait_until<Ruler>([&] { return edges_line1 != before; }, 100u)) {
             continue;
         }
         ++taken;
@@ -1132,13 +1161,12 @@ void tj_wire() {
         Pfic::clear_pending(Irq::exti1);
         const uint32_t before = edges_line1;
         const uint32_t t = Ticker::ticks();
-        while (Ticker::ticks() == t) {
+        if (!brio::wait_ticks<P>([&] { return Ticker::ticks() != t; }, 2u)) {
+            continue;
         }
-        const uint32_t c0 = cycles_now();
+        const uint32_t c0 = stk_count();
         PadA::set();
-        for (uint32_t spin = 0; spin < 10000u && edges_line1 == before; ++spin) {
-        }
-        if (edges_line1 == before) {
+        if (!brio::wait_until<Ruler>([&] { return edges_line1 != before; }, 100u)) {
             continue;
         }
         const uint32_t d = line1_entry_cycles - c0;
@@ -1237,11 +1265,8 @@ void tk_key() {
     print(serial, crlf, "  ten seconds of PA0: ", high, " samples high, ", low, " low, ", changes,
           " changes", crlf);
     // With no external resistor and no pull of its own the level is the
-    // board's to explain: this letter states what it saw and judges only
-    // that it ran.
-    bench.verdict("the KEY's pad was read a thousand times (what the levels mean is the board's "
-                  "to say)",
-                  high + low == 1000u);
+    // board's to explain: this letter states what it saw and claims no
+    // verdict.
     KeyPad::release();
 }
 
